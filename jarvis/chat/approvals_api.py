@@ -55,6 +55,53 @@ def _refuse_if_wiki_write(doc) -> None:
 		)
 
 
+def _refuse_if_ticket_triage(doc) -> None:
+	"""Ticket Triage has a typed sidecar, never a generic decision/resume path."""
+	from jarvis.chat.ticket_triage import is_ticket_triage_approval
+
+	if is_ticket_triage_approval(doc):
+		frappe.throw(
+			"This is a Ticket Triage proposal. Use the typed Ticket Triage reviewer controls.",
+			frappe.PermissionError,
+		)
+
+
+def _ticket_triage_visible(a):
+	"""Query predicate for rows that remain on the generic Approval Board.
+
+	A typed Ticket Triage shell has its own reviewer endpoint and no conversation
+	resume.  Hide only that exact three-field contract.  In particular, do not
+	hide ordinary Agent Review rows or a legacy row with an empty assessment key.
+	"""
+	from jarvis.chat.ticket_triage import AGENT, APPROVAL_SOURCE
+
+	return (
+		(Coalesce(a.agent, "") != AGENT)
+		| (Coalesce(a.source, "") != APPROVAL_SOURCE)
+		| (Coalesce(a.assessment_key, "") == "")
+	)
+
+
+def _approval_visibility(a, me, legacy_access):
+	"""Keep Chat review grants and native Cycle-Count read checks in one query."""
+	visible = approval_reviewers.visible_condition(a, me, legacy_access)
+	if me == "Administrator":
+		return visible
+	from jarvis.chat.cycle_count_permissions import CYCLE_COUNT_PLANNER, visible_count_plan_approval_names
+
+	readable = visible_count_plan_approval_names(me)
+	not_count_plan = a.agent.isnull() | (a.agent != CYCLE_COUNT_PLANNER)
+	ordinary = visible & not_count_plan
+	return ordinary | ((a.agent == CYCLE_COUNT_PLANNER) & a.name.isin(readable)) if readable else ordinary
+
+
+def _without_ticket_triage(rows):
+	"""Remove only typed Ticket Triage shells from a generic list response."""
+	from jarvis.chat.ticket_triage import is_ticket_triage_approval
+
+	return [row for row in rows if not is_ticket_triage_approval(row)]
+
+
 def _refuse_if_linked(doc) -> None:
 	"""A question linked to a File Box sheet is answered in the sheet, never on its own."""
 	if doc.get("sheet"):
@@ -112,6 +159,24 @@ def _may_act_on(conversation: str | None) -> bool:
 	return frappe.db.get_value("Jarvis Conversation", conversation, "owner") == frappe.session.user
 
 
+def _require_cycle_count_plan_read(doc) -> None:
+	"""Apply the stock-source read gate before an Approval path reveals a plan."""
+	if doc.get("agent") != "cycle-count-planner-operator":
+		return
+	from jarvis.chat.cycle_count_permissions import require_count_plan_read
+
+	require_count_plan_read(doc)
+
+
+def _may_list_approval(row) -> bool:
+	"""Filter the legacy list API, which intentionally bypasses DocType hooks."""
+	if row.get("agent") != "cycle-count-planner-operator":
+		return True
+	from jarvis.chat.cycle_count_permissions import may_read_count_plan
+
+	return may_read_count_plan(row)
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_approval_reviewers() -> list[dict]:
@@ -150,7 +215,12 @@ def untag_reviewer(name: str, user: str) -> list[dict]:
 @require_jarvis_user
 def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 	"""Approvals visible to the current user (owner of the linked
-	conversation, or any System Manager)."""
+	conversation, or any System Manager).
+
+	Cycle-Count plans also require current native Warehouse, Item, and Bin read. Keep
+	that filter in SQL, before the legacy endpoint's limit, so inaccessible plans
+	cannot consume an otherwise visible page.
+	"""
 	if status not in ("Pending", "Approved", "Rejected", "Answered", "Dismissed", "Decided", "All"):
 		frappe.throw("Invalid status filter")
 	a = frappe.qb.DocType(APPROVAL)
@@ -180,19 +250,26 @@ def list_approvals(status: str = "Pending", limit: int = 50) -> list[dict]:
 		query = query.where(a.status == status)
 	if _ar.sheet_ready():
 		query = query.where(Coalesce(a.sheet, "") == "")
+	legacy = _legacy_approval(a)
+	if legacy is not None:
+		query = query.where(legacy)
 	me = frappe.session.user
 	legacy_access = (
 		a.name.isnotnull() if "System Manager" in frappe.get_roles() else _owns_conversation(a, me)
 	)
 	rows = (
-		query.where(approval_reviewers.visible_condition(a, me, legacy_access))
+		query.where(_approval_visibility(a, me, legacy_access))
+		.where(_ticket_triage_visible(a))
 		.orderby(a.creation, order=frappe.qb.desc)
 		.limit(int(limit))
 		.run(as_dict=True)
 	)
-	rows = [r for r in rows if not is_collaborative(r.get("conversation"))]
 	for r in rows:
 		r["options"] = _parse_options(r.get("options"))
+		r.pop("assessment_evidence", None)
+		r.pop("agent", None)
+		r.pop("source", None)
+		r.pop("assessment_key", None)
 	conversation_names = [r.get("conversation") for r in rows if r.get("conversation")]
 	conversation_origins = {}
 	if conversation_names:
@@ -336,14 +413,14 @@ def list_approvals_page(
 	# Wiki-write proposals live on the reviewer lane only (SoD) - keep them OFF
 	# the customer decide board and its facet/badge counts. NULL-safe so legacy
 	# rows (source NULL = File Box) still show.
-	base = [a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE)]
+	base = [a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE), _ticket_triage_visible(a)]
 	legacy = _legacy_approval(a)
 	if legacy is not None:
 		base.append(legacy)
 	if _ar.sheet_ready():
 		base.append(IfNull(a.sheet, "") == "")  # answered in its File Box sheet
 	legacy_access = a.name.isnotnull() if is_sm else (_owns_conversation(a, me) | _tagged(a, me))
-	base.append(approval_reviewers.visible_condition(a, me, legacy_access))
+	base.append(_approval_visibility(a, me, legacy_access))
 	status = f.get("status") or "Pending"
 	if status not in _APPROVAL_STATUSES:
 		frappe.throw("Invalid status filter")
@@ -613,6 +690,8 @@ def get_approval(name: str) -> dict:
 	READ but gets ``can_act=0`` so the UI hides the decide controls. ``can_act``
 	mirrors what ``decide()`` would permit; the UI combines it with status."""
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.conversation)
@@ -637,6 +716,11 @@ def get_approval(name: str) -> dict:
 		)
 	):
 		frappe.throw("Not permitted", frappe.PermissionError)
+	count_entry = 0
+	if doc.agent == "cycle-count-planner-operator" and doc.status == "Approved":
+		from jarvis.chat.cycle_count_entry import can_record_count_plan
+
+		count_entry = int(can_record_count_plan(doc))
 	return {
 		"name": doc.name,
 		"title": doc.title,
@@ -669,6 +753,7 @@ def get_approval(name: str) -> dict:
 		"creation": str(doc.creation or ""),
 		"owner": doc.owner,
 		"can_act": int(can_act and not doc.get("sheet")),  # a sheet's question: answered in the sheet
+		"count_entry": count_entry,
 		"can_manage": int(is_requester) if chat_question else int(can_act),
 		"is_requester": int(is_requester) if chat_question else int(_may_act_on(doc.conversation)),
 		"requester": requester,
@@ -730,6 +815,7 @@ def _ar_pending_count() -> int:
 		.select(Count("*"))
 		.where(a.status == "Pending")
 		.where(a.source.isnull() | (a.source != FILE_BOX_WIKI_SOURCE))
+		.where(_ticket_triage_visible(a))
 	)
 	if _ar.sheet_ready():
 		query = query.where(IfNull(a.sheet, "") == "")
@@ -742,7 +828,7 @@ def _ar_pending_count() -> int:
 		if "System Manager" in frappe.get_roles()
 		else (_owns_conversation(a, me) | _tagged(a, me))
 	)
-	query = query.where(approval_reviewers.visible_condition(a, me, legacy_access))
+	query = query.where(_approval_visibility(a, me, legacy_access))
 	return query.run()[0][0]
 
 
@@ -814,6 +900,8 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	if not decision:
 		frappe.throw("Decision text is required")
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.get("conversation"))
@@ -864,7 +952,7 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		return {"ok": True, "status": doc.status, "resumed": False}
 
 	if doc.get("routing"):
-		return {"ok": True, "status": doc.status, "resumed": _apply_routing_answer(doc)}
+		return {"ok": True, "status": doc.status, **_apply_routing_answer(doc)}
 	chat_question = scoped
 	if chat_question:
 		try:
@@ -917,6 +1005,20 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 		# The decision is durably recorded above; a resume failure must
 		# not 500 the endpoint (the SPA would re-show a decided row).
 		try:
+			from jarvis.chat.filebox_source import SourceLost, selected_file
+
+			owner = frappe.db.get_value("Jarvis Conversation", doc.conversation, "owner")
+			try:
+				selected = selected_file(doc.conversation, read_as=owner)
+			except SourceLost:
+				return {
+					"ok": True,
+					"status": doc.status,
+					"resumed": False,
+					"reason": "source_unavailable",
+				}
+			if selected is not None:
+				attachments = json.dumps([dict(selected)])
 			res = _resume_conversation(doc.conversation, msg, origin="board_answer", attachments=attachments)
 			resumed = bool(res.get("ok"))
 		except Exception:
@@ -1084,15 +1186,18 @@ def continue_approval_chat(name: str) -> dict:
 	return out
 
 
-def _apply_routing_answer(doc) -> bool:
+def _apply_routing_answer(doc) -> dict:
 	"""A routing question's answer runs INSTEAD of the generic resume. The decision
 	is recorded already, so a failure is logged, never raised."""
 	try:
-		return filebox_skills.apply_answer(doc)
+		outcome = filebox_skills.apply_answer(doc)
+		if outcome is filebox_skills._SOURCE_UNAVAILABLE:
+			return {"resumed": False, "reason": "source_unavailable"}
+		return {"resumed": bool(outcome)}
 	except Exception:
 		frappe.db.rollback()
 		frappe.log_error(title="jarvis.file_box.routing_apply_failed", message=frappe.get_traceback())
-		return False
+		return {"resumed": False}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1107,6 +1212,8 @@ def dismiss_approval(name: str) -> dict:
 	"""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.conversation)
@@ -1139,11 +1246,11 @@ def dismiss_approval(name: str) -> dict:
 	doc.status = "Dismissed"
 	approval_reviewers.queue_settled(doc)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before resuming agent
-	resumed = False
+	result = {"ok": True, "status": "Dismissed", "resumed": False}
 	if doc.get("routing"):
 		doc.decision = decision
-		resumed = _apply_routing_answer(doc)
-	return {"ok": True, "status": "Dismissed", "resumed": resumed}
+		result.update(_apply_routing_answer(doc))
+	return result
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1153,6 +1260,8 @@ def restore_approval(name: str) -> dict:
 	accidental dismiss."""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_ticket_triage(doc)
+	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(doc.conversation)
@@ -1565,28 +1674,70 @@ def _badge_cutoff():
 	return frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-BOARD_BADGE_DELAY_S)
 
 
-def _chat_pending_count(me: str) -> int:
+def _safe_chat_badge_rows(me: str, *, before=None, after=None) -> list:
+	"""The chat rows that may truthfully contribute to an approval badge.
+
+	The lane already hides a Pending chat action unless its close-fence map is
+	current.  The badge must apply the same positive admission rule: a number for
+	a hidden stale card sends a person to an empty board and can keep refreshing
+	forever after a capped close cleanup.  Older schemas lack the fence field, so
+	they intentionally produce no chat badge until the close migration is ready.
+	"""
+	from jarvis.chat.agent_closure import (
+		PENDING_ACTION_FENCE_FIELD,
+		expected_confirmation_fences,
+		pending_action_fences_ready,
+	)
 	from jarvis.chat.pending_actions._store import table_ready
 
-	if not table_ready():
-		return 0
-	return frappe.db.sql(
-		"SELECT COUNT(*) FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND status='Pending'"
-		" AND owner_user=%(me)s AND creation <= %(cutoff)s",
-		{"k": CHAT, "me": me, "cutoff": _badge_cutoff()},
-	)[0][0]
+	if not table_ready() or not pending_action_fences_ready():
+		return []
+	# A badge is read-only. Take one current, non-locking fence snapshot and run
+	# each row through the same canonical predicate as a card. This avoids a
+	# fence lock (and possible fence-row creation) for every Pending row on a
+	# frequently refreshed badge.
+	try:
+		expected_fences = expected_confirmation_fences()
+	except Exception as exc:
+		frappe.logger("jarvis.pending_confirm").error(
+			"pending action badge fence read failed: %s", type(exc).__name__
+		)
+		return []
+	if expected_fences is None:
+		return []
+	pending_action = frappe.qb.DocType("Jarvis Pending Action")
+	query = (
+		frappe.qb.from_(pending_action)
+		.select(
+			pending_action.name,
+			pending_action.kind,
+			pending_action.status,
+			pending_action.owner_user,
+			pending_action.conversation,
+			pending_action.creation,
+			pending_action[PENDING_ACTION_FENCE_FIELD].as_(PENDING_ACTION_FENCE_FIELD),
+		)
+		.where(pending_action.kind == "chat")
+		.where(pending_action.status == "Pending")
+		.where(pending_action.owner_user == me)
+		.orderby(pending_action.creation)
+		.orderby(pending_action.name)
+	)
+	if before is not None:
+		query = query.where(pending_action.creation <= before)
+	if after is not None:
+		query = query.where(pending_action.creation > after)
+	rows = query.run(as_dict=True)
+	return [row for row in rows if _chat_card_safe(row, lock=False, expected_fences=expected_fences)]
+
+
+def _chat_pending_count(me: str) -> int:
+	return len(_safe_chat_badge_rows(me, before=_badge_cutoff()))
 
 
 def _chat_badge_next_in(me: str) -> int | None:
-	from jarvis.chat.pending_actions._store import table_ready
-
-	if not table_ready():
-		return None
-	oldest = frappe.db.sql(
-		"SELECT MIN(creation) FROM `tabJarvis Pending Action` WHERE kind=%(k)s AND status='Pending'"
-		" AND owner_user=%(me)s AND creation > %(cutoff)s",
-		{"k": CHAT, "me": me, "cutoff": _badge_cutoff()},
-	)[0][0]
+	rows = _safe_chat_badge_rows(me, after=_badge_cutoff())
+	oldest = rows[0].creation if rows else None
 	if not oldest:
 		return None
 	waited = (frappe.utils.now_datetime() - frappe.utils.get_datetime(oldest)).total_seconds()
@@ -1641,6 +1792,7 @@ def list_pending_actions_lane() -> dict:
 	4). Each row's ``document_type`` is its card's doctype; the card itself never
 	ships. A sheet reads its plain columns (counts; ``collecting`` = still listing,
 	not actionable yet)."""
+	from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD, pending_action_fences_ready
 	from jarvis.chat.pending_actions._store import table_ready
 
 	if not table_ready():
@@ -1649,10 +1801,16 @@ def list_pending_actions_lane() -> dict:
 	sm = int("System Manager" in frappe.get_roles())
 	params = {"sm": sm, "me": me, "lim": _HELD_LANE_LIMIT}
 	rows = []
+	# A chat card is only a navigation row when its current close-fence map says
+	# it may still be confirmed. Older schemas omit the field; that deliberately
+	# makes those chat rows fail closed below rather than showing a stale card.
+	fence_column = f", pa.`{PENDING_ACTION_FENCE_FIELD}`" if pending_action_fences_ready() else ""
 	# One capped query per kind: an SM's backlog of held rows never crowds out their own cards.
 	for kind, any_owner in ((HELD, sm), (CHAT, 0)):
 		rows += frappe.db.sql(
-			"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.card, pa.owner_user, pa.creation,
+			"""SELECT pa.name, pa.kind, pa.status, pa.summary, pa.card, pa.owner_user, pa.creation"""
+			+ fence_column
+			+ """,
 			pa.conversation, c.title AS conversation_title, c.origin_page,
 			(SELECT COUNT(*) FROM `tabJarvis Pending Action Waiter` w
 			 WHERE w.parent = pa.name AND w.parenttype = 'Jarvis Pending Action') AS waiters_count
@@ -1687,10 +1845,21 @@ def list_pending_actions_lane() -> dict:
 			as_dict=True,
 		)
 	rows.sort(key=lambda r: (r.creation, r.name))
+	from jarvis.chat.filebox_source import selection_previews
+
+	selected = selection_previews([r.conversation for r in rows if r.kind == SHEET and r.conversation])
+	for r in rows:
+		if r.kind == SHEET and r.conversation in selected:
+			r.file_name = (selected[r.conversation] or {}).get("file_name") or ""
 	out = []
 	for r in rows:
 		if r.kind == SHEET:
 			out.append(_sheet_lane_row(r, me))
+			continue
+		if r.kind == CHAT and r.status == "Pending" and not _chat_card_safe(r):
+			# Do not let the Approval Board link a stale durable card to its own
+			# Confirm/Discard detail. The chat transcript gets its terminal receipt
+			# through the normal history/resync path, without this read writing one.
 			continue
 		row = {
 			"name": r.name,
@@ -1741,6 +1910,19 @@ def _chat_link(conversation, title, origin_page) -> dict:
 	}
 
 
+def _chat_card_safe(row, *, lock: bool = True, expected_fences: dict[str, str] | None = None) -> bool:
+	"""Whether this durable chat row may render a confirmation control."""
+	from jarvis.chat.pending_confirm import pending_action_is_safe_to_render
+
+	return pending_action_is_safe_to_render(
+		row,
+		owner=row.get("owner_user"),
+		conversation=row.get("conversation"),
+		lock=lock,
+		expected_fences=expected_fences,
+	)
+
+
 def _chat_detail(row) -> dict:
 	"""A chat card for its owner: the stored card (secret-masked at park), never the seal."""
 	from jarvis.chat.pending_actions._store import PENDING, REASON_TEXT
@@ -1753,20 +1935,29 @@ def _chat_detail(row) -> dict:
 			)
 			or conv
 		)
-	code = row.reason_code or ""
+	safe = _chat_card_safe(row)
+	code = row.reason_code or ("safety_update" if row.status == PENDING and not safe else "")
 	return {
 		"name": row.name,
 		"kind": row.kind,
 		"status": row.status,
 		"tool": row.tool,
 		"summary": row.summary or "",
-		"card": json.loads(row.card) if row.card else None,
+		# Never return the card itself unless it has the same positive current
+		# fence attestation used by history, list resync, and realtime delivery.
+		"card": json.loads(row.card) if safe and row.card else None,
 		"created_at": str(row.creation),
 		"age": _age_s(row.creation),
 		**_chat_link(row.conversation, conv.title, conv.origin_page),
-		"can_act": int(row.status == PENDING),
+		"can_act": int(row.status == PENDING and safe),
+		"pending_card_safe": bool(row.status == PENDING and safe),
 		"reason_code": code,
-		"reason": REASON_TEXT.get(code, ""),
+		"reason": REASON_TEXT.get(code, "")
+		or (
+			"This action was cancelled during a safety update. Nothing ran."
+			if code == "safety_update"
+			else ""
+		),
 	}
 
 

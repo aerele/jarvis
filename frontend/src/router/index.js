@@ -112,6 +112,11 @@ const routes = [
 		beforeEnter: supportGuard,
 	},
 	{
+		path: "/reorder-reviews",
+		name: "ReorderReviews",
+		component: () => import("@/pages/agents/ReorderReviews.vue"),
+	},
+	{
 		path: "/macros",
 		name: "MacrosList",
 		component: () => import("@/pages/macros/MacrosList.vue"),
@@ -195,6 +200,22 @@ const routes = [
 		path: "/approvals/:id",
 		name: "ApprovalDetail",
 		component: () => import("@/pages/approvals/ApprovalsBoard.vue"),
+	},
+	{
+		path: "/count-plans",
+		name: "CountPlansList",
+		component: () => import("@/pages/count-plans/CountPlansList.vue"),
+	},
+	{
+		path: "/ticket-triage",
+		name: "TicketTriageReviews",
+		component: () => import("@/pages/agents/TicketTriageReviews.vue"),
+	},
+	{
+		path: "/count-plans/:request",
+		name: "CountPlanDetail",
+		component: () => import("@/pages/count-plans/CountPlanDetail.vue"),
+		props: true,
 	},
 	{
 		path: "/agents",

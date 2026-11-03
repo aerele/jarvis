@@ -1,12 +1,10 @@
-"""Return THIS run's engagement configuration - the per-installation tunables the
-operator set (materiality floors, engagement_risk_level, rounding_step, ...) - resolved
-server-side from the caller's run session.
+"""Return THIS run's immutable engagement-configuration snapshot.
 
 NO arguments. A delegate never has to know, name, or fumble the internal
-``Jarvis Agent Installation`` doctype or its opaque row id: the bench resolves the run's
-installation from the caller's ``session_key`` (NEVER a model-supplied id), so a delegate
-can only ever read its OWN config. Only the installation's ``config`` JSON is returned -
-never the row's other fields (agent_url, device tokens, run-as identity, ...).
+``Jarvis Agent Installation`` doctype or its opaque row id: the bench resolves a RUNNING
+``Jarvis Agent Run`` from the caller's ``session_key`` (NEVER a model-supplied id), so a
+delegate can only ever read its OWN server-stamped launch snapshot. The snapshot contains
+only declared/derived keys. It never falls back to mutable installation configuration.
 
 This exists because handing a weak model the doctype name + row hash and asking it to
 compose ``get_doc`` made it fumble the args on most calls; a zero-arg tool removes the
@@ -19,12 +17,11 @@ import frappe
 
 from jarvis.exceptions import InvalidArgumentError
 
-INSTALLATION = "Jarvis Agent Installation"
 RUN = "Jarvis Agent Run"
 
 
 def get_engagement_config() -> dict:
-	"""Return the current run's engagement config as a dict (``{}`` when none is set)."""
+	"""Return this active run's launch snapshot (``{}`` when no values were stamped)."""
 	from jarvis.tools._agent_run_ctx import get_session_key
 
 	session_key = get_session_key()
@@ -33,21 +30,25 @@ def get_engagement_config() -> dict:
 			"get_engagement_config must be called by an agent delegate over its run "
 			"session (no session_key in context)"
 		)
-	run_row = frappe.db.get_value(RUN, {"session_key": session_key}, ["name", "installation"], as_dict=True)
+	run_row = frappe.db.get_value(
+		RUN,
+		{"session_key": session_key, "status": "running"},
+		["name", "engagement_config_json"],
+		as_dict=True,
+	)
 	if not run_row:
-		raise InvalidArgumentError("no agent run is bound to this session")
-	if not run_row.installation:
-		raise InvalidArgumentError("run has no installation")
-	# Only the config JSON field, resolved from the trusted session - never the whole
-	# installation row (which carries agent_url / device tokens / run-as identity).
-	raw = frappe.db.get_value(INSTALLATION, run_row.installation, "config")
+		raise InvalidArgumentError("no active agent run is bound to this session")
+	# A legacy/empty/malformed snapshot is an intentional fail-closed {}.  In
+	# particular, NEVER read Installation.config here: an operator may edit it after
+	# launch and that edit must not change this run's evidence or gate decisions.
+	raw = run_row.engagement_config_json
 	try:
 		cfg = frappe.parse_json(raw) if raw else {}
 	except Exception:
-		# Stored config is not valid JSON (bad deploy / manual edit) - treat as unset, but
-		# leave a trail so a corrupt row is discoverable, not silently read as "no config".
+		# The immutable field should always be JSON, but a bad legacy/manual row must
+		# degrade to unset rather than inheriting mutable installation settings.
 		frappe.log_error(
-			title=f"jarvis get_engagement_config: bad config JSON on {run_row.installation}",
+			title=f"jarvis get_engagement_config: bad launch snapshot on {run_row.name}",
 			message=frappe.get_traceback(),
 		)
 		cfg = {}

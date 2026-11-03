@@ -65,6 +65,23 @@ export function withoutTokens(items, excluded) {
   return (items || []).filter((c) => !excluded.has(c.token));
 }
 
+// A safety-update terminal receipt can arrive through two paths: first in the
+// durable transcript, then as the direct Confirm response (or in the other
+// order). Both paths must remove the spent token. Only the first path may add
+// its Done-only notice. Keep a notice set separate from `settledTokens`: a
+// typed discard also settles a token, but must not hide a later safety reason.
+export function safetyUpdateTransition(state, token) {
+  const settledTokens = withExcluded(state?.settledTokens, [token]);
+  const safetyNoticeTokens = state?.safetyNoticeTokens || new Set();
+  const shouldEnqueue = !!token && !safetyNoticeTokens.has(token);
+  return {
+    settledTokens,
+    safetyNoticeTokens: withExcluded(safetyNoticeTokens, [token]),
+    pending: withoutTokens(state?.pending, settledTokens),
+    shouldEnqueue,
+  };
+}
+
 // Keep the card unless the Confirm answer settled it, with why (mirrors the SPA's
 // lib/chatCardActions.js keepsChatCard); "" = the card is spent, retire it. A "no"
 // without a reason_code is a legacy card's: its token is used.
@@ -83,7 +100,7 @@ const SETTLED_STATUS = [
   "Cancelled",
   "Superseded",
 ];
-const SETTLED_CODE = ["not_found", "already_handled"];
+const SETTLED_CODE = ["not_found", "already_handled", "safety_update"];
 export function keptCardMessage(res) {
   if (!res || res.ok !== false || !res.reason_code) return "";
   if (
@@ -96,6 +113,19 @@ export function keptCardMessage(res) {
     (res.error && res.error.message) ||
     "This action could not be completed."
   );
+}
+
+// A terminal outcome removes the card from the stack. Most outcomes have no
+// safe client-side recovery message. A safety update is different: the server
+// cancelled the card before dispatch, so the person must be told that no action
+// ran and that they can submit it again if still needed.
+const SETTLED_REASONS = {
+  safety_update:
+    "This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
+};
+export function settledReasonMessage(res) {
+  if (!res || res.ok !== false || !res.reason_code) return "";
+  return SETTLED_REASONS[res.reason_code] || "";
 }
 
 // Typed yes/no scope (decision 6), mirrored from frontend/src/lib/typedCardReply.js:

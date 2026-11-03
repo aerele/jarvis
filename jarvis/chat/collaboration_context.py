@@ -53,7 +53,13 @@ def validate_request(text: str, *, allow_empty=False) -> str:
 
 
 def request_fingerprint(text: str, attachments: list) -> str:
-	value = {"message": text, "files": [a["file_url"] for a in attachments]}
+	value = {
+		"message": text,
+		"files": [
+			({"file_url": a["file_url"], "file_id": a["file_id"]} if a.get("file_id") else a["file_url"])
+			for a in attachments
+		],
+	}
 	return hashlib.sha256(
 		json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 	).hexdigest()

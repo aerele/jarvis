@@ -1630,6 +1630,57 @@ class TestNonJsonResponse(FrappeTestCase):
 		self.assertIn("non-JSON", str(cm.exception))
 
 
+class TestDoPostCarriesTheHttpStatus(FrappeTestCase):
+	"""The error push tells a gateway answer (502/503/504) from admin refusing the
+	batch by the status on the exception, never by parsing its message."""
+
+	def setUp(self):
+		_settings_for_admin()
+
+	def tearDown(self):
+		_settings_clear_admin()
+
+	def _status_of_failure(self, response) -> int | None:
+		with patch("requests.post", MagicMock(return_value=response)):
+			with self.assertRaises(AdminUnreachableError) as cm:
+				post_update_llm_creds("p", "m", "b", "k")
+		return cm.exception.status_code
+
+	def test_do_post_carries_the_http_status(self):
+		cases = {
+			"a gateway page that is not JSON": (
+				_mock_response(502, json_body=None, text="<html>Bad Gateway</html>"),
+				502,
+			),
+			"a 5xx with no message": (_mock_response(500, json_body={"message": {}}), 500),
+			"a 5xx envelope": (
+				_mock_response(
+					503, json_body={"message": {"ok": False, "error": {"code": "Down", "message": "x"}}}
+				),
+				503,
+			),
+			"a 5xx with an exc_type we do not know": (
+				_mock_response(500, json_body={"exc_type": "SomethingNew", "exception": "boom"}),
+				500,
+			),
+			"a 200 that says ok false": (
+				_mock_response(
+					200, json_body={"message": {"ok": False, "error": {"code": "Nope", "message": "x"}}}
+				),
+				200,
+			),
+		}
+		for label, (response, status) in cases.items():
+			with self.subTest(label):
+				self.assertEqual(self._status_of_failure(response), status)
+
+	def test_a_transport_failure_has_no_status(self):
+		with patch("requests.post", MagicMock(side_effect=requests.ConnectionError("refused"))):
+			with self.assertRaises(AdminUnreachableError) as cm:
+				post_update_llm_creds("p", "m", "b", "k")
+		self.assertIsNone(cm.exception.status_code)
+
+
 class TestMissingConfig(FrappeTestCase):
 	def setUp(self):
 		_settings_clear_admin()

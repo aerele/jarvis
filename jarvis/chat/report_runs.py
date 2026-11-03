@@ -80,15 +80,25 @@ def _run_rows(where) -> list:
 		frappe.qb.from_(m)
 		.join(c)
 		.on(c.name == m.conversation)
-		.select(m.conversation, m.tool_args, c.title, c.origin_page)
-		.where((m.role == "tool") & (m.tool_name == _TOOL) & where)
+		.select(m.conversation, m.tool_args, m.tool_name, c.title, c.origin_page)
+		.where((m.role == "tool") & m.tool_name.isin((_TOOL, "query_report")) & where)
 		.orderby(m.conversation)
 		.orderby(m.seq)
 	)
 	mariadb = _json_functions_available()
 	if mariadb:
 		query = query.select(
-			*(_JsonValue(m.tool_result, f"$.data.{k}").as_(k) for k in ("status", "run", "report_name"))
+			*(
+				_JsonValue(m.tool_result, f"$.data.{k}").as_(k.replace(".", "_"))
+				for k in (
+					"status",
+					"run",
+					"report_name",
+					"read_status",
+					"prepared_report",
+					"coverage.complete",
+				)
+			),
 		)
 	else:
 		query = query.select(m.tool_result)
@@ -96,7 +106,10 @@ def _run_rows(where) -> list:
 	if not mariadb:
 		for r in rows:
 			data = _data(r.pop("tool_result"))
-			r.update(status=data.get("status"), run=data.get("run"), report_name=data.get("report_name"))
+			r.update(
+				{k: data.get(k) for k in ("status", "run", "report_name", "read_status", "prepared_report")}
+			)
+			r.coverage_complete = (data.get("coverage") or {}).get("complete")
 	return rows
 
 
@@ -106,6 +119,14 @@ def _open_runs(rows) -> list[dict]:
 	open_runs, defaults = {}, {}
 	for r in rows:
 		args = _json(r.tool_args)
+		if r.get("tool_name") == "query_report":
+			# An inspection is not an answer. Close only this exact run after a
+			# successful query loaded the complete permitted source.
+			if (args.get("sql") or args.get("source_query_executed") is True) and r.get(
+				"coverage_complete"
+			) in (True, "true", "1", 1):
+				open_runs.pop((r.conversation, r.get("prepared_report")), None)
+			continue
 		run, report = r.run, r.report_name or args.get("report_name")
 		if not run or not report:
 			continue
@@ -113,7 +134,9 @@ def _open_runs(rows) -> list[dict]:
 		for k, v in list(open_runs.items()):
 			if k[0] == r.conversation and (k[1] == run or (key and v["key"] == key)):
 				del open_runs[k]
-		if r.status in ("started", "generating"):
+		if r.status in ("started", "generating") or (
+			r.status == "ready" and r.get("read_status") == "not_read"
+		):
 			open_runs[(r.conversation, run)] = {
 				"conversation": r.conversation,
 				"run": run,

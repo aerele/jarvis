@@ -50,6 +50,9 @@ def apply_workflow_action(
 	doc's transition is enqueued rather than committed inline; it reports
 	``queued: True`` (no doc dict, because nothing is committed yet).
 	"""
+	from jarvis.tools._delegate_write_caps import enforce_closed_agent_direct_write
+
+	enforce_closed_agent_direct_write("apply workflow action", doctype)
 	if names is not None:
 		return _apply_batch(doctype, action, names)
 
@@ -77,6 +80,9 @@ def apply_workflow_action(
 def _apply_batch(doctype: str, action: str, names: list) -> dict:
 	"""Apply one ``action`` to every name atomically. If any transition fails
 	(illegal state, role/self-approval, condition), the whole batch rolls back."""
+	from jarvis.tools._delegate_write_caps import enforce_closed_agent_direct_write
+
+	enforce_closed_agent_direct_write("apply workflow action", doctype)
 	if not doctype:
 		raise InvalidArgumentError("doctype is required")
 	if not action or not str(action).strip():
