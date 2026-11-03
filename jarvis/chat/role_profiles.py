@@ -135,6 +135,8 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__preview_landed_cost_voucher",
 	"jarvis__preview_import",
 	"jarvis__query",
+	"jarvis__query_file",
+	"jarvis__query_report",
 	"jarvis__read_file",
 	"jarvis__read_wiki",
 	"jarvis__recall",
