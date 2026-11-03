@@ -2045,3 +2045,26 @@ class TestAgentsMarketplace(unittest.TestCase):
 
 		row = next(r for r in page["rows"] if r["name"] == act)
 		self.assertIsNone(row["run_status"])
+
+	def test_hrms_baseline_retains_measurement_category_with_hr_visibility_policy(self):
+		entry = next(
+			a
+			for a in agent_catalog._load_registry().get("agents") or []
+			if a.get("agent_slug") == "baseline-meter-auditor-hrms"
+		)
+		self.assertEqual(entry.get("domain"), "measurement")
+		self.assertEqual(entry.get("visibility_domain"), "hrms-payroll")
+		self.assertEqual(entry.get("version"), "0.3.1")
+		self.assertIs(entry.get("supports_record_scope"), True)
+
+	def test_sync_agent_listings_writes_hrms_nested_config_keys_from_the_registry(self):
+		agent_catalog.sync_agent_listings()
+		self.assertEqual(
+			json.loads(frappe.db.get_value(LISTING, "baseline-meter-auditor-hrms", "config_keys")),
+			[
+				"baseline_hrms.reviewer",
+				"baseline_hrms.reviewer_capacity",
+				"baseline_hrms.history_from",
+				"baseline_hrms.test_declaration",
+			],
+		)

@@ -1628,6 +1628,8 @@ def set_config(installation: str, config: str) -> dict:
 	(``materiality.benchmark_value`` / ``.percentage`` /
 	``.engagement_risk_level`` / ``.rounding_step`` — verified against
 	jarvis-agents/agents/close-auditor/evaluate.py's ``_materiality_pl_balance``).
+	The HRMS payroll baseline reads its closed ``baseline_hrms`` namespace through
+	its four declared dot paths.
 	The payroll deposit-status agent similarly reads its bounded ``deposit``
 	namespace from the paired bundle."""
 	doc = frappe.get_doc(INSTALLATION, installation)
