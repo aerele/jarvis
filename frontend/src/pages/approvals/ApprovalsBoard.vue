@@ -54,8 +54,8 @@
 			     selected row's white chip + shadow reads in light mode (CRM
 			     sidebar pattern; dark gray-1 ≠ surface-selected per §2.5) -->
 			<div
-				class="max-h-[40vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
 				data-testid="approvals-rail"
+				class="max-h-[35%] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
 			>
 				<!-- "Waiting for your reply" strip (notify-approvals Part 3): prose
 				     questions the agent asked in chat — derived server-side
@@ -397,7 +397,10 @@
 			<div class="min-h-0 min-w-0 flex-1 overflow-y-auto">
 				<!-- a held write / chat card / wiki note: its own detail, keyed so every
 				     selection mounts (and loads) a fresh one -->
-				<div v-if="selectedKey" class="mx-auto w-full max-w-3xl px-4 py-6 sm:px-8">
+				<div
+					v-if="selectedKey"
+					class="approval-record-preview mx-auto w-full max-w-3xl px-4 py-6 sm:px-8"
+				>
 					<div class="flex items-center gap-3">
 						<h1 class="min-w-0 flex-1 truncate text-xl font-semibold text-ink-gray-9">
 							{{ selectedAction ? selectedAction.title : KIND_LABEL[selectedKind] }}
@@ -506,6 +509,13 @@
 							"
 							iconLeft="message-circle"
 							@click="openChat"
+						/>
+						<Button
+							v-if="Number(selected.count_entry)"
+							variant="solid"
+							label="Record physical count"
+							iconLeft="clipboard"
+							@click="openCountPlan"
 						/>
 					</div>
 
@@ -1286,6 +1296,14 @@ function openChat() {
 	}
 }
 
+// The server exposes this only for an approved Cycle-Count Planner request that
+// this user may record. The count page rechecks the authority before it shows
+// source lines or writes an observation.
+function openCountPlan() {
+	if (selected.value?.name)
+		router.push({ name: "CountPlanDetail", params: { request: selected.value.name } });
+}
+
 // awaiting-reply strip rows answer in the conversation itself
 function conversationRoute(conversation, originPage = "") {
 	return originPage === "dashboards"
@@ -1532,7 +1550,11 @@ async function submitDecide(approve) {
 				? "Review acknowledged: no accounting or sending action"
 				: "Approved"
 			: "Rejected";
-		if (wasScoped && delivery === "done") {
+		if (res.reason === "source_unavailable") {
+			toast.warning(
+				"Decision saved. The source file is unavailable. Select a source file, then send a new message to continue."
+			);
+		} else if (wasScoped && delivery === "done") {
 			toast.success(
 				verdict + (requester ? " - sent to your chat" : " - sent to the requester's chat")
 			);
@@ -1606,7 +1628,7 @@ async function submitDismiss() {
 	const id = selected.value?.name;
 	if (!claimApprovalAction(id, "dismiss")) return;
 	try {
-		await api.dismissApproval(id);
+		const res = (await api.dismissApproval(id)) || {};
 		const r = railRows.value.find((x) => x.name === id);
 		if (r) {
 			r.status = "Dismissed";
@@ -1627,7 +1649,13 @@ async function submitDismiss() {
 			note.value = "";
 			selectedOption.value = "";
 		}
-		toast.success("Ignored. The assistant was not notified");
+		if (res.reason === "source_unavailable") {
+			toast.warning(
+				"Decision saved. The source file is unavailable. Select a source file, then send a new message to continue."
+			);
+		} else {
+			toast.success("Ignored. The assistant was not notified");
+		}
 		store.refreshApprovalsCount();
 		if ((filters.status || "Pending") === "Pending") advanceAfterDecide(id);
 		else loadRecord(id, { keep: true });
@@ -1842,3 +1870,17 @@ function onVisibility() {
 onMounted(() => document.addEventListener("visibilitychange", onVisibility));
 onBeforeUnmount(() => document.removeEventListener("visibilitychange", onVisibility));
 </script>
+
+<style scoped>
+/* Every action kind on the Board shares the detail pane's scroll. Cards in
+   chat retain their compact scrolling region. */
+.approval-record-preview :deep(.jv-pcard-recs) {
+	max-height: none;
+	overflow: visible;
+}
+.approval-record-preview :deep(.jv-rec-id) {
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+</style>

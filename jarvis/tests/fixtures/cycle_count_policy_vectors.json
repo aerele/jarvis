@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "vectors": [
+    {
+      "name": "multiwarehouse_tie_history_and_cap_tail",
+      "snapshot": {
+        "schema": "cycle-count-source-v2",
+        "scope": {
+          "company": "Example Manufacturing",
+          "from_date": "2026-08-01",
+          "to_date": "2026-10-31",
+          "count_history_from": "2025-11-01",
+          "warehouses": ["WH-1", "WH-2"],
+          "basis": "current_records",
+          "plan_date": "2026-11-01"
+        },
+        "config": {
+          "company": "Example Manufacturing",
+          "from_date": "2026-08-01",
+          "to_date": "2026-10-31",
+          "count_history_from": "2025-11-01",
+          "warehouses": ["WH-1", "WH-2"],
+          "line_limit": 2,
+          "recount_after_days": 30,
+          "basis": "current_records",
+          "review_scope": "count_plan_only",
+          "policy_version": "CYCLE-COUNT-v1",
+          "plan_date": "2026-11-01",
+          "reviewer": "reviewer@example.invalid"
+        },
+        "complete": true,
+        "currency": "INR",
+        "datasets": {
+          "bins": [
+            {"name": "BIN-FAST", "item_code": "A-FAST", "warehouse": "WH-1", "actual_qty": "10", "stock_value": "1000", "valuation_rate": "100"},
+            {"name": "BIN-RECENT", "item_code": "C-RECENT", "warehouse": "WH-1", "actual_qty": "3", "stock_value": "10", "valuation_rate": "3.33"},
+            {"name": "BIN-TIE-A", "item_code": "TIE-A", "warehouse": "WH-2", "actual_qty": "5", "stock_value": "100", "valuation_rate": "20"},
+            {"name": "BIN-TIE-B", "item_code": "TIE-B", "warehouse": "WH-2", "actual_qty": "5", "stock_value": "100", "valuation_rate": "20"}
+          ],
+          "items": [
+            {"name": "A-FAST", "is_stock_item": 1, "disabled": 0, "end_of_life": "2030-01-01", "stock_uom": "Nos", "has_batch_no": 0, "has_serial_no": 0},
+            {"name": "C-RECENT", "is_stock_item": 1, "disabled": 0, "end_of_life": "2030-01-01", "stock_uom": "Nos", "has_batch_no": 1, "has_serial_no": 0},
+            {"name": "TIE-A", "is_stock_item": 1, "disabled": 0, "end_of_life": null, "stock_uom": "Nos", "has_batch_no": 0, "has_serial_no": 0},
+            {"name": "TIE-B", "is_stock_item": 1, "disabled": 0, "end_of_life": null, "stock_uom": "Nos", "has_batch_no": 0, "has_serial_no": 0}
+          ],
+          "ledger": [
+            {"name": "SLE-FAST", "item_code": "A-FAST", "warehouse": "WH-1", "company": "Example Manufacturing", "posting_date": "2026-10-10", "posting_time": "10:00:00", "actual_qty": "-150", "voucher_type": "Delivery Note", "voucher_no": "DN-1", "is_cancelled": 0}
+          ],
+          "stock_entries": [],
+          "physical_counts": [
+            {"name": "COUNT-RECENT", "company": "Example Manufacturing", "warehouse": "WH-1", "counted_at": "2026-10-30 09:00:00", "approval_request": "AR-1"}
+          ],
+          "physical_count_items": [
+            {"name": "COUNT-ITEM-RECENT", "parent": "COUNT-RECENT", "item_code": "C-RECENT", "counted_qty": "3", "stock_uom": "Nos", "batch_detail_recorded": 1}
+          ]
+        },
+        "source_counts": {
+          "Bin": 4,
+          "Item": 4,
+          "Stock Ledger Entry": 1,
+          "Stock Entry": 0,
+          "Jarvis Physical Count": 1,
+          "Jarvis Physical Count Item": 1
+        }
+      },
+      "expected": {
+        "integrity_digest": "bb63492fd956269e1f775e08b37f77f9c958ee229158f693d496586edb3edbaa",
+        "rows_consumed": 11,
+        "proposals": {
+          "WH-1": {
+            "outcome": "plan",
+            "reason_code": "cadence_due",
+            "lines_considered": 2,
+            "lines_planned": 1,
+            "lines_rolled": 0,
+            "due_total": 1,
+            "lines": [
+              {"item_code": "A-FAST", "stock_uom": "Nos", "abc": "A", "velocity": "FAST", "outward_qty": "150", "actual_qty": "10", "stock_value": "1000", "last_physical_count_on": null, "capture_required": false}
+            ]
+          },
+          "WH-2": {
+            "outcome": "plan",
+            "reason_code": "cadence_due",
+            "lines_considered": 2,
+            "lines_planned": 1,
+            "lines_rolled": 1,
+            "due_total": 2,
+            "lines": [
+              {"item_code": "TIE-A", "stock_uom": "Nos", "abc": "A", "velocity": "", "outward_qty": "0", "actual_qty": "5", "stock_value": "100", "last_physical_count_on": null, "capture_required": false}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "unknown_movement_has_no_velocity_claim",
+      "snapshot": {
+        "schema": "cycle-count-source-v2",
+        "scope": {
+          "company": "Example Manufacturing",
+          "from_date": "2026-08-01",
+          "to_date": "2026-10-31",
+          "count_history_from": "2025-11-01",
+          "warehouses": ["WH-U"],
+          "basis": "current_records",
+          "plan_date": "2026-11-01"
+        },
+        "config": {
+          "company": "Example Manufacturing",
+          "from_date": "2026-08-01",
+          "to_date": "2026-10-31",
+          "count_history_from": "2025-11-01",
+          "warehouses": ["WH-U"],
+          "line_limit": 10,
+          "recount_after_days": 30,
+          "basis": "current_records",
+          "review_scope": "count_plan_only",
+          "policy_version": "CYCLE-COUNT-v1",
+          "plan_date": "2026-11-01",
+          "reviewer": "reviewer@example.invalid"
+        },
+        "complete": true,
+        "currency": "INR",
+        "datasets": {
+          "bins": [
+            {"name": "BIN-UNKNOWN", "item_code": "UNKNOWN-MOVE", "warehouse": "WH-U", "actual_qty": "10", "stock_value": "100", "valuation_rate": "10"}
+          ],
+          "items": [
+            {"name": "UNKNOWN-MOVE", "is_stock_item": 1, "disabled": 0, "end_of_life": null, "stock_uom": "Nos", "has_batch_no": 0, "has_serial_no": 0}
+          ],
+          "ledger": [
+            {"name": "SLE-UNKNOWN", "item_code": "UNKNOWN-MOVE", "warehouse": "WH-U", "company": "Example Manufacturing", "posting_date": "2026-10-10", "posting_time": "10:00:00", "actual_qty": "-4", "voucher_type": "Custom Stock Movement", "voucher_no": "CUSTOM-1", "is_cancelled": 0}
+          ],
+          "stock_entries": [],
+          "physical_counts": [],
+          "physical_count_items": []
+        },
+        "source_counts": {
+          "Bin": 1,
+          "Item": 1,
+          "Stock Ledger Entry": 1,
+          "Stock Entry": 0,
+          "Jarvis Physical Count": 0,
+          "Jarvis Physical Count Item": 0
+        }
+      },
+      "expected": {
+        "integrity_digest": "c04c9710fd3657d140da8049a98cd5e32cc58854668e1385cb68cf2ce6a2f801",
+        "rows_consumed": 3,
+        "proposals": {
+          "WH-U": {
+            "outcome": "plan",
+            "reason_code": "movement_unavailable",
+            "lines_considered": 1,
+            "lines_planned": 1,
+            "lines_rolled": 0,
+            "due_total": 1,
+            "lines": [
+              {"item_code": "UNKNOWN-MOVE", "stock_uom": "Nos", "abc": "A", "velocity": "", "outward_qty": null, "actual_qty": "10", "stock_value": "100", "last_physical_count_on": null, "capture_required": false}
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
