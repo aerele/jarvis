@@ -21,6 +21,11 @@ def copy_message(paired_site: str) -> str:
 	)
 
 
+INSTANCE_CHANGED_MESSAGE = (
+	"Jarvis paused because this site's identity changed, for example after a restore or a move. "
+	"Re-verify to reconnect Jarvis here."
+)
+
 _PIN_FIELDS = ("paired_site", "pairing_blocked", "pairing_blocked_reason")
 _read_failure_logged = False
 
@@ -47,7 +52,7 @@ def _log_read_failure() -> None:
 		return
 	_read_failure_logged = True
 	try:
-		frappe.log_error(title="site_pin: status read failed")
+		frappe.log_error(title="site_pin: status read failed", message=frappe.get_traceback())
 	except Exception:
 		pass
 
@@ -132,3 +137,65 @@ def clear_pairing_block() -> dict:
 		"cleared_paired_site": before["paired_site"],
 		"cleared_reason": before["reason"],
 	}
+
+
+@frappe.whitelist(methods=["POST"])
+def reverify() -> dict:
+	"""The way back from a false block: ask admin to prove, through the tenant
+	container, that this is the registered site. On a pass the block is cleared and
+	this site becomes the paired site. A failed proof keeps the block.
+
+	Sends this site's instance id with the proof, so an admin that supports it rebinds
+	the agent's pinned id after a restore or a move (``pin_rebound``). The "instance
+	changed" record is cleared only when the pin was rebound: a pass that rebound
+	nothing (an older admin or fleet) leaves it, because the agent would block the
+	site again. Admin down or rate limited answers ``proved: false`` with ``error:
+	"unreachable"``; admin refusing, or the proof being rejected, ``error:
+	"not_verified"``; instead of a 500."""
+	frappe.only_for("System Manager")
+	from jarvis import admin_client
+	from jarvis.chat import foreign_session, pairing_proof, site_identity
+	from jarvis.exceptions import (
+		AdminAuthError,
+		AdminRateLimitedError,
+		AdminRejectedError,
+		AdminUnreachableError,
+		AdminValidationError,
+	)
+
+	proved = False
+	pin_rebound = False
+	error = ""
+	try:
+		answer = admin_client.verify_site(
+			pairing_proof.issue_nonce(), instance_id=site_identity.instance_id()
+		)
+		proved = answer.get("proved") is True
+		# Absent from an older admin: nothing was rebound.
+		pin_rebound = proved and answer.get("pin_rebound") is True
+	except AdminAuthError:
+		proved = False
+	except (AdminValidationError, AdminRejectedError):
+		# Admin answered and refused (no running tenant, a rejected instance id, a
+		# permanent rejection): not a connectivity problem, so the SPA must not say
+		# "try again in a minute". AdminRejectedError subclasses AdminUnreachableError,
+		# so it has to be caught first.
+		error = "not_verified"
+	except (AdminUnreachableError, AdminRateLimitedError):
+		error = "unreachable"
+	if proved:
+		frappe.db.set_single_value(
+			SETTINGS,
+			{
+				"pairing_blocked": 0,
+				"pairing_blocked_reason": "",
+				"paired_site": _current_site(),
+			},
+			update_modified=False,
+		)
+		if pin_rebound:
+			foreign_session.clear_instance_changed()
+	out = {**status(), "proved": proved, "pin_rebound": pin_rebound}
+	if error:
+		out["error"] = error
+	return out

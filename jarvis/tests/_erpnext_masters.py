@@ -32,6 +32,22 @@ def clear_cache_after_rollback(test_class) -> None:
 	test_class.addClassCleanup(frappe.clear_cache)
 
 
+STANDARD_PARTY_TYPES = {"Customer": "Receivable", "Supplier": "Payable"}
+
+
+def ensure_party_types() -> None:
+	"""The setup wizard is the only thing that creates the Party Type rows. ERPNext
+	version-15 now rejects a GL Entry or Payment Entry whose party type has no row
+	("Supplier is not a valid Party Type"), so a ledger fixture on a fresh site has to
+	bring its own. Missing rows are inserted inside the calling test's transaction, so
+	the class rollback removes them; an existing row is never touched."""
+	for party_type, account_type in STANDARD_PARTY_TYPES.items():
+		ensure_party_type(party_type, account_type)
+	# ERPNext memoises party type -> account type per request; a lookup made before the
+	# rows existed would otherwise stay answered.
+	frappe.local.party_account_types = {}
+
+
 def ensure_ledger_company() -> str:
 	"""A real Company with the Standard chart, so its ledger, cost center and default
 	warehouses (Stores among them) exist.
@@ -40,6 +56,7 @@ def ensure_ledger_company() -> str:
 	a site makes HRMS add payroll Custom Fields, and that ALTER TABLE commits the open
 	transaction, leaking this company past the class rollback. INR stays the currency, as
 	before; the country decides only which regional setup runs."""
+	ensure_party_types()
 	if frappe.db.exists("Company", COMPANY):
 		return COMPANY
 	if not frappe.db.exists("Warehouse Type", "Transit"):
