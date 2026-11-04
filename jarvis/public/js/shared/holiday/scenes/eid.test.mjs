@@ -22,12 +22,14 @@ import {
 import {
   boxes,
   contractSuite,
+  replayFloorTest,
   floorTransformOf,
   loops,
   run,
 } from "./day-scene-fakes.test-support.mjs";
 
 contractSuite("eid", scene, { launch: 2500 });
+replayFloorTest("eid", scene);
 
 test("the moon stops under the clearance line, wherever the mark sits", () => {
   for (const shift of [-80, -39, 0, 60, 300]) {
@@ -151,9 +153,9 @@ test("the low pair is one floor group; a short stage fits it, a tall one leaves 
   short.end();
 });
 
-test("a replay has no floor row, so no low lanterns, and still lowers the crescent", () => {
+test("a replay has the floor row with its low lanterns, and lowers the crescent", () => {
   const r = run(scene, { replay: true });
-  assert.equal(r.host.svg.querySelectorAll(".t-lan").length, 3);
+  assert.equal(r.host.svg.querySelectorAll(".t-lan").length, 5);
   r.tick(2501);
   const a = r.host.svg.animations.find((x) =>
     x.node.classes.includes("t-drop")

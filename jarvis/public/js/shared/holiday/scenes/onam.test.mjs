@@ -24,6 +24,7 @@ import { wornMarkup } from "../worn.mjs";
 
 import {
   contractSuite,
+  replayFloorTest,
   edgeDrift,
   floorTransformOf,
   run,
@@ -31,6 +32,7 @@ import {
 } from "./day-scene-fakes.test-support.mjs";
 
 contractSuite("onam", scene, { row: FLOOR_ROW, launch: 2100 });
+replayFloorTest("onam", scene);
 
 // The scene most recently started, for the helpers below.
 let current = null;
@@ -52,14 +54,14 @@ const tick = (ms) => {
 };
 const scaleOf = (el) => Number(/scale\(([\d.]+)\)/.exec(el.attrs.transform)[1]);
 
-test("a replay has no floor props and never swaps the greeting", async () => {
+test("a replay has the floor props and never swaps the greeting", async () => {
   const { scene, names, svg } = start({ replay: true });
   tick(END_MS + 700);
   await scene.done;
   assert.ok(!names().includes("swap"));
   assert.ok(names().includes("deliver"));
-  assert.equal(svg.querySelectorAll(".t-floor").length, 0);
-  assert.equal(svg.querySelectorAll(".t-pring").length, 0);
+  assert.equal(svg.querySelectorAll(".t-floor").length, 1);
+  assert.equal(svg.querySelectorAll(".t-pring").length, 9);
   assert.ok(svg.querySelector(".t-drop"), "the umbrella still comes down");
 });
 
