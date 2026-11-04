@@ -10,7 +10,7 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.exceptions import InvalidArgumentError, InvalidFieldValueError, PermissionDeniedError
 from jarvis.tools.update_doc import update_doc
 
 NOTE_DT = "Note"
@@ -204,3 +204,159 @@ class TestUpdateDocMissing(FrappeTestCase):
 				name="JV-NONEXISTENT-99999",
 				changes={"content": "x"},
 			)
+
+
+BAD_SCRIPT = 'x = "PO {}".format(doc.name)\n'
+CLEAN_SCRIPT = 'x = f"PO {doc.name}"\n'
+
+
+class TestUpdateDocSandboxCode(FrappeTestCase):
+	"""jarvis-admin-v2#818 (T4): an agent update of sandbox code is checked, but only
+	for what the update changes (an old script stays editable)."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.tag = frappe.generate_hash(length=8)
+		self.addCleanup(frappe.db.rollback)
+
+	def _report(self, suffix: str = "", script: str = CLEAN_SCRIPT) -> str:
+		doc = frappe.get_doc(
+			{
+				"doctype": "Report",
+				"report_name": f"zz818 upd {self.tag}{suffix}",
+				"ref_doctype": "ToDo",
+				"report_type": "Script Report",
+				"is_standard": "No",
+				"report_script": script,
+			}
+		).insert()
+		return doc.name
+
+	def _server_script(self, *, disabled: int, stored: str = BAD_SCRIPT) -> str:
+		"""A Server Script whose stored code is ``stored``: inserted clean, then the
+		column is written directly (as an old script from Desk would be)."""
+		doc = frappe.get_doc(
+			{
+				"doctype": "Server Script",
+				"__newname": f"zz818 ss {self.tag}",
+				"script_type": "DocType Event",
+				"reference_doctype": "ToDo",
+				"doctype_event": "Before Save",
+				"script": CLEAN_SCRIPT,
+				"disabled": disabled,
+			}
+		).insert()
+		frappe.db.set_value("Server Script", doc.name, "script", stored)
+		return doc.name
+
+	def test_report_script_with_format_is_refused_and_unchanged(self):
+		name = self._report()
+		with self.assertRaises(InvalidFieldValueError) as ctx:
+			update_doc(doctype="Report", name=name, changes={"report_script": BAD_SCRIPT})
+		self.assertIn(f"Report {name} report_script:", str(ctx.exception))
+		self.assertEqual(frappe.db.get_value("Report", name, "report_script"), CLEAN_SCRIPT)
+
+	def test_clean_report_script_update_is_saved(self):
+		name = self._report()
+		update_doc(doctype="Report", name=name, changes={"report_script": 'y = f"{1}"\n'})
+		self.assertEqual(frappe.db.get_value("Report", name, "report_script"), 'y = f"{1}"\n')
+
+	def test_disabling_with_the_unchanged_stored_bad_script_succeeds(self):
+		name = self._server_script(disabled=0)
+		update_doc(doctype="Server Script", name=name, changes={"disabled": 1, "script": BAD_SCRIPT})
+		self.assertEqual(frappe.db.get_value("Server Script", name, "disabled"), 1)
+
+	def test_reenabling_a_stored_bad_script_is_refused(self):
+		name = self._server_script(disabled=1)
+		with self.assertRaises(InvalidFieldValueError) as ctx:
+			update_doc(doctype="Server Script", name=name, changes={"disabled": 0})
+		text = str(ctx.exception)
+		self.assertIn(f"Server Script {name} script (stored code, which this update makes active):", text)
+		self.assertIn("Send a corrected script in the same update, or call validate_script first.", text)
+		self.assertEqual(frappe.db.get_value("Server Script", name, "disabled"), 1)
+
+	def test_reenabling_a_clean_script_succeeds(self):
+		name = self._server_script(disabled=1, stored=CLEAN_SCRIPT)
+		update_doc(doctype="Server Script", name=name, changes={"disabled": 0})
+		self.assertEqual(frappe.db.get_value("Server Script", name, "disabled"), 0)
+
+	def test_script_type_change_of_an_enabled_stored_bad_script_is_refused(self):
+		name = self._server_script(disabled=0)
+		with self.assertRaises(InvalidFieldValueError) as ctx:
+			update_doc(doctype="Server Script", name=name, changes={"script_type": "Permission Query"})
+		self.assertIn(f"Server Script {name} script (stored code,", str(ctx.exception))
+		self.assertEqual(frappe.db.get_value("Server Script", name, "script_type"), "DocType Event")
+
+	def test_script_type_change_of_a_disabled_stored_bad_script_succeeds(self):
+		name = self._server_script(disabled=1)
+		update_doc(doctype="Server Script", name=name, changes={"script_type": "Permission Query"})
+		self.assertEqual(frappe.db.get_value("Server Script", name, "script_type"), "Permission Query")
+
+	def test_script_type_change_with_enabling_checks_the_stored_script(self):
+		name = self._server_script(disabled=1)
+		with self.assertRaises(InvalidFieldValueError):
+			update_doc(
+				doctype="Server Script",
+				name=name,
+				changes={"script_type": "Permission Query", "disabled": 0},
+			)
+		self.assertEqual(frappe.db.get_value("Server Script", name, "script_type"), "DocType Event")
+
+	def _stored_bad_report(self, **columns) -> str:
+		"""A Report whose stored code is BAD_SCRIPT, as an old report from Desk would be."""
+		name = self._report()
+		columns.setdefault("report_script", BAD_SCRIPT)
+		frappe.db.set_value("Report", name, columns)
+		return name
+
+	def test_report_type_change_to_script_report_checks_the_stored_script(self):
+		name = self._stored_bad_report(report_type="Query Report", query="select 1")
+		with self.assertRaises(InvalidFieldValueError) as ctx:
+			update_doc(doctype="Report", name=name, changes={"report_type": "Script Report"})
+		self.assertIn(f"Report {name} report_script (stored code,", str(ctx.exception))
+		self.assertEqual(frappe.db.get_value("Report", name, "report_type"), "Query Report")
+
+	def test_report_type_change_to_script_report_with_clean_stored_script_succeeds(self):
+		name = self._stored_bad_report(
+			report_type="Query Report", query="select 1", report_script=CLEAN_SCRIPT
+		)
+		update_doc(doctype="Report", name=name, changes={"report_type": "Script Report"})
+		self.assertEqual(frappe.db.get_value("Report", name, "report_type"), "Script Report")
+
+	def test_reenabling_a_report_with_a_stored_bad_script_is_refused(self):
+		name = self._stored_bad_report(disabled=1)
+		with self.assertRaises(InvalidFieldValueError) as ctx:
+			update_doc(doctype="Report", name=name, changes={"disabled": 0})
+		self.assertIn(f"Report {name} report_script (stored code,", str(ctx.exception))
+		self.assertEqual(frappe.db.get_value("Report", name, "disabled"), 1)
+
+	def test_reenabling_a_report_with_a_clean_stored_script_succeeds(self):
+		name = self._stored_bad_report(disabled=1, report_script=CLEAN_SCRIPT)
+		update_doc(doctype="Report", name=name, changes={"disabled": 0})
+		self.assertEqual(frappe.db.get_value("Report", name, "disabled"), 0)
+
+	def test_disabling_a_report_with_a_stored_bad_script_succeeds(self):
+		name = self._stored_bad_report(disabled=0)
+		update_doc(doctype="Report", name=name, changes={"disabled": 1})
+		self.assertEqual(frappe.db.get_value("Report", name, "disabled"), 1)
+
+	def test_a_standard_report_going_non_standard_checks_the_stored_script(self):
+		# Frappe then runs report_script (report.py execute_script_report), so it is checked
+		# before the save.
+		name = self._stored_bad_report(is_standard="Yes")
+		with self.assertRaises(InvalidFieldValueError) as ctx:
+			update_doc(doctype="Report", name=name, changes={"is_standard": "No"})
+		self.assertIn(f"Report {name} report_script (stored code,", str(ctx.exception))
+
+	def test_batch_with_one_blocked_item_rolls_back_the_whole_batch(self):
+		first, second = self._report("a"), self._report("b")
+		with self.assertRaises(InvalidFieldValueError):
+			update_doc(
+				doctype="Report",
+				updates=[
+					{"name": first, "changes": {"report_script": 'z = f"{1}"\n'}},
+					{"name": second, "changes": {"report_script": BAD_SCRIPT}},
+				],
+			)
+		self.assertEqual(frappe.db.get_value("Report", first, "report_script"), CLEAN_SCRIPT)
+		self.assertEqual(frappe.db.get_value("Report", second, "report_script"), CLEAN_SCRIPT)

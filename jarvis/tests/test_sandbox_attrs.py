@@ -16,10 +16,13 @@ from frappe.tests.classes.context_managers import enable_safe_exec
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils.safe_exec import safe_exec
 
+from jarvis.exceptions import InvalidFieldValueError, SandboxCodeError
 from jarvis.tools import _sandbox_attrs
 from jarvis.tools._sandbox_attrs import (
 	FORMAT_NAMES,
+	SANDBOX_CODE_FIELDS,
 	capped,
+	check_sandbox_code,
 	dotted,
 	error_text,
 	runtime_hint,
@@ -176,6 +179,28 @@ class TestUnsafeAttributeErrors(unittest.TestCase):
 				self.assertEqual(unsafe_attribute_errors(value), [])
 
 
+class TestConditionSubject(unittest.TestCase):
+	"""FX-6: a workflow condition gets condition wording and no f-string hint."""
+
+	def test_condition_wording_has_no_fstring_hint(self):
+		[call] = unsafe_attribute_errors('"{}".format(1)', mode="eval", subject="condition")
+		self.assertIn("line 1: .format is blocked in Frappe's restricted expression evaluator", call)
+		self.assertNotIn("f-string", call)
+		self.assertNotIn("%", call)
+		self.assertIn('Compare fields directly (for example doc.status == "Open")', call)
+		self.assertNotIn("server-script sandbox", call)
+		[read] = unsafe_attribute_errors("doc.format == 1", mode="eval", subject="condition")
+		self.assertIn("line 1: .format is blocked in Frappe's restricted expression evaluator", read)
+		self.assertIn('doc.get("format")', read)
+		self.assertNotIn("f-string", read)
+
+	def test_default_subject_keeps_the_script_wording(self):
+		[call] = unsafe_attribute_errors('x = "{}".format(1)')
+		self.assertIn("is blocked in the server-script sandbox and fails when the script runs.", call)
+		self.assertIn('Use an f-string (f"PO {doc.name}")', call)
+		self.assertEqual(call, unsafe_attribute_errors('x = "{}".format(1)', subject="script")[0])
+
+
 class TestFailOpen(unittest.TestCase):
 	def test_syntax_error(self):
 		self.assertEqual(unsafe_attribute_errors("def (:\n"), [])
@@ -315,6 +340,208 @@ class TestRuntimeHint(unittest.TestCase):
 	def test_no_hint_for_other_names(self):
 		for name in ("__class__", "gi_frame", "format_value", ""):
 			self.assertIsNone(runtime_hint(name))
+
+
+_BAD = 'x = "{}".format(1)\n'
+_THREE_BAD = 'a = "{}".format(1)\nb = "{}".format(2)\nc = "{}".format_map({})\n'
+_FIX_LINE = "Fix every line, then call validate_script before you write it."
+
+
+def _raised(*args, **kwargs) -> str:
+	with unittest.TestCase().assertRaises(InvalidFieldValueError) as ctx:
+		check_sandbox_code(*args, **kwargs)
+	return str(ctx.exception)
+
+
+class TestCheckSandboxCode(unittest.TestCase):
+	"""T4: an agent write of a Server Script / Report script is checked."""
+
+	def test_mapped_fields(self):
+		self.assertEqual(SANDBOX_CODE_FIELDS, {"Server Script": ("script",), "Report": ("report_script",)})
+
+	def test_create_lists_every_line_in_one_error(self):
+		text = _raised("Server Script", {"script": _THREE_BAD})
+		self.assertTrue(text.startswith("Server Script script:\n"), text)
+		self.assertTrue(text.endswith("\n" + _FIX_LINE), text)
+		for line in ("line 1:", "line 2:", "line 3:"):
+			self.assertIn(line, text)
+		# Plain text: the hint keeps its quotes, nothing is HTML-escaped.
+		self.assertIn('f"PO {doc.name}"', text)
+		self.assertNotIn("&quot;", text)
+
+	def test_create_report_script(self):
+		self.assertTrue(_raised("Report", {"report_script": _BAD}).startswith("Report report_script:\n"))
+
+	def test_create_clean_empty_and_other_shapes_pass(self):
+		for doctype, values in (
+			("Server Script", {"script": 'x = f"{1}"\n'}),
+			("Server Script", {"script": ""}),
+			("Server Script", {"script": None}),
+			("Server Script", {"script": 5}),
+			("Server Script", {"script": ["a.format(1)"]}),
+			("Server Script", {"reference_doctype": "ToDo"}),
+			("Server Script", {}),
+			("Note", {"content": _BAD}),
+			("ToDo", {"script": _BAD}),
+		):
+			with self.subTest(doctype=doctype, values=values):
+				self.assertIsNone(check_sandbox_code(doctype, values))
+
+	def test_only_the_mapped_field_of_each_doctype_is_checked(self):
+		self.assertIsNone(check_sandbox_code("Server Script", {"report_script": _BAD}))
+		self.assertIsNone(check_sandbox_code("Report", {"script": _BAD}))
+
+	def test_cap_notes_the_rest(self):
+		text = _raised(
+			"Server Script", {"script": "".join(f'a{i} = "{{}}".format({i})\n' for i in range(12))}
+		)
+		self.assertIn("(+2 more)", text)
+
+	def test_update_changed_field_is_checked(self):
+		before = frappe._dict(script="x = 1\n", disabled=0, script_type="API")
+		self.assertIn("Server Script script:", _raised("Server Script", {"script": _BAD}, before))
+
+	def test_update_unchanged_field_is_not_checked(self):
+		before = frappe._dict(script=_BAD, disabled=0, script_type="API")
+		self.assertIsNone(check_sandbox_code("Server Script", {"script": _BAD}, before))
+		before = frappe._dict(report_script=_BAD, report_type="Script Report")
+		self.assertIsNone(check_sandbox_code("Report", {"report_script": _BAD}, before))
+
+	def test_update_repeated_unchanged_value_beside_disabling_passes(self):
+		before = frappe._dict(script=_BAD, disabled=0, script_type="API")
+		self.assertIsNone(check_sandbox_code("Server Script", {"disabled": 1, "script": _BAD}, before))
+
+	def test_update_reenabling_a_stored_bad_script_is_refused(self):
+		before = frappe._dict(script=_BAD, disabled=1, script_type="API")
+		for disabled in (0, "0", False):
+			with self.subTest(disabled=disabled):
+				self.assertIn(
+					"Server Script script (stored code,",
+					_raised("Server Script", {"disabled": disabled}, before),
+				)
+		# Repeating the unchanged stored code beside the re-enable is refused once.
+		self.assertIn("line 1:", _raised("Server Script", {"disabled": 0, "script": _BAD}, before))
+
+	def test_update_changes_that_do_not_activate_pass(self):
+		before = frappe._dict(script=_BAD, disabled=1, script_type="API")
+		self.assertIsNone(check_sandbox_code("Server Script", {"disabled": 1}, before))
+		self.assertIsNone(check_sandbox_code("Server Script", {"disabled": "1"}, before))
+		active = frappe._dict(script=_BAD, disabled=0, script_type="API")
+		self.assertIsNone(check_sandbox_code("Server Script", {"disabled": 0}, active))
+		self.assertIsNone(check_sandbox_code("Server Script", {"disabled": 1}, active))
+
+	def test_the_error_is_a_sandbox_code_error_with_the_argument_envelope(self):
+		with self.assertRaises(SandboxCodeError) as ctx:
+			check_sandbox_code("Server Script", {"script": _BAD})
+		self.assertIsInstance(ctx.exception, InvalidFieldValueError)
+		self.assertEqual(ctx.exception.envelope_code, "InvalidArgumentError")
+
+	def test_update_script_type_change_checks_the_stored_script(self):
+		before = frappe._dict(script=_BAD, disabled=0, script_type="API")
+		self.assertIn(
+			"Server Script script (stored code,",
+			_raised("Server Script", {"script_type": "Permission Query"}, before),
+		)
+		self.assertIsNone(check_sandbox_code("Server Script", {"script_type": "API"}, before))
+
+	def test_update_script_type_change_on_a_disabled_script_passes(self):
+		# A disabled script's code cannot run; enabling it later is still checked.
+		before = frappe._dict(script=_BAD, disabled=1, script_type="API")
+		self.assertIsNone(check_sandbox_code("Server Script", {"script_type": "Permission Query"}, before))
+		self.assertIsNone(
+			check_sandbox_code("Server Script", {"script_type": "Permission Query", "disabled": 1}, before)
+		)
+		self.assertIn(
+			"Server Script script (stored code,",
+			_raised("Server Script", {"script_type": "Permission Query", "disabled": 0}, before),
+		)
+
+	def test_update_script_type_change_with_disabling_in_the_same_update_passes(self):
+		before = frappe._dict(script=_BAD, disabled=0, script_type="API")
+		self.assertIsNone(
+			check_sandbox_code("Server Script", {"script_type": "Permission Query", "disabled": 1}, before)
+		)
+
+	def test_update_report_type_to_script_report_checks_the_stored_script(self):
+		before = frappe._dict(report_script=_BAD, report_type="Query Report")
+		self.assertIn(
+			"Report report_script (stored code,", _raised("Report", {"report_type": "Script Report"}, before)
+		)
+		self.assertIsNone(check_sandbox_code("Report", {"report_type": "Report Builder"}, before))
+		already = frappe._dict(report_script=_BAD, report_type="Script Report")
+		self.assertIsNone(check_sandbox_code("Report", {"report_type": "Script Report"}, already))
+
+	def test_update_report_reenabling_checks_the_stored_script(self):
+		before = frappe._dict(report_script=_BAD, report_type="Script Report", disabled=1, is_standard="No")
+		for disabled in (0, "0", False):
+			with self.subTest(disabled=disabled):
+				self.assertIn(
+					"Report report_script (stored code,", _raised("Report", {"disabled": disabled}, before)
+				)
+		self.assertIsNone(check_sandbox_code("Report", {"disabled": 1}, before))
+
+	def test_update_report_reenabling_a_report_that_is_not_a_script_report_passes(self):
+		before = frappe._dict(report_script=_BAD, report_type="Query Report", disabled=1, is_standard="No")
+		self.assertIsNone(check_sandbox_code("Report", {"disabled": 0}, before))
+		# ... unless the same update makes it one.
+		self.assertIn(
+			"Report report_script (stored code,",
+			_raised("Report", {"disabled": 0, "report_type": "Script Report"}, before),
+		)
+
+	def test_update_report_going_non_standard_checks_the_stored_script(self):
+		before = frappe._dict(report_script=_BAD, report_type="Script Report", disabled=0, is_standard="Yes")
+		self.assertIn("Report report_script (stored code,", _raised("Report", {"is_standard": "No"}, before))
+		self.assertIsNone(check_sandbox_code("Report", {"is_standard": "Yes"}, before))
+		no_script = frappe._dict(report_script=_BAD, report_type="Report Builder", is_standard="Yes")
+		self.assertIsNone(check_sandbox_code("Report", {"is_standard": "No"}, no_script))
+		already = frappe._dict(report_script=_BAD, report_type="Script Report", is_standard="No")
+		self.assertIsNone(check_sandbox_code("Report", {"is_standard": "No"}, already))
+
+	def test_a_stored_code_refusal_names_the_document_and_says_so(self):
+		before = frappe._dict(name="zz-ss", script=_BAD, disabled=1, script_type="API")
+		text = _raised("Server Script", {"disabled": 0}, before)
+		self.assertTrue(
+			text.startswith("Server Script zz-ss script (stored code, which this update makes active):\n"),
+			text,
+		)
+		self.assertIn("line 1:", text)
+		self.assertTrue(
+			text.endswith("\nSend a corrected script in the same update, or call validate_script first."),
+			text,
+		)
+		self.assertNotIn(_FIX_LINE, text)
+		# Repeating the unchanged stored code beside the re-enable is still the stored code.
+		self.assertIn("(stored code,", _raised("Server Script", {"disabled": 0, "script": _BAD}, before))
+		report = frappe._dict(
+			name="zz-rep", report_script=_BAD, report_type="Query Report", is_standard="No", disabled=0
+		)
+		text = _raised("Report", {"report_type": "Script Report"}, report)
+		self.assertTrue(text.startswith("Report zz-rep report_script (stored code,"), text)
+		self.assertTrue(
+			text.endswith(
+				"Send a corrected report_script in the same update, or call validate_script first."
+			),
+			text,
+		)
+
+	def test_a_changed_value_on_update_names_the_document_but_is_not_stored_code(self):
+		before = frappe._dict(name="zz-ss", script="x = 1\n", disabled=0, script_type="API")
+		text = _raised("Server Script", {"script": _BAD}, before)
+		self.assertTrue(text.startswith("Server Script zz-ss script:\n"), text)
+		self.assertTrue(text.endswith("\n" + _FIX_LINE), text)
+		self.assertNotIn("stored code", text)
+
+	def test_update_clean_stored_code_passes_every_trigger(self):
+		before = frappe._dict(script="x = 1\n", disabled=1, script_type="API")
+		self.assertIsNone(
+			check_sandbox_code("Server Script", {"disabled": 0, "script_type": "Permission Query"}, before)
+		)
+
+	def test_deep_input_fails_open(self):
+		deep = "x = " + "(" * 100000 + "1" + ")" * 100000
+		self.assertIsNone(check_sandbox_code("Server Script", {"script": deep}))
+		self.assertIsNone(check_sandbox_code("Report", {"report_script": "-" * 200000 + "1"}))
 
 
 class TestParityWithSandbox(FrappeTestCase):
