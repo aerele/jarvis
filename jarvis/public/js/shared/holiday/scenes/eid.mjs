@@ -62,7 +62,7 @@ class EidScene extends Scene {
   inner(geo) {
     const { p } = this;
     const { low, air } = lanternsSVG(p, geo.lanternX);
-    const floor = this.opts.replay ? "" : this.floorGroup(low);
+    const floor = this.floorGroup(low);
     return `${moonSVG(p)}${starsSVG(p, geo)}${floor}${air}${this.item("eid")}`;
   }
 

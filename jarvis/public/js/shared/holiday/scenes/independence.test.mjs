@@ -45,7 +45,7 @@ const tick = (ms) => {
 };
 const scaleOf = (el) => Number(/scale\(([\d.]+)\)/.exec(el.attrs.transform)[1]);
 
-test("a replay has no floor props and never swaps the greeting", async () => {
+test("a replay never swaps the greeting and has no floor props, as the first play has none", async () => {
   const { scene, names, svg } = start({ replay: true });
   tick(END_MS + 700);
   await scene.done;

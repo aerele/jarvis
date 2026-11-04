@@ -11,9 +11,11 @@
 // Phases: pending (the scene may still play: cards hidden, normal greeting) -> playing ->
 // rest. Or pending -> rest at once when the answer is no, there is no room, the deadline
 // passes or the art will not load. A scene never restarts on its own. The replay on the mark runs
-// as "replaying" and hides the cards like the first play (the floor row stands in their band, so
-// they would be under the art), then brings them back at rest. A replay tapped while the last
-// scene is still fading out waits for it (one tap is kept).
+// the whole scene as "replaying" and hides the cards like the first play (the floor row stands
+// in their band, so they would be under the art), then brings them back at rest. It is
+// unlimited and uncounted. Reduced motion, a draft, no room or a hidden tab make it a smile. A
+// replay tapped while the last scene is still fading out waits for it (one tap is kept), and any
+// settle forgets that tap.
 //
 // A tab opened hidden does not begin until it is shown, so a day's showing is not spent on
 // a scene nobody sees. `reason` says why the scene is or is not playing, for support.
@@ -212,7 +214,12 @@ export function createHolidayScene({
 		clearTimeout(deadline);
 		deadline = null;
 		const el = host();
-		if (!el) return giveUp(run, "early", "declined");
+		if (!el) {
+			if (!replay) return giveUp(run, "early", "declined");
+			// A replay starts from rest, where giveUp does nothing: put the mark back as it was.
+			rest();
+			return;
+		}
 		// The scenes before this one are over (a replay waits for that); this closes their
 		// last timer (the smile's) and drops them.
 		started.splice(0).forEach((old) => old.settle("instant"));
@@ -238,6 +245,7 @@ export function createHolidayScene({
 			failed(a.design, error);
 			scene = null;
 			rest();
+			fadeMs.value = FADE_MS.early; // the starters were hidden: they come back softly
 			phase.value = "rest";
 		}
 	}
@@ -246,6 +254,7 @@ export function createHolidayScene({
 		scene = null;
 		if (phase.value === "playing" || phase.value === "replaying") {
 			rest();
+			fadeMs.value = FADE_MS.early;
 			phase.value = "rest";
 		}
 		drain();
@@ -259,6 +268,7 @@ export function createHolidayScene({
 	// ---- ending it -------------------------------------------------------------------
 	/** End the scene: "early" (input, resize, ...) or "instant". Does nothing at rest. */
 	function settle(mode = "early") {
+		queuedReplay = false; // whatever ends or interrupts the page also forgets a kept tap
 		if (phase.value === "pending") return giveUp(run, mode);
 		if (phase.value !== "playing" && phase.value !== "replaying") return;
 		const was = phase.value;
@@ -285,9 +295,12 @@ export function createHolidayScene({
 
 	/**
 	 * A key anywhere ends the scene. Enter or Space on the mark (`startsMarkClick`) is also the
-	 * start of the click that would replay it, so that click is swallowed like a tap's.
+	 * start of the click that would replay it, so that click is swallowed like a tap's. A key
+	 * held down repeats: the repeats are ignored, so they neither end the replay a click on the
+	 * mark started nor undo the swallow of the click the first press began.
 	 */
-	function onKeyDown(startsMarkClick = false) {
+	function onKeyDown(startsMarkClick = false, repeat = false) {
+		if (repeat) return;
 		if (startsMarkClick) swallowClick = phase.value !== "rest" && phase.value !== "idle";
 		settle("early");
 	}
@@ -302,11 +315,21 @@ export function createHolidayScene({
 		return was;
 	}
 
-	/** Tapping the mark at rest replays it with the cards showing; mid-scene it only settled. */
+	/** The rules a replay obeys, at the tap and again when a kept tap runs: none of them may be bypassed. */
+	function replayBlocked() {
+		return (
+			reduced() ||
+			!composerEmpty() ||
+			!fits() ||
+			(!!doc && doc.visibilityState !== "visible")
+		);
+	}
+
+	/** Tapping the mark at rest replays the whole scene, starters hidden; mid-scene it only settled. */
 	async function replay() {
 		if (takeEndingTap()) return;
 		if (phase.value !== "rest") return;
-		if (reduced() || !fits()) return smile();
+		if (replayBlocked()) return smile();
 		// The last scene is still fading out: start after it.
 		if (scene) {
 			queuedReplay = true;
@@ -323,9 +346,11 @@ export function createHolidayScene({
 	}
 
 	async function playReplay() {
+		if (replayBlocked()) return smile();
 		const a = answer();
 		const mod = await load(a.design);
-		if (!mod || phase.value !== "rest" || stopped || scene) return;
+		if (phase.value !== "rest" || stopped || scene) return;
+		if (!mod || replayBlocked()) return smile(); // a draft typed while the art loaded counts
 		mark.item = false;
 		startScene(mod, a, true);
 	}

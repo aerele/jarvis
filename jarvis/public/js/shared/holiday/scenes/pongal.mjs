@@ -74,11 +74,9 @@ class PongalScene extends Scene {
 
   inner(geo) {
     const { p } = this;
-    return `${sunSVG(p)}${toranSVG(p, geo.from, geo.to)}${
-      this.opts.replay
-        ? ""
-        : this.floorGroup(this.onGround(this.floorProps(geo)))
-    }`;
+    return `${sunSVG(p)}${toranSVG(p, geo.from, geo.to)}${this.floorGroup(
+      this.onGround(this.floorProps(geo))
+    )}`;
   }
 
   // Sugarcane at the stage's edges, the kolam and the hearth in the middle (left out when the
