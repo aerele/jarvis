@@ -117,7 +117,7 @@ describe("the view renders through this module", () => {
 
 	it("passes the streaming flag, so a settled reply is not held forever", () => {
 		expect(src).toContain('import { stripBlocks } from "@/lib/chatBlocks";');
-		expect(src).toContain("renderMarkdown(stripBlocks(text, streaming))");
+		expect(src).toContain("renderMarkdown(stripBlocks(text, streaming), { copyCode: true })");
 		expect(src).toContain("render(m.content, m.streaming)");
 	});
 
