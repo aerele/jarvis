@@ -44,6 +44,7 @@ from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, Y
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.chat.filebox_source import SourceLost
 from jarvis.chat.runtime_profile import get_profile
+from jarvis.chat.session_repair import Repair, ensure_session_usable
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription, pool_primary_model
 
@@ -387,6 +388,27 @@ def _publish_to_user(user, payload):
 	from jarvis.chat import worker as _worker
 
 	return _worker.publish_to_user(user, payload)
+
+
+def _repair_session(sess, conv, user, conversation_id, assistant_msg, run_id) -> Repair:
+	"""``session_repair.ensure_session_usable`` for the legacy path; mirrors
+	``prepare._repair_session``. ``waking`` goes out through ``_publish_to_user``.
+	``ensure_session_usable`` swallows a failing ``on_waking``. Raises only a TEMPORARY
+	restore ``AgentUnreachableError``, which the caller's ``except`` handles."""
+
+	def _on_waking() -> None:
+		_publish_to_user(
+			user,
+			{
+				"kind": "run:status",
+				"conversation_id": conversation_id,
+				"message_id": assistant_msg.name,
+				"run_id": run_id,
+				"status": "waking",
+			},
+		)
+
+	return ensure_session_usable(sess, conv, on_waking=_on_waking, path="legacy", run_id=run_id)
 
 
 class _AssistantContentBatcher:
@@ -1773,6 +1795,13 @@ def handle_chat_send(payload: dict) -> None:
 			t_checkout = time.monotonic()
 			with agent_session_pool.checkout(gateway_url) as sess:
 				checkout_ms = int((time.monotonic() - t_checkout) * 1000)
+				# jarvis-admin-v2#753: heal an archived gateway session before the mint
+				# branch below, so a key minted just now is never probed. A stale-device
+				# key (#712 above) was blanked to "" and is skipped here; its "waking" was
+				# already published, so this publishes none for it. Only a TEMPORARY restore
+				# failure escapes, into the outer ``except AgentUnreachableError``.
+				if conv.session_key:
+					_repair_session(sess, conv, user, conversation_id, assistant_msg, run_id)
 				# First turn of this conversation: create the agent
 				# session on THIS pooled connection (no extra handshake)
 				# and persist the Jarvis Chat Session row BEFORE the
