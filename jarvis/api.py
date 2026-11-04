@@ -3422,7 +3422,10 @@ def _dispatch_and_wrap(
 		except Exception:
 			pass
 	if is_write:
-		audit.record(tool=tool, args=args, ok=True, result=data)
+		# Both audits get the same projected pair: App Learning writes carry private
+		# source/wiki content that must never reach a durable or logged audit.
+		audit_args, audit_data = _app_learning_audit_payload(tool, args, data)
+		audit.record(tool=tool, args=audit_args, ok=True, result=audit_data)
 		# Manager audit: a dispatched write (one metadata-only row; bulk collapses
 		# to one row + bulk_count). Own savepoint, never commits. This branch
 		# (version-16-hotfix) has no envelope_ok / _ENVELOPE_TOOLS machinery, so a
@@ -3431,7 +3434,6 @@ def _dispatch_and_wrap(
 		# connector-envelope feature that is not on this branch.
 		from jarvis import agent_audit
 
-		audit_args, audit_data = _app_learning_audit_payload(tool, args, data)
 		agent_audit.record_write(
 			actor=frappe.session.user,
 			tool=tool,
