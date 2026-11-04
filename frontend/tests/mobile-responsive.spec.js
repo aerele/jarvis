@@ -41,6 +41,13 @@ const RULES = {
 		matchAll(src, /(?:^|["'\s])((?:min-)?w-\[(\d+)px\])/g).filter(
 			(m) => Number(m.match(/(\d+)px/)[1]) > 480
 		),
+	// A width in vw sizes an element against the viewport, but the chat's
+	// side-over panels (and anything else in the routed column) live BESIDE the
+	// in-flow sidebar, so the viewport is wider than their container. The panel
+	// then overflowed the column and was cut off under the sidebar on a resized
+	// window (jarvis-admin-v2#776). Size against the container (%) instead.
+	"vw-width-in-style": (src) =>
+		matchAll(src, /(?:^|[\s;{])((?:max-|min-)?width:\s*[\d.]+vw)\b/g),
 	// A bare table overflows narrow screens; it must sit inside an overflow-x
 	// (or overflow-auto) scroller. Coarse per-file check: table present, no
 	// horizontal scroller anywhere in the file.
