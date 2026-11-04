@@ -132,6 +132,37 @@ class TestRunMethod(FrappeTestCase):
 		with self.assertRaises(InvalidArgumentError):
 			run_method("frappe.ping", {"bogus_arg": 1})
 
+	def test_get_count_ignores_the_outer_request(self):
+		"""Aerele-RnD/jarvis-admin-v2#750: frappe.client.get_count reads its query from
+		frappe.form_dict. Run inside the Confirm request, whose form_dict carries
+		token / conversation, it raised "unexpected keyword argument 'token'"; it
+		must see only its own args, return the permission-filtered count, and leave
+		the outer request's form_dict as it was."""
+		outer = frappe._dict({"token": "jarvis-test-token", "conversation": "jarvis-test-conv"})
+		frappe.local.form_dict = outer
+		try:
+			expected = len(frappe.get_list("ToDo", pluck="name", limit_page_length=0))
+			self.assertEqual(run_method("frappe.client.get_count", {"doctype": "ToDo"}), expected)
+			expected_open = len(
+				frappe.get_list("ToDo", filters={"status": "Open"}, pluck="name", limit_page_length=0)
+			)
+			self.assertEqual(
+				run_method("frappe.client.get_count", {"doctype": "ToDo", "filters": {"status": "Open"}}),
+				expected_open,
+			)
+			self.assertIs(frappe.local.form_dict, outer, "the outer request's form_dict is put back")
+			self.assertEqual(dict(outer), {"token": "jarvis-test-token", "conversation": "jarvis-test-conv"})
+		finally:
+			frappe.local.form_dict = frappe._dict({})
+
+	def test_no_arg_method_still_runs_inside_a_request(self):
+		"""The #750 comparison call: a method with no args is unaffected."""
+		frappe.local.form_dict = frappe._dict({"token": "jarvis-test-token"})
+		try:
+			self.assertEqual(run_method("frappe.auth.get_logged_user"), frappe.session.user)
+		finally:
+			frappe.local.form_dict = frappe._dict({})
+
 	# --- Server Script API branch (classified via the server-script map) ---
 
 	def test_calls_server_script_api(self):
