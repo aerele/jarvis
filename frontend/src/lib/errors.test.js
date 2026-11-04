@@ -403,6 +403,7 @@ test("retryable is pinned per code", () => {
 		"timeout",
 		"connection",
 		"session-reset",
+		"session-archived",
 		"empty-reply",
 		"empty-reply-tools",
 		"gateway",
@@ -413,6 +414,79 @@ test("retryable is pinned per code", () => {
 	assert.equal(turnErrorInfo("No endpoints found").retryable, true);
 	assert.equal(turnErrorInfo("429 model_not_found").retryable, false);
 	assert.equal(turnErrorInfo("503 Service Unavailable: upstream not found").retryable, true);
+});
+
+// A chat whose session the gateway archived heals on the next send, so the error must
+// offer Retry and read as a reconnect, not as a rejected request.
+test("an archived session reads as a reconnect with Retry", () => {
+	const rule = rules.find((r) => r.code === "session-archived");
+	assert.ok(rule, "session-archived rule exists");
+	const texts = ["", "billing", "quota", "rate-limit-timeout", "forbidden"].map(
+		(role) =>
+			`chat.send rejected: INVALID_REQUEST: Session "agent:${
+				role ? `${role}:` : "main:"
+			}dashboard:3f2b1c9e" is archived. Restore it before starting new work.`
+	);
+	for (const text of texts) {
+		const info = turnErrorInfo(text);
+		assert.equal(info.code, "session-archived", text);
+		assert.equal(info.retryable, true, text);
+		assert.equal(info.headline, "This chat needs to reconnect");
+	}
+	// A different INVALID_REQUEST stays a rejected request without Retry.
+	const other = turnErrorInfo("chat.send rejected: INVALID_REQUEST: message is required");
+	assert.equal(other.code, "invalid-request");
+	assert.equal(other.retryable, false);
+});
+
+// A tombstoned session cannot heal (the bench cannot reset it), so there is no Retry, whatever
+// role word the session key carries.
+test("a tombstoned session reads as a dead chat with no Retry", () => {
+	const rule = rules.find((r) => r.code === "session-ended");
+	assert.ok(rule, "session-ended rule exists");
+	assert.equal(turnErrorInfo("x", "session-ended").retryable, false);
+	const texts = ["", "billing", "quota", "rate-limit-timeout", "forbidden"].map(
+		(role) =>
+			`chat.send rejected: INVALID_REQUEST: Session "agent:${
+				role ? `${role}:` : "main:"
+			}dashboard:3f2b1c9e" ended during restart recovery. Use /new or /reset to start a replacement session.`
+	);
+	for (const text of texts) {
+		const info = turnErrorInfo(text);
+		assert.equal(info.code, "session-ended", text);
+		assert.equal(info.retryable, false, text);
+		assert.equal(info.headline, "This chat can't continue");
+		assert.equal(info.hint, "Start a new chat to keep going.");
+	}
+});
+
+test("the session rules sit right after internal and ahead of the rules their text can hit", () => {
+	const codes = rules.map((r) => r.code);
+	assert.equal(codes.indexOf("session-archived"), codes.indexOf("internal") + 1);
+	assert.equal(codes.indexOf("session-ended"), codes.indexOf("session-archived") + 1);
+	for (const earlier of ["session-archived", "session-ended"]) {
+		for (const later of [
+			"billing",
+			"quota",
+			"rate-limit",
+			"timeout",
+			"permission",
+			"invalid-request",
+		]) {
+			assert.ok(codes.indexOf(earlier) < codes.indexOf(later), `${earlier} before ${later}`);
+		}
+	}
+});
+
+// The runtime name is kept out of this copy by the CI runtime-branding gate.
+test("customer copy has no em-dash and no doubled punctuation", () => {
+	for (const rule of rules) {
+		const copy = `${rule.headline}. ${rule.hint}`;
+		assert.ok(!copy.includes("\u2014"), `${rule.code}: em-dash`);
+		if (rule.code === "session-archived" || rule.code === "session-ended") {
+			assert.ok(!/[.!?,;:]\s*[.!?,;:]/.test(copy), `${rule.code}: doubled punctuation`);
+		}
+	}
 });
 
 // An empty reply names no cause, so the site's expired sign-in for that model explains it.
