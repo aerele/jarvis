@@ -27,8 +27,13 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat.agent_client import AgentSession
+from jarvis.chat.agent_client import (
+	AgentSession,
+	is_definitive_refusal,
+	is_session_changed,
+)
 from jarvis.chat.device import ChatDeviceCredentials
+from jarvis.chat.socket_io import SendNotStarted, SendUncertain
 from jarvis.exceptions import AgentUnreachableError
 
 # --- helpers --------------------------------------------------------------
@@ -1202,6 +1207,160 @@ class TestCompactSession(FrappeTestCase):
 		with self.assertRaises(AgentUnreachableError) as cm:
 			sess.compact_session(key, None, timeout_s=5)
 		self.assertEqual(cm.exception.code, "compact-timeout")
+
+
+class TestSessionRepairCalls(FrappeTestCase):
+	"""#753: the two gateway calls the pre-send session repair uses, and the two
+	classifiers that decide which failures are final. Frames and timeouts are pinned
+	exactly, because a patch that silently dropped ``expectedSessionId`` would
+	restore the wrong incarnation of a session."""
+
+	KEY = "agent:main:dashboard:u1"
+
+	def _timeouts(self, sess):
+		"""Record the timeout_s each ``_request`` was called with, then delegate."""
+		seen = []
+		real = sess._request
+
+		def _spy(method, params, *, timeout_s, **kw):
+			seen.append((method, timeout_s))
+			return real(method, params, timeout_s=timeout_s, **kw)
+
+		sess._request = _spy
+		return seen
+
+	def test_describe_session_sends_key_and_unwraps_session(self):
+		row = {"key": self.KEY, "sessionId": "sid-1", "archived": True}
+		sess = _session_with_scripted_frames([{"type": "res", "ok": True, "payload": {"session": row}}])
+		seen = self._timeouts(sess)
+
+		self.assertEqual(sess.describe_session(self.KEY), row)
+
+		sent = sess._ws.sent[-1]
+		self.assertEqual((sent["method"], sent["params"]), ("sessions.describe", {"key": self.KEY}))
+		self.assertEqual(seen, [("sessions.describe", 5)])
+
+	def test_describe_session_timeout_is_overridable(self):
+		sess = _session_with_scripted_frames([{"type": "res", "ok": True, "payload": {"session": {}}}])
+		seen = self._timeouts(sess)
+		sess.describe_session(self.KEY, timeout_s=2)
+		self.assertEqual(seen, [("sessions.describe", 2)])
+
+	def test_describe_session_null_session_is_none(self):
+		sess = _session_with_scripted_frames([{"type": "res", "ok": True, "payload": {"session": None}}])
+		self.assertIsNone(sess.describe_session(self.KEY))
+
+	def test_describe_session_non_dict_payload_is_none(self):
+		for payload in ({"session": "gone"}, {"session": ["x"]}, {}, None):
+			with self.subTest(payload=payload):
+				sess = _session_with_scripted_frames([{"type": "res", "ok": True, "payload": payload}])
+				self.assertIsNone(sess.describe_session(self.KEY))
+
+	def test_restore_session_patches_archived_false_with_expected_session_id(self):
+		sess = _session_with_scripted_frames([{"type": "res", "ok": True, "payload": {"ok": True}}])
+		seen = self._timeouts(sess)
+
+		self.assertIsNone(sess.restore_session(self.KEY, "sid-1"))
+
+		sent = sess._ws.sent[-1]
+		self.assertEqual(sent["method"], "sessions.patch")
+		self.assertEqual(sent["params"], {"key": self.KEY, "archived": False, "expectedSessionId": "sid-1"})
+		self.assertEqual(seen, [("sessions.patch", 5)])
+
+	def test_the_agent_session_has_no_reset_call(self):
+		# sessions.reset needs operator.admin, which the bench does not hold.
+		self.assertFalse(hasattr(AgentSession, "reset_session"))
+
+	def test_gateway_refusal_propagates_with_rejected_method(self):
+		sess = _session_with_scripted_frames(
+			[{"type": "res", "ok": False, "error": {"code": "INVALID_REQUEST", "message": "nope"}}]
+		)
+		with self.assertRaises(AgentUnreachableError) as cm:
+			sess.restore_session(self.KEY, "sid-1")
+		self.assertEqual(cm.exception.rejected_method, "sessions.patch")
+		self.assertTrue(is_definitive_refusal(cm.exception))
+
+	def test_ack_timeout_is_temporary(self):
+		# No response frame: _request times out with the ambiguous ack-timeout code.
+		sess, _ws = _build_session()
+		with self.assertRaises(AgentUnreachableError) as cm:
+			sess.describe_session(self.KEY, timeout_s=0.05)
+		self.assertEqual(cm.exception.code, "ack-timeout")
+		self.assertFalse(is_definitive_refusal(cm.exception))
+
+	def test_real_send_not_started_is_temporary(self):
+		sess, _ws = _build_session()
+		sess.abort_transport()
+		with self.assertRaises(SendNotStarted) as cm:
+			sess.describe_session(self.KEY)
+		self.assertEqual(cm.exception.code, "send-not-started")
+		self.assertFalse(is_definitive_refusal(cm.exception))
+
+	# -- classifiers (pure) ------------------------------------------------
+
+	def test_is_definitive_refusal_requires_an_explicit_rejection(self):
+		for code in ("INVALID_REQUEST", "FORBIDDEN", "NOT_PAIRED", "SOMETHING_NEW"):
+			with self.subTest(code=code):
+				err = AgentUnreachableError("x", code=code, rejected_method="sessions.patch")
+				self.assertTrue(is_definitive_refusal(err))
+
+	def test_is_definitive_refusal_unavailable_is_temporary_even_when_rejected(self):
+		err = AgentUnreachableError("x", code="UNAVAILABLE", rejected_method="sessions.patch")
+		self.assertFalse(is_definitive_refusal(err))
+
+	def test_is_definitive_refusal_agent_timeout_is_temporary_even_when_rejected(self):
+		err = AgentUnreachableError("x", code="AGENT_TIMEOUT", rejected_method="sessions.patch")
+		self.assertFalse(is_definitive_refusal(err))
+
+	def test_is_definitive_refusal_requires_a_code_even_when_rejected(self):
+		for code in (None, ""):
+			with self.subTest(code=code):
+				err = AgentUnreachableError("x", code=code, rejected_method="sessions.patch")
+				self.assertFalse(is_definitive_refusal(err))
+
+	def test_is_definitive_refusal_everything_else_is_temporary(self):
+		for err in (
+			AgentUnreachableError("x", code="UNAVAILABLE"),
+			AgentUnreachableError("x", code="ack-timeout"),
+			AgentUnreachableError("x", code="send-not-started"),
+			SendNotStarted("busy", reason="busy"),
+			SendUncertain("write failed"),
+			AgentUnreachableError("x"),
+			# A rejection code with no rejected_method is not an answer to THIS rpc.
+			AgentUnreachableError("x", code="INVALID_REQUEST"),
+		):
+			with self.subTest(err=repr(err)):
+				self.assertFalse(is_definitive_refusal(err))
+
+	def test_is_session_changed(self):
+		def mk(code, details):
+			return AgentUnreachableError("x", code=code, details=details, rejected_method="sessions.patch")
+
+		self.assertTrue(is_session_changed(mk("INVALID_REQUEST", {"reason": "session-changed"})))
+		self.assertFalse(is_session_changed(mk("INVALID_REQUEST", {"reason": "other"})))
+		self.assertFalse(is_session_changed(mk("INVALID_REQUEST", None)))
+		self.assertFalse(is_session_changed(mk("INVALID_REQUEST", {})))
+		self.assertFalse(is_session_changed(mk("FORBIDDEN", {"reason": "session-changed"})))
+		self.assertFalse(is_session_changed(AgentUnreachableError("x")))
+
+	def test_session_changed_survives_the_wire(self):
+		sess = _session_with_scripted_frames(
+			[
+				{
+					"type": "res",
+					"ok": False,
+					"error": {
+						"code": "INVALID_REQUEST",
+						"message": "session changed",
+						"details": {"reason": "session-changed"},
+					},
+				}
+			]
+		)
+		with self.assertRaises(AgentUnreachableError) as cm:
+			sess.restore_session(self.KEY, "stale-sid")
+		self.assertTrue(is_session_changed(cm.exception))
+		self.assertTrue(is_definitive_refusal(cm.exception))
 
 
 # --- Mechanism A: connect-first device pairing ------------------------------
