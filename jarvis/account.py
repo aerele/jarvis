@@ -817,6 +817,9 @@ def is_ready_for_chat() -> dict:
 	- ``"site_is_copy"`` - this site is not the one Jarvis was first connected from
 	  (a restored copy). Checked FIRST, before anything asks admin, which refuses a
 	  copy. Carries ``copy_notice: {paired_site}``.
+	- ``"site_instance_changed"`` - the agent was pinned to another instance id than
+	  this site's (a restore or a move). Checked right after ``site_is_copy``; cleared
+	  by a passing Re-verify (``site_pin.reverify``).
 	- ``None`` when ``ready`` is True.
 
 	Also carries one non-blocking worker-health field, merged in AFTER the
@@ -837,6 +840,15 @@ def is_ready_for_chat() -> dict:
 			"reason": "site_is_copy",
 			"detail": site_pin.copy_message(pin["paired_site"]),
 			"copy_notice": {"paired_site": pin["paired_site"]},
+			"billing_notice": {},
+		}
+	from jarvis.chat import foreign_session
+
+	if foreign_session.instance_changed():
+		return {
+			"ready": False,
+			"reason": "site_instance_changed",
+			"detail": site_pin.INSTANCE_CHANGED_MESSAGE,
 			"billing_notice": {},
 		}
 	verdict = _ready_verdict()

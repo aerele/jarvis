@@ -59,6 +59,33 @@ class TestBootSiteSetupFlag(FrappeTestCase):
 		self.assertFalse(b.jarvis_onboarded)
 
 
+class TestBootInstanceChanged(FrappeTestCase):
+	"""A site whose identity changed pauses chat but IS set up: the desk must not show the
+	onboarding nudge for it (the chat page carries the Re-verify banner)."""
+
+	def _boot(self, verdict):
+		b = frappe._dict()
+		with patch("jarvis.account.is_ready_for_chat", return_value=verdict):
+			set_jarvis_boot(b)
+		return b
+
+	def test_an_instance_change_reads_as_onboarded_with_no_nudge_reason(self):
+		b = self._boot({"ready": False, "reason": "site_instance_changed"})
+		self.assertTrue(b.jarvis_onboarded)
+		self.assertEqual(b.jarvis_ready_reason, "")
+		self.assertFalse(b.jarvis_pairing_blocked)
+
+	def test_other_not_ready_reasons_still_nudge(self):
+		b = self._boot({"ready": False, "reason": "signup"})
+		self.assertFalse(b.jarvis_onboarded)
+		self.assertEqual(b.jarvis_ready_reason, "signup")
+
+	def test_a_copy_is_still_not_onboarded_and_blocked(self):
+		b = self._boot({"ready": False, "reason": "site_is_copy", "copy_notice": {"paired_site": "x.site"}})
+		self.assertFalse(b.jarvis_onboarded)
+		self.assertTrue(b.jarvis_pairing_blocked)
+
+
 class TestBootHasBeenReadyFlag(FrappeTestCase):
 	"""jarvis_has_been_ready disambiguates the two reasons that alone cannot
 	tell a brand-new tenant (first sync still pending) from an established

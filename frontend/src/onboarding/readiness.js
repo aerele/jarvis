@@ -182,11 +182,14 @@ export async function replacedNoticeOf() {
 	return r.replaced_notice || { replaced: true };
 }
 
-// This site is a restored copy of another one (jarvis.chat.site_pin). Like
+// This site is a restored copy of another one (jarvis.chat.site_pin), or its own identity
+// changed ("site_instance_changed": same banner, own wording). Like
 // `site_replaced` it is deliberately absent from NOT_ONBOARDED_REASONS: the site
 // is onboarded, it just must not drive the original's agent. Null unless it applies.
 export async function copyNoticeOf() {
 	const r = await checkReady();
+	if (r && r.reason === "site_instance_changed")
+		return { instance_changed: true, message: r.detail || "" };
 	if (!r || r.reason !== "site_is_copy") return null;
 	return r.copy_notice || null;
 }
@@ -238,10 +241,23 @@ export function replacedBanner(notice) {
 	};
 }
 
-// Same sentence as jarvis.chat.site_pin.copy_message. No action: only support can
-// move the pairing, so there is nothing to click.
+// Same sentence as jarvis.chat.site_pin.copy_message. The banner carries no action
+// here; ChatView adds a "Re-verify this site" button for System Managers (site_pin.reverify).
+// Only support can move the pairing.
 export function copyBanner(notice) {
 	if (!notice) return null;
+	// The site itself changed (a restore or a move), not a copy of it: same banner and
+	// Re-verify action, different words (jarvis.chat.site_pin.INSTANCE_CHANGED_MESSAGE).
+	if (notice.instance_changed) {
+		return {
+			tone: "warning",
+			title: "This site changed",
+			// The server's own sentence (readiness `detail`) wins; this is the fallback.
+			message:
+				notice.message ||
+				"Jarvis paused because this site's identity changed, for example after a restore or a move. Re-verify to reconnect Jarvis here.",
+		};
+	}
 	// A block with no recorded pin still shows: "another site" matches the desk banner.
 	const site = notice.paired_site || "another site";
 	return {

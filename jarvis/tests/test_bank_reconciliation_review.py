@@ -11,7 +11,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import bank_reconciliation_review as review
 from jarvis.chat import operator_review
-from jarvis.tests._erpnext_masters import clear_cache_after_rollback, ensure_customer
+from jarvis.tests._erpnext_masters import clear_cache_after_rollback, ensure_customer, ensure_party_types
 
 
 def config(**over):
@@ -166,7 +166,9 @@ E2E_CO = "_Test BRR Co"
 def _ensure_masters():
 	# A fresh CI site never ran the setup wizard (see _erpnext_masters): a Standard chart
 	# Company needs Warehouse Type "Transit", and a non-India country avoids HRMS's
-	# regional ALTER TABLE committing past the class rollback.
+	# regional ALTER TABLE committing past the class rollback. The Payment Entries below
+	# also need the standard Party Type rows, which only the setup wizard creates.
+	ensure_party_types()
 	if not frappe.db.exists("Warehouse Type", "Transit"):
 		frappe.get_doc({"doctype": "Warehouse Type", "name": "Transit"}).insert(ignore_permissions=True)
 	if not frappe.db.exists("Company", E2E_CO):
