@@ -34,12 +34,8 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 
-<<<<<<< HEAD
-from jarvis.chat import admission, empty_reply_recovery, finalize, prepare, pump, settlement, txn
-=======
 from jarvis.chat import (
 	admission,
-	connector_focus,
 	empty_reply_recovery,
 	finalize,
 	prepare,
@@ -48,7 +44,6 @@ from jarvis.chat import (
 	turn_handler,
 	txn,
 )
->>>>>>> 2db77b2 (fix(chat): heal archived agent sessions on the next message (Aerele-RnD/jarvis-admin-v2#753))
 from jarvis.chat import api as chat_api
 from jarvis.chat import turn_state as ts
 from jarvis.chat.error_taxonomy import classify_error_text
