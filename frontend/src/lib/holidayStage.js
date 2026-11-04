@@ -8,15 +8,14 @@ import {
 import { hasScene } from "@/lib/holidayScenes";
 
 /**
- * Does the welcome screen use the stage layout? Only on a day or a birthday the server
- * marked as a scene day (the first day of a run, not white label), for a design that has
- * a scene in this build, with the item to wear, on a viewport that is not phone mode and
- * with no maintenance hold when the screen opened. Everything else keeps the normal
- * layout, which already shows the day heading.
+ * Does the welcome screen use the stage layout? Only when the server marked today as a
+ * scene day (a lead-up day, the first day of a run or a birthday; never white label), for a
+ * design that has a scene in this build, with the item to wear, on a viewport that is not
+ * phone mode and with no maintenance hold when the screen opened. Everything else keeps the
+ * normal layout, which already shows the day heading.
  */
 export function stageEligible({ answer, phone, whiteLabel, holdAtMount }) {
 	if (!answer || phone || whiteLabel || holdAtMount) return false;
-	if (answer.kind !== "day" && answer.kind !== "birthday") return false;
 	return answer.scene === true && answer.worn === true && hasScene(answer.design);
 }
 

@@ -95,8 +95,8 @@ describe("createHolidayScene", () => {
 			["it is not a scene day", { scene: false }],
 			["the server says no slot is left", { may_play: false }],
 			["the design has no scene yet", { design: "ramadan", occasion: "ramadan" }],
-			["it is a lead-up day", { kind: "leadup" }],
-			["there is no answer", { kind: "none" }],
+			["it is a lead-up day without a scene", { kind: "leadup", scene: false }],
+			["there is no answer", { kind: "none", scene: undefined }],
 		])("shows the rest state at once when %s, and records nothing", async (_, patch) => {
 			const { scene, options } = setup({ answer: { ...DAY, ...patch } });
 			scene.begin();
@@ -151,6 +151,18 @@ describe("createHolidayScene", () => {
 			expect(scene.phase.value).toBe("playing");
 			expect(scene.cardsHidden.value).toBe(true);
 			expect(vi.getTimerCount()).toBe(0); // the deadline is cleared once it plays
+		});
+
+		it("plays on a lead-up day the server marked as a scene day", async () => {
+			const { scene, mod, options } = setup({
+				answer: { ...DAY, kind: "leadup", date: "2026-11-06" },
+			});
+			expect(scene.phase.value).toBe("pending");
+			scene.begin();
+			await tick(50);
+			expect(options.recordShown).toHaveBeenCalledTimes(1);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+			expect(scene.phase.value).toBe("playing");
 		});
 
 		it("with a 5 s import the cards are visible by 2.5 s, nothing plays, and the late art is ignored", async () => {

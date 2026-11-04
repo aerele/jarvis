@@ -7230,7 +7230,8 @@ const stageOn = computed(() =>
 		holdAtMount: holdAtWelcomeMount.value,
 	})
 );
-// The festive greeting card replaces the last starter on a scene day.
+// The festive greeting card replaces the last starter on the holiday itself (never on a
+// lead-up day or a birthday, though both can use the stage).
 const welcomeCards = computed(() =>
 	stageOn.value
 		? withFestiveCard(starterCards.value, holidayTouch.answer.value)

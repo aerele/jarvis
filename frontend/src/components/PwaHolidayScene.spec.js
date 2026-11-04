@@ -94,6 +94,18 @@ describe("PWA createHolidayScene", () => {
 		expect(scene.phase.value).toBe("playing");
 	});
 
+	it("plays on a lead-up day the server marked as a scene day", async () => {
+		const { scene, mod, options } = setup({
+			answer: () => ({ ...DAY, kind: "leadup", date: "2026-11-06" }),
+		});
+		expect(scene.phase.value).toBe("pending");
+		scene.begin();
+		await tick(50);
+		expect(options.recordShown).toHaveBeenCalledTimes(1);
+		expect(mod.play).toHaveBeenCalledTimes(1);
+		expect(scene.phase.value).toBe("playing");
+	});
+
 	it("rests with no art load and no record_shown when the screen has no room", async () => {
 		const { scene, options } = setup({ fits: () => false });
 		scene.begin();

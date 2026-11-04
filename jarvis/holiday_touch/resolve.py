@@ -9,6 +9,8 @@ Two layers, split so the first can be cached:
 * ``answer(user, now)``: the payload the client gets. It applies the switches, the personal
   switch, the policy mirror, white label and ``may_play`` on every call, then picks the
   first of ``[winner, fallback]`` that the birthday switch and the disabled designs allow.
+  ``scene`` is true on a lead-up day, a birthday, or the first day of a run (``scene_first_day``),
+  unless the site is white label; ``scene_first_day`` is cached, ``scene`` is not.
 
 A date of birth is compared, never stored, returned or logged. ``safe_answer`` is the only
 entry point a request path should call: it never raises.
@@ -80,7 +82,9 @@ def answer(user: str, now: datetime | None = None) -> dict:
 	if chosen is None:
 		return payload
 	white = settings.white_label(site)
-	scene = chosen["kind"] in ("day", "birthday") and chosen["scene_first_day"] and not white
+	scene = not white and (
+		(chosen["kind"] in ("day", "birthday") and chosen["scene_first_day"]) or chosen["kind"] == "leadup"
+	)
 	payload.update(
 		kind=chosen["kind"],
 		design=chosen["design"],

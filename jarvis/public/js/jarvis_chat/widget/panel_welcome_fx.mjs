@@ -1,14 +1,15 @@
-// What the mini chat's welcome does on a holiday: the hero smiles with its item, and on a
-// day or birthday the holiday's particles drift down behind it. No full scene: people open
-// this panel mid-work. Text only (the art arrives through holiday.ensureArt); Panel.vue
-// gives it the svg to draw into and a callback for the smile.
+// What the mini chat's welcome does on a holiday: the hero smiles with its item, and when
+// today has a scene (a lead-up day, a birthday or the first day of a run) the holiday's
+// particles drift down behind it. No full scene: people open this panel mid-work. Text
+// only (the art arrives through holiday.ensureArt); Panel.vue gives it the svg to draw
+// into and a callback for the smile.
 //
 // One "welcome open" is one call to open(): the welcome block becoming visible while the
 // panel is open. close() ends everything and leaves no timer behind. Every async step
 // checks it still belongs to the current open, so a late reply draws nothing.
 //
 // One deadline (DEADLINE_MS) from the open covers the art. The smile and the particles start
-// together, once the art is in and, on a day or birthday, the server has answered. Art that is
+// together, once the art is in and, when today has a scene, the server has answered. Art that is
 // not in by the deadline means no smile, now or later. A reply that misses the deadline still
 // smiles; if it turns out to be `play: true` while this same welcome is open, the particles
 // start then (the server has already spent the slot).
@@ -18,7 +19,6 @@ import { DEADLINE_MS } from "./holiday_celebration.mjs";
 
 export const SMILE_MS = 2400;
 const SMILE_KINDS = ["leadup", "day", "birthday"];
-const CELEBRATE_KINDS = ["day", "birthday"];
 
 export function createWelcomeFx({
   holiday, // the Desk holiday state (holiday_state.mjs)
@@ -93,9 +93,7 @@ export function createWelcomeFx({
     const mine = ++token;
     stopVisuals();
     if (!wants()) return;
-    const celebrating = CELEBRATE_KINDS.includes(view().kind)
-      ? holiday.celebrate()
-      : null;
+    const celebrating = view().scene === true ? holiday.celebrate() : null;
     const [art, reply] = await Promise.all([artWithinDeadline(), celebrating]);
     if (mine !== token || !art) return;
     smile();
@@ -118,7 +116,7 @@ export function createWelcomeFx({
     const art = await artWithinDeadline();
     if (mine !== token || !art) return;
     smile();
-    if (CELEBRATE_KINDS.includes(view().kind) && !reduced()) drop(art);
+    if (!reduced()) drop(art);
   }
 
   function close() {

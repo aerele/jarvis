@@ -2,11 +2,11 @@
 // component so bare `node --test` can run them.
 
 /**
- * Does the welcome screen use the stage? Only on a day or a birthday the server marked as a
- * scene day, with an item to wear, for a design that has a scene in this build, not white
- * label and with no maintenance hold or top banner when the screen opened. Anything else keeps the
- * ordinary welcome (which already shows the day heading). `hasScene(design)` is injected so
- * this file needs no bundler alias.
+ * Does the welcome screen use the stage? Only when the server marked today as a scene day (a
+ * lead-up day, the first day of a run or a birthday), with an item to wear, for a design that
+ * has a scene in this build, not white label and with no maintenance hold or top banner when
+ * the screen opened. Anything else keeps the ordinary welcome (which already shows the day
+ * heading). `hasScene(design)` is injected so this file needs no bundler alias.
  */
 export function stageEligible({
 	answer,
@@ -16,7 +16,6 @@ export function stageEligible({
 	hasScene,
 }) {
 	if (!answer || whiteLabel || holdAtMount || bannerAtMount) return false;
-	if (answer.kind !== "day" && answer.kind !== "birthday") return false;
 	return answer.scene === true && answer.worn === true && hasScene(answer.design);
 }
 
