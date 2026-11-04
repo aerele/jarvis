@@ -3,7 +3,10 @@
 		<div v-for="(q, qi) in questions" :key="qi" class="jv-ask-q">
 			<div class="jv-ask-qt">
 				<span class="jv-ask-num">{{ qi + 1 }}</span
-				>{{ q.q }}
+				>{{ q.q
+				}}<span v-if="q.optional && !saysOptional(q.q)" class="jv-ask-optional">
+					(optional)</span
+				>
 			</div>
 			<!-- field: waiting on the field's meta -->
 			<div v-if="q.type === 'loading'" class="jv-ask-loading">
@@ -136,9 +139,11 @@
 			<button class="jv-ask-submit" :disabled="!ready || answered || busy" @click="submit">
 				{{ answered ? "Answered" : "Submit answers" }}
 			</button>
-			<span v-if="!ready && !answered" class="jv-ask-hint"
-				>Answer each question to continue</span
-			>
+			<span v-if="!ready && !answered" class="jv-ask-hint">{{
+				hasOptional
+					? "Answer each required question to continue"
+					: "Answer each question to continue"
+			}}</span>
 		</div>
 	</div>
 </template>
@@ -293,6 +298,11 @@ function drawn(q, i) {
 }
 const questions = computed(() => props.spec.questions.map(drawn));
 const ready = computed(() => isAskReady({ questions: questions.value }, sel.value, other.value));
+// An optional question (parseAsk: `optional: true`, `required: false`, or a label
+// ending in "(optional)") never holds Submit back while blank. The label is shown
+// as written; only a flag-marked one gets an "(optional)" suffix drawn for it.
+const hasOptional = computed(() => questions.value.some((q) => q.optional));
+const saysOptional = (text) => /\(\s*optional\s*\)\s*$/i.test(text || "");
 const linkSeq = {};
 watch(
 	() => props.spec.questions.map((q) => JSON.stringify([q.type, fieldKey(q)])),
@@ -485,6 +495,10 @@ function submit() {
 }
 .jv-ask--form .jv-ask-num {
 	display: none;
+}
+.jv-ask-optional {
+	font-weight: 400;
+	color: var(--text-3);
 }
 .jv-ask--form .jv-ask-q {
 	border-bottom: 0;
