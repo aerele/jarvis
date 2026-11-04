@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onBeforeUnmount } from "vue";
+import { ref, computed, onBeforeUnmount, onMounted } from "vue";
 import { isRequiredBlank, lineItemSummary } from "@/lib/actionSummary";
 import { draftParentDoc } from "@/lib/draftApply";
 import { AUTO_OPEN_MAX, savedRowsByName } from "@/lib/draftTables";
@@ -82,14 +82,23 @@ function moreSummary(extra) {
 const DEFAULT_WIDTH = 720;
 const MIN_WIDTH = 440;
 const STORAGE_KEY = "jarvis-draftpreview-width";
-const maxWidth = () => Math.min(1100, Math.round(window.innerWidth * 0.92));
+const panelEl = ref(null);
+// The overlay fills the chat column, not the window: beside the in-flow sidebar
+// the column is narrower than the viewport, and a width clamped to the viewport
+// let the panel's left edge run under the sidebar (jarvis-admin-v2#776). Before
+// mount the column is unknown, so the initial number falls back to the window;
+// the stylesheet's percentage max-width caps the paint, and onMounted re-clamps.
+const hostWidth = () => panelEl.value?.parentElement?.clientWidth || window.innerWidth;
+const maxWidth = () => Math.min(1100, Math.round(hostWidth() * 0.92));
 const clampWidth = (w) => Math.min(maxWidth(), Math.max(MIN_WIDTH, w));
 
 const stored = Number(localStorage.getItem(STORAGE_KEY));
 const panelWidth = ref(clampWidth(stored || DEFAULT_WIDTH));
 const resizing = ref(false);
-const panelEl = ref(null);
 let panelRight = 0;
+onMounted(() => {
+	panelWidth.value = clampWidth(panelWidth.value);
+});
 
 function onMove(e) {
 	resizing.value = true;
@@ -304,7 +313,10 @@ onBeforeUnmount(() => {
 }
 .dp-panel {
 	position: relative;
-	max-width: 92vw;
+	/* Of the overlay (the chat column), never the viewport: a definite max-width
+	   also caps the flex item's automatic minimum, so a nowrap grid cannot hold
+	   the panel wider than the column and push it under the sidebar (#776). */
+	max-width: 92%;
 	height: 100%;
 	background: var(--surface);
 	border-left: 1px solid var(--border);
