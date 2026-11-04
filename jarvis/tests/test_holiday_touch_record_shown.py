@@ -108,12 +108,6 @@ class TestNoScene(_Case):
 		_set("holiday_touches_enabled", 0)
 		self.assert_no_play(user, _at(9))
 
-	def test_a_lead_up_day_has_no_scene(self):
-		if not HAS_HRMS:
-			self.skipTest("hrms is not installed on this site")
-		user = self.person([(DIWALI, "Diwali", 0)])
-		self.assert_no_play(user, _at(9, on=date(2026, 11, 6)))
-
 	def test_day_two_of_a_run_has_no_scene(self):
 		if not HAS_HRMS:
 			self.skipTest("hrms is not installed on this site")
@@ -136,6 +130,15 @@ class TestCadence(_Case):
 		user = self.person(dob=BIRTHDAY)
 		self.assertEqual(self.record(user, _at(9)), {"play": True})
 		self.assertEqual(self.record(user, _at(11)), {"play": False})
+		self.assertEqual(len(_stored(user)["times"]), 1)
+
+	def test_a_lead_up_day_records_a_showing_and_the_second_in_the_slot_does_not_play(self):
+		if not HAS_HRMS:
+			self.skipTest("hrms is not installed on this site")
+		user = self.person([(DIWALI, "Diwali", 0)])
+		on = date(2026, 11, 6)
+		self.assertEqual(self.record(user, _at(9, on=on)), {"play": True})
+		self.assertEqual(self.record(user, _at(11, on=on)), {"play": False})
 		self.assertEqual(len(_stored(user)["times"]), 1)
 
 	def test_the_afternoon_waits_three_hours_after_the_morning(self):
@@ -257,12 +260,13 @@ class TestForceOverride(_Case):
 		with mock.patch.dict(frappe.conf, {"developer_mode": 0, "jarvis_holiday_touch_force": "diwali:day"}):
 			self.assertEqual(self.record(user, _at(9)), {"play": False})
 
-	def test_a_forced_lead_up_still_has_no_scene(self):
+	def test_a_forced_lead_up_plays(self):
 		user = self.person()
 		with mock.patch.dict(
 			frappe.conf, {"developer_mode": 1, "jarvis_holiday_touch_force": "diwali:leadup"}
 		):
-			self.assertEqual(self.record(user, _at(9)), {"play": False})
+			self.assertEqual(self.record(user, _at(9)), {"play": True})
+			self.assertEqual(self.record(user, _at(9, 5)), {"play": True})
 
 
 def _fail_on_shown_write(error, calls):

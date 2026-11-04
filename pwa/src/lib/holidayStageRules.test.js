@@ -10,9 +10,16 @@ test("stageEligible: a scene day with an item to wear and a scene in this build"
 	assert.equal(stageEligible({ answer: { ...day, kind: "birthday" }, ...open }), true);
 });
 
+test("stageEligible: a lead-up day the server marked as a scene day uses the stage too", () => {
+	assert.equal(stageEligible({ answer: { ...day, kind: "leadup" }, ...open }), true);
+});
+
 test("stageEligible: everything else keeps the ordinary welcome", () => {
 	assert.equal(stageEligible({ answer: null, ...open }), false);
-	assert.equal(stageEligible({ answer: { ...day, kind: "leadup" }, ...open }), false);
+	assert.equal(
+		stageEligible({ answer: { ...day, kind: "leadup", scene: false }, ...open }),
+		false
+	);
 	assert.equal(stageEligible({ answer: { ...day, scene: false }, ...open }), false);
 	assert.equal(stageEligible({ answer: { ...day, worn: false }, ...open }), false);
 	assert.equal(stageEligible({ answer: day, ...open, whiteLabel: true }), false);

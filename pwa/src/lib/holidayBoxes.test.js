@@ -40,6 +40,14 @@ test("heroBox: the mark and the heading together, not the flex area around them"
 	assert.deepEqual(heroBox(mark, heading), { x: 80, y: 220, w: 230, h: 122 });
 });
 
+test("heroBox: a lead-up day's advance line is part of the hero, so the scene keeps off it", () => {
+	const mark = { x: 167, y: 220, w: 56, h: 56 };
+	const heading = { x: 80, y: 290, w: 230, h: 30 };
+	const advance = { x: 60, y: 326, w: 270, h: 44 };
+	assert.deepEqual(heroBox(mark, heading, advance), { x: 60, y: 220, w: 270, h: 150 });
+	assert.deepEqual(heroBox(mark, heading, null), heroBox(mark, heading));
+});
+
 // The test layouts of the scene bounds tests (phoneBoxes) stand for this page. The sizes its CSS
 // sets are checked here against the view, so a restyle cannot leave the tests drawing a page
 // that no longer exists. (The bar, composer, hero and starter band depend on content: they are

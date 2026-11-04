@@ -106,9 +106,18 @@ test("an art that failed to load means no call and no play", async () => {
   assert.equal(result.reason, "load-failed");
 });
 
-test("no call for lead-up, none, scene false, may_play false or reduced motion", async () => {
+test("a lead-up with a scene asks the server and plays", async () => {
+  const { celebrator, calls } = setup({ current: day({ kind: "leadup" }) });
+  const result = await celebrator.celebrate();
+  assert.deepEqual(calls, ["art", "record_shown"]);
+  assert.equal(result.play, true);
+});
+
+test("no call for none, scene false, may_play false or reduced motion", async () => {
   const cases = {
-    leadup: setup({ current: day({ kind: "leadup", scene: false }) }),
+    "leadup, scene false": setup({
+      current: day({ kind: "leadup", scene: false }),
+    }),
     none: setup({ current: { v: 1, kind: "none" } }),
     "scene false": setup({ current: day({ scene: false }) }),
     "may_play false": setup({ current: day({ may_play: false }) }),
