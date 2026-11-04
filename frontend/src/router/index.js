@@ -1,5 +1,6 @@
 import { createRouter, createWebHistory } from "vue-router";
 import { isWorkspaceReady } from "@/onboarding/readiness.js";
+import { createPreloadErrorHandler } from "@/router/preloadGuard";
 // STATIC import: the main chunk = shell + store + ChatView (chat is the app
 // home, D33); every other page is a route-level dynamic import.
 import ChatView from "@/views/ChatView.vue";
@@ -111,6 +112,11 @@ const routes = [
 		beforeEnter: supportGuard,
 	},
 	{
+		path: "/reorder-reviews",
+		name: "ReorderReviews",
+		component: () => import("@/pages/agents/ReorderReviews.vue"),
+	},
+	{
 		path: "/macros",
 		name: "MacrosList",
 		component: () => import("@/pages/macros/MacrosList.vue"),
@@ -171,6 +177,11 @@ const routes = [
 		component: () => import("@/pages/dashboards/DashboardsPage.vue"),
 	},
 	{
+		path: "/dashboards/payment-calendar",
+		name: "PaymentCalendar",
+		component: () => import("@/pages/payment-calendar/PaymentCalendarPage.vue"),
+	},
+	{
 		path: "/dashboards/:id",
 		name: "DashboardView",
 		component: () => import("@/pages/dashboards/DashboardView.vue"),
@@ -189,6 +200,22 @@ const routes = [
 		path: "/approvals/:id",
 		name: "ApprovalDetail",
 		component: () => import("@/pages/approvals/ApprovalsBoard.vue"),
+	},
+	{
+		path: "/count-plans",
+		name: "CountPlansList",
+		component: () => import("@/pages/count-plans/CountPlansList.vue"),
+	},
+	{
+		path: "/ticket-triage",
+		name: "TicketTriageReviews",
+		component: () => import("@/pages/agents/TicketTriageReviews.vue"),
+	},
+	{
+		path: "/count-plans/:request",
+		name: "CountPlanDetail",
+		component: () => import("@/pages/count-plans/CountPlanDetail.vue"),
+		props: true,
 	},
 	{
 		path: "/agents",
@@ -343,13 +370,15 @@ router.onError((error, to) => {
 // Vite's own signal when a preloaded module fails to fetch — fires before the
 // import promise rejects, so it's the earliest chance to recover. Both handlers
 // share the sessionStorage guard, so at most one reload happens.
-window.addEventListener("vite:preloadError", (event) => {
-	if (_isChunkLoadError(event && event.payload)) {
-		event.preventDefault();
-		// Reload straight to the route being navigated to (recorded in
-		// beforeEach), not the page currently in memory.
-		_recoverFromStaleChunk(_pendingTarget);
-	}
-});
+// A failed holiday art chunk is not recovered here (see router/preloadGuard.js).
+window.addEventListener(
+	"vite:preloadError",
+	createPreloadErrorHandler({
+		isChunkLoadError: _isChunkLoadError,
+		// Reload straight to the route being navigated to (recorded in beforeEach),
+		// not the page currently in memory.
+		recover: () => _recoverFromStaleChunk(_pendingTarget),
+	})
+);
 
 export default router;

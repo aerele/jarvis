@@ -411,7 +411,7 @@ class TestErrorCodesOnTheWire(unittest.TestCase):
 			# checks the verb against the whitelist's allowed set, and the JSON
 			# serializer reads the path to pick its response version.
 			frappe.local.request = Request(
-				EnvironBuilder(path=f"/api/method/{cmd}", method="GET").get_environ()
+				EnvironBuilder(path=f"/api/method/{cmd}", method="POST").get_environ()
 			)
 			frappe.local.response = frappe._dict({"type": "json"})
 			frappe.local.form_dict = frappe._dict({"cmd": cmd, **params})

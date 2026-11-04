@@ -61,6 +61,10 @@ CONNECTION = ResetSpec(
 		# (review plan 04 P0-5). A reset re-points this bench at a fresh tenancy,
 		# so the previous handle must not linger and trip the identity check.
 		"tenant_authority_handle",
+		# The site pin names the PREVIOUS tenancy's site. The reset also wipes the
+		# admin credentials, so dropping the pin cannot unlock a copy.
+		"paired_site",
+		"pairing_blocked_reason",
 		"chat_device_id",
 		"chat_device_public_key",
 		# Per-push statuses that otherwise read as "already sent" on a fresh site
@@ -107,6 +111,7 @@ CONNECTION = ResetSpec(
 		"jarvis_admin_api_secret",
 		"jarvis_admin_customer_password",
 		"agent_token",
+		"callback_key",
 		"chat_device_private_key",
 		"chat_device_token",
 	),
@@ -144,6 +149,7 @@ CONNECTION = ResetSpec(
 		# connection is accepted on its own terms, not rejected as "older" than
 		# the previous tenancy's generation (review plan 04 P0-5).
 		"tenant_authority_generation",
+		"pairing_blocked",
 		# enable_role_profiles is now an admin-owned mirror (spec B4), not
 		# operator intent - it must not carry the PREVIOUS tenancy's admin
 		# decision into a fresh one with no config pulled yet.
@@ -157,6 +163,14 @@ FULL = CONNECTION | LLM
 def apply(settings, spec: ResetSpec) -> None:
 	"""Clear ``spec`` on Jarvis Settings. db_set only - never save() - so
 	on_update (creds push / pool sync) cannot fire mid-reset."""
+	# Reset intentionally changes the catalog marker/version, but it must still
+	# join the same catalog lock -> version -> dirty order as Apply, mutation,
+	# migration, and Settings save paths. Otherwise a reset can deadlock an Apply
+	# worker after it has taken one of the two Single rows.
+	if {"agent_catalog_version", "agent_catalog_dirty"}.intersection(spec.zero):
+		from jarvis.chat.agents_api import _locked_catalog_state
+
+		_locked_catalog_state()
 	for field in spec.blank:
 		settings.db_set(field, "")
 	for field in spec.passwords:

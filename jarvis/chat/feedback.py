@@ -98,6 +98,9 @@ def submit_feedback(message_id: str, rating: str, note: str | None = None) -> di
 	# conversation, DoesNotExistError if it vanished). session_key is permlevel-1;
 	# read it via db.get_value to bypass that, matching how the worker touches it.
 	_get_owned_conversation(msg.conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(msg.conversation)
 	session_key = frappe.db.get_value(CONV, msg.conversation, "session_key")
 
 	payload = {
@@ -127,7 +130,7 @@ def _session_uuid(session_key: str | None) -> str:
 # --------------------------------------------------------------------------- #
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def session_feedback_status(conversation: str) -> dict:
 	"""Whether the once-per-session popup is due for this conversation now.
 
@@ -148,6 +151,9 @@ def session_feedback_status(conversation: str) -> dict:
 	# The canonical ownership gate; it already loads the row, so read the four
 	# fields off the doc it returns rather than issuing a second query.
 	conv = _get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	if conv.file_box or conv.agent_initiated:
 		return {"due": False}
 	due = int(conv.turn_count or 0) >= SESSION_FEEDBACK_TURN_THRESHOLD and not conv.session_feedback_asked_at
@@ -183,6 +189,9 @@ def submit_session_feedback(
 	"""
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	if chip_value and chip_value not in _SESSION_CHIP_VALUES:
 		frappe.throw("chip_value is not one of the preset reactions", frappe.ValidationError)
 

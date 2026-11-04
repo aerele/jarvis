@@ -242,10 +242,19 @@ class AgentUnreachableError(JarvisError):
 	alone cannot distinguish an auth rejection from any other
 	malformed-request rejection."""
 
-	def __init__(self, message: str, *, code: str | None = None, details: dict | None = None):
+	def __init__(
+		self,
+		message: str,
+		*,
+		code: str | None = None,
+		details: dict | None = None,
+		rejected_method: str | None = None,
+	):
 		super().__init__(message)
 		self.code = code
 		self.details = details
+		# Set only from an explicit negative response to this exact RPC.
+		self.rejected_method = rejected_method
 
 
 class AgentReloadFailedError(JarvisError):
@@ -253,7 +262,41 @@ class AgentReloadFailedError(JarvisError):
 
 
 class AdminUnreachableError(JarvisError):
-	"""HTTPS call to jarvis_admin failed (network, timeout, 5xx, non-JSON)."""
+	"""HTTPS call to jarvis_admin failed (network, timeout, 5xx, non-JSON).
+
+	``status_code`` is the HTTP status admin (or a proxy in front of it) answered
+	with, None for a transport failure. The error push reads it to tell a gateway
+	502/503/504 from admin refusing a request."""
+
+	def __init__(self, *args, status_code: int | None = None):
+		super().__init__(*args)
+		self.status_code = status_code
+
+
+SITE_IS_COPY_CODE = "site_is_copy"
+
+
+class SiteIsCopyError(AgentUnreachableError):
+	"""This site is a restored copy of the site its agent was paired with, so
+	Jarvis refuses to connect to that agent from here. Built from the pinned
+	site name; the message is the user-facing copy string."""
+
+	def __init__(self, paired_site: str):
+		from jarvis.chat.site_pin import copy_message
+
+		# Distinct code: retry loops (pump, collaboration) must not retry a copy.
+		super().__init__(copy_message(paired_site), code=SITE_IS_COPY_CODE)
+		self.paired_site = paired_site
+
+
+class AdminSiteIsCopyError(AdminUnreachableError):
+	"""Same as ``SiteIsCopyError`` for calls to jarvis_admin as the tenant."""
+
+	def __init__(self, paired_site: str):
+		from jarvis.chat.site_pin import copy_message
+
+		super().__init__(copy_message(paired_site))
+		self.paired_site = paired_site
 
 
 class AdminAmbiguousError(AdminUnreachableError):

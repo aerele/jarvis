@@ -14,11 +14,13 @@ b. ``update_wiki`` -> the gate's fenced wiki proposal;
 c. ``Jarvis Approval Request`` create/update -> applied (single, or an all-AR batch);
 d. a denied doctype in any item -> refused; while a skill_conflict routing question
    is Pending, every create/update is refused too (``filebox_skills``);
-e. a single create/update of a draft of a submittable doctype -> auto-applied, when
-   it is the doctype the followed File Box skill drafts (``filebox_skills``);
-f. any other create/update -> HELD on the Approval Board (a batch that includes a
+e. a single create of a draft of a submittable doctype -> auto-applied, when it is the
+   doctype the followed File Box skill drafts (``filebox_skills``); an update is
+   auto-applied only to a draft this same conversation created (``note_created_draft``);
+f. any other create/update (an update of any other record included) -> HELD on the Approval Board (a batch that includes a
    submittable doctype is refused instead);
-g. every other gated tool, and bulk forms of ungated writes -> refused, no preview.
+g. every other gated tool, and bulk forms of ungated writes -> refused, no preview;
+   ``remember`` (the user's durable memory) is refused outright.
 
 A held write is a sealed ``Jarvis Pending Action`` (kind ``file_box_held``), deduped
 per owner + party (``held_parties``): K files from one new vendor wait on ONE row.
@@ -59,6 +61,9 @@ HELD = "file_box_held"
 AR = "Jarvis Approval Request"
 CONV = "Jarvis Conversation"
 _WRITE_DOC_TOOLS = frozenset({"create_doc", "update_doc"})
+# New settings need an explicit policy review before unattended proposals can
+# reach the board. Existing risk, secret and permission checks still apply.
+FILEBOX_SETTINGS = frozenset({"Buying Settings"})
 # Framework / Jarvis internals an unattended run must never write (F6).
 DENIED_MODULES = frozenset(
 	{
@@ -76,6 +81,7 @@ DENIED_MODULES = frozenset(
 )
 RECENT_DECISION_S = 600  # a row decided this recently still answers for its records
 MISS_TTL_S = 3600  # "tries once": a first miss is remembered this long
+DRAFTS_TTL_S = 30 * 86400  # a run's created drafts stay updatable this long
 TITLE_MAX = 140
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
@@ -159,6 +165,10 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		return None
 	if not isinstance(args, dict):  # fail closed: the policy can't read the call
 		return _refuse("InvalidArgumentError", "args must be a JSON object; nothing was written.")
+	if tool == "remember":  # the user's durable memory: a person writes it, in chat
+		from jarvis.tools.remember import UNATTENDED_MESSAGE
+
+		return _refuse("FileBoxRefusedError", UNATTENDED_MESSAGE)
 	from jarvis.chat import held_sheets
 
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release locks before lock
@@ -183,6 +193,7 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		result = api.dispatch_confirmed(tool, args, provenance="auto_apply", uncarded=True)
 		data = result.get("data")
 		if tool == "create_doc" and result.get("ok") and api._stamp_file_box_draft(conversation, data):
+			note_created_draft(conversation, data["doctype"], data["name"])
 			# The draft exists now, so the dropped file can be attached to it.
 			from jarvis.chat import filebox
 
@@ -229,8 +240,8 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 	doctypes = [i["doctype"] for i in items]
 	if items and all(dt == AR for dt in doctypes):
 		return held_sheets.classify_questions(tool, items, conversation, sheet) if sheets else ("apply", None)
-	for dt in doctypes:
-		refusal = _denied(dt)
+	for item in items:
+		refusal = _denied_item(item, batch=bulk)
 		if refusal:
 			return "refuse", refusal
 	refusal = filebox_skills.routing_refusal(conversation)
@@ -248,7 +259,11 @@ def _classify(tool: str, args: dict, conversation: str) -> tuple[str, object]:
 		refusal = filebox_skills.target_refusal(conversation, items[0]["doctype"])
 		if not refusal and sheets:
 			refusal = held_sheets.draft_refusal(conversation, sheet)
-		return ("refuse", refusal) if refusal else ("apply", None)
+		if refusal:
+			return "refuse", refusal
+		if items[0]["op"] == "create" or created_draft(conversation, items[0]["doctype"], items[0]["name"]):
+			return "apply", None
+		# An update of a draft this run did not create waits for a human, like any other record.
 	if sheets and _write_risk.risk_of(tool, args) == "sensitive":
 		return "refuse", _sensitive_sheet_refusal(tool, args)
 	return held_sheets.classify_masters(items, conversation, sheet) if sheets else ("hold", items)
@@ -277,17 +292,97 @@ def _sensitive_sheet_refusal(tool: str, args: dict) -> dict:
 	return env
 
 
-def _denied(doctype: str) -> dict | None:
+def _denied(doctype: str, *, allow_single=False) -> dict | None:
 	if doctype == AR:
 		return None
 	if not doctype or not frappe.db.exists("DocType", doctype):
 		return _refuse("InvalidArgumentError", f"DocType {doctype or '(none)'} does not exist.")
 	meta = frappe.get_meta(doctype)
-	if meta.module in DENIED_MODULES or meta.issingle or meta.istable:
+	if meta.module in DENIED_MODULES or (meta.issingle and not allow_single) or meta.istable:
 		return _refuse(
 			"FileBoxRefusedError", f"An unattended File Box run can't write {doctype}. {_ASK_A_HUMAN}"
 		)
 	return None
+
+
+def _denied_item(item: dict, *, batch=False) -> dict | None:
+	"""Only ordinary, initialized Single updates may reach human approval.
+
+	Repeat on the complete edited record at Apply and immediately before writing;
+	metadata/risk may have changed since collection. Other records keep their policy.
+	"""
+	from jarvis.chat.pending_actions._park import single_has_version
+
+	doctype = item["doctype"]
+	refusal = _denied(doctype, allow_single=True)
+	if refusal or not frappe.get_meta(doctype).issingle:
+		return refusal
+	args = {"doctype": doctype, "name": item.get("name"), "changes": item["values"]}
+	if (
+		batch
+		or item.get("op") != "update"
+		or item.get("name") != doctype
+		or _write_risk.risk_of("update_doc", args) is not None
+		or _has_secret(frappe.get_meta(doctype), item["values"])
+	):
+		return _refuse(
+			"FileBoxRefusedError",
+			f"File Box can only propose ordinary settings updates without secret fields. {_ASK_A_HUMAN}",
+		)
+	if doctype not in FILEBOX_SETTINGS:
+		return _refuse(
+			"FileBoxRefusedError",
+			f"File Box settings proposals are not enabled for {doctype}. Use Desk for this setting, or ask a "
+			f"developer to add it to the reviewed File Box settings allowlist. {_ASK_A_HUMAN}",
+		)
+	if not single_has_version(doctype):
+		return _refuse(
+			"FileBoxRefusedError",
+			f"Initialize {doctype} by saving it in Desk before proposing a File Box update.",
+		)
+	return None
+
+
+def _has_secret(meta, values: dict) -> bool:
+	from jarvis.chat._record_summary import is_secret
+
+	for key, value in values.items():
+		if is_secret(meta, key):
+			return True
+		df = meta.get_field(key)
+		if df and df.fieldtype in ("Table", "Table MultiSelect") and isinstance(value, list):
+			child = frappe.get_meta(df.options)
+			if any(_has_secret(child, row) for row in value if isinstance(row, dict)):
+				return True
+	return False
+
+
+def _drafts_key(conversation: str) -> str:
+	return f"jarvis:filebox_drafts:{conversation}"
+
+
+def note_created_draft(conversation: str, doctype: str, name: str) -> None:
+	"""Remember that this File Box conversation created the draft ``doctype`` ``name``:
+	only such a draft is later updated without a human. A cache failure is logged and
+	the draft is simply not remembered (its updates are then held, never applied)."""
+	try:
+		cache = frappe.cache()
+		# sadd / sismember prefix the key themselves on Frappe 15 and 16; the plain
+		# redis expire does not (expire_key is 16 only), so it gets the made key.
+		cache.sadd(_drafts_key(conversation), f"{doctype}\x1f{name}")
+		cache.expire(cache.make_key(_drafts_key(conversation)), DRAFTS_TTL_S)
+	except Exception:
+		frappe.log_error(title="jarvis.file_box.draft_note_failed", message=frappe.get_traceback())
+
+
+def created_draft(conversation: str, doctype: str, name: str) -> bool:
+	"""True when this conversation created ``doctype`` ``name`` (see ``note_created_draft``);
+	False on a miss or a cache failure."""
+	try:
+		return bool(frappe.cache().sismember(_drafts_key(conversation), f"{doctype}\x1f{name}"))
+	except Exception:
+		frappe.log_error(title="jarvis.file_box.draft_check_failed", message=frappe.get_traceback())
+		return False
 
 
 def _is_draft(item: dict) -> bool:
@@ -461,6 +556,8 @@ def held_title(items: list[dict]) -> str:
 	if len(items) == 1:
 		verb = "New" if first["op"] == "create" else "Update"
 		head = f"{verb} {first['doctype'].lower()}"
+		if held_parties.company_scoped(first["doctype"]) and first["values"].get("company"):
+			label = f"{label} · {first['values']['company']}"
 		return _clean_title(f"{head}: {label}" if label else head)
 	head = "New records" if all(i["op"] == "create" for i in items) else "Record changes"
 	lead = f"{first['doctype']} {label}".strip()
@@ -479,16 +576,19 @@ def _primary_key(keys: list[str]) -> str:
 def _existing_party(items: list[dict]) -> dict | None:
 	"""A new party that already exists (read as the running user, the exec_user)."""
 	for item in items:
-		if item["op"] != "create" or not held_parties.is_party(item["doctype"]):
+		if item["op"] != "create" or not (
+			held_parties.is_party(item["doctype"]) or held_parties.company_scoped(item["doctype"])
+		):
 			continue
 		party = held_parties.party_of(item)
 		if not (party["title"] or party["gstin"]):
 			continue
-		found = held_parties.find_existing(
-			item["doctype"], title=party["title"], gstin=party["gstin"], limit=1
-		)
+		found = held_parties.existing_of(item, limit=1)
 		if found:
-			return {"doctype": item["doctype"], **found[0]}
+			match = {"doctype": item["doctype"], **found[0]}
+			if held_parties.company_scoped(item["doctype"]):
+				match["requested_currency"] = item["values"].get("account_currency")
+			return match
 	return None
 
 
@@ -510,15 +610,13 @@ def _hold(tool: str, args: dict, conversation: str, items: list[dict]) -> dict:
 			f"too many records in one batch ({len(items)}); the max is {_MAX_BATCH}. Split them into "
 			f"batches of {_MAX_BATCH}; each batch waits for a human on the Approval Board.",
 		)
+	if held_parties.missing_scope(items):
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
+		return _refuse("InvalidArgumentError", held_parties.SCOPE_REQUIRED)
 	match = _existing_party(items)
 	if match:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release conversation lock
-		label = match["title"] or match["name"]
-		return _refuse(
-			"InvalidArgumentError",
-			f"{match['doctype']} {label} already exists (name: {match['name']}). Use it: leave it out "
-			"of this call and do not create it again.",
-		)
+		return _refuse("InvalidArgumentError", held_parties.existing_note(match))
 	needs_input = []
 	try:
 		preview = api._run_preview(tool, args)
@@ -919,7 +1017,7 @@ def _resume_one(row, waiter, message: str) -> bool:
 			waiter.conversation,
 			message,
 			origin="file_box",
-			attachments=_attachments(filebox._source_file(waiter.conversation)),
+			attachments=_attachments(filebox._source_file(waiter.conversation, read_as=row.owner_user)),
 			background=1,
 		)
 	except Exception:

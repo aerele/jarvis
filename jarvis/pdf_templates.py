@@ -31,7 +31,7 @@ SETTINGS = "Jarvis Settings"
 _DEFAULT_FIELD = "default_pdf_template"
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_pdf_templates() -> dict:
 	"""The shipped templates (key, label, description + a small spec) for the pane,
 	plus the current workspace default. Any Jarvis user may read (the pane is
@@ -43,14 +43,14 @@ def list_pdf_templates() -> dict:
 	return {"ok": True, "data": {"templates": templates, "default": _current_default()}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_default_pdf_template() -> dict:
 	"""The workspace default template key. Any Jarvis user may read."""
 	require_jarvis_access()
 	return {"ok": True, "data": {"default": _current_default()}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_default_pdf_template(key: str) -> dict:
 	"""Set the workspace default template. Tenant-admin only; the server re-checks
 	(the SPA gate is only UX). Writes the Single field directly (no full doc.save,
@@ -67,7 +67,7 @@ def set_default_pdf_template(key: str) -> dict:
 	return {"ok": True, "data": {"default": resolved}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def rerender_document(source_name: str, template: str) -> dict:
 	"""Re-render an already-generated document in a different predefined template.
 
@@ -135,7 +135,7 @@ _TEMPLATE_FIELDS = (
 _CHECK_DEFAULTS = {"enabled": True, "show_logo": True, "accent_bar": False, "use_letterhead_footer": False}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_pdf_template(payload: str) -> dict:
 	"""Create or update a custom PDF template from the settings pane. Tenant-admin
 	only. Validation (safe slug, hex/font css values, no built-in-key collision,
@@ -182,7 +182,7 @@ def save_pdf_template(payload: str) -> dict:
 	return {"ok": True, "data": {"key": doc.template_key}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def delete_pdf_template(key: str) -> dict:
 	"""Delete a custom PDF template. Tenant-admin only. The controller's on_trash
 	resets the workspace default to classic if this was it."""
@@ -194,7 +194,7 @@ def delete_pdf_template(key: str) -> dict:
 	return {"ok": True, "data": {"deleted": key}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_pdf_template(key: str) -> dict:
 	"""The editable fields of one custom template (for the edit form). Admin only."""
 	require_jarvis_admin()
@@ -212,7 +212,7 @@ def get_pdf_template(key: str) -> dict:
 	return {"ok": True, "data": out}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def preview_pdf_template(config: str) -> dict:
 	"""HTML preview for a saved key or an unsaved draft, for the sandboxed-iframe
 	preview. Admin only. A draft's css values are validated first (so an invalid
@@ -229,7 +229,7 @@ def preview_pdf_template(config: str) -> dict:
 	return {"ok": True, "data": {"html": preview_template_html(tpl, company)}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pdf_template_options() -> dict:
 	"""Companies + non-disabled Letter Heads for the footer-mapping dropdowns, and the
 	built-in font catalog for the body/title font pickers. Admin only."""

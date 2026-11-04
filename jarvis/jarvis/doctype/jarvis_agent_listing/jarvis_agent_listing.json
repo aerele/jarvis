@@ -19,6 +19,7 @@
   "tools_required",
   "doctypes_required",
   "config_keys",
+  "supports_record_scope",
   "rule_tokens",
   "advisory_tokens",
   "min_apps",
@@ -121,6 +122,14 @@
    "fieldtype": "Small Text",
    "label": "Config Keys (JSON)",
    "description": "JSON array of the agent-specific installation config keys this agent's bundle actually reads (jarvis#1063), as dot paths for a nested key - e.g. materiality.benchmark_value/materiality.percentage/materiality.engagement_risk_level/materiality.rounding_step for close-auditor (its evaluate.py reads them nested under a top-level materiality object). Excludes the universal scope keys (company/fiscal_year/from_date/to_date) every run receives regardless, which stay flat. Drives which agent-specific fields ConfigForm.vue renders; [] for an agent with none."
+  },
+  {
+   "default": "0",
+   "fieldname": "supports_record_scope",
+   "fieldtype": "Check",
+   "label": "Supports Record Scope",
+   "read_only": 1,
+   "description": "Bundle-declared capability for a record-scoped run. The catalog sync writes this from the bundled registry. A false value rejects record_scope before configuration is saved or a run starts."
   },
   {
    "fieldname": "rule_tokens",

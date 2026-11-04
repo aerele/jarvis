@@ -632,6 +632,10 @@ function wikiUrl(slug) {
 // "running" is handled by its own branch above (#1062 C3 progress display) -
 // this only ever renders for a run that has already finished (or stopped).
 const emptyText = computed(() => {
+	if (props.run.agent === "reorder-replenishment-operator")
+		return props.run.status === "completed"
+			? "Use Open buyer review to see the reorder suggestions."
+			: "No reorder suggestions were prepared.";
 	if (props.run.status === "failed") return "This run recorded no findings.";
 	if (props.run.status === "stopped") return "This run was stopped before it reported findings.";
 	return `No ${stateFilter.value ? stateFilter.value + " " : ""}findings for this run.`;

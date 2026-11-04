@@ -39,16 +39,9 @@ container in the field now runs a plugin build that signs every call,
 so the default is now ENFORCE: no signature headers is a reject with
 the same 400 InvalidArgumentError shape as partial headers.
 
-The single escape hatch is the site_config key
-``jarvis_plugin_allow_unsigned`` (absent or 0 = enforce; 1 = accept
-unsigned bearer-only requests). It exists only for benches whose agent
-plugin has not been upgraded yet, it WARN-logs the sunset date on every
-request it lets through, and it bumps a per-day Redis counter
-(``jarvis:plugin_unsigned_allowed:<YYYY-MM-DD>``) so an operator can confirm
-the field is quiet before turning it off. The flag itself is scheduled for
-removal on 2026-10-01 (``_UNSIGNED_SUNSET_DATE``).
+There is no escape hatch: signatures are always enforced.
 
-Requests rejected while the flag is off land in the Error Log under
+Requests rejected for missing signature headers land in the Error Log under
 "plugin_auth: unsigned request rejected", throttled to one row per
 session per minute: an un-upgraded plugin retries every tool call, so an
 unthrottled audit would fill the Error Log with thousands of copies of
@@ -63,16 +56,24 @@ import time
 
 import frappe
 
+from jarvis._http import constant_time_equal
+
 _MAX_CLOCK_SKEW_S = 60
 _NONCE_TTL_S = 120
 _NONCE_REDIS_PREFIX = "jarvis:plugin_nonce:"
 
-# JF-014 unsigned-request sunset. See the module docstring.
-_ALLOW_UNSIGNED_CONF_KEY = "jarvis_plugin_allow_unsigned"
-_UNSIGNED_SUNSET_DATE = "2026-10-01"
-_UNSIGNED_COUNTER_PREFIX = "jarvis:plugin_unsigned_allowed:"
-_UNSIGNED_COUNTER_DAYS = 7
-_UNSIGNED_COUNTER_TTL_S = _UNSIGNED_COUNTER_DAYS * 24 * 60 * 60
+# The normal plugin channel can make many read calls in a turn.  The private
+# input recovery channel has exactly one job: close a Deposit run after the
+# source transport cannot finish.  Keep its budget separate so a normal-channel
+# 429 cannot strand that run, while a leaked bearer cannot use recovery as a
+# second high-volume channel.
+_NORMAL_RATE_PREFIX = "jarvis:plugin_rl:"
+_NORMAL_RATE_PER_MINUTE = 60
+_RECOVERY_RATE_PREFIX = "jarvis:plugin_recovery_rl:"
+_RECOVERY_RATE_PER_MINUTE = 3
+_RATE_WINDOW_S = 60
+
+# Throttle for the unsigned-reject audit row. See the module docstring.
 _UNSIGNED_AUDIT_GATE_PREFIX = "jarvis:plugin_unsigned_audit:"
 _UNSIGNED_AUDIT_GATE_TTL_S = 60
 
@@ -104,6 +105,22 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 	``body_bytes`` is the raw request body needed for HMAC validation -
 	only used when the optional signature headers are present.
 	"""
+	return _validate_plugin_request(body_bytes, recovery=False)
+
+
+def validate_private_input_recovery_request(body_bytes: bytes) -> str:
+	"""Validate a signed Deposit private-input recovery callback.
+
+	This keeps the bearer, session, HMAC, clock, and nonce checks identical to
+	:func:`validate_plugin_request`.  Only its tiny rate bucket differs.  A source
+	call can therefore hit the ordinary tool budget and still close its own run,
+	but a recovery callback cannot become a general-purpose tool channel.
+	"""
+	return _validate_plugin_request(body_bytes, recovery=True)
+
+
+def _validate_plugin_request(body_bytes: bytes, *, recovery: bool) -> str:
+	"""Shared signed plugin validator with a fixed internal rate profile."""
 	headers = _safe_headers()
 
 	# Caller IP is read once and threaded through every audit row in
@@ -120,22 +137,31 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			code="AuthenticationError",
 			message="X-Jarvis-Token header missing",
 		)
-	expected_token = _agent_token()
-	if not expected_token:
+	accepted_keys = stored_keys()
+	if not accepted_keys:
 		_audit_log(
 			"plugin_auth: agent_token unset on bench",
-			"Jarvis Settings.agent_token is empty; refusing all plugin requests",
+			"Jarvis Settings.callback_key and agent_token are empty; refusing all plugin requests",
 		)
+		# A site with no key at all (a lost key after a retirement, a restore) would
+		# otherwise 503 until the daily sync. Same throttled, proof-backed self-heal
+		# as a mismatch; the request is still refused.
+		_request_key_resync()
 		raise PluginAuthError(
 			http_status=503,
 			code="ServiceUnavailable",
 			message="plugin auth not configured on this bench",
 		)
-	if not hmac.compare_digest(presented_token, expected_token):
+	expected_token = match_stored_key(presented_token, accepted_keys)
+	if not expected_token:
 		_audit_log(
 			"plugin_auth: bearer mismatch",
-			f"remote_ip={caller_ip!r} session={headers.get('X-Jarvis-Session', '')!r}",
+			f"remote_ip={caller_ip!r} session_hash={_log_hash(headers.get('X-Jarvis-Session', ''))}",
 		)
+		# The container may hold a key this site never received (a rotation, a missed
+		# delivery). Rejecting is unchanged; one throttled background sync, backed by
+		# a site proof, fetches the current key so the next request can match.
+		_request_key_resync()
 		raise PluginAuthError(
 			http_status=401,
 			code="AuthenticationError",
@@ -158,18 +184,14 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			message="X-Jarvis-Session header required when using X-Jarvis-Token",
 		)
 
-	# 4. HMAC signature (Phase 2) - REQUIRED unless the deprecated
-	# site_config escape hatch is on. See the module docstring for the
-	# rollout story.
+	# 4. HMAC signature (Phase 2) - always REQUIRED. See the module docstring.
 	sig = (headers.get("X-Jarvis-Signature") or "").strip()
 	nonce = (headers.get("X-Jarvis-Nonce") or "").strip()
 	ts_str = (headers.get("X-Jarvis-Timestamp") or "").strip()
 	if sig or nonce or ts_str:
 		# Partial signature headers are ALWAYS a reject - either you sign
 		# the request properly or you don't sign at all. Partial = client
-		# bug at best, downgrade-attack attempt at worst. Not even the
-		# escape hatch relaxes this: it re-enables *unsigned* requests,
-		# never half-signed ones.
+		# bug at best, downgrade-attack attempt at worst.
 		if not (sig and nonce and ts_str):
 			raise PluginAuthError(
 				http_status=400,
@@ -185,42 +207,23 @@ def validate_plugin_request(body_bytes: bytes) -> str:
 			nonce=nonce,
 			timestamp_str=ts_str,
 		)
-	elif _allow_unsigned():
-		# Deprecated bearer-only path, explicitly re-enabled by the
-		# operator. WARN + a per-day counter so the stragglers are
-		# visible before the flag is turned off for good.
-		allowed_today = _record_unsigned_allowed()
-		frappe.logger().warning(
-			"plugin_auth: DEPRECATED unsigned request allowed by site_config "
-			"%s (removal %s); caller=%s session=%s unsigned_today=%s; upgrade "
-			"the agent plugin so it signs every call",
-			_ALLOW_UNSIGNED_CONF_KEY,
-			_UNSIGNED_SUNSET_DATE,
-			caller_ip,
-			session_key,
-			"unknown" if allowed_today is None else allowed_today,
-		)
 	else:
 		if _should_audit_unsigned_reject(session_key):
 			_audit_log(
 				"plugin_auth: unsigned request rejected",
-				f"remote_ip={caller_ip!r} session={session_key!r}; no signature headers "
-				f"and {_ALLOW_UNSIGNED_CONF_KEY} is off",
+				f"remote_ip={caller_ip!r} session_hash={_log_hash(session_key)}; no signature headers",
 			)
 		raise PluginAuthError(
 			http_status=400,
 			code="InvalidArgumentError",
 			message="signature headers required; provide all of "
 			"X-Jarvis-Signature/X-Jarvis-Nonce/X-Jarvis-Timestamp. Upgrade the "
-			"agent plugin to a signing build, or run `bench --site <site> "
-			f"set-config {_ALLOW_UNSIGNED_CONF_KEY} 1` as a stopgap until that "
-			f"flag is removed on {_UNSIGNED_SUNSET_DATE}.",
+			"agent plugin to a signing build.",
 		)
 
-	# 5. Rate limit per session_key (after signature validation so the
-	# rate-limit counter is for *valid* callers; spammers exhaust their
-	# own keys, not the counter we'd care about for legitimate use).
-	_enforce_rate_limit(session_key)
+	# 5. Rate-limit only after every cryptographic check. The caller selects no
+	# profile: the public wrappers above choose one fixed bucket each.
+	_enforce_rate_limit(session_key, recovery=recovery)
 
 	return session_key
 
@@ -264,21 +267,6 @@ def _caller_ip() -> str:
 	return ""
 
 
-def _allow_unsigned() -> bool:
-	"""True iff site_config re-enables the deprecated unsigned path.
-
-	Read with an explicit ``0`` default and truthiness decided on an
-	allowlist of literals: the flag is a security downgrade, so anything
-	we don't positively recognise as "on" (absent key, 0, "", "no", a
-	NULL-ish read, a raising conf) means ENFORCE.
-	"""
-	try:
-		raw = frappe.conf.get(_ALLOW_UNSIGNED_CONF_KEY, 0)
-	except Exception:
-		return False
-	return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
-
-
 def _should_audit_unsigned_reject(session_key: str) -> bool:
 	"""One "unsigned request rejected" Error Log row per session per minute.
 
@@ -296,67 +284,51 @@ def _should_audit_unsigned_reject(session_key: str) -> bool:
 		return True
 
 
-def unsigned_escape_hatch_status() -> dict | None:
-	"""Operator-facing state of the deprecated unsigned-plugin escape hatch.
-
-	Returns None when the hatch is off - the enforcing default, nothing to
-	advise about. When it is on, returns the conf key, the removal date, the
-	counter window and how many unsigned calls it let through over that
-	window (``recent_allowed`` is None when the cache is unreachable).
-	"""
-	if not _allow_unsigned():
-		return None
-	return {
-		"conf_key": _ALLOW_UNSIGNED_CONF_KEY,
-		"sunset_date": _UNSIGNED_SUNSET_DATE,
-		"window_days": _UNSIGNED_COUNTER_DAYS,
-		"recent_allowed": _unsigned_allowed_recent(),
-	}
+def stored_keys() -> list[str]:
+	"""Every key a plugin request may carry: the callback key and the owner token, empty
+	ones dropped. The owner token verifies until retirement clears it, because before
+	retirement every copy of it is held by the owner anyway."""
+	return [k for k in (_callback_key(), _agent_token()) if k]
 
 
-def _unsigned_allowed_recent() -> int | None:
-	"""Unsigned requests allowed across the counter's retention window.
-
-	Reads the same raw (un-pickled) keys ``_record_unsigned_allowed`` writes
-	with ``incr``, so it must use ``cache.get``, not ``get_value``. Returns
-	None when the cache is unreachable - the caller says "unknown" rather
-	than an untrue zero.
-	"""
-	try:
-		cache = frappe.cache()
-		total = 0
-		for offset in range(_UNSIGNED_COUNTER_DAYS):
-			day = frappe.utils.add_days(frappe.utils.today(), -offset)
-			raw = cache.get(_UNSIGNED_COUNTER_PREFIX + str(day))
-			if raw is None:
-				continue
-			total += int(raw.decode() if isinstance(raw, bytes) else raw)
-		return total
-	except Exception:
-		return None
+def match_stored_key(presented: str, keys: list[str]) -> str:
+	"""The stored key equal to ``presented`` ("" when none). Compares against every key
+	in constant time per compare and never short-circuits, so timing does not reveal
+	which key was close."""
+	matched = ""
+	for key in keys:
+		if constant_time_equal(presented, key):
+			matched = key
+	return matched
 
 
-def _record_unsigned_allowed() -> int | None:
-	"""Bump the per-day counter of legacy-allowed unsigned requests.
-
-	Returns the running count for today, or None when the cache is
-	unreachable. Best-effort observability only - it must never fail a
-	request that auth has already decided to allow.
-	"""
-	try:
-		cache = frappe.cache()
-		key = _UNSIGNED_COUNTER_PREFIX + frappe.utils.today()
-		count = int(cache.incr(key))
-		if count == 1:
-			cache.expire(key, _UNSIGNED_COUNTER_TTL_S)
-		return count
-	except Exception:
-		return None
+def _callback_key() -> str:
+	"""Per-tenant callback key (admin delivers it through a proof-backed sync)."""
+	return _settings_password("callback_key")
 
 
 def _agent_token() -> str:
-	settings = frappe.get_single("Jarvis Settings")
-	return settings.get_password("agent_token", raise_exception=False) or ""
+	return _settings_password("agent_token")
+
+
+def _settings_password(fieldname: str) -> str:
+	from frappe.utils.password import get_decrypted_password
+
+	return (
+		get_decrypted_password("Jarvis Settings", "Jarvis Settings", fieldname, raise_exception=False) or ""
+	)
+
+
+def _request_key_resync() -> None:
+	"""Queue the throttled stale-key self-heal (see ``onboarding.request_key_resync``).
+	Called only after a presented key matched nothing; a signed, matching request never
+	reaches it. Must never change the reject, so any failure is swallowed."""
+	try:
+		from jarvis import onboarding
+
+		onboarding.request_key_resync()
+	except Exception:
+		pass
 
 
 def _canonical_request(*, session_key: str, body_bytes: bytes, nonce: str, timestamp_s: int) -> bytes:
@@ -411,8 +383,11 @@ def _validate_signature(
 		timestamp_s=ts,
 	)
 	expected = hmac.new(token.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
-	if not hmac.compare_digest(expected, signature):
-		_audit_log("plugin_auth: signature mismatch", f"session={session_key!r} nonce_prefix={nonce[:8]!r}")
+	if not constant_time_equal(expected, signature):
+		_audit_log(
+			"plugin_auth: signature mismatch",
+			f"session_hash={_log_hash(session_key)} nonce_hash={_log_hash(nonce)}",
+		)
 		raise PluginAuthError(
 			http_status=401,
 			code="AuthenticationError",
@@ -436,7 +411,8 @@ def _validate_signature(
 		return
 	if not got:
 		_audit_log(
-			"plugin_auth: nonce replay rejected", f"session={session_key!r} nonce_prefix={nonce[:8]!r}"
+			"plugin_auth: nonce replay rejected",
+			f"session_hash={_log_hash(session_key)} nonce_hash={_log_hash(nonce)}",
 		)
 		raise PluginAuthError(
 			http_status=401,
@@ -445,11 +421,12 @@ def _validate_signature(
 		)
 
 
-def _enforce_rate_limit(session_key: str) -> None:
-	"""60 calls/min per session_key. The 60s tick window resets on first
-	call so a quiet session isn't penalized for past activity."""
+def _enforce_rate_limit(session_key: str, *, recovery: bool = False) -> None:
+	"""Apply the fixed normal or private-input recovery budget for one session."""
 	cache = frappe.cache()
-	key = f"jarvis:plugin_rl:{session_key}"
+	prefix = _RECOVERY_RATE_PREFIX if recovery else _NORMAL_RATE_PREFIX
+	limit = _RECOVERY_RATE_PER_MINUTE if recovery else _NORMAL_RATE_PER_MINUTE
+	key = f"{prefix}{session_key}"
 	try:
 		count = cache.incr(key)
 	except Exception:
@@ -457,16 +434,21 @@ def _enforce_rate_limit(session_key: str) -> None:
 		return
 	if count == 1:
 		try:
-			cache.expire(key, 60)
+			cache.expire(key, _RATE_WINDOW_S)
 		except Exception:
 			pass
-	if count > 60:
-		_audit_log("plugin_auth: rate limit exceeded", f"session={session_key!r} count={count}")
+	if count > limit:
+		_audit_log("plugin_auth: rate limit exceeded", f"session_hash={_log_hash(session_key)} count={count}")
 		raise PluginAuthError(
 			http_status=429,
 			code="RateLimitExceededError",
 			message="plugin-auth rate limit exceeded for this session",
 		)
+
+
+def _log_hash(value) -> str:
+	"""Correlate refusals without forwarding the session bearer or caller text."""
+	return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if isinstance(value, str) else "absent"
 
 
 def _audit_log(title: str, detail: str) -> None:

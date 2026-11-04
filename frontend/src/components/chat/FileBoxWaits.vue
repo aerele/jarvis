@@ -62,6 +62,14 @@
 			</template>
 			<div v-else class="jv-fbw-held">
 				<span class="jv-fbw-heldtext">{{ heldLabel(it) }}</span>
+				<button
+					v-if="it.src === 'sheet'"
+					type="button"
+					class="jv-fbw-send"
+					@click="emit('review', it)"
+				>
+					Review here
+				</button>
 				<router-link class="jv-fbw-link" :to="it.link"
 					>Review on Approval Board</router-link
 				>
@@ -75,12 +83,12 @@ import { reactive } from "vue";
 
 // A File Box file's open items, shown in that file's chat (the Approval Board lists
 // the same ones): a question is answered here exactly as on the board; a held record
-// or an approval sheet needs the board's fuller review, so it links there.
+// uses the native decision API. Sheets open the same complete editor in chat.
 defineProps({
 	items: { type: Array, required: true },
 	busy: { type: String, default: "" }, // the item being decided
 });
-const emit = defineEmits(["decide"]);
+const emit = defineEmits(["decide", "review"]);
 
 const picked = reactive({});
 const notes = reactive({});

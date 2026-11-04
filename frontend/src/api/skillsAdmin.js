@@ -69,5 +69,19 @@ export const adminHandoverTargets = (search = "", skill = "") =>
 // off, with its shares, File Box opt-in and assignments cleared, and any hold lifted.
 // -> { ok, new_owner, cleared: { shares, armed, file_box, assignments },
 //      hold_lifted, requests_cancelled, needs_apply }
-export const adminHandover = (skill, new_owner, expected_owner) =>
-	call(SA + "admin_handover", { skill, new_owner, expected_owner });
+//
+// Several people: `new_owner` may be a list. The first is handed the skill, each of
+// the others gets a private copy; with `keep` the skill stays and everyone gets a
+// copy. One person and no `keep` sends exactly what a single hand over always sent.
+// -> also { handed_over, copies: [{ user, skill }], copy_failed: [{ user, reason }] }
+export const adminHandover = (skill, new_owner, expected_owner, keep = false) => {
+	const people = Array.isArray(new_owner) ? new_owner : [new_owner];
+	if (people.length === 1 && !keep)
+		return call(SA + "admin_handover", { skill, new_owner: people[0], expected_owner });
+	return call(SA + "admin_handover", {
+		skill,
+		new_owners: JSON.stringify(people),
+		expected_owner,
+		keep: keep ? 1 : 0,
+	});
+};

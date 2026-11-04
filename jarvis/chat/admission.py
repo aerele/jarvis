@@ -44,6 +44,7 @@ from frappe.query_builder import Case
 from frappe.query_builder.functions import Count, IfNull
 
 from jarvis.chat import txn
+from jarvis.chat.collaboration_ownership import legacy_clause
 from jarvis.chat.events import publish_to_user
 from jarvis.permissions import refuse_in_tool_dispatch, require_jarvis_access
 
@@ -576,6 +577,7 @@ def accept_or_queue(
 	seed_hidden: bool = False,
 	on_seed=None,
 	refuse_if=None,
+	collaboration=None,
 ) -> dict:
 	"""Admit or durably queue one turn. Returns one of:
 
@@ -615,6 +617,11 @@ def accept_or_queue(
 	admission txn commits."""
 	from jarvis.chat import pump
 
+	# The adapter is server-only. Shared work must seed all four identity rows in
+	# this transaction; it cannot reuse the legacy precommitted-seed branch.
+	if collaboration is not None and seed_message:
+		raise ValueError("Collaborative admission must insert its own bound seed")
+
 	if not seed_message and not seed_origin:
 		raise ValueError("accept_or_queue: seed_origin is required when admission seeds the user row")
 
@@ -633,6 +640,29 @@ def accept_or_queue(
 	# Sweep note (contention): read the row's transport_mode ONCE and derive BOTH decisions from
 	# it, rather than turn_machine_enabled(from_db) + pump_mode_active(from_db) each re-reading
 	# the row (three indexed reads) while the site-wide admission lock is held.
+	if collaboration is not None:
+		# Freeze the initial choice in the same authoritative row mode-flips lock.
+		# The lifecycle reconciler owns a commit; admission must keep its locks.
+		try:
+			if not frappe.db.get_value("Jarvis Relay Pump", target, "transport_mode"):
+				frappe.db.set_value(
+					"Jarvis Relay Pump",
+					target,
+					"transport_mode",
+					pump._config_transport_mode(),
+					update_modified=False,
+				)
+			if frappe.db.get_value("Jarvis Relay Pump", target, "transport_mode") not in (
+				"pump",
+				"legacy",
+				"draining",
+			):
+				from jarvis.chat.collaboration import _deny
+
+				_deny()
+		except Exception:
+			frappe.db.rollback()
+			raise
 	_pred = pump.transport_predicates_from_row(target)
 	pump_mode = _pred["pump_active"]
 	machine_active = pump_mode or (admission_enabled() and not _pred["configured"])
@@ -643,6 +673,8 @@ def accept_or_queue(
 	# failure must also release the locks immediately (not linger until request/job
 	# teardown), so the whole locked section is guarded - rollback + re-raise (never mask).
 	try:
+		if collaboration is not None:
+			collaboration.authorize(conversation, run_id)
 		# Was this very turn accepted before? Asked FIRST, ahead of the legacy fallback
 		# and the overload guard. An id is minted per send (so this is one primary-key
 		# miss for a typed message, a retry, a continuation), except for a macro step,
@@ -667,6 +699,10 @@ def accept_or_queue(
 			return {"ok": False, "refused": refusal}
 
 		if not machine_active:
+			if collaboration is not None:
+				from jarvis.chat.collaboration import _deny
+
+				_deny()
 			# CDX-10 (reverse direction): the world reverted to pure-legacy (kill switch back on
 			# AND Phase-0 off) while this sender waited on the shard lock — its stale conf still said
 			# machine-ON, which is why it entered accept_or_queue. Creating a machine Turn now would
@@ -720,7 +756,12 @@ def accept_or_queue(
 		# Seed the user Message if the caller delegated it (the insert branch, see the
 		# docstring): uncommitted until the Turn below is, and rolled back with it.
 		if not seed_message:
-			seed_message = _insert_seed(conversation, seed_content, seed_origin, seed_hidden)
+			if collaboration is not None:
+				seed_message = collaboration.insert_seed(
+					conversation, run_id, seed_content, seed_origin, seed_hidden
+				)
+			else:
+				seed_message = _insert_seed(conversation, seed_content, seed_origin, seed_hidden)
 			if on_seed:
 				on_seed(seed_message)
 
@@ -741,6 +782,9 @@ def accept_or_queue(
 				}
 			)
 			turn.flags.ignore_permissions = True
+			if collaboration is not None:
+				collaboration.stamp_turn(turn)
+				turn.collaboration_executor = "pump" if pump_mode else "rq"
 			turn.insert()
 		except frappe.DuplicateEntryError:
 			# Same send replayed (double-click / retry-after-ack): already accepted. The
@@ -853,7 +897,7 @@ def accept_or_queue(
 			# durably queued (a sweep/promote will re-dispatch it) instead of a false
 			# "dispatched".
 			frappe.log_error(title="admission.accept dispatch", message=frappe.get_traceback())
-			_compensate_failed_dispatch(run_id, target)
+			_compensate_failed_dispatch(run_id, target, version=1 if collaboration is not None else None)
 			pos = _position_of(run_id, target)
 			return {
 				"ok": True,
@@ -875,15 +919,41 @@ def accept_or_queue(
 # --------------------------------------------------------------------------- #
 
 
-def _cas_dispatch(run_id: str) -> bool:
+def _cas_dispatch(run_id: str, version: int | None = None) -> bool:
+	from jarvis.chat.collaboration_ownership import executor_clause
+
+	shared = frappe.db.has_column(TURN, "collaboration_binding") and frappe.db.get_value(
+		TURN, run_id, "collaboration_binding"
+	)
+	if shared and version is None:
+		return False
+	if shared:
+		from jarvis.chat import collaboration as c
+		from jarvis.chat import turn_state as ts
+		from jarvis.chat.collaboration_bindings import require_live
+		from jarvis.chat.collaboration_turn import binding_for_run
+
+		if not c.writes_ready():
+			return False
+		conversation = frappe.db.get_value(TURN, run_id, "conversation")
+		_lock_conversation(conversation)
+		try:
+			require_live(binding_for_run(run_id))
+		except frappe.PermissionError:
+			# No external work has been dispatched. Cancel this exact queued
+			# version inside the admission transaction, then inspect the next.
+			ts.cancel_queued(run_id, int(version))
+			return False
+	version_clause = " AND version=%(v)s" if shared else ""
 	return (
 		_run_cas(
 			f"""UPDATE `tab{TURN}`
 			SET state='dispatching', reserved=1, dispatching_at=%(now)s,
 			    reservation_expires_at=%(exp)s, version=version+1
-			WHERE name=%(r)s AND state='queued'""",
+			WHERE name=%(r)s AND state='queued' {executor_clause("rq")} {version_clause}""",
 			{
 				"r": run_id,
+				"v": version,
 				"now": _now(),
 				"exp": frappe.utils.add_to_date(None, seconds=RESERVE_TTL_S),
 			},
@@ -892,7 +962,7 @@ def _cas_dispatch(run_id: str) -> bool:
 	)
 
 
-def _compensate_failed_dispatch(run_id: str, target: str) -> None:
+def _compensate_failed_dispatch(run_id: str, target: str, *, version: int | None = None) -> None:
 	"""CDX-9: an enqueue (RQ/Redis) failure AFTER the admission/promotion commit leaves
 	the row ``dispatching`` + ``reserved`` with no job behind it, stranding a shard
 	credit until the ~900s reservation TTL + the periodic sweep. Compensate
@@ -902,12 +972,25 @@ def _compensate_failed_dispatch(run_id: str, target: str) -> None:
 	streaming (won't happen on the same run in Phase-0, but defensive) is untouched.
 	Best-effort — never raises into the caller."""
 	try:
+		from jarvis.chat.collaboration_ownership import executor_clause
+
+		shared = frappe.db.has_column(TURN, "collaboration_binding") and frappe.db.get_value(
+			TURN, run_id, "collaboration_binding"
+		)
+		if shared and version is None:
+			return
+		guard = ""
+		if shared:
+			guard = (
+				" AND version=%(v)s AND preparing_at IS NULL"
+				" AND collaboration_send_started_at IS NULL" + executor_clause("rq")
+			)
 		affected = _run_cas(
 			f"""UPDATE `tab{TURN}`
 			SET state='queued', reserved=0, dispatching_at=NULL,
 			    reservation_expires_at=NULL, version=version+1
-			WHERE name=%(r)s AND state='dispatching'""",
-			{"r": run_id},
+			WHERE name=%(r)s AND state='dispatching' {guard}""",
+			{"r": run_id, "v": version},
 		)
 		frappe.db.commit()
 		if affected == 1:
@@ -999,7 +1082,7 @@ def promote_next(target: str | None = None) -> int:
 			candidate = _pick_next(target, cap, promoted_convs)
 			if not candidate:
 				break
-			if _cas_dispatch(candidate["run_id"]):
+			if _cas_dispatch(candidate["run_id"], candidate.get("version")):
 				promoted_rows.append(candidate)
 				promoted_convs.add(candidate["conversation"])
 			# else lost the row; loop re-reads and tries the next candidate
@@ -1020,7 +1103,11 @@ def promote_next(target: str | None = None) -> int:
 			# dispatching->queued + release the credit) instead of only logging, so the
 			# promoted-but-not-dispatched credit is not stranded until the sweep.
 			frappe.log_error(title="admission.promote dispatch", message=frappe.get_traceback())
-			_compensate_failed_dispatch(row["run_id"], target)
+			_compensate_failed_dispatch(
+				row["run_id"],
+				target,
+				version=int(row["version"]) + 1 if row.get("version") is not None else None,
+			)
 
 	# Positions shifted for everyone still queued.
 	try:
@@ -1034,11 +1121,19 @@ def _pick_next(target: str, cap: int, promoted_convs: set[str]) -> dict | None:
 	"""Choose the next queued turn to promote, honoring the background floor
 	and per-conversation single-flight. Reads a small ordered batch and filters
 	in Python (bounded work: at most a handful of credits per round)."""
-	rows = frappe.db.sql(
-		"""
-		SELECT t.run_id, t.conversation, t.seed_message, t.turn_class, t.dispatch_payload
+	from jarvis.chat.collaboration_ownership import executor_clause
+
+	binding_column = (
+		"t.collaboration_binding" if frappe.db.has_column(TURN, "collaboration_binding") else "NULL"
+	)
+
+	# Only fixed schema columns and closed executor predicates are formatted; target stays bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
+		f"""
+		SELECT t.run_id, t.conversation, t.seed_message, t.turn_class, t.dispatch_payload, t.version,
+		       {binding_column} AS collaboration_binding
 		FROM `tabJarvis Chat Turn` t
-		WHERE t.relay_target_id=%(t)s AND t.state='queued'
+		WHERE t.relay_target_id=%(t)s AND t.state='queued' {executor_clause("rq", "t")}
 		ORDER BY t.enqueued_at ASC, t.run_id ASC
 		LIMIT 200
 		""",
@@ -1047,6 +1142,11 @@ def _pick_next(target: str, cap: int, promoted_convs: set[str]) -> dict | None:
 	)
 
 	def eligible(r: dict) -> bool:
+		if r.get("collaboration_binding"):
+			from jarvis.chat.collaboration import writes_ready
+
+			if not writes_ready():
+				return False
 		conv = r["conversation"]
 		if conv in promoted_convs:
 			return False
@@ -1111,6 +1211,8 @@ def settle_turn(run_id: str, terminal_state: str, error: str | None = None) -> N
 	Guarded by the flag so flag-OFF is byte-identical. Best-effort: never
 	breaks the turn."""
 	try:
+		from jarvis.chat.collaboration_ownership import legacy_clause
+
 		if not admission_enabled():
 			return
 		try:
@@ -1118,7 +1220,7 @@ def settle_turn(run_id: str, terminal_state: str, error: str | None = None) -> N
 				f"""UPDATE `tab{TURN}`
 				SET state=%(s)s, reserved=0, cancel_requested=0, done_at=%(now)s,
 				    error=%(err)s, version=version+1
-				WHERE name=%(r)s AND state='dispatching'""",
+				WHERE name=%(r)s AND state='dispatching' {legacy_clause()}""",
 				{"s": terminal_state, "now": _now(), "err": (error or "")[:1000], "r": run_id},
 			)
 			target = frappe.db.get_value(TURN, run_id, "relay_target_id") or DEFAULT_RELAY_TARGET
@@ -1182,11 +1284,13 @@ def mark_cancel_requested(conversation: str, run_id: str | None = None) -> None:
 	from jarvis.chat import pump
 
 	def unit() -> None:
+		from jarvis.chat.collaboration_ownership import legacy_clause
+
 		turn = frappe.db.get_value(TURN, {"conversation": conversation, "state": "dispatching"}, "name")
 		if turn and pump.stop_names_turn(turn, run_id):
 			_run_cas(
 				f"""UPDATE `tab{TURN}` SET cancel_requested=1, version=version+1
-				WHERE name=%(r)s AND state='dispatching'""",
+				WHERE name=%(r)s AND state='dispatching' {legacy_clause()}""",
 				{"r": turn},
 			)
 			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist cancel marker
@@ -1259,6 +1363,9 @@ def _cancel_pre_dispatch(run_id: str, *, owner_of, label: str, attempts: int = 1
 		)
 		if not row:
 			return {"row": None, "owner": None, "path": None}
+		from jarvis.chat.collaboration import require_legacy_conversation
+
+		require_legacy_conversation(row["conversation"])
 		owner = owner_of(row["conversation"])
 		state = row["state"]
 		version = int(row["version"] or 0)
@@ -1407,6 +1514,10 @@ def cancel_queued_on_stop(conversation: str, run_id: str | None) -> bool:
 	and nothing is cancelled here. Returns True when every turn meant was cancelled, so
 	nothing is left for the agent abort; a turn promoted mid-cancel returns False."""
 	from jarvis.chat import turn_state as ts
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(conversation):
+		return False
 
 	under_way = tuple(s for s in ts.NONTERMINAL_STATES if s != "queued")
 	if ts.unfinished_turn(conversation, states=under_way):
@@ -1463,7 +1574,7 @@ def cancel_queued_on_stop(conversation: str, run_id: str | None) -> bool:
 	return all_cancelled
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def queue_position(run_id: str) -> dict:
 	"""Poll-on-focus fallback for the queued chip. Owner-checked. Returns the
 	current state and (when queued) the approximate position."""
@@ -1480,7 +1591,7 @@ def queue_position(run_id: str) -> dict:
 	return {"ok": True, "run_id": run_id, "state": row["state"], "position": pos}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def active_turn_for_conversation(conversation: str) -> dict:
 	"""SUXI-1 server-truth resync for the queued chip. Owner-checked. Returns the
 	conversation's own QUEUED turn (the one the chip represents), if any, so a
@@ -1571,7 +1682,7 @@ def _legacy_turn_jobs() -> tuple[int, list[str], bool]:
 	return len(ordered), ordered[:20], scan_ok
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pump_cutover_preflight(relay_target: str | None = None) -> dict:
 	"""CDX-10 — the MANDATORY first-deploy cutover preflight. Before removing the
 	explicit ``jarvis_pump_enabled=0`` kill switch to enter the default-ON pump, run
@@ -1634,7 +1745,7 @@ def pump_cutover_preflight(relay_target: str | None = None) -> dict:
 	return result
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pump_cutover_execute(relay_target: str | None = None) -> dict:
 	"""CDX-10/CDX-21 — ONE cutover PASS that encodes the safe protocol (the loop is the
 	operator's; this method is one pass). It closes the TOCTOU window the read-only
@@ -1741,7 +1852,7 @@ def pump_cutover_execute(relay_target: str | None = None) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def pump_set_transport_mode(mode: str, relay_target: str | None = None) -> dict:
 	"""CDX-10/CDX-21 — the operator command for a DELIBERATE transport-mode change OTHER than the
 	forward cutover: the kill switch (``legacy``), the rollback ladder's drain step
@@ -1941,12 +2052,13 @@ def _sweep_reconcile(targets: set[str]) -> int:
 	streaming placeholder (worker provably dead - reservation past the 900s TTL,
 	well beyond the 720s worker cap) is closed errored so a post-deploy batch of
 	orphans frees its shard credits instead of pinning them for extra cycles."""
-	rows = frappe.db.sql(
-		"""
+	# legacy_clause accepts only a closed alias set and returns fixed schema predicates.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
+		f"""
 		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message,
 		       t.reservation_expires_at
 		FROM `tabJarvis Chat Turn` t
-		WHERE t.state='dispatching'
+		WHERE t.state='dispatching' {legacy_clause("t")}
 		""",
 		as_dict=True,
 	)
@@ -1989,7 +2101,7 @@ def _sweep_reconcile(targets: set[str]) -> int:
 			state = "errored" if a.get("error") else "done"
 		affected = _run_cas(
 			f"""UPDATE `tab{TURN}` SET state=%(s)s, reserved=0, done_at=%(now)s,
-			was_recovered=1, version=version+1 WHERE run_id=%(r)s AND state='dispatching'""",
+			was_recovered=1, version=version+1 WHERE run_id=%(r)s AND state='dispatching' {legacy_clause()}""",
 			{"s": state, "now": now, "r": r["run_id"]},
 		)
 		if affected == 1:
@@ -2014,13 +2126,14 @@ def _sweep_reservations(targets: set[str]) -> int:
 	OARI-6: a stopped turn (``cancel_requested``) whose worker died before making
 	a placeholder is CANCELLED (terminal), never re-dispatched - a turn the user
 	explicitly stopped must not run again."""
-	rows = frappe.db.sql(
-		"""
+	# Only the closed legacy schema predicate is formatted; the cutoff stays bound.
+	rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection
+		f"""
 		SELECT t.run_id, t.conversation, t.relay_target_id, t.seed_message,
 		       t.cancel_requested
 		FROM `tabJarvis Chat Turn` t
 		WHERE t.state='dispatching' AND t.reservation_expires_at IS NOT NULL
-		  AND t.reservation_expires_at < %(now)s
+		  AND t.reservation_expires_at < %(now)s {legacy_clause("t")}
 		""",
 		{"now": _now()},
 		as_dict=True,
@@ -2041,7 +2154,7 @@ def _sweep_reservations(targets: set[str]) -> int:
 				f"""UPDATE `tab{TURN}` SET state='cancelled', reserved=0, done_at=%(now)s,
 				was_recovered=1, version=version+1
 				WHERE run_id=%(r)s AND state='dispatching'
-				  AND reservation_expires_at IS NOT NULL AND reservation_expires_at < %(now)s""",
+				  AND reservation_expires_at IS NOT NULL AND reservation_expires_at < %(now)s {legacy_clause()}""",
 				{"r": r["run_id"], "now": _now()},
 			)
 			if affected == 1:
@@ -2053,7 +2166,7 @@ def _sweep_reservations(targets: set[str]) -> int:
 			SET state='queued', reserved=0, dispatching_at=NULL,
 			    reservation_expires_at=NULL, was_recovered=1, version=version+1
 			WHERE run_id=%(r)s AND state='dispatching'
-			  AND reservation_expires_at IS NOT NULL AND reservation_expires_at < %(now)s""",
+			  AND reservation_expires_at IS NOT NULL AND reservation_expires_at < %(now)s {legacy_clause()}""",
 			{"r": r["run_id"], "now": _now()},
 		)
 		if affected == 1:
@@ -2084,9 +2197,13 @@ def _sweep_age_out(targets: set[str]) -> int:
 	reason = AGE_OUT_REASON
 	cancelled = 0
 	for r in rows:
+		from jarvis.chat.collaboration import is_collaborative
+
+		if is_collaborative(r["conversation"]):
+			continue
 		affected = _run_cas(
 			f"""UPDATE `tab{TURN}` SET state='cancelled', cancel_reason=%(reason)s,
-			done_at=%(now)s, version=version+1 WHERE run_id=%(r)s AND state='queued'""",
+			done_at=%(now)s, version=version+1 WHERE run_id=%(r)s AND state='queued' {legacy_clause()}""",
 			{"reason": reason, "now": _now(), "r": r["run_id"]},
 		)
 		if affected != 1:

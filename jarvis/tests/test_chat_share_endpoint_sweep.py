@@ -137,6 +137,10 @@ def only_seen_advanced(before, after):
 # These are the newly authorized reads. Their dedicated tests enforce exact
 # allowlists/scrubbing/file checks; the sweep is about privilege escalation.
 EXEMPTIONS = {
+	"jarvis.chat.collaboration_api.get_conversation": "Explicit projected shared read.",
+	"jarvis.chat.collaboration_api.get_tool_detail": "Explicit projected tool detail.",
+	"jarvis.chat.collaboration_api.get_canvas": "Explicit sanitized static artifact.",
+	"jarvis.chat.collaboration_api.get_file": "Explicit common attachment download.",
 	"jarvis.chat.sharing.get_shared_conversation": "The explicitly authorized, projected read; seen_marker may advance.",
 	"jarvis.chat.sharing.get_shared_tool_detail": "The explicitly authorized, projected tool read.",
 	"jarvis.chat.sharing.get_shared_canvas": "The explicitly authorized sanitized static artifact read.",
@@ -290,6 +294,62 @@ class TestShareEndpointSweep(SharingCase):
 					)
 				else:
 					self.assertTrue(entry["reason"].strip())
+
+	def test_record_counts_share_probe_reaches_conversation_gateway(self):
+		from jarvis.chat import collaboration, cycle_count_entry
+
+		self.share()
+		args = substitute(
+			ENDPOINTS["jarvis.chat.cycle_count_entry.record_counts"]["arguments"], self.identifiers()
+		)
+		counts = frappe.db.count("Jarvis Physical Count")
+		with (
+			as_user(RECIPIENT),
+			patch.object(
+				cycle_count_entry,
+				"require_legacy_conversation",
+				wraps=collaboration.require_legacy_conversation,
+			) as gateway,
+		):
+			# In a legacy shared chat, the plan-shape refusal follows the gateway.
+			with self.assertRaises(frappe.PermissionError):
+				cycle_count_entry.record_counts(**args)
+			gateway.assert_called_once_with(self.conversation)
+
+			# In a collaborative chat, the gateway itself must refuse the call.
+			if frappe.db.has_column("Jarvis Conversation", "collaboration_active"):
+				frappe.db.set_value("Jarvis Conversation", self.conversation, "collaboration_active", 1)
+				with self.assertRaisesRegex(frappe.PermissionError, "Collaborative chat execution"):
+					cycle_count_entry.record_counts(**args)
+		self.assertEqual(frappe.db.count("Jarvis Physical Count"), counts)
+
+	def test_correct_counts_share_probe_reaches_conversation_gateway(self):
+		from jarvis.chat import collaboration, cycle_count_entry
+
+		self.share()
+		args = substitute(
+			ENDPOINTS["jarvis.chat.cycle_count_entry.correct_counts"]["arguments"], self.identifiers()
+		)
+		counts = frappe.db.count("Jarvis Physical Count")
+		with (
+			as_user(RECIPIENT),
+			patch.object(
+				cycle_count_entry,
+				"require_legacy_conversation",
+				wraps=collaboration.require_legacy_conversation,
+			) as gateway,
+		):
+			# In a legacy shared chat, the plan-shape refusal follows the gateway.
+			with self.assertRaises(frappe.PermissionError):
+				cycle_count_entry.correct_counts(**args)
+			gateway.assert_called_once_with(self.conversation)
+
+			# In a collaborative chat, the gateway itself must refuse the call.
+			if frappe.db.has_column("Jarvis Conversation", "collaboration_active"):
+				frappe.db.set_value("Jarvis Conversation", self.conversation, "collaboration_active", 1)
+				with self.assertRaisesRegex(frappe.PermissionError, "Collaborative chat execution"):
+					cycle_count_entry.correct_counts(**args)
+		self.assertEqual(frappe.db.count("Jarvis Physical Count"), counts)
 
 	def identifiers(self):
 		if hasattr(self, "fixture_identifiers"):

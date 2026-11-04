@@ -503,7 +503,15 @@ class TestAStepThatEndedWithNoHook(CheckBase):
 		self.assertEqual(
 			int(frappe.db.get_value(MSG, amsg, "streaming")), 0, "premise: the reply was stamped"
 		)
-		self._assert_ended(run, conv, rid, status="failed", reason="Step 1 failed")
+		# Not an end with no hook any more: the budget edge owes the macro hook like a
+		# settled end does, and the finalize job (run for real here) moves the run.
+		self.assertEqual(self._effects(rid), {"macro_advance": "pending"})
+		self.assertEqual(self._run(run).status, "running", "premise: before finalize runs")
+		finalize.run_finalize(rid, self._target)
+		row = self._run(run)
+		self.assertEqual(row.status, "failed")
+		self.assertIn("Step 1 failed", row.error or "")
+		self.assertEqual(len(self._seeds(conv)), 1, "no step was sent after a failed one (Stop on error)")
 
 	def test_the_step_waited_too_long_in_the_queue(self):
 		# Through the pump's own watchdog.
@@ -618,10 +626,11 @@ class TestAHookThatWasLost(CheckBase):
 		self._settled_long_enough(run, rid, seconds=3 * 3600 - 300)  # however late: an end is an end
 		self._tick()
 		self.assertEqual((self._run(run).status, self._run(run).error or ""), ("completed", ""))
-		# A clean completion is told to nobody, as on the hook's own path: the check is
-		# not louder than the hook. Only an ending with a reason notifies.
+		# Told exactly as on the hook's own path, once: the check is no louder than the
+		# hook, and a finished run is told there too (its chat is not in the chat list).
 		subjects = frappe.get_all("Notification Log", filters={"for_user": TEST_USER}, pluck="subject")
-		self.assertEqual(subjects, [])
+		self.assertEqual(len(subjects), 1)
+		self.assertTrue(subjects[0].startswith("Macro run finished: "), subjects)
 
 	def test_a_hook_that_was_delivered_is_not_logged_as_lost(self):
 		# The ledger row is `done` with attempts to spare and the hook left no trace of
@@ -668,7 +677,10 @@ class TestAHookThatWasLost(CheckBase):
 		rows = self._signals()
 		self.assertEqual(len(rows), 1, "one Error Log row per run")
 		self.assertEqual(rows[0].method, SIGNAL + "hook_dropped")
-		self.assertEqual(rows[0].error, f"run {run}; turn state done; shape hook_dropped")
+		# api_errors.tag_error_log_origin appends the calling frame after a blank line.
+		self.assertEqual(
+			rows[0].error.partition("\n\n")[0], f"run {run}; turn state done; shape hook_dropped"
+		)
 		for row in frappe.get_all(
 			LOG, filters={"method": ["like", "jarvis.chat.macros.reconcil%"]}, fields=["*"]
 		):
@@ -1110,8 +1122,9 @@ class TestSendingAnotherStepUnattended(CheckBase):
 				self.assertEqual(len(self._seeds(conv)), 1)
 
 	def test_a_run_stopped_at_a_confirmation_card_is_told_to_its_owner(self):
-		# The closing line is withheld while the reply holds the card, and a manual run
-		# gets no notification from the engine: the run row was the only trace.
+		# The closing line is withheld while the reply holds the card, so the
+		# notification is the trace. Told once: by the engine's own ending, not again
+		# by the check.
 		run, conv, rid = self._lost()
 		self._settled_long_enough(run, rid)
 		parked = {"tool": "delete_doc", "summary": "delete_doc doctype=ToDo name=X", "conversation": conv}

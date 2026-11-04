@@ -86,9 +86,12 @@ class TestAttachmentCanvasStorage(FrappeTestCase):
 		self.assertEqual(_att_type({"file_url": "/private/files/x.pdf"}), "pdf")
 
 	def test_att_canvas_item_shape(self):
-		item = _att_canvas_item({"file_url": "/private/files/q3.pdf", "file_name": "q3.pdf"})
-		self.assertEqual(set(item), {"name", "type", "file_url", "title"})
+		item = _att_canvas_item(
+			{"file_url": "/private/files/q3.pdf", "file_name": "q3.pdf", "file_id": "FILE-EXACT"}
+		)
+		self.assertEqual(set(item), {"name", "type", "file_url", "file_id", "title"})
 		self.assertEqual(item["type"], "pdf")
+		self.assertEqual(item["file_id"], "FILE-EXACT")
 		self.assertEqual(item["file_url"], "/private/files/q3.pdf")
 		self.assertEqual(item["title"], "q3.pdf")
 		self.assertTrue(item["name"])  # a stable key for the v-for

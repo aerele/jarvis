@@ -20,6 +20,12 @@ NO company-level filter of its own, so this wrapper additionally gates
 and - in party-only mode, where the balance is otherwise summed across
 every company in the bench - requires an explicit, permission-checked
 ``company`` from a caller who is restricted to specific companies.
+
+A balance also sums GL Entries across every Cost Center, Project and
+accounting dimension. A caller restricted on any dimension but Cost Center is
+refused, and one restricted on Cost Center must name a permitted
+``cost_center`` (a group only if its whole subtree is permitted) on a Profit
+and Loss account, the only case ERPNext narrows by cost center.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ import frappe
 
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools._company_scope import assert_company_permitted
-from jarvis.tools._ledger_access import assert_ledger_readable
+from jarvis.tools._ledger_access import assert_gl_balance_in_scope, assert_ledger_readable
 
 
 def get_balance_on(
@@ -59,6 +65,7 @@ def get_balance_on(
 
 	# Party mode may use the party's AR/AP report; an account balance needs GL Entry read.
 	assert_ledger_readable(party_type if (party_type and party) else None)
+	assert_gl_balance_in_scope(account, cost_center)
 
 	if company:
 		assert_company_permitted(company)

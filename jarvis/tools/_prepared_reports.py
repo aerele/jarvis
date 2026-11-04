@@ -8,7 +8,7 @@ a prepared report and the agent relayed that as "no data" - the bug this fixes.
 
 Instead we return a **self-describing status envelope**. On every call we
 recompute from live state (there is no stored ticket):
-  - ``ready``       - a completed copy exists; its rows + ``as_of`` ride along.
+  - ``ready``       - a completed copy exists; metadata points to ``query_report``.
   - ``generating``  - a background run for these filters is in flight.
   - ``failed``      - the most recent run terminally errored; surfaced, not looped.
   - ``started``     - nothing usable, so we kicked off a background run.
@@ -36,7 +36,9 @@ lacks the ``Prepared Report`` read role.
 
 from __future__ import annotations
 
+import html
 import json
+import re
 
 import frappe
 from frappe.core.doctype.prepared_report.prepared_report import make_prepared_report
@@ -79,33 +81,95 @@ _BOOKKEEPING_KEYS = ("prepared_report_name",)
 _MATCH_SCAN = 50
 
 
-def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
+def handle_prepared(report_name: str, raw_filters: dict, *, user: str, since=None) -> dict:
 	"""Return a status envelope (ready / generating / failed / started) for a
 	prepared report. Pull-model, stateless, runs as ``user``. Raises
-	InvalidArgumentError when the background queue can't run the report."""
-	_gate_report(report_name)
-	# The report's own defaults, as Desk sends them: a run started here is the run
-	# Desk would start, and a Desk run is found again.
-	filters = {**_report_defaults(report_name), **_canonical_filters(raw_filters)}
-	_gate_filters(report_name, filters, user)
+	InvalidArgumentError when the background queue can't run the report.
+
+	``since`` (a macro run's start): only a copy or a run created at/after it counts,
+	so the step reads data made for this run. Nothing newer ⇒ a new run, whose
+	``started`` / ``generating`` envelopes carry ``waiting: True``. ``None`` is the
+	unbounded answer, unchanged."""
+	filters = gate_and_fill(report_name, raw_filters, user=user)
 
 	# 1. A completed copy we can read? (0 rows is a valid answer; unreadable -> fall through)
-	row = _latest(report_name, filters, user, ("Completed",))
+	row = _latest(report_name, filters, user, ("Completed",), since=since)
 	if row:
 		ready = _read_completed(row.name)
 		if ready is not None:
 			return ready
+		if since is not None:
+			# A copy made for this run that will not read: regenerating would start a
+			# second 25-minute run behind it, so say so.
+			return _unreadable(report_name, row.name)
+	return _not_ready(report_name, filters, user, since=since)
 
-	# 2. The most recent non-completed attempt decides: still generating, or a
-	#    terminal failure to surface. A stalled attempt returns None so we re-run.
+
+def completed_or_status(report_name: str, filters: dict, *, user: str) -> tuple[dict | None, dict | None]:
+	"""For an export, after the caller ran the gates and ``fill_defaults``:
+	``(completed, None)`` with EVERY row of the completed copy (``{columns, result,
+	as_of, run}``, no ``_MAX_ROWS`` cap: the rows go to a file, not to the model), or
+	``(None, status)`` with the same ``generating`` / ``failed`` / ``started``
+	envelope ``handle_prepared`` returns. One pass over the live state, so a copy
+	that completes between two lookups is never answered with a capped ``ready``
+	envelope."""
+	row = _latest(report_name, filters, user, ("Completed",))
+	if row:
+		completed = read_completed_rows(row.name)
+		if completed is not None:
+			return completed, None
+	return None, _not_ready(report_name, filters, user)
+
+
+def peek(report_name: str, filters: dict, *, user: str) -> tuple[str, dict | None]:
+	"""The state of ``user``'s copy for already-filled ``filters``, WITHOUT starting a run:
+	``("ready", completed)``, ``("generating", envelope)``, ``("failed", envelope)`` or
+	``("missing", None)`` when nothing usable exists (never run, or the run stalled). The
+	export job dispatcher polls with this from the scheduler, so it must have no side
+	effect and must be called under the owner (``_latest`` is owner-scoped)."""
+	row = _latest(report_name, filters, user, ("Completed",))
+	if row:
+		completed = read_completed_rows(row.name)
+		if completed is not None:
+			return "ready", completed
 	pending = _pending_state(report_name, filters, user)
-	if pending is not None:
-		return pending
+	if pending is None:
+		return "missing", None
+	return pending["status"], pending
 
-	# 3. Nothing usable -> (re)generate. Refuse (raise) if the queue can't run it,
-	#    so we never leave an orphan Queued row that no worker will drain.
+
+def report_deadline_s(report_name: str) -> int:
+	"""Seconds after which a run started for this report counts as stuck."""
+	return _report_timeout(report_name) + _STARTED_STALL_MARGIN
+
+
+def gate_and_fill(report_name: str, raw_filters: dict, *, user: str) -> dict:
+	"""The gates ``run()`` applies, then the filters as Desk would send them."""
+	gate_report(report_name)
+	filters = fill_defaults(report_name, raw_filters)
+	gate_filters(report_name, filters, user)
+	return filters
+
+
+def fill_defaults(report_name: str, raw_filters: dict | str | None) -> dict:
+	"""The report's own defaults under the caller's values, as Desk sends them. A
+	run started with these is the run Desk would start, and a Desk run is found
+	again; a Script Report's required filter with a default never reaches the
+	script unset."""
+	return {**_report_defaults(report_name), **_canonical_filters(raw_filters)}
+
+
+def _not_ready(report_name: str, filters: dict, user: str, *, since=None) -> dict:
+	"""No readable completed copy: the most recent attempt decides (generating or a
+	terminal failure to surface), else (re)generate. Refuses (raises) if the queue
+	can't run it, so we never leave an orphan Queued row that no worker will drain."""
+	pending = _pending_state(report_name, filters, user, since=since)
+	if pending is not None:
+		return _waiting(pending) if since is not None else pending
 	_require_worker()
 	run = make_prepared_report(report_name, filters)["name"]
+	if since is not None:
+		return _waiting(_envelope(report_name, "started", "", run=run))
 	return _envelope(
 		report_name,
 		"started",
@@ -115,14 +179,36 @@ def handle_prepared(report_name: str, raw_filters: dict, *, user: str) -> dict:
 	)
 
 
+def _waiting(env: dict) -> dict:
+	"""``env`` for a step that waits on the report: a run in flight is marked
+	``waiting`` with the instruction to stop; ``failed`` is left as it is."""
+	if env["status"] in ("started", "generating"):
+		env["waiting"] = True
+		env["message"] = _WAITING_MESSAGE
+	return env
+
+
+def _unreadable(report_name: str, run: str) -> dict:
+	detail = "the report's output could not be read"
+	return _envelope(
+		report_name,
+		"failed",
+		f"That report finished, but {detail}. An administrator can see it in Prepared Report {run}.",
+		run=run,
+		reason="internal",
+		error=detail,
+	)
+
+
 # --------------------------------------------------------------------------- #
 # gates
 # --------------------------------------------------------------------------- #
-def _gate_report(report_name: str) -> None:
+def gate_report(report_name: str):
 	"""Gate the report exactly as run() does: Has-Role allow-list, ref_doctype
-	report permission, disabled-check, Custom-Report resolution."""
+	report permission, disabled-check, Custom-Report resolution. Returns the
+	resolved report doc (the reference report, for a Custom Report)."""
 	try:
-		get_report_doc(report_name)
+		return get_report_doc(report_name)
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"no permission to run report {report_name}") from e
 	except frappe.ValidationError as e:
@@ -130,7 +216,7 @@ def _gate_report(report_name: str) -> None:
 		raise InvalidArgumentError(str(e) or f"report {report_name} is unavailable") from e
 
 
-def _gate_filters(report_name: str, filters: dict, user: str) -> None:
+def gate_filters(report_name: str, filters: dict, user: str) -> None:
 	"""Record-level guard that a Link filter value points at a doc the caller may
 	read. make_prepared_report skips this (ignore_permissions insert), and the
 	completed-copy read path bypasses run() too, so we apply it once, up front."""
@@ -181,7 +267,7 @@ def _report_defaults(report_name: str) -> dict:
 	return {f["fieldname"]: f["default"] for f in filters if not _unset(f.get("default"))}
 
 
-def _unset(value) -> bool:
+def is_unset(value) -> bool:
 	"""Desk sends only the filters that have a value (``get_filter_values``): a blank,
 	0 / false, "%" or an empty selection reads as not set."""
 	if isinstance(value, list | tuple):
@@ -189,13 +275,42 @@ def _unset(value) -> bool:
 	return value is None or value in ("", "%") or (isinstance(value, int | float) and value == 0)
 
 
+_unset = is_unset  # the name the module's own callers and tests use
+
+
 # --------------------------------------------------------------------------- #
 # completed copy (read DIRECTLY - never via run() by name)
 # --------------------------------------------------------------------------- #
-def _read_completed(dn: str) -> dict | None:
-	"""Read a completed Prepared Report's rows straight from its doc. Returns a
-	`ready` envelope, or None if the stored output can't be read (missing/corrupt
-	gz) so the caller falls through to (re)generate rather than emit empty."""
+def _read_completed(dn: str) -> dict:
+	"""A completed run is ready for analysis. Do not fetch or parse its source here."""
+	row = frappe.db.get_value(
+		"Prepared Report",
+		{"name": dn, "owner": frappe.session.user, "status": "Completed"},
+		["report_name", "report_end_time", "creation"],
+		as_dict=True,
+	)
+	if not row:
+		raise PermissionDeniedError("The completed report is no longer available. Select a current run.")
+	as_of = str(row.report_end_time or row.creation)
+	return _envelope(
+		row.report_name,
+		"ready",
+		f"The stored report is ready (generated {as_of}). Its data has not been read yet. Use query_report to inspect and query the complete stored source.",
+		run=dn,
+		as_of=as_of,
+		read_status="not_read",
+		preview_complete=False,
+		coverage={"complete": False},
+		next_query={"tool": "query_report", "args": {"prepared_report": dn}},
+	)
+
+
+def read_completed_rows(dn: str) -> dict | None:
+	"""EVERY row of a completed Prepared Report, read DIRECTLY from its doc (no
+	``Prepared Report`` read role needed): ``{report_name, columns, result, as_of,
+	run}``, or None when the stored output can't be read (missing/corrupt gz) so the
+	caller regenerates rather than emits empty. Uncapped: the export path writes
+	these rows to a file; ``_read_completed`` returns metadata only."""
 	try:
 		doc = frappe.get_doc("Prepared Report", dn)
 		raw = doc.get_prepared_data()
@@ -221,16 +336,14 @@ def _read_completed(dn: str) -> dict | None:
 		result = []
 	if not isinstance(result, list):
 		return None
-	capped, note = _cap_rows(result)
 	as_of = doc.get("report_end_time") or doc.get("creation")
-	env = _envelope(doc.report_name, "ready", _ready_message(len(result), as_of))
-	env["columns"] = columns or []
-	env["result"] = capped
-	env["as_of"] = str(as_of) if as_of else None
-	env["run"] = dn
-	if note:
-		env["row_note"] = note
-	return env
+	return {
+		"report_name": doc.report_name,
+		"columns": columns or [],
+		"result": result,
+		"as_of": str(as_of) if as_of else None,
+		"run": dn,
+	}
 
 
 def _split_columns_result(doc, data):
@@ -247,12 +360,13 @@ def _split_columns_result(doc, data):
 	return [], None
 
 
-def _cap_rows(result: list):
+def _cap_rows(result: list, report_name: str):
 	if len(result) <= _MAX_ROWS:
 		return result, None
 	note = (
-		f"Showing the first {_MAX_ROWS} of {len(result)} rows. Ask me to narrow "
-		f"the filters, or to export the full report."
+		f"Showing the first {_MAX_ROWS} of {len(result)} stored rows. For questions, counts or totals "
+		"use query_report with this response's exact run ID. Inspect first, then pin its version "
+		"for queries over all stored rows. This preview is not a complete report read."
 	)
 	return result[:_MAX_ROWS], note
 
@@ -273,7 +387,7 @@ def _ready_message(row_count: int, as_of) -> str:
 # --------------------------------------------------------------------------- #
 # in-flight / recent failure / worker
 # --------------------------------------------------------------------------- #
-def _pending_state(report_name: str, filters: dict, user: str) -> dict | None:
+def _pending_state(report_name: str, filters: dict, user: str, *, since=None) -> dict | None:
 	"""State from the most recent NON-completed run for this owner+filters:
 	`generating` if a run is in flight within its stall deadline, `failed` if the
 	most recent run terminally errored, or None (nothing pending, or the in-flight
@@ -282,7 +396,9 @@ def _pending_state(report_name: str, filters: dict, user: str) -> dict | None:
 	One query over the SINGLE newest attempt, so an old failure can never shadow a
 	newer in-flight run. Owner-scoped with ignore_permissions - a normal ERP user
 	lacks the Prepared Report read role, so a permission-checked read finds nothing."""
-	row = _latest(report_name, filters, user, (*_INFLIGHT_STATUSES, *_FAILED_STATUSES, "Cancelled"))
+	row = _latest(
+		report_name, filters, user, (*_INFLIGHT_STATUSES, *_FAILED_STATUSES, "Cancelled"), since=since
+	)
 	if not row or row.status == "Cancelled":
 		# A run someone stopped (v16 Cancelled) is not pending and is no failure to
 		# surface: asked again, start it again. Counted so it shadows an older Error.
@@ -297,29 +413,116 @@ def _pending_state(report_name: str, filters: dict, user: str) -> dict | None:
 		return None  # started but the worker died mid-run -> caller re-generates
 	# Error / Failed - surface it and stop; re-firing the same doomed job on every
 	# ask is the loop we are avoiding. The user can adjust the filters (a new match
-	# key -> a fresh run). The raw error (a traceback) stays out of the message;
-	# Frappe already logged it on the failing job.
+	# key -> a fresh run). Only the exception's own message reaches the user (see
+	# failure_reason); the traceback stays on the Prepared Report for an admin.
+	reason, detail = failure_reason(frappe.db.get_value("Prepared Report", row.name, "error_message"))
 	return _envelope(
 		report_name,
 		"failed",
-		"That report failed to generate. If it needs a filter you didn't set "
-		"(a company, a date range, a required value), tell me and I'll run it "
-		"again with it.",
+		_FAILED_MESSAGES[reason].format(detail=detail, run=row.name),
 		run=row.name,
+		reason=reason,
+		error=detail,
 	)
 
 
-def _latest(report_name, filters, user, statuses):
-	"""Newest owner-scoped Prepared Report for these filters in one of ``statuses``.
+# What the agent relays per failure reason. Only ``report_error`` invites a filter
+# change: a permission refusal or a timeout would fail again whatever the filters.
+_FAILED_MESSAGES = {
+	"permission": "I couldn't run that report: {detail} Changing the filters won't help; "
+	"this needs access from an administrator.",
+	"timed_out": "That report failed to generate: {detail} A narrower date range or "
+	"fewer rows may finish in time, or an administrator can raise the report's time limit.",
+	"report_error": "That report failed to generate: {detail} If a filter needs changing, "
+	"tell me and I'll run it again.",
+	"internal": "That report failed to generate. If it needs a filter you didn't set "
+	"(a company, a date range, a required value), tell me and I'll run it again with "
+	"it. An administrator can see the error in Prepared Report {run}.",
+}
+_FAILURE_DETAIL_MAX = 300
+# What a macro step is told when its report is generating (see ``handle_prepared``).
+_WAITING_MESSAGE = (
+	"This report is generating in the background. Start any other reports this step needs now, "
+	"then stop: Jarvis will continue this step automatically when they are ready. Do not send, "
+	"create or change anything in this step until then."
+)
+_TIMED_OUT = "It took too long to generate and was stopped."
+_NO_PERMISSION = "You don't have permission to run this report."
+# frappe.exceptions that wrap a database error: their message is the driver's
+# (an error code and SQL fragments), not one written for the user.
+_FRAPPE_DB_ERRORS = frozenset(
+	{"QueryDeadlockError", "DuplicateEntryError", "UniqueValidationError", "InvalidColumnName", "SQLError"}
+)
+# The traceback's final exception line, at column 0 (a traceback's frames and
+# variables are indented): "frappe.exceptions.PermissionError: <message>". The
+# message may run on over further lines, up to the end of the text.
+_EXC_LINE = re.compile(r"^((?:[A-Za-z_]\w*\.)*[A-Za-z_]\w*(?:Error|Exception|Timeout|Exit)\w*)(?::(.*))?$")
+
+
+def failure_reason(error_message: str | None) -> tuple[str, str]:
+	"""Why a Prepared Report failed, as ``(reason, detail)`` safe to show its owner.
+
+	``error_message`` is what Frappe stored: a traceback with variables (the user's
+	roles, the filters, the report's config), or "Report timed out." for a run the
+	stall sweep failed. Only the final exception's own message is kept, and only
+	from a ``frappe.*`` exception - the text ``frappe.throw`` addresses to the user,
+	the same text Desk would show them. Anything else (KeyError, SQL errors) is
+	developer-facing and reads as ``internal`` with no detail.
+
+	``reason`` is ``permission``, ``timed_out``, ``report_error`` or ``internal``."""
+	text = (error_message or "").strip()
+	if not text:
+		return "internal", ""
+	if text.startswith("Report timed out"):
+		return "timed_out", _TIMED_OUT
+	lines = text.splitlines()
+	for i in range(len(lines) - 1, -1, -1):
+		match = _EXC_LINE.match(lines[i])
+		if match:
+			exc = match.group(1)
+			message = "\n".join([match.group(2) or "", *lines[i + 1 :]])
+			break
+	else:
+		return "internal", ""
+	name = exc.rsplit(".", 1)[-1]
+	if name in ("JobTimeoutException", "QueryTimeoutError"):
+		return "timed_out", _TIMED_OUT
+	if not exc.startswith("frappe.") or name in _FRAPPE_DB_ERRORS:
+		return "internal", ""
+	detail = _clean_detail(message)
+	if exc.endswith("PermissionError"):
+		return "permission", detail or _NO_PERMISSION
+	return ("report_error", detail) if detail else ("internal", "")
+
+
+def _clean_detail(message: str) -> str:
+	"""The exception message as one plain sentence: tags dropped (``<br>`` reads as a
+	space), entities decoded, whitespace collapsed, capped, and closed with a full
+	stop so the agent's next sentence does not run into it."""
+	text = html.unescape(re.sub(r"<[^>]*>", " ", message))
+	text = " ".join(text.split())
+	if len(text) > _FAILURE_DETAIL_MAX:
+		text = text[: _FAILURE_DETAIL_MAX - 1].rstrip() + "…"
+	elif text and text[-1] not in ".!?":
+		text += "."
+	return text
+
+
+def _latest(report_name, filters, user, statuses, since=None):
+	"""Newest owner-scoped Prepared Report for these filters in one of ``statuses``,
+	created at/after ``since`` when that is given.
 
 	Matched on the filters' meaning, not Frappe's exact JSON string (#635): a run
 	started from Desk stores the empty filters it showed and its own value types
 	(1 for true, a multi-select in its own order), so the copy it left was never
 	found and the report ran again."""
 	want = _match_key(filters)
+	conditions = {"report_name": report_name, "owner": user, "status": ("in", statuses)}
+	if since is not None:
+		conditions["creation"] = (">=", since)
 	rows = frappe.get_all(
 		"Prepared Report",
-		filters={"report_name": report_name, "owner": user, "status": ("in", statuses)},
+		filters=conditions,
 		fields=["name", "filters", "status", "creation"],
 		order_by="creation desc",
 		limit=_MATCH_SCAN,

@@ -944,8 +944,9 @@ class TestRefusedOnEveryRoute(_Base):
 				)
 				self._assert_refused(result, case, where)
 
-	def test_run_method_in_an_auto_mode_chat(self):
-		conv = self._conv(auto_mode=1, auto_mode_at=frappe.utils.now())
+	def test_run_method_in_an_armed_macro_chat(self):
+		# Auto mode always cards run_method, so the uncarded route left is an armed macro.
+		conv = self._conv(skip_confirmation=1)
 		case = self.cases[0]
 		call = self._client_save(case)
 		audited = self._refused_rows("run_method", case.dt)
@@ -955,7 +956,7 @@ class TestRefusedOnEveryRoute(_Base):
 			self.assertEqual(self._refused_rows("run_method", case.dt), audited + 1, "filed as refused")
 			return result
 
-		self._assert_refused(self._attempt(case, "auto mode run_method", attempt), case)
+		self._assert_refused(self._attempt(case, "armed macro run_method", attempt), case)
 
 	def test_a_new_row_saved_as_a_root_document(self):
 		"""``frappe.client.save`` of a row with no name inserts it under the parent it

@@ -205,7 +205,7 @@ def _dashboard_detail(doc) -> dict:
 # --------------------------------------------------------------------------- #
 # caps probe
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_dashboards_caps() -> dict:
 	"""Single gating probe for the Dashboards page: which scopes the caller
@@ -239,7 +239,7 @@ def get_dashboards_caps() -> dict:
 # --------------------------------------------------------------------------- #
 # list / detail
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_dashboard_conversations(conversation: str = "") -> dict:
 	"""Non-empty dashboard-builder threads owned by the caller, newest first.
@@ -283,7 +283,7 @@ def list_dashboard_conversations(conversation: str = "") -> dict:
 	return {"ok": True, "data": {"rows": rows}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 @list_filters.filter_errors_to_envelope
 def list_dashboards_page(
@@ -367,7 +367,7 @@ def list_dashboards_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_dashboard(name: str) -> dict:
 	"""Full detail of one dashboard (read is scope-gated by the has_permission
@@ -377,7 +377,7 @@ def get_dashboard(name: str) -> dict:
 	return {"ok": True, "data": _dashboard_detail(doc)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def dashboard_for_conversation(conversation: str) -> dict:
 	"""The saved dashboard this conversation built, if there is one.
@@ -504,7 +504,7 @@ def _normalize_source_rows(sources) -> list[dict]:
 	return rows
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def save_dashboard(payload: str) -> dict:
 	"""Create or update a dashboard from a whitelisted-fields JSON payload.
@@ -558,7 +558,7 @@ def save_dashboard(payload: str) -> dict:
 	return {"ok": True, "data": _dashboard_detail(doc)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_dashboard(name: str) -> dict:
 	"""Delete one dashboard (owner or admin tier)."""
@@ -683,7 +683,7 @@ def _validate_run_report_spec(label: str, spec: dict) -> None:
 # --------------------------------------------------------------------------- #
 # view-time data runner
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def run_dashboard_source(dashboard: str, source_name: str, filters: str = "") -> dict:
 	"""Execute one SAVED data source of a dashboard as the SESSION user.
@@ -813,7 +813,7 @@ def _execute_source(tool: str, spec: dict) -> tuple[list, list | None]:
 	raise InvalidArgumentError(_("Unsupported tool: {0}").format(tool))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def preview_dashboard_source(tool: str, spec: str, filter_defs: str = "", filters: str = "") -> dict:
 	"""Builder-canvas data path: run an UNSAVED spec from the html being

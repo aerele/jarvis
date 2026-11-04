@@ -20,8 +20,11 @@ import { ARTIFACT_TITLES, artifactBuildPhase, artifactPhaseList } from "./artifa
 
 // The longest reply text that can still be narration. Keep in lockstep with
 // MAX_PREAMBLE_STEP_CHARS in jarvis/chat/steps.py: the backend moves a
-// runtime-flagged preamble up to this length into the step list, so the
-// client must treat text up to the same length as a possible step.
+// runtime-flagged preamble, and any is_step text (one line, up to three
+// sentences), up to this length into the step list, so the client must treat
+// text up to the same length as a possible step. The sentence cap is not
+// mirrored: a flagged preamble has none, and typing text that turns out to be
+// a fourth sentence simply lands in the reply when the relay keeps it there.
 export const MAX_CANDIDATE_CHARS = 320;
 
 // Done steps shown above the current one; older ones fold into "+N earlier".

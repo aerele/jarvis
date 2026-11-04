@@ -6,8 +6,9 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis._password_utils import set_settings_password
 from jarvis.api import call_tool
-from jarvis.tests.test_api import sign_plugin_headers
+from jarvis.tests.test_api import restore_agent_token, sign_plugin_headers
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -81,13 +82,12 @@ class TestCallToolWithSessionHeader(FrappeTestCase):
 		super().setUpClass()
 		settings = frappe.get_single("Jarvis Settings")
 		cls._original_token = settings.get_password("agent_token", raise_exception=False) or ""
-		settings.db_set("agent_token", PLUGIN_TOKEN)
+		set_settings_password(settings, "agent_token", PLUGIN_TOKEN)
 		frappe.db.commit()
 
 	@classmethod
 	def tearDownClass(cls):
-		settings = frappe.get_single("Jarvis Settings")
-		settings.db_set("agent_token", cls._original_token)
+		restore_agent_token(cls._original_token)
 		frappe.db.commit()
 		super().tearDownClass()
 
@@ -197,9 +197,13 @@ class TestCallToolWithSessionHeader(FrappeTestCase):
 	def test_unknown_session_now_rejected(self):
 		"""Without a Chat Session row we have no user to dispatch as - fail
 		fast rather than silently fall back to a different identity."""
-		req = _FakeRequest(_plugin_headers("agent:nonexistent"))
-		with _patch_request(req):
+		unknown_session = "agent:PRIVATE-UNKNOWN-SESSION-BEARER"
+		req = _FakeRequest(_plugin_headers(unknown_session))
+		with _patch_request(req), patch("jarvis.api_errors.record_server_error") as recorded:
 			result = call_tool("get_schema", args={"doctype": "Customer"})
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["error"]["code"], "InvalidArgumentError")
 		self.assertIn("unknown session", result["error"]["message"])
+		self.assertNotIn(unknown_session, result["error"]["message"])
+		self.assertTrue(recorded.called)
+		self.assertNotIn(unknown_session, str(recorded.call_args_list))

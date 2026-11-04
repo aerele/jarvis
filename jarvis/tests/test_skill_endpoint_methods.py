@@ -1,10 +1,13 @@
 """The skills, learned-rules and app-learning endpoints that change something answer
 POST only, and so do the document side-panel writers (comments, assignments, shares,
-likes, attachments). Endpoints that only read keep answering GET.
+likes, attachments). Endpoints that only read are POST only too: no caller reads
+them with GET, and the one rule for jarvis endpoints is POST unless allowlisted in
+``test_whitelist_http_methods``.
 
 Every whitelisted function of the three modules is found in Frappe's own registry and
-must be either POST-only or named in ``READ_ONLY`` below, so an endpoint added later
-has to be classified here. A function named as read-only is also checked for the
+must be POST-only, and each one that only reads is named in ``READ_ONLY`` below, so an
+endpoint added later has to be classified here. A function named as read-only is also
+checked for the
 calls that would make it a writer."""
 
 import inspect
@@ -110,15 +113,13 @@ class TestSkillEndpointMethods(FrappeTestCase):
 				with self.subTest(endpoint=f"{module.__name__}.{name}"):
 					self._assert_post_only(module, name, fn)
 
-	def test_every_read_only_name_is_a_real_endpoint_that_answers_get(self):
+	def test_every_read_only_name_is_a_real_endpoint_that_answers_post_only(self):
 		for module, readers in READ_ONLY.items():
 			endpoints = _endpoints(module)
 			for name in sorted(readers):
 				with self.subTest(endpoint=f"{module.__name__}.{name}"):
 					self.assertIn(name, endpoints)  # a renamed or removed reader fails here
-					for method in ("GET", "POST"):
-						set_request(method=method, path=f"/api/method/{module.__name__}.{name}")
-						is_valid_http_method(endpoints[name])  # no raise
+					self._assert_post_only(module, name, endpoints[name])
 
 	def test_a_read_only_endpoint_does_not_write(self):
 		# Shallow on purpose: it reads the function's own source, not what it calls. It

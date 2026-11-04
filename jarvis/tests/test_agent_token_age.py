@@ -74,12 +74,13 @@ class TestStampPatch(FrappeTestCase):
 
 
 class TestAgeNotice(FrappeTestCase):
-	def _notices(self, *, age_days: int, max_age_days: int = 90):
+	def _notices(self, *, age_days: int, max_age_days: int = 90, callback_key: str = ""):
 		fake = MagicMock()
 		fake.agent_token_max_age_days = max_age_days
 		fake.agent_token_issued_at = datetime.datetime.now() - datetime.timedelta(days=age_days, hours=1)
 		with (
 			patch.object(cron.frappe, "get_single", return_value=fake),
+			patch("jarvis._plugin_auth._callback_key", return_value=callback_key),
 			patch("jarvis.learning.lifecycle.notify_system_managers") as notify,
 		):
 			cron.check_agent_token_age()
@@ -96,3 +97,9 @@ class TestAgeNotice(FrappeTestCase):
 		for age_days, max_age_days in ((30, 90), (80, 90), (500, 0)):
 			with self.subTest(age_days=age_days, max_age_days=max_age_days):
 				self._notices(age_days=age_days, max_age_days=max_age_days).assert_not_called()
+
+	def test_quiet_once_a_callback_key_is_stored(self):
+		"""rotate_agent_token refuses on such a site, so the notice could not be acted on."""
+		for age_days in (76, 120):
+			with self.subTest(age_days=age_days):
+				self._notices(age_days=age_days, callback_key="ab" * 32).assert_not_called()

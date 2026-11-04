@@ -1,7 +1,119 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { JSDOM } from "jsdom";
+
 import { renderMarkdown } from "./markdown.js";
+
+// Parse like a browser would, so invalid nesting shows up as repaired (empty) elements.
+const dom = (html) => new JSDOM(`<body>${html}</body>`).window.document.body;
+const assertValid = (html) => {
+	const body = dom(html);
+	assert.equal(body.querySelectorAll("p details, p summary").length, 0);
+	assert.equal([...body.querySelectorAll("p")].filter((p) => !p.textContent.trim()).length, 0);
+	return body;
+};
+
+test("renders bare disclosure tags around a calculation while retaining markdown", () => {
+	const html = renderMarkdown(
+		"<details><summary>How this was worked out</summary>\n\nRequired: **10**\n</details>"
+	);
+	assert.ok(html.includes("<details><summary>How this was worked out</summary>"));
+	assert.ok(html.includes("Required: <strong>10</strong>"));
+	assert.ok(html.includes("</details>"));
+	assert.ok(!html.includes("&lt;details&gt;"));
+});
+
+test("disclosure tags never permit attributes or unescape other HTML", () => {
+	for (const tag of [
+		"<details open>",
+		"<details ontoggle=alert(1)>",
+		'<summary onclick="alert(1)">',
+		"<details/name=x>",
+		"<script>alert(1)</script>",
+	]) {
+		assert.ok(!renderMarkdown(tag).includes(tag));
+		assert.ok(renderMarkdown(tag).includes("&lt;"));
+	}
+});
+
+test("disclosure examples in inline and fenced code stay literal", () => {
+	for (const src of [
+		"`<details><summary>Example</summary></details>`",
+		"```html\n<details><summary>Example</summary></details>\n```",
+	])
+		assert.ok(!renderMarkdown(src).includes("<details>"));
+});
+
+test("a disclosure parses to valid structure with the list inside it", () => {
+	const html = renderMarkdown(
+		"Intro.\n\n<details><summary>Calculation</summary>\n\n- On hand: **120**\n- Spare: **10**\n</details>\n\nAfter."
+	);
+	const body = assertValid(html);
+	const d = body.querySelector("details");
+	assert.equal(d.firstElementChild.tagName, "SUMMARY");
+	assert.equal(d.querySelectorAll("ul > li").length, 2);
+	assert.equal(body.querySelector("p:last-child").textContent, "After.");
+	assert.equal(body.querySelectorAll("details").length, 1);
+});
+
+test("a bare details line with a separate summary line is a disclosure", () => {
+	const body = assertValid(
+		renderMarkdown("<details>\n<summary>Why</summary>\nBecause **math**.\n</details>")
+	);
+	assert.equal(body.querySelector("details > summary").textContent, "Why");
+	assert.equal(body.querySelector("details > p strong").textContent, "math");
+});
+
+test("a one-line disclosure and nested disclosures stay block structure", () => {
+	const one = assertValid(renderMarkdown("<details><summary>S</summary>Body text</details>"));
+	assert.equal(one.querySelector("details > p").textContent, "Body text");
+	const nested = assertValid(
+		renderMarkdown(
+			"<details><summary>A</summary>\n<details><summary>B</summary>\n\n1. x\n</details>\n</details>"
+		)
+	);
+	assert.equal(nested.querySelectorAll("details details > ol").length, 1);
+});
+
+test("tables and paragraphs inside a disclosure keep their markup", () => {
+	const body = assertValid(
+		renderMarkdown(
+			"<details><summary>T</summary>\n\n| a | b |\n|---|---|\n| 1 | 2 |\n</details>"
+		)
+	);
+	assert.equal(body.querySelectorAll("details table td").length, 2);
+});
+
+test("orphan, unterminated and inline disclosure tags never yield invalid HTML", () => {
+	for (const src of [
+		"</details>",
+		"</details>\n\nText",
+		"<summary>Lone</summary>",
+		"Text <details>inline</details> text",
+		"Total = 10</details>",
+		"<details><summary>Cut off</summary>\n\n- item",
+	]) {
+		const html = renderMarkdown(src);
+		assertValid(html);
+	}
+	assert.ok(renderMarkdown("</details>").includes("&lt;/details&gt;"));
+	assert.ok(renderMarkdown("Text <details>x</details>").includes("&lt;details&gt;"));
+	assert.equal(
+		dom(renderMarkdown("<details><summary>Cut off</summary>\n\n- item")).querySelectorAll(
+			"details"
+		).length,
+		1
+	);
+});
+
+test("disclosure summary text is escaped and fenced disclosure tags stay literal", () => {
+	const html = renderMarkdown("<details><summary><b onclick=x>Hi</b></summary>\n</details>");
+	assert.ok(!html.includes("<b"));
+	assert.ok(html.includes("&lt;b onclick=x&gt;"));
+	const fenced = renderMarkdown("```\n<details>\n<summary>S</summary>\n```");
+	assert.ok(!fenced.includes("<details>"));
+});
 
 test("finding evidence links retain their document labels and local targets", () => {
 	const html = renderMarkdown(
@@ -228,4 +340,106 @@ test("a pipe table separator row is not swallowed by the thematic-break rule", (
 	const html = renderMarkdown(["| A | B |", "| --- | --- |", "| 1 | 2 |"].join("\n"));
 	assert.ok(html.includes("<table"), "the table still renders");
 	assert.ok(!html.includes("<hr"), "the |---| separator did not become a rule");
+});
+
+test("numbered steps keep indented descriptions and nested costs inside one list", () => {
+	const html = renderMarkdown(
+		[
+			"1. **Cancel INV-1**  ",
+			"   Reverse the payable.",
+			"",
+			"2. **Amend the invoice**  ",
+			"   Keep the supplier reference.",
+			"",
+			"3. **Add costs**  ",
+			"   Include:",
+			"   - Duty: 100 INR",
+			"   - Freight: 200 INR",
+			"",
+			"4. **Keep as Draft**  ",
+			"   No ledger change.",
+			"",
+			"No records changed.",
+		].join("\n")
+	);
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.equal((html.match(/<ul\b/g) || []).length, 1);
+	assert.match(html, /Cancel INV-1<\/strong>.*Reverse the payable\..*<\/li><li>/s);
+	assert.match(html, /Include:.*<ul.*Duty: 100 INR.*Freight: 200 INR.*<\/ul>.*Keep as Draft/s);
+	assert.match(html, /No ledger change\..*<\/li><\/ol>\n<p[^>]*>No records changed\./s);
+});
+
+test("list continuations keep soft lines, paragraph gaps and parent text after children", () => {
+	const html = renderMarkdown(
+		"1. Parent\n   Soft line\n   wraps here.\n\n   Another paragraph.\n   - Child\n     Child detail.\n   Parent tail.\n\n2. Next\n\nOutside."
+	);
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.match(html, /Soft line wraps here\./);
+	assert.match(
+		html,
+		/Another paragraph\..*<ul.*Child.*Child detail\..*<\/ul>.*Parent tail\..*<\/li><li>Next/s
+	);
+	assert.match(html, /<\/ol>\n<p[^>]*>Outside\./);
+});
+
+test("list continuation content stays escaped and code blocks end the prose list", () => {
+	const html = renderMarkdown(
+		"1. First\n   <img src=x onerror=alert(1)>\n\n```\n2. literal\n```"
+	);
+	assert.ok(html.includes("&lt;img"));
+	assert.ok(!html.includes("<img"));
+	assert.match(html, /<\/ol>.*<pre.*2\. literal/s);
+});
+
+test("tab-indented descriptions stay inside numbered steps", () => {
+	const html = renderMarkdown("1. First\n\tDetails.\n\n2. Next");
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.match(html, /First Details\.<\/li><li>Next/);
+});
+
+test("only space and tabs can follow a list marker", () => {
+	for (const markerSpace of ["\u00a0", "\v", "\f", "\u2028"]) {
+		const html = renderMarkdown(`1.${markerSpace}Pay invoice`);
+		assert.ok(html.startsWith('<p class="jv-md-p">'), "malformed marker stays a paragraph");
+		assert.ok(!html.includes("<ol"), "malformed marker does not start a list");
+	}
+
+	const html = renderMarkdown("1. Pay invoice\n\n2.\u00a0Still text");
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.match(html, /<p class="jv-md-p">2\.\u00a0Still text<\/p>/);
+
+	const adjacent = renderMarkdown("1. Pay invoice\n2.\u00a0Still text");
+	assert.equal((adjacent.match(/<ol\b/g) || []).length, 1);
+	assert.match(adjacent, /<p class="jv-md-p">2\.\u00a0Still text<\/p>/);
+});
+
+test("indented headings, quotes, tables and rules keep their block format", () => {
+	for (const [body, tag] of [
+		["   # Heading", "h3"],
+		["   > Quoted", "blockquote"],
+		["   ---", "hr"],
+		["   | A | B |\n   |---|---|\n   |x|y|", "table"],
+	]) {
+		const html = renderMarkdown("1. First\n" + body);
+		assert.match(html, new RegExp("</ol>.*<" + (tag === "table" ? "div" : tag), "s"));
+		assert.ok(html.includes("<" + tag));
+	}
+});
+
+test("an indented code fence stays inside its step without parsing list text", () => {
+	const html = renderMarkdown("1. First\n\n   ```\n   8. literal <script>\n   ```\n\n2. Next");
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.match(html, /First<pre.*8\. literal &lt;script&gt;.*<\/pre><\/li><li>Next/s);
+});
+
+test("an indented code fence removes its list indentation from code", () => {
+	const html = renderMarkdown(
+		"1. First\n\n\t```\n\tconst total = 1;\n\t  keep this indent;\n\t```\n\n2. Next"
+	);
+	assert.equal((html.match(/<ol\b/g) || []).length, 1);
+	assert.match(html, /<code>const total = 1;\n {2}keep this indent;<\/code>/);
+	assert.ok(!html.includes("\tconst total"));
+
+	const partialTab = renderMarkdown("1. First\n\n   ```\n\tkeep one column\n   ```");
+	assert.match(partialTab, /<code> keep one column<\/code>/);
 });

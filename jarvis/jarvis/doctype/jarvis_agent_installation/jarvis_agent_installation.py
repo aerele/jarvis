@@ -22,37 +22,52 @@ LISTING = "Jarvis Agent Listing"
 # Per-owner install cap, mirroring jarvis_custom_skill._validate_owner_cap.
 MAX_INSTALLS_PER_OWNER = 20
 
-# GL-linked dimensions (OTHER than Company) whose User Permissions silently
-# record-scope aggregates BEFORE they are summed — so a run_as_user carrying one
-# would compute a numerically WRONG total (a false "TB out by X" blocker, wrong
-# party balances, flipped YoY). Detected at mapping time -> scoped_visibility=1
-# (A12). Company is deliberately excluded: the audit is already company-scoped,
-# so a Company User Permission is a scoping consistency, not a slice.
-_GL_SCOPED_DIMENSIONS = (
-	"Account",
-	"Cost Center",
-	"Project",
-	"Fiscal Year",
-	"Finance Book",
-	"Customer",
-	"Supplier",
-	"Employee",
-	"Shareholder",
-)
-
 
 class JarvisAgentInstallation(NotRenamable, Document):
 	def validate(self):
+		# Code-owned closure comes before mutable listing/installability state.
+		# This blocks Desk, REST, imports, and crafted ORM saves alike.
+		from jarvis.chat.agent_closure import validate_installation
+
+		validate_installation(self)
+		self._guard_registry_no_runtime()
 		self._default_reviewer()
 		self._guard_installability()
 		self._guard_operator_visibility()
 		self._validate_unique_per_owner()
 		self._validate_owner_cap()
 		self._validate_run_as_user()
+		self._guard_statutory_payroll_scope()
+		self._guard_stock_variance_scope()
 		self._validate_schedule_time()
 		self._validate_schedule_day_of_month()
+		self._validate_agent_config()
+		self._validate_fefo_schedule_configuration()
 		self._validate_schedule_budget()
 		self._guard_activation_transition()
+
+	def _guard_registry_no_runtime(self):
+		"""Refuse new or enabled installs of a reviewed no-runtime teaser.
+
+		Existing disabled rows stay recoverable, so an old or manually changed row
+		can still be disabled, repaired, or removed without becoming runnable.
+		"""
+		from jarvis.chat.agent_catalog import registry_is_coming_soon_no_runtime
+
+		if not registry_is_coming_soon_no_runtime(self.agent):
+			return
+		if self.is_new():
+			frappe.throw(
+				_("This agent is not available to install."),
+				frappe.PermissionError,
+				title=_("Agent not available"),
+			)
+		if frappe.utils.cint(self.get("enabled")):
+			frappe.throw(
+				_("This agent has no runnable bundled workflow and cannot be enabled."),
+				frappe.PermissionError,
+				title=_("Agent not available"),
+			)
 
 	def on_update(self):
 		self._audit_cross_user_run_as()
@@ -225,6 +240,38 @@ class JarvisAgentInstallation(NotRenamable, Document):
 
 		validate_schedule_day_of_month_or_throw(self.schedule_day_of_month)
 
+	def _validate_agent_config(self):
+		"""Keep malformed FEFO settings out of every direct save surface.
+
+		Incomplete policy is intentionally allowed so an owner can save setup in
+		steps.  A supplied invalid value or the retired nested scope declaration is
+		never useful and must not persist through Desk, REST, import, or the SPA.
+		"""
+		if self.agent != "fefo-expiry-compliance-auditor":
+			return
+		if not self.is_new() and not self.has_value_changed("config"):
+			return
+		from jarvis.chat.fefo_expiry_compliance import validate_configuration_edit
+
+		try:
+			validate_configuration_edit(self.config or "{}")
+		except ValueError as exc:
+			frappe.throw(str(exc))
+
+	def _validate_fefo_schedule_configuration(self):
+		"""Preflight every enabled FEFO schedule before this document is saved.
+
+		This is the authoritative direct-save guard.  It deliberately does not run
+		on a disable, so a legacy invalid schedule remains recoverable.
+		"""
+		if self.agent != "fefo-expiry-compliance-auditor" or not frappe.utils.cint(
+			self.get("schedule_enabled")
+		):
+			return
+		from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
+
+		assert_schedule_configuration(self)
+
 	def _validate_schedule_budget(self):
 		"""A14: warn (do not hard-block) when an enabled schedule's expected monthly
 		runs exceed the per-installation run budget — the run would be starved
@@ -340,7 +387,7 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		# Only re-litigate the mapping when it is actually being (re)assigned.
 		# An unrelated save (enable / schedule / config) on a row whose
 		# run_as_user is unchanged must not be blocked just because, e.g., an
-		# admin earlier mapped it cross-user — and perms drift is re-checked at
+		# System Manager earlier mapped it cross-user, and perms drift is re-checked at
 		# each run's session-mint, not on every incidental write.
 		if not self.is_new():
 			old = frappe.db.get_value("Jarvis Agent Installation", self.name, "run_as_user")
@@ -357,24 +404,89 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		self._validate_run_as_escalation(target)
 		self._validate_run_as_permissions(target)
 
+	def _guard_stock_variance_scope(self):
+		"""Check a Stock Variance Warehouse root as its execution identity.
+
+		The person who edits an installation can differ from run_as_user. The
+		Warehouse and Company checks must therefore run as run_as_user on every
+		save: this covers an enable, a run-as remap, and a disabled setup draft.
+		An empty disabled draft remains valid, but any supplied scope must already
+		be readable by the identity that will run the audit. The launch guard keeps
+		this invariant true for legacy rows and direct database writes.
+		"""
+		from jarvis.chat.stock_variance_scope import (
+			is_stock_variance,
+			require_configuration,
+			validate_saved_configuration,
+		)
+
+		if not is_stock_variance(self.agent):
+			return
+		if not frappe.utils.cint(self.get("enabled")) and not (
+			self.is_new()
+			or self.has_value_changed("agent")
+			or self.has_value_changed("config")
+			or self.has_value_changed("run_as_user")
+		):
+			return
+		run_as_user = (self.run_as_user or "").strip()
+		if not run_as_user:
+			return  # _validate_run_as_user() refuses this state when enabled.
+		from jarvis._session import impersonate
+
+		with impersonate(run_as_user):
+			if frappe.utils.cint(self.get("enabled")):
+				require_configuration(self.config or "{}")
+			else:
+				validate_saved_configuration(self.config or "{}")
+
+	def _guard_statutory_payroll_scope(self):
+		"""Validate the Payroll Entry as the identity that will run the audit.
+
+		A person who edits an installation can be different from ``run_as_user``.
+		The entry, company and required dates must therefore be read as the execution
+		identity. A disabled empty draft remains repairable; any supplied entry is
+		checked immediately, and enabled installations require a complete scope.
+		Launch repeats this guard for legacy rows and direct database writes.
+		"""
+		from jarvis.chat.statutory_payroll_scope import (
+			is_statutory_payroll,
+			require_configuration,
+			validate_saved_configuration,
+		)
+
+		if not is_statutory_payroll(self.agent):
+			return
+		if not frappe.utils.cint(self.get("enabled")) and not (
+			self.is_new()
+			or self.has_value_changed("agent")
+			or self.has_value_changed("config")
+			or self.has_value_changed("run_as_user")
+		):
+			return
+		run_as_user = (self.run_as_user or "").strip()
+		if not run_as_user:
+			return  # _validate_run_as_user() refuses this state when enabled.
+		from jarvis._session import impersonate
+
+		with impersonate(run_as_user):
+			if frappe.utils.cint(self.get("enabled")):
+				require_configuration(self.config or "{}")
+			else:
+				validate_saved_configuration(self.config or "{}")
+
 	def _validate_run_as_escalation(self, target: str) -> None:
-		"""A4: a non-admin setter may map ONLY to themselves; any cross-user
-		mapping needs Jarvis Admin (``has_jarvis_admin_access`` — SM or Jarvis
-		Admin, never an invented permission); binding to a System Manager
-		additionally requires the setter BE a System Manager."""
-		from jarvis.permissions import has_jarvis_admin_access
+		"""A4: mapping an install to run as ANOTHER user needs the setter to be
+		Administrator or a System Manager; every other user may map ONLY to
+		themselves. The same rule is re-checked at every run
+		(``agent_scheduler.run_as_mapping_refusal``), against the setter's roles at
+		that time."""
+		from jarvis.permissions import is_system_manager
 
 		setter = frappe.session.user
-		if target != setter and not has_jarvis_admin_access(setter):
+		if target != setter and not is_system_manager(setter):
 			frappe.throw(
-				_("You may only set this agent to run as yourself."),
-				frappe.PermissionError,
-			)
-		target_is_sm = "System Manager" in frappe.get_roles(target)
-		setter_is_sm = setter == "Administrator" or "System Manager" in frappe.get_roles(setter)
-		if target_is_sm and not setter_is_sm:
-			frappe.throw(
-				_("Only a System Manager may map an agent to run as a System Manager."),
+				_("Only a System Manager may set this agent to run as another user."),
 				frappe.PermissionError,
 			)
 
@@ -439,13 +551,17 @@ class JarvisAgentInstallation(NotRenamable, Document):
 		return [d.strip() for d in vals if isinstance(d, str) and d.strip()]
 
 	def _detect_scoped_visibility(self, target: str) -> bool:
+		"""Detect a launch identity slice using its bundled agent domain."""
 		from frappe.permissions import get_user_permissions
+
+		from jarvis.chat.agent_catalog import registry_domain
+		from jarvis.chat.agent_visibility import permissions_scoped_visibility
 
 		try:
 			perms = get_user_permissions(target) or {}
+			return permissions_scoped_visibility(perms, registry_domain(self.agent)) is True
 		except Exception:
 			return False
-		return any(dt in perms for dt in _GL_SCOPED_DIMENSIONS)
 
 
 def on_doctype_update():

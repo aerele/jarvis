@@ -85,6 +85,15 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 		return {"ok": False, "reason": "no turn"}
 	state = turn["state"]
 	conversation = turn["conversation"]
+	from jarvis.chat.collaboration import is_collaborative
+
+	shared_binding = None
+	if is_collaborative(conversation):
+		from jarvis.chat.collaboration_turn import binding_for_run
+
+		shared_binding = binding_for_run(run_id)
+		if not shared_binding or shared_binding.conversation != conversation:
+			return {"ok": False, "reason": "invalid_shared_identity"}
 	if state == "done":
 		# jarvis#681: the enrichment terminal's CDX-12 backstop. ``run:end`` carried
 		# ``enrichment_pending``, which is the SPA's instruction to hold the subtle
@@ -99,7 +108,10 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 			"ok": True,
 			"already_done": True,
 			"republished": _publish_enriched(
-				run_id, conversation, _conversation_owner(conversation), turn.get("assistant_message")
+				run_id,
+				conversation,
+				shared_binding.actor if shared_binding else _conversation_owner(conversation),
+				turn.get("assistant_message"),
 			),
 		}
 	# Only settled turns own an effect ledger. A turn still pre-terminal (queued/
@@ -107,7 +119,7 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 	if state not in ("finalizing", "errored", "cancelled"):
 		return {"ok": False, "reason": f"not settled ({state})"}
 
-	owner = _conversation_owner(conversation)
+	owner = shared_binding.actor if shared_binding else _conversation_owner(conversation)
 	errored = state in ("errored", "cancelled")
 	ctx = _Ctx(
 		run_id=run_id,
@@ -116,6 +128,7 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 		owner=owner,
 		errored=errored,
 		payload=_load_payload(turn),
+		shared_binding=shared_binding,
 	)
 
 	ran = 0
@@ -125,16 +138,27 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 		# crash mid-effect still counts toward the force-done budget AND another
 		# finalizer sees the live claim (never runs the same effect twice, CDX-4).
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist claim before effect
+		if shared_binding and name == "usage" and outcome in {"done", "force_done"}:
+			from jarvis.chat.collaboration_usage import mark_unavailable
+
+			# Repair a crash after force-done committed but before the
+			# explicit accounting disposition was recorded.
+			mark_unavailable(shared_binding, run_id)
 		# 'done' (not required / already applied), 'busy' (another finalizer holds a
 		# live claim), or 'force_done' (budget spent) — skip.
 		if outcome != "attempt":
 			continue
 		try:
-			_RUNNERS[name](ctx)
+			if shared_binding:
+				from jarvis.chat.collaboration_finalize import run_effect
+
+				run_effect(name, ctx)
+			else:
+				_RUNNERS[name](ctx)
 			ts.complete_effect(run_id, name, token)
 			frappe.db.commit()
 			ran += 1
-		except Exception:
+		except Exception as exc:
 			# Roll back this effect's uncommitted work (e.g. the usage guard CAS),
 			# then RELEASE the claim back to pending (CDX-4) so the next finalize
 			# cycle / the watchdog effect-scan retries it; claim_effect force-dones
@@ -148,7 +172,12 @@ def run_finalize(run_id: str, relay_target_id: str | None = None, deps=None) -> 
 				frappe.db.commit()
 			except Exception:
 				pass
-			frappe.log_error(title=f"finalize.{name}", message=frappe.get_traceback())
+			frappe.log_error(
+				title=f"finalize.{name}",
+				message=f"run={run_id} cause={type(exc).__name__}"
+				if shared_binding
+				else frappe.get_traceback(),
+			)
 
 	# jarvis#737: release the VISIBLE "Finishing..." affordance as soon as the
 	# perceivable effects are done, without waiting on usage/telemetry, which
@@ -215,15 +244,16 @@ def _publish_enriched(
 
 
 class _Ctx:
-	__slots__ = ("conversation", "errored", "owner", "payload", "run_id", "turn")
+	__slots__ = ("conversation", "errored", "owner", "payload", "run_id", "shared_binding", "turn")
 
-	def __init__(self, *, run_id, turn, conversation, owner, errored, payload):
+	def __init__(self, *, run_id, turn, conversation, owner, errored, payload, shared_binding=None):
 		self.run_id = run_id
 		self.turn = turn
 		self.conversation = conversation
 		self.owner = owner
 		self.errored = errored
 		self.payload = payload
+		self.shared_binding = shared_binding
 
 
 def _load_payload(turn: dict) -> dict:

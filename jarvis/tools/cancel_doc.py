@@ -40,6 +40,9 @@ from jarvis.tools._bulk import run_atomic_batch
 def _cancel_one(doctype: str, name: str) -> "frappe.model.document.Document":
 	"""Guards + cancel for ONE doc. Returns the cancelled Document. Shared by
 	the single and batch paths so the guards never drift."""
+	from jarvis.tools._delegate_write_caps import enforce_closed_agent_direct_write
+
+	enforce_closed_agent_direct_write("cancel", doctype)
 	meta = frappe.get_meta(doctype)
 	if not meta.is_submittable:
 		raise InvalidArgumentError(

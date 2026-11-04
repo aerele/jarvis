@@ -18,6 +18,7 @@ import { prefs } from "./lib/prefs";
 import { agentName } from "@/branding";
 import { flushBuffered } from "@shared/lib/errorReporter";
 import { recordEvent } from "./lib/notifications";
+import { isMacroConversation, macroDoneEntry } from "./lib/macroFeed.js";
 import { exportSignals } from "./lib/exportFeed.js";
 
 const socket = inject("$socket");
@@ -66,7 +67,11 @@ function onEvent(p) {
 		store.applyRename(p.conversation_id, p.title);
 	} else if (p.kind === "conversation:new") {
 		store.loadConversations();
-	} else if (p.kind === "run:end" && !p.stopped) {
+	} else if (p.kind === "macro:done") {
+		// A macro run's chat is not in the chat list: its end is the one signal.
+		const entry = macroDoneEntry(p);
+		if (entry && prefs.notifyDone) notify(entry.title, entry.body, conv);
+	} else if (p.kind === "run:end" && !p.stopped && !isMacroConversation(conv)) {
 		// A reply the user hasn't seen. Not gated on notifyDone: the dot is the
 		// quiet in-app signal, and someone who turned notifications off still
 		// wants to know which chat moved. Skip the chat that's already open —
@@ -88,7 +93,11 @@ function onEvent(p) {
 		// in the chat has the details, and ChatView refreshes it when that chat is open; this
 		// handler owns only the off-screen unread dot. No browser push.
 		if (conv !== openConversationId()) store.markUnread(conv);
-	} else if (p.kind === "action:pending" && prefs.notifyDecision) {
+	} else if (
+		p.kind === "action:pending" &&
+		p.pending_card_safe === true &&
+		prefs.notifyDecision
+	) {
 		notify(
 			`${agentName} needs your approval`,
 			p.summary || p.tool || "A change is waiting for you",

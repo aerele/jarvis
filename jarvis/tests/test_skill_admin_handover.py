@@ -189,6 +189,9 @@ class TestWhatArrives(HandoverBase):
 				"hold_lifted": False,
 				"requests_cancelled": 0,
 				"needs_apply": False,
+				"handed_over": True,
+				"copies": [],
+				"copy_failed": [],
 			},
 		)
 		row = self._state(skill)

@@ -608,38 +608,50 @@
 				</svg>
 			</div>
 			<!-- ===== WELCOME ===== -->
+			<!-- Scene-day layout (lib/holidayStage.js says when): a big centred mark and the
+			     greeting over the same starter cards, link and catalog, with the holiday scene's
+			     art on a layer above. Every other day takes the normal layout below. -->
+			<HolidayStage
+				v-else-if="showWelcome && stageOn"
+				:greeting="greeting"
+				:first-name="firstName"
+				:mood="holdActive ? 'upgrading' : 'star'"
+				:hold-active="holdActive"
+				:composer-empty="!input"
+			>
+				<template #sub>
+					<p class="jv-welcome-sub">
+						Ask about your ERP data, run a workflow or draft something.
+						{{ brand.agentName }}
+						is connected to your
+						<strong style="color: var(--text); font-weight: 600">ERPNext</strong>
+						instance.
+					</p>
+				</template>
+				<template #bottom>
+					<WelcomeStarters
+						:cards="welcomeCards"
+						:tint="starterTint"
+						@select="onWelcomeSuggestion"
+					/>
+				</template>
+			</HolidayStage>
 			<!-- Scroll viewport + inner column are CLASSES, not inline styles: inline
 			     styles cannot be overridden, and the overflow-safe centring below
 			     (jv-welcome-scroll/jv-welcome-col) has to win on short/zoomed
 			     viewports. See the style block for the centre-when-it-fits rationale. -->
 			<div v-else-if="showWelcome" class="jv-welcome-scroll">
 				<div class="jv-welcome-col">
-					<!-- The brand mark inline with the greeting, then one line of
-					     orienting copy. The copy earns its place on an empty screen: it
-					     is the only thing that says what this box is for and that the
-					     agent is wired to real ERP data. -->
-					<h1
-						class="jv-welcome-h1"
-						style="
-							display: flex;
-							align-items: center;
-							justify-content: center;
-							gap: 16px;
-							font-size: 40px;
-							font-weight: 640;
-							letter-spacing: -0.03em;
-							margin: 0;
-							overflow-wrap: anywhere;
-						"
-					>
-						<JarvisMark
-							:size="38"
-							:radius="11"
-							:mood="holdActive ? 'upgrading' : 'star'"
-							style="flex: none"
-						/>
-						<span>{{ greeting }}, {{ firstName }}</span>
-					</h1>
+					<!-- The brand mark inline with the greeting (a holiday heading and
+					     advance wish on those days), then one line of orienting copy.
+					     The copy earns its place on an empty screen: it is the only
+					     thing that says what this box is for and that the agent is
+					     wired to real ERP data. -->
+					<WelcomeHero
+						:greeting="greeting"
+						:first-name="firstName"
+						:mood="holdActive ? 'upgrading' : 'star'"
+					/>
 					<p class="jv-welcome-sub">
 						Ask about your ERP data, run a workflow or draft something.
 						{{ brand.agentName }}
@@ -653,71 +665,11 @@
 					     the original four defaults for a workspace with no history yet.
 					     They FILL the composer, never send: the do-not-regress rule the old
 					     cards had. -->
-					<div
-						class="jv-welcome-grid"
-						style="
-							display: grid;
-							grid-template-columns: 1fr 1fr;
-							gap: 11px;
-							text-align: left;
-							margin-top: 26px;
-						"
-					>
-						<button
-							v-for="(s, i) in starterCards"
-							:key="s.prompt"
-							type="button"
-							class="jv-suggest"
-							@click="onWelcomeSuggestion(s)"
-							style="
-								display: flex;
-								gap: 11px;
-								padding: 14px;
-								background: var(--surface);
-								border: 1px solid var(--border);
-								border-radius: 10px;
-								cursor: pointer;
-								transition: border-color 0.12s, background 0.12s;
-								text-align: left;
-								font-family: inherit;
-								color: inherit;
-								width: 100%;
-							"
-						>
-							<div
-								:style="{
-									width: '30px',
-									height: '30px',
-									flex: 'none',
-									borderRadius: '8px',
-									background: starterTint(i).bg,
-									color: starterTint(i).fg,
-									display: 'flex',
-									alignItems: 'center',
-									justifyContent: 'center',
-								}"
-								v-html="starterTint(i).icon"
-							></div>
-							<div style="min-width: 0">
-								<div
-									v-if="s.title"
-									style="font-size: 13.5px; font-weight: 550; margin-bottom: 2px"
-								>
-									{{ s.title }}
-								</div>
-								<div
-									style="
-										font-size: 12.5px;
-										color: var(--text-3);
-										line-height: 1.4;
-									"
-								>
-									{{ s.prompt }}
-								</div>
-							</div>
-						</button>
-					</div>
-					<CapabilityCatalog @select="onWelcomeSuggestion" />
+					<WelcomeStarters
+						:cards="welcomeCards"
+						:tint="starterTint"
+						@select="onWelcomeSuggestion"
+					/>
 				</div>
 			</div>
 
@@ -773,7 +725,11 @@
 					</p>
 					<!-- macro run progress banner -->
 					<div
-						v-if="macroRun && macroRun.conversation === currentId"
+						v-if="
+							hasCurrentMessageSnapshot &&
+							macroRun &&
+							macroRun.conversation === currentId
+						"
 						class="jv-macrobar"
 						:class="{
 							ok: macroRun.status === 'completed',
@@ -790,6 +746,20 @@
 								></span
 							>
 							<button class="jv-macrobar-stop" @click="stopMacro">Stop</button>
+						</template>
+						<template v-else-if="macroRun.status === 'waiting_report'">
+							<span class="jv-macrobar-dot"></span>
+							<span class="jv-macrobar-txt"
+								>Step {{ macroRun.step }}/{{ macroRun.total }}:
+								{{ macroRun.label || "Waiting for report" }}</span
+							>
+							<button
+								class="jv-macrobar-stop"
+								:title="STOP_WHILE_WAITING"
+								@click="stopMacro"
+							>
+								Stop
+							</button>
 						</template>
 						<template v-else-if="macroRun.status === 'completed'"
 							><span class="jv-macrobar-chip">✓ Macro completed</span></template
@@ -846,13 +816,14 @@
 						<!-- receipt chip: a confirmed / discarded / failed gated write, shown
 						     inline in place of the confirmation card that used to vanish -->
 						<ReceiptChip
-							v-else-if="m.role === 'tool'"
+							v-else-if="m.role === 'tool' && hasCurrentMessageSnapshot"
 							:message="m"
 							:auto-mode="!!convAutoMode"
 							:next-done="nextStepDone(m)"
 							:next-busy="nextBusyKey === m.name"
 							@next-action="proposeNext(m, $event)"
 						/>
+						<template v-else-if="m.role === 'tool'" />
 						<!-- user -->
 						<Message
 							v-else-if="m.role === 'user'"
@@ -861,11 +832,14 @@
 							:attachments="m.canvas"
 							:timestamp="msgTime(m)"
 							:timestampFull="msgTimeFull(m)"
-							:editable="!['uncertain', 'checking'].includes(m.deliveryState)"
+							:editable="
+								hasCurrentMessageSnapshot &&
+								!['uncertain', 'checking'].includes(m.deliveryState)
+							"
 							:copied="copiedId === m.name"
-							:failed="m.failed"
-							:delivery-state="m.deliveryState"
-							:delivery-note="m.deliveryNote"
+							:failed="hasCurrentMessageSnapshot && m.failed"
+							:delivery-state="hasCurrentMessageSnapshot ? m.deliveryState : ''"
+							:delivery-note="hasCurrentMessageSnapshot ? m.deliveryNote : ''"
 							:delivery-conversation="m.deliveryConversation"
 							@edit="editCommand(m)"
 							@copy="copyMsg(m.name, m.content)"
@@ -894,7 +868,7 @@
 							@open-attachment="openArtifact(m, $event)"
 						>
 							<template #avatar>
-								<JarvisMark
+								<HolidayMark
 									:size="28"
 									:radius="7"
 									:mood="
@@ -947,6 +921,7 @@
 											>
 												<button
 													class="jv-tool-head"
+													:disabled="!hasCurrentMessageSnapshot"
 													@click="toggleTool(item.row.name)"
 												>
 													<span
@@ -982,7 +957,10 @@
 													</svg>
 												</button>
 												<div
-													v-if="toolOpen[item.row.name]"
+													v-if="
+														hasCurrentMessageSnapshot &&
+														toolOpen[item.row.name]
+													"
 													class="jv-tool-detail"
 												>
 													<template
@@ -1182,7 +1160,11 @@
 											{{ m.error }}
 										</div>
 										<button
-											v-if="errorInfo(m).retryable && mi === retryIdx"
+											v-if="
+												hasCurrentMessageSnapshot &&
+												errorInfo(m).retryable &&
+												mi === retryIdx
+											"
 											class="jv-retry"
 											@click="retry(m.name)"
 											:disabled="retrying || busy"
@@ -1197,6 +1179,7 @@
 										     look as the Retry button (shared .jv-retry class). -->
 										<button
 											v-if="
+												hasCurrentMessageSnapshot &&
 												errorInfo(m).action === 'reconnect' &&
 												canConnectModel
 											"
@@ -1204,6 +1187,21 @@
 											@click="goReconnectSubscription(errorInfo(m).upstream)"
 										>
 											{{ errorInfo(m).actionLabel }}
+										</button>
+										<button
+											v-if="canReportError(m)"
+											type="button"
+											class="jv-retry"
+											:disabled="openSupportInFlight"
+											:style="{
+												cursor: openSupportInFlight
+													? 'default'
+													: 'pointer',
+												opacity: openSupportInFlight ? 0.6 : 1,
+											}"
+											@click="openErrorSupport(m)"
+										>
+											{{ __("Report error") }}
 										</button>
 									</div>
 								</div>
@@ -1261,7 +1259,10 @@
 											<button
 												class="jv-action-2nd"
 												@click="
-													actionSend('Regenerate that email, please.')
+													actionSend(
+														'Regenerate that email, please.',
+														m.name
+													)
 												"
 											>
 												<svg
@@ -1547,7 +1548,10 @@
 									<div v-else class="jv-legacy-note">{{ LEGACY_GATE_NOTE }}</div>
 								</template>
 								<!-- confirm / cancel (fallback, simple label) -->
-								<div v-else-if="confirmFor === m.name" class="jv-confirm">
+								<div
+									v-else-if="hasCurrentMessageSnapshot && confirmFor === m.name"
+									class="jv-confirm"
+								>
 									<svg
 										width="16"
 										height="16"
@@ -1568,13 +1572,13 @@
 									}}</span>
 									<button
 										class="jv-confirm-no"
-										@click="answerConfirm(false, confirmLabel(m))"
+										@click="answerConfirm(false, confirmLabel(m), m.name)"
 									>
 										Cancel
 									</button>
 									<button
 										class="jv-confirm-yes"
-										@click="answerConfirm(true, confirmLabel(m))"
+										@click="answerConfirm(true, confirmLabel(m), m.name)"
 									>
 										Confirm
 									</button>
@@ -1583,11 +1587,13 @@
 								     Submit). Keyed by message: AskCard holds the draft picks and
 								     must remount, not merely re-render, when a new ask arrives. -->
 								<AskCard
-									v-else-if="askFor === m.name && activeAsk"
+									v-else-if="
+										hasCurrentMessageSnapshot && askFor === m.name && activeAsk
+									"
 									:key="m.name"
 									:spec="activeAsk"
 									:busy="sending"
-									@submit="send"
+									@submit="answerAsk($event, m.name)"
 								/>
 								<!-- record cards: scrollable card strip instead of a wide table -->
 								<div v-if="cardsOf(m)" class="jv-cards">
@@ -1627,7 +1633,10 @@
 									</div>
 									<!-- long lists paginate — an endless horizontal scroll loses your place -->
 									<div
-										v-if="cardsOf(m).cards.length > CARD_PAGE_SIZE"
+										v-if="
+											hasCurrentMessageSnapshot &&
+											cardsOf(m).cards.length > CARD_PAGE_SIZE
+										"
 										class="jv-cards-pager"
 									>
 										<button
@@ -1661,7 +1670,10 @@
 									</div>
 								</div>
 								<!-- save-as-macro card: the agent proposed a reusable macro -->
-								<div v-if="macroCardOf(m)" class="jv-macrocard">
+								<div
+									v-if="hasCurrentMessageSnapshot && macroCardOf(m)"
+									class="jv-macrocard"
+								>
 									<div class="jv-macrocard-ic">
 										<svg
 											width="16"
@@ -1692,7 +1704,7 @@
 									</div>
 									<button
 										class="jv-macrocard-btn"
-										@click="openMacroFromCard(macroCardOf(m))"
+										@click="openMacroFromCard(macroCardOf(m), m.name)"
 									>
 										Save as macro
 									</button>
@@ -1707,36 +1719,38 @@
 								     redirect, so a second/third click resumes the builder
 								     conversation the first hand-off created instead of starting a
 								     new one. -->
-								<div v-if="gotoOf(m)" class="jv-macrocard">
-									<div class="jv-macrocard-ic">
-										<svg
-											width="16"
-											height="16"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.7"
-											stroke-linecap="round"
-											stroke-linejoin="round"
+								<template v-if="hasCurrentMessageSnapshot">
+									<div v-if="gotoOf(m)" class="jv-macrocard">
+										<div class="jv-macrocard-ic">
+											<svg
+												width="16"
+												height="16"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.7"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<path d="M18 20V10M12 20V4M6 20v-6" />
+											</svg>
+										</div>
+										<div class="jv-macrocard-txt">
+											<span class="jv-macrocard-title"
+												>Continue in Dashboards</span
+											>
+											<span class="jv-macrocard-sub">{{
+												gotoOf(m).prompt
+											}}</span>
+										</div>
+										<button
+											class="jv-macrocard-btn"
+											@click="gotoDashboards(gotoOf(m).prompt, m.name)"
 										>
-											<path d="M18 20V10M12 20V4M6 20v-6" />
-										</svg>
+											Open Dashboards
+										</button>
 									</div>
-									<div class="jv-macrocard-txt">
-										<span class="jv-macrocard-title"
-											>Continue in Dashboards</span
-										>
-										<span class="jv-macrocard-sub">{{
-											gotoOf(m).prompt
-										}}</span>
-									</div>
-									<button
-										class="jv-macrocard-btn"
-										@click="gotoDashboards(gotoOf(m).prompt, m.name)"
-									>
-										Open Dashboards
-									</button>
-								</div>
+								</template>
 								<!-- inline charts: ECharts rendered from the agent's jarvis-chart spec -->
 								<div
 									v-for="(spec, ci) in chartsOf(m)"
@@ -1784,7 +1798,9 @@
 									     below); never the builder's own live-query render mode,
 									     which would fire queries on every scrolled-past message. -->
 									<button
-										v-else-if="canPromoteDashCanvas(cv)"
+										v-else-if="
+											hasCurrentMessageSnapshot && canPromoteDashCanvas(cv)
+										"
 										class="jv-dash-thumb"
 										@click="openInDashboards(m, cv)"
 										:title="
@@ -2016,19 +2032,20 @@
 									</div>
 								</div>
 								<FeedbackBar
-									v-if="feedbackFor === m.name"
-									@rate="onFeedbackRate"
-									@close="onFeedbackClose"
+									v-if="feedbackViewIsCurrent(m)"
+									@rate="onFeedbackRate($event, feedbackViewFor(m))"
+									@close="onFeedbackClose(feedbackViewFor(m))"
 								/>
 							</template>
 						</Message>
 					</template>
 					<!-- a File Box file's open questions, also on the Approval Board -->
 					<FileBoxWaits
-						v-if="fileboxWaits.length"
-						:items="fileboxWaits"
+						v-if="visibleFileboxWaits.length"
+						:items="visibleFileboxWaits"
 						:busy="fileboxWaitBusy"
 						@decide="decideFileboxWait"
+						@review="reviewFileboxSheet"
 					/>
 					<!-- background reports this chat started, until their results are shown -->
 					<ReportRunCards
@@ -2149,7 +2166,7 @@
 					     StepsBox's own Cancel button (queued mode) calls the same
 					     cancelQueued the old chip's button did. -->
 					<div v-if="inFlightRowVisible" style="display: flex; gap: 12px">
-						<JarvisMark
+						<HolidayMark
 							:size="28"
 							:radius="7"
 							:mood="queuedTurn ? 'star' : 'thinking'"
@@ -2164,6 +2181,22 @@
 					     Confirm click (issue #186). The authoritative confirm UI: each
 					     carries its own server-minted one-time token. A single turn can
 					     park more than one, so we stack a card per queued token (#4). -->
+					<div
+						v-if="safetyUpdateNotice"
+						class="jv-action jv-safety-update"
+						role="status"
+						aria-live="polite"
+					>
+						<div class="jv-action-head">
+							<span class="jv-action-title">Action cancelled</span>
+						</div>
+						<div class="jv-pending-body">{{ safetyUpdateNotice.message }}</div>
+						<div class="jv-action-foot">
+							<button class="jv-action-primary" @click="dismissSafetyUpdateNotice">
+								Done
+							</button>
+						</div>
+					</div>
 					<div
 						v-for="(pa, pi) in visiblePendingActions"
 						:key="pa.token"
@@ -2354,8 +2387,28 @@
 				<!-- The account was reconnected on another site, so this one lost the
 					 workspace. Leads the chain: billing/suspension wording is
 					 meaningless once the account is somewhere else. -->
+				<!-- A restored copy of another site: Jarvis is off here. Heads the chain. -->
 				<Banner
-					v-if="replacedAlert"
+					v-if="copyAlert"
+					type="warning"
+					:title="copyAlert.title"
+					:message="
+						reverifyError ? `${copyAlert.message} ${reverifyError}` : copyAlert.message
+					"
+					style="margin-bottom: 10px"
+				>
+					<template v-if="canReverifySite" #action>
+						<button
+							class="jv-btn jv-btn--sm"
+							:disabled="reverifying"
+							@click="reverifySite"
+						>
+							Re-verify this site
+						</button>
+					</template>
+				</Banner>
+				<Banner
+					v-else-if="replacedAlert"
 					type="warning"
 					:title="replacedAlert.title"
 					:message="replacedAlert.message"
@@ -2485,6 +2538,27 @@
 					:message="notReadyNotice || 'We\'re working to bring your workspace back.'"
 					style="margin-bottom: 10px"
 				/>
+				<!-- Private network: an established workspace must re-pass the connection test (for
+					 example after an operator-confirmed host move). Specific before the generic
+					 banner below, because it carries the only route to the Connect panel (rules and
+					 Test connection). Admin's own sentence is the message. -->
+				<Banner
+					v-else-if="networkCheckRequired"
+					type="warning"
+					title="Allow your Jarvis server"
+					:message="notReadyNotice"
+					style="margin-bottom: 10px"
+				>
+					<template #action>
+						<button
+							v-if="canConnectModel"
+							class="jv-btn jv-btn--sm"
+							@click="goNetworkCheck"
+						>
+							Open connection test
+						</button>
+					</template>
+				</Banner>
 				<!-- Not chat-ready for a NON-billing reason (e.g. the connected LLM account
 					 itself is out of quota, or a container is still coming up). No CTA: unlike
 					 a lapsed subscription there's nothing to renew via us here - the detail
@@ -3610,6 +3684,7 @@
 						<span class="jv-artifact-head-title">{{ artifact.cv.title }}</span>
 						<span class="jv-canvas-type">{{ artifact.cv.type }}</span>
 						<a
+							v-if="!artifact.sourceUnavailable"
 							class="jv-art-act"
 							:href="artifact.url"
 							target="_blank"
@@ -3633,6 +3708,7 @@
 							</svg>
 						</a>
 						<a
+							v-if="!artifact.sourceUnavailable"
 							class="jv-art-act"
 							:href="artifact.url"
 							:download="cvFile(artifact.cv)"
@@ -3660,9 +3736,13 @@
 						     a switch in the sidebar behind it, and the hand-off pairs the
 						     CURRENT conversation with the OPEN artifact's message -->
 						<button
-							v-if="canOpenDash(artifact.cv) && artifact.conv === currentId"
+							v-if="
+								artifactSourceIsCurrent(artifact) &&
+								canOpenDash(artifact.cv) &&
+								artifact.conv === currentId
+							"
 							class="jv-art-act"
-							@click="openInDashboards(artifact.m, artifact.cv)"
+							@click="openInDashboards(artifact.m, artifact.cv, artifact)"
 							title="Open in Dashboards"
 							aria-label="Open in Dashboards"
 						>
@@ -3734,9 +3814,31 @@
 							</svg>
 						</button>
 					</div>
+					<FileBoxUseAsSource
+						v-if="
+							artifact.conv === currentId &&
+							fileboxConversation &&
+							canSelectFileboxSource &&
+							artifact.m?.role === 'user'
+						"
+						:key="artifact.conv + ':' + artifact.m.name + ':' + artifact.cv.name"
+						:conversation="artifact.conv"
+						:message="artifact.m.name"
+						:attachment="artifact.cv"
+						:can-select="canSelectFileboxSource"
+						@availability="artifactSourceAvailability"
+					/>
 					<div class="jv-artifact-body">
+						<div
+							v-if="artifact.sourceUnavailable"
+							class="jv-artifact-nopreview"
+							role="status"
+						>
+							<p>This attachment is unavailable.</p>
+							<p>Close this preview and attach another file.</p>
+						</div>
 						<iframe
-							v-if="artifact.kind === 'pdf'"
+							v-else-if="artifact.kind === 'pdf'"
 							:src="artifact.url"
 							class="jv-artifact-frame"
 							title="PDF preview"
@@ -3787,6 +3889,11 @@
 								</table>
 							</div>
 						</template>
+						<DocumentBlocks
+							v-else-if="artifact.document"
+							:document="artifact.document"
+							:file-url="artifact.url"
+						/>
 						<pre v-else-if="artifact.kind === 'text'" class="jv-artifact-text">{{
 							artifact.text
 						}}</pre>
@@ -3794,7 +3901,9 @@
 							Loading preview…
 						</div>
 						<div v-else class="jv-artifact-nopreview">
-							<p class="jv-preview-note">No inline preview for this file type.</p>
+							<p class="jv-preview-note">
+								{{ artifact.error || "No inline preview for this file type." }}
+							</p>
 							<a
 								:href="artifact.url"
 								:download="cvFile(artifact.cv)"
@@ -4304,6 +4413,13 @@
 			@confirm="onPreviewConfirm"
 		/>
 
+		<FileBoxSheetReview
+			v-if="fileboxReviewSession"
+			:key="fileboxReviewSession.id"
+			:session="fileboxReviewSession"
+			:onChanged="fileboxReviewChanged"
+			:onClosed="closeFileboxReview"
+		/>
 		<ConnectPhoneDialog v-model="showConnect" />
 
 		<CompactDialog
@@ -4438,6 +4554,7 @@ import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
 import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
+import { supportErrorDraft } from "@/lib/supportErrorDraft";
 import {
 	supportPillLabel as supportPillLabelFor,
 	supportAwaitingPhrase,
@@ -4455,22 +4572,41 @@ import { report as reportError } from "@/lib/errorReporter";
 import JvChart from "@/charts/JvChart.vue";
 import ConnectPhoneDialog from "@/components/ConnectPhoneDialog.vue";
 import JarvisMark from "@/components/JarvisMark.vue";
-import CapabilityCatalog from "@/components/CapabilityCatalog.vue";
+import HolidayMark from "@/components/holiday/HolidayMark.vue";
+import WelcomeHero from "@/components/holiday/WelcomeHero.vue";
+import HolidayStage from "@/components/holiday/HolidayStage.vue";
+import { holidayTouch } from "@/holidayTouch";
+import { stageEligible, withFestiveCard } from "@/lib/holidayStage";
+import WelcomeStarters from "@/components/chat/WelcomeStarters.vue";
 import DraftPreview from "@/components/doc/DraftPreview.vue";
 import ActionError from "@/components/ActionError.vue";
 import Banner from "@/components/Banner.vue";
 import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
-import { newSendRequestId, observeDelivery, deliveryFailureCopy } from "@/lib/sendDelivery.js";
+import {
+	newSendRequestId,
+	observeDelivery,
+	deliveryFailureCopy,
+	deliveryTimeoutError,
+	DELIVERY_TOAST,
+} from "@/lib/sendDelivery.js";
+// How long a send, a same-request retry, and a delivery check wait before the
+// bubble turns "not confirmed" and says so. The late answer still lands.
+const SEND_DEADLINE_MS = 30000;
+const CHECK_DEADLINE_MS = 15000;
 import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import FilePreview from "@/components/FilePreview.vue";
+import FileBoxUseAsSource from "@/components/chat/FileBoxUseAsSource.vue";
+import DocumentBlocks from "@/components/DocumentBlocks.vue";
 import SheetCharts from "@/components/SheetCharts.vue";
 import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
+import FileBoxSheetReview from "@/components/chat/FileBoxSheetReview.vue";
+import { useFileBoxWaits } from "@/composables/useFileBoxWaits";
 import ReportRunCards from "@/components/chat/ReportRunCards.vue";
 import VersionPill from "@/components/chat/VersionPill.vue";
 import UpdateBanner from "@/components/chat/UpdateBanner.vue";
@@ -4494,7 +4630,14 @@ import { onLlmSwitch } from "@/llmSwitch";
 import { parseAsk } from "@/lib/chatAsk";
 import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
-import { parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire } from "@/lib/chatGoto";
+import {
+	parseGoto,
+	gotoFiredKey,
+	parseFiredStamp,
+	claimGotoFire,
+	builderSeed,
+	requestBefore,
+} from "@/lib/chatGoto";
 import { normaliseAction } from "@/lib/chatAction";
 import { isSilentRun, shouldStopSpinning, streamingRowIsLive } from "@/lib/silentRun";
 import { markMissing, panelField as _panelField } from "@/lib/docFields";
@@ -4569,6 +4712,7 @@ import {
 	artifactPhaseList,
 	detectArtifactKind,
 } from "@/lib/artifactActivityCard";
+import { canSelectFileBoxSource } from "@/lib/fileboxSourceOwner";
 import {
 	activityItems,
 	addStep,
@@ -4583,6 +4727,7 @@ import {
 	turnToolNames,
 } from "@/lib/liveTurn";
 import { mergeCanvasItems } from "@/lib/canvasMerge";
+import { progressStatus, STOP_WHILE_WAITING } from "@/lib/macroRunOutcome";
 import { candidateTextFor } from "@/lib/candidateSnap";
 import { pickGreeting } from "@/lib/greeting";
 import { dashboardForConversation } from "@/api/dashboards";
@@ -4593,6 +4738,8 @@ import {
 	isLlmApplying,
 	isLlmApplyStuck,
 	isContainerUnavailable,
+	needsNetworkCheck,
+	NETWORK_INTENT_URL,
 	subscriptionExpiredBanner,
 	forgetReady,
 } from "@/onboarding/readiness.js";
@@ -4608,6 +4755,8 @@ import {
 	billingNoticeOf,
 	replacedNoticeOf,
 	replacedBanner,
+	copyNoticeOf,
+	copyBanner,
 	RECONNECT_INTENT_URL,
 } from "@/onboarding/readiness.js";
 import { useShellStore } from "@/stores/shell";
@@ -4634,6 +4783,80 @@ const router = useRouter();
 const store = useShellStore();
 
 const currentId = ref(null);
+// Receipt next-step controls are scoped to the conversation view. Declare their
+// state with the other view identity state so the synchronous switch fence can
+// clear it before any old async continuation settles.
+const nextBusyKey = ref("");
+const nextStepGone = ref(new Set());
+// A conversation id can repeat after A → B → A. Keep a monotonic view identity
+// so an old A request cannot write into the later A view.
+let chatViewGeneration = 0;
+// Messages can stay painted while a different conversation loads. Treat them as
+// display-only until an accepted snapshot explicitly stamps this generation.
+const directActionViewGeneration = ref(chatViewGeneration);
+const hasCurrentMessageSnapshot = computed(
+	() => directActionViewGeneration.value === chatViewGeneration
+);
+function captureChatView(token = "") {
+	return {
+		generation: chatViewGeneration,
+		conversation: currentId.value,
+		token,
+	};
+}
+function chatViewIsCurrent(view) {
+	return (
+		!!view && chatViewGeneration === view.generation && currentId.value === view.conversation
+	);
+}
+function pendingActionIsCurrent(view) {
+	return (
+		chatViewIsCurrent(view) &&
+		(inflightTokens.has(view.token) ||
+			pendingActions.value.some(
+				(card) => card.token === view.token && card.conversation === view.conversation
+			))
+	);
+}
+// A normal Vue watcher can batch A → B → A into no observable change. Count
+// the switch synchronously, then let the existing watcher reset state as before.
+watch(
+	currentId,
+	(id, previous) => {
+		if (id !== previous) {
+			chatViewGeneration++;
+			directActionViewGeneration.value = -1;
+			// The ordinary watcher can batch A → B → A. Reset confirmation-only
+			// state here too, so no old card, busy control, or Done notice reaches
+			// the new generation before its load begins.
+			pendingActions.value = [];
+			inflightTokens.clear();
+			approveRunBusyToken.value = null;
+			safetySettledTokens.value = new Set();
+			safetyUpdateNotice.value = null;
+			safetyUpdateQueue.value = [];
+			loadingOlder.value = false;
+			fileboxWaits.value = [];
+			fileboxWaitBusy.value = "";
+			fileboxWaitInFlight.clear();
+			nextBusyKey.value = "";
+			nextStepGone.value = new Set();
+			retrying.value = false;
+			compactSubmitting.value = false;
+			compactDialogOpen.value = false;
+			compactHintSeed.value = "";
+			feedbackFor.value = null;
+			feedbackRated.value = false;
+			feedbackView.value = null;
+			toolOpen.value = {};
+			// Draft panels, summaries, previews, and their action identity are just
+			// as view-scoped as a pending confirmation. Clear them synchronously so
+			// an A build or apply response cannot paint B (or a later A view).
+			resetDraftActionState();
+		}
+	},
+	{ flush: "sync" }
+);
 // Remember the open chat per-device so a refresh — or a duplicated tab — restores
 // it instead of jumping to whatever sorts first in the sidebar (e.g. a starred
 // chat). Also lets a duplicated tab land on the SAME in-progress conversation.
@@ -4669,6 +4892,16 @@ watch(currentId, (id) => {
 	} catch (e) {}
 });
 const messages = ref([]);
+function currentMessageSnapshotIsCurrent(view) {
+	return hasCurrentMessageSnapshot.value && chatViewIsCurrent(view);
+}
+function messageActionIsCurrent(view) {
+	return (
+		currentMessageSnapshotIsCurrent(view) &&
+		!!view?.token &&
+		messages.value.some((message) => message.name === view.token)
+	);
+}
 // History paging (#715 F13): `messages` holds the newest page plus any older pages
 // the reader scrolled up to (@/lib/historyPaging). `conv` is the chat this state
 // was read for: a resync keeps older rows only for that same chat.
@@ -4693,15 +4926,29 @@ const sending = ref(false);
 
 // ---- post-reply feedback line (lib/feedbackGate decides IF/when it appears) ----
 const feedbackFor = ref(null); // message name currently showing the feedback bar
+// Feedback belongs to the reply that earned it. Keep the full view identity so
+// a late child event from A cannot rate or close feedback that B later shows.
+const feedbackView = ref(null);
 const feedbackRated = ref(false); // did the user rate the current bar?
 const feedbackEvaluated = new Set(); // message names already run through the gate
+function feedbackViewFor(m) {
+	const view = feedbackView.value;
+	return view?.token === m?.name ? view : null;
+}
+function feedbackViewIsCurrent(m) {
+	const view = feedbackViewFor(m);
+	return !!view && feedbackFor.value === view.token && messageActionIsCurrent(view);
+}
 function maybeOfferFeedback(m) {
 	if (!m || m.role !== "assistant" || m.error || m.stopped) return;
 	if (feedbackEvaluated.has(m.name)) return;
+	const view = captureChatView(m.name);
+	if (!messageActionIsCurrent(view)) return;
 	feedbackEvaluated.add(m.name); // gate each reply exactly once
 	const secs = parseFloat(elapsedOf(m)) || 0;
 	if (shouldOfferFeedback(secs * 1000)) {
 		feedbackFor.value = m.name;
+		feedbackView.value = view;
 		feedbackRated.value = false;
 	}
 }
@@ -4717,7 +4964,10 @@ async function maybeCheckSessionFeedback(m) {
 	// upstream, which already blocks a repeat equal-epoch terminal) never
 	// re-polls the server or double-counts.
 	if (feedbackEvaluated.has(m.name)) return;
-	const conv = currentId.value;
+	const view = captureChatView(m.name);
+	const feedbackViewIsCurrent = () =>
+		chatViewIsCurrent(view) && messages.value.some((row) => row.name === view.token);
+	const conv = view.conversation;
 	if (!conv) {
 		maybeOfferFeedback(m);
 		return;
@@ -4733,7 +4983,7 @@ async function maybeCheckSessionFeedback(m) {
 	// Never surface a popup for a chat no longer on screen (matches "never on
 	// history load" — the reply just gets no prompt), and re-check the guard
 	// in case a second run:end for this same reply raced in during the await.
-	if (currentId.value !== conv || feedbackEvaluated.has(m.name)) return;
+	if (!feedbackViewIsCurrent() || feedbackEvaluated.has(m.name)) return;
 	if (due) {
 		feedbackEvaluated.add(m.name); // gate this reply exactly once, like maybeOfferFeedback
 		markIgnored();
@@ -4742,20 +4992,24 @@ async function maybeCheckSessionFeedback(m) {
 		maybeOfferFeedback(m);
 	}
 }
-function onFeedbackRate({ rating, note }) {
+function onFeedbackRate({ rating, note }, view) {
+	if (feedbackView.value !== view || !messageActionIsCurrent(view)) return;
 	feedbackRated.value = true;
 	markRated(); // any rating stops further asks this session
-	const target = feedbackFor.value;
-	if (target) api.submitFeedback(target, rating, note || "").catch(() => {}); // best-effort
+	api.submitFeedback(view.token, rating, note || "").catch(() => {}); // best-effort
 }
-function onFeedbackClose() {
+
+function onFeedbackClose(view) {
+	if (feedbackView.value !== view || !messageActionIsCurrent(view)) return;
 	feedbackFor.value = null;
+	feedbackView.value = null;
 }
 function dismissFeedback() {
 	// Starting the next query clears a still-unanswered bar (counts as an ignore).
 	if (!feedbackFor.value) return;
 	if (!feedbackRated.value) markIgnored();
 	feedbackFor.value = null;
+	feedbackView.value = null;
 }
 const waiting = ref(false);
 // Phase-0 admission (chat concurrency): when a send is accepted but QUEUED
@@ -4813,6 +5067,10 @@ const notReadyNotice = ref("");
 // message body still reads notReadyNotice's text - readinessDetailOf() now
 // covers this reason too, so admin's own words are never duplicated.
 const containerUnavailable = ref(false);
+// Private network: the workspace must re-pass the connection test (readiness reason
+// network_check_required). Own flag so the banner can carry a route to the Connect panel; the
+// message body is still admin's sentence from notReadyNotice.
+const networkCheckRequired = ref(false);
 // No AI connected at all (is_ready_for_chat reason "llm_credentials"): the customer
 // disconnected their model, or the credential expired. Until now this reason was
 // handled by NEITHER the onboarding gate (correctly - see readiness.js) nor any
@@ -4886,6 +5144,10 @@ const noAiConnectedMessage = computed(() =>
 		? "Connect a model to start chatting again"
 		: "Ask your administrator to reconnect a model"
 );
+function goNetworkCheck() {
+	// A full load, like the desk banner's link: the wizard re-reads readiness on mount.
+	window.location.assign(NETWORK_INTENT_URL);
+}
 function goConnectModel() {
 	store.openSettings("aimodels");
 }
@@ -4910,6 +5172,46 @@ const billingNotice = ref({});
 // Set by the readiness poll when this site's account moved elsewhere.
 const replacedNotice = ref({});
 const replacedAlert = computed(() => replacedBanner(replacedNotice.value));
+// Set by the readiness poll when this site is a restored copy of another one.
+const copyNotice = ref(null);
+const copyAlert = computed(() => copyBanner(copyNotice.value));
+// Re-verify asks admin to prove this is the registered site (System Manager only,
+// matching jarvis.chat.site_pin.reverify). A pass clears the block; a refusal keeps it.
+const canReverifySite = !!window.is_system_manager;
+const reverifying = ref(false);
+const reverifyError = ref("");
+async function reverifySite() {
+	if (reverifying.value || !canReverifySite) return;
+	reverifying.value = true;
+	reverifyError.value = "";
+	try {
+		const res = await api.reverifySite();
+		if (
+			res &&
+			res.proved &&
+			!res.blocked &&
+			copyNotice.value?.instance_changed &&
+			!res.pin_rebound
+		) {
+			// Proof passed but nothing rebound the agent's pin (an older control plane
+			// or a failed rebind): the site would be blocked again, so keep the banner.
+			reverifyError.value =
+				"This site is verified, but Jarvis could not reconnect it yet. Try again in a minute, or contact support if this keeps happening.";
+		} else if (res && res.proved && !res.blocked) {
+			forgetReady();
+			copyNotice.value = null;
+		} else if (res && res.error === "unreachable") {
+			reverifyError.value =
+				"Could not reach Jarvis to verify this site. Try again in a minute.";
+		} else {
+			reverifyError.value = "Re-verify did not confirm this site.";
+		}
+	} catch (e) {
+		reverifyError.value = "Could not reach Jarvis to verify this site. Try again in a minute.";
+	} finally {
+		reverifying.value = false;
+	}
+}
 function goReconnect() {
 	// The wizard owns the reconnect flow; land on it rather than duplicating the
 	// code-entry screen here. The flag matters: without it the wizard resumes down
@@ -4958,11 +5260,13 @@ const hasUrgentAlert = computed(
 			// release-nudge soft banner yields to the "back shortly" banner.
 			(
 				holdActive.value ||
+				copyAlert.value ||
 				replacedAlert.value ||
 				billingAlert.value ||
 				suspendedNotice.value ||
 				noAiConnected.value ||
 				containerUnavailable.value ||
+				networkCheckRequired.value ||
 				llmApplyStuck.value ||
 				notReadyNotice.value
 			)
@@ -5082,7 +5386,7 @@ function recentMessagesForSupport() {
 // a double-click firing openSupport() twice concurrently: without this, a
 // second click could race the first to SupportNew before the first's prompt
 // even resolves.
-let openSupportInFlight = false;
+const openSupportInFlight = ref(false);
 async function openSupport() {
 	if (!supportOn) {
 		// Unconfigured-but-visible state (see supportEntryVisible): explain rather
@@ -5096,12 +5400,12 @@ async function openSupport() {
 	// supportMenuOptions below), and its "New ticket from this chat" row calls
 	// straight into this same function - so openSupport() itself never needs to
 	// know which of the two paths got it here.
-	if (openSupportInFlight) return;
-	openSupportInFlight = true;
+	if (openSupportInFlight.value) return;
+	openSupportInFlight.value = true;
 	try {
 		const recent = recentMessagesForSupport();
 		if (!recent.length) {
-			router.push({ name: "SupportNew" });
+			await router.push({ name: "SupportNew" });
 			return;
 		}
 		let copyBody = "";
@@ -5128,9 +5432,49 @@ async function openSupport() {
 				supportStore.setCopyPref("No");
 			}
 		}
-		router.push({ name: "SupportNew", query: copyBody ? { body: copyBody } : {} });
+		await router.push({ name: "SupportNew", query: copyBody ? { body: copyBody } : {} });
 	} finally {
-		openSupportInFlight = false;
+		openSupportInFlight.value = false;
+	}
+}
+
+function canReportError(m) {
+	const id = currentId.value;
+	// During selection, currentId/route can already name the next chat while the
+	// old history remains on screen. Never pair those IDs in a support draft.
+	if (!supportOn || !id || _shownConvId !== id || (route.params.id && route.params.id !== id))
+		return false;
+	const row = m?.name && messages.value.find((item) => item.name === m.name);
+	return !!(
+		row &&
+		row.role === "assistant" &&
+		row.error &&
+		!row.hidden &&
+		!row.stopped &&
+		!row.streaming &&
+		errorInfo(row).code !== "cancelled"
+	);
+}
+
+async function openErrorSupport(m) {
+	if (openSupportInFlight.value || !canReportError(m)) return;
+	const row = messages.value.find((item) => item.name === m.name);
+	const info = errorInfo(row);
+	const draft = supportErrorDraft({
+		code: info.code,
+		upstream: info.upstream,
+		conversation: currentId.value,
+		message: row.name,
+		at: row.modified || row.creation,
+	});
+	if (!draft) return;
+	openSupportInFlight.value = true;
+	try {
+		await router.push({ name: "SupportNew", query: draft });
+	} catch {
+		notify(__("Could not open Support. Try again."), { type: "error" });
+	} finally {
+		openSupportInFlight.value = false;
 	}
 }
 // Waiting-reply count pill (header headphones button). awaiting_count is a
@@ -5248,6 +5592,7 @@ function resetAutoModeFor(isEmptyChat, serverAutoMode = 0) {
 	autoModeArmed.value = !!isEmptyChat && !serverAutoMode && !!store.defaultAutoMode;
 }
 async function onAutoModeClick() {
+	const view = captureChatView();
 	const v = autoView.value;
 	// Locked: a chat in auto mode never turns it off. aria-disabled (not the
 	// disabled attribute) keeps the tooltip and colour, so the click is a no-op.
@@ -5257,6 +5602,7 @@ async function onAutoModeClick() {
 		return;
 	}
 	if (!(await ensureAutoModeConsent())) return;
+	if (!chatViewIsCurrent(view)) return;
 	autoModeArmed.value = true;
 }
 // The account default can arrive (or change in Settings) after an empty chat
@@ -5425,9 +5771,16 @@ async function loadMacros() {
 }
 
 async function stopMacro() {
-	if (!macroRun.value) return;
+	const macro = macroRun.value;
+	const view = captureChatView(macro?.run || "");
+	if (
+		!macro ||
+		!currentMessageSnapshotIsCurrent(view) ||
+		macro.conversation !== view.conversation
+	)
+		return;
 	try {
-		await api.stopMacroRun(macroRun.value.run);
+		await api.stopMacroRun(macro.run);
 	} catch (e) {
 		/* ignore */
 	}
@@ -5568,7 +5921,7 @@ function patchMacroRunRow(p, done) {
 	const row = macroRuns.value.find((r) => r.name === p.macro_run);
 	if (row) {
 		if (p.step != null) row.current_step = p.step;
-		row.status = done ? p.status || "completed" : "running";
+		row.status = done ? p.status || "completed" : progressStatus(p);
 	}
 	loadMacroRunStats();
 }
@@ -5610,18 +5963,20 @@ const compactBusyReason = computed(() => {
 // context:compact_failed events (plus the dropped-frame progress guards in
 // assistant:delta / tool:start) are the only other clearers.
 async function loadContext({ applyCompacting = false } = {}) {
-	const id = currentId.value;
+	const view = captureChatView();
+	const id = view.conversation;
 	if (!id) {
-		contextInfo.value = null;
+		if (chatViewIsCurrent(view)) contextInfo.value = null;
 		return;
 	}
 	try {
 		const c = await api.getConversationContext(id);
-		takeUsage(c);
 		// Stale-response guard (mirrors loadConversation): a slow response for a
 		// chat the user has since left must not stamp ITS compacting/context state
-		// onto whichever chat is on screen now.
-		if (currentId.value !== id) return;
+		// onto whichever chat is on screen now. The generation also rejects an
+		// old A response after A → B → A.
+		if (!chatViewIsCurrent(view)) return;
+		takeUsage(c);
 		if (c && c.fresh) contextInfo.value = c;
 		if (applyCompacting) {
 			compacting.value = !!(c && c.compacting);
@@ -5639,10 +5994,12 @@ function openCompactDialog(seed = "") {
 }
 
 async function runCompact(hint) {
-	if (!currentId.value) return;
+	const view = captureChatView();
+	if (!view.conversation) return;
 	compactSubmitting.value = true;
 	try {
-		const res = await api.compactConversation(currentId.value, hint);
+		const res = await api.compactConversation(view.conversation, hint);
+		if (!chatViewIsCurrent(view)) return;
 		if (!res || !res.ok) {
 			notify(compactFailureCopy(res && res.reason), { type: "error" });
 			return;
@@ -5652,9 +6009,10 @@ async function runCompact(hint) {
 		compactHintSeed.value = hint || "";
 		compactDialogOpen.value = false;
 	} catch (e) {
-		notify(errMessage(e) || compactFailureCopy(), { type: "error" });
+		if (chatViewIsCurrent(view))
+			notify(errMessage(e) || compactFailureCopy(), { type: "error" });
 	} finally {
-		compactSubmitting.value = false;
+		if (chatViewIsCurrent(view)) compactSubmitting.value = false;
 	}
 }
 
@@ -5781,7 +6139,7 @@ const enrichmentTracker = createEnrichmentPending({
 		// Same idle re-render pass the other two reload sites do: loadConversation
 		// runs processMermaid once, but a late re-render can swap a freshly-rendered
 		// mermaid node back to raw source, and this catches that race.
-		setTimeout(processMermaid, 300);
+		scheduleMermaid(captureChatView(), 300);
 	},
 });
 onUnmounted(() => enrichmentTracker.reset());
@@ -6134,6 +6492,10 @@ const liveElapsedLabel = computed(() => {
 });
 const runMeta = ref({}); // { [message_id]: { ms, tools, names } } — survives reloads
 const canvasContent = ref({}); // { `${msgName}::${canvasName}`: srcdoc html (html/svg) | data-url (pdf/image/file) }
+const fileboxConversation = ref(false);
+const canSelectFileboxSource = computed(() =>
+	canSelectFileBoxSource(currentId.value, store.conversations)
+);
 const pendingFiles = ref([]); // [{ file_url, file_name }] attachments to send
 // Per-file upload state. This was a single `uploading` boolean, which could
 // only ever say "something is happening somewhere" - no file name, no way to
@@ -6170,7 +6532,7 @@ const jarvisTools = ref([
 
 // Shared with the shell via @/lib/user (see the cookie double-decode note there).
 const fullName = displayName(session.user);
-const firstName = computed(() => fullName.split(/\s+/)[0]);
+const firstName = computed(() => fullName.trim().split(/\s+/)[0]);
 // The empty-chat greeting. `now` is captured ONCE per mount, not read per render:
 // the phrase must not change under the user while they sit on the screen (and a
 // session left open past midnight keeping its line is the calmer behaviour).
@@ -6422,14 +6784,17 @@ const visibleMessages = computed(() =>
 		// placeholder that is not (or no longer) the turn THIS tab has live —
 		// a missed terminal, a different in-flight turn, or a reload landing
 		// between runs. A placeholder that has text, an error, or a canvas is
-		// a real reply and always renders regardless.
+		// a real reply and always renders regardless. So does the row parked for
+		// background recovery: its "Finishing in the background" copy renders
+		// inside it (overrideFor), and run:recovering clears currentRunId.
 		if (
 			m.role === "assistant" &&
 			m.streaming &&
 			!(m.content || "").trim() &&
 			!m.error &&
 			!(m.canvas && m.canvas.length) &&
-			!(currentRunId.value && m.name === currentMsgId.value)
+			!(currentRunId.value && m.name === currentMsgId.value) &&
+			recovering.value?.message_id !== m.name
 		)
 			return false;
 		return true;
@@ -6487,8 +6852,9 @@ const toolOpen = ref({});
 const showActivityDetail = computed(() => store.activityDetail);
 const notifyEnabled = computed(() => store.notifyEnabled);
 
-// Danger zone: wipe every conversation + message (macros/skills untouched). A chat
-// waiting for a reply is kept by the server; lib/clearHistory.js decides the rest.
+// Danger zone: wipe every conversation + message (macros/skills untouched). The
+// server can retain a live reply or physical-count evidence; clearHistory decides
+// the user-safe explanation.
 const clearingHistory = ref(false);
 async function clearAllHistory() {
 	if (
@@ -6509,9 +6875,9 @@ async function clearAllHistory() {
 				duration: 9000,
 			});
 		if (outcome.openChatKept) {
-			// The open chat was not deleted (it is waiting for its reply, or its
-			// delete failed): leave it exactly as it is (a reply goes on streaming)
-			// and only refresh the sidebar.
+			// The open chat was not deleted (it has a live reply, retained physical
+			// count evidence, or a delete failure). Leave it as it is and refresh the
+			// sidebar.
 			settingsOpen.value = false;
 			store.loadConversations();
 			return;
@@ -6586,6 +6952,7 @@ function toggleActivity(name) {
 	activityOpen.value = { ...activityOpen.value, [name]: !isActivityOpen(name) };
 }
 function toggleTool(name) {
+	if (!messageActionIsCurrent(captureChatView(name))) return;
 	toolOpen.value = { ...toolOpen.value, [name]: !toolOpen.value[name] };
 	if (toolOpen.value[name]) loadToolDetail(name);
 }
@@ -6593,15 +6960,22 @@ function toggleTool(name) {
 // output load the first time its row is expanded, and stay for this chat.
 const _toolDetailInflight = new Set();
 async function loadToolDetail(name) {
-	const id = currentId.value;
+	const view = captureChatView(name);
 	const row = transcript.value.find((m) => m.name === name);
-	if (!needsToolDetail(row, toolDetails.value) || _toolDetailInflight.has(name)) return;
+	if (
+		!messageActionIsCurrent(view) ||
+		!needsToolDetail(row, toolDetails.value) ||
+		_toolDetailInflight.has(name)
+	)
+		return;
+	const detailViewIsCurrent = () => messageActionIsCurrent(view);
 	_toolDetailInflight.add(name);
 	try {
 		const d = await api.getToolDetail(name);
-		if (currentId.value === id && d && d.name === name)
+		if (detailViewIsCurrent() && d && d.name === name)
 			toolDetails.value = { ...toolDetails.value, [name]: d };
 	} catch (e) {
+		if (!detailViewIsCurrent()) return;
 		toolOpen.value = { ...toolOpen.value, [name]: false };
 		notifyActionError("Couldn't load this step's details", e);
 	} finally {
@@ -6656,6 +7030,33 @@ const showWelcome = computed(
 	() =>
 		!booting.value &&
 		(!currentId.value || (visibleMessages.value.length === 0 && !isExistingTitledConv.value))
+);
+
+// The scene-day stage layout (lib/holidayStage.js): decided from the answer, the phone
+// flag and white label, plus whether a hold was showing when this welcome screen opened.
+// A hold that starts later does not swap the layout; the stage just settles its scene.
+const holdAtWelcomeMount = ref(false);
+watch(
+	showWelcome,
+	(on) => {
+		if (on) holdAtWelcomeMount.value = holdActive.value;
+	},
+	{ immediate: true }
+);
+const stageOn = computed(() =>
+	stageEligible({
+		answer: holidayTouch.answer.value,
+		phone: store.mobile,
+		whiteLabel: brand.isWhitelabeled,
+		holdAtMount: holdAtWelcomeMount.value,
+	})
+);
+// The festive greeting card replaces the last starter on the holiday itself (never on a
+// lead-up day or a birthday, though both can use the stage).
+const welcomeCards = computed(() =>
+	stageOn.value
+		? withFestiveCard(starterCards.value, holidayTouch.answer.value)
+		: starterCards.value
 );
 
 // settings/overview derived metrics (all from data we already hold)
@@ -6876,6 +7277,7 @@ function pagedCards(m) {
 	return cs.cards.slice(p * CARD_PAGE_SIZE, (p + 1) * CARD_PAGE_SIZE);
 }
 function stepCardPage(m, dir) {
+	if (!messageActionIsCurrent(captureChatView(m?.name || ""))) return;
 	const cs = cardsOf(m);
 	if (!cs) return;
 	const last = Math.max(0, Math.ceil(cs.cards.length / CARD_PAGE_SIZE) - 1);
@@ -6887,6 +7289,7 @@ const _macroCardCache = new Map();
 // draft (via macroPrefill) and navigate there; MacrosView opens it pre-filled.
 const canSaveAsMacro = computed(
 	() =>
+		hasCurrentMessageSnapshot.value &&
 		!!currentId.value &&
 		messages.value.some(
 			(m) => m.role === "user" && m.content && !m.content.startsWith("▶ Running macro")
@@ -6896,12 +7299,14 @@ const canSaveAsMacro = computed(
 // the rows on screen may be only the newest pages, so it reads the whole thread
 // first (the unpaged get_conversation, owner-gated like every read of it).
 async function saveConversationAsMacro() {
-	const id = currentId.value;
+	const view = captureChatView();
+	if (!view.conversation || !currentMessageSnapshotIsCurrent(view)) return;
+	const id = view.conversation;
 	let rows = messages.value;
 	if (id && (historyPaging.value.conv !== id || historyPaging.value.hasMore)) {
 		try {
 			const d = await api.getWholeConversation(id);
-			if (currentId.value !== id) return;
+			if (!currentMessageSnapshotIsCurrent(view)) return;
 			rows = d?.messages || [];
 		} catch (e) {
 			notifyActionError("Couldn't read this chat", e);
@@ -6911,7 +7316,7 @@ async function saveConversationAsMacro() {
 	const steps = rows
 		.filter((m) => m.role === "user" && m.content && !m.content.startsWith("▶ Running macro"))
 		.map((m) => ({ label: "", prompt: m.content }));
-	if (!steps.length) return;
+	if (!steps.length || !currentMessageSnapshotIsCurrent(view)) return;
 	setMacroPrefill({
 		macro_name:
 			currentTitle.value && currentTitle.value !== "New chat" ? currentTitle.value : "",
@@ -6920,7 +7325,9 @@ async function saveConversationAsMacro() {
 	router.push("/macros/new");
 }
 // An agent-proposed ```jarvis-macro card's "Save as macro" button.
-function openMacroFromCard(card) {
+function openMacroFromCard(card, messageId) {
+	const view = captureChatView(messageId || "");
+	if (!messageActionIsCurrent(view)) return;
 	setMacroPrefill({
 		macro_name: card.name || "",
 		description: card.description || "",
@@ -7062,7 +7469,13 @@ function gotoOf(m) {
 // navigates - the prefill slot is left alone so the claimant's own payload
 // (set moments earlier, in the same tick or the one before) is what the
 // single resulting mount actually consumes.
+//
+// The builder is sent the restatement with the user's own words under it
+// (builderSeed), so a detail the restatement dropped still reaches the build.
 function gotoDashboards(prompt, messageId) {
+	const view = captureChatView(messageId || "");
+	if (!messageActionIsCurrent(view)) return;
+	const text = builderSeed(prompt, requestBefore(messages.value, messageId));
 	const key = messageId ? gotoFiredKey(messageId) : null;
 	const claim = key ? claimGotoFire(localStorage.getItem(key)) : { build: true };
 	if (claim.build) {
@@ -7085,9 +7498,9 @@ function gotoDashboards(prompt, messageId) {
 				.slice(50)
 				.forEach(([k]) => localStorage.removeItem(k));
 		}
-		setDashboardPrefill({ text: prompt, autoSend: true, messageId });
+		setDashboardPrefill({ text, autoSend: true, messageId });
 	} else if (claim.conv) {
-		setDashboardPrefill({ text: prompt, resume: true, conv: claim.conv, messageId });
+		setDashboardPrefill({ text, resume: true, conv: claim.conv, messageId });
 	}
 	router.push("/dashboards");
 }
@@ -7201,13 +7614,17 @@ function linkifyDocs(html) {
 // The one message that may show Retry: the last visible one, not counting a macro
 // run's closing message (lib/retryTarget.js says why). For Retry only; the cards
 // below keep their own "last assistant" rule.
-const retryIdx = computed(() => retryTargetIndex(visibleMessages.value));
+const retryIdx = computed(() =>
+	hasCurrentMessageSnapshot.value ? retryTargetIndex(visibleMessages.value) : -1
+);
 // "Retry", or "Retry this step" under a macro's closing message (retryLabel).
-const retryText = computed(() => retryLabel(visibleMessages.value));
+const retryText = computed(() =>
+	hasCurrentMessageSnapshot.value ? retryLabel(visibleMessages.value) : ""
+);
 // The last assistant message (finished, turn idle) decides which card is live —
 // once the user clicks, a new message lands and the card retires automatically.
 const _lastAssistant = computed(() => {
-	if (busy.value) return null;
+	if (!hasCurrentMessageSnapshot.value || busy.value) return null;
 	// visibleMessages now also carries receipt-chip tool rows (a confirmed /
 	// discarded / failed gated write), and a discard fires no continuation, so a
 	// chip can be the tail. Scan back past any trailing tool rows to the real
@@ -7235,21 +7652,60 @@ const _cardMessage = computed(() =>
 		Boolean(actionOf(m))
 	)
 );
-const activeAction = computed(() => (_cardMessage.value ? actionOf(_cardMessage.value) : null));
+// `messages` intentionally stays visible while a different conversation loads.
+// Do not let its old action card remain actionable in that new view. A raw action
+// re-enables itself only when the new view receives its own message snapshot.
+const _rawActiveAction = computed(() =>
+	_cardMessage.value ? actionOf(_cardMessage.value) : null
+);
+const activeAction = computed(() =>
+	hasCurrentMessageSnapshot.value ? _rawActiveAction.value : null
+);
 const actionFor = computed(() => (activeAction.value ? _cardMessage.value.name : null));
+function captureDraftActionView(
+	a = activeAction.value,
+	messageKey = actionFor.value || "",
+	actionKey = a ? draftActionKey(a) : ""
+) {
+	return { ...captureChatView(actionKey), messageKey, actionKey };
+}
+function draftActionViewIsCurrent(view) {
+	const action = activeAction.value;
+	return (
+		chatViewIsCurrent(view) &&
+		!!view?.actionKey &&
+		!!action &&
+		actionFor.value === view.messageKey &&
+		draftActionKey(action) === view.actionKey
+	);
+}
+function draftModelViewIsCurrent(view, model) {
+	return (
+		draftActionViewIsCurrent(view) &&
+		!!model &&
+		model.actionKey === view.actionKey &&
+		(model.messageKey || "") === (view.messageKey || "")
+	);
+}
 const confirmFor = computed(() =>
 	_lastAssistant.value && !activeAction.value && confirmLabel(_lastAssistant.value)
 		? _lastAssistant.value.name
 		: null
 );
-function actionSend(text) {
+function actionSend(text, messageId) {
+	if (!messageActionIsCurrent(captureChatView(messageId || ""))) return;
 	send(text);
 }
-function answerConfirm(ok, label) {
+function answerConfirm(ok, label, messageId) {
+	if (!messageActionIsCurrent(captureChatView(messageId || ""))) return;
 	// Echo the card's own wording so the transcript reads like what the user
 	// clicked ("Yes — Confirm and save") instead of a canned "go ahead".
 	const l = (label || "").trim();
 	send(ok ? (l ? `Yes: ${l}` : "Yes, go ahead.") : "No, cancel that.");
+}
+function answerAsk(answer, messageId) {
+	if (!messageActionIsCurrent(captureChatView(messageId || ""))) return;
+	send(answer);
 }
 
 // --- Field-control helpers shared by the confirm card and the record draft
@@ -7368,6 +7824,11 @@ function onOverlayBackdropClick(close) {
 
 // one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<row __key>:<col>"
 const draftLink = ref({ key: "", items: [], open: false, anchor: null });
+// Each popup belongs to one search, including its pending blur and response.
+let draftLinkGeneration = 0;
+onBeforeUnmount(() => {
+	draftLinkGeneration++;
+});
 const draftLinkError = ref("");
 // Company / row dependency changes invalidate suggestions even if a request is
 // still pending or its field remains focused. Existing field values stay intact.
@@ -7532,13 +7993,15 @@ async function buildDraftModel(a) {
 }
 
 // Open the editable panel for an action, via the shared buildDraftModel.
-async function openDraftPanel(a) {
+async function openDraftPanel(a, capturedView = null) {
 	// The draft this panel edits, captured before the build: actionFor goes null
 	// while a turn runs and moves on with the next reply, so read later it would
 	// name another draft (the server sends "fixing it in the panel" once per draft).
 	const messageKey = actionFor.value || "";
 	const card = activeAction.value || null;
 	const actionKey = draftActionKey(a);
+	const view = capturedView || captureDraftActionView(a, messageKey, actionKey);
+	if (!draftActionViewIsCurrent(view)) return false;
 	// The panel already edits this very draft (Edit clicked again, a failed Confirm, or
 	// the agent re-sending the same proposal): keep it, with the person's edits and the
 	// marked fields, instead of rebuilding it from the agent's proposal. Its stamp stays
@@ -7554,7 +8017,7 @@ async function openDraftPanel(a) {
 	} catch (e) {
 		return false;
 	}
-	if (!model) return false;
+	if (!model || !draftActionViewIsCurrent(view)) return false;
 	markDraftBaseline(model);
 	// An update's changed rows (1 to 3) open on the first build, or when a re-emit changes
 	// what the agent proposed (the same draft re-sent keeps its panel above). A rebuild
@@ -7567,6 +8030,7 @@ async function openDraftPanel(a) {
 		console.warn("Jarvis card: could not auto-open the changed rows", e);
 	}
 	// Only the open panel can be edited after a failure (R2-9, lib/draftSave).
+	if (!draftActionViewIsCurrent(view)) return false;
 	draftPanel.value = stampDraftModel(model, { messageKey, card, editable: true, actionKey });
 	return true;
 }
@@ -7597,6 +8061,7 @@ function dismissDraftPanel() {
 	closeDraftPanel();
 }
 function closeDraftPanel() {
+	draftLinkGeneration++;
 	draftLinkError.value = "";
 	draftPanel.value = null;
 	draftLink.value = { key: "", items: [], open: false, anchor: null };
@@ -7604,6 +8069,7 @@ function closeDraftPanel() {
 
 // Link search shared by panel fields + grid cells.
 async function onDraftLink(key, target, doctype, ev) {
+	const generation = ++draftLinkGeneration;
 	const anchor = ev && ev.target;
 	draftLink.value = { key, items: [], open: true, anchor };
 	const search = draftLink.value;
@@ -7622,6 +8088,7 @@ async function onDraftLink(key, target, doctype, ev) {
 			args.filters
 		);
 		if (
+			generation !== draftLinkGeneration ||
 			draftLink.value !== search ||
 			draftLinkContext(draftPanel.value, key) !== filterContext
 		)
@@ -7636,7 +8103,7 @@ async function onDraftLink(key, target, doctype, ev) {
 			filterContext,
 		};
 	} catch (e) {
-		if (draftLink.value === search) {
+		if (generation === draftLinkGeneration && draftLink.value === search) {
 			draftLink.value = { ...draftLink.value, open: false, items: [] };
 			draftLinkError.value =
 				e instanceof DraftLinkFilterError
@@ -7665,6 +8132,7 @@ async function fillRuleValues(doctype, tables, isCurrent = () => true) {
 	);
 }
 function pickDraftLink(setter, item) {
+	draftLinkGeneration++;
 	if (
 		draftLink.value.filterContext !== draftLinkContext(draftPanel.value, draftLink.value.key)
 	) {
@@ -7677,8 +8145,12 @@ function pickDraftLink(setter, item) {
 	const panel = draftPanel.value;
 	if (panel) fillRuleValues(panel.doctype, panel.tables, () => draftPanel.value === panel);
 }
-function closeDraftLink() {
+function closeDraftLink(ev) {
+	const generation = draftLinkGeneration;
+	const anchor = ev?.target || draftLink.value.anchor;
 	setTimeout(() => {
+		if (generation !== draftLinkGeneration || document.activeElement === anchor) return;
+		draftLinkGeneration++;
 		draftLink.value = { ...draftLink.value, open: false };
 	}, 160);
 }
@@ -7727,7 +8199,10 @@ const draftCta = computed(() => {
 	return p.verb === "update" ? `Update ${p.docName || p.doctype}` : `Create ${p.doctype}`;
 });
 // Summary-first: the read-only model + view for the current create/update action.
-const summaryState = ref({ key: "", model: null, view: null, error: "" });
+function blankSummaryState() {
+	return { key: "", messageKey: "", model: null, view: null, error: "" };
+}
+const summaryState = ref(blankSummaryState());
 // What the card's Confirm and Preview act on: the open panel when it edits this draft
 // (lib/draftSave openPanelFor), else the card's own read-only copy.
 const cardModel = computed(() => {
@@ -7736,53 +8211,86 @@ const cardModel = computed(() => {
 });
 async function ensureActionSummary(a) {
 	const key = draftActionKey(a);
-	if (summaryState.value.key === key) return;
 	const messageKey = actionFor.value || ""; // this draft's message, before the build
 	const card = activeAction.value || null;
-	summaryState.value = { key, model: null, view: null, error: "" };
+	const view = captureDraftActionView(a, messageKey, key);
+	if (!draftActionViewIsCurrent(view)) return;
+	if (summaryState.value.key === key && summaryState.value.messageKey === messageKey) return;
+	summaryState.value = { key, messageKey, model: null, view: null, error: "" };
 	let model;
 	try {
 		model = await buildDraftModel({ verb: a.verb || "create", ...a });
 	} catch (e) {
 		const msg = (e && e.jvUserMessage) || "Could not load this draft. Tell me to try again.";
-		if (summaryState.value.key === key)
-			summaryState.value = { key, model: null, view: null, error: msg };
+		if (
+			draftActionViewIsCurrent(view) &&
+			summaryState.value.key === key &&
+			summaryState.value.messageKey === messageKey
+		)
+			summaryState.value = { key, messageKey, model: null, view: null, error: msg };
 		return;
 	}
 	if (!model) {
-		if (summaryState.value.key === key)
+		if (
+			draftActionViewIsCurrent(view) &&
+			summaryState.value.key === key &&
+			summaryState.value.messageKey === messageKey
+		)
 			summaryState.value = {
 				key,
+				messageKey,
 				model: null,
 				view: null,
 				error: "Could not load this draft. Tell me to try again.",
 			};
 		return;
 	}
-	if (summaryState.value.key !== key) return; // a newer action superseded this build
+	if (
+		!draftActionViewIsCurrent(view) ||
+		summaryState.value.key !== key ||
+		summaryState.value.messageKey !== messageKey
+	)
+		return; // a newer action or view superseded this build
 	stampDraftModel(model, { messageKey, card, editable: false, actionKey: key });
-	summaryState.value = { key, model, view: summarize(model, a), error: "" };
-	if (model.verb === "create") fillComputedCells(key, model, a);
+	summaryState.value = { key, messageKey, model, view: summarize(model, a), error: "" };
+	if (model.verb === "create") fillComputedCells(key, model, a, view);
 }
 // A create card's blank read-only cells (amounts, tax totals) are what ERPNext
 // computes on save: ask a dry run for them and show them on the card, marked as
 // calculated (#647). Display only - Confirm still sends what the card proposes.
 // Latest wins: a newer action's card is never touched; any failure keeps the blanks.
-async function fillComputedCells(key, model, a) {
+async function fillComputedCells(
+	key,
+	model,
+	a,
+	view = captureDraftActionView(a, model?.messageKey || actionFor.value, key)
+) {
 	const columns = blankComputedColumns(model);
-	if (!Object.keys(columns).length || !currentId.value) return;
+	if (
+		!Object.keys(columns).length ||
+		!view.conversation ||
+		!draftModelViewIsCurrent(view, model)
+	)
+		return;
 	let r;
 	try {
 		r = await api.draftComputed({
 			doctype: model.doctype,
-			conversation: currentId.value,
+			conversation: view.conversation,
 			values: draftValues(model),
 			columns,
 		});
 	} catch (e) {
 		return;
 	}
-	if (!r || !r.ok || summaryState.value.key !== key) return;
+	if (
+		!r ||
+		!r.ok ||
+		!draftModelViewIsCurrent(view, model) ||
+		summaryState.value.key !== key ||
+		summaryState.value.model !== model
+	)
+		return;
 	const computed = {};
 	for (const t of model.tables) {
 		const rows = alignComputedRows(t, (r.tables || {})[t.fieldname]);
@@ -7799,26 +8307,37 @@ async function confirmSummary() {
 	const model = summaryState.value.model;
 	// Captured before the round-trip: a newer turn may replace the active action.
 	const a = activeAction.value;
-	if (!model || model.applying || convStreaming.value) return;
+	const view = captureDraftActionView(
+		a,
+		model?.messageKey || actionFor.value,
+		model?.actionKey || (a ? draftActionKey(a) : "")
+	);
+	if (!model || model.applying || convStreaming.value || !draftModelViewIsCurrent(view, model))
+		return;
 	// The panel is open on this draft: Confirm saves what the person sees there (their
 	// edits, not the card's copy), and a failure marks the fields in that same panel.
 	const panel = openPanelFor(draftPanel.value, model.actionKey);
 	if (panel) {
-		await applyDraft(0, panel);
+		await applyDraft(0, panel, view);
 		return;
 	}
-	await applyDraft(0, model);
-	const stillShown = summaryState.value.model === model;
-	if (model.error && model.error.fields && stillShown) await openDraftForMissing(a, model.error);
+	await applyDraft(0, model, view);
+	const stillShown = draftModelViewIsCurrent(view, model) && summaryState.value.model === model;
+	if (model.error && model.error.fields && stillShown)
+		await openDraftForMissing(a, model.error, view);
 }
 // Confirm failed on empty required fields: open the edit panel on them, so the
 // person fills them in instead of hitting a dead end (#603). A fresh model, like the
 // Edit button, so panel edits never leak into the card.
-async function openDraftForMissing(a, error) {
+async function openDraftForMissing(a, error, capturedView = null) {
 	if (!a) return;
-	await openDraftPanel({ verb: a.verb || "create", ...a });
+	const key = draftActionKey(a);
+	const view = capturedView || captureDraftActionView(a, actionFor.value || "", key);
+	if (!draftActionViewIsCurrent(view)) return;
+	await openDraftPanel({ verb: a.verb || "create", ...a }, view);
+	if (!draftActionViewIsCurrent(view)) return;
 	const p = draftPanel.value;
-	if (!p) return;
+	if (!p || !draftModelViewIsCurrent(view, p)) return;
 	markMissing(p, error.fields, (_formMetaCache[p.doctype] || {}).fields);
 	markMissingRows(p, error.fields);
 	p.error = error;
@@ -7826,6 +8345,18 @@ async function openDraftForMissing(a, error) {
 
 // Read-only preview: opens DraftPreview over the current summary's model.
 const previewOpen = ref(false);
+function resetDraftActionState() {
+	// This is called by the synchronous conversation-switch fence. It must not
+	// use closeDraftPanel(), which is for a user action in the current view.
+	draftLinkGeneration++;
+	draftLinkError.value = "";
+	draftLink.value = { key: "", items: [], open: false, anchor: null };
+	draftPanel.value = null;
+	summaryState.value = blankSummaryState();
+	previewOpen.value = false;
+	fixingDraft.value = "";
+	parkedDrafts.value = new Map();
+}
 function previewSummary() {
 	if (!summaryState.value.model) return;
 	previewOpen.value = true;
@@ -7855,19 +8386,21 @@ watch(actionFor, () => {
 	// summary card must also attempt its model, so an unbuildable shape produces
 	// the error card instead of a permanent placeholder.
 	if (!a || a.kind === "email" || !isEditVerb(a)) return;
+	const view = captureDraftActionView(a, actionFor.value || "", draftActionKey(a));
 	ensureActionSummary(a); // keep the summary card in sync with the latest action
 	if (draftPanel.value) {
 		// panel is open (user is editing) and the action re-emitted: rebuilt only when the
 		// agent proposed something different (openDraftPanel keeps the same draft's edits)
-		openDraftPanel({ verb: a.verb || "create", ...a }).then((rebuilt) => {
-			if (rebuilt && draftPanel.value) draftPanel.value.updatedToast = true;
+		openDraftPanel({ verb: a.verb || "create", ...a }, view).then((rebuilt) => {
+			if (rebuilt && draftModelViewIsCurrent(view, draftPanel.value))
+				draftPanel.value.updatedToast = true;
 		});
 	}
 });
 
 // --- apply wiring: draft panel create/update round-trip via apply_action ---
 
-async function applyDraft(submitFlag, model = draftPanel.value) {
+async function applyDraft(submitFlag, model = draftPanel.value, capturedView = null) {
 	const p = model;
 	if (!p || p.applying) return;
 	// read_only gating, coercion and the changed-only update payload live in
@@ -7878,6 +8411,14 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 	// Which draft this is: stamped when the model was built (actionFor drifts once a
 	// reply lands), else the current one, captured before the round-trip.
 	const draftKey = p.messageKey || actionFor.value;
+	const actionKey =
+		p.actionKey || (activeAction.value ? draftActionKey(activeAction.value) : "");
+	const view = capturedView || captureDraftActionView(activeAction.value, draftKey, actionKey);
+	const draftStillCurrent = () =>
+		draftModelViewIsCurrent(view, p) &&
+		(draftPanel.value === p || summaryState.value.model === p);
+	if (!draftStillCurrent()) return;
+	const card = p.card || activeAction.value;
 	const waiting =
 		parkedNoteFor(parkedDrafts.value, draftKey) ||
 		parkedByCard(pendingActions.value, draftKey);
@@ -7893,10 +8434,11 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			applyActionPayload(p, {
 				values,
 				submit: submitFlag,
-				conversation: currentId.value,
-				fallback: { messageKey: draftKey, card: activeAction.value },
+				conversation: view.conversation,
+				fallback: { messageKey: draftKey, card },
 			})
 		);
+		if (!draftStillCurrent()) return;
 		const outcome = draftSaveOutcome(r, brand.agentName);
 		if (outcome.kind === "closed") {
 			// R2-9: no value in the panel fixes this one (a business rule, a
@@ -7905,7 +8447,8 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			closeDraftPanel();
 			notify(outcome.note, { type: "error" });
 			fixingDraft.value = "";
-			await loadConversation(currentId.value);
+			await loadConversation(view.conversation);
+			if (!chatViewIsCurrent(view)) return;
 			store.loadConversations();
 			showQueuedContinuation(r);
 			return;
@@ -7933,16 +8476,20 @@ async function applyDraft(submitFlag, model = draftPanel.value) {
 			p.parked = parked;
 			parkedDrafts.value = markParked(parkedDrafts.value, draftKey, parked);
 			await nextTick();
+			if (!draftStillCurrent()) return;
 			if (draftParkedRegion.value) draftParkedRegion.value.focus();
-			await loadConversation(currentId.value);
+			if (!draftStillCurrent()) return;
+			await loadConversation(view.conversation);
 			return;
 		}
 		fixingDraft.value = "";
 		closeDraftPanel();
-		await loadConversation(currentId.value);
+		await loadConversation(view.conversation);
+		if (!chatViewIsCurrent(view)) return;
 		store.loadConversations();
 		showQueuedContinuation(r);
 	} catch (e) {
+		if (!draftStillCurrent()) return;
 		p.applying = false;
 		p.error = { message: errMessage(e, "Could not save. Check the values.") };
 	}
@@ -7976,6 +8523,49 @@ function discardDraft() {
 // confirmable card + busy/error state. Each item:
 // { conversation, token, tool, summary, preview, run_id, busy, error }.
 const pendingActions = ref([]);
+// A close migration can settle a card while it is cached on this page. Keep
+// its token locally after the terminal receipt arrives, so a late socket frame
+// cannot restore a Confirm card before the next durable resync completes.
+const safetySettledTokens = ref(new Set());
+const safetyUpdateNotice = ref(null);
+const safetyUpdateQueue = ref([]);
+const SAFETY_UPDATE_COPY =
+	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
+function passiveSafetyUpdate(row) {
+	if (row?.role !== "tool" || row.action_outcome !== "cancelled" || !row.tool_call_id)
+		return null;
+	let result = row.tool_result;
+	if (typeof result === "string") {
+		try {
+			result = JSON.parse(result);
+		} catch {
+			return null;
+		}
+	}
+	if (result?.reason_code !== "safety_update") return null;
+	return {
+		token: row.tool_call_id,
+		message: result?.error?.message || SAFETY_UPDATE_COPY,
+	};
+}
+function enqueueSafetyUpdateNotice(notice) {
+	if (!safetyUpdateNotice.value) {
+		safetyUpdateNotice.value = notice;
+		return;
+	}
+	safetyUpdateQueue.value = [...safetyUpdateQueue.value, notice];
+}
+function observePassiveSafetyUpdates(rows) {
+	for (const row of rows || []) {
+		const notice = passiveSafetyUpdate(row);
+		if (!notice) continue;
+		settleSafetyUpdateNotice(notice.token, notice.message);
+	}
+}
+function dismissSafetyUpdateNotice() {
+	safetyUpdateNotice.value = safetyUpdateQueue.value[0] || null;
+	safetyUpdateQueue.value = safetyUpdateQueue.value.slice(1);
+}
 // Which card's Approve & run is in flight. pa.busy alone disables BOTH of a
 // runnable card's buttons (so a double-click can't fire twice) but can't say
 // WHICH one is running - this is just the label disambiguator (P1, skill
@@ -8013,7 +8603,11 @@ const olderCardsNoteText = computed(() =>
 const visiblePendingActions = computed(() =>
 	// Ordered by the shared, unit-tested comparator (sortPendingCards): stable
 	// numbers for a typed "confirm N". See lib/sortPendingCards.js.
-	sortPendingCards(pendingActions.value.filter((pa) => pa.conversation === currentId.value))
+	sortPendingCards(
+		pendingActions.value.filter(
+			(pa) => pa.conversation === currentId.value && !safetySettledTokens.value.has(pa.token)
+		)
+	)
 );
 
 // A legacy container (persona v0.39, pre write-safety) may still emit a
@@ -8083,6 +8677,31 @@ function removePending(token) {
 	if (!token) return;
 	pendingActions.value = pendingActions.value.filter((x) => x.token !== token);
 }
+
+function settleSafetyUpdateNotice(token, message) {
+	const seen = safetySettledTokens.value.has(token);
+	safetySettledTokens.value = new Set(safetySettledTokens.value).add(token);
+	// A direct response can arrive after its passive terminal receipt. Always
+	// repair the card state, but enqueue the Done-only explanation once.
+	removePending(token);
+	if (!seen) {
+		enqueueSafetyUpdateNotice({
+			token,
+			message: message || SAFETY_UPDATE_COPY,
+		});
+	}
+}
+
+// A direct Confirm, Approve & run, or Discard can race a close migration. The
+// endpoint then returns the same terminal safety_update envelope as a durable
+// receipt. Treat it as that receipt immediately: exclude only its token, drop
+// only its card, and give the person the one Done-only explanation. A later
+// transcript reload sees the exclusion and cannot add a duplicate notice.
+function settleSafetyUpdate(token, response) {
+	if (!token || response?.reason_code !== "safety_update") return false;
+	settleSafetyUpdateNotice(token, response?.error?.message || SAFETY_UPDATE_COPY);
+	return true;
+}
 function confirmationStorageUnavailable(response) {
 	const type = response && response.error && response.error.type;
 	return type === "ConfirmationUnavailableError" || type === "ConfirmationOutcomeUnknownError";
@@ -8114,6 +8733,7 @@ function pendingActionFromRow(m, convId) {
 		expires_at: _rowExpiresEpoch(m.expires_at),
 		seq: m.seq ?? null,
 		recent: m.recent !== false,
+		pending_card_safe: m.pending_card_safe === true,
 	};
 }
 function seedPendingFromRows(msgs, convId) {
@@ -8123,6 +8743,7 @@ function seedPendingFromRows(msgs, convId) {
 			m.role === "tool" &&
 			m.tool_status === "pending" &&
 			m.pending_card &&
+			m.pending_card_safe === true &&
 			m.tool_call_id
 		) {
 			enqueuePending(pendingActionFromRow(m, convId));
@@ -8139,7 +8760,8 @@ function seedPendingFromRows(msgs, convId) {
 const inflightTokens = new Set();
 
 function enqueuePending(card) {
-	if (!card || !card.token) return;
+	if (!card || !card.token || card.pending_card_safe !== true) return;
+	if (safetySettledTokens.value.has(card.token)) return;
 	if (inflightTokens.has(card.token)) return;
 	if (pendingActions.value.some((x) => x.token === card.token)) return;
 	pendingActions.value.push({
@@ -8153,6 +8775,7 @@ function enqueuePending(card) {
 		expires_at: card.expires_at || null,
 		seq: card.seq ?? null,
 		recent: card.recent !== false,
+		pending_card_safe: true,
 		busy: false,
 		error: null,
 	});
@@ -8169,13 +8792,20 @@ async function confirmPending(pa) {
 	// call can never clear/error a different unconfirmed card (in-flight-race
 	// guard, R1/Task7).
 	const token = pa.token;
-	const cardById = () => pendingActions.value.find((x) => x.token === token);
+	const view = captureChatView(token);
+	if (pa.conversation !== view.conversation || !pendingActionIsCurrent(view)) return;
+	const cardById = () =>
+		pendingActions.value.find(
+			(x) => x.token === token && x.conversation === view.conversation
+		);
 	pa.busy = true;
 	pa.error = null;
 	inflightTokens.add(token);
 	try {
-		const r = await api.confirmTool(token, pa.conversation || currentId.value || "");
+		const r = await api.confirmTool(token, view.conversation);
+		if (!pendingActionIsCurrent(view)) return;
 		if (r && r.ok === false) {
+			if (settleSafetyUpdate(token, r)) return;
 			if (confirmationStorageUnavailable(r)) {
 				const card = cardById();
 				if (card) card.error = r.error;
@@ -8212,14 +8842,16 @@ async function confirmPending(pa) {
 			// persisted a durable "failed" receipt chip. Drop the card and reload
 			// so the chip shows in the thread instead of a lingering spent card.
 			removePending(token);
-			await loadConversation(currentId.value);
+			await loadConversation(view.conversation);
+			if (!chatViewIsCurrent(view)) return;
 			store.loadConversations();
 			return;
 		}
 		// Success - the executed result surfaces via the turn's normal tool/stream
 		// events; reload to be sure the transcript reflects it (same as applyDraft).
 		removePending(token);
-		await loadConversation(currentId.value);
+		await loadConversation(view.conversation);
+		if (!chatViewIsCurrent(view)) return;
 		store.loadConversations();
 		// SUX-3/SUXI-2: the continuation turn queued (all slots taken). Show the
 		// standard queued chip + lock the composer so the card doesn't vanish into
@@ -8233,12 +8865,17 @@ async function confirmPending(pa) {
 			sending.value = true;
 		}
 	} catch (e) {
+		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
 		if (card) card.error = { message: errMessage(e, "Could not confirm.") };
 	} finally {
-		const card = cardById();
-		if (card) card.busy = false;
-		inflightTokens.delete(token);
+		// The switch watcher already dropped this view's in-flight token. Do not
+		// delete a same-token action started by a later A view after A → B → A.
+		if (chatViewIsCurrent(view)) {
+			const card = cardById();
+			if (card) card.busy = false;
+			inflightTokens.delete(token);
+		}
 	}
 }
 // Approve & run (P1, skill approve-and-run): modeled on confirmPending above,
@@ -8256,14 +8893,21 @@ async function approveAndRunPending(pa) {
 	// parent turn is still streaming this conversation.
 	if (convStreaming.value) return;
 	const token = pa.token;
-	const cardById = () => pendingActions.value.find((x) => x.token === token);
+	const view = captureChatView(token);
+	if (pa.conversation !== view.conversation || !pendingActionIsCurrent(view)) return;
+	const cardById = () =>
+		pendingActions.value.find(
+			(x) => x.token === token && x.conversation === view.conversation
+		);
 	pa.busy = true;
 	pa.error = null;
 	approveRunBusyToken.value = token;
 	inflightTokens.add(token);
 	try {
-		const r = await api.approveAndRun(token, pa.conversation || currentId.value || "");
+		const r = await api.approveAndRun(token, view.conversation);
+		if (!pendingActionIsCurrent(view)) return;
 		if (r && r.ok === false) {
+			if (settleSafetyUpdate(token, r)) return;
 			if (confirmationStorageUnavailable(r)) {
 				const card = cardById();
 				if (card) card.error = r.error;
@@ -8295,14 +8939,16 @@ async function approveAndRunPending(pa) {
 			// the run on a failed first step (§3.4), so this is exactly confirmPending's
 			// spent-card path: a durable "failed" receipt chip is already persisted.
 			removePending(token);
-			await loadConversation(currentId.value);
+			await loadConversation(view.conversation);
+			if (!chatViewIsCurrent(view)) return;
 			store.loadConversations();
 			return;
 		}
 		// Success - the run's own writes surface via the turn's normal tool/stream
 		// events as they happen; reload to be sure the transcript reflects step 1.
 		removePending(token);
-		await loadConversation(currentId.value);
+		await loadConversation(view.conversation);
+		if (!chatViewIsCurrent(view)) return;
 		store.loadConversations();
 		if (r && r.queued) {
 			queuedTurn.value = {
@@ -8313,25 +8959,35 @@ async function approveAndRunPending(pa) {
 			sending.value = true;
 		}
 	} catch (e) {
+		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
 		if (card) card.error = { message: errMessage(e, "Could not start the run.") };
 	} finally {
-		const card = cardById();
-		if (card) card.busy = false;
-		approveRunBusyToken.value = null;
-		inflightTokens.delete(token);
+		// See confirmPending: this continuation must not clear a later view's
+		// matching token when the user leaves and returns while it is in flight.
+		if (chatViewIsCurrent(view)) {
+			const card = cardById();
+			if (card) card.busy = false;
+			if (approveRunBusyToken.value === token) approveRunBusyToken.value = null;
+			inflightTokens.delete(token);
+		}
 	}
 }
 // Resolution shared by the typed go-ahead and the Confirm button, so the two
 // ways of approving a card cannot drift apart in what the user then sees.
 // `r` is the envelope from the confirmation itself, already stripped of its card.
-async function onTypedConfirmResolved(r) {
+// `view` is captured before the typed message is sent. A response must never
+// resync or queue a continuation in a chat selected after that send, including
+// an A → B → A return while the server is resolving the typed confirmation.
+async function onTypedConfirmResolved(r, view = captureChatView()) {
+	if (!chatViewIsCurrent(view)) return;
 	if (r && r.ok === false) {
 		// A storage wobble means the write did NOT run, and the card has already
 		// been retired on screen, so say so plainly rather than leave them guessing.
 		if (confirmationStorageUnavailable(r)) {
 			notify(r.error.message, { type: "error" });
-			await resyncPendingConfirmations(currentId.value);
+			await resyncPendingConfirmations(view.conversation);
+			if (!chatViewIsCurrent(view)) return;
 			return;
 		}
 		if (r.error && r.error.type === "InvalidConfirmation") {
@@ -8346,11 +9002,13 @@ async function onTypedConfirmResolved(r) {
 		}
 		// The token was spent and the write failed. A durable "failed" receipt chip
 		// is already in the transcript; reload so it is what the user sees.
-		await loadConversation(currentId.value);
+		await loadConversation(view.conversation);
+		if (!chatViewIsCurrent(view)) return;
 		store.loadConversations();
 		return;
 	}
-	await loadConversation(currentId.value);
+	await loadConversation(view.conversation);
+	if (!chatViewIsCurrent(view)) return;
 	store.loadConversations();
 	// The continuation turn queued behind other work. Same chip the button raises,
 	// so an approved action never vanishes into silence.
@@ -8371,37 +9029,50 @@ async function onTypedConfirmResolved(r) {
 async function discardPending(pa) {
 	if (!pa || pa.busy) return;
 	const token = pa.token;
-	const conv = pa.conversation || currentId.value || "";
+	const view = captureChatView(token);
+	if (pa.conversation !== view.conversation || !pendingActionIsCurrent(view)) return;
+	const cardById = () =>
+		pendingActions.value.find(
+			(card) => card.token === token && card.conversation === view.conversation
+		);
 	pa.busy = true;
 	// Outer try/finally guards the WHOLE settle sequence (including the reload
 	// below), not just the RPC, so a stale resync in flight during that reload
 	// still can't re-add this token (see inflightTokens above).
 	inflightTokens.add(token);
 	try {
-		try {
-			const r = await api.dismissTool(token, conv);
-			if (r && r.ok === false && confirmationStorageUnavailable(r)) {
-				pa.error = r.error;
-				notify(r.error.message, { type: "error" });
-				return;
-			}
-			if (keepsChatCard(r)) {
-				pa.error = { message: chatRefusalMessage(r) };
-				notify(chatRefusalMessage(r), { type: "error" });
-				return;
-			}
-		} catch (e) {
-			pa.error = { message: errMessage(e, "Could not discard.") };
+		const r = await api.dismissTool(token, view.conversation);
+		if (!pendingActionIsCurrent(view)) return;
+		if (settleSafetyUpdate(token, r)) return;
+		if (r && r.ok === false && confirmationStorageUnavailable(r)) {
+			const card = cardById();
+			if (card) card.error = r.error;
+			notify(r.error.message, { type: "error" });
 			return;
-		} finally {
-			pa.busy = false;
+		}
+		if (keepsChatCard(r)) {
+			const card = cardById();
+			if (card) card.error = { message: chatRefusalMessage(r) };
+			notify(chatRefusalMessage(r), { type: "error" });
+			return;
 		}
 		removePending(token);
 		// Re-fetch so the durable "discarded" chip shows in the thread.
-		await loadConversation(currentId.value);
+		await loadConversation(view.conversation);
+		if (!chatViewIsCurrent(view)) return;
 		store.loadConversations();
+	} catch (e) {
+		if (!pendingActionIsCurrent(view)) return;
+		const card = cardById();
+		if (card) card.error = { message: errMessage(e, "Could not discard.") };
 	} finally {
-		inflightTokens.delete(token);
+		// A stale direct dismissal must leave a later view's in-flight guard
+		// untouched. The synchronous switch reset owns the old guard instead.
+		if (chatViewIsCurrent(view)) {
+			const card = cardById();
+			if (card) card.busy = false;
+			inflightTokens.delete(token);
+		}
 	}
 }
 
@@ -8409,11 +9080,9 @@ async function discardPending(pa) {
 // confirm card (the server parks the same card the assistant's own submit /
 // workflow call gets, as the person), then the card is pulled in with the usual
 // resync. It is hidden once a later receipt in the thread acted on that record.
-const nextBusyKey = ref("");
 // The records a submit / workflow receipt already acted on (confirmed, or auto-applied
 // without a card; a failed or discarded one leaves the step open), plus any step a
 // refusal said is gone.
-const nextStepGone = ref(new Set());
 const nextStepActed = computed(() => {
 	return nextStepActedKeys(visibleMessages.value, nextStepGone.value);
 });
@@ -8426,22 +9095,27 @@ function hideNextStep(step) {
 	nextStepGone.value = new Set(nextStepGone.value).add(`${step.doctype}|${step.name}`);
 }
 async function proposeNext(m, step) {
-	if (nextBusyKey.value || !currentId.value) return;
-	nextBusyKey.value = m.name;
+	const view = captureChatView(m?.name || "");
+	if (nextBusyKey.value || !messageActionIsCurrent(view)) return;
+	nextBusyKey.value = view.token;
 	try {
-		const r = await api.proposeNextAction(currentId.value, step);
+		const r = await api.proposeNextAction(view.conversation, step);
+		if (!messageActionIsCurrent(view) || nextBusyKey.value !== view.token) return;
 		if (r && r.ok === false) {
 			const refusal = nextStepRefusal(r);
 			notify(refusal.message, { type: "error" });
 			if (shouldHideNextStep(refusal)) hideNextStep(step);
 			return;
 		}
-		await resyncPendingConfirmations(currentId.value);
+		await resyncPendingConfirmations(view.conversation);
+		if (!messageActionIsCurrent(view) || nextBusyKey.value !== view.token) return;
 	} catch (e) {
+		if (!messageActionIsCurrent(view) || nextBusyKey.value !== view.token) return;
 		notify(errMessage(e, "Could not open that step."), { type: "error" });
 		hideNextStep(step);
 	} finally {
-		nextBusyKey.value = "";
+		if (messageActionIsCurrent(view) && nextBusyKey.value === view.token)
+			nextBusyKey.value = "";
 	}
 }
 
@@ -8451,10 +9125,11 @@ async function proposeNext(m, step) {
 // against whatever is already queued; freshness-guarded against a mid-flight
 // conversation switch.
 async function resyncPendingConfirmations(id, source) {
-	if (!id) return;
+	const view = captureChatView();
+	if (!id || id !== view.conversation) return;
 	let items = null;
 	try {
-		const r = await api.listPendingConfirmations(id, source);
+		const r = await api.listPendingConfirmations(view.conversation, source);
 		// ok:false is a transient store blip (the strict owner-index read). Keep
 		// whatever is already on screen and let the next poll tick retry; never
 		// wipe the queue on a single bad read (that was the fail-closed hole that
@@ -8464,8 +9139,14 @@ async function resyncPendingConfirmations(id, source) {
 	} catch (e) {
 		return;
 	}
-	if (currentId.value !== id) return; // navigated away while the request was in flight
+	if (!chatViewIsCurrent(view)) return; // navigated away, or returned to the same id, while in flight
 	if (!Array.isArray(items)) return;
+	// A clean list is authoritative only for positively attested cards. Do not
+	// let an old/raw list item bypass the per-card enqueue gate or retain a
+	// cached Confirm card.
+	items = items.filter(
+		(it) => it?.pending_card_safe === true && it.conversation === view.conversation
+	);
 	// Reconcile the on-screen queue to the server's authoritative live set for
 	// THIS conversation: DROP cards the store no longer holds (confirmed/expired,
 	// or a stale token orphaned by a model restage) and ADD any a dropped
@@ -8473,6 +9154,12 @@ async function resyncPendingConfirmations(id, source) {
 	// (busy) confirms, are left untouched. Server truth (not a caught socket
 	// frame) decides what shows. A token whose Confirm/Discard RPC is in flight
 	// is never (re)added (P0c in-flight suppression) - see reconcilePending.
+	const removedByCleanResync = pendingActions.value.some(
+		(pa) =>
+			pa.conversation === id &&
+			!inflightTokens.has(pa.token) &&
+			!items.some((it) => it.token === pa.token)
+	);
 	const { kept, toAdd } = reconcilePending(pendingActions.value, id, items, inflightTokens);
 	// Server truth also says which kept cards are still "recent" (decision 6).
 	const fresh = new Map(items.map((it) => [it.token, it]));
@@ -8482,7 +9169,7 @@ async function resyncPendingConfirmations(id, source) {
 	pendingActions.value = kept;
 	for (const it of toAdd) {
 		enqueuePending({
-			conversation: it.conversation || id,
+			conversation: it.conversation,
 			token: it.token,
 			tool: it.tool,
 			summary: it.summary || "",
@@ -8492,8 +9179,12 @@ async function resyncPendingConfirmations(id, source) {
 			expires_at: it.expires_at || null,
 			seq: it.seq ?? null,
 			recent: it.recent,
+			pending_card_safe: it.pending_card_safe,
 		});
 	}
+	// A missing formerly-visible token can be a passive close migration. Fetch
+	// the terminal receipt once so the person gets the Done-only explanation.
+	if (removedByCleanResync && chatViewIsCurrent(view)) loadConversation(view.conversation);
 }
 
 // Authoritative pull. A confirmation card (and therefore its Confirm button AND
@@ -8544,15 +9235,16 @@ function stopPendingPoll() {
 // the conversation's own turn is queued; a dispatching turn is covered by
 // loadConversation's existing streaming resume.
 async function resyncQueuedTurn(id) {
-	if (!id) return;
+	const view = captureChatView();
+	if (!id || id !== view.conversation) return;
 	let active = null;
 	try {
-		const r = await api.getActiveTurn(id);
+		const r = await api.getActiveTurn(view.conversation);
 		active = (r && r.ok && r.active) || null;
 	} catch (e) {
 		return; // best-effort — never block the load
 	}
-	if (currentId.value !== id) return; // navigated away while the request was in flight
+	if (!chatViewIsCurrent(view)) return; // navigated away, or returned to the same id, while in flight
 	// SUXF-3: keep the chip (and the composer lock) through the whole pre-stream
 	// window — queued AND the new preparing/ready stages — so a reload during
 	// prompt-assembly/session-bootstrap shows "Starting…" rather than going silent
@@ -8724,6 +9416,7 @@ function showCopied(id) {
 	}, 1300);
 }
 function editCommand(m) {
+	if (!messageActionIsCurrent(captureChatView(m?.name || ""))) return;
 	input.value = m.content || "";
 	nextTick(() => {
 		const el = composerRef.value?.el;
@@ -8788,41 +9481,83 @@ const curCharts = computed(() => {
 		  )
 		: [];
 });
+function artifactSourceAvailability({ conversation, message, item, file_url, available }) {
+	const current = artifact.value;
+	if (
+		current &&
+		current.conv === currentId.value &&
+		current.conv === conversation &&
+		current.m.name === message &&
+		current.cv.name === item &&
+		current.cv.file_url === file_url
+	)
+		current.sourceUnavailable = !available;
+}
 function closeArtifact() {
 	artifact.value = null;
 }
 function setSheet(si) {
 	if (artifact.value) artifact.value = { ...artifact.value, sheetIdx: si };
 }
+function artifactSourceIsCurrent(source) {
+	return (
+		!!source?.view &&
+		source.m?.name === source.view.token &&
+		source.conv === source.view.conversation &&
+		messageActionIsCurrent(source.view)
+	);
+}
 async function openArtifact(m, cv) {
+	const view = captureChatView(m?.name || "");
+	if (!messageActionIsCurrent(view)) return;
 	const url = cv.file_url || cvOf(m, cv);
 	const t = cv.type;
-	const conv = currentId.value;
+	const conv = view.conversation;
 	if (t === "pdf" || t === "image") {
-		artifact.value = { m, cv, url, conv, kind: t };
+		artifact.value = { m, cv, url, conv, view, kind: t };
 		if (t === "pdf") ensurePdfTemplates();
 		return;
 	}
 	if (t === "html" || t === "svg") {
 		let content = cvOf(m, cv);
+		let pending;
 		if (!content) {
-			artifact.value = { m, cv, url, conv, kind: "loading" };
+			artifact.value = { m, cv, url, conv, view, kind: "loading" };
+			const loading = artifact.value;
+			pending = loading;
 			await ensureCanvas(m);
+			if (!messageActionIsCurrent(view) || artifact.value !== loading) return;
 			content = cvOf(m, cv);
 		}
-		artifact.value = { m, cv, url, conv, kind: content ? t : "nopreview", content };
+		if (!messageActionIsCurrent(view)) return;
+		artifact.value = {
+			...pending,
+			m,
+			cv,
+			url,
+			conv,
+			view,
+			kind: content ? t : "nopreview",
+			content,
+		};
 		return;
 	}
 	// "file" (xlsx / csv / txt / …) → ask the backend for a tabular/text preview.
-	artifact.value = { m, cv, url, conv, kind: "loading" };
+	artifact.value = { m, cv, url, conv, view, kind: "loading" };
+	const loading = artifact.value;
+	let previewError = "";
 	try {
 		const r = await api.previewFile(cv.file_url);
+		if (!messageActionIsCurrent(view) || artifact.value !== loading) return;
+		previewError = r?.error || "";
 		if (r && r.kind === "table" && Array.isArray(r.sheets) && r.sheets.length) {
 			artifact.value = {
+				...loading,
 				m,
 				cv,
 				url,
 				conv,
+				view,
 				kind: "table",
 				...tablePreviewFields(r),
 				sheetIdx: 0,
@@ -8830,13 +9565,33 @@ async function openArtifact(m, cv) {
 			return;
 		}
 		if (r && r.kind === "text") {
-			artifact.value = { m, cv, url, conv, kind: "text", text: r.text || "" };
+			artifact.value = {
+				...loading,
+				m,
+				cv,
+				url,
+				conv,
+				view,
+				kind: "text",
+				text: r.text || "",
+				document: r.document,
+			};
 			return;
 		}
 	} catch (e) {
-		/* fall through to download-only */
+		if (!messageActionIsCurrent(view) || artifact.value !== loading) return;
 	}
-	artifact.value = { m, cv, url, conv, kind: "nopreview" };
+	if (!messageActionIsCurrent(view) || artifact.value !== loading) return;
+	artifact.value = {
+		...loading,
+		m,
+		cv,
+		url,
+		conv,
+		view,
+		kind: "nopreview",
+		error: previewError,
+	};
 }
 
 // --- Per-document PDF template override (jarvis.pdf_templates.rerender_document).
@@ -9190,18 +9945,28 @@ watch(effectiveDark, () => {
 			ensureCanvas(m);
 	}
 });
-async function openInDashboards(m, cv) {
-	const conv = currentId.value;
-	if (!conv || !canPromoteDashCanvas(cv)) return;
+async function openInDashboards(m, cv, source = null) {
+	const view = captureChatView(m?.name || "");
+	if (
+		!messageActionIsCurrent(view) ||
+		(source && (!artifactSourceIsCurrent(source) || source.m !== m || source.cv !== cv)) ||
+		!canPromoteDashCanvas(cv)
+	)
+		return;
 	let dashboard = null;
 	try {
-		dashboard = await dashboardForConversation(conv);
+		dashboard = await dashboardForConversation(view.conversation);
 	} catch (e) {
 		// A lookup that fails (offline, a dashboard since moved out of scope)
 		// must never leave a dead button: fall through to the builder promotion,
 		// which needs nothing but the transcript.
 		dashboard = null;
 	}
+	if (
+		!messageActionIsCurrent(view) ||
+		(source && (!artifactSourceIsCurrent(source) || source.m !== m || source.cv !== cv))
+	)
+		return;
 	closeArtifact();
 	// m.creation decides the fork: a conversation keeps building after its first
 	// save, so a click on a LATER artifact must promote that artifact, not reopen
@@ -9211,7 +9976,7 @@ async function openInDashboards(m, cv) {
 	router.push(
 		dashboardOpenRoute({
 			dashboard,
-			conversation: conv,
+			conversation: view.conversation,
 			messageId: m.name,
 			messageCreation: m.creation,
 		})
@@ -9326,9 +10091,9 @@ let _olderFailedAt = 0;
 // Whether the scroll trigger may fire: off from a chat switch until the open has
 // scrolled to the newest message, and from a prepend until its hold is applied.
 let _olderArmed = false;
-function armOlderNextFrame() {
+function armOlderNextFrame(view = captureChatView()) {
 	requestAnimationFrame(() => {
-		_olderArmed = true;
+		if (chatViewIsCurrent(view)) _olderArmed = true;
 	});
 }
 function holdFromBottom(fromBottom) {
@@ -9358,7 +10123,8 @@ function promptsOf(rows) {
 		.filter(Boolean);
 }
 async function loadOlder({ auto = false } = {}) {
-	const id = currentId.value;
+	const view = captureChatView();
+	const id = view.conversation;
 	const paging = historyPaging.value;
 	if (!id || paging.conv !== id || !paging.hasMore || loadingOlder.value) return;
 	if (auto && Date.now() - _olderFailedAt < 10000) return;
@@ -9366,26 +10132,33 @@ async function loadOlder({ auto = false } = {}) {
 	try {
 		const d = await api.getConversation(id, { before: paging.before });
 		// A switch, or a resync that started the thread over, owns the rows now.
-		if (currentId.value !== id || historyPaging.value.before !== paging.before) return;
+		if (!chatViewIsCurrent(view) || historyPaging.value.before !== paging.before) return;
 		const el = threadEl.value;
 		const fromBottom = el ? el.scrollHeight - el.scrollTop : null;
 		_olderArmed = false;
 		const page = prependOlderPage(messages.value, historyPaging.value, d);
 		messages.value = page.messages;
 		historyPaging.value = { ...page.paging, conv: id };
+		// An old page can contain a terminal receipt for a card that was still
+		// visible from a newer page. Observe the fetched rows as soon as they are
+		// merged so its Done-only safety notice is not lost behind pagination.
+		observePassiveSafetyUpdates(d?.messages || []);
 		promptHistory.value = promptsOf(promptRows(recentPrompts, messages.value));
 		for (const m of d?.messages || []) {
 			if (Array.isArray(m.canvas) && m.canvas.length) ensureCanvas(m);
 		}
 		await nextTick();
+		if (!chatViewIsCurrent(view)) return;
 		if (fromBottom !== null) holdFromBottom(fromBottom);
 		armOlderNextFrame();
-		processMermaid();
+		processMermaid(view);
 	} catch (e) {
-		_olderFailedAt = Date.now();
-		notifyActionError("Couldn't load earlier messages", e);
+		if (chatViewIsCurrent(view)) {
+			_olderFailedAt = Date.now();
+			notifyActionError("Couldn't load earlier messages", e);
+		}
 	} finally {
-		loadingOlder.value = false;
+		if (chatViewIsCurrent(view)) loadingOlder.value = false;
 	}
 }
 // Arrow click: smooth-scroll to the newest message and re-pin.
@@ -9559,8 +10332,32 @@ function _checkPulseOnce(id) {
 // A File Box file's chat shows what the file waits on, the same items the Approval
 // Board lists: its questions are answered here as on the board. Re-read on every load
 // (a run's end reloads the chat, which is when a new question appears).
-const fileboxWaits = ref([]);
+const {
+	items: fileboxWaits,
+	visibleItems: visibleFileboxWaits,
+	refresh: refreshFileboxWaits,
+	onEvent: onFileboxWaitEvent,
+	reviewSession: fileboxReviewSession,
+	openReview: reviewFileboxSheet,
+	reviewChanged: fileboxReviewChanged,
+	closeReview: closeFileboxReview,
+} = useFileBoxWaits({
+	conversation: currentId,
+	activeAsk,
+	load: api.fileboxOpenWaits,
+	onChanged: () => store.refreshApprovalsCount?.(),
+});
 const fileboxWaitBusy = ref("");
+const fileboxWaitInFlight = new Set();
+function fileboxWaitIsCurrent(view) {
+	return (
+		chatViewIsCurrent(view) &&
+		(fileboxWaitInFlight.has(view.token) ||
+			fileboxWaits.value.some(
+				(wait) => wait.name === view.token && wait.conversation === view.conversation
+			))
+	);
+}
 // Background reports this chat started: a card each until Jarvis shows the results.
 // Re-read on every load, on Frappe's report_generated event, and every 15s while one
 // is still preparing (an errored run sends no event).
@@ -9568,13 +10365,14 @@ const reportRuns = ref([]);
 const REPORT_POLL_MS = 15000;
 let _reportPoll = null;
 async function refreshReportRuns(id) {
-	if (!id) {
-		reportRuns.value = [];
+	const view = captureChatView();
+	if (!id || id !== view.conversation) {
+		if (chatViewIsCurrent(view)) reportRuns.value = [];
 		return;
 	}
 	try {
-		const r = await api.chatReportRuns(id);
-		if (currentId.value === id) reportRuns.value = (r && r.items) || [];
+		const r = await api.chatReportRuns(view.conversation);
+		if (chatViewIsCurrent(view)) reportRuns.value = (r && r.items) || [];
 	} catch (e) {
 		// best-effort: asking Jarvis still finds the report
 	}
@@ -9598,35 +10396,36 @@ function showReportResults(item) {
 	if (busy.value || convStreaming.value) return;
 	send(`Show me the ${item.report_name} results${item.filters ? ` (${item.filters})` : ""}.`);
 }
-async function refreshFileboxWaits(id, isFileBox) {
-	if (!id || !isFileBox) {
-		fileboxWaits.value = [];
-		return;
-	}
-	try {
-		const r = await api.fileboxOpenWaits(id);
-		if (currentId.value === id) fileboxWaits.value = (r && r.items) || [];
-	} catch (e) {
-		// best-effort: the board still lists them
-	}
-}
 async function decideFileboxWait(item, text, approve) {
-	if (fileboxWaitBusy.value || !text) return;
-	const id = currentId.value;
-	fileboxWaitBusy.value = item.name;
+	if (fileboxWaitBusy.value || !text || !item?.name) return;
+	const view = captureChatView(item.name);
+	if (item.conversation !== view.conversation || !fileboxWaitIsCurrent(view)) return;
+	fileboxWaitBusy.value = view.token;
+	fileboxWaitInFlight.add(view.token);
 	try {
-		await api.decideApproval(item.name, text, approve);
-		notify(approve ? "Answer sent. Jarvis carries on with this file." : "Rejected.", {
-			type: "success",
-		});
+		const res = (await api.decideApproval(view.token, text, approve)) || {};
+		if (!fileboxWaitIsCurrent(view)) return;
+		if (res.reason === "source_unavailable") {
+			notify(
+				"Decision saved. The source file is unavailable. Select a source file, then send a new message to continue.",
+				{ type: "warning" }
+			);
+		} else {
+			notify(approve ? "Answer sent. Jarvis carries on with this file." : "Rejected.", {
+				type: "success",
+			});
+		}
 		store.refreshApprovalsCount?.();
 	} catch (e) {
+		if (!fileboxWaitIsCurrent(view)) return;
 		notifyActionError("Couldn't send that answer", e);
 	} finally {
-		fileboxWaitBusy.value = "";
+		fileboxWaitInFlight.delete(view.token);
+		if (chatViewIsCurrent(view) && fileboxWaitBusy.value === view.token)
+			fileboxWaitBusy.value = "";
 	}
 	// the decision resumes the run in this chat: show it, and re-read what is left
-	if (id && currentId.value === id) loadConversation(id).catch(() => {});
+	if (fileboxWaitIsCurrent(view)) loadConversation(view.conversation).catch(() => {});
 }
 // Whether the last loadConversation picked a live reply back up (read by checkSilentRun),
 // and when the open chat last heard from its run. Declared before loadConversation: a
@@ -9638,6 +10437,8 @@ function noteRunSignal() {
 	_lastRunSignalAt = Date.now();
 }
 async function loadConversation(id, { staleRetry = true } = {}) {
+	const view = captureChatView();
+	if (id !== view.conversation) return false;
 	const loadId = ++_conversationLoadId;
 	_recoveryRefreshEpoch++;
 	// Preserve the reader's position across an in-place resync. Captured BEFORE
@@ -9650,6 +10451,9 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 		// another chat's cards must not linger (or be acted on) while this one loads
 		fileboxWaits.value = [];
 		reportRuns.value = [];
+		safetySettledTokens.value = new Set();
+		safetyUpdateNotice.value = null;
+		safetyUpdateQueue.value = [];
 	}
 	const _keepScrollTop =
 		_sameConv && !pinnedToBottom.value && threadEl.value ? threadEl.value.scrollTop : null;
@@ -9660,6 +10464,9 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	triggerMode.value = false;
 	createMenuOpen.value = false;
 	if (!id) {
+		safetySettledTokens.value = new Set();
+		safetyUpdateNotice.value = null;
+		safetyUpdateQueue.value = [];
 		resetAutoModeFor(true);
 		messages.value = injectPendingBubbles([], _pendingSends.peek(_NEW_CHAT_SCOPE));
 		fileboxWaits.value = [];
@@ -9701,12 +10508,13 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 					() =>
 						_recoveryViewActive &&
 						id === currentId.value &&
+						chatViewIsCurrent(view) &&
 						loadId === _conversationLoadId
 				);
 			} catch {
 				/* Fall through to existing unavailable-chat recovery. */
 			}
-			if (!_recoveryViewActive || id !== currentId.value || loadId !== _conversationLoadId)
+			if (!_recoveryViewActive || !chatViewIsCurrent(view) || loadId !== _conversationLoadId)
 				return null;
 			// Restore home's draft before changing the scope. Never create a chat
 			// or stop a server turn just because this read was refused.
@@ -9728,7 +10536,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// to with the wrong (or empty) messages — and only a page refresh, which
 	// does a single clean load, would put it right. (Root cause of "open a
 	// chat, switch away and back, it shows empty until I refresh".)
-	if (!d || currentId.value !== id || loadId !== _conversationLoadId || !_recoveryViewActive)
+	if (!d || !chatViewIsCurrent(view) || loadId !== _conversationLoadId || !_recoveryViewActive)
 		return false;
 	// Context meter: best-effort, off the critical path (never awaited) — a slow
 	// or failed get_conversation_context must not delay messages rendering.
@@ -9764,6 +10572,11 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// switch. Dedupe by name (a rejection that lands while we're on-screen already holds one).
 	_pendingSends.reconcile(id, messages.value);
 	messages.value = injectPendingBubbles(messages.value, _pendingSends.peek(id));
+	// A successful snapshot belongs to this exact view generation. This stamps
+	// direct draft actions back in after a switch, including A → B → A where the
+	// message key can equal the one in the old A array.
+	directActionViewGeneration.value = view.generation;
+	observePassiveSafetyUpdates(messages.value);
 	// Auto mode: the server flag always wins. The local armed choice is reset only
 	// on a real chat switch, never on an in-place resync of the chat on screen (a
 	// tab-focus reload must not undo what the user just toggled).
@@ -9801,6 +10614,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// SUXI-1: rebuild the queued chip from server truth (reload / switch / second
 	// tab / reconnect all lose the client-only chip otherwise).
 	resyncQueuedTurn(id);
+	fileboxConversation.value = !!d?.conversation?.file_box;
 	refreshFileboxWaits(id, d?.conversation?.file_box);
 	refreshReportRuns(id);
 	// Seed Up/Down recall from THIS conversation's past prompts. Without this,
@@ -9942,6 +10756,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	if (!_sameConv) _checkPulseOnce(id);
 	_shownConvId = id;
 	await nextTick();
+	if (!chatViewIsCurrent(view) || loadId !== _conversationLoadId) return false;
 	if (_keepScrollTop !== null && threadEl.value) {
 		// Hold the position while the thread finishes laying out. The message array
 		// was just replaced, so on this tick the content is still short and a single
@@ -9967,7 +10782,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 		scrollBottom();
 	}
 	armOlderNextFrame();
-	processMermaid();
+	processMermaid(view);
 	// An older page loaded while this read was in flight brought pending cards it did
 	// not ask about: refresh once more so none stays confirmable after it resolved.
 	if (page.stale.length && staleRetry)
@@ -10002,23 +10817,34 @@ const MERMAID_PALETTE = [
 // raw source. _mmQueued re-runs once if a trigger fires mid-pass.
 let _mmRunning = false;
 let _mmQueued = false;
-async function processMermaid() {
+let _mmQueuedView = null;
+function scheduleMermaid(view = captureChatView(), delay = 0) {
+	setTimeout(() => {
+		if (chatViewIsCurrent(view)) processMermaid(view);
+	}, delay);
+}
+async function processMermaid(view = captureChatView()) {
+	if (!chatViewIsCurrent(view)) return;
 	if (_mmRunning) {
 		_mmQueued = true;
+		_mmQueuedView = view;
 		return;
 	}
 	_mmRunning = true;
 	try {
-		await _renderMermaid();
+		await _renderMermaid(view);
 	} finally {
 		_mmRunning = false;
 		if (_mmQueued) {
+			const queuedView = _mmQueuedView;
 			_mmQueued = false;
-			setTimeout(processMermaid, 0);
+			_mmQueuedView = null;
+			if (chatViewIsCurrent(queuedView)) scheduleMermaid(queuedView);
 		}
 	}
 }
-async function _renderMermaid() {
+async function _renderMermaid(view) {
+	if (!chatViewIsCurrent(view)) return;
 	const nodes = rootEl.value?.querySelectorAll?.(".jv-mermaid:not([data-rendered])");
 	if (!nodes || !nodes.length) return;
 	try {
@@ -10026,6 +10852,7 @@ async function _renderMermaid() {
 	} catch (e) {
 		return;
 	}
+	if (!chatViewIsCurrent(view)) return;
 	// Re-initialize each run so the palette tracks the active light/dark theme —
 	// mermaid snapshots its theme at init, so a one-time init would freeze it.
 	const dark = effectiveDark.value;
@@ -10068,6 +10895,7 @@ async function _renderMermaid() {
 	});
 	let n = 0;
 	for (const el of nodes) {
+		if (!chatViewIsCurrent(view)) return;
 		const src = (el.textContent || "").trim();
 		if (!src) {
 			el.setAttribute("data-rendered", "1");
@@ -10078,6 +10906,7 @@ async function _renderMermaid() {
 				`jvmmd-${n++}-${Math.floor(performance.now())}`,
 				src
 			);
+			if (!chatViewIsCurrent(view)) return;
 			el.innerHTML = svg;
 			el.setAttribute("data-rendered", "1"); // mark only AFTER a successful render
 			_addChartDownload(el); // hover button to save the chart as PNG
@@ -10088,7 +10917,9 @@ async function _renderMermaid() {
 			else el.setAttribute("data-try", String(t));
 		}
 	}
-	nextTick(scrollBottomIfPinned);
+	nextTick(() => {
+		if (chatViewIsCurrent(view)) scrollBottomIfPinned();
+	});
 }
 // Drop a hover "download PNG" button onto a rendered chart. The chart is raw
 // (markdown-rendered) HTML, not a Vue node, so we wire the button imperatively.
@@ -10188,13 +11019,14 @@ async function selectConversation(id) {
 	// navigating into the run's own conversation.
 	if (macroRun.value && macroRun.value.conversation !== id) macroRun.value = null;
 	currentId.value = id;
+	const view = captureChatView();
 	// Selection can also start INSIDE the component (proactive toast, run
 	// history) — keep the URL coherent with the sidebar's /c/:id navigation.
 	// No-op when the route watcher initiated this call (params already match).
 	if (route.params.id !== id) router.replace("/c/" + id);
-	const loaded = await loadConversation(id);
+	const loaded = await loadConversation(view.conversation);
 	await nextTick();
-	if (loaded && _recoveryViewActive && currentId.value === id) composerRef.value?.focusInput();
+	if (loaded && _recoveryViewActive && chatViewIsCurrent(view)) composerRef.value?.focusInput();
 }
 // Surface a failed action (new chat, send, …) as an error toast. String()-coerces
 // the extracted reason so a non-string Frappe error payload can't throw inside the
@@ -10228,16 +11060,22 @@ async function newChat() {
 	// not leave the user on a half-reset screen (blank draft + wiped run state
 	// but still the old conversation) with no feedback — surface why and bail,
 	// keeping them exactly where they were.
+	const view = captureChatView();
 	let conv;
 	try {
 		conv = await api.createOrFocusEmpty();
 	} catch (e) {
-		notifyActionError("Couldn't start a new chat", e);
+		if (chatViewIsCurrent(view)) notifyActionError("Couldn't start a new chat", e);
 		return;
 	}
+	// A click in A can settle after the person has selected B, or selected A
+	// again. The server may have made an empty chat, but it must not take over
+	// the newer view or its route.
+	if (!chatViewIsCurrent(view)) return;
 	swapDraft(null);
 	resetRunState();
 	currentId.value = conv?.name || conv;
+	const newView = captureChatView();
 	// loadConversation does not run on this path, so the `!_sameConv` pulse
 	// check there never fires for a new chat — this is a genuine chat-open
 	// event too (pulse is gated per-user-period, not per-conversation, so an
@@ -10282,11 +11120,12 @@ async function newChat() {
 	// replaces any /c/:old-id so the previous conversation isn't stranded.
 	if (currentId.value) router.replace("/c/" + currentId.value);
 	await store.loadConversations();
+	if (!chatViewIsCurrent(newView)) return;
 	// A genuinely-new chat may have just moved the server-side counter onto a
 	// multiple of three - re-probe, but never await it (must never block chat).
 	probeGreeting();
 	await nextTick();
-	composerRef.value?.focusInput();
+	if (chatViewIsCurrent(newView)) composerRef.value?.focusInput();
 }
 // Welcome cards drop the prompt into the input (don't send) so the user can
 // tweak it first.
@@ -10300,29 +11139,31 @@ function openErpDesk() {
 	window.open("/app", "_blank");
 }
 async function selectModel(m) {
+	const view = captureChatView();
 	const prev = modelOverride.value;
 	modelOverride.value = m;
-	if (currentId.value) {
+	if (view.conversation) {
 		try {
-			const res = await api.setConversationModel(currentId.value, m);
+			const res = await api.setConversationModel(view.conversation, m);
 			// The server rejects a model the customer has not configured. Roll the
 			// pill back rather than showing a pin the next turn will not honour.
-			if (res && res.ok === false) modelOverride.value = prev;
+			if (chatViewIsCurrent(view) && res && res.ok === false) modelOverride.value = prev;
 		} catch (e) {
-			modelOverride.value = prev;
+			if (chatViewIsCurrent(view)) modelOverride.value = prev;
 		}
 	}
 }
 
 async function selectThinking(level) {
+	const view = captureChatView();
 	const prev = thinkingOverride.value;
 	thinkingOverride.value = level;
-	if (currentId.value) {
+	if (view.conversation) {
 		try {
-			const res = await api.setConversationThinking(currentId.value, level);
-			if (res && res.ok === false) thinkingOverride.value = prev;
+			const res = await api.setConversationThinking(view.conversation, level);
+			if (chatViewIsCurrent(view) && res && res.ok === false) thinkingOverride.value = prev;
 		} catch (e) {
-			thinkingOverride.value = prev;
+			if (chatViewIsCurrent(view)) thinkingOverride.value = prev;
 		}
 	}
 }
@@ -10336,7 +11177,8 @@ async function retry(messageId) {
 	// here the error card's Retry re-enables mid-run and every click launches
 	// another turn - the agent working "again and again". busy also blocks a
 	// retry while any other turn is in flight (single-flight chat).
-	if (retrying.value || busy.value) return;
+	const view = captureChatView(messageId);
+	if (retrying.value || busy.value || !messageActionIsCurrent(view)) return;
 	retrying.value = true;
 	sending.value = true;
 	waiting.value = true;
@@ -10345,6 +11187,7 @@ async function retry(messageId) {
 	currentMsgId.value = null;
 	try {
 		const r = await api.retryMessage(messageId);
+		if (!messageActionIsCurrent(view)) return;
 		if (r && r.ok === false) {
 			sending.value = false;
 			waiting.value = false;
@@ -10367,17 +11210,19 @@ async function retry(messageId) {
 			clearHold();
 		}
 	} catch (e) {
+		if (!messageActionIsCurrent(view)) return;
 		sending.value = false;
 		waiting.value = false;
 		notifyActionError("Couldn't retry that", e);
 	} finally {
-		retrying.value = false;
+		if (messageActionIsCurrent(view)) retrying.value = false;
 	}
 }
 
 function resendFailed(m) {
 	// The original request lives on the scope-owned failed bubble. send() checks
 	// every guard before replacing it; a blocked Retry must never lose work.
+	if (!messageActionIsCurrent(captureChatView(m?.name || ""))) return;
 	if (m.deliveryState === "uncertain") return recoverSend(m);
 	return send({ retryBubble: m }, m.voiceAck || null);
 }
@@ -10396,9 +11241,17 @@ function consumeRecoveredContext(request, scope) {
 		groundNextTurn.value = false;
 }
 
-async function refreshRecoveredSend(m, r) {
+async function refreshRecoveredSend(m, r, view) {
+	const viewIsCurrent = () => !view || chatViewIsCurrent(view);
 	const id = r.conversation_id;
-	if (!_recoveryViewActive || !id || currentId.value !== id || sending.value || waiting.value)
+	if (
+		!_recoveryViewActive ||
+		!viewIsCurrent() ||
+		!id ||
+		currentId.value !== id ||
+		sending.value ||
+		waiting.value
+	)
 		return;
 	const epoch = ++_recoveryRefreshEpoch;
 	const snapshot = () =>
@@ -10419,6 +11272,7 @@ async function refreshRecoveredSend(m, r) {
 		const data = await api.getConversation(id, { refresh, after });
 		if (
 			!_recoveryViewActive ||
+			!viewIsCurrent() ||
 			currentId.value !== id ||
 			epoch !== _recoveryRefreshEpoch ||
 			before !== snapshot()
@@ -10495,7 +11349,8 @@ async function refreshRecoveredSend(m, r) {
 	}
 }
 
-async function settleRecoveredSend(m, r) {
+async function settleRecoveredSend(m, r, view) {
+	const viewIsCurrent = () => !view || chatViewIsCurrent(view);
 	if (m.deliveryDismissed || ["delivered", "rejected"].includes(m.deliveryState)) return;
 	const scope = _pendingSends.scopeOf(m);
 	if (scope == null) return;
@@ -10520,8 +11375,10 @@ async function settleRecoveredSend(m, r) {
 			: "Delivery confirmed. View the conversation for the current result.";
 	// Only adopt this home send while the same empty surface still owns it.
 	// A newer draft/request or another mounted route must never be moved.
+	let refreshView = view;
 	if (
 		_recoveryViewActive &&
+		viewIsCurrent() &&
 		scope === _NEW_CHAT_SCOPE &&
 		!currentId.value &&
 		!input.value &&
@@ -10533,27 +11390,40 @@ async function settleRecoveredSend(m, r) {
 		_pendingSends.remove(scope, m.name);
 		_pendingSends.add(r.conversation_id, m);
 		currentId.value = r.conversation_id;
+		refreshView = captureChatView();
 		convAutoMode.value = r.auto_mode ? 1 : 0;
 		originPage.value = "";
 		originOf.value = "";
 		router.replace("/c/" + r.conversation_id);
 	}
-	if (_recoveryViewActive && currentId.value === r.conversation_id && r.message_id) {
+	if (
+		_recoveryViewActive &&
+		viewIsCurrent() &&
+		currentId.value === r.conversation_id &&
+		r.message_id
+	) {
 		autoModeDecided.value = true;
 		if ("auto_mode" in r) convAutoMode.value = r.auto_mode ? 1 : 0;
 	}
 	if (r.confirmed) {
 		_pendingSends.remove(_pendingSends.scopeOf(m), m.name);
-		if (_recoveryViewActive && r.ok === false) notify(m.deliveryNote, { type: "error" });
+		if (_recoveryViewActive && viewIsCurrent() && r.ok === false)
+			notify(m.deliveryNote, { type: "error" });
 	}
 	// A receipt is historical evidence. It must not move the current draft,
 	// change run state or gates, restore old picks, or revive a queue chip.
 	store.loadConversations();
-	await refreshRecoveredSend(m, r);
+	await refreshRecoveredSend(m, r, refreshView);
 }
 
 async function recoverSend(m, retrySame = false) {
 	if (m.deliveryState !== "uncertain" || m.deliveryBusy) return;
+	const view = captureChatView(m?.name || "");
+	const recoveryViewIsCurrent = () => {
+		const scope = _pendingSends.scopeOf(m);
+		return messageActionIsCurrent(view) && scope === (view.conversation || _NEW_CHAT_SCOPE);
+	};
+	if (!recoveryViewIsCurrent()) return;
 	if (
 		retrySame &&
 		(booting.value || holdActive.value || compacting.value || noAiConnected.value)
@@ -10571,17 +11441,19 @@ async function recoverSend(m, retrySame = false) {
 		const operation = retrySame
 			? api.sendMessage(...m.sendRequest.args)
 			: api.checkMessageDelivery(id);
+		const deadline = retrySame ? SEND_DEADLINE_MS : CHECK_DEADLINE_MS;
 		const r = await observeDelivery(
 			operation,
 			() => {
 				if (m.deliveryReadEpoch === epoch && m.deliveryState === "checking") {
 					m.deliveryState = "uncertain";
 					m.deliveryBusy = false;
+					m.deliveryNote = deliveryFailureCopy(deliveryTimeoutError(deadline), id);
 				}
 			},
-			retrySame ? 30000 : 15000
+			deadline
 		);
-		if (m.sendRequest.requestId === id) await settleRecoveredSend(m, r);
+		if (m.sendRequest.requestId === id) await settleRecoveredSend(m, r, view);
 	} catch (error) {
 		if (
 			!m.deliveryDismissed &&
@@ -10590,7 +11462,7 @@ async function recoverSend(m, retrySame = false) {
 			m.deliveryState === "checking"
 		) {
 			m.deliveryState = "uncertain";
-			m.deliveryNote = deliveryFailureCopy(error);
+			m.deliveryNote = deliveryFailureCopy(error, id);
 		}
 	} finally {
 		if (m.sendRequest.requestId === id && m.deliveryReadEpoch === epoch)
@@ -10599,8 +11471,14 @@ async function recoverSend(m, retrySame = false) {
 }
 
 async function dismissUncertain(m) {
+	const view = captureChatView(m?.name || "");
 	const scope = _pendingSends.scopeOf(m);
-	if (scope == null || !["uncertain", "delivered"].includes(m.deliveryState)) return;
+	if (
+		!messageActionIsCurrent(view) ||
+		scope == null ||
+		!["uncertain", "delivered"].includes(m.deliveryState)
+	)
+		return;
 	if (
 		m.deliveryState === "uncertain" &&
 		!(await confirm({
@@ -10610,7 +11488,8 @@ async function dismissUncertain(m) {
 		}))
 	)
 		return;
-	if (!["uncertain", "delivered"].includes(m.deliveryState)) return;
+	if (!messageActionIsCurrent(view) || !["uncertain", "delivered"].includes(m.deliveryState))
+		return;
 	if (m.deliveryState === "uncertain") voiceStore?.orphanToken(m.voiceAck || []);
 	m.deliveryDismissed = true;
 	_pendingSends.remove(_pendingSends.scopeOf(m), m.name);
@@ -10673,13 +11552,14 @@ async function send(textArg, resendAck) {
 	// so a false positive never eats a message and the persona "show it" backstop stays
 	// reachable. Main-composer sends only (not resend/prefill).
 	if (fromMain && currentId.value && !pendingFiles.value.length && isShowCardRequest(text)) {
-		const _typedConv = currentId.value;
+		const _typedView = captureChatView();
+		const _typedConv = _typedView.conversation;
 		const before = visiblePendingActions.value.length;
 		seedPendingFromRows(messages.value, _typedConv);
 		await resyncPendingConfirmations(_typedConv, "typed");
 		// Swallow ONLY if a card actually surfaced AND we're still on the same conversation
 		// (a switch during the await must not clear the new composer).
-		if (currentId.value === _typedConv && visiblePendingActions.value.length > before) {
+		if (chatViewIsCurrent(_typedView) && visiblePendingActions.value.length > before) {
 			input.value = "";
 			notify("Found a pending confirmation.", { type: "success" });
 			return;
@@ -10788,6 +11668,11 @@ async function send(textArg, resendAck) {
 	// while this POST is in flight, so all post-send reconciliation gates on
 	// "still on the chat we sent from" — never yank them back to this one.
 	const sentFrom = retryBubble ? retryBubble.sendRequest.conversation : currentId.value || "";
+	// A typed confirmation is a direct decision hidden inside this send. Keep the
+	// full view identity from before its POST so its result cannot load or lock a
+	// later B (or a later generation of A) after a conversation switch.
+	const _sentView = captureChatView();
+	const _sentViewIsCurrent = () => chatViewIsCurrent(_sentView);
 	// One-shot wiki grounding: pass the armed flag but only CONSUME it on a
 	// successful send, so a rejected send (and its Retry) keeps grounding armed.
 	const groundWiki = groundNextTurn.value;
@@ -10860,9 +11745,11 @@ async function send(textArg, resendAck) {
 	//      written. Staying pinned is what made a long reply unreadable.
 	// The arrow appears once the text runs past the bottom; only a scroll back to
 	// the bottom (or that arrow) resumes following.
-	scrollBottom();
-	pinnedToBottom.value = false;
-	showScrollDown.value = false;
+	if (_sentViewIsCurrent()) {
+		scrollBottom();
+		pinnedToBottom.value = false;
+		showScrollDown.value = false;
+	}
 	sendRequest.args = JSON.parse(
 		JSON.stringify([
 			sendRequest.conversation,
@@ -10889,29 +11776,41 @@ async function send(textArg, resendAck) {
 			return;
 		_optBubble.failed = true;
 		_optBubble.deliveryState = "uncertain";
+		// The deadline is the one path here that is not an exception, so without
+		// this the bubble showed the bare title and no reason. A later throw or
+		// late answer still overwrites it.
+		if (!_optBubble.deliveryNote)
+			_optBubble.deliveryNote = deliveryFailureCopy(
+				deliveryTimeoutError(SEND_DEADLINE_MS),
+				sendRequest.requestId
+			);
 		const scope = _pendingSends.scopeOf(_optBubble) || _sentScope;
 		_pendingSends.add(scope, _optBubble);
-		if (_recoveryViewActive && _currentScope() === scope)
+		if (_recoveryViewActive && _sentViewIsCurrent())
 			messages.value = injectPendingBubbles(messages.value, [_optBubble]);
 	};
 	try {
-		const r = await observeDelivery(api.sendMessage(...sendRequest.args), () => {
-			expired = true;
-			markUncertain();
-			// Do not interrupt a reply which has already started or another chat.
-			if (_currentScope() === _sentScope && !currentMsgId.value) {
-				sending.value = false;
-				waiting.value = false;
-			}
-		});
+		const r = await observeDelivery(
+			api.sendMessage(...sendRequest.args),
+			() => {
+				expired = true;
+				markUncertain();
+				// Do not interrupt a reply which has already started or another chat.
+				if (_sentViewIsCurrent() && !currentMsgId.value) {
+					sending.value = false;
+					waiting.value = false;
+				}
+			},
+			SEND_DEADLINE_MS
+		);
 		if (
 			expired ||
 			!_recoveryViewActive ||
 			(_sentScope === _NEW_CHAT_SCOPE &&
 				(input.value || pendingFiles.value.length || drafts.value[_NEW_CHAT_SCOPE]))
 		) {
-			await settleRecoveredSend(_optBubble, r);
-			if (_recoveryViewActive && _currentScope() === _sentScope && !currentMsgId.value) {
+			await settleRecoveredSend(_optBubble, r, _sentView);
+			if (_recoveryViewActive && _sentViewIsCurrent() && !currentMsgId.value) {
 				sending.value = false;
 				waiting.value = false;
 			}
@@ -10927,9 +11826,13 @@ async function send(textArg, resendAck) {
 			_optBubble.deliveryState = "rejected";
 			_optBubble.deliveryNote =
 				r.message || sendRejectionCopy(r.reason, brand.agentName, r).message;
+			// Decide from the full request identity, not an id-only lookup: an
+			// A → B → A return must not let A's rejected request remove B's cards
+			// or unlock B's composer.
+			const _originOnScreen = _sentViewIsCurrent();
 			// A typed "no" whose send then lost the admission race still discarded its
 			// cards (the server says which); they must not linger as live offers.
-			for (const t of discardedTokens(r)) removePending(t);
+			if (_originOnScreen) for (const t of discardedTokens(r)) removePending(t);
 			// The server rejected the send (e.g. the single-flight guard:
 			// "a reply is already in progress", or the monthly usage cap).
 			// Nothing was persisted — recover it (below) so no work and no voice audio
@@ -10937,7 +11840,6 @@ async function send(textArg, resendAck) {
 			// (no run:start / run:error is coming).
 			// Decide from the STABLE bubble reference (its token), not a messages.value lookup that a
 			// mid-send switch already invalidated (VR4-2). `_sentScope` is the ORIGIN conversation.
-			const _originOnScreen = _currentScope() === _sentScope;
 			const _plan = planRejectedSend({
 				fromMain,
 				bubbleVoiceAck: _optBubble.voiceAck,
@@ -10963,6 +11865,7 @@ async function send(textArg, resendAck) {
 					drafts.value[_sentScope] = text;
 				}
 			}
+			if (!_originOnScreen) return;
 			sending.value = false;
 			waiting.value = false;
 			// Lapsed sub: raise the persistent banner (admins get its Renew link,
@@ -11015,13 +11918,15 @@ async function send(textArg, resendAck) {
 			return;
 		}
 		if (r && r.ok !== false) {
-			workersWarnShown.value = false; // fresh send proves availability
 			_pendingSends.remove(_pendingSends.scopeOf(_optBubble), _optBubble.name);
 			_optBubble.deliveryState = undefined;
 			// An accepted send proves the CP-side gate passed, i.e. any upgrade
 			// maintenance hold has lifted - clear the banner + wake the avatar now
 			// rather than stranding them until a reload (self-heal).
-			clearHold();
+			if (_sentViewIsCurrent()) {
+				workersWarnShown.value = false; // fresh send proves availability
+				clearHold();
+			}
 		}
 		// An accepted send consumes only its own one-shot context. A retry must
 		// not consume a newer selection made in the current composer.
@@ -11029,6 +11934,9 @@ async function send(textArg, resendAck) {
 		// returns before reaching this line, and a thrown send never reaches it either
 		// (see the catch block below) — so a retry after either failure still carries
 		// the same prefill context instead of silently sending without it.
+		// Revision and scope guards inside consumeRecoveredContext make this safe
+		// to settle off-screen: it clears only the one-shot context this accepted
+		// request owned, never a newer B selection.
 		consumeRecoveredContext(sendRequest, _sentScope);
 		// The payload's voice-derived text is now durably in the conversation — release EXACTLY
 		// the recordings this send captured (audio + leave guard). Payload-bound, so a same-scope
@@ -11048,17 +11956,18 @@ async function send(textArg, resendAck) {
 		// message has legitimately earned.
 		if (r && r.confirmed) {
 			_pendingSends.remove(_sentScope, _optBubble.name);
-			if (_currentScope() === _sentScope)
-				messages.value = messages.value.filter((x) => x.name !== tmpName);
+			if (!_sentViewIsCurrent()) return;
+			messages.value = messages.value.filter((x) => x.name !== tmpName);
 			sending.value = false;
 			waiting.value = false;
 			for (const t of r.tokens || []) removePending(t);
 			try {
-				await onTypedConfirmResolved(r);
+				await onTypedConfirmResolved(r, _sentView);
 			} catch {
+				if (!chatViewIsCurrent(_sentView)) return;
 				// Transcript refresh failure cannot undo an authoritative confirmation.
 				_pendingSends.add(_sentScope, _optBubble);
-				await settleRecoveredSend(_optBubble, r);
+				await settleRecoveredSend(_optBubble, r, _sentView);
 				if (
 					_currentScope() === _sentScope &&
 					!messages.value.some((m) => m.name === tmpName)
@@ -11071,14 +11980,16 @@ async function send(textArg, resendAck) {
 		// reload mid-send. The user just spoke, so every card still here is Earlier;
 		// a yes/no that bound none raises the non-blocking note (decision 13).
 		const _spokeIn = r?.conversation_id || sentFrom;
-		for (const t of discardedTokens(r)) removePending(t);
-		markCardsEarlier(pendingActions.value, _spokeIn);
-		olderCardsNoteFor.value = r?.older_cards_waiting ? _spokeIn : "";
+		if (_sentViewIsCurrent()) {
+			for (const t of discardedTokens(r)) removePending(t);
+			markCardsEarlier(pendingActions.value, _spokeIn);
+			olderCardsNoteFor.value = r?.older_cards_waiting ? _spokeIn : "";
+		}
 		// Phase-0 admission: the send was accepted but QUEUED (all slots taken).
 		// Show the "~N ahead" chip + Cancel instead of the streaming spinner; the
 		// reply begins when a slot frees (run:start clears queuedTurn). Position
 		// refreshes via the queue:position realtime event + poll-on-focus.
-		if (r && r.queued) {
+		if (r && r.queued && _sentViewIsCurrent()) {
 			queuedTurn.value = {
 				run_id: r.run_id,
 				message_id: r.message_id,
@@ -11087,7 +11998,7 @@ async function send(textArg, resendAck) {
 			waiting.value = false; // not streaming yet — the chip carries the state
 		}
 		if (r?.conversation_id) {
-			const _stillOnSentChat = (currentId.value || "") === sentFrom;
+			const _stillOnSentChat = _sentViewIsCurrent();
 			// VR4-3: promoting the new-chat SENTINEL scope to the server's real id — migrating the
 			// queued voice records + their mirror + the stashed draft + the take scope — is
 			// VISIBILITY-INDEPENDENT: the server created a real conversation whether or not the user is
@@ -11147,7 +12058,7 @@ async function send(textArg, resendAck) {
 				(_optBubble.deliveryReadEpoch || 0) === initialEpoch &&
 				!["delivered", "rejected"].includes(_optBubble.deliveryState)
 			)
-				_optBubble.deliveryNote = deliveryFailureCopy(e);
+				_optBubble.deliveryNote = deliveryFailureCopy(e, sendRequest.requestId);
 			markUncertain();
 			return;
 		}
@@ -11158,13 +12069,14 @@ async function send(textArg, resendAck) {
 		// and show it now if the origin is still on screen.
 		_optBubble.failed = true;
 		_optBubble.deliveryState = "uncertain";
-		_optBubble.deliveryNote = deliveryFailureCopy(e);
+		_optBubble.deliveryNote = deliveryFailureCopy(e, sendRequest.requestId);
 		_pendingSends.add(_sentScope, _optBubble);
-		if (_currentScope() === _sentScope && !messages.value.some((x) => x.name === tmpName))
+		if (_sentViewIsCurrent() && !messages.value.some((x) => x.name === tmpName))
 			messages.value = [...messages.value, _optBubble];
+		if (!_sentViewIsCurrent()) return;
 		sending.value = false;
 		waiting.value = false;
-		notify(deliveryFailureCopy(e), { type: "info" });
+		notify(DELIVERY_TOAST, { type: "info" });
 	}
 }
 
@@ -11212,7 +12124,7 @@ function onEvent(p) {
 				step: p.step || 0,
 				total: p.total || (macroRun.value && macroRun.value.total) || 0,
 				label: p.label || "",
-				status: "running",
+				status: progressStatus(p),
 			};
 		}
 		patchMacroRunRow(p, false); // live-advance the open run-history dashboard
@@ -11258,14 +12170,19 @@ function onEvent(p) {
 				expires_at: p.expires_at || null,
 				seq: p.seq ?? null,
 				recent: p.recent,
+				pending_card_safe: p.pending_card_safe,
 			});
 			// Keep pulling server truth for the rest of the turn: if THIS push
 			// arrived but a sibling's was dropped, the poll fills the gap.
-			startPendingPoll();
+			if (p.pending_card_safe === true) startPendingPoll();
 		}
 		return;
 	}
 	if (p.conversation_id !== currentId.value) return;
+	// Socket frames are synchronous, but their post-render callbacks are not.
+	// Keep the generation that accepted this frame so an A frame cannot scroll or
+	// clear controls in B, or in a later generation of A.
+	const eventView = captureChatView(p.message_id || p.run_id || p.kind);
 	if (p.run_id && p.run_id === stoppedRunId.value) return; // user stopped this run
 	if (p.message_id && stoppedMsgIds.value.has(p.message_id)) return; // …incl. a later "recovered" run for a stopped reply
 	noteRunSignal();
@@ -11391,7 +12308,7 @@ function onEvent(p) {
 			confirmedAck.value = true;
 			if (_confirmedAckTimer) clearTimeout(_confirmedAckTimer);
 			_confirmedAckTimer = setTimeout(() => {
-				confirmedAck.value = false;
+				if (chatViewIsCurrent(eventView)) confirmedAck.value = false;
 			}, 3500);
 			break;
 		case "assistant:delta": {
@@ -11458,7 +12375,9 @@ function onEvent(p) {
 			// words and, at the end, equals when the text finished.
 			stampDeltaTime(m);
 			pumpReveal();
-			nextTick(scrollBottomIfPinned);
+			nextTick(() => {
+				if (chatViewIsCurrent(eventView)) scrollBottomIfPinned();
+			});
 			break;
 		}
 		case "tool:result":
@@ -11515,7 +12434,9 @@ function onEvent(p) {
 			if (liveCandidate.value.held)
 				liveCandidate.value = { ...liveCandidate.value, text: "", held: false };
 			waiting.value = false;
-			nextTick(scrollBottomIfPinned);
+			nextTick(() => {
+				if (chatViewIsCurrent(eventView)) scrollBottomIfPinned();
+			});
 			break;
 		}
 		case "tool:start": {
@@ -11540,7 +12461,9 @@ function onEvent(p) {
 			];
 			waiting.value = false;
 			statusPhase.value = null;
-			nextTick(scrollBottomIfPinned);
+			nextTick(() => {
+				if (chatViewIsCurrent(eventView)) scrollBottomIfPinned();
+			});
 			break;
 		}
 		case "tool:end": {
@@ -11588,11 +12511,13 @@ function onEvent(p) {
 			// finalize backstop re-publish can't double-render; a conv-less token ("") binds
 			// to this conversation, mirroring the action:pending handler's rescue.
 			if (Array.isArray(p.pending)) {
-				for (const card of p.pending)
+				for (const card of p.pending) {
+					if (card?.pending_card_safe !== true) continue;
 					enqueuePending({
 						...card,
 						conversation: card.conversation || p.conversation_id,
 					});
+				}
 			}
 			// UNCONDITIONAL backstop: re-read the parked list from durable server
 			// state at every terminal, whether or not this payload carried `pending`.
@@ -11691,7 +12616,7 @@ function onEvent(p) {
 			// that starts (and pushes its own tool) before this callback fires is
 			// never clobbered by a stale clear from the run that just ended.
 			nextTick(() => {
-				if (!currentRunId.value) activeTools.value = [];
+				if (chatViewIsCurrent(eventView) && !currentRunId.value) activeTools.value = [];
 			});
 			currentRunId.value = null;
 			store.streamingConvId = null;
@@ -11713,8 +12638,8 @@ function onEvent(p) {
 				// Re-render charts after the reload settles — late re-renders can swap a
 				// freshly-rendered mermaid node back to raw source; these idle passes
 				// (mutex-guarded, no-op when nothing's pending) catch that race.
-				setTimeout(processMermaid, 300);
-				setTimeout(processMermaid, 900);
+				scheduleMermaid(captureChatView(), 300);
+				scheduleMermaid(captureChatView(), 900);
 			}
 			// jarvis#884: a ```jarvis-goto block on the turn that just ENDED, live,
 			// in THIS mounted view, auto-redirects to the Dashboards builder exactly
@@ -11775,7 +12700,7 @@ function onEvent(p) {
 			// tracker no-ops on a message it is not holding, which makes a repeat inert.
 			enrichmentTracker.clear(p.message_id);
 			loadConversation(currentId.value);
-			setTimeout(processMermaid, 300);
+			scheduleMermaid(captureChatView(), 300);
 			break;
 		}
 		case "macro:closed": {
@@ -11833,11 +12758,13 @@ function onEvent(p) {
 			// (run:error reloads the conversation, not the pending list). Deduped by token;
 			// a conv-less token ("") binds to this conversation.
 			if (Array.isArray(p.pending)) {
-				for (const card of p.pending)
+				for (const card of p.pending) {
+					if (card?.pending_card_safe !== true) continue;
 					enqueuePending({
 						...card,
 						conversation: card.conversation || p.conversation_id,
 					});
+				}
 			}
 			// …and the unconditional backstop, for the same reason as run:end below.
 			resyncPendingConfirmations(currentId.value);
@@ -11941,9 +12868,13 @@ function stopRun() {
 // continues invisibly (the reserved-credit leak the old optimistic clear masked).
 async function cancelQueued() {
 	const q = queuedTurn.value;
-	if (!q) return;
+	const view = captureChatView(q?.run_id || "");
+	const queuedIsCurrent = () =>
+		chatViewIsCurrent(view) && queuedTurn.value?.run_id === view.token;
+	if (!q || !view.token || !queuedIsCurrent()) return;
 	try {
-		const r = await api.cancelQueuedTurn(q.run_id);
+		const r = await api.cancelQueuedTurn(view.token);
+		if (!queuedIsCurrent()) return;
 		if (r && r.ok) {
 			// Confirmed cancelled (queued or preparing/ready path). Retire the chip +
 			// unlock the composer, and let turn:cancelled reconcile other tabs.
@@ -11962,6 +12893,7 @@ async function cancelQueued() {
 			notify((r && r.reason) || "That reply already started.", { type: "info" });
 		}
 	} catch (e) {
+		if (!queuedIsCurrent()) return;
 		// Server state UNKNOWN (network/500): KEEP the chip + lock so the user can retry
 		// the cancel. No optimistic clear on failure (CDX-8).
 		notifyActionError("Couldn't cancel the queued message", e);
@@ -11972,9 +12904,13 @@ async function cancelQueued() {
 // chip's position in case a realtime queue:position push was missed.
 async function refreshQueuePositionOnFocus() {
 	const q = queuedTurn.value;
-	if (!q) return;
+	const view = captureChatView(q?.run_id || "");
+	const queuedIsCurrent = () =>
+		chatViewIsCurrent(view) && queuedTurn.value?.run_id === view.token;
+	if (!q || !view.token || !queuedIsCurrent()) return;
 	try {
-		const r = await api.getQueuePosition(q.run_id);
+		const r = await api.getQueuePosition(view.token);
+		if (!queuedIsCurrent()) return;
 		if (!r || r.ok === false) return;
 		if (r.state !== "queued") {
 			// Promoted or settled while we were away — the stream/end events will
@@ -13019,7 +13955,8 @@ watch(busy, (b) => {
 });
 let _silentCheck = false;
 async function checkSilentRun() {
-	const id = currentId.value;
+	const view = captureChatView();
+	const id = view.conversation;
 	if (!id || booting.value || _silentCheck || !isSilentRun(busy.value, _lastRunSignalAt)) return;
 	_silentCheck = true;
 	noteRunSignal();
@@ -13027,13 +13964,13 @@ async function checkSilentRun() {
 		forgetReady();
 		isContainerUnavailable()
 			.then((v) => {
-				containerUnavailable.value = v;
+				if (chatViewIsCurrent(view)) containerUnavailable.value = v;
 			})
 			.catch(() => {});
 		await loadConversation(id);
-		if (currentId.value !== id) return;
+		if (!chatViewIsCurrent(view)) return;
 		const r = await api.getActiveTurn(id);
-		if (currentId.value !== id) return;
+		if (!chatViewIsCurrent(view)) return;
 		const preStream = (r && r.ok && r.active) || null;
 		if (shouldStopSpinning({ busy: busy.value, resumed: _lastLoadResumed, preStream }))
 			clearStreamingActivity();
@@ -13082,11 +14019,14 @@ watch(
 	}
 );
 // External archive (deleted from the sidebar): fall back to the empty
-// new-chat state when the open conversation disappears from the list.
+// new-chat state when the open conversation disappears from the list. Only one
+// the list HAD: a chat it never lists (a macro run's, opened from the Runs page)
+// is not one that vanished.
 watch(
 	() => store.conversations,
-	(list) => {
+	(list, previous) => {
 		if (booting.value || !currentId.value) return;
+		if (!(previous || []).some((c) => c.name === currentId.value)) return;
 		// A fresh/unsent chat is intentionally hidden from the list — "hidden" is
 		// not "deleted", so don't reset it out from under the user. This covers an
 		// empty draft (no messages) AND the first send in flight (only optimistic
@@ -13133,12 +14073,16 @@ onMounted(async () => {
 	replacedNoticeOf()
 		.then((n) => (replacedNotice.value = n || {}))
 		.catch(() => {});
+	copyNoticeOf()
+		.then((n) => (copyNotice.value = n || null))
+		.catch(() => {});
 	billingNoticeOf()
 		.then((n) => {
 			billingNotice.value = n || {};
 		})
 		.catch(() => {});
 	socket?.on("jarvis:event", onEvent);
+	socket?.on("jarvis:event", onFileboxWaitEvent);
 	socket?.on("jarvis:llm_switch", onLlmSwitch);
 	socket?.on("connect", onResync);
 	socket?.on("report_generated", onReportGenerated);
@@ -13190,6 +14134,12 @@ onMounted(async () => {
 	isContainerUnavailable()
 		.then((v) => {
 			containerUnavailable.value = v;
+		})
+		.catch(() => {});
+	// ...and the network_check_required half: same fail-open posture.
+	needsNetworkCheck()
+		.then((v) => {
+			networkCheckRequired.value = v;
 		})
 		.catch(() => {});
 	// ...and the llm_credentials half of the same boot promise. Same fail-open
@@ -13354,6 +14304,7 @@ onBeforeUnmount(() => {
 	// away, app close) — nothing here is visible to blank.
 	flushReveal(); // cancels the frame loop and leaves every row whole
 	socket?.off("jarvis:event", onEvent);
+	socket?.off("jarvis:event", onFileboxWaitEvent);
 	socket?.off("jarvis:llm_switch", onLlmSwitch);
 	socket?.off("connect", onResync);
 	socket?.off("report_generated", onReportGenerated);
@@ -13438,7 +14389,9 @@ onUnmounted(() => {
 
 <style scoped>
 /* The brand mark is now <JarvisMark> everywhere on this surface (hero, assistant
-   avatars, proactive toast), so it carries its own gradient in BOTH themes.
+   avatars, proactive toast; the hero and avatars through <HolidayMark>, which draws
+   a JarvisMark and adds the holiday item on top), so it carries its own gradient in
+   BOTH themes.
    Deleted with this comment: a `.jv-dark .jv-logo, .jv-dark .jv-toast-ic` rule
    that force-painted the gradient with !important in dark only. It existed
    because those chips were `background: var(--cta)` — near-black in light, and
@@ -14315,15 +15268,7 @@ onUnmounted(() => {
 	line-height: 1.5;
 	margin: 12px 0 0;
 }
-/* Starter cards (the original card treatment, now carrying synthesised copy). */
-.jv-suggest:hover {
-	border-color: var(--border-2);
-	background: var(--surface-1);
-}
-.jv-suggest:focus-visible {
-	outline: 2px solid var(--cta);
-	outline-offset: 2px;
-}
+/* Starter card styles live in components/chat/WelcomeStarters.vue. */
 /* mobile layout (UX #12): the chat had fixed 40px desktop paddings + a 2-col
    welcome grid; inline styles win over class rules, so these override with
    !important. The "Connect phone" QR flow ships people straight here. */
@@ -14342,19 +15287,9 @@ onUnmounted(() => {
 	.jv-welcome-scroll {
 		padding: 24px 16px;
 	}
-	.jv-welcome-h1 {
-		/* Scaled with the desktop bump (32 -> 40), kept a step smaller so a long
-		   "Long time no see, <name>" still fits a phone without wrapping oddly. */
-		font-size: 28px !important;
-	}
 	.jv-welcome-sub {
 		font-size: 14px;
 		margin-top: 10px;
-	}
-	/* Starter cards stack: two 14px-padded cards side by side are unreadable at
-	   phone width. Inline styles set the grid, so this has to win with !important. */
-	.jv-welcome-grid {
-		grid-template-columns: 1fr !important;
 	}
 }
 /* Phone mode (< 768px, matches the shell store `mobile` flag that swaps the
@@ -16629,6 +17564,9 @@ onUnmounted(() => {
    marks a write parked awaiting the owner's Confirm click. */
 .jv-pending {
 	border-color: var(--amber);
+}
+.jv-safety-update {
+	border-color: var(--border-2);
 }
 .jv-pending .jv-action-head {
 	border-bottom-color: var(--border);

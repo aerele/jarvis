@@ -39,12 +39,34 @@ import frappe
 from jarvis._session import impersonate
 from jarvis.chat import seq_watermark, txn
 from jarvis.chat import turn_state as ts
+from jarvis.chat.filebox_source import SourceLost
 from jarvis.chat.runtime_profile import get_profile
+from jarvis.chat.session_repair import Repair, ensure_session_usable
 from jarvis.exceptions import AgentUnreachableError
 
 TURN = "Jarvis Chat Turn"
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
+
+
+def _repair_session(sess, conv, owner, conversation, run_id, assistant_msg) -> Repair:
+	"""``session_repair.ensure_session_usable`` for the pump path: ``waking`` goes out as
+	a fenced ``run:status`` (the same shape as the cold-start publish in ``run_prepare``).
+	``ensure_session_usable`` swallows a failing ``on_waking``. Raises only a TEMPORARY
+	restore ``AgentUnreachableError``, which ``run_prepare`` handles as a retryable
+	prepare error."""
+
+	def _on_waking() -> None:
+		ts.publish_fenced(
+			owner,
+			"run:status",
+			conversation_id=conversation,
+			run_id=run_id,
+			message_id=assistant_msg,
+			status="waking",
+		)
+
+	return ensure_session_usable(sess, conv, on_waking=_on_waking, path="pump", run_id=run_id)
 
 
 def _claim_preparing_unit(run_id: str) -> dict:
@@ -80,6 +102,12 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	"""Prepare one reserved ``queued`` turn for dispatch. Idempotent + re-offer-safe;
 	returns a small status dict. Never raises out (a prepare crash must not kill the
 	pump hop; the deadline watchdog reclaims a stuck ``preparing`` turn)."""
+	from jarvis.chat.collaboration import is_collaborative
+
+	if is_collaborative(frappe.db.get_value(TURN, run_id, "conversation")):
+		from jarvis.chat.collaboration_workers import prepare_shared
+
+		return prepare_shared(run_id, relay_target_id)
 	try:
 		result = txn.replay_on_conflict(
 			lambda: _claim_preparing_unit(run_id), label=f"prepare.claim_preparing {run_id}", fresh=True
@@ -123,7 +151,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	try:
 		from jarvis.chat import chat_asks
 
-		chat_asks.resolve_on_user_message(conversation)
+		chat_asks.resolve_on_user_message(conversation, seed_message=turn["seed_message"])
 	except Exception:
 		frappe.log_error(title="prepare.chat_asks_resolve", message=frappe.get_traceback())
 
@@ -172,6 +200,11 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 				attachments=attachments,
 				user=owner,
 			)
+	except SourceLost as exc:
+		_prepare_error(
+			run_id, version, assistant_msg, conversation, owner, str(exc), code="source_unavailable"
+		)
+		return {"ok": False, "reason": "source_unavailable"}
 	except Exception:
 		# Assembly is all best-effort reads; a hard failure here is unexpected. Error
 		# the turn (release credit) rather than dispatch a broken prompt.
@@ -216,7 +249,14 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	try:
 		with agent_session_pool.checkout(gateway_url) as sess:
 			session_key = conv.session_key
-			if not session_key:
+			if session_key:
+				# jarvis-admin-v2#753: heal an archived gateway session
+				# BEFORE the mint branch and the model patch, for a key that existed at turn
+				# start. A key minted just below is brand new and never probed. Only a
+				# TEMPORARY restore failure escapes (an AgentUnreachableError, handled as
+				# today's retryable prepare error below).
+				_repair_session(sess, conv, owner, conversation, run_id, assistant_msg)
+			else:
 				# (#22) create the session on THIS pooled connection and persist the
 				# Jarvis Chat Session row + CONV.session_key BEFORE the first tool
 				# callback can fire (the plugin sessionKey->user moat, jarvis/api.py:55).
@@ -274,6 +314,9 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 		"turn_start_ms": turn_start_ms,
 		"context": context,
 		"attachments_raw": attachments,
+		# The ack window the pump waits after the frame is written, sized like the
+		# legacy path's (the agent ingests the whole message before it acks).
+		"ack_timeout_s": turn_handler._ack_timeout_s(len(managed_attachments or []), ap.inlined_prompt_chars),
 	}
 	# (CDX-7) store the handoff payload through an ACTOR-fenced CAS: a prepare that
 	# lost the preparing claim discards its payload (never stamping dispatch state onto

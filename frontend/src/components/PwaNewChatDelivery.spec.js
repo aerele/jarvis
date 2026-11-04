@@ -5,7 +5,11 @@ import { ref } from "vue";
 const router = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("vue-router", () => ({ useRouter: () => router }));
 vi.mock("../../../pwa/src/maintenanceGate", () => ({ holdActive: ref(false) }));
-vi.mock("@/branding", () => ({ agentName: ref("Jarvis") }));
+// The holiday stage asks whether a top banner shows; the gates behind that read the router.
+vi.mock("../../../pwa/src/noticeGate", () => ({ showBanner: ref(false) }));
+vi.mock("../../../pwa/src/announcementGate", () => ({ showAnnouncement: ref(false) }));
+// isWhitelabeled: the holiday store reads it, and a strict mock throws on a missing export.
+vi.mock("@/branding", () => ({ agentName: ref("Jarvis"), isWhitelabeled: false }));
 vi.mock("../../../pwa/src/api", () => ({
 	listConversations: vi.fn(async () => []),
 	uploadFile: vi.fn(),
@@ -13,12 +17,15 @@ vi.mock("../../../pwa/src/api", () => ({
 	getPromptSuggestions: vi.fn(async () => ({})),
 	getMySettings: vi.fn(async () => ({})),
 	sendRecoverableMessage: vi.fn(),
+	recordHolidayShown: vi.fn(async () => ({ play: false })),
 }));
 vi.mock("../../../pwa/src/lib/notifications", () => ({ feed: ref([]) }));
 import * as api from "../../../pwa/src/api";
 import NewChat from "../../../pwa/src/views/NewChatView.vue";
 import { holdActive } from "../../../pwa/src/maintenanceGate";
 import { recoveryState } from "../../../pwa/src/sendRecoveryStore";
+import { holidayTouch } from "../../../pwa/src/holidayTouch";
+import { _resetSpentForTests } from "../../../pwa/src/lib/useHolidayScene";
 let wrapper;
 beforeEach(() => {
 	vi.clearAllMocks();
@@ -32,6 +39,7 @@ beforeEach(() => {
 afterEach(() => {
 	wrapper?.unmount();
 	vi.useRealTimers();
+	vi.unstubAllGlobals();
 });
 async function open() {
 	wrapper = mount(NewChat, {
@@ -271,4 +279,51 @@ it("late acceptance off the hero does not intercept the next new-chat message", 
 	await flushPromises();
 	expect(api.sendRecoverableMessage).toHaveBeenCalledTimes(2);
 	expect(recoveryState.requests[1].conversation).toBe("B");
+});
+
+// The holiday words on a lead-up day, through the real new-chat view and the real stage. The
+// scene plays (or rests) over words that never change: the normal greeting in ONE heading
+// span (no greeting-to-greeting cross-fade) and the advance line under it, in the hero box.
+async function leadupDay() {
+	const today = new Date().toISOString().slice(0, 10);
+	const answer = {
+		v: 1,
+		date: today,
+		tz: "UTC",
+		year: 2026,
+		kind: "leadup",
+		design: "diwali",
+		occasion: "diwali",
+		worn: true,
+		scene: true,
+		may_play: true,
+	};
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ message: answer }) }))
+	);
+	await holidayTouch.refresh({ force: true });
+	_resetSpentForTests();
+}
+const ADVANCE = "Wishing you a happy Diwali in advance!";
+
+it("a lead-up scene day: one plain heading with the normal greeting (no cross-fade pair), the advance line as its own hero piece", async () => {
+	await leadupDay();
+	wrapper = mount(NewChat, {
+		global: {
+			stubs: { BrandMark: true, Sheet: true, AutoModeToggle: true, VoiceSheet: true },
+		},
+	});
+	// Before anything settles the stage is pending: the cross-fade pair would be on the page.
+	const heading = () => wrapper.get('[data-testid="welcome-greeting"]');
+	expect(wrapper.find('[data-testid="holiday-art"]').exists()).toBe(true);
+	for (const when of ["pending", "after the scene decision"]) {
+		expect(heading().findAll(".jv-greeting-t"), when).toHaveLength(0);
+		expect(heading().text(), when).toMatch(/^Good (morning|afternoon|evening)(, .+)?\.$/);
+		const advance = wrapper.get('[data-testid="welcome-leadup"]');
+		expect(advance.text(), when).toBe(ADVANCE);
+		expect(advance.attributes("data-hs"), when).toBe("leadup");
+		expect(wrapper.text(), when).not.toMatch(/Happy/);
+		await flushPromises();
+	}
 });

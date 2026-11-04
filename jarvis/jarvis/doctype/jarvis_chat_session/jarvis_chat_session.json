@@ -27,7 +27,8 @@
     "budget_route",
     "reserve_tokens",
     "compaction_count",
-    "last_compacted_at"
+    "last_compacted_at",
+    "collaboration_binding"
   ],
   "fields": [
     {
@@ -186,6 +187,15 @@
       "fieldtype": "Datetime",
       "label": "Last Compacted At",
       "read_only": 1
+    },
+    {
+      "fieldname": "collaboration_binding",
+      "fieldtype": "Link",
+      "label": "Collaboration Binding",
+      "read_only": 1,
+      "no_copy": 1,
+      "options": "Jarvis Chat Binding",
+      "hidden": 1
     }
   ],
   "permissions": [

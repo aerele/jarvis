@@ -54,6 +54,13 @@ PROTECTED_FIELDS = frozenset(
 )
 
 
+def refused_field_names(keys, protected=PROTECTED_FIELDS) -> list[str]:
+	"""The keys a write payload may not set: the protected fields, amended_from,
+	and underscore-prefixed names (_comments, _assign, ...), which are all
+	framework-managed. Shared by create_doc and update_doc."""
+	return sorted(k for k in keys if k in protected or k == "amended_from" or str(k).startswith("_"))
+
+
 def _validate_create_args(doctype: str, values: dict) -> None:
 	"""Shared guards for create-shaped payloads (create_doc + preview_doc):
 	non-empty args, no protected fields, create permission."""
@@ -62,7 +69,7 @@ def _validate_create_args(doctype: str, values: dict) -> None:
 	if not isinstance(values, dict) or not values:
 		raise InvalidArgumentError("values must be a non-empty dict")
 
-	protected = sorted(set(values.keys()) & PROTECTED_FIELDS)
+	protected = refused_field_names(values)
 	if protected:
 		raise InvalidArgumentError(f"refusing to write protected field(s): {', '.join(protected)}")
 
@@ -87,6 +94,10 @@ def _insert_one(
 	doc = build_doc(doctype, values)
 	if ignore_mandatory:
 		doc.flags.ignore_mandatory = True
+	if doctype == "Landed Cost Voucher":
+		from jarvis.tools._lcv_source_tax import gate_lcv
+
+		gate_lcv(doc, lock=True)
 	doc.insert()  # runs DocType validate() + on_insert hooks; sets autoname
 	return doc
 
@@ -99,9 +110,45 @@ def build_doc(doctype: str, values: dict) -> "frappe.model.document.Document":
 	doc = frappe.new_doc(doctype)
 	for field, value in values.items():
 		doc.set(field, value)
+	if doctype == "Landed Cost Voucher":
+		from jarvis.tools._client_defaults import landed_cost_receipt_details, landed_cost_vendor_amounts
+
+		landed_cost_vendor_amounts(doc, values)
+		landed_cost_receipt_details(doc)
 	cast_numbers(doc)
+	apply_tax_template(doc)
 	_set_title_from_title_field(doc)
 	return doc
+
+
+def apply_tax_template(doc):
+	"""Fill ``doc.taxes`` from its tax template when the template is set and no rows
+	were sent, as Desk does on picking the template. Rows already present are never
+	touched. A no-op without ERPNext, without the field, for a template that does not
+	exist, is disabled or belongs to another company (Desk's picker offers neither),
+	or for one the user cannot read (its rows are not copied past the user's
+	permissions). Shared by every insert and dry run so the card total equals the saved one."""
+	field = doc.meta.get_field("taxes_and_charges")
+	template = doc.get("taxes_and_charges")
+	# A card value is untrusted JSON: only a plain name may reach get_value(), where a
+	# dict would read as filters.
+	if not (field and field.options and isinstance(template, str) and template.strip()):
+		return
+	if doc.get("taxes"):
+		return
+	master = frappe.db.get_value(field.options, template, ["company", "disabled"], as_dict=True)
+	if not master or master.disabled:
+		return
+	if doc.get("company") and master.company and master.company != doc.get("company"):
+		return
+	if not frappe.has_permission(field.options, "read", doc=template):
+		return
+	try:
+		from erpnext.controllers.accounts_controller import get_taxes_and_charges
+	except ImportError:
+		return
+	for row in get_taxes_and_charges(field.options, template) or []:
+		doc.append("taxes", row)
 
 
 def create_doc(

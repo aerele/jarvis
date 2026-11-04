@@ -127,11 +127,19 @@ const tone = (text, kind = "") => ({ text, tone: kind });
 // One entry per status: the parts of the card that depend on it.
 const BUILDERS = {
 	queued: (s, ctx) => ({
-		pill: tone(__("Queued")),
-		track: "empty",
+		// A saved report's export waits, queued, for the report's own background run
+		// (phase "generating"); it takes a worker only once that copy exists.
+		pill: s.phase === "generating" ? tone(__("Generating report"), "run") : tone(__("Queued")),
+		track: s.phase === "generating" ? "indet" : "empty",
 		notes: [
 			s.error
 				? tone(s.error, "warn")
+				: s.phase === "generating"
+				? tone(
+						__(
+							"The report is being generated in the background; the file follows automatically."
+						)
+				  )
 				: tone(__("Waiting for a free background worker; it starts automatically.")),
 		],
 		footer: s.asked_at
@@ -178,7 +186,9 @@ const BUILDERS = {
 		};
 	},
 	ready: (s, ctx) => {
-		const took = secondsBetween(s.started_at, s.finished_at);
+		// From the ask to the file: for a report job the worker's own conversion is a
+		// fraction of a second, the wait for the report's run is what the person felt.
+		const took = secondsBetween(s.asked_at || s.started_at, s.finished_at);
 		const made = s.finished_at ? whenText(s.finished_at, ctx.now) : "";
 		const notes = [];
 		if (made)

@@ -4,7 +4,7 @@ Three whitelisted endpoints exposed as buttons:
 
 - ping_admin: hits an authenticated admin endpoint to verify the
   customer's jarvis_admin_api_key works against jarvis_admin_url.
-- ping_agent: opens a WS to agent_url with agent_token and completes
+- ping_agent: connects to agent_url with the paired chat device and completes
   the connect handshake only. No restart, no reload.
 - force_resync: re-runs the same sync path as Jarvis Settings.on_update
   without depending on its change-detection. Useful when an LLM key
@@ -19,7 +19,7 @@ import frappe
 from jarvis.permissions import require_jarvis_admin
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def ping_admin() -> dict:
 	"""Hit the admin's get_connection endpoint with the customer's stored
 	jarvis_admin_api_key. Distinguishes auth failure from unreachable.
@@ -52,26 +52,26 @@ def ping_admin() -> dict:
 		return {"ok": False, "kind": "unreachable", "error": str(e)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def ping_agent() -> dict:
-	"""Open WS to agent_url with agent_token; connect handshake only.
+	"""Connect to agent_url with the paired chat device; connect handshake only.
 
 	SECURITY (PART 4 REVISED, TASK 34-R / 45): gated on ``require_jarvis_admin``
 	and the ``agent_url`` is dropped from the response (endpoint disclosure +
 	operator-scope probe surface). Returns only the connectivity verdict."""
 	require_jarvis_admin()
 	from jarvis import agent_ws
+	from jarvis.chat import device
 	from jarvis.exceptions import AgentUnreachableError
 
 	settings = frappe.get_single("Jarvis Settings")
 	url = (settings.agent_url or "").strip()
-	token = settings.get_password("agent_token", raise_exception=False) or ""
 	if not url:
 		return {"ok": False, "kind": "config", "error": "agent_url is not set."}
-	if not token:
-		return {"ok": False, "kind": "config", "error": "agent_token is not set."}
+	if not device.has_paired_token(settings):
+		return {"ok": False, "kind": "config", "error": "The chat device is not paired yet."}
 	try:
-		agent_ws.ping(url, token)
+		agent_ws.ping(url)
 		return {"ok": True, "kind": "ok", "connected": True}
 	except AgentUnreachableError as e:
 		return {"ok": False, "kind": "unreachable", "error": str(e)}
@@ -79,7 +79,7 @@ def ping_agent() -> dict:
 		return {"ok": False, "kind": "error", "error": f"{type(e).__name__}: {e}"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def force_resync(action: str = "reload") -> dict:
 	"""Bypass on_update change-detection. Re-drive the CURRENT Settings through
 	admin, branching pool vs direct like every other dispatch path.
@@ -174,7 +174,7 @@ def force_resync(action: str = "reload") -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def chat_recovery_stats() -> dict:
 	"""Operator-facing visibility into snapshot recovery (turn_recovery):
 	how often the never-error machinery is quietly compensating for a
@@ -228,7 +228,7 @@ def chat_recovery_stats() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reset_agent_pairing() -> dict:
 	"""Clear the cached chat-device pairing and re-pair from scratch.
 
@@ -267,7 +267,7 @@ def reset_agent_pairing() -> dict:
 		return {"ok": False, "kind": "error", "error": f"{type(e).__name__}: {e}"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def import_announce_stats() -> dict:
 	"""Operator visibility into the Slice B import auto-tell (import_announce). Surfaces
 	the pending/stuck backlog broken out by reason, and the fast-path ATTRIBUTION so a

@@ -38,14 +38,14 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import websocket
 
 _logger = logging.getLogger(__name__)
 
-from jarvis.chat import egress_rules
+from jarvis.chat import egress_rules, site_pin
 from jarvis.chat.device import (
 	ChatDeviceCredentials,
 	build_payload_v3,
@@ -55,6 +55,16 @@ from jarvis.chat.device import (
 	update_device_token,
 )
 from jarvis.chat.events import parse_event
+
+# #773: every socket call of a session goes through one gated, deadline-bounded IO
+# path; the names are re-exported here for callers of this module.
+from jarvis.chat.socket_io import (
+	IO_GATE_WAIT_S,
+	IO_WRITE_TIMEOUT_S,
+	SendNotStarted,
+	SendUncertain,
+	_SocketIO,
+)
 
 # Agent gateway's WS frame format. Looks JSON-RPC-shaped but has its
 # own type discriminator (``"type": "req"|"res"|"event"``) rather than
@@ -226,10 +236,12 @@ def _log_pinned_oneshot(run_id: str, model: str | None, provider: str | None) ->
 	)
 
 
-# Scopes the chat path needs: operator.write for sessions.create + agent;
-# operator.admin so the same connection can also read state (status snapshots,
-# etc.) without re-pairing.
-_REQUESTED_SCOPES = ["operator.write", "operator.admin"]
+# Scopes the chat path asks for: read for state (history, status snapshots) and write
+# for sessions.create / chat.send / agent. Never operator.admin or operator.pairing: the
+# site must not hold a credential that can do owner-only things. The four owner-only
+# actions (sessions.delete, inherited tool policy, llm-task, canvas) go through signed
+# plugin routes instead (jarvis.chat.plugin_routes).
+_REQUESTED_SCOPES = ["operator.read", "operator.write"]
 _CLIENT_ID = "gateway-client"
 _CLIENT_MODE = "backend"
 _ROLE = "operator"
@@ -355,6 +367,18 @@ _NOT_PAIRED_DETAIL_CODES = frozenset({"PAIRING_REQUIRED", "NOT_PAIRED"})
 _NOT_PAIRED_REASONS = frozenset({"not-paired"})
 
 
+_BOOTSTRAP_INVALID_CODE = "AUTH_BOOTSTRAP_TOKEN_INVALID"
+
+
+def _is_bootstrap_code_invalid(err: Exception) -> bool:
+	"""True iff the gateway refused the presented bootstrap code. Typed like the
+	other classifiers: only ``.code``/``.details`` are read, never message text."""
+	if getattr(err, "code", None) == _BOOTSTRAP_INVALID_CODE:
+		return True
+	details = getattr(err, "details", None)
+	return isinstance(details, dict) and details.get("code") == _BOOTSTRAP_INVALID_CODE
+
+
 def _is_not_paired(err: Exception) -> bool:
 	"""Return True iff ``err`` is agent's connect-first PENDING signal: the
 	bench presented the gateway token (bootstrap) and agent created/returned a
@@ -375,6 +399,42 @@ def _is_not_paired(err: Exception) -> bool:
 	if details.get("authReason") in _NOT_PAIRED_REASONS:
 		return True
 	return details.get("reason") in _NOT_PAIRED_REASONS
+
+
+# --- Session repair classifiers (#753) ----------------------------------------
+#
+# The pre-send repair (jarvis.chat.session_repair) must tell "the gateway said no
+# to this call" from "we do not know what happened". Only the first is final.
+# ``rejected_method`` is set ONLY from an explicit ``ok:false`` answer to this
+# exact RPC (exceptions.AgentUnreachableError), so a missing value proves nothing
+# was refused: ack-timeout (``SendUncertain`` included), send-not-started
+# (``SendNotStarted``, e.g. a busy pooled connection) and a code-less transport
+# error all stay temporary. ``UNAVAILABLE`` is the gateway asking us to retry, so
+# it stays temporary even when explicit, as does ``AGENT_TIMEOUT``, and a refusal
+# with no code at all proves nothing about the cause.
+
+_TEMPORARY_REFUSAL_CODES = frozenset({"UNAVAILABLE", "AGENT_TIMEOUT"})
+
+
+def is_definitive_refusal(err: Exception) -> bool:
+	"""True iff the gateway explicitly refused this RPC with a non-retry code
+	(INVALID_REQUEST, FORBIDDEN, NOT_PAIRED, ...). Everything else is temporary:
+	no ``rejected_method``, no code, or a code that asks us to retry
+	(``UNAVAILABLE``, ``AGENT_TIMEOUT``)."""
+	if getattr(err, "rejected_method", None) is None:
+		return False
+	code = getattr(err, "code", None)
+	return bool(code) and code not in _TEMPORARY_REFUSAL_CODES
+
+
+def is_session_changed(err: Exception) -> bool:
+	"""True iff a ``sessions.patch`` guarded by ``expectedSessionId`` lost the race:
+	the session was replaced between our describe and our patch. Typed on code and
+	``details.reason`` only, never on message text."""
+	if getattr(err, "code", None) != "INVALID_REQUEST":
+		return False
+	details = getattr(err, "details", None) or {}
+	return isinstance(details, dict) and details.get("reason") == "session-changed"
 
 
 def _chat_final_text(payload: dict) -> str | None:
@@ -655,6 +715,15 @@ class AgentSession:
 		self._ws = ws
 		self._creds = creds
 		self._lock = threading.Lock()  # serialize concurrent sends on same WS
+		# The one gate every read, write and close of this socket goes through (#773).
+		self._io = _SocketIO(ws)
+
+	def _socket_io(self) -> _SocketIO:
+		# Tests build sessions with __new__ and a stubbed _ws; give those one lazily.
+		io = self.__dict__.get("_io")
+		if io is None:
+			io = self._io = _SocketIO(self._ws)
+		return io
 
 	# -- lifecycle --------------------------------------------------------
 
@@ -662,6 +731,8 @@ class AgentSession:
 	def connect(cls, gateway_url: str) -> AgentSession:
 		if not gateway_url:
 			raise AgentUnreachableError("agent_url not set on Jarvis Settings")
+		# One site per tenant: a copied site must not reach the agent.
+		site_pin.assert_not_copy()
 
 		# Two-shot self-heal for tenant re-provisioning: on the first attempt
 		# we use whatever paired creds the customer has; if agent rejects
@@ -760,7 +831,7 @@ class AgentSession:
 		chat-turn budget). Fail-CLOSED at the cap (D-d): raise the honest
 		"still getting ready" error, NEVER fabricate a token.
 		"""
-		if not creds.bootstrap_token:
+		if not (creds.current_bootstrap_code or creds.bootstrap_token):
 			# Can neither present nor sign a bootstrap connect without the gateway
 			# token. Fail closed rather than send an unsignable/empty auth.
 			raise AgentUnreachableError(
@@ -781,6 +852,24 @@ class AgentSession:
 					ws.close()
 				except Exception:
 					pass
+				if _is_bootstrap_code_invalid(e):
+					# The presented code was refused (spent or bound elsewhere): move
+					# to the next code once. Both spent ends like any failed pairing;
+					# the next turn re-pairs through a fresh proof.
+					next_creds = creds.with_next_bootstrap_code()
+					if next_creds is None:
+						_logger.warning(
+							"chat pairing: bootstrap codes exhausted device_id=%s attempts=%d",
+							creds.device_id,
+							attempt,
+						)
+						raise AgentUnreachableError(
+							PAIRING_PENDING_USER_MESSAGE,
+							code="pairing-pending",
+						) from None
+					_logger.info("chat pairing: next bootstrap code device_id=%s", creds.device_id)
+					creds = next_creds
+					continue
 				if _is_not_paired(e):
 					# Still pending. Reconnect on our own timer within the deadline;
 					# agent's pauseReconnect hint is deliberately ignored.
@@ -972,10 +1061,17 @@ class AgentSession:
 			# newly-persisted creds without re-pairing.
 
 	def close(self) -> None:
+		"""Graceful close (CLOSE frame, bounded), or an abort when another operation
+		holds the socket. Idempotent; the descriptor closes once nothing uses it."""
 		try:
-			self._ws.close()
+			self._socket_io().close_graceful()
 		except Exception:
 			pass
+
+	def abort_transport(self) -> None:
+		"""Poison the socket from any thread without waiting: blocked reads and writes
+		return at once and every later write is ``SendNotStarted``."""
+		self._socket_io().abort()
 
 	# -- protocol methods -------------------------------------------------
 
@@ -1009,6 +1105,9 @@ class AgentSession:
 		key = (res.get("payload") or {}).get("key")
 		if not key:
 			raise AgentUnreachableError(f"sessions.create returned no key: {res}")
+		from jarvis.chat import session_claims
+
+		session_claims.claim(key)
 		return key
 
 	# -- Gateway-native turn model (chat.send + chat.history + sessions.*) --
@@ -1026,6 +1125,8 @@ class AgentSession:
 		deliver: bool = False,
 		attachments: list[dict] | None = None,
 		timeout_s: float = CONNECT_TIMEOUT_SECONDS,
+		verified_session_id: str | None = None,
+		event_observer: Callable[[dict], None] | None = None,
 	) -> dict:
 		"""Start an agent turn via chat.send (agent's UI turn-start RPC).
 
@@ -1034,6 +1135,11 @@ class AgentSession:
 		them via the relay after subscribe_session), NOT on this response.
 		deliver=False keeps the result session-only (no external channel
 		delivery), matching the current chat path."""
+		if ":dashboard:collab:" in session_key and not verified_session_id:
+			raise AgentUnreachableError(
+				"Shared chat requires a verified existing runtime session.",
+				code="collaboration_policy_required",
+			)
 		params: dict = {
 			"sessionKey": session_key,
 			"message": message,
@@ -1044,7 +1150,31 @@ class AgentSession:
 			params["thinking"] = thinking
 		if attachments:
 			params["attachments"] = attachments
-		res = self._request("chat.send", params, timeout_s=timeout_s)
+		if verified_session_id:
+			params.update(
+				sessionId=verified_session_id,
+				expectedPermissionMode="read-only",
+			)
+		if event_observer is not None and ":dashboard:collab:" in session_key:
+
+			def observe(frame):
+				payload = frame.get("payload") or {}
+				if (
+					frame.get("type") != "event"
+					or frame.get("event") != "agent"
+					or payload.get("runId") != idempotency_key
+					or payload.get("sessionKey") not in (None, session_key)
+				):
+					return
+				parsed = parse_event(payload, collaboration=True)
+				if parsed and parsed.get("kind") == "tool_boundary" and parsed.get("tool_call_id"):
+					parsed = {**parsed, "kind": "tool", "phase": "start"}
+				if parsed and parsed.get("kind") == "tool":
+					event_observer(parsed)
+
+			res = self._request("chat.send", params, timeout_s=timeout_s, event_observer=observe)
+		else:
+			res = self._request("chat.send", params, timeout_s=timeout_s)
 		return res.get("payload") or {}
 
 	def chat_abort(
@@ -1254,11 +1384,34 @@ class AgentSession:
 		(transcript is archived gateway-side first; ``deleteTranscript``
 		defaults true there). The gateway refuses to delete the agent's
 		main session - callers treat that error as a skip, never retry."""
-		self._request(
-			"sessions.delete",
-			{"key": session_key},
-			timeout_s=timeout_s,
-		)
+		# sessions.delete is owner-only, so it goes through the plugin's signed route.
+		# The plugin vouches the key with this site, so the caller must delete its own
+		# row for the key only AFTER this returns. ``timeout_s`` bounds the reply wait.
+		import frappe
+
+		from jarvis.chat import plugin_routes
+
+		agent_url = frappe.db.get_single_value("Jarvis Settings", "agent_url") or ""
+		try:
+			plugin_routes.delete_session(agent_url, session_key, read_timeout_s=timeout_s)
+		except plugin_routes.PluginRouteError as e:
+			raise AgentUnreachableError(f"sessions.delete failed: {e}") from e
+
+	def patch_session_policy(self, session_key: str, patch: dict) -> None:
+		"""Set a session's inherited tool policy (``inheritedTool*`` fields).
+
+		Owner-only on the gateway, so it goes through the plugin's signed
+		``/jarvis/sessions/patch`` route. Only the three policy fields are accepted;
+		plain fields (model, label) stay on ``sessions.patch`` over this socket."""
+		import frappe
+
+		from jarvis.chat import plugin_routes
+
+		agent_url = frappe.db.get_single_value("Jarvis Settings", "agent_url") or ""
+		try:
+			plugin_routes.patch_session_policy(agent_url, session_key, patch)
+		except plugin_routes.PluginRouteError as e:
+			raise AgentUnreachableError(f"sessions.patch failed: {e}") from e
 
 	def set_session_model(
 		self,
@@ -1284,6 +1437,34 @@ class AgentSession:
 		self._request(
 			"sessions.patch",
 			{"key": session_key, "model": model_ref},
+			timeout_s=timeout_s,
+		)
+
+	# -- Session repair calls (#753) -----------------------------------------
+	# Used only by jarvis.chat.session_repair, before a send. A refusal raises an
+	# AgentUnreachableError carrying ``rejected_method``; see is_definitive_refusal.
+
+	def describe_session(self, session_key: str, *, timeout_s: float = 5) -> dict | None:
+		"""Read one session row via ``sessions.describe`` without creating it.
+
+		Returns the row dict, or None when the gateway has no such session
+		(``{"session": null}``) or answers with anything that is not a dict.
+		Unwrapped like ``collaboration_lifecycle``'s existing describe call."""
+		res = self._request("sessions.describe", {"key": session_key}, timeout_s=timeout_s)
+		payload = res.get("payload") or res
+		row = payload.get("session") if isinstance(payload, dict) else None
+		return row if isinstance(row, dict) else None
+
+	def restore_session(self, session_key: str, session_id: str, *, timeout_s: float = 5) -> None:
+		"""Un-archive a session via ``sessions.patch``. ``expectedSessionId`` makes the
+		gateway refuse (reason ``session-changed``) if the session was replaced since
+		we described it, so we never restore a different incarnation than we looked at.
+
+		Call only for a key ``describe_session`` just returned: ``sessions.patch`` on an
+		absent key creates an entry."""
+		self._request(
+			"sessions.patch",
+			{"key": session_key, "archived": False, "expectedSessionId": session_id},
 			timeout_s=timeout_s,
 		)
 
@@ -1405,7 +1586,9 @@ class AgentSession:
 				continue  # delta (150ms cumulative mirror) and unknown states: ignore
 			if payload.get("runId") != run_id:
 				continue
-			parsed = parse_event(payload)
+			parsed = parse_event(payload, collaboration=":dashboard:collab:" in session_key)
+			if parsed and parsed.get("kind") == "tool_boundary" and parsed.get("tool_call_id"):
+				parsed = {**parsed, "kind": "tool", "phase": "start"}
 			if parsed is None or parsed.get("kind") == "lifecycle":
 				# lifecycle frames stay off the terminal path, but the ``error``
 				# phase carries the runtime's own user-facing failure text - the
@@ -1505,6 +1688,32 @@ class AgentSession:
 				}
 			continue  # delta (cumulative mirror) / unknown chat states: keep waiting
 
+	def _apply_oneshot_model(
+		self,
+		session_key: str,
+		model: str | None,
+		provider: str | None,
+		idempotency_key: str,
+	) -> None:
+		"""Pin a one-shot's model on its session before the ``agent`` RPC.
+
+		The gateway refuses ``model`` / ``provider`` on the ``agent`` RPC for a caller
+		without operator.admin ("provider/model overrides are not authorized"), and this
+		site never holds admin. ``sessions.patch {key, model}`` is allowed with write
+		scope, so the override rides there instead. The ref is the same ``<provider>/<model>``
+		(or bare ``<model>``) form ``_session_model_patch`` sends for chat turns. A provider
+		without a model has nothing to patch and is dropped. The pin still disables the
+		failover chain, so the pinned-run log line is kept."""
+		if not (model or provider):
+			return
+		_log_pinned_oneshot(idempotency_key, model, provider)
+		if model:
+			self.set_session_model(
+				session_key,
+				f"{provider}/{model}" if provider else model,
+				timeout_s=CONNECT_TIMEOUT_SECONDS,
+			)
+
 	def fire_agent(
 		self,
 		session_key: str,
@@ -1521,7 +1730,8 @@ class AgentSession:
 		the result stays session-only. ``_request`` drops the interleaved
 		event frames and returns the agent ack response.
 
-		Setting ``model`` / ``provider`` disables agent's failover for this
+		Setting ``model`` / ``provider`` patches the session first (see
+		``_apply_oneshot_model``) and disables agent's failover for this
 		run - see PINNED_ONESHOT_RUN_PREFIX."""
 		params = {
 			"message": message,
@@ -1529,12 +1739,7 @@ class AgentSession:
 			"deliver": False,
 			"idempotencyKey": idempotency_key,
 		}
-		if model:
-			params["model"] = model
-		if provider:
-			params["provider"] = provider
-		if model or provider:
-			_log_pinned_oneshot(idempotency_key, model, provider)
+		self._apply_oneshot_model(session_key, model, provider, idempotency_key)
 		res = self._request("agent", params, timeout_s=CONNECT_TIMEOUT_SECONDS)
 		return (res.get("payload") or {}).get("runId") or ""
 
@@ -1550,11 +1755,10 @@ class AgentSession:
 	) -> Iterator[dict[str, Any]]:
 		"""Send an `agent` request, then yield parsed events until lifecycle.end.
 
-		`model` / `provider` are optional per-turn overrides. When set, they
-		flow into agent's agent RPC params; the gateway honours them via
-		the operator.admin-scope-gated modelOverride path (our connect already
-		declares that scope), and the run loses its failover chain for the
-		duration - see PINNED_ONESHOT_RUN_PREFIX. When omitted, agent falls
+		`model` / `provider` are optional overrides. They are NOT sent on the agent RPC
+		(that needs operator.admin, which the site no longer holds): they are applied to
+		the session with ``sessions.patch`` first, and the run loses its failover chain
+		for the duration - see PINNED_ONESHOT_RUN_PREFIX. When omitted, agent falls
 		back to agents.defaults.model.primary from agent configuration AND keeps its
 		fallbacks.
 
@@ -1562,24 +1766,21 @@ class AgentSession:
 		the subprocess. Raises AgentUnreachableError on WS drop, agent
 		errors, or timeout - all the failure modes worker.py already maps to
 		assistant-message error rows."""
+		if ":dashboard:collab:" in session_key:
+			raise AgentUnreachableError("Shared sessions require a verified chat.send transport.")
 		params = {
 			"message": message,
 			"sessionKey": session_key,
 			"deliver": False,
 			"idempotencyKey": idempotency_key,
 		}
-		if model:
-			params["model"] = model
-		if provider:
-			params["provider"] = provider
 		if attachments:
 			# Native vision input. agent's `agent` handler reads these and
 			# normalizes them to the active provider's image blocks; the flat
 			# {type:"image", mimeType, fileName, content:<base64>} shape is what
 			# its gateway normalizer accepts.
 			params["attachments"] = attachments
-		if model or provider:
-			_log_pinned_oneshot(idempotency_key, model, provider)
+		self._apply_oneshot_model(session_key, model, provider, idempotency_key)
 		agent_id = self._send("agent", params)
 		deadline = time.monotonic() + TURN_TIMEOUT_SECONDS
 
@@ -1681,8 +1882,12 @@ class AgentSession:
 		# token and the signed token can never drift (invariant #2). Bootstrap
 		# (no device token) presents auth.token=<gateway token>; steady state
 		# presents auth.deviceToken=<device token>.
+		# Precedence: device token, else the current one-time bootstrap code, else
+		# the legacy owner token (older admin, no codes).
 		if creds.device_token:
 			auth = {"deviceToken": creds.device_token}
+		elif creds.current_bootstrap_code:
+			auth = {"bootstrapToken": creds.current_bootstrap_code}
 		else:
 			auth = {"token": creds.bootstrap_token}
 		signing_token = auth.get("token") or auth.get("deviceToken") or auth.get("bootstrapToken") or ""
@@ -1755,13 +1960,31 @@ class AgentSession:
 		raise AgentUnreachableError("no connect response before timeout")
 
 	def _send(self, method: str, params: dict) -> str:
-		"""Send a request frame; return the generated request id."""
+		"""Send a request frame; return the generated request id. Raises
+		``SendNotStarted`` when no byte went out and ``SendUncertain`` (code
+		``ack-timeout``) when the write started and failed."""
 		payload, req_id = _build_request_frame(method, params)
-		with self._lock:
-			self._ws.send(payload)
+		self._write_frame(payload, method=method)
 		return req_id
 
-	def _request(self, method: str, params: dict, *, timeout_s: float) -> dict:
+	def _write_frame(
+		self,
+		payload: str,
+		*,
+		wait_s: float = IO_GATE_WAIT_S,
+		write_s: float = IO_WRITE_TIMEOUT_S,
+		not_after: float | None = None,
+		method: str = "frame",
+	) -> None:
+		"""Write one pre-built frame (the relay mux's write seam): wait at most
+		``wait_s`` in total for the send lock and the socket, then at most ``write_s``
+		for the whole frame; ``not_after`` (monotonic) refuses a write that could not
+		finish by then."""
+		self._socket_io().write(
+			payload, lock=self._lock, wait_s=wait_s, write_s=write_s, not_after=not_after, method=method
+		)
+
+	def _request(self, method: str, params: dict, *, timeout_s: float, event_observer=None) -> dict:
 		"""Send a request and wait for the matching response frame.
 
 		Drops out-of-order event frames silently - the caller is RPC-style
@@ -1772,6 +1995,8 @@ class AgentSession:
 			frame = self._recv(deadline - time.monotonic())
 			if frame is None:
 				continue
+			if event_observer is not None and frame.get("type") == "event":
+				event_observer(frame)
 			if _is_response_frame(frame, req_id):
 				if not frame.get("ok"):
 					err = frame.get("error") or {}
@@ -1780,6 +2005,7 @@ class AgentSession:
 						f"{method} rejected: {err.get('code', '?')}: {err.get('message', '')}",
 						code=err.get("code"),
 						details=details if isinstance(details, dict) else None,
+						rejected_method=method,
 					)
 				return frame
 		# Tagged so callers can tell an AMBIGUOUS outcome from a definite one:
@@ -1793,8 +2019,9 @@ class AgentSession:
 	def _recv(self, timeout_s: float) -> dict | None:
 		"""Read one frame from the WS, parse JSON, or return None on a soft
 		timeout / non-JSON noise. Raises AgentUnreachableError on hard
-		close so the caller can wrap into an assistant-message error row."""
-		return _recv_with_timeout(self._ws, timeout_s)
+		close so the caller can wrap into an assistant-message error row. A quiet
+		socket is waited on outside the IO gate, so it never delays a write."""
+		return self._socket_io().read(timeout_s)
 
 
 def _recv_with_timeout(ws: websocket.WebSocket, timeout_s: float) -> dict | None:

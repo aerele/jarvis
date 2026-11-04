@@ -94,6 +94,8 @@ class TestSharedFiles(SharingCase):
 			"canvas",
 			json.dumps([{"name": "exact", "type": "file", "file_url": requested.file_url}]),
 		)
+		for doc in docs:
+			frappe.share.add("File", doc.name, RECIPIENT, read=1, flags={"ignore_share_permission": True})
 		with as_user(RECIPIENT):
 			conversation, _ = _require_share(self.conversation)
 			selected = read_file(conversation, requested.file_url)
@@ -111,6 +113,7 @@ class TestSharedFiles(SharingCase):
 		path.write_bytes(b"owner-authorized fixture bytes")
 		self.addCleanup(path.unlink, missing_ok=True)
 		doc = self.file(f"/private/files/{filename}", filename)
+		frappe.share.add("File", doc.name, RECIPIENT, read=1, flags={"ignore_share_permission": True})
 		self.download(doc.file_url)
 		content = frappe.local.response.filecontent
 		self.assertEqual(
@@ -157,14 +160,15 @@ class TestSharedFiles(SharingCase):
 			):
 				self.download(url)
 
-	def test_multiple_rows_choose_and_read_same_owner_readable_row_without_impersonation(self):
+	def test_multiple_rows_choose_and_read_same_readable_row_without_impersonation(self):
 		self.share()
 		first = self.file()
 		second = self.file()
 		read_names = []
 
 		def permission(doctype, ptype, doc=None, user=None, **kwargs):
-			self.assertEqual((doctype, ptype, user), ("File", "read", OWNER))
+			self.assertEqual((doctype, ptype), ("File", "read"))
+			self.assertIn(user, (OWNER, RECIPIENT))
 			return doc.name == second.name
 
 		def content(doc):

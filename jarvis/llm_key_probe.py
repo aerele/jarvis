@@ -374,7 +374,7 @@ def _stored_api_key(provider: str) -> str:
 		return ""
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def test_llm_api_key(
 	provider: str, model: str, api_key: str = "", base_url: str = "", use_stored_key: int = 0
 ) -> dict:
