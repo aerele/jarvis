@@ -57,6 +57,7 @@
 					:class="bodyClass"
 					style="white-space: normal"
 					v-html="html"
+					@click="onBodyClick"
 				/>
 				<template v-else>{{ text }}</template>
 			</div>
@@ -191,6 +192,7 @@
 					:class="bodyClass"
 					style="font-size: 14px; line-height: 1.6; color: var(--text)"
 					v-html="html"
+					@click="onBodyClick"
 				></div>
 				<slot name="below-body" />
 				<!-- Built-in trailer (attachments + Copy bar) for consumers that
@@ -333,6 +335,52 @@ const emit = defineEmits(["edit", "copy", "retry", "dismiss", "retry-same", "ope
 // built-in attachments + Copy trailer must yield to avoid double-rendering.
 const slots = useSlots();
 const hasBelowBody = computed(() => !!slots["below-body"]);
+
+// A code block's copy button (markdown.js ``copyCode``, #2170). The body is v-html,
+// so the click is caught here and copies that block's <code> text, exactly as shown.
+function onBodyClick(event) {
+	const btn = event.target?.closest?.(".jv-code-copy");
+	if (!btn) return;
+	event.preventDefault();
+	const code = btn.parentElement?.querySelector("pre code");
+	if (!code) return;
+	copyPlain(code.textContent || "").then((ok) => {
+		btn.classList.toggle("is-copied", ok);
+		btn.title = ok ? "Copied" : "Copy failed";
+		setTimeout(() => {
+			btn.classList.remove("is-copied");
+			btn.title = "Copy";
+		}, 1500);
+	});
+}
+
+// navigator.clipboard exists only on a secure page (https / localhost); over plain
+// http fall back to a hidden textarea, as the message Copy does.
+async function copyPlain(text) {
+	try {
+		if (navigator.clipboard && window.isSecureContext) {
+			await navigator.clipboard.writeText(text);
+			return true;
+		}
+	} catch (e) {
+		/* fall back below */
+	}
+	try {
+		const ta = document.createElement("textarea");
+		ta.value = text;
+		ta.setAttribute("readonly", "");
+		ta.style.position = "fixed";
+		ta.style.top = "-9999px";
+		document.body.appendChild(ta);
+		ta.select();
+		ta.setSelectionRange(0, text.length);
+		const ok = document.execCommand("copy");
+		document.body.removeChild(ta);
+		return ok;
+	} catch (e) {
+		return false;
+	}
+}
 </script>
 
 <style scoped>
@@ -660,6 +708,52 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
 	font-size: 12px;
 	color: var(--text);
 	white-space: pre;
+}
+/* code block copy button (#2170): top-right of the block, outside the <pre> so it
+   stays put while a long line scrolls sideways. Shown on hover, always on touch. */
+.jv-md-body.jv-md :deep(.jv-md-codeblock) {
+	position: relative;
+}
+.jv-md-body.jv-md :deep(.jv-code-copy) {
+	position: absolute;
+	top: 12px;
+	right: 6px;
+	z-index: 1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	padding: 0;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	background: var(--surface-1);
+	color: var(--text-3);
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.jv-md-body.jv-md :deep(.jv-md-codeblock:hover .jv-code-copy),
+.jv-md-body.jv-md :deep(.jv-code-copy:focus-visible),
+.jv-md-body.jv-md :deep(.jv-code-copy.is-copied) {
+	opacity: 1;
+}
+.jv-md-body.jv-md :deep(.jv-code-copy:hover) {
+	color: var(--text);
+	background: var(--surface-2);
+	border-color: var(--border-2);
+}
+.jv-md-body.jv-md :deep(.jv-code-copy.is-copied) {
+	color: var(--green);
+}
+/* keep the first line's end clear of the button */
+.jv-md-body.jv-md :deep(.jv-md-codeblock .jv-md-pre) {
+	padding-right: 40px;
+}
+@media (hover: none) {
+	.jv-md-body.jv-md :deep(.jv-code-copy) {
+		opacity: 1;
+	}
 }
 /* markdown content → the imported design's table look */
 .jv-md-body.jv-md :deep(.jv-md-p) {
