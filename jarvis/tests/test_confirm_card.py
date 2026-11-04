@@ -425,6 +425,52 @@ class TestPhase1Rewire(FrappeTestCase):
 		self.assertTrue(card.get("tables"))
 		self.assertEqual(card["tables"][0]["count"], 1)
 
+	# jarvis-admin-v2#823: a Timesheet row sent as hours=3 over a 13:00-14:30 slot
+	# drew as 3 hours while Confirm stored 1.5 - ERPNext's validate() recomputes
+	# ``hours`` from the two times, and the card's table read the call, not the trial.
+	_TIME_LOG = {
+		"activity_type": "Testing",
+		"from_time": "2026-11-03 13:00:00",
+		"hours": 3,
+		"to_time": "2026-11-03 14:30:00",
+	}
+
+	def _timesheet_card(self, would):
+		args = {
+			"doctype": "Timesheet",
+			"values": {"employee": "HR-EMP-1", "time_logs": [dict(self._TIME_LOG)]},
+		}
+		return build_card("create_doc", args, {"would": would} if would is not None else {})
+
+	def test_create_card_table_cells_show_what_the_trial_stores(self):
+		trial_row = {
+			**self._TIME_LOG,
+			"hours": 1.5,
+			"name": "row-1",
+			"idx": 1,
+			"parent": "TS-2026-00001",
+			"billing_hours": 0.0,
+		}
+		card = self._timesheet_card(
+			{"name": "TS-2026-00001", "employee": "HR-EMP-1", "time_logs": [trial_row]}
+		)
+		table = card["tables"][0]
+		# The columns stay the ones the call chose: no bookkeeping or unset field leaks in.
+		self.assertEqual(set(table["fieldnames"]), set(self._TIME_LOG))
+		cells = dict(zip(table["fieldnames"], table["rows"][0]["cells"], strict=True))
+		self.assertEqual(frappe.utils.flt(cells["hours"]), 1.5)
+		self.assertIn("13:00", cells["from_time"])
+		self.assertIn("14:30", cells["to_time"])
+
+	def test_create_card_table_keeps_the_call_rows_without_a_matching_trial(self):
+		# A held create has no dry run; a validate that added or removed rows cannot
+		# be paired by position. Both keep the rows as sent (the behaviour before).
+		for would in (None, {"name": "TS-1", "time_logs": []}):
+			with self.subTest(would=would):
+				table = self._timesheet_card(would)["tables"][0]
+				cells = dict(zip(table["fieldnames"], table["rows"][0]["cells"], strict=True))
+				self.assertEqual(frappe.utils.flt(cells["hours"]), 3)
+
 
 class TestVerbCardRecords(FrappeTestCase):
 	def setUp(self):
