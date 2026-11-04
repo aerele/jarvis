@@ -73,11 +73,7 @@ class DiwaliScene extends Scene {
       p,
       geo.from,
       geo.to
-    )}${
-      this.opts.replay
-        ? ""
-        : this.floorGroup(floorSVG(p, geo.ground, (x) => squeezeX(x, geo)))
-    }`;
+    )}${this.floorGroup(floorSVG(p, geo.ground, (x) => squeezeX(x, geo)))}`;
   }
 
   // The art's own timeline: toran, flames, fountains, rockets and bursts.

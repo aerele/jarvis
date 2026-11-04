@@ -77,11 +77,9 @@ class NewYearScene extends Scene {
   inner(geo) {
     const { p } = this;
     this.cannonX = geo.cannons;
-    const floor = this.opts.replay
-      ? ""
-      : this.floorGroup(
-          floorSVG(p, geo.ground, geo.cannons, (x, prop) => this.edge(x, prop))
-        );
+    const floor = this.floorGroup(
+      floorSVG(p, geo.ground, geo.cannons, (x, prop) => this.edge(x, prop))
+    );
     return `${skySVG(p, geo.dy, geo.burstX)}${yearSVG(
       p,
       yearText(this.opts.year),
@@ -141,7 +139,6 @@ class NewYearScene extends Scene {
   // The cannons stand low, so the spray is scaled up to reach the same height by the mark.
   confetti() {
     const { stage, p, geo } = this;
-    if (this.opts.replay) return; // no cannons on a replay
     const rand = rng(57);
     const muzzleY = this.fitted([
       CANNON.x[1],
@@ -177,15 +174,12 @@ class NewYearScene extends Scene {
     spray("cr", -1, 2250);
   }
 
-  // The right cannon fires the party hat in a high arc onto Jarvis's head. On a replay the
-  // cannons are not drawn, so the hat comes in from the bottom right corner instead.
+  // The right cannon fires the party hat in a high arc onto Jarvis's head.
   prepare() {
     const arc = (g) => {
       const x = this.cannonX[1];
       const [mx, my] = muzzle(x, -1);
-      const mouth = this.opts.replay
-        ? [g.to - 20, g.hu + 20]
-        : this.fittedHeld(x, [mx, this.floorBottom + my]);
+      const mouth = this.fittedHeld(x, [mx, this.floorBottom + my]);
       return quadPath(toTile(g, mouth), [140, -150], [0, 0], 14, -720);
     };
     this.fly(arc, {

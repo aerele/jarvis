@@ -232,6 +232,16 @@ const inside = (node, cls) => {
   return false;
 };
 
+/** A design with a floor row draws it on a replay too (the cards are hidden, the row stays). */
+export function replayFloorTest(label, mod) {
+  test(`${label}: a replay has the floor group`, () => {
+    const r = run(mod, { replay: true });
+    assert.equal(r.host.svg.querySelectorAll(".t-floor").length, 1);
+    r.api.settle("instant");
+    r.end();
+  });
+}
+
 /** The contract every day scene meets (scene-runtime.mjs header). `ms` are the scene's own times. */
 export function contractSuite(label, mod, ms) {
   const scene = (over) => run(mod, over);
@@ -325,12 +335,31 @@ export function contractSuite(label, mod, ms) {
     r.end();
   });
 
-  test(`${label}: replay has no greeting swap and no floor props`, () => {
-    const r = scene({ replay: true });
-    r.finish();
-    assert.equal(r.count("swap"), 0);
-    assert.ok(!r.markup().includes("floor"), "no floor row");
-    r.end();
+  test(`${label}: a replay draws the same art as a first play and sends no swap`, () => {
+    // What a run drew: the art at its start and just before its end, and every animation
+    // (what it moves, its keyframes and its options).
+    const drawn = (over) => {
+      const r = scene(over);
+      const first = r.markup();
+      r.tick(mod.END_MS - 1);
+      const last = r.markup();
+      const animations = r.host.svg.animations.map((a) => ({
+        node: `${a.node.tag}.${a.node.attrs.class || ""}`,
+        frames: a.frames,
+        options: a.options,
+      }));
+      const swaps = r.count("swap");
+      r.api.settle("instant");
+      r.end();
+      return { first, last, animations, swaps };
+    };
+    const play = drawn({});
+    const replay = drawn({ replay: true });
+    assert.ok(play.swaps >= 1, "the first play swaps the greeting");
+    assert.equal(replay.swaps, 0, "a replay sends no swap");
+    assert.equal(replay.first, play.first, "the same art at the start");
+    assert.equal(replay.last, play.last, "the same art at the end");
+    assert.deepEqual(replay.animations, play.animations, "the same motion");
   });
 
   test(`${label}: reduced motion, and a layout the scenes do not draw, only rest`, async () => {
