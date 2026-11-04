@@ -95,6 +95,7 @@
   "tenant_authority_handle",
   "foreign_sessions_seen",
   "foreign_session_last_at",
+  "instance_changed",
   "chat_device_id",
   "chat_device_public_key",
   "chat_device_private_key",
@@ -770,6 +771,15 @@
    "hidden": 1,
    "read_only": 1,
    "description": "When the most recent foreign plugin session was recorded."
+  },
+  {
+   "fieldname": "instance_changed",
+   "fieldtype": "Check",
+   "label": "Site Instance Changed",
+   "default": "0",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Set when the Jarvis agent reports it was pinned to a different instance id than this site's (a restore or a move). Cleared by a passing Re-verify. Chat readiness reports site_instance_changed while set."
   },
   {
    "fieldname": "chat_device_id",
@@ -1463,5 +1473,5 @@
    "write": 1
   }
  ],
- "modified": "2026-10-28 12:00:00.000000"
+ "modified": "2026-11-03 23:30:00.000000"
 }

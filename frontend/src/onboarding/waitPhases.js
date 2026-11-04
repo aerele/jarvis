@@ -306,6 +306,17 @@ export function readinessPhase({ answered = false, reason = "", detail = "" } = 
 				paged: false,
 				title: "This site is a copy",
 			};
+		case "site_instance_changed":
+			return {
+				observed: true,
+				state: PHASE_STATE.UNKNOWN,
+				kind: PHASE_KIND.NONE,
+				label: "This site changed",
+				detail: say,
+				stop: true,
+				paged: false,
+				title: "This site changed",
+			};
 		case "site_replaced":
 			return {
 				observed: true,

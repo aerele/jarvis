@@ -503,10 +503,13 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 		stored = frappe.get_single(SETTINGS).get_password("agent_token", raise_exception=False)
 		self.assertEqual(stored, "keep-me")
 
-	def test_retired_without_key_queues_the_fetch_after_commit(self):
+	def test_retired_without_key_queues_the_resync_after_commit(self):
 		"""write_connection holds the Jarvis Settings row lock: the admin round trip must
-		not run inside it."""
+		not run inside it. The retire-time fetch is the throttled key resync."""
 		clear_settings_password(frappe.get_single(SETTINGS), "callback_key")
+		gate = frappe.cache().make_key(onboarding._KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site)
+		frappe.cache().delete(gate)
+		self.addCleanup(frappe.cache().delete, gate)
 		with (
 			patch("frappe.enqueue") as enq,
 			patch("jarvis.onboarding.admin_client.get_connection") as get_conn,
@@ -514,10 +517,36 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 			onboarding.write_connection({"owner_key_retired": True})
 		get_conn.assert_not_called()
 		enq.assert_called_once()
-		self.assertEqual(enq.call_args.args[0], "jarvis.onboarding.fetch_callback_key_if_missing")
+		self.assertEqual(enq.call_args.args[0], "jarvis.onboarding.run_key_resync")
 		self.assertTrue(enq.call_args.kwargs["enqueue_after_commit"])
 		self.assertTrue(enq.call_args.kwargs["deduplicate"])
 		self.assertTrue(enq.call_args.kwargs["job_id"])
+
+	def test_retired_without_key_queues_the_resync_even_inside_the_throttle_window(self):
+		"""A retirement always triggers one fetch: the 10-minute self-heal throttle is
+		bypassed (the job id dedupes it)."""
+		clear_settings_password(frappe.get_single(SETTINGS), "callback_key")
+		gate = frappe.cache().make_key(onboarding._KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site)
+		frappe.cache().setex(gate, 500, 1)
+		self.addCleanup(frappe.cache().delete, gate)
+		with patch("frappe.enqueue") as enq:
+			onboarding.write_connection({"owner_key_retired": True})
+		enq.assert_called_once()
+		self.assertEqual(enq.call_args.args[0], "jarvis.onboarding.run_key_resync")
+		self.assertEqual(enq.call_args.kwargs["queue"], "short")
+		self.assertEqual(enq.call_args.kwargs["job_id"], f"jarvis_key_resync:{frappe.local.site}")
+		self.assertTrue(enq.call_args.kwargs["deduplicate"])
+		self.assertTrue(enq.call_args.kwargs["enqueue_after_commit"])
+
+	def test_a_retire_enqueue_failure_is_logged_and_never_fails_the_write(self):
+		clear_settings_password(frappe.get_single(SETTINGS), "callback_key")
+		with (
+			patch("frappe.enqueue", side_effect=RuntimeError("queue down")),
+			patch.object(frappe, "log_error") as log_error,
+		):
+			onboarding.write_connection({"owner_key_retired": True})
+		self.assertEqual(log_error.call_args.kwargs["title"], "callback key resync: enqueue failed")
+		self.assertFalse(frappe.get_single(SETTINGS).get_password("agent_token", raise_exception=False))
 
 	def test_retired_with_a_key_queues_nothing(self):
 		set_settings_password(frappe.get_single(SETTINGS), "callback_key", CALLBACK)
@@ -525,7 +554,7 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 			onboarding.write_connection({"owner_key_retired": True})
 		enq.assert_not_called()
 
-	def test_the_queued_fetch_runs_a_proof_backed_sync(self):
+	def test_the_resync_job_runs_a_proof_backed_sync(self):
 		clear_settings_password(frappe.get_single(SETTINGS), "callback_key")
 		calls = []
 
@@ -537,15 +566,17 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 			patch("frappe.enqueue") as enq,
 			patch("jarvis.onboarding.admin_client.get_connection", side_effect=_conn),
 		):
-			onboarding.fetch_callback_key_if_missing()
+			onboarding.run_key_resync()
 		self.assertEqual(len(calls), 1)
 		self.assertRegex(calls[0]["proof_nonce"], HEX32)
-		enq.assert_not_called()
+		# The stored key is confirmed to admin; no nested resync is queued.
+		queued = [c.args[0] for c in enq.call_args_list]
+		self.assertEqual(queued, ["jarvis.onboarding.confirm_callback_key_job"])
 		self.assertEqual(
 			frappe.get_single(SETTINGS).get_password("callback_key", raise_exception=False), CALLBACK
 		)
 
-	def test_the_queued_fetch_does_not_loop_when_no_key_returned(self):
+	def test_the_resync_job_does_not_loop_when_no_key_returned(self):
 		clear_settings_password(frappe.get_single(SETTINGS), "callback_key")
 		with (
 			patch("frappe.enqueue") as enq,
@@ -554,7 +585,7 @@ class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 				return_value={"agent_url": "ws://x.invalid", "owner_key_retired": True},
 			) as get_conn,
 		):
-			onboarding.fetch_callback_key_if_missing()
+			onboarding.run_key_resync()
 		self.assertEqual(get_conn.call_count, 1)
 		enq.assert_not_called()
 
@@ -590,6 +621,113 @@ class TestReverify(JarvisSettingsSnapshot, FrappeTestCase):
 			out = site_pin.reverify()
 		self.assertTrue(out["blocked"])
 		self.assertEqual(frappe.db.get_single_value(SETTINGS, "paired_site"), "other.site")
+
+	def test_reverify_sends_this_sites_instance_id(self):
+		from jarvis.chat import site_identity
+
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True}) as vs:
+			site_pin.reverify()
+		self.assertEqual(vs.call_args.kwargs["instance_id"], site_identity.instance_id())
+
+	def test_reverify_returns_pin_rebound(self):
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True, "pin_rebound": True}):
+			out = site_pin.reverify()
+		self.assertTrue(out["proved"])
+		self.assertTrue(out["pin_rebound"])
+
+	def test_reverify_against_an_old_admin_reports_no_rebind(self):
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True}):
+			out = site_pin.reverify()
+		self.assertTrue(out["proved"])
+		self.assertFalse(out["pin_rebound"])
+
+	def test_reverify_clears_the_instance_changed_record_when_the_pin_was_rebound(self):
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 1, update_modified=False)
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True, "pin_rebound": True}):
+			out = site_pin.reverify()
+		self.assertTrue(out["proved"] and out["pin_rebound"])
+		self.assertFalse(frappe.db.get_single_value(SETTINGS, "instance_changed"))
+
+	def test_reverify_keeps_the_instance_changed_record_when_proved_but_nothing_rebound(self):
+		"""An older admin/fleet proves but rebinds nothing: the agent would block the
+		site again, so the record (and the banner) stays."""
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 1, update_modified=False)
+		for answer in ({"proved": True}, {"proved": True, "pin_rebound": False}):
+			with self.subTest(answer=answer):
+				with patch("jarvis.admin_client.verify_site", return_value=answer):
+					out = site_pin.reverify()
+				self.assertTrue(out["proved"])
+				self.assertFalse(out["pin_rebound"])
+				self.assertNotIn("error", out)
+				self.assertTrue(frappe.db.get_single_value(SETTINGS, "instance_changed"))
+				# The pairing block is still lifted by a pass.
+				self.assertFalse(out["blocked"])
+
+	def test_reverify_keeps_the_instance_changed_record_when_not_proved(self):
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 1, update_modified=False)
+		err = AdminAuthError("no", status_code=403, code="SiteProofFailed")
+		with patch("jarvis.admin_client.verify_site", side_effect=err):
+			out = site_pin.reverify()
+		self.assertFalse(out["proved"])
+		self.assertFalse(out["pin_rebound"])
+		self.assertTrue(frappe.db.get_single_value(SETTINGS, "instance_changed"))
+
+	def test_reverify_admin_unreachable_returns_not_proved_with_reason(self):
+		from jarvis.exceptions import AdminRateLimitedError, AdminUnreachableError
+
+		for exc in (
+			AdminUnreachableError("admin 503", status_code=503),
+			AdminUnreachableError("connection refused"),
+			AdminRateLimitedError("slow down"),
+		):
+			with self.subTest(exc=type(exc).__name__, msg=str(exc)):
+				with patch("jarvis.admin_client.verify_site", side_effect=exc):
+					out = site_pin.reverify()
+				self.assertFalse(out["proved"])
+				self.assertFalse(out["pin_rebound"])
+				self.assertEqual(out["error"], "unreachable")
+				self.assertTrue(out["blocked"])
+
+	def test_reverify_admin_refusing_returns_not_verified_not_unreachable(self):
+		from jarvis.exceptions import AdminContractError, AdminValidationError
+
+		for exc in (
+			AdminValidationError("no running tenant", exc_type="DuplicateEntryError"),
+			AdminContractError("bad instance_id", code="NoRunningTenant"),
+		):
+			with self.subTest(exc=type(exc).__name__):
+				with patch("jarvis.admin_client.verify_site", side_effect=exc):
+					out = site_pin.reverify()
+				self.assertFalse(out["proved"])
+				self.assertFalse(out["pin_rebound"])
+				self.assertEqual(out["error"], "not_verified")
+
+	def test_reverify_rejected_proof_is_not_verified_but_ambiguous_stays_unreachable(self):
+		from jarvis.exceptions import AdminAmbiguousError, AdminRejectedError
+
+		with patch(
+			"jarvis.admin_client.verify_site",
+			side_effect=AdminRejectedError("admin returned 502", code="FleetConfigError"),
+		):
+			self.assertEqual(site_pin.reverify()["error"], "not_verified")
+		with patch("jarvis.admin_client.verify_site", side_effect=AdminAmbiguousError("read timeout")):
+			self.assertEqual(site_pin.reverify()["error"], "unreachable")
+
+	def test_a_normal_answer_carries_no_error(self):
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True}):
+			self.assertNotIn("error", site_pin.reverify())
+
+	def test_verify_site_sends_instance_id_only_when_given(self):
+		with patch.object(admin_client, "_post", return_value={"proved": True}) as post:
+			admin_client.verify_site("n" * 32)
+			self.assertEqual(post.call_args.kwargs["body"], {"proof_nonce": "n" * 32})
+			admin_client.verify_site("n" * 32, instance_id="ab" * 16)
+			self.assertEqual(
+				post.call_args.kwargs["body"], {"proof_nonce": "n" * 32, "instance_id": "ab" * 16}
+			)
+			admin_client.verify_site("n" * 32, instance_id="")
+			self.assertEqual(post.call_args.kwargs["body"]["instance_id"], "")
+			self.assertTrue(post.call_args.kwargs["allow_copy"])
 
 	def test_reverify_requires_system_manager(self):
 		with (

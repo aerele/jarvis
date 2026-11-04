@@ -172,6 +172,86 @@ class TestVouchSession(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertEqual(enq.call_count, 1)
 		self.assertEqual(enq.call_args.args[0], "jarvis.chat.foreign_session.report")
 
+	def _instance_changed(self) -> bool:
+		return bool(frappe.db.get_single_value(SETTINGS, "instance_changed"))
+
+	def test_readiness_reports_site_instance_changed_after_a_recorded_mismatch(self):
+		import jarvis.account
+
+		session_claims.claim(KEY)
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 0, update_modified=False)
+		with self._request(), patch("frappe.enqueue"):
+			vouch_session(pinned_instance_id="f" * 32)
+		self.assertTrue(self._instance_changed())
+		with patch("jarvis.admin_client.get_connection") as get_connection:
+			out = jarvis.account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "site_instance_changed")
+		get_connection.assert_not_called()
+
+	def test_the_instance_changed_marker_is_set_on_every_mismatch_not_once_a_day(self):
+		session_claims.claim(KEY)
+		with self._request(), patch("frappe.enqueue"):
+			vouch_session(pinned_instance_id="f" * 32)
+			frappe.db.set_single_value(SETTINGS, "instance_changed", 0, update_modified=False)
+			vouch_session(pinned_instance_id="f" * 32)  # report throttled, marker is not
+		self.assertTrue(self._instance_changed())
+
+	def test_a_matching_or_absent_pin_clears_the_instance_changed_marker(self):
+		session_claims.claim(KEY)
+		with self._request(), patch("frappe.enqueue"):
+			own = vouch_session()["instance_id"]
+			for pinned in (own, None):
+				frappe.db.set_single_value(SETTINGS, "instance_changed", 1, update_modified=False)
+				vouch_session(pinned_instance_id=pinned)
+				self.assertFalse(self._instance_changed())
+
+	def test_vouch_with_a_bad_signature_never_marks_instance_changed(self):
+		session_claims.claim(KEY)
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 0, update_modified=False)
+		with self._request(verified=False), patch("frappe.enqueue"):
+			vouch_session(pinned_instance_id="f" * 32)
+		self.assertFalse(self._instance_changed())
+
+	def test_vouch_with_a_bad_signature_never_clears_instance_changed(self):
+		session_claims.claim(KEY)
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 1, update_modified=False)
+		with self._request(verified=False), patch("frappe.enqueue"):
+			vouch_session(pinned_instance_id=None)
+		self.assertTrue(self._instance_changed())
+
+	def test_reading_the_marker_where_the_row_is_absent_is_false_and_never_throws(self):
+		frappe.db.delete("Singles", {"doctype": SETTINGS, "field": "instance_changed"})
+		with patch("frappe.throw", side_effect=AssertionError("frappe.throw")) as thrown:
+			self.assertFalse(foreign_session.instance_changed())
+		thrown.assert_not_called()
+		self.assertEqual(frappe.local.message_log, [])
+
+	def test_the_marker_round_trips_through_the_singles_read(self):
+		foreign_session.mark_instance_changed()
+		self.assertTrue(foreign_session.instance_changed())
+		foreign_session.clear_instance_changed()
+		self.assertFalse(foreign_session.instance_changed())
+
+	def test_an_unmigrated_site_never_raises_marking_or_clearing(self):
+		"""The DocType meta lacks the field until migrate: set_single_value would throw."""
+		meta = MagicMock()
+		meta.has_field.return_value = False
+		with (
+			patch("frappe.get_meta", return_value=meta),
+			patch("frappe.db.set_single_value", side_effect=AssertionError("write")) as write,
+			patch("frappe.throw", side_effect=AssertionError("frappe.throw")),
+		):
+			foreign_session.mark_instance_changed()
+			foreign_session.clear_instance_changed()
+		write.assert_not_called()
+
+	def test_an_unknown_session_never_marks_the_instance_changed(self):
+		frappe.db.set_single_value(SETTINGS, "instance_changed", 0, update_modified=False)
+		with self._request(key="agent:main:dashboard:never-seen"), patch("frappe.enqueue"):
+			vouch_session(pinned_instance_id="f" * 32)
+		self.assertFalse(self._instance_changed())
+
 	def test_vouch_lookup_error_is_503_never_known(self):
 		with (
 			self._request(),

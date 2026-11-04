@@ -2,15 +2,18 @@
 token keeps verifying until retirement clears it. The site signs plugin-route
 requests with the callback key, else the owner token."""
 
+import hashlib
+import hmac
 from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis import _http, _plugin_auth, onboarding, onboarding_contract, settings_reset
+from jarvis import _http, _plugin_auth, admin_client, onboarding, onboarding_contract, settings_reset
 from jarvis._password_utils import clear_settings_password, set_settings_password
 from jarvis._plugin_auth import PluginAuthError
 from jarvis.chat import plugin_routes
+from jarvis.exceptions import AdminSiteIsCopyError, AdminValidationError
 from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
 from jarvis.tests.test_api import _FakeRequest, sign_plugin_headers
 
@@ -23,15 +26,15 @@ SESSION = "agent:test:j2"
 class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
 		super().setUp()
-		# The retired-without-key path queues a key fetch, and a wrong key queues the
-		# self-heal sync (both go through admin): never for real.
-		for target in (
-			"jarvis.onboarding.schedule_callback_key_fetch",
-			"jarvis._plugin_auth._request_key_resync",
-		):
+		# The retired-without-key path and a wrong key both queue the self-heal sync
+		# (through admin): never for real.
+		for target in ("jarvis._plugin_auth._request_key_resync",):
 			mocked = patch(target)
 			mocked.start()
 			self.addCleanup(mocked.stop)
+		resync = patch("jarvis.onboarding.request_key_resync")
+		self.resync = resync.start()
+		self.addCleanup(resync.stop)
 		self.settings = frappe.get_single(SETTINGS)
 		set_settings_password(self.settings, "agent_token", OWNER, update_modified=False)
 		clear_settings_password(self.settings, "callback_key")
@@ -105,11 +108,50 @@ class TestCallbackKey(JarvisSettingsSnapshot, FrappeTestCase):
 		self.assertEqual(_plugin_auth._callback_key(), CALLBACK)
 		self.assertEqual(_plugin_auth._agent_token(), OWNER)
 
-	def test_retired_payload_clears_agent_token(self):
+	def test_retired_payload_with_a_key_clears_agent_token(self):
 		set_settings_password(self.settings, "callback_key", CALLBACK)
 		onboarding.write_connection({"owner_key_retired": True})
 		self.assertEqual(_plugin_auth._agent_token(), "")
 		self.assertEqual(_plugin_auth._callback_key(), CALLBACK)
+		self.resync.assert_not_called()
+
+	def test_retired_payload_carrying_the_key_clears_agent_token(self):
+		onboarding.write_connection({"owner_key_retired": True, "callback_key": CALLBACK})
+		self.assertEqual(_plugin_auth._agent_token(), "")
+		self.assertEqual(_plugin_auth._callback_key(), CALLBACK)
+		self.resync.assert_not_called()
+
+	def test_retired_payload_without_a_key_clears_agent_token_and_queues_resync(self):
+		"""Fail closed: the old owner token also sits in every pre-retirement copy of
+		the site, so it must stop verifying even with no callback key stored. The key
+		is fetched by a resync job queued directly (not through the throttle)."""
+		with patch("frappe.enqueue") as enq:
+			onboarding.write_connection({"owner_key_retired": True})
+		self.assertEqual(_plugin_auth._agent_token(), "")
+		self.assertEqual(_plugin_auth._callback_key(), "")
+		resyncs = [c for c in enq.call_args_list if c.args[0] == "jarvis.onboarding.run_key_resync"]
+		self.assertEqual(len(resyncs), 1)
+		self.resync.assert_not_called()
+
+	def test_retired_payload_with_a_malformed_key_clears_agent_token_and_queues_resync(self):
+		with patch("frappe.enqueue") as enq:
+			onboarding.write_connection({"owner_key_retired": True, "callback_key": "short"})
+		self.assertEqual(_plugin_auth._agent_token(), "")
+		self.assertEqual(
+			len([c for c in enq.call_args_list if c.args[0] == "jarvis.onboarding.run_key_resync"]), 1
+		)
+
+	def test_retired_payload_inside_a_key_sync_queues_no_nested_job(self):
+		with (
+			patch.dict(frappe.flags, {"jarvis_key_fetch": True}),
+			patch("jarvis.onboarding._shorten_key_resync_throttle") as shorten,
+			patch("frappe.enqueue") as enq,
+		):
+			onboarding.write_connection({"owner_key_retired": True})
+		self.assertEqual(_plugin_auth._agent_token(), "")
+		self.resync.assert_not_called()
+		enq.assert_not_called()
+		shorten.assert_called_once_with()
 
 	def test_not_retired_payload_keeps_agent_token(self):
 		onboarding.write_connection({"owner_key_retired": False})
@@ -237,3 +279,137 @@ class TestSignedRouteHeaders(JarvisSettingsSnapshot, FrappeTestCase):
 		with patch.object(frappe, "request", _FakeRequest(headers), create=True):
 			with self.assertRaises(PluginAuthError):
 				_plugin_auth.validate_plugin_request(b"b")
+
+
+def _confirm_enqueues(enq):
+	return [
+		c for c in enq.call_args_list if c.args and c.args[0] == "jarvis.onboarding.confirm_callback_key_job"
+	]
+
+
+class TestCallbackKeyConfirm(JarvisSettingsSnapshot, FrappeTestCase):
+	"""The site tells admin, by digest, that it stored the callback key (contract C1)."""
+
+	def setUp(self):
+		super().setUp()
+		self.settings = frappe.get_single(SETTINGS)
+		clear_settings_password(self.settings, "callback_key")
+		resync = patch("jarvis.onboarding.request_key_resync")
+		resync.start()
+		self.addCleanup(resync.stop)
+
+	def test_stored_key_queues_one_confirm_after_commit(self):
+		with patch("frappe.enqueue") as enq:
+			onboarding.write_connection({"callback_key": CALLBACK})
+		(call,) = _confirm_enqueues(enq)
+		self.assertEqual(call.kwargs["queue"], "short")
+		self.assertTrue(call.kwargs["deduplicate"])
+		self.assertTrue(call.kwargs["enqueue_after_commit"])
+		self.assertEqual(call.kwargs["job_id"], f"jarvis_callback_key_confirm:{frappe.local.site}")
+
+	def test_malformed_key_queues_no_confirm(self):
+		with patch("frappe.enqueue") as enq:
+			onboarding.write_connection({"callback_key": "short"})
+		self.assertEqual(_confirm_enqueues(enq), [])
+
+	def test_payload_without_a_key_queues_no_confirm(self):
+		with patch("frappe.enqueue") as enq:
+			onboarding.write_connection({"owner_key_retired": False})
+		self.assertEqual(_confirm_enqueues(enq), [])
+
+	def test_rejected_stale_payload_queues_no_confirm(self):
+		self.settings.db_set("tenant_authority_generation", 5)
+		self.settings.db_set("tenant_authority_handle", "h-current")
+		with patch("frappe.enqueue") as enq:
+			onboarding.write_connection(
+				{
+					"agent_url": "ws://stale.invalid",
+					"tenant_authority_generation": 3,
+					"tenant_authority_handle": "h-old",
+					"callback_key": CALLBACK,
+				}
+			)
+		self.assertEqual(_confirm_enqueues(enq), [])
+
+	def test_an_enqueue_failure_never_fails_the_store(self):
+		with patch("frappe.enqueue", side_effect=RuntimeError("queue down")):
+			onboarding.write_connection({"callback_key": CALLBACK})
+		self.assertEqual(_plugin_auth._callback_key(), CALLBACK)
+
+	def test_digest_is_the_contract_hmac(self):
+		expected = hmac.new(CALLBACK.encode("ascii"), b"jarvis-callback-key-confirm:v1", hashlib.sha256)
+		self.assertEqual(onboarding.callback_key_digest(CALLBACK), expected.hexdigest())
+		self.assertRegex(onboarding.callback_key_digest(CALLBACK), r"[0-9a-f]{64}")
+
+	def test_confirm_job_sends_the_hmac_digest_never_the_key(self):
+		set_settings_password(self.settings, "callback_key", CALLBACK)
+		with (
+			patch.object(admin_client, "_post", return_value={"confirmed": True}) as post,
+			patch.object(frappe, "log_error") as log_error,
+		):
+			onboarding.confirm_callback_key_job()
+		post.assert_called_once()
+		self.assertTrue(post.call_args.kwargs["path"].endswith(".api.tenant.confirm_callback_key"))
+		self.assertEqual(
+			post.call_args.kwargs["body"], {"key_digest": onboarding.callback_key_digest(CALLBACK)}
+		)
+		self.assertNotIn(CALLBACK, repr(post.call_args))
+		self.assertFalse(post.call_args.kwargs.get("allow_copy", False))
+		log_error.assert_not_called()
+
+	def test_confirm_job_without_a_stored_key_calls_nothing(self):
+		with patch.object(admin_client, "_post") as post:
+			onboarding.confirm_callback_key_job()
+		post.assert_not_called()
+
+	def test_confirm_failure_is_logged_without_key_material(self):
+		set_settings_password(self.settings, "callback_key", CALLBACK)
+
+		def _boom(**kwargs):
+			secret_local = CALLBACK  # a frame local the log must not dump
+			raise RuntimeError(f"admin down ({len(secret_local)})")
+
+		with (
+			patch.object(admin_client, "_post", side_effect=_boom),
+			patch.object(frappe, "log_error") as log_error,
+		):
+			onboarding.confirm_callback_key_job()
+		log_error.assert_called_once()
+		self.assertEqual(log_error.call_args.kwargs["title"], "callback key confirm failed")
+		self.assertIn("RuntimeError: admin down", log_error.call_args.kwargs["message"])
+		self.assertNotIn(CALLBACK, repr(log_error.call_args))
+
+	def test_old_admin_without_confirm_is_ignored(self):
+		set_settings_password(self.settings, "callback_key", CALLBACK)
+		missing = AdminValidationError(
+			"Failed to get method for command jarvis_admin_v2.api.tenant.confirm_callback_key",
+			exc_type="ValidationError",
+		)
+		with (
+			patch.object(admin_client, "_post", side_effect=missing),
+			patch.object(frappe, "log_error") as log_error,
+		):
+			onboarding.confirm_callback_key_job()
+		log_error.assert_not_called()
+
+	def test_other_admin_validation_errors_are_logged(self):
+		set_settings_password(self.settings, "callback_key", CALLBACK)
+		with (
+			patch.object(
+				admin_client,
+				"_post",
+				side_effect=AdminValidationError("bad shape", exc_type="ValidationError"),
+			),
+			patch.object(frappe, "log_error") as log_error,
+		):
+			onboarding.confirm_callback_key_job()
+		log_error.assert_called_once()
+
+	def test_a_flagged_copy_never_confirms_and_logs_nothing(self):
+		set_settings_password(self.settings, "callback_key", CALLBACK)
+		with (
+			patch.object(admin_client, "_post", side_effect=AdminSiteIsCopyError("other.site")),
+			patch.object(frappe, "log_error") as log_error,
+		):
+			onboarding.confirm_callback_key_job()
+		log_error.assert_not_called()

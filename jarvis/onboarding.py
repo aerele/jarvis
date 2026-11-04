@@ -2,6 +2,8 @@
 Settings, and thin server wrappers the onboarding page calls (so the browser
 never holds admin creds). admin_client returns already-unwrapped admin data."""
 
+import hashlib
+import hmac
 import json
 import re
 import unicodedata
@@ -23,6 +25,7 @@ from jarvis._cache_latch import claim_once
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
+	AdminSiteIsCopyError,
 	AdminUnreachableError,
 	AdminValidationError,
 )
@@ -237,17 +240,10 @@ def write_connection(data: dict) -> None:
 			if data.get("agent_token"):
 				_store_agent_token(s, data["agent_token"])
 		if write_conn:
-			if data.get("callback_key"):
-				_store_callback_key(data["callback_key"])
+			if data.get("callback_key") and _store_callback_key(data["callback_key"]):
+				_queue_callback_key_confirm()
 			if retiring:
-				# Admin retired the gateway owner key: the plugin now signs with the
-				# callback key only, so the stored owner token must stop verifying.
-				clear_settings_password(s, "agent_token")
-				s.db_set("agent_token_issued_at", None)
-				# Retired with no callback key stored: tool calls 503 until it
-				# arrives, so fetch it with a proof. Never inline: this runs under the
-				# Jarvis Settings row lock, and the fetch is an admin round trip.
-				schedule_callback_key_fetch()
+				_retire_owner_token(s)
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them. Wider than
 	# ``new_admin_login`` above on purpose - a standalone customer_password (the
@@ -295,6 +291,8 @@ def _store_agent_token(settings, token: str) -> None:
 
 
 _CALLBACK_KEY_RE = re.compile(r"[0-9a-f]{64}")
+# Fixed label of the key-confirmation digest (contract C1; admin uses the same bytes).
+_CONFIRM_LABEL = b"jarvis-callback-key-confirm:v1"
 
 
 def _store_callback_key(key: str) -> bool:
@@ -308,47 +306,105 @@ def _store_callback_key(key: str) -> bool:
 	return True
 
 
-def has_callback_key() -> bool:
-	from frappe.utils.password import get_decrypted_password
-
-	return bool(
-		get_decrypted_password("Jarvis Settings", "Jarvis Settings", "callback_key", raise_exception=False)
-	)
-
-
-def fetch_callback_key_if_missing() -> None:
-	"""Run a proof-backed sync when no callback key is stored. The key only ever
-	arrives through ``write_connection`` (behind the tenant-authority guard), never
-	from a pairing response. Best effort and not re-entrant: a sync that returns no
-	key does not start another."""
-	if has_callback_key():
-		return
-	_best_effort_key_sync()
+def callback_key_digest(key: str) -> str:
+	"""What the site tells admin to prove it stored the key: an HMAC of a fixed label
+	keyed with the callback key. Admin recomputes it from its own copy and compares;
+	the key itself never leaves this site in the confirmation."""
+	return hmac.new(key.encode("ascii"), _CONFIRM_LABEL, hashlib.sha256).hexdigest()
 
 
-def schedule_callback_key_fetch() -> None:
-	"""``fetch_callback_key_if_missing`` as a background job that starts after the
-	current transaction commits, so no lock is held across the admin call. Deduplicated
-	per site; skipped inside a key sync already running (its own write must not queue
-	another) and when a key is already stored. Never raises."""
-	if getattr(frappe.flags, "jarvis_key_fetch", False) or has_callback_key():
-		return
+def _queue_callback_key_confirm() -> None:
+	"""Tell admin, after this transaction commits, that the key was stored. Admin treats
+	the confirmation as "this site can verify plugin calls" and gates enforce and the
+	owner-key retirement on it. Sent on every store (admin stamps once, idempotent), so
+	a confirmation lost to an unreachable admin is re-sent by the next proof-backed
+	sync. Never inline (this runs under the Jarvis Settings row lock) and never raises."""
 	try:
 		frappe.enqueue(
-			"jarvis.onboarding.fetch_callback_key_if_missing",
+			"jarvis.onboarding.confirm_callback_key_job",
 			queue="short",
-			job_id=f"jarvis_callback_key_fetch:{frappe.local.site}",
+			job_id=f"jarvis_callback_key_confirm:{frappe.local.site}",
 			deduplicate=True,
 			enqueue_after_commit=True,
 		)
 	except Exception:
-		frappe.log_error(title="callback key fetch: enqueue failed", message=frappe.get_traceback())
+		frappe.log_error(title="callback key confirm: enqueue failed", message=frappe.get_traceback())
+
+
+def confirm_callback_key_job() -> None:
+	"""The confirmation job. An admin that predates the endpoint answers Frappe's
+	"Failed to get method" (417); that is not an error, the site simply never becomes
+	enforce-ready. A site that is a flagged copy never confirms. Failures are logged
+	with the traceback only: no frame locals, which hold the key."""
+	key = _stored_callback_key()
+	if not key:
+		return
+	try:
+		admin_client.confirm_callback_key(callback_key_digest(key))
+	except AdminSiteIsCopyError:
+		return
+	except AdminValidationError as exc:
+		if not admin_client.is_method_not_found(exc):
+			frappe.log_error(title="callback key confirm failed", message=frappe.get_traceback())
+	except Exception:
+		frappe.log_error(title="callback key confirm failed", message=frappe.get_traceback())
+
+
+def _stored_callback_key() -> str:
+	from frappe.utils.password import get_decrypted_password
+
+	return (
+		get_decrypted_password("Jarvis Settings", "Jarvis Settings", "callback_key", raise_exception=False)
+		or ""
+	)
+
+
+def has_callback_key() -> bool:
+	return bool(_stored_callback_key())
+
+
+def _retire_owner_token(s) -> None:
+	"""Admin retired the gateway owner key: the plugin now signs with the callback key
+	only, so the stored owner token must stop verifying. Always, even with no callback
+	key stored: the old owner token also sits in every copy of this site made before
+	the retirement, and a site that kept it would accept plugin calls signed by a copy.
+	Failing closed costs availability only until the key arrives, so without one a
+	proof-backed sync fetches it. The retirement queues that fetch itself, past the
+	10-minute self-heal throttle (a retirement must always trigger one fetch; the job id
+	dedupes it), and the 503 path of every plugin call re-queues it. Never inline: this
+	runs under the Jarvis Settings row lock, and the fetch is an admin round trip."""
+	from jarvis._password_utils import clear_settings_password
+
+	clear_settings_password(s, "agent_token")
+	s.db_set("agent_token_issued_at", None)
+	if has_callback_key():
+		return
+	if getattr(frappe.flags, "jarvis_key_fetch", False):
+		# Inside a key sync that returned no key: no nested job, but let the next
+		# plugin call retry within two minutes instead of ten.
+		_shorten_key_resync_throttle()
+		return
+	try:
+		_enqueue_key_resync()
+	except Exception:
+		frappe.log_error(title="callback key resync: enqueue failed", message=frappe.get_traceback())
 
 
 KEY_RESYNC_THROTTLE_S = 600
 # A FAILED self-heal retries sooner: the throttle's expiry is cut to this.
 KEY_RESYNC_FAILED_THROTTLE_S = 120
 _KEY_RESYNC_THROTTLE_PREFIX = "jarvis:key_resync:"
+
+
+def _enqueue_key_resync() -> None:
+	"""The key-resync job, after this transaction commits, one per site at a time."""
+	frappe.enqueue(
+		"jarvis.onboarding.run_key_resync",
+		queue="short",
+		job_id=f"jarvis_key_resync:{frappe.local.site}",
+		deduplicate=True,
+		enqueue_after_commit=True,
+	)
 
 
 def request_key_resync() -> bool:
@@ -360,13 +416,7 @@ def request_key_resync() -> bool:
 	try:
 		if not claim_once(_KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site, KEY_RESYNC_THROTTLE_S):
 			return False
-		frappe.enqueue(
-			"jarvis.onboarding.run_key_resync",
-			queue="short",
-			job_id=f"jarvis_key_resync:{frappe.local.site}",
-			deduplicate=True,
-			enqueue_after_commit=True,
-		)
+		_enqueue_key_resync()
 		return True
 	except Exception:
 		return False
@@ -424,20 +474,6 @@ def resync_callback_key_after_pairing() -> None:
 		)
 	except Exception:
 		frappe.log_error(title="callback key resync: enqueue failed", message=frappe.get_traceback())
-
-
-def _best_effort_key_sync() -> None:
-	if getattr(frappe.flags, "jarvis_key_fetch", False):
-		return
-	frappe.flags.jarvis_key_fetch = True
-	try:
-		_sync_connection(timeout_s=8, prove=True)
-	except Exception:
-		# message= on purpose: without it Frappe dumps every frame's locals, and these
-		# frames hold the admin Authorization header and the connection payload.
-		frappe.log_error(title="callback key fetch failed", message=frappe.get_traceback())
-	finally:
-		frappe.flags.jarvis_key_fetch = False
 
 
 @frappe.whitelist(methods=["POST"])

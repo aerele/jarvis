@@ -645,6 +645,10 @@ def vouch_session(pinned_instance_id: str | None = None) -> dict:
 	else:
 		if own_id and pinned_instance_id and pinned_instance_id != own_id:
 			foreign_session.record_instance_mismatch(key)
+		elif own_id:
+			# The plugin is unpinned (rebound, or Rotate pairing) or pinned to this
+			# site: whatever changed is resolved, so readiness stops saying so.
+			foreign_session.clear_instance_changed()
 		try:
 			from jarvis.chat import site_pin
 
