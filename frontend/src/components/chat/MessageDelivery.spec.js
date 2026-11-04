@@ -100,21 +100,25 @@ it("keeps every action in place but locked while a check or retry is running", a
 	w.unmount();
 });
 
-it("links a confirmed delivery to its conversation and offers no retry", () => {
+// Aerele-RnD/jarvis-admin-v2#805: the confirmed notice used to carry a "View
+// conversation" link that opened the chat it already sat in, in a new tab. The
+// outcome and Dismiss are the whole notice; a retry would send the message twice.
+it("shows a confirmed delivery as its outcome and Dismiss, with no link and no retry", () => {
 	const w = mount(Message, {
 		props: {
 			text: "Invoice",
 			deliveryState: "delivered",
-			deliveryNote: "Delivery confirmed. View the conversation for the current result.",
-			deliveryConversation: "conv 1",
+			deliveryNote: "Delivery confirmed. The result is in this chat.",
 		},
 	});
-	expect(w.get(".jv-delivery-note").text()).toBe(
-		"View the conversation for the current result."
-	);
-	expect(w.get("a").attributes("href")).toBe("/jarvis/c/conv%201");
-	const labels = w.findAll("button").map((b) => b.text());
-	expect(labels).not.toContain("Retry");
-	expect(labels).toContain("Dismiss");
+	expect(w.get(".jv-delivery-note").text()).toBe("The result is in this chat.");
+	expect(w.find(".jv-delivery a").exists()).toBe(false);
+	expect(w.text()).not.toContain("View conversation");
+	expect(
+		w
+			.get(".jv-delivery")
+			.findAll("button")
+			.map((b) => b.text())
+	).toEqual(["Dismiss"]);
 	w.unmount();
 });
