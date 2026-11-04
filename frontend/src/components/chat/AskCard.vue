@@ -72,15 +72,21 @@
 				placeholder="Select an option"
 				@update:model-value="pickSingle(qi, $event)"
 			/>
-			<!-- number: a field's Int / Float / Currency / Percent -->
-			<FormControl
+			<!-- number: a field's Int / Float / Currency / Percent. The card's own
+			     field, like its date/text/link siblings: a frappe-ui FormControl is
+			     styled by Tailwind utilities, and the chat surface's forms-plugin
+			     compensation (index.css, `.jv-root :where(input…)`) reverts those to
+			     the browser's bare input (jarvis-admin-v2#806). -->
+			<input
 				v-else-if="q.type === 'number'"
 				type="text"
 				inputmode="decimal"
-				:model-value="sel[qi] || ''"
+				class="jv-ask-field"
+				:value="sel[qi] || ''"
 				:disabled="answered"
 				placeholder="Type a number"
-				@update:model-value="pickSingle(qi, $event)"
+				@input="pickSingle(qi, $event.target.value)"
+				@keydown.enter.prevent
 			/>
 			<!-- link: search a record of the given DocType -->
 			<div
@@ -163,7 +169,7 @@
 // identity) on every stream tick — resetting on a `spec` watcher would wipe
 // half-made picks. Remounting on a new message is what clears the draft.
 import { ref, computed, watch } from "vue";
-import { FormControl, LoadingIndicator, Select } from "frappe-ui";
+import { LoadingIndicator, Select } from "frappe-ui";
 import { getDoctypeFields, searchLink } from "@/api";
 import { controlFor } from "@/lib/docFields";
 import { DraftLinkFilterError, resolveLinkFilters } from "@/lib/draftLinkFilters";
