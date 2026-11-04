@@ -23,6 +23,10 @@ import {
 	parseFiredStamp,
 	encodeFiredStamp,
 	claimGotoFire,
+	builderSeed,
+	requestBefore,
+	REQUEST_WORDS_MAX,
+	REQUEST_TURNS_MAX,
 } from "./chatGoto.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -88,7 +92,7 @@ test("chatBlocks strips jarvis-goto from the visible prose", () => {
 test("ChatView parses goto through the shared module, not a private copy", () => {
 	assert.match(
 		chatViewSrc,
-		/import \{ parseGoto, gotoFiredKey, parseFiredStamp, claimGotoFire \} from "@\/lib\/chatGoto";/
+		/import \{\s*parseGoto,\s*gotoFiredKey,\s*parseFiredStamp,\s*claimGotoFire,\s*builderSeed,\s*requestBefore,?\s*\} from "@\/lib\/chatGoto";/
 	);
 	const gotoOf = fnBody(chatViewSrc, "function gotoOf(m)");
 	assert.match(gotoOf, /return parseGoto\(\(m && m\.content\) \|\| ""\);/);
@@ -134,7 +138,11 @@ test("gotoDashboards stashes the prefill and navigates to the builder", () => {
 		/import \{ setDashboardPrefill \} from "@\/composables\/dashboardPrefill";/
 	);
 	const fn = fnBody(chatViewSrc, "function gotoDashboards(prompt, messageId)");
-	assert.match(fn, /setDashboardPrefill\(\{ text: prompt, autoSend: true, messageId \}\);/);
+	assert.match(
+		fn,
+		/const text = builderSeed\(prompt, requestBefore\(messages\.value, messageId\)\);/
+	);
+	assert.match(fn, /setDashboardPrefill\(\{ text, autoSend: true, messageId \}\);/);
 	assert.match(fn, /router\.push\("\/dashboards"\);/);
 });
 
@@ -149,7 +157,7 @@ test("gotoDashboards resumes the recorded conversation for a repeat hand-off", (
 	assert.match(fn, /\} else if \(claim\.conv\) \{/);
 	assert.match(
 		fn,
-		/setDashboardPrefill\(\{ text: prompt, resume: true, conv: claim\.conv, messageId \}\);/
+		/setDashboardPrefill\(\{ text, resume: true, conv: claim\.conv, messageId \}\);/
 	);
 });
 
@@ -206,4 +214,99 @@ test("run:end auto-fires the redirect at most once, and never for an errored or 
 	const gotoIdx = runEnd.indexOf("gotoDashboards(goto.prompt, m.name);");
 	assert.notEqual(gateIdx, -1);
 	assert.ok(gateIdx < gotoIdx, "the stamp must be checked before the redirect fires");
+});
+
+// Aerele-RnD/jarvis-admin-v2#740 use case 3: the restatement dropped "the
+// connecting lanes diagram", so the builder never drew it. The user's own words
+// now ride along under the restatement.
+const goto = (prompt) =>
+	"```jarvis-goto\n" + JSON.stringify({ page: "dashboards", prompt }) + "\n```";
+const thread = [
+	{ name: "u1", role: "user", content: "hello" },
+	{ name: "a1", role: "assistant", content: "Hi." },
+	{
+		name: "u2",
+		role: "user",
+		content: "  Build a dashboard. Show me the connecting lanes diagram.  ",
+	},
+	{ name: "t1", role: "assistant", content: "", tool_name: "jarvis__query" },
+	{ name: "a2", role: "assistant", content: "Taking you to the builder." },
+];
+
+test("requestBefore: the user turns before the goto message, oldest first, trimmed", () => {
+	assert.equal(
+		requestBefore(thread, "a2"),
+		"hello\nBuild a dashboard. Show me the connecting lanes diagram."
+	);
+	assert.equal(requestBefore(thread, "a1"), "hello");
+});
+
+test("requestBefore: a short answer keeps the request it answers", () => {
+	const chat = [
+		{ name: "u1", role: "user", content: "Coverage by sales order, with the lanes diagram." },
+		{ name: "a1", role: "assistant", content: "Shall I build it as a dashboard?" },
+		{ name: "u2", role: "user", content: "yes" },
+		{ name: "a2", role: "assistant", content: goto("Coverage dashboard.") },
+	];
+	assert.equal(
+		requestBefore(chat, "a2"),
+		"Coverage by sales order, with the lanes diagram.\nyes"
+	);
+});
+
+test("requestBefore: at most REQUEST_TURNS_MAX turns, and none from before an earlier hand-off", () => {
+	const many = [1, 2, 3, 4, 5].map((n) => ({
+		name: `u${n}`,
+		role: "user",
+		content: `turn ${n}`,
+	}));
+	many.push({ name: "a", role: "assistant", content: "Done." });
+	assert.equal(requestBefore(many, "a"), "turn 3\nturn 4\nturn 5");
+	assert.equal(REQUEST_TURNS_MAX, 3);
+	const twice = [
+		{ name: "u1", role: "user", content: "first dashboard" },
+		{ name: "a1", role: "assistant", content: goto("First.") },
+		{ name: "u2", role: "user", content: "second dashboard" },
+		{ name: "a2", role: "assistant", content: goto("Second.") },
+	];
+	assert.equal(requestBefore(twice, "a2"), "second dashboard");
+});
+
+test("requestBefore: macro rows and the attachment marker are not the user's words", () => {
+	const chat = [
+		{ name: "u1", role: "user", content: "Stock by warehouse\n\n📎 stock.xlsx" },
+		{ name: "u2", role: "user", content: "📎 notes.pdf" },
+		{ name: "u3", role: "user", content: "▶ Running macro Weekly stock" },
+		{ name: "a1", role: "assistant", content: "Taking you to the builder." },
+	];
+	assert.equal(requestBefore(chat, "a1"), "Stock by warehouse");
+});
+
+test("requestBefore: nothing when the message is unknown or no user turn precedes it", () => {
+	assert.equal(requestBefore(thread, "missing"), "");
+	assert.equal(requestBefore(thread, "u1"), "");
+	assert.equal(requestBefore(null, "a2"), "");
+});
+
+test("builderSeed: the restatement first, then the user's own words", () => {
+	assert.equal(
+		builderSeed(
+			"Coverage dashboard for pending POs and SOs.",
+			"Show me the connecting lanes diagram."
+		),
+		"Coverage dashboard for pending POs and SOs.\n\nIn my own words: Show me the connecting lanes diagram."
+	);
+});
+
+test("builderSeed: no repeat when the restatement already quotes the request, none without one", () => {
+	assert.equal(
+		builderSeed("Sales by month. Sales by month", "Sales by month"),
+		"Sales by month. Sales by month"
+	);
+	assert.equal(builderSeed("  Sales by month.  ", ""), "Sales by month.");
+});
+
+test("builderSeed: a long request keeps its newest words and never splits a character", () => {
+	const seed = builderSeed("Brief.", "😀" + "x".repeat(REQUEST_WORDS_MAX) + "😀");
+	assert.equal(seed, `Brief.\n\nIn my own words: …${"x".repeat(REQUEST_WORDS_MAX - 1)}😀`);
 });

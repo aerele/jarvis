@@ -2,7 +2,10 @@
 Settings, and thin server wrappers the onboarding page calls (so the browser
 never holds admin creds). admin_client returns already-unwrapped admin data."""
 
+import hashlib
+import hmac
 import json
+import re
 import unicodedata
 
 import frappe
@@ -17,14 +20,17 @@ from jarvis import (
 	onboarding_contract,
 	release_notice,
 )
+from jarvis._cache_latch import claim_once
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
+	AdminSiteIsCopyError,
 	AdminUnreachableError,
 	AdminValidationError,
 )
+from jarvis.holiday_touch import policy as holiday_policy
 from jarvis.hooks import get_default_admin_url
-from jarvis.permissions import grant_onboarding_admin, require_jarvis_admin
+from jarvis.permissions import grant_onboarding_admin, is_system_manager, require_jarvis_admin
 
 # Every admin-side failure admin_client raises. One tuple so the onboarding
 # facade's catch sites cannot drift apart from _surface's.
@@ -123,7 +129,7 @@ def write_connection(data: dict) -> None:
 	"no on_update retrigger" property this function exists for."""
 	if not isinstance(data, dict):
 		return
-	from jarvis._password_utils import set_settings_password
+	from jarvis._password_utils import clear_settings_password, set_settings_password
 	from jarvis.chat import runtime_profile
 
 	# Serialize authority receipt, connection, and profile as one DB transaction.
@@ -173,6 +179,9 @@ def write_connection(data: dict) -> None:
 		from jarvis import tenant_authority
 
 		tenant_authority.clear(s)
+		# A different principal is a different tenant: the old tenant's callback
+		# key must not shadow the new tenant's token.
+		clear_settings_password(s, "callback_key")
 	if data.get("api_key"):
 		set_settings_password(s, "jarvis_admin_api_key", data["api_key"])
 	if data.get("api_secret"):
@@ -193,7 +202,11 @@ def write_connection(data: dict) -> None:
 	# old one. guard() advances the stored (generation, handle) only on ACCEPT, so
 	# the secrets and the authority receipt move together. Credential fields above
 	# are unguarded: they carry no generation and are never part of the race.
-	if data.get("agent_url"):
+	# The callback key and the owner-key retirement ride the same authority
+	# fence, so a stale or foreign payload can neither set the key nor clear the
+	# stored agent_token. A payload without agent_url passes the same guard.
+	retiring = data.get("owner_key_retired") is True
+	if data.get("agent_url") or data.get("callback_key") or retiring:
 		from jarvis import tenant_authority
 
 		write_conn = True
@@ -216,7 +229,7 @@ def write_connection(data: dict) -> None:
 				tenant_authority.log_stale_once(
 					s.get(tenant_authority.GEN_FIELD), data.get(tenant_authority.GEN_FIELD)
 				)
-		if write_conn:
+		if write_conn and data.get("agent_url"):
 			runtime_profile._forget_snapshot()
 			s.db_set("agent_url", data["agent_url"])
 			if isinstance(data, runtime_profile.ConnectionData):
@@ -225,6 +238,11 @@ def write_connection(data: dict) -> None:
 				runtime_profile.persist(None, s, unavailable=True)
 			if data.get("agent_token"):
 				_store_agent_token(s, data["agent_token"])
+		if write_conn:
+			if data.get("callback_key") and _store_callback_key(data["callback_key"]):
+				_queue_callback_key_confirm()
+			if retiring:
+				_retire_owner_token(s)
 	# Credentials just changed (fresh signup, or a reconnect rotating onto another
 	# account): a bearer minted from the old ones would outlive them. Wider than
 	# ``new_admin_login`` above on purpose - a standalone customer_password (the
@@ -271,13 +289,203 @@ def _store_agent_token(settings, token: str) -> None:
 		settings.db_set("agent_token_issued_at", frappe.utils.now_datetime())
 
 
-@frappe.whitelist()
-def sync_connection(timeout_s: int | None = None) -> dict:
-	"""Pull the container connection from admin and store it. Daily scheduled +
-	the page's 'Sync connection' button + the reconnect landing. No-op until
-	onboarded/assigned.
+_CALLBACK_KEY_RE = re.compile(r"[0-9a-f]{64}")
+# Fixed label of the key-confirmation digest (contract C1; admin uses the same bytes).
+_CONFIRM_LABEL = b"jarvis-callback-key-confirm:v1"
+
+
+def _store_callback_key(key: str) -> bool:
+	"""Store the per-tenant callback key. Only a 64 lowercase hex key is accepted;
+	anything else is ignored so a malformed payload cannot lock the plugin out."""
+	from jarvis._password_utils import set_settings_password
+
+	if not isinstance(key, str) or not _CALLBACK_KEY_RE.fullmatch(key):
+		return False
+	set_settings_password(frappe.get_single("Jarvis Settings"), "callback_key", key)
+	return True
+
+
+def callback_key_digest(key: str) -> str:
+	"""What the site tells admin to prove it stored the key: an HMAC of a fixed label
+	keyed with the callback key. Admin recomputes it from its own copy and compares;
+	the key itself never leaves this site in the confirmation."""
+	return hmac.new(key.encode("ascii"), _CONFIRM_LABEL, hashlib.sha256).hexdigest()
+
+
+def _queue_callback_key_confirm() -> None:
+	"""Tell admin, after this transaction commits, that the key was stored. Admin treats
+	the confirmation as "this site can verify plugin calls" and gates enforce and the
+	owner-key retirement on it. Sent on every store (admin stamps once, idempotent), so
+	a confirmation lost to an unreachable admin is re-sent by the next proof-backed
+	sync. Never inline (this runs under the Jarvis Settings row lock) and never raises."""
+	try:
+		frappe.enqueue(
+			"jarvis.onboarding.confirm_callback_key_job",
+			queue="short",
+			job_id=f"jarvis_callback_key_confirm:{frappe.local.site}",
+			deduplicate=True,
+			enqueue_after_commit=True,
+		)
+	except Exception:
+		frappe.log_error(title="callback key confirm: enqueue failed", message=frappe.get_traceback())
+
+
+def confirm_callback_key_job() -> None:
+	"""The confirmation job. An admin that predates the endpoint answers Frappe's
+	"Failed to get method" (417); that is not an error, the site simply never becomes
+	enforce-ready. A site that is a flagged copy never confirms. Failures are logged
+	with the traceback only: no frame locals, which hold the key."""
+	key = _stored_callback_key()
+	if not key:
+		return
+	try:
+		admin_client.confirm_callback_key(callback_key_digest(key))
+	except AdminSiteIsCopyError:
+		return
+	except AdminValidationError as exc:
+		if not admin_client.is_method_not_found(exc):
+			frappe.log_error(title="callback key confirm failed", message=frappe.get_traceback())
+	except Exception:
+		frappe.log_error(title="callback key confirm failed", message=frappe.get_traceback())
+
+
+def _stored_callback_key() -> str:
+	from frappe.utils.password import get_decrypted_password
+
+	return (
+		get_decrypted_password("Jarvis Settings", "Jarvis Settings", "callback_key", raise_exception=False)
+		or ""
+	)
+
+
+def has_callback_key() -> bool:
+	return bool(_stored_callback_key())
+
+
+def _retire_owner_token(s) -> None:
+	"""Admin retired the gateway owner key: the plugin now signs with the callback key
+	only, so the stored owner token must stop verifying. Always, even with no callback
+	key stored: the old owner token also sits in every copy of this site made before
+	the retirement, and a site that kept it would accept plugin calls signed by a copy.
+	Failing closed costs availability only until the key arrives, so without one a
+	proof-backed sync fetches it. The retirement queues that fetch itself, past the
+	10-minute self-heal throttle (a retirement must always trigger one fetch; the job id
+	dedupes it), and the 503 path of every plugin call re-queues it. Never inline: this
+	runs under the Jarvis Settings row lock, and the fetch is an admin round trip."""
+	from jarvis._password_utils import clear_settings_password
+
+	clear_settings_password(s, "agent_token")
+	s.db_set("agent_token_issued_at", None)
+	if has_callback_key():
+		return
+	if getattr(frappe.flags, "jarvis_key_fetch", False):
+		# Inside a key sync that returned no key: no nested job, but let the next
+		# plugin call retry within two minutes instead of ten.
+		_shorten_key_resync_throttle()
+		return
+	try:
+		_enqueue_key_resync()
+	except Exception:
+		frappe.log_error(title="callback key resync: enqueue failed", message=frappe.get_traceback())
+
+
+KEY_RESYNC_THROTTLE_S = 600
+# A FAILED self-heal retries sooner: the throttle's expiry is cut to this.
+KEY_RESYNC_FAILED_THROTTLE_S = 120
+_KEY_RESYNC_THROTTLE_PREFIX = "jarvis:key_resync:"
+
+
+def _enqueue_key_resync() -> None:
+	"""The key-resync job, after this transaction commits, one per site at a time."""
+	frappe.enqueue(
+		"jarvis.onboarding.run_key_resync",
+		queue="short",
+		job_id=f"jarvis_key_resync:{frappe.local.site}",
+		deduplicate=True,
+		enqueue_after_commit=True,
+	)
+
+
+def request_key_resync() -> bool:
+	"""Stale-key self-heal. A plugin request carried a key this site does not hold
+	(admin rotated it, or a delivery was missed): queue ONE proof-backed key sync so
+	the next request can match. At most once per ``KEY_RESYNC_THROTTLE_S`` per site
+	(``KEY_RESYNC_FAILED_THROTTLE_S`` after a failed run), and the caller has already
+	rejected the request. Returns whether a job was queued; never raises."""
+	try:
+		if not claim_once(_KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site, KEY_RESYNC_THROTTLE_S):
+			return False
+		_enqueue_key_resync()
+		return True
+	except Exception:
+		return False
+
+
+def run_key_resync() -> None:
+	"""The key-resync job (stale-key self-heal and the post-pairing resync): one
+	proof-backed sync as Administrator with the normal admin timeout (no request is
+	held open). Failures are logged without frame locals, and a failed run shortens
+	the self-heal throttle so the next stale request retries within two minutes."""
+	if getattr(frappe.flags, "jarvis_key_fetch", False):
+		return
+	# nosemgrep: frappe-setuser -- background job has no session user; the key sync writes Jarvis Settings and the Error Log
+	frappe.set_user("Administrator")
+	frappe.flags.jarvis_key_fetch = True
+	try:
+		_sync_connection(prove=True)
+	except Exception:
+		frappe.log_error(title="callback key resync failed", message=frappe.get_traceback())
+		_shorten_key_resync_throttle()
+	finally:
+		frappe.flags.jarvis_key_fetch = False
+
+
+def _shorten_key_resync_throttle() -> None:
+	"""Cut the self-heal throttle's remaining life to ``KEY_RESYNC_FAILED_THROTTLE_S``
+	(never extend it). A no-op when no throttle key exists, e.g. after a post-pairing
+	run. Never raises."""
+	try:
+		cache = frappe.cache()
+		gate = cache.make_key(_KEY_RESYNC_THROTTLE_PREFIX + frappe.local.site)
+		ttl = cache.ttl(gate)
+		if ttl == -1 or ttl > KEY_RESYNC_FAILED_THROTTLE_S:
+			cache.expire(gate, KEY_RESYNC_FAILED_THROTTLE_S)
+	except Exception:
+		pass
+
+
+def resync_callback_key_after_pairing() -> None:
+	"""Queue a proof-backed sync after EVERY proof-backed pairing, whether or not a key
+	is stored, so a callback key admin rotated always reaches this site. A background
+	job that starts after the current transaction commits: pairing never waits for it
+	(admin's pairing approval holds a container lock for up to 30 s, which an inline
+	sync would stall behind and give up on). Deduplicated per site; skipped inside a
+	running key sync. A failure to queue never fails the pairing."""
+	if getattr(frappe.flags, "jarvis_key_fetch", False):
+		return
+	try:
+		frappe.enqueue(
+			"jarvis.onboarding.run_key_resync",
+			queue="short",
+			job_id=f"jarvis_key_resync_pairing:{frappe.local.site}",
+			deduplicate=True,
+			enqueue_after_commit=True,
+		)
+	except Exception:
+		frappe.log_error(title="callback key resync: enqueue failed", message=frappe.get_traceback())
+
+
+@frappe.whitelist(methods=["POST"])
+def sync_connection(timeout_s: int | None = None, prove: int = 0) -> dict:
+	"""Pull the container connection from admin and store it. The page's 'Sync
+	connection' button, the onboarding wizard's poll and the reconnect landing; the
+	daily job is ``scheduled_sync_connection``. No-op until onboarded/assigned.
 
 	``timeout_s`` bounds the admin fetch (None = default); the reconnect landing passes a short one.
+	``prove`` attaches a fresh site proof (admin charges it to a shared hourly budget and
+	runs a container exec). Off by default so the wizard's 2 s poll never spends it; an
+	enforced tenant then gets the connection without secrets, an unenforced one still
+	gets agent_token, which first onboarding needs.
 
 	Gated on System Manager: writes admin credentials and container connection
 	into Jarvis Settings (jarvis_admin_api_key, agent_url, agent_token). The
@@ -285,6 +493,19 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	from the 2026-06-16 code review.
 	"""
 	require_jarvis_admin()
+	return _sync_connection(timeout_s, prove=bool(prove))
+
+
+def scheduled_sync_connection() -> dict:
+	"""The daily job: ``sync_connection`` with a site proof. Not whitelisted."""
+	return sync_connection(prove=True)
+
+
+def _sync_connection(timeout_s: int | None = None, prove: bool = False) -> dict:
+	"""``sync_connection`` without the role check, for the callers that must fetch
+	the connection themselves. Carries a fresh site proof only when ``prove``."""
+	from jarvis.chat import pairing_proof
+
 	settings = frappe.get_single("Jarvis Settings")
 	api_key = settings.get_password("jarvis_admin_api_key", raise_exception=False) or ""
 	api_secret = settings.get_password("jarvis_admin_api_secret", raise_exception=False) or ""
@@ -293,7 +514,9 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	)
 	if not ((api_key and api_secret) or oauth_ready):
 		return {"synced": False, "reason": "not onboarded"}
-	get_conn_kwargs = {} if timeout_s is None else {"timeout_s": timeout_s}
+	get_conn_kwargs = {"proof_nonce": pairing_proof.issue_nonce()} if prove else {}
+	if timeout_s is not None:
+		get_conn_kwargs["timeout_s"] = timeout_s
 	data = admin_client.get_connection(**get_conn_kwargs)
 	# Outside the agent_url branch: a payload without one must still be able to
 	# raise or clear the release notice, and this is the only refresh an idle
@@ -312,18 +535,21 @@ def sync_connection(timeout_s: int | None = None) -> dict:
 	# Marker-aware + KEEP-on-doubt (jarvis.catalogue_visibility) so an old/rolled-back CP
 	# never un-hides a withdrawn agent fleet-wide.
 	catalogue_visibility.persist_from_connection(data)
+	# Same cadence: mirror the operator's holiday-touch policy. This is the daily path, the
+	# only one that stamps holiday_policy_synced_at (jarvis.holiday_touch.policy). Never raises.
+	holiday_policy.persist(data, daily=True)
 	if data.get("agent_url"):
 		write_connection(data)
 		return {"synced": True, "tenant_status": data.get("tenant_status")}
 	return {"synced": False, "tenant_status": data.get("tenant_status", "pending")}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_plans() -> list:
 	return admin_client.get_plans()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_payment_providers() -> dict:
 	"""Gateways the wizard may offer, already narrowed to what THIS bench can
 	render: ``{providers: [...], default: "..."}``.
@@ -370,14 +596,14 @@ def _payment_ui_v2_enabled() -> bool:
 	return bool(value)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_preset_catalog() -> list:
 	"""Preset catalog for the desk onboarding step + the /ai SPA route.
 	Thin wrapper over admin_client (fetch/cache/bundled fallback)."""
 	return admin_client.get_preset_catalog()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def capture_onboarding_lead(
 	email: str | None = None,
 	company: str | None = None,
@@ -431,7 +657,7 @@ def capture_onboarding_lead(
 		return {"ok": False}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_terms_url() -> dict:
 	"""The public Terms & Conditions URL (marketing site) for the Details-step
 	checkbox link. Best-effort: ``{"url": ""}`` on any failure so the checkbox
@@ -568,7 +794,7 @@ def _adopt_orphan_capture(account_ref: str, consumed_capture_ids: list) -> str:
 	return blob
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_llm_pool(
 	models: str | list,
 	preset: str | None = None,
@@ -918,7 +1144,7 @@ _DISCONNECTED_LLM_FIELDS = {
 _POOL_MODEL_DOCTYPE = "Jarvis LLM Pool Model"
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def disconnect_llm() -> dict:
 	"""Tear the customer's whole LLM connection down: delete every credential this
 	bench stores AND ask admin to delete them from the container.
@@ -1030,7 +1256,43 @@ def _clear_llm_secrets(settings) -> None:
 	clear_settings_password(settings, "llm_api_key")
 
 
-@frappe.whitelist()
+#: Shown when private-network setup is off on admin (design 5.3, 10). Same sentence the
+#: Network step uses (frontend privateNetwork.js SETUP_UNAVAILABLE).
+PRIVATE_NETWORK_UNAVAILABLE = "Private network setup isn't available yet. Contact support."
+#: A bare 429 on the gate is a rate limit, not "off" (ruling R6). Shared with private_network.
+PRIVATE_NETWORK_BUSY = "Too many attempts. Try again in a minute."
+
+
+def _require_private_setup_enabled() -> None:
+	"""Private mode only: ask admin whether private onboarding is on BEFORE the customer
+	signs up. Admin stays the final authority (it refuses a forced signup with
+	``PRIVATE_NETWORK_DISABLED``); asking first turns "the operator has not switched this on"
+	into one clear sentence now instead of a coded refusal later. An unreachable admin is
+	reported as unreachable and a rate limit as "try again", neither as "off"; any other
+	failure, including an admin that does not know the method yet, reads as off."""
+	try:
+		info = admin_client.private_setup_info(timeout_s=8) or {}
+	except AdminUnreachableError as e:
+		_throw_admin_error(e)  # always raises
+	except AdminRateLimitedError as e:
+		error, _status = onboarding_contract.error_object(e)
+		error["message"] = PRIVATE_NETWORK_BUSY
+		onboarding_contract.stamp_error(error)
+		frappe.throw(PRIVATE_NETWORK_BUSY)
+	except _ADMIN_ERRORS:
+		info = {}
+	if isinstance(info, dict) and info.get("enabled"):
+		return
+	error = {
+		"code": "PRIVATE_NETWORK_DISABLED",
+		"message": PRIVATE_NETWORK_UNAVAILABLE,
+		"recovery": onboarding_contract.RECOVERY_CONTACT_SUPPORT,
+	}
+	onboarding_contract.stamp_error(error)
+	frappe.throw(PRIVATE_NETWORK_UNAVAILABLE)
+
+
+@frappe.whitelist(methods=["POST"])
 def start_signup(
 	email: str,
 	company: str,
@@ -1104,6 +1366,11 @@ def start_signup(
 	if onboarding_contract.awaiting_reconciliation():
 		_refuse_while_money_is_parked()  # always raises
 	_require_contact_number(billing)
+	# Private network (design 5.3): the host gate above already passes for a completed
+	# private setup. Last of the local checks, so a parked-money refusal or a missing
+	# contact number never costs an admin call; asks admin whether the feature is on.
+	if admin_client.is_private_mode():
+		_require_private_setup_enabled()
 	# The identity the customer TYPED, before admin is asked anything. Two
 	# reasons it is written first: a response lost in transit still leaves the
 	# bench knowing whose signup this was (plan 03's "bench response lost after
@@ -1167,6 +1434,11 @@ def start_signup(
 	# above: admin's envelope carries the account's real email and company, the
 	# plan label, and what is actually due today.
 	onboarding_contract.absorb(data)
+	# Private network: remember the address this signup succeeded with. Admin keeps it as the
+	# account's ``frappe_site_url``, so the bench must neither drift from it nor lose the
+	# proof that a later "address already taken" is this customer's own (see
+	# ``_own_address_taken``).
+	onboarding_contract.record_signup_address(admin_client.private_public_address())
 	# Credentials do not go back to the browser. This response is the one that
 	# CARRIES them — api_key, api_secret and (on the flag-off path) the OAuth
 	# login password — and write_connection above has already stored every one.
@@ -1219,7 +1491,7 @@ def _try_resume_pending_signup(
 	error. A resume that itself fails (e.g. a genuinely different account's
 	duplicate) also returns None: the original duplicate error is the honest
 	message for that case."""
-	if not onboarding_contract.is_duplicate_signup(err):
+	if not (onboarding_contract.is_duplicate_signup(err) or _own_address_taken(err)):
 		return None
 	settings = frappe.get_single("Jarvis Settings")
 	if not _has_admin_credentials(settings):
@@ -1242,6 +1514,18 @@ def _try_resume_pending_signup(
 			message=frappe.get_traceback(),
 		)
 		return None
+
+
+def _own_address_taken(err) -> bool:
+	"""``PRIVATE_ADDRESS_TAKEN`` raised by this customer's OWN earlier signup: admin runs its
+	address gate before its duplicate check, so a re-signup from the same account and the
+	same address answers "taken". Resumable only when the address now configured equals the
+	one recorded at the successful signup; the caller also requires stored credentials, which
+	authenticate the resume. Any other "taken" stays a refusal."""
+	if getattr(err, "code", "") != "PRIVATE_ADDRESS_TAKEN":
+		return False
+	recorded = onboarding_contract.signup_address()
+	return bool(recorded) and recorded == admin_client.private_public_address()
 
 
 def _reserve_idempotency_key(*, supplied: str | None = None, context: dict | None = None) -> str:
@@ -1274,6 +1558,9 @@ def _absorb_signup_state(data: dict, *, from_check: bool = False) -> dict:
 	``onboarding_contract.absorb_check``."""
 	if not isinstance(data, dict):
 		return onboarding_contract.load()
+	# Private network: the poll that follows the email click carries the held host
+	# (data.private_hold, contract 4.4). Stored before the context is read back below.
+	onboarding_contract.absorb_private_hold(data)
 	if data.get("customer_password"):
 		write_connection({"customer_password": data["customer_password"]})
 	if from_check:
@@ -1317,7 +1604,7 @@ def _no_signup_here() -> dict:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_onboarding_state() -> dict:
 	"""Where this site's signup actually stands, from admin, plus what this
 	bench knows locally.
@@ -1401,14 +1688,14 @@ def _raw_gstin_info(gstin: str):
 	return _ic._get_gstin_info(gstin, throw_error=False)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def gstin_autofill_available() -> dict:
 	"""Whether to offer the onboarding GSTIN 'Fetch details' button on this site."""
 	require_jarvis_admin()
 	return {"available": _gstin_autofill_available()}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def gstin_autofill(gstin: str) -> dict:
 	"""Prefill billing party details from a GSTIN via THIS site's own India Compliance.
 
@@ -1467,7 +1754,7 @@ def _clean_registry_value(value, maxlen):
 	return cleaned.strip()[:maxlen]
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def initiate_signup_payment(
 	plan: str | None = None,
 	provider: str | None = None,
@@ -1567,7 +1854,7 @@ def initiate_signup_payment(
 	return onboarding_contract.success(data, context=context)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def check_signup_payment_status() -> dict:
 	"""Ask the PROVIDER what happened to this signup's payment, and converge.
 
@@ -1614,7 +1901,7 @@ def check_signup_payment_status() -> dict:
 	return onboarding_contract.success(data, context=context)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_billing(billing: dict) -> dict:
 	"""Authenticated billing-only edit facade (Plan 01, post-intent Review & Pay
 	"Edit"): forwards to admin's ``update_pending_billing`` on the owned pending
@@ -1628,7 +1915,7 @@ def update_billing(billing: dict) -> dict:
 	return _surface(admin_client.update_pending_billing, billing)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reconnect_available(email: str, company: str = "") -> dict:
 	"""Would a reconnect for this (email, company) find an account to reconnect?
 
@@ -1658,7 +1945,7 @@ def reconnect_available(email: str, company: str = "") -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def start_account_reconnect(email: str, company: str = "") -> dict:
 	"""Fresh-bench recovery: ask admin to email a reconnect CODE to the
 	REGISTERED address of an existing paid account (wiped-site scenario — the
@@ -1672,7 +1959,7 @@ def start_account_reconnect(email: str, company: str = "") -> dict:
 	return _surface(admin_client.request_account_reconnect, email, company)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def check_account_reconnect(request_id: str, code: str = "") -> dict:
 	"""Redeem the reconnect code the customer received BY EMAIL (the customer-
 	started request path). Only a correct code releases anything: admin rotates and
@@ -1683,7 +1970,7 @@ def check_account_reconnect(request_id: str, code: str = "") -> dict:
 	return _land_reconnect(data)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def redeem_reconnect_code(code: str, email: str = "") -> dict:
 	"""Redeem an OPERATOR-ISSUED reconnect code on this fresh bench — the
 	request-less counterpart to check_account_reconnect. The customer got the code
@@ -1743,7 +2030,7 @@ def _land_reconnect(data: dict) -> dict:
 	# best-effort) not on the daily cron, or every call_tool 401s for up to a day.
 	# require_jarvis_admin (sync_connection's gate) already passed at the entry.
 	try:
-		sync_connection(timeout_s=15)
+		sync_connection(timeout_s=15, prove=True)
 	except Exception:
 		frappe.log_error(frappe.get_traceback(), "reconnect: eager agent_token sync failed")
 	return {"status": "connected"}
@@ -1791,7 +2078,7 @@ def _installed_apps() -> set[str]:
 		return set()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_account_defaults() -> dict:
 	"""Prefill for the onboarding Account step so the customer doesn't retype what
 	the site already knows: the caller's email + a default company. Company is the
@@ -1948,7 +2235,7 @@ def _resolve_company_billing_address(company: str) -> dict | None:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_company_onboarding_defaults(company: str) -> dict:
 	"""ERP-derived billing defaults for ONE selected Company (Plan 01): its primary
 	Contact's phone and its primary billing Address (+ optional India Compliance
@@ -1992,7 +2279,7 @@ def get_company_onboarding_defaults(company: str) -> dict:
 	return {"ok": True, "data": data}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def check_signup_payment_state() -> dict:
 	"""Wizard-poll endpoint for the email-verification window.
 
@@ -2024,7 +2311,7 @@ def check_signup_payment_state() -> dict:
 	return onboarding_contract.strip_credentials(data)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def finish_payment(payload: dict | str) -> dict:
 	"""Confirm Checkout success → store the returned container connection.
 
@@ -2066,7 +2353,7 @@ def finish_payment(payload: dict | str) -> dict:
 	return onboarding_contract.strip_credentials(data)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def renew(provider: str | None = None, target_plan: str | None = None) -> dict:
 	"""Existing customer initiates a renewal payment; returns a pay-page token
 	the billing page top-level-navigates to (plan-09 WS8). The admin-hosted
@@ -2141,7 +2428,7 @@ _WIPE_DOCTYPES = (
 )
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_llm: bool = False) -> dict:
 	"""Self-serve workspace reset: the control plane rebuilds the container NOW
 	(subscription kept), then this site disconnects its agent transport and polls
@@ -2153,8 +2440,17 @@ def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_ll
 	markers) so the customer sets up their AI model fresh after the reset.
 	Both run only AFTER the control plane accepted the reset.
 
-	Gated on System Manager, like the rest of onboarding."""
+	Gated on Jarvis Admin (or System Manager). ``wipe_data`` additionally needs
+	System Manager, the same role as :func:`reset_onboarding`, because it deletes
+	every user's workspace content. Checked directly rather than with
+	``frappe.only_for``, which no-ops under the v15 test runner and raises with no
+	message the SPA could show."""
 	require_jarvis_admin()
+	if cint(wipe_data) and not is_system_manager():
+		frappe.throw(
+			"Only a System Manager can reset the workspace and delete its data.",
+			frappe.PermissionError,
+		)
 	settings = frappe.get_single("Jarvis Settings")
 	# Tear down the container-side OAuth auth-profile while the old container is
 	# still reachable (same ordering as dev.reset_onboarding). Best-effort — a
@@ -2165,6 +2461,9 @@ def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_ll
 		except Exception:
 			pass
 	out = _surface(admin_client.reset_workspace, reason)
+	from jarvis.payment_calendar.lifecycle import reset_workspace
+
+	reset_workspace()
 	if cint(wipe_data):
 		_wipe_workspace_content()
 	if cint(revoke_llm):
@@ -2173,7 +2472,7 @@ def request_workspace_reset(reason: str = "", wipe_data: bool = False, revoke_ll
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reset_onboarding(wipe_data: bool = True) -> dict:
 	"""Customer-facing "Reset onboarding" (Jarvis Settings button): clear this
 	bench's connection + LLM credentials and — by default, matching the
@@ -2248,7 +2547,7 @@ def _disconnect_agent_transport(settings, reconnect_llm: bool = False) -> None:
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before cache bust
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def workspace_reset_state() -> dict:
 	"""Poll endpoint for the reset card: admin request state + serving readiness.
 	When admin reports the new container Ready, persists the fresh connection and
@@ -2388,7 +2687,7 @@ def reconcile_pending_workspace_reset() -> None:
 		frappe.log_error(title="Jarvis: workspace-reset reconcile failed", message=frappe.get_traceback())
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_llm_creds(
 	provider: str,
 	model: str,
@@ -2501,7 +2800,7 @@ def save_llm_creds(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_config() -> dict:
 	"""Current effective LLM pool for the desk step + /ai SPA: models[] rows,
 	preset, routing_mode, derived proxy_active. Reads models[] (NOT the legacy
@@ -2548,7 +2847,7 @@ def get_llm_config() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_sync_status() -> dict:
 	"""Lightweight poller for the onboarding + account pages.
 
@@ -2681,7 +2980,7 @@ _RESYNC_COOLDOWN_S = 180
 _RESYNC_COOLDOWN_KEY = "jarvis:resync_llm_cooldown"
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def resync_llm() -> dict:
 	"""Re-drive this workspace's saved AI configuration through admin. The customer
 	half of #713: a way forward from a sync that failed.

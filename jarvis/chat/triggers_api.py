@@ -142,7 +142,7 @@ def _publish_changed() -> None:
 # --------------------------------------------------------------------------- #
 # caps probe
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_triggers_caps() -> dict:
 	"""Single gating probe for the Triggers page: manage tier, whether Script
@@ -170,7 +170,7 @@ def get_triggers_caps() -> dict:
 # --------------------------------------------------------------------------- #
 # trigger list / detail
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 @list_filters.filter_errors_to_envelope
 def list_triggers_page(
@@ -304,7 +304,7 @@ def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
 	return detail
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_trigger(name: str) -> dict:
 	"""Full detail of one trigger (read is org-wide for jarvis users; the
@@ -332,7 +332,7 @@ def _parse_payload(payload: str) -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def create_trigger(payload: str) -> dict:
 	"""Create a trigger from a whitelisted-fields JSON payload. Validation
@@ -347,7 +347,7 @@ def create_trigger(payload: str) -> dict:
 	return {"ok": True, "data": _trigger_detail(doc)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def update_trigger(name: str, payload: str) -> dict:
 	"""Update whitelisted fields of a trigger (manage-gated)."""
@@ -360,7 +360,7 @@ def update_trigger(name: str, payload: str) -> dict:
 	return {"ok": True, "data": _trigger_detail(doc)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def set_trigger_enabled(name: str, enabled: int) -> dict:
 	"""Quick enable/disable toggle (manage-gated): raw db_set — no revalidation
@@ -376,7 +376,7 @@ def set_trigger_enabled(name: str, enabled: int) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "enabled": value}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_trigger(name: str) -> dict:
 	"""Delete one trigger (manage-gated). on_trash removes the managed Server
@@ -388,7 +388,7 @@ def delete_trigger(name: str) -> dict:
 	return {"ok": True, "data": {"deleted": 1}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_triggers_bulk(names: str) -> dict:
 	"""Bulk delete (manage-gated, cap 50). Per-row try/except so one bad row
@@ -478,7 +478,7 @@ def _readonly_eval_doc(doc) -> "_ConditionDoc":
 	return _ConditionDoc(doc.as_dict())
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def test_trigger_condition(target_doctype: str, condition: str = "", docname: str = "") -> dict:
 	"""READ-ONLY condition tester. Without ``docname``: compile/eval against an
@@ -675,7 +675,7 @@ def _readable_target_doctypes(query) -> list:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_activity_page(
 	search: str = "",
@@ -786,7 +786,7 @@ def list_activity_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def activity_stats() -> dict:
 	"""Admin summary tiles: per-status counts over the last 24h + total rows.

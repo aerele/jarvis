@@ -17,15 +17,17 @@ import frappe
 from frappe import _
 
 from jarvis._session import authenticated_user, impersonate
+from jarvis.chat import agent_scope
 from jarvis.chat import coverage_reasons as cr
 from jarvis.chat.agent_activity import log_activity
-from jarvis.chat.agent_catalog import build_agent_push_payload
+from jarvis.chat.agent_catalog import build_agent_push_payload, registry_supports_record_scope
 from jarvis.chat.filebox import _clamp_page, _lk
 from jarvis.chat.finding_presentation import finding_text
 from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.permissions import (
 	has_jarvis_admin_access,
 	is_skill_reviewer,
+	is_valid_unattended_owner,
 	message_origin,
 	refuse_in_tool_dispatch,
 	require_jarvis_admin,
@@ -43,6 +45,11 @@ PROVENANCE = "Jarvis Agent Provenance Event"
 ALLOWED_ROLE = "Jarvis Agent Allowed Role"
 ALLOWED_USER = "Jarvis Agent Allowed User"
 _SETTINGS = "Jarvis Settings"
+CYCLE_COUNT_PLANNER = "cycle-count-planner-operator"
+PHYSICAL_COUNT = "Jarvis Physical Count"
+_CATALOG_LOCK = "Jarvis Agent Catalog Lock"
+_CATALOG_LOCK_NAME = "agent-catalog-lock"
+_CATALOG_STATE_FIELDS = ("agent_catalog_version", "agent_catalog_dirty")
 
 # PP-6 — the stage-maximum global activation ceiling. The initial ceiling is 1
 # (every customer starts with a single live module); a Jarvis Admin may raise it
@@ -185,7 +192,7 @@ def _allowed_users_map() -> dict[str, list[str]]:
 # --------------------------------------------------------------------------- #
 # catalog + install state (read)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_agents() -> list[dict]:
 	"""The full catalog plus THIS owner's install/enable/schedule state per
@@ -420,7 +427,18 @@ def _enriched_catalog() -> list[dict]:
 	return out
 
 
-@frappe.whitelist()
+def _statutory_payroll_issues_for_run_as(installation: str, config: str) -> dict:
+	"""Return Payroll Entry setup faults as the configured execution identity."""
+	from jarvis.chat.statutory_payroll_scope import configuration_issues
+
+	run_as_user = (frappe.db.get_value(INSTALLATION, installation, "run_as_user") or "").strip()
+	if not run_as_user:
+		return {"run_as_user": "Set a run-as user before configuring the Payroll Entry."}
+	with impersonate(run_as_user):
+		return configuration_issues(config or "{}")
+
+
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_agents_page(
 	tab: str = "available",
@@ -489,15 +507,39 @@ def list_agents_page(
 	}
 
 
-@frappe.whitelist()
+def _stock_variance_issues_for_run_as(installation: str, config: str) -> dict:
+	"""Return Stock Variance setup faults as the execution identity.
+
+	get_agent is read by the installation owner, but the Warehouse tree is read
+	by run_as_user. Keep this small identity boundary separate so the UI cannot
+	report a scope as valid or invalid from the wrong user.
+	"""
+	from jarvis._session import impersonate
+	from jarvis.chat.stock_variance_scope import configuration_issues
+
+	run_as_user = (frappe.db.get_value(INSTALLATION, installation, "run_as_user") or "").strip()
+	if not run_as_user:
+		return {"run_as_user": "Set a run-as user before configuring the Warehouse scope."}
+	with impersonate(run_as_user):
+		return configuration_issues(config or "{}")
+
+
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_agent(agent_slug: str) -> dict:
 	"""One listing + the CURRENT user's installation for the agent detail page
 	(DESIGN-V3 §8.3 / D39). Any authenticated user may read (listing perms =
 	All read); the ``installation`` block is the caller's own install or None.
 	``all_roles`` rides along only for System Managers (Admin-tab roles editor)."""
+	from jarvis.chat.agent_closure import is_closed_agent, is_closed_installation
+	from jarvis.chat.fefo_expiry_compliance import AGENT as FEFO_EXPIRY_AGENT
+	from jarvis.chat.fefo_expiry_compliance import configuration_issues as fefo_configuration_issues
 	from jarvis.chat.operator_review import AGENTS as REVIEW_OPERATORS
 	from jarvis.chat.operator_review import backend
+	from jarvis.chat.sla_breach_ageing import AGENT as SLA_BREACH_AGENT
+	from jarvis.chat.sla_breach_ageing import configuration_issues as sla_configuration_issues
+	from jarvis.chat.statutory_payroll_scope import is_statutory_payroll
+	from jarvis.chat.stock_variance_scope import is_stock_variance
 
 	try:
 		listing = frappe.get_doc(LISTING, agent_slug)  # All-role read; 404s if unknown
@@ -549,7 +591,8 @@ def get_agent(agent_slug: str) -> dict:
 		"category": listing.category,
 		"nature": listing.nature,
 		"supports_manual_run": listing.nature in ("Auditor", "Scribe")
-		or listing.agent_slug in REVIEW_OPERATORS,
+		or listing.agent_slug in REVIEW_OPERATORS
+		or listing.agent_slug in {"reorder-replenishment-operator", "ticket-triage-operator"},
 		"version": listing.version,
 		"publisher": listing.publisher,
 		"status": listing.status,
@@ -580,6 +623,11 @@ def get_agent(agent_slug: str) -> dict:
 	# The owner reads a withdrawn (teaser/hidden) install as DISABLED — visible so they can
 	# view / uninstall it, but not runnable while the operator keeps it withdrawn.
 	out["install_disabled"] = 1 if (installed_by_caller and vis in ("teaser", "hidden")) else 0
+	# A reviewed code closure is not a normal marketplace lifecycle state: a
+	# tenant operator cannot re-enable it later. The owner still receives the
+	# installation so they can remove it, but the client needs this distinct
+	# signal to avoid offering controls that the server must reject.
+	out["runtime_closed"] = 1 if (installed_by_caller and is_closed_agent(listing.agent_slug)) else 0
 	if _masked:
 		# Redact the teaser for a non-admin non-owner via the SAME helper the list uses,
 		# so the detail seam can never drift from the list seam.
@@ -609,6 +657,7 @@ def get_agent(agent_slug: str) -> dict:
 	if inst:
 		i = inst[0]
 		i["enabled"] = int(i.enabled or 0)
+		out["runtime_closed"] = int(is_closed_installation(frappe._dict(agent=listing.agent_slug, **i)))
 		i["schedule_enabled"] = int(i.schedule_enabled or 0)
 		i["schedule_day_of_month"] = i.schedule_day_of_month or None
 		i["schedule_time"] = str(i.schedule_time) if i.schedule_time else None
@@ -616,6 +665,28 @@ def get_agent(agent_slug: str) -> dict:
 		i["last_run_at"] = str(i.last_run_at) if i.last_run_at else None
 		if listing.agent_slug in REVIEW_OPERATORS:
 			i["configuration_issues"] = backend(listing.agent_slug).configuration_issues(i.config or "{}")
+		elif listing.agent_slug == "reorder-replenishment-operator":
+			from jarvis.chat.reorder_review import configuration_issues
+
+			i["configuration_issues"] = configuration_issues(i.config or "{}")
+		elif is_stock_variance(listing.agent_slug):
+			i["configuration_issues"] = _stock_variance_issues_for_run_as(i.name, i.config or "{}")
+		elif is_statutory_payroll(listing.agent_slug):
+			i["configuration_issues"] = _statutory_payroll_issues_for_run_as(i.name, i.config or "{}")
+		elif listing.agent_slug == FEFO_EXPIRY_AGENT:
+			# The FEFO bundle has no defaults for its reviewer or expiry window. Surface
+			# saved-state issues before a person can request a run; _launch_audit checks
+			# the same contract again as the run-as identity.
+			i["configuration_issues"] = fefo_configuration_issues(i.config or "{}")
+		elif listing.agent_slug == "ticket-triage-operator":
+			from jarvis.chat import ticket_triage
+
+			i["configuration_issues"] = ticket_triage.configuration_issues(i.config or "{}")
+		elif listing.agent_slug == SLA_BREACH_AGENT:
+			# The selected Helpdesk team is an explicit, permission-bounded launch
+			# boundary. Surface its saved-state issues so Run Now can fail closed in
+			# the UI; _launch_audit re-checks under the run-as identity.
+			i["configuration_issues"] = sla_configuration_issues(i.config or "{}")
 		out["installation"] = i
 
 	if is_sm and not _masked:
@@ -639,7 +710,7 @@ def get_agent(agent_slug: str) -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_installations() -> list[dict]:
 	"""This owner's installations, with the linked listing title/nature/status."""
@@ -715,7 +786,7 @@ def _parse_name_list(raw, what: str) -> list[str]:
 	return clean
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_agent_access(
 	agent_slug: str,
 	roles: str | list | None = None,
@@ -828,7 +899,7 @@ def set_agent_access(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_agent_roles(agent_slug: str, roles: str | list | None = None) -> dict:
 	"""Compat shim over ``set_agent_access`` — sets the ROLE half, users untouched.
 
@@ -847,7 +918,7 @@ def set_agent_roles(agent_slug: str, roles: str | list | None = None) -> dict:
 	return {"ok": True, "allowed_roles": res["allowed_roles"]}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def search_users(q: str | None = None) -> list[dict]:
 	"""Enabled, named users matching ``q`` for the admin Access picker.
 
@@ -870,7 +941,7 @@ def search_users(q: str | None = None) -> list[dict]:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_listing_status(agent_slug: str, status: str) -> dict:
 	"""Set a listing's marketplace status. Jarvis Admin / System Manager (PART 4
 	REVISED, TASK 45). Only the admin-meaningful statuses are settable (Draft
@@ -878,6 +949,9 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 	require_jarvis_admin()
 	if status not in _ADMIN_STATUSES:
 		frappe.throw(_("Status must be one of: {0}.").format(", ".join(_ADMIN_STATUSES)))
+	from jarvis.chat.agent_closure import assert_listing_status
+
+	assert_listing_status(agent_slug, status)
 	doc = frappe.get_doc(LISTING, agent_slug)
 	doc.check_permission("write")
 	before = doc.status
@@ -908,7 +982,7 @@ def set_listing_status(agent_slug: str, status: str) -> dict:
 _VISIBILITY_CHOICES = ("available", "teaser", "hidden")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_operator_visibility(agent_slug: str, visibility: str) -> dict:
 	"""Set an agent's operator catalogue visibility (available / teaser / hidden).
 
@@ -940,7 +1014,7 @@ def set_operator_visibility(agent_slug: str, visibility: str) -> dict:
 	return {"ok": True, "visibility": doc.operator_visibility}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_agent_admin_overview() -> dict:
 	"""Bench-admin overview: the selectable Roles + every listing with its
 	allowed_roles and ALL owners' installs. Jarvis Admin / System Manager (PART 4
@@ -1037,7 +1111,7 @@ def get_agent_admin_overview() -> dict:
 # --------------------------------------------------------------------------- #
 # install / enable / schedule / uninstall (mutations — all owner-gated)
 # --------------------------------------------------------------------------- #
-def _mark_catalog_dirty() -> None:
+def _mark_catalog_dirty(*, strict: bool = False) -> None:
 	"""Flag that the container-pushed ENABLED set changed since the last Apply
 	(install / uninstall / enable-disable). Cleared only on a SUCCESSFUL push
 	inside ``_enqueued_push_agent_skills``; surfaced to the SPA as ``dirty`` in
@@ -1046,12 +1120,16 @@ def _mark_catalog_dirty() -> None:
 	payload, so a mutation landing MID-push can never have its dirty flag
 	cleared by that push (TOCTOU). Best-effort — the flag must never break the
 	mutation it annotates, bar a deadlock over its uncommitted writes (rolled back
-	with it), which re-raises so the mutation is not reported as done."""
+	with it), which re-raises so the mutation is not reported as done. ``strict``
+	is for a safety migration: it must not receive a completed Patch Log row
+	without a durable Apply marker."""
 	pending = frappe.db.transaction_writes
 	try:
-		frappe.db.set_single_value(_SETTINGS, "agent_catalog_dirty", 1)
 		_bump_catalog_version()
+		frappe.db.set_single_value(_SETTINGS, "agent_catalog_dirty", 1)
 	except Exception as e:
+		if strict:
+			raise
 		if pending and isinstance(e, frappe.QueryDeadlockError):
 			# RES8-1: same exception type (existing catches still match), friendly message.
 			frappe.throw(
@@ -1061,39 +1139,72 @@ def _mark_catalog_dirty() -> None:
 		frappe.log_error(title="Jarvis: agent catalog dirty flag failed", message=frappe.get_traceback())
 
 
-def _bump_catalog_version() -> None:
-	"""Increment ``agent_catalog_version`` in ONE statement (#458).
+def _catalog_lock_table_ready() -> bool:
+	"""Return whether model sync created the primary-key catalog lock table."""
+	try:
+		return bool(frappe.db.table_exists(_CATALOG_LOCK, cached=False))
+	except Exception:
+		return False
 
-	The obvious read-modify-write (``get_single_value`` + ``set_single_value``)
-	loses updates: two mutations racing both read V and both write V+1, so the
-	second mutation leaves the version looking untouched. The push worker's TOCTOU
-	recheck compares against that version, so a lost increment is exactly the case
-	where the worker clears the dirty flag for a change that never made the
-	payload.
 
-	Frappe stores one Single field as one ``tabSingles`` row, so a single
-	``UPDATE ... SET value = value + 1`` runs under that row's write lock and
-	cannot lose an increment however the two writers interleave.
-	``set_single_value`` survives only as the SEED path: a Single field that was
-	never written has no ``tabSingles`` row at all, and the UPDATE above would
-	silently match nothing.
+def _lock_catalog_state() -> None:
+	"""Take the first lock in the catalog state order.
+
+	Every writer then locks ``agent_catalog_version`` and
+	``agent_catalog_dirty`` in that fixed order through
+	:func:`_locked_catalog_state`. The fallback keeps a newly deployed web process
+	usable before model sync; the close migrations run only after model sync.
 	"""
-	params = {"dt": _SETTINGS, "field": "agent_catalog_version"}
+	if not _catalog_lock_table_ready():
+		return
+	params = {"name": _CATALOG_LOCK_NAME, "user": "Administrator"}
 	frappe.db.sql(
-		"""UPDATE `tabSingles`
-		SET `value` = CAST(COALESCE(NULLIF(`value`, ''), '0') AS UNSIGNED) + 1
-		WHERE `doctype` = %(dt)s AND `field` = %(field)s""",
+		"""INSERT IGNORE INTO `tabJarvis Agent Catalog Lock`
+		(`name`, `creation`, `modified`, `modified_by`, `owner`, `docstatus`, `idx`, `state_key`)
+		VALUES (%(name)s, NOW(6), NOW(6), %(user)s, %(user)s, 0, 0, %(name)s)""",
 		params,
 	)
-	if not frappe.db.sql(
-		"""SELECT 1 FROM `tabSingles` WHERE `doctype` = %(dt)s AND `field` = %(field)s LIMIT 1""",
-		params,
-	):
-		frappe.db.set_single_value(_SETTINGS, "agent_catalog_version", 1)
-	# Raw SQL bypasses both the Single's redis document cache and
-	# ``frappe.db.value_cache``, which would otherwise keep serving the
-	# pre-increment value for the rest of this request.
-	frappe.clear_document_cache(_SETTINGS, _SETTINGS)
+	rows = frappe.db.sql(
+		"SELECT `name` FROM `tabJarvis Agent Catalog Lock` WHERE `name`=%(name)s FOR UPDATE", params
+	)
+	if not rows:
+		frappe.throw("The agent catalog lock could not be acquired.", frappe.ValidationError)
+
+
+def _locked_catalog_state() -> dict[str, int]:
+	"""Lock and read catalog state in the one global order.
+
+	Order is fixed: catalog lock row, version Single row, then dirty Single row.
+	Do not open-code a Settings read for either field in an Apply, mutation,
+	migration, or Settings save; a reversed pair deadlocks under concurrent Apply.
+	"""
+	_lock_catalog_state()
+	# Frappe v15 get_single_value has no for_update option. Read Singles directly
+	# so these are fresh locking reads, still version first and dirty second.
+	state = {}
+	for field in _CATALOG_STATE_FIELDS:
+		rows = frappe.db.sql(
+			"SELECT value FROM `tabSingles` WHERE doctype=%s AND field=%s FOR UPDATE",
+			(_SETTINGS, field),
+		)
+		state[field] = frappe.utils.cint(rows[0][0] if rows else None)
+	return state
+
+
+def _locked_catalog_version() -> int:
+	"""Compatibility reader for the Apply worker's terminal version check."""
+	return _locked_catalog_state()["agent_catalog_version"]
+
+
+def _bump_catalog_version() -> None:
+	"""Increment the version under the shared catalog lock order.
+
+	This helper deliberately keeps its historic ``None`` return contract. Several
+	callers use it only for its durable side effect while building an Apply result.
+	"""
+	state = _locked_catalog_state()
+	version = state["agent_catalog_version"] + 1
+	frappe.db.set_single_value(_SETTINGS, "agent_catalog_version", version)
 
 
 def _default_schedule_weekday(sched: dict) -> str | None:
@@ -1141,6 +1252,9 @@ def install_agent(
 	model, validated before and saved in the same request as the install (enforced
 	min-model only; ignored with the flag off). ``pick_if_unpinned``: the pick is the
 	dialog's unchanged shown model, kept out of a row someone has pinned since."""
+	from jarvis.chat.agent_closure import assert_new_install_allowed
+
+	assert_new_install_allowed(agent_slug)
 	listing = frappe.get_doc(LISTING, agent_slug)  # All-role read
 	me = frappe.session.user
 	# FIX 11: an agent runs AS a named user (run_as_user defaults to the installer),
@@ -1169,6 +1283,13 @@ def install_agent(
 		frappe.throw(_("This agent is not available to install."), frappe.PermissionError)
 	if listing.status != "Published":
 		frappe.throw(_("This agent is not available to install."))
+	# A mutable legacy listing can say Published even though its reviewed bundle
+	# is a no-runtime Coming Soon teaser. Refuse before installability checks so
+	# a missing optional app cannot mask the closed bundle contract.
+	from jarvis.chat.agent_catalog import registry_is_coming_soon_no_runtime
+
+	if registry_is_coming_soon_no_runtime(listing.name):
+		frappe.throw(_("This agent is not available to install."), frappe.PermissionError)
 	if frappe.db.exists(INSTALLATION, {"owner": me, "agent": listing.name}):
 		frappe.throw(_("You have already installed this agent."))
 	# R5-J8: refuse when the listing's min_apps are not all installed / a required
@@ -1208,8 +1329,8 @@ def install_agent(
 			"enabled": 0,
 			# Phase 1 identity: the agent runs AS this user (every jarvis__* read is
 			# permission-bounded to them). Defaults to the installer — a self-map,
-			# which the controller's escalation guard always permits. An admin may
-			# retarget it later via set_run_as_user.
+			# which the controller's escalation guard always permits. A System
+			# Manager may retarget it later via set_run_as_user.
 			"run_as_user": me,
 			# PP-4: every capability activates per customer in preview/SHADOW first,
 			# with the installer as the initial named reviewer (retargetable by an
@@ -1282,20 +1403,33 @@ def _check_installation_write(doc, ptype: str = "write") -> bool:
 	return False
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_enabled(installation: str, enabled: int) -> dict:
 	"""Enable/disable an installed agent — a pure DB write (O6: NO restart; the
 	bundle only reaches the container on the next Apply)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	via_admin = _check_installation_write(doc)  # S3 owner-gate, or a tenant admin
+	from jarvis.chat.agent_closure import assert_enabled, is_closed_installation, retire_document
+
+	assert_enabled(doc.agent, enabled, doc)
+	before = int(doc.enabled or 0)
+	if is_closed_installation(doc):
+		retire_document(doc)
 	# R5-J8: never enable a non-installable capability (a min_apps dependency
 	# absent at install, or one that vanished after install and was reconciled to
 	# installable=0). Disabling is always allowed.
 	if int(enabled or 0):
+		from jarvis.chat.agent_catalog import registry_is_coming_soon_no_runtime
+
+		if registry_is_coming_soon_no_runtime(doc.agent):
+			frappe.throw(
+				_("This agent has no runnable bundled workflow and cannot be enabled."),
+				frappe.PermissionError,
+				title=_("Agent not available"),
+			)
 		from jarvis.chat.agent_installability import assert_installable
 
 		assert_installable(doc.agent)
-	before = int(doc.enabled or 0)
 	doc.enabled = int(enabled or 0)
 	doc.save(ignore_permissions=via_admin)
 	# jarvis#1062 polish: only an ACTUAL flip changes the pushed bundle set - a
@@ -1314,7 +1448,47 @@ def set_enabled(installation: str, enabled: int) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "enabled": doc.enabled}}
 
 
-@frappe.whitelist()
+def _assert_fefo_schedule_configuration(doc) -> None:
+	"""Validate a FEFO schedule as its eventual run-as identity.
+
+	The Installation controller owns the authoritative all-write-path gate. This
+	endpoint calls the same shared helper as defense in depth, before it computes
+	and saves a schedule.
+	"""
+	from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
+
+	assert_schedule_configuration(doc)
+
+
+def _assert_sla_schedule_configuration(doc) -> None:
+	"""Validate an SLA schedule's team boundary as its eventual run-as user.
+
+	A schedule is an unattended commitment. Checking the configuration as the
+	requesting owner could accept a Helpdesk team that the scheduled run-as user
+	cannot read. Refuse before the schedule row is saved, so the next cron tick
+	does not have to record a confusing failed run.
+	"""
+	from jarvis.chat.sla_breach_ageing import AGENT as SLA_BREACH_AGENT
+	from jarvis.chat.sla_breach_ageing import assert_configuration
+
+	if doc.agent != SLA_BREACH_AGENT:
+		return
+	run_as = (doc.run_as_user or "").strip()
+	if not is_valid_unattended_owner(run_as):
+		frappe.throw(
+			_(
+				"This agent needs an enabled non-system run-as user before you can enable an "
+				"automatic schedule."
+			)
+		)
+	# The configuration has no scheduler-owned write. Its only side effect is a
+	# permission-bounded HD Team read, which must occur under the identity that
+	# will execute the scheduled audit.
+	with impersonate(run_as):
+		assert_configuration(doc)
+
+
+@frappe.whitelist(methods=["POST"])
 def set_schedule(
 	installation: str,
 	schedule_enabled: int | None = None,
@@ -1337,14 +1511,43 @@ def set_schedule(
 
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
+	# An old or directly edited record scope must not survive any save that leaves
+	# this schedule enabled. Explicitly turning the schedule off remains allowed
+	# so the owner has a safe recovery path.
+	schedule_will_be_enabled = (
+		int(schedule_enabled or 0) if schedule_enabled is not None else int(doc.schedule_enabled or 0)
+	)
+	if schedule_will_be_enabled and agent_scope.record_scope_requested(doc.config):
+		agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
+	if schedule_will_be_enabled and doc.agent == "fefo-expiry-compliance-auditor":
+		# Validate the immutable policy and any optional leaf before this endpoint
+		# computes next_run_at, writes activity, or saves the installation.  The
+		# controller repeats this for Desk/REST/import/direct saves.
+		from jarvis.chat.fefo_expiry_compliance import assert_schedule_configuration
+
+		assert_schedule_configuration(doc)
+	from jarvis.chat.agent_closure import assert_scheduled, is_closed_installation, retire_document
+
+	was_enabled = frappe.utils.cint(doc.enabled)
+	final_schedule_enabled = (
+		frappe.utils.cint(schedule_enabled)
+		if schedule_enabled is not None
+		else frappe.utils.cint(doc.schedule_enabled)
+	)
+	assert_scheduled(doc.agent, final_schedule_enabled)
+	if is_closed_installation(doc):
+		retire_document(doc)
 	# R5-J8: turning a schedule ON is a run commitment — refuse it for a
 	# non-installable capability (a scheduled run would only fail its preflight).
 	if int(schedule_enabled or 0):
 		from jarvis.chat.agent_installability import assert_installable
 
-		if doc.agent in REVIEW_OPERATORS:
+		if agent_scope.record_scope_requested(doc.config):
+			agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
+		if doc.agent in REVIEW_OPERATORS or doc.agent == "ticket-triage-operator":
 			frappe.throw(_("Operator evidence review supports manual runs only."))
 		assert_installable(doc.agent)
+		_assert_sla_schedule_configuration(doc)
 	if schedule_enabled is not None:
 		doc.schedule_enabled = int(schedule_enabled or 0)
 	if schedule_frequency is not None:
@@ -1371,6 +1574,8 @@ def set_schedule(
 	else:
 		doc.next_run_at = None
 	doc.save()
+	if was_enabled != frappe.utils.cint(doc.enabled):
+		_mark_catalog_dirty()
 	log_activity(
 		agent=doc.agent,
 		agent_title=frappe.db.get_value(LISTING, doc.agent, "title"),
@@ -1392,7 +1597,7 @@ def set_schedule(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_ap_review_defaults(company: str | None = None) -> dict:
 	"""Permission-bounded AP starter settings; this endpoint never saves configuration."""
@@ -1401,7 +1606,7 @@ def get_ap_review_defaults(company: str | None = None) -> dict:
 	return configuration_defaults(company)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_ar_review_defaults(company: str | None = None) -> dict:
 	"""Read-only AR suggestions, including company-bound fiscal years."""
@@ -1410,7 +1615,16 @@ def get_ar_review_defaults(company: str | None = None) -> dict:
 	return configuration_defaults(company)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def get_cycle_count_review_defaults(company: str | None = None) -> dict:
+	"""Read-only count-plan suggestions; the owner must save the actual scope."""
+	from jarvis.chat.cycle_count_review import configuration_defaults
+
+	return configuration_defaults(company)
+
+
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_bank_recon_review_defaults(company: str | None = None) -> dict:
 	"""Read-only bank reconciliation starter settings; never saves configuration."""
@@ -1419,7 +1633,7 @@ def get_bank_recon_review_defaults(company: str | None = None) -> dict:
 	return configuration_defaults(company)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_config(installation: str, config: str) -> dict:
 	"""Persist an installed agent's engagement config JSON — a pure DB write
 	(O6: no restart; the delegate reads it on its installation on the next run).
@@ -1433,8 +1647,11 @@ def set_config(installation: str, config: str) -> dict:
 	inputs are nested under a top-level ``materiality`` object
 	(``materiality.benchmark_value`` / ``.percentage`` /
 	``.engagement_risk_level`` / ``.rounding_step`` — verified against
-	jarvis-agents/agents/close-auditor/evaluate.py's ``_materiality_pl_balance``,
-	the only bundle that reads any agent-specific config today)."""
+	jarvis-agents/agents/close-auditor/evaluate.py's ``_materiality_pl_balance``).
+	The HRMS payroll baseline reads its closed ``baseline_hrms`` namespace through
+	its four declared dot paths.
+	The payroll deposit-status agent similarly reads its bounded ``deposit``
+	namespace from the paired bundle."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
 	try:
@@ -1443,6 +1660,14 @@ def set_config(installation: str, config: str) -> dict:
 		frappe.throw(_("Config must be valid JSON."))
 	if not isinstance(parsed, dict):
 		frappe.throw(_("Config must be a JSON object."))
+	agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), parsed)
+	if doc.agent == "fefo-expiry-compliance-auditor":
+		from jarvis.chat.fefo_expiry_compliance import validate_configuration_edit
+
+		try:
+			validate_configuration_edit(parsed)
+		except ValueError as exc:
+			frappe.throw(str(exc))
 	doc.config = frappe.as_json(parsed)
 	doc.save()
 	log_activity(
@@ -1457,15 +1682,15 @@ def set_config(installation: str, config: str) -> dict:
 	return {"ok": True, "data": {"name": doc.name}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_run_as_user(installation: str, user: str) -> dict:
 	"""Map an installed agent's RUN-AS identity — the user every ``jarvis__*``
 	ERP read is permission-bounded to (Phase 1 identity). Owner-gated (S3:
 	``check_permission("write")``) for WHO may touch the row; the ESCALATION guard
 	(who may map WHICH user) lives in the controller ``validate()`` so it holds on
-	Desk/test writes too — a non-admin may only map to themselves, any cross-user
-	mapping needs Jarvis Admin, and binding to a System Manager needs a System
-	Manager. Mirrors ``set_config``: check_permission, set, then save so
+	Desk/test writes too: only Administrator or a System Manager may map to
+	another user; everyone else may map only to themselves. The same rule is
+	re-checked at every run against whoever last set the mapping. Mirrors ``set_config``: check_permission, set, then save so
 	validate() enforces the guard. Pure DB write (no restart)."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3 owner-gate
@@ -1529,16 +1754,18 @@ def _installation_finding_names(run_names: list) -> set:
 
 
 def _detach_last_seen_run(run_names: list) -> None:
-	"""Re-point any SURVIVING finding whose ``last_seen_run`` lands in the runs this
-	cascade is about to force-delete.
+	"""Re-point any SURVIVING finding whose ``last_seen_run`` lands in a run this
+	cascade removes from its installation.
 
 	A survivor here is by definition another installation's row that the #454
-	recurrence bump attached to one of our runs. Leaving the pointer would dangle
-	it: ``get_findings``' run drill-down INNER JOINs ``last_seen_run``, so the row
-	would vanish from its real owner's history, and Frappe's link validation would
-	reject that owner's next acknowledge/resolve save outright. Falling back to the
-	row's own ``first_seen_run`` (which belongs to ITS installation and survives, or
-	is empty) keeps the recurrence pointer truthful and the row usable.
+	recurrence bump attached to one of our runs. A deleted run would leave the
+	pointer dangling; a budget- or provenance-retained run loses its installation
+	and also cannot truthfully remain another installation's latest run.
+	``get_findings``' run drill-down INNER JOINs ``last_seen_run``, so either case
+	hides the row from its real owner's history, and Frappe's link validation can
+	reject that owner's next acknowledge/resolve save. Falling back to the row's
+	own ``first_seen_run`` (which belongs to ITS installation and survives, or is
+	empty) keeps the recurrence pointer truthful and the row usable.
 
 	Raw ``db.set_value`` — ``last_seen_run`` is a frozen audit field, so this must
 	bypass the finding controller exactly as the recurrence bump does.
@@ -1603,7 +1830,7 @@ def _delete_installation_preserving_provenance(doc, via_admin: bool) -> None:
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def uninstall_agent(installation: str) -> dict:
 	"""Delete an installation (owner-gated) plus its run + finding history —
 	bottom-up, mirroring ``macros_api.delete_macro``: findings link runs (via
@@ -1668,6 +1895,83 @@ def _stop_live_runs_for_uninstall(installation: str) -> int:
 	return stopped
 
 
+def _detach_cycle_count_provenance_runs(run_names: list[str], owner: str) -> set[str]:
+	"""Keep the minimal sealed-run authority behind retained count facts.
+
+	An approved Cycle-Count plan and its submitted observations remain useful
+	after uninstall: a permitted human can still read or correct an observation.
+	The approval's ``run`` Link is also the writer fence.  Deleting that row
+	would leave a truthful-looking plan that fails only when the user submits it.
+
+	The retained row is detached from the installation and loses every live
+	delegate capability and raw input/output payload.  It cannot resume or
+	restore a budget, but it remains a stable immutable identity for the approval
+	cohort and the factual ``source_run`` value.
+	"""
+	if not run_names:
+		return set()
+	# Take the same run fence that review staging and fact recording use before
+	# we inspect linked reviews. A staging writer either finishes before this
+	# query (and its link is retained) or sees the detached/deleted run after the
+	# uninstall commits; it cannot create an Approval Request whose run vanishes.
+	fenced_runs = tuple(
+		frappe.db.get_values(
+			RUN,
+			filters={"name": ["in", tuple(run_names)]},
+			fieldname="name",
+			pluck=True,
+			for_update=True,
+		)
+	)
+	if not fenced_runs:
+		return set()
+	# Keep every Cycle-Count review that still links one of these runs, not only
+	# approved rows. Otherwise a pending review can be approved after uninstall
+	# and point at a deleted run. The retained row has no live capability.
+	review_runs = set(
+		frappe.db.sql(
+			"""SELECT `run` FROM `tabJarvis Approval Request`
+			WHERE `run` IN %(runs)s AND agent = %(agent)s AND source = 'Agent Review'
+			FOR UPDATE""",
+			{"runs": fenced_runs, "agent": CYCLE_COUNT_PLANNER},
+			pluck=True,
+		)
+	)
+	count_runs = set()
+	if frappe.db.table_exists(PHYSICAL_COUNT):
+		count_runs = set(
+			frappe.get_all(
+				PHYSICAL_COUNT,
+				filters={"source_run": ["in", run_names], "docstatus": ["in", [1, 2]]},
+				pluck="source_run",
+				ignore_permissions=True,
+			)
+		)
+	kept = {name for name in review_runs | count_runs if isinstance(name, str) and name in fenced_runs}
+	if not kept:
+		return set()
+	keys = frappe.get_all(
+		RUN,
+		filters={"name": ["in", tuple(kept)]},
+		pluck="session_key",
+		ignore_permissions=True,
+	)
+	keys = [key for key in keys if isinstance(key, str) and key]
+	if keys:
+		frappe.db.delete("Jarvis Chat Session", {"session_key": ["in", keys]})
+	# Keep only the immutable identity that the approval writer fence needs.
+	# Use the same dynamic clearing policy as a budget-retained run so a new
+	# Agent Run field cannot silently become an uninstalled agent capability.
+	from jarvis.chat.agent_scheduler import _kept_row_clear_values
+
+	run = frappe.qb.DocType(RUN)
+	query = frappe.qb.update(run).set(run.installation, None).set(run.owner, owner)
+	for fieldname, value in _kept_row_clear_values().items():
+		query = query.set(run[fieldname], value)
+	query.where(run.name.isin(tuple(kept))).run()
+	return kept
+
+
 def _uninstall_cascade(doc, via_admin: bool) -> None:
 	"""The delete itself, under the caller's dispatch lock; commits."""
 	log_activity(
@@ -1693,15 +1997,29 @@ def _uninstall_cascade(doc, via_admin: bool) -> None:
 			force=True,
 			flags={"jarvis_uninstall_installation": doc.name},
 		)
+	# A cross-install recurrence pointer is not membership. Repair it before a
+	# run is either retained without its installation or force-deleted.
 	_detach_last_seen_run(run_names)
 	# The month's counted runs are KEPT, detached from the installation, so uninstalling
 	# and installing again does not hand the month's run budget back (A14). For the user
 	# the run history is gone all the same: no screen lists a run with no installation.
-	from jarvis.chat.agent_scheduler import keep_budget_rows_of_uninstalled
+	# A Deposit report is immutable while its Run links it. Remove each such
+	# report through the narrow server lifecycle helper before either deleting a
+	# Run or detaching a kept budget row. A generic dashboard is untouched.
+	from jarvis.chat.dashboard_permissions import delete_deposit_dashboard_for_uninstall
 
-	kept = set(keep_budget_rows_of_uninstalled(doc.name, doc.owner))
 	for name in run_names:
-		if name not in kept:
+		delete_deposit_dashboard_for_uninstall(name, doc.name)
+	from jarvis.chat.agent_scheduler import keep_budget_rows_of_uninstalled
+	from jarvis.jarvis.doctype.jarvis_agent_run.jarvis_agent_run import trusted_deposit_run_removal
+
+	provenance_runs = _detach_cycle_count_provenance_runs(run_names, doc.owner)
+	kept = provenance_runs | set(
+		keep_budget_rows_of_uninstalled(doc.name, doc.owner, exclude=provenance_runs)
+	)
+	deleted_runs = [name for name in run_names if name not in kept]
+	for name in deleted_runs:
+		with trusted_deposit_run_removal(doc.name):
 			frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 	# honors if_owner for an owner; the admin path was authorised above. The append-only
 	# provenance ledger is preserved (immutable audit trail); see the helper.
@@ -1711,7 +2029,7 @@ def _uninstall_cascade(doc, via_admin: bool) -> None:
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before stopping runs
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	"""Manual trigger: enqueue an audit turn NOW via the SAME code path the
 	scheduler uses (``agent_scheduler._launch_audit``), executed UNDER THE
@@ -1738,6 +2056,14 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 	the run's immutable ``initiating_human`` (JF-021) — three distinct identities."""
 	doc = frappe.get_doc(INSTALLATION, installation)
 	doc.check_permission("write")  # S3: who may trigger
+	# A legacy or directly edited configuration can predate set_config's guard.
+	# Check it before any manual-launch preparation can persist state (including a
+	# model fallback or Custom App Learning's source_apps_json selection).
+	if agent_scope.record_scope_requested(doc.config):
+		agent_scope.assert_record_scope_supported(registry_supports_record_scope(doc.agent), doc.config)
+	from jarvis.chat.agent_closure import assert_launch_allowed
+
+	assert_launch_allowed(doc.agent, doc)
 	# Operator-visibility gate: a teaser/hidden (operator-withdrawn) agent does not run, even
 	# for an existing install — the install stays but is DISABLED. Reversible (agent -> available
 	# runs it again; never mutates ``enabled``), and applies to everyone incl. an admin
@@ -1770,6 +2096,13 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 			_("The run-as user does not have access to this agent. Ask your administrator."),
 			frappe.PermissionError,
 		)
+	# A mapping to someone other than the owner is only honoured while whoever set it
+	# is still a System Manager (or Administrator); judged now, on every run.
+	from jarvis.chat.agent_scheduler import run_as_mapping_refusal
+
+	refusal = run_as_mapping_refusal(installation, doc.owner, run_as)
+	if refusal:
+		frappe.throw(_("This agent cannot run: {0}.").format(refusal), frappe.PermissionError)
 	if not doc.enabled:
 		frappe.throw(_("Enable the agent before running it."))
 	# R5-J8: refuse an on-demand run for a non-installable capability — a required
@@ -1782,7 +2115,12 @@ def run_agent_now(installation: str, options: str | dict | None = None) -> dict:
 
 	listing = frappe.db.get_value(LISTING, doc.agent, ["nature", "status"], as_dict=True) or frappe._dict()
 	nature = listing.get("nature")
-	if nature not in ("Auditor", "Scribe") and doc.agent not in REVIEW_OPERATORS:
+	if (
+		nature not in ("Auditor", "Scribe")
+		and doc.agent not in REVIEW_OPERATORS
+		and doc.agent != "reorder-replenishment-operator"
+		and doc.agent != "ticket-triage-operator"
+	):
 		frappe.throw(
 			_("Only auditor and scribe agents run on demand; operators draft through the Approval Board.")
 		)
@@ -1985,7 +2323,7 @@ def _try_abort_gateway_session(session_key: str | None, run: str) -> None:
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def stop_agent_run(run: str) -> dict:
 	"""Stop a RUNNING agent run: terminalize it ``stopped``, revoke its session bearer
 	and best-effort abort its gateway session. Idempotent on an already-terminal run.
@@ -2237,7 +2575,7 @@ def _require_activation_authority(user: str) -> None:
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def promote_installation(installation: str, justification: str | None = None) -> dict:
 	"""PP-4 — promote a shadow installation to LIVE on a reviewer's explicit
 	sign-off. This is the SINGLE choke point PP-4 (calibration) and PP-6 (budget)
@@ -2329,7 +2667,7 @@ def promote_installation(installation: str, justification: str | None = None) ->
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def demote_installation(installation: str, reason: str | None = None) -> dict:
 	"""PP-4 — the demotion / kill path: send a live installation back to SHADOW
 	(re-closing the owner surface, freeing a global activation-budget slot). Same
@@ -2359,7 +2697,7 @@ def demote_installation(installation: str, reason: str | None = None) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "activation_state": "shadow"}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def raise_activation_ceiling(customer: str, justification: str, new_ceiling: int = 2) -> dict:
 	"""PP-6 — raise the activation ceiling from 1 to 2 (the stage maximum) FOR ONE
 	NAMED CUSTOMER. Restricted to a Jarvis Admin. The raise is per-customer, never a
@@ -2472,7 +2810,7 @@ def _stamp_run_nature(rows: list[dict]) -> list[dict]:
 	return rows
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_runs(agent: str | None = None, limit: int = 50) -> list[dict]:
 	"""This owner's run history (optionally filtered to one agent)."""
@@ -2490,7 +2828,7 @@ def list_runs(agent: str | None = None, limit: int = 50) -> list[dict]:
 	return _stamp_run_nature(rows)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_runs_page(
 	agent: str | None = None,
@@ -2540,7 +2878,7 @@ def list_runs_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_findings(
 	run: str | None = None,
@@ -2585,7 +2923,9 @@ def list_findings(
 		# get_value bypasses perms, so without the owner check a foreign run id is
 		# an existence/metadata oracle. A run the caller does not own returns empty
 		# (identical to an unknown run), never leaking that it exists.
-		run_row = frappe.db.get_value(RUN, run, ["agent", "creation", "status", "owner"], as_dict=True)
+		run_row = frappe.db.get_value(
+			RUN, run, ["agent", "creation", "status", "owner", "scope_json"], as_dict=True
+		)
 		if not run_row or run_row.owner != me:
 			return _empty()
 		if run_row.status not in ("completed", "partial"):
@@ -2593,14 +2933,20 @@ def list_findings(
 			# (findings_count is 0 there too — the drill-down must match).
 			return _empty()
 		observed = frappe.db.sql(
-			"""SELECT f.name FROM `tabJarvis Agent Finding` f
+			"""SELECT f.name, fr.scope_json FROM `tabJarvis Agent Finding` f
 			JOIN `tabJarvis Agent Run` fr ON fr.name = f.first_seen_run
 			JOIN `tabJarvis Agent Run` lr ON lr.name = f.last_seen_run
 			WHERE f.owner = %(me)s AND f.agent = %(agent)s
 			  AND fr.creation <= %(rc)s AND lr.creation >= %(rc)s""",
 			{"me": me, "agent": run_row.agent, "rc": run_row.creation},
-			pluck=True,
+			as_dict=True,
 		)
+		# Detections from another record can span this run's timestamp. Match the
+		# launch boundary as well, so the drill-down follows finding identity.
+		from jarvis.chat.agent_runs import _record_scope
+
+		boundary = _record_scope(run_row.scope_json)
+		observed = [row.name for row in observed if _record_scope(row.scope_json) == boundary]
 		if not observed:
 			return _empty()
 		filters["name"] = ["in", observed]
@@ -2702,7 +3048,7 @@ def list_findings(
 RUN_STEPS_CAP = 200
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_run_steps(run: str) -> dict:
 	"""One run's STEP TIMELINE, oldest first: ``{steps, count}``.
@@ -2758,7 +3104,7 @@ def list_run_steps(run: str) -> dict:
 	return {"steps": steps, "count": len(steps)}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_finding_state(finding: str, state: str) -> dict:
 	"""Move a finding to open/acknowledged/resolved. Owner-gated (S3)."""
 	if state not in ("open", "acknowledged", "resolved"):
@@ -2771,7 +3117,7 @@ def set_finding_state(finding: str, state: str) -> dict:
 	return {"ok": True, "data": {"name": doc.name, "state": state}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_agent_activity_page(
 	agent: str | None = None,
@@ -2924,7 +3270,7 @@ def take_finding_to_chat(finding: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Apply (explicit push to the container, via admin -> fleet) + status poller
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_agents_sync_status() -> dict:
 	"""Lightweight poller mirroring get_custom_skills_sync_status."""
@@ -2940,7 +3286,7 @@ def get_agents_sync_status() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_agents_caps() -> dict:
 	"""Lightweight capability probe for the Agents SPA (PART 3 remediation).
@@ -2961,7 +3307,7 @@ def get_agents_caps() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def apply_agents() -> dict:
 	"""Push all ENABLED installed agent bundles to the container (one restart).
 	Explicit action. Builds the payload synchronously (surfaces size/cap errors
@@ -3086,10 +3432,12 @@ def _enqueued_push_agent_skills() -> None:
 			# successful push whose payload saw every mutation (version
 			# unchanged) and whose model stamps all landed; failures, mid-push
 			# mutations and an unstamped model row leave it set.
-			fresh = frappe.utils.cint(
-				frappe.db.get_single_value(_SETTINGS, "agent_catalog_version", cache=False)
-			)
-			if fresh == version and stamped:
+			# Terminal Apply takes the same catalog-lock -> version -> dirty order as
+			# every mutation. The lock covers both this comparison and a possible
+			# dirty clear, so a concurrent close or catalog edit re-dirties after us
+			# or is observed here; it cannot be lost between read and clear.
+			state = _locked_catalog_state()
+			if state["agent_catalog_version"] == version and stamped:
 				values["agent_catalog_dirty"] = 0
 			frappe.db.set_single_value(_SETTINGS, values)
 			terminal_written = True

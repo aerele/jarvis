@@ -2,8 +2,10 @@
 
 Wraps ``erpnext.stock.utils.get_stock_balance``. That function enforces
 ``frappe.has_permission("Item", "read", throw=True)`` internally before
-querying the stock ledger, so this wrapper just translates argument
-shape; permission gating is owned by the underlying ERPNext helper.
+querying the stock ledger, but that check is doctype-level only and it
+applies no Warehouse or Company scoping. So this wrapper additionally
+requires read on the Item and on the Warehouse (User Permissions apply)
+and a permitted Company for that Warehouse, then translates argument shape.
 
 This is one of the "computed-truth" reads LLMs hallucinate when forced
 to derive from raw Stock Ledger Entry rows: the right answer depends on
@@ -17,6 +19,7 @@ from __future__ import annotations
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError
+from jarvis.tools._ledger_access import assert_item_readable, assert_warehouse_readable
 
 
 def get_stock_balance(
@@ -40,6 +43,8 @@ def get_stock_balance(
 		raise InvalidArgumentError(f"unknown Item: {item_code}")
 	if not frappe.db.exists("Warehouse", warehouse):
 		raise InvalidArgumentError(f"unknown Warehouse: {warehouse}")
+	assert_item_readable(item_code)
+	assert_warehouse_readable(warehouse)
 
 	from erpnext.stock.utils import get_stock_balance as _gsb
 

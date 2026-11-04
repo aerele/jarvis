@@ -64,9 +64,12 @@ class TestCreateDocValidation(FrappeTestCase):
 
 		def fake_new_doc(dt):
 			class _Stub:
-				meta = frappe._dict(fields=[])  # what cast_numbers reads; no numeric fields
+				# What cast_numbers and apply_tax_template read: no numeric fields, no tax template field.
+				meta = frappe._dict(fields=[], get_field=lambda name: None)
 
 				def __init__(self):
+					self.doctype = dt
+					self.docstatus = 0
 					self._values = {}
 
 				def set(self, f, v):

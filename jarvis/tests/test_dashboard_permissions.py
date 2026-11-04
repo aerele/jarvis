@@ -13,10 +13,14 @@ from jarvis.chat.dashboard_permissions import (
 	can_edit_dashboard,
 	can_read_dashboard,
 	creatable_scopes,
+	delete_deposit_dashboard_for_retention,
+	delete_deposit_dashboard_for_uninstall,
 	has_dashboard_permission,
+	is_immutable_deposit_dashboard,
 	manageable_roles,
 )
 from jarvis.exceptions import PermissionDeniedError
+from jarvis.jarvis.doctype.jarvis_agent_run.jarvis_agent_run import trusted_deposit_run_removal
 from jarvis.permissions import (
 	JARVIS_ADMIN_ROLE,
 	JARVIS_USER_ROLE,
@@ -26,8 +30,11 @@ from jarvis.permissions import (
 from jarvis.tools.get_doc import get_doc as tool_get_doc
 
 DASHBOARD = "Jarvis Dashboard"
+RUN = "Jarvis Agent Run"
+DEPOSIT_AGENT = "statutory-payroll-deposit-status"
 
 ADMIN_USER = "jarvis-dash-admin@example.com"
+SYSTEM_MANAGER_USER = "jarvis-dash-system-manager@example.com"
 PLAIN_A = "jarvis-dash-user-a@example.com"
 PLAIN_B = "jarvis-dash-user-b@example.com"
 ROLE_USER = "jarvis-dash-roleholder@example.com"
@@ -71,14 +78,21 @@ class _DashboardPermTestCase(FrappeTestCase):
 		ensure_jarvis_admin_role()
 		_ensure_custom_role()
 		_ensure_user(ADMIN_USER, [JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE, CUSTOM_ROLE])
+		_ensure_user(SYSTEM_MANAGER_USER, ["System Manager", JARVIS_USER_ROLE])
 		_ensure_user(PLAIN_A, [JARVIS_USER_ROLE])
 		_ensure_user(PLAIN_B, [JARVIS_USER_ROLE])
 		_ensure_user(ROLE_USER, [JARVIS_USER_ROLE, CUSTOM_ROLE])
 		self._orig_user = frappe.session.user
 		self._dashboards: list[str] = []
+		self._runs: list[str] = []
 
 	def tearDown(self):
 		frappe.set_user(self._orig_user)
+		for name in self._runs:
+			if frappe.db.exists(RUN, name):
+				delete_deposit_dashboard_for_retention(name)
+				with trusted_deposit_run_removal(None):
+					frappe.delete_doc(RUN, name, ignore_permissions=True, force=True)
 		for name in self._dashboards:
 			if frappe.db.exists(DASHBOARD, name):
 				frappe.delete_doc(DASHBOARD, name, ignore_permissions=True, force=True)
@@ -111,6 +125,34 @@ class _DashboardPermTestCase(FrappeTestCase):
 
 	def _doc(self, name: str):
 		return frappe.get_doc(DASHBOARD, name)
+
+	def _link_deposit_report(self, dashboard: str, owner: str = ROLE_USER) -> str:
+		"""Make a real linked run. Raw rehome is intentionally server-only."""
+		run = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"agent": DEPOSIT_AGENT,
+				"status": "completed",
+				"dashboard": dashboard,
+				"owner": owner,
+			}
+		).insert(ignore_permissions=True, ignore_links=True)
+		self._runs.append(run.name)
+		frappe.db.commit()
+		return run.name
+
+	def _mk_run(self, agent: str, dashboard: str | None = None) -> str:
+		run = frappe.get_doc(
+			{
+				"doctype": RUN,
+				"agent": agent,
+				"status": "completed",
+				"dashboard": dashboard,
+			}
+		).insert(ignore_permissions=True, ignore_links=True)
+		self._runs.append(run.name)
+		frappe.db.commit()
+		return run.name
 
 	def _visible_names(self, user: str, names: list[str]) -> set:
 		frappe.set_user(user)
@@ -219,6 +261,182 @@ class TestWriteMatrix(_DashboardPermTestCase):
 		frappe.set_user(PLAIN_B)
 		self.assertRaises(PermissionDeniedError, tool_get_doc, DASHBOARD, name)
 		frappe.clear_messages()
+
+	def test_linked_deposit_report_is_immutable_for_reviewer_owner_and_admin(self):
+		# A shadow report is readable by its reviewer, then trusted raw rehome makes
+		# the same artifact visible to the live owner. Neither party can mutate it.
+		from jarvis.chat import dashboards_api
+
+		name = self._mk("User", target_user=ROLE_USER, owner=ROLE_USER)
+		run = self._link_deposit_report(name)
+		doc = self._doc(name)
+		self.assertTrue(can_read_dashboard(doc, ROLE_USER))
+		self.assertTrue(is_immutable_deposit_dashboard(doc))
+		for user in (ROLE_USER, ADMIN_USER, SYSTEM_MANAGER_USER, "Administrator"):
+			with self.subTest(user=user):
+				self.assertFalse(can_edit_dashboard(doc, user))
+				self.assertFalse(has_dashboard_permission(doc, "write", user))
+				self.assertFalse(has_dashboard_permission(doc, "delete", user))
+				frappe.set_user(user)
+				candidate = frappe.get_doc(DASHBOARD, name)
+				candidate.description = "must not save"
+				self.assertRaises(frappe.PermissionError, candidate.save, ignore_permissions=True)
+
+		# Server-only shadow -> live rehome bypasses the ORM lock, as intended.
+		frappe.db.set_value(
+			DASHBOARD, name, {"owner": PLAIN_A, "target_user": PLAIN_A}, update_modified=False
+		)
+		frappe.db.commit()
+		rehomed = self._doc(name)
+		self.assertTrue(can_read_dashboard(rehomed, PLAIN_A))
+		self.assertFalse(can_edit_dashboard(rehomed, PLAIN_A))
+		for user in (PLAIN_A, SYSTEM_MANAGER_USER, "Administrator"):
+			with self.subTest(user=user, route="client-set-value"):
+				frappe.set_user(user)
+				self.assertRaises(
+					frappe.PermissionError,
+					frappe.client.set_value,
+					DASHBOARD,
+					name,
+					"description",
+					"must not set",
+				)
+			with self.subTest(user=user, route="dashboard-api"):
+				self.assertRaises(
+					frappe.PermissionError,
+					dashboards_api.save_dashboard,
+					frappe.as_json({"name": name, "description": "must not save"}),
+				)
+			with self.subTest(user=user, route="dashboard-api-delete"):
+				self.assertRaises(frappe.PermissionError, dashboards_api.delete_dashboard, name)
+			with self.subTest(user=user, route="force-delete"):
+				self.assertRaises(
+					frappe.PermissionError,
+					frappe.delete_doc,
+					DASHBOARD,
+					name,
+					ignore_permissions=True,
+					force=True,
+				)
+
+		# Retention has one explicit server route: it removes the report while
+		# holding the Run lock. This is not an external permission bypass.
+		delete_deposit_dashboard_for_retention(run)
+		self.assertFalse(frappe.db.exists(DASHBOARD, name))
+
+	def test_deposit_run_dashboard_link_and_deletion_need_server_lifecycle(self):
+		"""No Desk/REST/ORM path can clear, repoint, relabel, or delete the Run."""
+		report = self._mk("User", target_user=ROLE_USER, owner=ROLE_USER)
+		other = self._mk("User", target_user=ROLE_USER, owner=ROLE_USER)
+		run = self._link_deposit_report(report)
+		for user in (ROLE_USER, ADMIN_USER, SYSTEM_MANAGER_USER, "Administrator"):
+			for field, value in (("dashboard", None), ("dashboard", other), ("agent", "generic-agent")):
+				with self.subTest(user=user, field=field, value=value):
+					frappe.set_user(user)
+					candidate = frappe.get_doc(RUN, run)
+					candidate.set(field, value)
+					# The test slug is not a Listing fixture. Ignore that unrelated
+					# Link check so this exercises the controller guard that also
+					# protects an otherwise valid relabel.
+					candidate.flags.ignore_links = True
+					self.assertRaises(frappe.PermissionError, candidate.save, ignore_permissions=True)
+		for user in (SYSTEM_MANAGER_USER, "Administrator"):
+			for dashboard in (None, other):
+				with self.subTest(user=user, route="client-set-value", dashboard=dashboard):
+					frappe.set_user(user)
+					self.assertRaises(
+						frappe.PermissionError,
+						frappe.client.set_value,
+						RUN,
+						run,
+						"dashboard",
+						dashboard,
+					)
+			with self.subTest(user=user, route="delete-doc"):
+				self.assertRaises(
+					frappe.PermissionError,
+					frappe.delete_doc,
+					RUN,
+					run,
+					ignore_permissions=True,
+					force=True,
+				)
+		# Each failed mutation leaves the original report link in place, so the
+		# Dashboard remains locked even when a caller cannot mutate the Run.
+		self.assertEqual(frappe.db.get_value(RUN, run, "dashboard"), report)
+		self.assertTrue(is_immutable_deposit_dashboard(self._doc(report)))
+		locked = self._doc(report)
+		locked.description = "must remain immutable"
+		self.assertRaises(frappe.PermissionError, locked.save, ignore_permissions=True)
+
+		# A generic run cannot relabel itself as Deposit to bypass the old/new
+		# identity guard either.
+		generic = self._mk_run("generic-agent", other)
+		candidate = frappe.get_doc(RUN, generic)
+		candidate.agent = DEPOSIT_AGENT
+		candidate.flags.ignore_links = True
+		self.assertRaises(frappe.PermissionError, candidate.save, ignore_permissions=True)
+
+		# The trusted retention path removes the report first, then uses a
+		# process-local capability for the detached Run deletion.
+		delete_deposit_dashboard_for_retention(run)
+		self.assertFalse(frappe.db.exists(DASHBOARD, report))
+		with trusted_deposit_run_removal(None):
+			frappe.delete_doc(RUN, run, ignore_permissions=True, force=True)
+		self._runs.remove(run)
+		self.assertFalse(frappe.db.exists(RUN, run))
+
+	def test_trusted_rehome_and_uninstall_lifecycle_preserve_the_report_lock(self):
+		"""Only the private rehome/uninstall routes may move or remove the receipt."""
+		from jarvis.chat import agents_api
+
+		report = self._mk("User", target_user=ROLE_USER, owner=ROLE_USER)
+		run = self._link_deposit_report(report)
+		installation = f"deposit-lifecycle-{frappe.generate_hash(length=8)}"
+		frappe.db.set_value(RUN, run, "installation", installation, update_modified=False)
+		frappe.db.commit()
+		try:
+			# Promotion/demotion uses this narrow raw server route. It changes only
+			# visibility ownership, so the linked report stays immutable.
+			agents_api._rehome_installation_outputs(frappe._dict(name=installation), PLAIN_A)
+			self.assertEqual(frappe.db.get_value(DASHBOARD, report, "owner"), PLAIN_A)
+			self.assertTrue(is_immutable_deposit_dashboard(self._doc(report)))
+			locked = self._doc(report)
+			locked.description = "still immutable after rehome"
+			self.assertRaises(frappe.PermissionError, locked.save, ignore_permissions=True)
+
+			# The uninstall route binds both the Run and its installation. A caller
+			# cannot use it to free another installation's linked report.
+			self.assertRaises(
+				frappe.PermissionError,
+				delete_deposit_dashboard_for_uninstall,
+				run,
+				"wrong-installation",
+			)
+			self.assertTrue(frappe.db.exists(DASHBOARD, report))
+			delete_deposit_dashboard_for_uninstall(run, installation)
+			self.assertFalse(frappe.db.exists(DASHBOARD, report))
+			with trusted_deposit_run_removal(installation):
+				frappe.delete_doc(RUN, run, ignore_permissions=True, force=True)
+			self._runs.remove(run)
+			self.assertFalse(frappe.db.exists(RUN, run))
+		finally:
+			# Leave the shared fake site clean if an assertion failed before the
+			# official lifecycle completed.
+			if frappe.db.exists(RUN, run):
+				if frappe.db.get_value(RUN, run, "dashboard"):
+					delete_deposit_dashboard_for_uninstall(run, installation)
+				with trusted_deposit_run_removal(installation):
+					frappe.delete_doc(RUN, run, ignore_permissions=True, force=True)
+				self._runs.remove(run)
+
+	def test_generic_dashboard_remains_editable(self):
+		name = self._mk("User", target_user=PLAIN_A, owner=PLAIN_A)
+		frappe.set_user(PLAIN_A)
+		doc = self._doc(name)
+		doc.description = "generic owner edit"
+		doc.save()
+		self.assertEqual(frappe.db.get_value(DASHBOARD, name, "description"), "generic owner edit")
 
 
 class TestScopeHelpers(_DashboardPermTestCase):

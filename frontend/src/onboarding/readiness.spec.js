@@ -17,12 +17,17 @@ const {
 	regateOnRouteChange,
 	forgetReady,
 	replacedBanner,
+	copyBanner,
+	copyNoticeOf,
 	subscriptionExpiredBanner,
 	hasReconnectIntent,
 	landingStep,
 	isLlmApplying,
 	isLlmApplyStuck,
 	isContainerUnavailable,
+	needsNetworkCheck,
+	hasNetworkIntent,
+	NETWORK_INTENT_URL,
 	RECONNECT_INTENT_URL,
 } = await import("./readiness.js");
 
@@ -556,7 +561,13 @@ describe("workersWarnNotice self-heal (round 2 mainchat warning)", () => {
 			"send() must also clear workersWarnNotice on a successful response"
 		).not.toBe(-1);
 		// Gated on a genuinely accepted send, same as retry() above.
-		expect(chatSrc.slice(Math.max(0, second - 120), second)).toContain("r.ok !== false");
+		// A view-identity fence and explanatory comments can sit between the
+		// accepted response and this visible-state reset. Pin it to the enclosing
+		// send branch, rather than a fragile character distance.
+		const sendStart = chatSrc.indexOf("async function send(");
+		const accepted = chatSrc.lastIndexOf("if (r && r.ok !== false)", second);
+		expect(accepted).toBeGreaterThan(sendStart);
+		expect(accepted).toBeLessThan(second);
 	});
 
 	it("never gates canSend on workersWarnNotice (composer must stay enabled - heads-up only)", () => {
@@ -584,6 +595,68 @@ describe("replaced-site banner", () => {
 		expect(replacedBanner({})).toBeNull();
 		expect(replacedBanner(null)).toBeNull();
 		expect(replacedBanner({ replaced: false })).toBeNull();
+	});
+});
+
+describe("copied-site banner", () => {
+	it("says the site is a copy and names the original", () => {
+		const b = copyBanner({ paired_site: "erp.example.com" });
+		expect(b.tone).toBe("warning");
+		expect(b.title).toBe("This site is a copy");
+		expect(b.message).toBe(
+			"This site is a copy of erp.example.com. Jarvis is turned off here. Contact support to use Jarvis on this site."
+		);
+	});
+
+	it("names another site when the pin is empty", () => {
+		expect(copyBanner({ paired_site: "" }).message).toBe(
+			"This site is a copy of another site. Jarvis is turned off here. Contact support to use Jarvis on this site."
+		);
+	});
+
+	it("stays silent without a notice", () => {
+		expect(copyBanner(null)).toBeNull();
+	});
+
+	it("says the site changed, with its own wording, when the identity changed", () => {
+		const b = copyBanner({ instance_changed: true });
+		expect(b.tone).toBe("warning");
+		expect(b.title).toBe("This site changed");
+		expect(b.message).toBe(
+			"Jarvis paused because this site's identity changed, for example after a restore or a move. Re-verify to reconnect Jarvis here."
+		);
+	});
+
+	it("uses the server's own sentence for the instance-changed banner when it sends one", () => {
+		const b = copyBanner({ instance_changed: true, message: "Server wording." });
+		expect(b.title).toBe("This site changed");
+		expect(b.message).toBe("Server wording.");
+	});
+
+	it("reads the instance-changed reason off the readiness verdict", async () => {
+		verdict({ ready: false, reason: "site_instance_changed" });
+		expect(await copyNoticeOf()).toEqual({ instance_changed: true, message: "" });
+		forgetReady();
+		verdict({ ready: false, reason: "site_instance_changed", detail: "Server wording." });
+		expect(await copyNoticeOf()).toEqual({
+			instance_changed: true,
+			message: "Server wording.",
+		});
+		forgetReady();
+		verdict({ ready: true });
+		expect(await copyNoticeOf()).toBeNull();
+	});
+
+	it("reads the notice off the readiness verdict", async () => {
+		verdict({
+			ready: false,
+			reason: "site_is_copy",
+			copy_notice: { paired_site: "erp.example.com" },
+		});
+		expect(await copyNoticeOf()).toEqual({ paired_site: "erp.example.com" });
+		forgetReady();
+		verdict({ ready: false, reason: "signup" });
+		expect(await copyNoticeOf()).toBeNull();
 	});
 });
 
@@ -867,5 +940,43 @@ describe("ChatView subscription-expired wiring", () => {
 		expect(chatSrc).toContain("loadSubscriptionNotice();");
 		expect(chatSrc).toContain("watchSubscriptionNotice(socket)");
 		expect(chatSrc).toContain("unwatchSubscriptionNotice()");
+	});
+});
+
+describe("network_check_required (private network)", () => {
+	it("hands admin's sentence to the generic not-ready banner and is not a setup-poster reason", async () => {
+		const sentence =
+			"Allow your Jarvis server through your firewall, then test the connection.";
+		verdict({ ready: false, reason: "network_check_required", detail: sentence });
+		expect(await readinessDetailOf()).toBe(sentence);
+		expect(await needsOnboarding()).toBe(false);
+	});
+
+	it("needsNetworkCheck is true for this reason alone", async () => {
+		verdict({ ready: false, reason: "network_check_required", detail: "x" });
+		expect(await needsNetworkCheck()).toBe(true);
+		forgetReady();
+		verdict({ ready: false, reason: "container_provisioning", detail: "x" });
+		expect(await needsNetworkCheck()).toBe(false);
+		forgetReady();
+		verdict({ ready: true });
+		expect(await needsNetworkCheck()).toBe(false);
+	});
+
+	it("the Connect-panel link round-trips through hasNetworkIntent", () => {
+		expect(NETWORK_INTENT_URL).toBe("/jarvis/onboarding?network=1");
+		expect(hasNetworkIntent("?network=1")).toBe(true);
+		expect(hasNetworkIntent("?reconnect=1")).toBe(false);
+		expect(hasNetworkIntent("")).toBe(false);
+	});
+
+	it("ChatView gives the customer a route to the Connect panel, ahead of the generic banner", () => {
+		const HERE = path.dirname(fileURLToPath(import.meta.url));
+		const src = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
+		const specific = src.indexOf('v-else-if="networkCheckRequired"');
+		const generic = src.indexOf('v-else-if="notReadyNotice"');
+		expect(specific, "ChatView must render the network_check_required banner").not.toBe(-1);
+		expect(specific).toBeLessThan(generic);
+		expect(src).toContain('@click="goNetworkCheck"');
 	});
 });

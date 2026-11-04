@@ -1,0 +1,39 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "creation": "2026-11-01 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "state_key"
+ ],
+ "fields": [
+  {
+   "fieldname": "state_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "State Key",
+   "no_copy": 1,
+   "read_only": 1
+  }
+ ],
+ "hide_toolbar": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-01 00:00:00.000000",
+ "module": "Jarvis",
+ "name": "Jarvis Agent Catalog Lock",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "role": "System Manager"
+  }
+ ],
+ "quick_entry": 0,
+ "read_only": 1,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

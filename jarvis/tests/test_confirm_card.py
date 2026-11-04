@@ -9,7 +9,7 @@ shapes it does not cover, so the SPA falls back to the raw preview.
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat.confirm_card import _MAX_ROWS, build_card
+from jarvis.chat.confirm_card import _MAX_ROWS, _code_diff_rows, _diff_row, build_card
 
 
 class TestCreateCard(FrappeTestCase):
@@ -80,6 +80,68 @@ class TestUpdateCard(FrappeTestCase):
 		)
 		# description is a no-op (from == to) and priority is not perm-visible.
 		self.assertEqual(card["diff"], [])
+
+
+class TestCodeSecretsMasked(FrappeTestCase):
+	"""jarvis#2152: a key hard-coded in a Code field or a code cell is masked."""
+
+	OLD = (
+		'api_key = "sk_live_abc123DEF456ghi789jkl"\n'
+		'headers = {"Authorization": "Bearer abcDEF123456xyz7890QRSTuv"}\n'
+		"requests.post(url)\n"
+	)
+	NEW = "api_key = frappe.conf.sms_key\nrequests.post(url)\n"
+
+	def _assert_masked(self, row):
+		blob = repr(row)
+		self.assertNotIn("sk_live_abc123", blob)
+		self.assertNotIn("abcDEF123456xyz", blob)
+		self.assertIn("requests.post(url)", row["from"])  # the rest stays readable
+
+	def test_code_field_diff_masks_old_script(self):
+		meta = frappe.get_meta("Server Script")
+		row = _diff_row(meta, "script", self.OLD, self.NEW, None, True)
+		self._assert_masked(row)
+		self.assertEqual(row["to"], self.NEW)
+
+	def test_code_cell_diff_masks_old_condition(self):
+		old = {"transitions": [{"name": "t1", "action": "Go", "state": "A", "next_state": "B"}]}
+		old["transitions"][0]["condition"] = 'api_key = "sk_live_abc123DEF456ghi789jkl"'
+		new = {"transitions": [{**old["transitions"][0], "condition": "doc.ok"}]}
+		(row,) = _code_diff_rows("Workflow", new, old)
+		self.assertNotIn("sk_live_abc123", repr(row))
+		self.assertEqual(row["to"], "doc.ok")
+
+	def test_changed_secret_alone_still_differs(self):
+		old = 'api_key = "sk_live_abc123DEF456ghi789jkl"\n'
+		new = 'api_key = "sk_live_zzz999XYZ000uvw111mno"\n'
+		meta = frappe.get_meta("Server Script")
+		row = _diff_row(meta, "script", old, new, None, True)
+		self.assertNotIn("sk_live_", repr(row))
+		self.assertNotEqual(row["from"], row["to"])
+		self.assertTrue(row.get("lines"))
+		cells = {"transitions": [{"name": "t1", "action": "Go", "state": "A", "next_state": "B"}]}
+		before = {"transitions": [{**cells["transitions"][0], "condition": old}]}
+		after = {"transitions": [{**cells["transitions"][0], "condition": new}]}
+		(cell,) = _code_diff_rows("Workflow", after, before)
+		self.assertNotIn("sk_live_", repr(cell))
+		self.assertNotEqual(cell["from"], cell["to"])
+		self.assertTrue(cell.get("lines"))
+
+	def test_same_secret_masks_identically(self):
+		meta = frappe.get_meta("Server Script")
+		old = 'api_key = "sk_live_abc123DEF456ghi789jkl"\nx = 1\n'
+		new = 'api_key = "sk_live_abc123DEF456ghi789jkl"\nx = 2\n'
+		row = _diff_row(meta, "script", old, new, None, True)
+		self.assertEqual(row["from"].splitlines()[0], row["to"].splitlines()[0])
+		self.assertNotIn("sk_live_", repr(row))
+
+	def test_same_secret_tags_differ_across_rows(self):
+		meta = frappe.get_meta("Server Script")
+		text = 'api_key = "sk_live_abc123DEF456ghi789jkl"\n'
+		first = _diff_row(meta, "script", text, text + "x = 1\n", None, True)
+		second = _diff_row(meta, "script", text, text + "x = 1\n", None, True)
+		self.assertNotEqual(first["from"].splitlines()[0], second["from"].splitlines()[0])
 
 
 class TestVerbCard(FrappeTestCase):

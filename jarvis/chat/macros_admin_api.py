@@ -35,6 +35,9 @@ read them). A run's conversation is never returned.
 
 from __future__ import annotations
 
+import html
+from traceback import format_tb
+
 import frappe
 from frappe import _
 
@@ -195,7 +198,7 @@ def admin_list_macros(
 		elif on_hold:
 			conditions.append("1=0")  # before the migrate nothing is held
 
-	from jarvis.chat.macro_scheduler import once_ready
+	from jarvis.chat.macro_scheduler import cron_ready, once_ready
 
 	where = " AND ".join(conditions)
 	order = list_filters.order_by(sort_field, sort_dir, _SORTABLE, "macro_name", "asc", prefix="m.")
@@ -203,7 +206,7 @@ def admin_list_macros(
 	rows = list_filters.bounded_sql(
 		f"""SELECT {_LIST_COLUMNS}{", m.admin_hold, m.admin_hold_reason" if held_column else ""}{
 			", m.schedule_date" if once_ready() else ""
-		}
+		}{", m.schedule_cron" if cron_ready() else ""}
 		FROM `tabJarvis Macro` m
 		WHERE {where}
 		ORDER BY {order}
@@ -389,6 +392,7 @@ def admin_get_macro(name: str) -> dict:
 		# `is None`, not truthiness: midnight is timedelta(0), which is falsy.
 		"schedule_time": "" if doc.schedule_time is None else str(doc.schedule_time),
 		"schedule_date": str(doc.get("schedule_date") or ""),
+		"schedule_cron": doc.get("schedule_cron") or "",
 		"next_run_at": str(doc.next_run_at or ""),
 		"next_run_is_retry": int(is_retry_pending(doc)),
 		"modified": str(doc.modified or ""),
@@ -483,7 +487,7 @@ def _tell_the_owner(macro: str | None, admin: str) -> None:
 			return
 		macros.notify_owner(
 			owner,
-			subject=f"{macros._OUTCOME_SUBJECT['stopped']}: {macro_name}",
+			subject=f"{macros._OUTCOME_SUBJECT['stopped']}: {frappe.utils.escape_html(macro_name)}",
 			body=STOPPED_BY_ADMIN,
 		)
 	except Exception:
@@ -752,7 +756,7 @@ def admin_delete(macro: str) -> dict:
 	if owner != admin:
 		macros.notify_owner(
 			owner,
-			subject=f"{macros_api.ADMIN_DELETE_NOTICE}: {row.macro_name}",
+			subject=f"{macros_api.ADMIN_DELETE_NOTICE}: {frappe.utils.escape_html(row.macro_name)}",
 			body=_("An admin deleted your macro {0}.").format(row.macro_name),
 		)
 	return {"ok": True, "deleted": True, "stopped_runs": out.get("stopped_runs") or 0}
@@ -768,6 +772,8 @@ def admin_delete(macro: str) -> dict:
 _HANDOVER_ROUNDS = 3
 # How many people the hand-over dialog's search offers at a time.
 TARGETS_MAX = 20
+# How many people one hand-over can name (the macro to the first, copies to the rest).
+HANDOVER_MAX = 10
 
 
 class MacroHandoverError(frappe.ValidationError):
@@ -876,7 +882,13 @@ def _write_handover(row, new_owner: str) -> None:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def admin_handover(macro: str, new_owner: str, expected_owner: str | None = None) -> dict:
+def admin_handover(
+	macro: str,
+	new_owner: str | None = None,
+	expected_owner: str | None = None,
+	new_owners: str | list | None = None,
+	keep: bool | int | str = False,
+) -> dict:
 	"""Hand another user's macro to ``new_owner``. It arrives switched off,
 	unscheduled and disarmed, with no summary, no skills on its steps, no shares, no
 	open assignments and nobody following it; only its new owner can turn any of that
@@ -906,11 +918,21 @@ def admin_handover(macro: str, new_owner: str, expected_owner: str | None = None
 
 	Refused on the admin's own macro, as hold and release are: the hand-over starts
 	with a hold, and a hold is for another user's macro. Another admin can hand it
-	over. Handing a macro TO oneself is allowed."""
+	over. Handing a macro TO oneself is allowed.
+
+	Several people (``new_owners``, a list or a comma separated text, with or without
+	``new_owner``): the first is handed the macro as above, and each of the others gets
+	a copy of it (``_give_copies``). With ``keep`` the macro stays where it is, nothing
+	is held or stopped, and everyone named gets a copy (the admin's own macro too: a
+	copy holds nothing). Every person is checked before anything is written, and one
+	who cannot have it refuses the whole request. ``{ok, handed_over, new_owner,
+	stopped_runs, copies: [{user, macro}], copy_failed: [{user, reason}]}``: a copy
+	refused by a change made in the meantime is listed, the others stand."""
 	refuse_in_tool_dispatch()
 	require_jarvis_admin()
 	row = _load_macro(macro)
-	new_owner = _new_owner_arg(new_owner)
+	targets = _new_owners_arg(new_owner, new_owners)
+	keep = _bool_arg(keep, _("Keep"))
 	# As stored, as the new owner is: a name in another case is the same person.
 	expected_owner = _name_arg(expected_owner, _("Current owner"))
 	expected_owner = frappe.db.get_value("User", {"name": expected_owner}, "name") or expected_owner
@@ -918,10 +940,24 @@ def admin_handover(macro: str, new_owner: str, expected_owner: str | None = None
 	own_macro_hint = _("Another admin has to hand it over.")
 	if row.owner != expected_owner:
 		_refuse_changed_hands()
-	_refuse_own_macro(row, own_macro_hint)
-	_refuse_handover(row, new_owner)  # before anything is written
+	if not keep:
+		_refuse_own_macro(row, own_macro_hint)
+	for target in targets:
+		_refuse_handover(row, target)  # every one of them before anything is written
 
 	old_owner = row.owner
+	if keep:
+		copies, failed = _give_copies(row.name, targets, old_owner, admin)
+		_tell_both_owners(row.macro_name, old_owner, None, admin, copied_to=[c["user"] for c in copies])
+		return {
+			"ok": True,
+			"handed_over": False,
+			"new_owner": None,
+			"stopped_runs": 0,
+			"copies": copies,
+			"copy_failed": failed,
+		}
+	new_owner, others = targets[0], targets[1:]
 	hold_reason = _HANDOVER_HOLD.format(new_owner)
 	row = _stand_down(
 		row,
@@ -939,8 +975,137 @@ def admin_handover(macro: str, new_owner: str, expected_owner: str | None = None
 		from jarvis.chat import macros_api
 
 		macros_api._delete_summary_chat(row.merge_conversation, owned_by=old_owner)
-	_tell_both_owners(row.macro_name, old_owner, new_owner, admin)
-	return {"ok": True, "handed_over": True, "new_owner": new_owner, "stopped_runs": stopped}
+	copies, failed = _give_copies(row.name, others, old_owner, admin)
+	_tell_both_owners(row.macro_name, old_owner, new_owner, admin, copied_to=[c["user"] for c in copies])
+	return {
+		"ok": True,
+		"handed_over": True,
+		"new_owner": new_owner,
+		"stopped_runs": stopped,
+		"copies": copies,
+		"copy_failed": failed,
+	}
+
+
+def _new_owners_arg(new_owner, new_owners) -> list[str]:
+	"""Who the macro goes to, in the order picked, each as stored and named once:
+	``new_owner`` first when given, then ``new_owners`` (a list, a JSON list or a comma
+	separated text). At least one and at most ``HANDOVER_MAX``."""
+	listed = new_owners
+	if isinstance(listed, str):
+		text = listed.strip()
+		listed = (
+			frappe.parse_json(text) if text.startswith("[") else [p for p in text.split(",") if p.strip()]
+		)
+	if listed is None:
+		listed = []
+	if not isinstance(listed, list):
+		frappe.throw(_("New owners must be a list of users."), frappe.ValidationError)
+	names = ([new_owner] if new_owner not in (None, "") else []) + listed
+	if not names:
+		frappe.throw(_("Pick who gets the macro."), MacroHandoverError)
+	if len(names) > HANDOVER_MAX * 2:  # before a database read per name
+		frappe.throw(
+			_("A macro can go to at most {0} people at once.").format(HANDOVER_MAX), MacroHandoverError
+		)
+	targets = []
+	for name in names:
+		stored = _new_owner_arg(name)
+		if stored not in targets:
+			targets.append(stored)
+	if len(targets) > HANDOVER_MAX:
+		frappe.throw(
+			_("A macro can go to at most {0} people at once.").format(HANDOVER_MAX), MacroHandoverError
+		)
+	return targets
+
+
+def _bool_arg(value, what: str) -> bool:
+	"""A checkbox as JSON or form data sends it: a bool, 0 / 1, or their text."""
+	if isinstance(value, bool):
+		return value
+	if isinstance(value, int) and value in (0, 1):
+		return bool(value)
+	if isinstance(value, str) and value.strip().lower() in ("0", "1", "true", "false", ""):
+		return value.strip().lower() in ("1", "true")
+	if value is None:
+		return False
+	frappe.throw(_("{0} must be true or false.").format(what), frappe.ValidationError)
+
+
+def _give_copies(macro: str, users: list[str], old_owner: str, admin: str) -> tuple[list[dict], list[dict]]:
+	"""A copy of ``macro`` for each of ``users``, each in its own commit, as the macro
+	stands now (after a hand-over, the macro its new owner has). ``(copies, refused)``.
+
+	A copy is a new macro inserted AS its new owner (``impersonate``), so the doctype's
+	own checks judge it for them: the per-owner cap and a macro of the same name. It
+	arrives as a hand-over leaves a macro: switched off, unscheduled, not armed, no
+	summary, no skills on its steps, no shares, assignments or followers (a new row
+	has none). Its runs start from nothing: the past runs stay with ``old_owner``.
+	Each person was checked before anything was written; one refused here is a
+	change made since, and is reported without undoing the others."""
+	from jarvis._session import impersonate
+
+	copies, refused = [], []
+	if not users:
+		return copies, refused
+	src = frappe.get_doc(MACRO, macro)
+	steps = [
+		{
+			"label": s.label,
+			"prompt": s.prompt,
+			"model_override": s.model_override,
+			"thinking_override": s.thinking_override,
+			"skills": "[]",
+		}
+		for s in src.steps
+	]
+	for i, user in enumerate(users, 1):
+		messages = len(frappe.local.message_log or [])
+		try:
+			reason = _handover_refusal(frappe._dict(owner=src.owner, macro_name=src.macro_name), user)
+			if reason:
+				frappe.throw(frappe.utils.escape_html(reason), MacroHandoverError)
+			with impersonate(user):
+				copy = frappe.get_doc(
+					{
+						"doctype": MACRO,
+						"macro_name": src.macro_name,
+						"description": src.description,
+						"enabled": 0,
+						"skip_confirmation": 0,
+						"stop_on_error": src.stop_on_error,
+						"schedule_enabled": 0,
+						"steps": steps,
+					}
+				)
+				copy.insert(ignore_permissions=True)
+			_leave_comment(copy.name, f"{admin} gave {user} this copy of a macro of {old_owner}.")
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- each copy stands on its own
+			copies.append({"user": user, "macro": copy.name})
+		except Exception as e:
+			frappe.db.rollback()
+			del frappe.local.message_log[messages:]  # said in copy_failed, not as a popup
+			refused.append({"user": user, "reason": _copy_failure(e, macro, i, len(users))})
+	return copies, refused
+
+
+def _copy_failure(error: Exception, macro: str, i: int, n: int) -> str:
+	"""What ``copy_failed`` says for a copy that did not land. A refusal is plain text
+	(the dialog escapes it again for its toast); anything else is logged and kept
+	short, so one bad copy never stops the others or the notices after them."""
+	if isinstance(error, frappe.ValidationError):
+		return html.unescape(frappe.utils.strip_html(str(error))) or _("Not copied.")
+	# Error Logs are forwarded off-site: name the macro and the position, never the
+	# recipient, and leave out the exception's message (it can quote a user).
+	frappe.log_error(
+		title="macro handover: copy failed",
+		message=(
+			f"{macro}: copy {i} of {n} failed\n{type(error).__name__}\n\n"
+			+ "".join(format_tb(error.__traceback__))
+		),
+	)
+	return _("Not copied: something went wrong. The error is in the Error Log.")
 
 
 def _handover_under_lock(row, old_owner: str, new_owner: str, admin: str, *, hold_reason: str):
@@ -1004,19 +1169,41 @@ def _stopped_others(count: int) -> str:
 	return _("no other was stopped")
 
 
-def _tell_both_owners(macro_name: str, old_owner: str, new_owner: str, admin: str) -> None:
+def _tell_both_owners(
+	macro_name: str, old_owner: str, new_owner: str | None, admin: str, *, copied_to: list[str] = ()
+) -> None:
 	"""A notice to each owner that names no document (``macros.notify_owner``), which
-	their Macros list shows until dismissed. Not to the admin about their own act."""
+	their Macros list shows until dismissed: the old owner once, saying where the macro
+	and its copies went; ``new_owner`` (None when the macro stayed) and each person
+	given a copy. Not to the admin about their own act."""
 	from jarvis.chat import macros, macros_api
 
-	subject = f"{macros_api.ADMIN_HANDOVER_NOTICE}: {macro_name}"
-	if old_owner != admin:
-		macros.notify_owner(
-			old_owner,
-			subject=subject,
-			body=_("An admin handed your macro {0} to {1}.").format(macro_name, new_owner),
-		)
-	if new_owner != admin:
+	# The desk bell renders a subject as HTML. The bodies are shown as text.
+	subject = f"{macros_api.ADMIN_HANDOVER_NOTICE}: {frappe.utils.escape_html(macro_name)}"
+	copied = frappe.utils.comma_and(list(copied_to), add_quotes=False)
+	if old_owner != admin and (new_owner or copied_to):
+		if not new_owner:
+			body = _("An admin gave {1} a copy of your macro {0}. Yours is unchanged.").format(
+				macro_name, copied
+			)
+		elif copied_to:
+			body = _("An admin handed your macro {0} to {1}, and gave {2} a copy of it.").format(
+				macro_name, new_owner, copied
+			)
+		else:
+			body = _("An admin handed your macro {0} to {1}.").format(macro_name, new_owner)
+		macros.notify_owner(old_owner, subject=subject, body=body)
+	for user in copied_to:
+		if user != admin:
+			macros.notify_owner(
+				user,
+				subject=subject,
+				body=_(
+					"An admin gave you a copy of the macro {0} from {1}. It is switched off, unscheduled and "
+					"not armed, and its steps' skills were cleared."
+				).format(macro_name, old_owner),
+			)
+	if new_owner and new_owner != admin:
 		macros.notify_owner(
 			new_owner,
 			subject=subject,

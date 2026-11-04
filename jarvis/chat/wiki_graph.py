@@ -482,7 +482,7 @@ def enqueue_sync() -> None:
 		frappe.log_error(title="wiki graph: enqueue failed", message=frappe.get_traceback())
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def sync_now() -> dict:
 	"""Operator 'Sync now' from the Wiki tab (Jarvis Admin / System Manager —
 	PART 4 REVISED, TASK 45)."""

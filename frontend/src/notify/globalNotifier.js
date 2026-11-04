@@ -172,6 +172,18 @@ export function attachGlobalNotifier({ socket, router }) {
 	const runErrorSignalAt = new Map();
 	const MACRO_AFTER_RUN_ERROR_MS = 5000;
 
+	// Conversations seen running a macro (macro:progress / macro:done name them). A
+	// run's chat is not in the chat list, and each of its steps is a turn of its own:
+	// without this every step raised "Reply ready" and an unread dot on a row the
+	// sidebar never shows. The run is announced once, when it ends (macro:done).
+	const macroConvs = new Set();
+	const MACRO_CONVS_MAX = 200;
+	const noteMacroConv = (conv) => {
+		if (!conv || macroConvs.has(conv)) return;
+		macroConvs.add(conv);
+		if (macroConvs.size > MACRO_CONVS_MAX) macroConvs.delete(macroConvs.values().next().value);
+	};
+
 	// Terminal fence, per listener. The server publishes a turn's terminal MORE THAN
 	// ONCE (settlement, then the finalize backstop re-publish), and ChatView has always
 	// deduped it one-shot so its announce + reload fire once. This listener did not, so
@@ -201,6 +213,10 @@ export function attachGlobalNotifier({ socket, router }) {
 	}
 
 	function onEvent(p) {
+		if (p?.kind === "share:changed") {
+			store.loadSharedConversations?.({ refresh: true });
+			return;
+		}
 		if (!p || !p.kind) return;
 		if (p.conversation_id) store.scheduleConversationActivityRefresh();
 		switch (p.kind) {
@@ -226,6 +242,8 @@ export function attachGlobalNotifier({ socket, router }) {
 					});
 				}
 				if (!conv) return;
+				// A macro step's turn: the run is announced when it ends (macro:done).
+				if (macroConvs.has(conv)) return;
 				// The Triggers pane renders this conversation's turns inline — treat
 				// it like the on-screen chat: no unread dot, no "Reply ready" toast.
 				// A hidden tab still browser-notifies below, same as a hidden chat.
@@ -260,6 +278,9 @@ export function attachGlobalNotifier({ socket, router }) {
 				return;
 			}
 			case "action:pending": {
+				// The live frame is a delivery hint, not proof that a Confirm card is
+				// still safe. Do not tell the user to approve a raw or delayed frame.
+				if (p.pending_card_safe !== true) return;
 				// keyed `conversation` (may be "" when the server can't resolve one —
 				// it still reached THIS user's socket, so fall back to the active chat)
 				const conv = p.conversation || store.currentConvId || null;
@@ -282,6 +303,8 @@ export function attachGlobalNotifier({ socket, router }) {
 				const conv = p.conversation_id || null;
 				const dashboardApproval = p.origin_page === "dashboards";
 				if (dashboardApproval && conv === dashboardsPaneConv() && !document.hidden) return;
+				if (p.source === "Chat" && conv && conv === onScreenConv() && !document.hidden)
+					return;
 				signal({
 					conv: null,
 					toastAnywhere: true, // waiting-on-you is worth a toast even on-conversation
@@ -300,6 +323,24 @@ export function attachGlobalNotifier({ socket, router }) {
 			}
 			case "action:settled":
 				// a card or held write was decided somewhere: the badge may have dropped
+				store.refreshApprovalsCount();
+				return;
+			case "approval:continuation_failed":
+				// a reviewer's decision on the requester's question did not reach their
+				// chat: open the question (no chat id travels), where they can send it
+				signal({
+					conv: null,
+					toastAnywhere: true,
+					title: "Decision not sent to your chat",
+					body: "A reviewer answered your question, but it was not sent to your chat. Open it to send it.",
+					tag: "jarvis-approvals",
+					open: () => go("/approvals/" + encodeURIComponent(p.name || "")),
+				});
+				return;
+			case "approval:tagged":
+			case "approval:untagged":
+				// a Chat question's reviewer grant was added or revoked: the count of what
+				// waits on this user moved. Badge only; the board re-reads its own lists.
 				store.refreshApprovalsCount();
 				return;
 			case "review:pending": {
@@ -353,21 +394,21 @@ export function attachGlobalNotifier({ socket, router }) {
 				}
 				return;
 			}
+			case "macro:progress":
+				noteMacroConv(p.conversation);
+				return;
 			case "macro:done": {
-				// A macro run that FAILED. Before this, nothing outside the run's own
-				// conversation said so: the Runs tab had to be opened to find out.
+				// A macro run that finished or FAILED. The run's chat is not in the chat
+				// list (no unread dot to set), so this is the one signal it ends with.
+				const conv = p.conversation || null;
+				noteMacroConv(conv);
 				const sig = macroDoneSignal(p);
 				if (!sig) return;
-				const conv = p.conversation || null;
 				if (
 					conv &&
 					Date.now() - (runErrorSignalAt.get(conv) || 0) < MACRO_AFTER_RUN_ERROR_MS
 				)
 					return; // the step's own failure was just announced
-				if (conv && conv !== onScreenConv()) {
-					store.markUnread(conv);
-					store.applyRemoteNew();
-				}
 				signal({
 					conv,
 					// A run with no conversation left has no screen that shows it.

@@ -28,6 +28,7 @@ from jarvis.exceptions import (
 	AdminUnreachableError,
 	AdminValidationError,
 )
+from jarvis.holiday_touch import policy as holiday_policy
 from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model
 from jarvis.onboarding import _surface
 from jarvis.permissions import require_jarvis_access, require_jarvis_admin
@@ -495,6 +496,23 @@ def _diagnostic_class(err) -> tuple[str, bool]:
 	return "admin_error", True
 
 
+#: Admin's ``get_connection.network_check`` keys (contract 4.4). Anything else admin adds is
+#: not forwarded to the browser.
+_NETWORK_CHECK_KEYS = ("host_ip", "reach_url", "status", "reason", "checked_at")
+#: Customer-facing copy for the network gate. Admin's ``chat_readiness_reason`` is the bare
+#: token ``network_check_required`` (possibly joined with other blockers by "; "), never prose.
+NETWORK_CHECK_DETAIL = "Allow your Jarvis server through your firewall, then test the connection."
+
+
+def _network_check_of(conn) -> dict:
+	"""The five contract keys of ``conn["network_check"]`` as strings, or ``{}`` when admin did
+	not send the block (it is absent whenever the plugin env gate does not block)."""
+	raw = conn.get("network_check")
+	if not isinstance(raw, dict) or not raw:
+		return {}
+	return {key: str(raw.get(key) or "") for key in _NETWORK_CHECK_KEYS}
+
+
 def _admin_chat_gate() -> dict:
 	"""Last managed ready-gate: ask admin whether the customer's container is
 	actually provisioned enough to serve chat. v1-tolerant.
@@ -512,7 +530,9 @@ def _admin_chat_gate() -> dict:
 	(jarvis#885: admin's health cron confirmed the container is dead/unhealthy -
 	an outage, not a wait) and ``"container_provisioning"`` otherwise (wait) -
 	each kept distinct so a customer isn't told to wait for a container that won't
-	come back, or to keep spinning on a strand that only a reconnect can clear.
+	come back, or to keep spinning on a strand that only a reconnect can clear. A
+	private-network customer whose server has not passed the connection test gets
+	``"network_check_required"`` (the SPA sends them to the Connect panel).
 
 	- v1-tolerance: an ABSENT ``chat_readiness`` key (v1 admin, or a v2 that
 	  doesn't surface it) means the control plane has no opinion → allow.
@@ -573,6 +593,12 @@ def _admin_chat_gate() -> dict:
 	from jarvis.chat import egress_rules
 
 	egress_rules.persist(conn.get("redaction_patterns"))
+	# Same cadence: mirror the operator's holiday-touch policy. daily=False: the gate runs
+	# about every 30 s, so it writes only on change and never stamps the sync time. Skipped
+	# when the request will not commit (the desk's boot GET is rolled back): the write would
+	# be discarded and would take a row lock on Jarvis Settings for nothing. persist never raises.
+	if _write_is_durable():
+		holiday_policy.persist(conn, daily=False)
 	notice = conn.get("billing_notice") or {}
 	if "chat_readiness" in conn and conn["chat_readiness"] != "Ready":
 		# Authority-repair incident (review plan 04 P0-6): admin's strict resolver
@@ -621,6 +647,20 @@ def _admin_chat_gate() -> dict:
 				"billing_notice": {},
 				"detail": conn.get("chat_readiness_reason") or "",
 			}
+		# Private network (design 8.5): admin withholds the plugin env until the connection
+		# test passes for the current binding, and says so with ``network_check``. Its own
+		# reason, so the Connect screen shows the rules and a Test connection button instead
+		# of the endless "coming online" spinner. A paused subscription still wins.
+		network_check = _network_check_of(conn)
+		if network_check and conn["chat_readiness"] != "Suspended":
+			return {
+				"ready": False,
+				"reason": "network_check_required",
+				"billing_notice": {},
+				# Never admin's reason string: it is a machine token, not customer copy.
+				"detail": NETWORK_CHECK_DETAIL,
+				"network_check": network_check,
+			}
 		suspended = conn["chat_readiness"] == "Suspended"
 		return {
 			"ready": False,
@@ -644,7 +684,7 @@ def _admin_chat_gate() -> dict:
 	return {"ready": True, "reason": None, "billing_notice": notice}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def is_onboarded() -> dict:
 	"""True iff Jarvis Settings holds an admin api_key. The wizard's
 	completion-card branch and the account page's redirect guard share this.
@@ -688,7 +728,7 @@ def _site_replacement() -> dict:
 	return verdict
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def is_ready_for_chat() -> dict:
 	"""Pre-flight check used by /jarvis-chat's page load to decide whether to
 	render the chat surface or redirect the customer to /jarvis-onboarding.
@@ -760,6 +800,10 @@ def is_ready_for_chat() -> dict:
 	  the container isn't chat-ready yet (chat_readiness != "Ready"). Set only by
 	  the final ``_admin_chat_gate`` at the managed ready-exits; fail-open and
 	  v1-tolerant (see ``_admin_chat_gate``).
+	- ``"network_check_required"`` - a private-network workspace whose plugin env admin is
+	  withholding until the connection test passes. ``detail`` is the bench's own sentence
+	  and ``network_check`` carries ``{host_ip, reach_url, status, reason, checked_at}`` for
+	  the Connect screen's rules and Test connection button.
 	- ``"readiness_unconfirmed"`` - admin could not be asked AND this workspace
 	  has never been confirmed ready, so nothing knows whether a container is
 	  serving it. Carries ``retryable: True``: it is the absence of a verdict,
@@ -770,6 +814,12 @@ def is_ready_for_chat() -> dict:
 	  ambiguous/invalid and support has been paged. A safe blocked state - the
 	  customer must NOT retry payment or reconnect; ``detail`` carries admin's own
 	  reassurance (see ``_admin_chat_gate``, review plan 04 P0-6).
+	- ``"site_is_copy"`` - this site is not the one Jarvis was first connected from
+	  (a restored copy). Checked FIRST, before anything asks admin, which refuses a
+	  copy. Carries ``copy_notice: {paired_site}``.
+	- ``"site_instance_changed"`` - the agent was pinned to another instance id than
+	  this site's (a restore or a move). Checked right after ``site_is_copy``; cleared
+	  by a passing Re-verify (``site_pin.reverify``).
 	- ``None`` when ``ready`` is True.
 
 	Also carries one non-blocking worker-health field, merged in AFTER the
@@ -781,6 +831,26 @@ def is_ready_for_chat() -> dict:
 	Fails safe: any exception probing worker health leaves the field False
 	rather than raising or affecting the verdict above.
 	"""
+	from jarvis.chat import site_pin
+
+	pin = site_pin.status()
+	if pin["blocked"]:
+		return {
+			"ready": False,
+			"reason": "site_is_copy",
+			"detail": site_pin.copy_message(pin["paired_site"]),
+			"copy_notice": {"paired_site": pin["paired_site"]},
+			"billing_notice": {},
+		}
+	from jarvis.chat import foreign_session
+
+	if foreign_session.instance_changed():
+		return {
+			"ready": False,
+			"reason": "site_instance_changed",
+			"detail": site_pin.INSTANCE_CHANGED_MESSAGE,
+			"billing_notice": {},
+		}
 	verdict = _ready_verdict()
 	if verdict.get("ready"):
 		from jarvis.chat.runtime_profile import RuntimeProfileError, ensure_ready
@@ -1238,7 +1308,7 @@ def _llm_missing_verdict(settings) -> dict:
 	return {"ready": False, "reason": "llm_credentials"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_apply_operation(operation_id: str) -> dict:
 	"""Read-only status of a durable LLM-apply operation (plan-05 D2), for the SPA's
 	single Start-chatting controller to follow one operation to a terminal state.
@@ -1307,7 +1377,7 @@ def _persist_operation_probe_verdicts(status: dict) -> None:
 	frappe.db.set_single_value("Jarvis Settings", fields, update_modified=False)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_usage() -> dict:
 	"""Real LLM usage for the Monitor tab (System-Manager only, spec 7).
 
@@ -1405,7 +1475,7 @@ def _subscription_expiry_fields(attention_reason: str) -> dict:
 	return {"attention_detail": detail, "subscription_health": entries}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_connection_status() -> dict:
 	"""Connection card for Settings, General: how this workspace's LLM config is
 	SHAPED (``pool_mode`` / ``proxy_active`` / ``model_count`` / ``routing_mode``)
@@ -1518,7 +1588,7 @@ def get_llm_connection_status() -> dict:
 MEMBER_HEALTH_STATES = ("ok", "applying", "attention", "down")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_llm_connection_health() -> dict:
 	"""The Settings Status badge for a workspace MEMBER: is this workspace's
 	assistant working right now? Returns exactly one field, ``state``, one of
@@ -1848,7 +1918,7 @@ def _has_llm_config(settings) -> bool:
 		return False
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_account() -> dict:
 	"""Plan + validity + upgrade-eligible plans for the account page.
 
@@ -1870,7 +1940,7 @@ def get_account() -> dict:
 _SUBSCRIPTION_STATUS_TIMEOUT_S = 8
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_subscription_status() -> dict:
 	"""LIVE plan + status for the chat agent's 'what is my current subscription plan?' answer.
 
@@ -1885,7 +1955,7 @@ def get_subscription_status() -> dict:
 	return _surface(admin_client.get_account_summary, timeout_s=_SUBSCRIPTION_STATUS_TIMEOUT_S)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def preview_upgrade(target_plan: str) -> dict:
 	"""Prorated amount for the upgrade modal's per-plan cards.
 
@@ -1898,7 +1968,7 @@ def preview_upgrade(target_plan: str) -> dict:
 	return _surface(admin_client.preview_upgrade, target_plan)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def start_upgrade(target_plan: str, provider: str | None = None) -> dict:
 	"""Create the prorated order on the sub's gateway (or the ``provider``
 	override); the page then opens that gateway's Checkout.
@@ -1917,7 +1987,7 @@ def start_upgrade(target_plan: str, provider: str | None = None) -> dict:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def cancel_plan_at_period_end() -> dict:
 	"""Schedule a period-end cancellation of the site's BILLING plan.
 
@@ -1935,7 +2005,7 @@ def cancel_plan_at_period_end() -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def resume_plan() -> dict:
 	"""Undo a scheduled cancellation (System Manager, as above)."""
 	require_jarvis_admin()
@@ -1944,7 +2014,7 @@ def resume_plan() -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def reauthorize_autopay() -> dict:
 	"""Start re-arming auto-renewal; the page then opens a mandate Checkout.
 
@@ -1957,7 +2027,7 @@ def reauthorize_autopay() -> dict:
 	return onboarding_contract.augment_pay_page(_surface(admin_client.reauthorize_autopay))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def stop_autopay_to_pay() -> dict:
 	"""Past-Due pay-now, step one of two: neutralize the customer's still-live
 	Razorpay mandate so the account's EXISTING reactivation grid (can_reactivate)
@@ -1980,7 +2050,7 @@ def stop_autopay_to_pay() -> dict:
 	return _surface(admin_client.stop_autopay_to_pay, requesting_user=frappe.session.user)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_billing_payment_state() -> dict:
 	"""Where the current billing checkout stands, without asking a gateway.
 
@@ -1991,7 +2061,7 @@ def get_billing_payment_state() -> dict:
 	return onboarding_contract.augment_pay_page(_surface(admin_client.get_billing_payment_state))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_invoices() -> list:
 	"""The customer's own GST invoices for the billing page. SM/Jarvis-Admin only, like its
 	billing siblings (the SPA route adds no client guard and leans on this one)."""
@@ -1999,21 +2069,21 @@ def get_invoices() -> list:
 	return _surface(admin_client.get_invoices)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def download_invoice(erp_name: str) -> dict:
 	"""Base64 PDF of ONE of the customer's invoices; admin re-verifies ownership."""
 	require_jarvis_admin()
 	return _surface(admin_client.download_invoice, erp_name)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_billing_profile() -> dict:
 	"""The billing-details card: editable party (direct) or a 'billed through <partner>' notice."""
 	require_jarvis_admin()
 	return _surface(admin_client.get_billing_profile)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_billing_details(billing: dict | None = None) -> dict:
 	"""Save the customer's own billing party (validated admin-side; a partner-billed customer is
 	refused there)."""
@@ -2021,7 +2091,7 @@ def update_billing_details(billing: dict | None = None) -> dict:
 	return _surface(admin_client.update_billing_details, billing)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def check_billing_payment_status() -> dict:
 	"""Ask the provider what happened to the current billing payment and converge.
 
@@ -2043,14 +2113,14 @@ def check_billing_payment_status() -> dict:
 	return onboarding_contract.success(out, context={})
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def preview_downgrade(target_plan: str) -> dict:
 	"""Describe a downgrade for the picker. SM-only, same gate as upgrade."""
 	require_jarvis_admin()
 	return _surface(admin_client.preview_downgrade, target_plan)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def start_downgrade(target_plan: str) -> dict:
 	"""Schedule a downgrade (next cycle). Monthly autopay returns a mandate
 	pay-page token for a ₹0 mandate checkout; Annual just schedules.
@@ -2063,7 +2133,7 @@ def start_downgrade(target_plan: str) -> dict:
 	return onboarding_contract.augment_pay_page(_surface(admin_client.start_downgrade, target_plan))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def cancel_scheduled_downgrade() -> dict:
 	"""Revoke a scheduled downgrade (SM-only).
 

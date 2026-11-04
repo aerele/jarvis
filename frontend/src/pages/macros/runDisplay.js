@@ -17,6 +17,7 @@ export const RUN_THEMES = {
 	queued: "gray",
 	running: "blue",
 	waiting_capacity: "orange", // parked, not failed - matches the merge_status "pending" badge elsewhere in Macros
+	waiting_report: "orange", // parked until a prepared report is ready, not failed
 	completed: "green",
 	failed: "red",
 	stopped: "gray",
@@ -24,7 +25,20 @@ export const RUN_THEMES = {
 // Statuses whose display label isn't just a capitalized value (e.g. waiting_capacity).
 export const STATUS_LABELS = {
 	waiting_capacity: "Waiting for capacity",
+	waiting_report: "Waiting for report",
 };
+// The Runs tab's status filter: every status a run can have (the doctype's options),
+// in the order a run moves through them. A spec holds this list to the doctype.
+export const RUN_STATUS_OPTIONS = [
+	{ label: "All statuses", value: "" },
+	{ label: "Queued", value: "queued" },
+	{ label: "Running", value: "running" },
+	{ label: "Waiting for capacity", value: "waiting_capacity" },
+	{ label: "Waiting for report", value: "waiting_report" },
+	{ label: "Completed", value: "completed" },
+	{ label: "Failed", value: "failed" },
+	{ label: "Stopped", value: "stopped" },
+];
 export function statusLabel(s) {
 	if (!s) return "";
 	return STATUS_LABELS[s] || s.charAt(0).toUpperCase() + s.slice(1);

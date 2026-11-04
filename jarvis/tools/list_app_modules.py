@@ -21,9 +21,10 @@ data fences.
 
 from __future__ import annotations
 
-import os
+import frappe
 
-from jarvis.learning import app_source, source_guard
+from jarvis.exceptions import InvalidArgumentError
+from jarvis.learning import app_source, app_source_receipts
 from jarvis.tools import _app_learning_ctx as ctx
 
 
@@ -68,26 +69,34 @@ def list_app_modules(app: str | None = None) -> dict:
 
 	name = str(app).strip()
 	ctx.assert_custom_app(name, run["name"])  # allowlist + this run's authorized selection
-	src = app_source._resolve_app_root(name)  # canonical + root-validated source dir
-	rels, notes = app_source._collect_files(src)
-	# CX5-4: drop files whose NAME advertises credentials before they are ever
-	# listed, so the delegate cannot even ask for one; the omission is disclosed as a
-	# coverage caveat rather than silently narrowing what the wiki claims to cover.
-	kept = [rel for rel in rels if not source_guard.is_sensitive_path(rel)]
-	skipped_sensitive = len(rels) - len(kept)
-	files: list[dict] = []
-	for rel in sorted(kept, key=lambda r: (app_source._priority(r), r)):
-		try:
-			size = os.path.getsize(os.path.join(src, rel))
-		except OSError:
-			size = 0
-		files.append({"path": rel, "size": size})
-	modules = sorted({rel.split("/", 1)[0] for rel in kept if "/" in rel})
-	caveats = app_source.coverage_caveats(notes)
-	if skipped_sensitive:
-		caveats.append(
-			f"{skipped_sensitive} file(s) skipped: the filename indicates credentials (never served)"
+	# The manifest is server-issued receipt state, not merely a model convenience.
+	# It binds every later source read and page citation to the approved root and
+	# metadata snapshot. Hold the run row while replacing an older manifest so a
+	# concurrent read cannot mix evidence from two source trees.
+	locked = ctx.lock_run_budget(
+		run["name"], ["source_selection_json", "permission_profile", "source_receipt_json"]
+	)
+	if locked.get("status") != "running":
+		raise InvalidArgumentError("this agent run has already finalized")
+	selection, profile_digest = ctx.source_selection_from_row(locked, run["name"])
+	receipt, manifest = app_source_receipts.prepare_manifest(
+		locked, run["name"], name, selection, profile_digest
+	)
+	frappe.db.set_value(
+		"Jarvis Agent Run",
+		run["name"],
+		"source_receipt_json",
+		app_source_receipts.encode_receipt(receipt),
+		update_modified=False,
+	)
+	files = [
+		{"path": entry["path"], "size": entry["bytes"]}
+		for entry in sorted(
+			manifest["files"], key=lambda entry: (app_source._priority(entry["path"]), entry["path"])
 		)
+	]
+	modules = sorted({entry["path"].split("/", 1)[0] for entry in manifest["files"] if "/" in entry["path"]})
+	caveats = list(manifest["coverage"])
 	return {
 		"app": name,
 		"title": app_source._app_title(name),

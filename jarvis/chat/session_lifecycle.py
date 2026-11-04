@@ -213,6 +213,11 @@ def _free_idle_sessions(sess, budget: int, summary: dict, days: int) -> int:
 	status are irrelevant here - any idle chat with a live session qualifies.
 	Returns leftover budget for the remaining sweeps."""
 	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-days)
+	legacy = (
+		" AND COALESCE(c.collaboration_active,0)=0"
+		if frappe.db.has_column(CONV, "collaboration_active")
+		else ""
+	)
 	rows = frappe.db.sql(
 		"""
 		SELECT c.name, c.session_key
@@ -224,6 +229,9 @@ def _free_idle_sessions(sess, budget: int, summary: dict, days: int) -> int:
 			WHERE m.conversation = c.name
 			  AND (m.streaming = 1 OR m.recovering = 1)
 		  )
+		"""
+		+ legacy
+		+ """
 		ORDER BY c.last_active_at ASC
 		LIMIT %(limit)s
 		""",
@@ -289,6 +297,11 @@ def _reap_empty(sess, budget: int, summary: dict) -> int:
 	- no attached File of any kind, as belt-and-suspenders for the same cascade.
 	"""
 	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-EMPTY_GRACE_DAYS)
+	legacy = (
+		" AND COALESCE(c.collaboration_active,0)=0"
+		if frappe.db.has_column(CONV, "collaboration_active")
+		else ""
+	)
 	rows = frappe.db.sql(
 		"""
 		SELECT c.name, c.session_key
@@ -313,6 +326,9 @@ def _reap_empty(sess, budget: int, summary: dict) -> int:
 			WHERE f.attached_to_doctype = 'Jarvis Conversation'
 			  AND f.attached_to_name = c.name
 		  )
+		"""
+		+ legacy
+		+ """
 		ORDER BY c.last_active_at ASC
 		LIMIT %(limit)s
 		""",
@@ -396,6 +412,10 @@ def _reap_orphans(sess, budget: int, summary: dict) -> None:
 		key = entry.get("key") or ""
 		if _CHAT_NAMESPACE_MARKER not in key or key in known:
 			continue
+		from jarvis.chat.collaboration import is_collaborative_session
+
+		if is_collaborative_session(key):
+			continue
 		if entry.get("hasActiveRun"):
 			summary["skipped"] += 1
 			continue
@@ -425,6 +445,10 @@ def _delete_gateway_session(sess, session_key: str, summary: dict) -> bool:
 	the caller leaves the bench pointers intact for a retry next run. The
 	gateway's refusal to delete the main session lands here as a normal
 	failure - logged once per run at most per key, never fatal."""
+	from jarvis.chat.collaboration import is_collaborative_session
+
+	if is_collaborative_session(session_key):
+		return False
 	try:
 		sess.delete_session(session_key)
 		return True
@@ -549,6 +573,10 @@ def reclaim_throwaway_session(
 	Never raises: every caller is a best-effort path whose real work is already
 	done by the time it reclaims."""
 	if not session_key or not isinstance(session_key, str):
+		return False
+	from jarvis.chat.collaboration import is_collaborative_session
+
+	if is_collaborative_session(session_key):
 		return False
 	log = frappe.logger(logger_name)
 	# Before this instant an idle answer only means "the run has not started

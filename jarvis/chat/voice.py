@@ -397,7 +397,7 @@ def _openrouter_transcribe(content: bytes, audio_format: str, model: str, api_ke
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def transcribe_audio() -> dict:
 	"""Transcribe one recorded clip (multipart field ``audio`` + form

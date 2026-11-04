@@ -215,6 +215,14 @@ def has_jarvis_admin_access(user: str | None = None) -> bool:
 	return bool(set(JARVIS_ADMIN_ROLES) & set(frappe.get_roles(user)))
 
 
+def is_system_manager(user: str | None = None) -> bool:
+	"""True iff ``user`` is Administrator or holds System Manager right now.
+	Defaults to the current session user. Checked directly (not via
+	``frappe.only_for``, which no-ops under the v15 test runner)."""
+	user = user or frappe.session.user
+	return user == "Administrator" or "System Manager" in frappe.get_roles(user)
+
+
 def require_jarvis_admin(user: str | None = None) -> None:
 	"""Raise ``frappe.PermissionError`` (with a clear message) if the user is not
 	a Jarvis Admin (or System Manager / Administrator). Defaults to the current

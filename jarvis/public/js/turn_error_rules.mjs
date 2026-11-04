@@ -18,6 +18,22 @@ export default [
     "status": false
   },
   {
+    "code": "session-archived",
+    "pattern": "is archived\\. restore it before starting new work",
+    "headline": "This chat needs to reconnect",
+    "hint": "Try again to continue. If it fails again, start a new chat.",
+    "retryable": true,
+    "status": false
+  },
+  {
+    "code": "session-ended",
+    "pattern": "ended during restart recovery",
+    "headline": "This chat can't continue",
+    "hint": "Start a new chat to keep going.",
+    "retryable": false,
+    "status": false
+  },
+  {
     "code": "subscription-expired",
     "pattern": "refresh_token_(reused|expired|invalidated|revoked)|auth_unavailable[\\s\\S]{0,600}unauthori[sz]ed|please run /login|\\bnot logged in\\b|(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)[\\s\\S]{0,400}(invalid_grant|oauth token has expired|token expired)|(invalid_grant|oauth token has expired|token expired)[\\s\\S]{0,400}(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)",
     "headline": "{provider} sign-in expired",
@@ -146,7 +162,7 @@ export default [
   },
   {
     "code": "quota",
-    "pattern": "\\bquota\\b|usage limit|usage cap",
+    "pattern": "\\bquota\\b|usage limit|usage cap|\\b(?:session|weekly|daily|monthly|hourly|5-hour|five-hour) limit\\b[^\\n]{0,80}\\bresets?\\b|\\blimit reached\\b[^\\n]{0,40}\\bresets?\\b|\\bhit your [a-z0-9 -]{0,20}\\blimit\\b",
     "headline": "The model account’s usage allowance was reached",
     "hint": "Try another available model, or ask the account owner when the allowance resets and whether it can be increased.",
     "retryable": false,

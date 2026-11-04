@@ -367,7 +367,7 @@ def _wipe_varied(user: str) -> None:
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- outside request or job
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def seed_varied_approvals(user: str) -> dict:
 	"""Seed ~6 currently-PENDING approvals with genuinely varied 3+ option
@@ -417,7 +417,7 @@ def _seed_for(owner: str, share_to: str | None, scale: str) -> None:
 			_seed_standalone_approvals(owner, convs, n_pending=8, n_decided=4)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def seed_feature_pages(user: str) -> dict:
 	"""Seed the four feature pages for ``user`` at scale, plus a small scoping

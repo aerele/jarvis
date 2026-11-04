@@ -82,6 +82,7 @@ from jarvis.exceptions import (
 )
 from jarvis.tools import _expr
 from jarvis.tools._doctype_name import canonical_doctype
+from jarvis.tools._export import masking
 
 # Row guard: refuse a result over this size unless the caller passes
 # ``confirm_large=True``. Mirrors the run_query guard so the agent's
@@ -182,7 +183,36 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 		ResultTooLargeError: result exceeds ``ROW_GUARD`` and
 			``confirm_large`` is False.
 	"""
+	return _execute_query(spec, confirm_large=confirm_large, model_output=True)
+
+
+def _query_private_server(spec: dict, confirm_large: bool = False) -> dict:
+	"""Run a fixed server query without applying the model-output byte budget.
+
+	This is deliberately private and unregistered.  It is only for a server-owned
+	private-source transport; it still uses the public query compiler, permission
+	weave, field masking, row guard, and requested row limit.  It omits only the
+	model-facing result text budget and the saved-query escape hatch that budget
+	creates.
+	"""
+	from jarvis.tools import _private_output
+
+	if not _private_output.is_private():
+		raise InvalidArgumentError("Private server queries require the private source transport.")
+	return _execute_query(spec, confirm_large=confirm_large, model_output=False)
+
+
+def _execute_query(spec: dict, *, confirm_large: bool, model_output: bool) -> dict:
+	"""Run the shared guarded query pipeline.
+
+	``model_output`` controls only serialization-facing metadata.  Every data
+	access control stays before this switch, so the private path cannot broaden a
+	query or exceed its normal row limit.
+	"""
 	q = compile_spec(spec)
+	# Frappe 16 field masking (a no-op on 15); a computed column over a masked
+	# field is refused here, before the SELECT runs.
+	columns, masked = _masking_for_rows(spec, q)
 
 	# Step 7: execute.
 	limit = int(spec.get("limit") or DEFAULT_LIMIT)
@@ -190,6 +220,7 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 	more_rows = len(rows) > limit
 	partial = more_rows and not spec.get("limit")
 	rows = rows[:limit]
+	masking.mask_rows(columns, rows, masked)
 
 	# Step 8: row guard (post-execute - we can't know the row count
 	# without running, and limiting earlier would break aggregates).
@@ -200,29 +231,38 @@ def query(spec: dict, confirm_large: bool = False) -> dict:
 			tool="query",
 		)
 
-	# Resolve the SQL for the operator triage payload. ``get_sql()``
-	# is the qb call that produces the final dialect-specific SQL
-	# string; safe to expose since the spec doesn't carry secrets.
-	try:
-		resolved_sql = q.get_sql()
-	except Exception:
-		resolved_sql = "<sql resolution failed>"
-
-	result = {"sql": resolved_sql, "rows": rows}
+	result = {}
+	if model_output:
+		# Resolve the SQL for the operator triage payload. ``get_sql()``
+		# is the qb call that produces the final dialect-specific SQL
+		# string; safe to expose since the spec doesn't carry secrets.
+		try:
+			result["sql"] = q.get_sql()
+		except Exception:
+			result["sql"] = "<sql resolution failed>"
+	result["rows"] = rows
 	if more_rows and spec.get("limit"):
 		result["more_rows"] = True
 		result["note"] = f"Showing the requested first {limit} rows; more rows match."
-	from jarvis.tools._result_guard import enforce_result_budget
+	from jarvis.tools import _private_output
 
-	_, budget_event = enforce_result_budget(result, tool="query")
-	# Only a cut answer gets a saved id; an event that cut nothing ("uncapped", "measure_failed")
-	# is a complete answer and must not tell the agent to export it again.
-	if partial or (budget_event and budget_event["kind"] in _CUTTING_EVENTS):
-		from jarvis.tools._export.saved_queries import save
+	if model_output and not _private_output.is_private():
+		from jarvis.tools._result_guard import enforce_result_budget
 
-		result["result_id"] = save(spec, preserve_limit=bool(spec.get("limit")))
+		_, budget_event = enforce_result_budget(result, tool="query")
+		# Only a cut answer gets a saved id; an event that cut nothing ("uncapped", "measure_failed")
+		# is a complete answer and must not tell the agent to export it again.
+		if partial or (budget_event and budget_event["kind"] in _CUTTING_EVENTS):
+			from jarvis.tools._export.saved_queries import save
+
+			result["result_id"] = save(spec, preserve_limit=bool(spec.get("limit")))
+			result["partial"] = True
+			result["note"] = _saved_note(result["result_id"], spec.get("limit"))
+	elif partial:
+		# Preserve the public incomplete-result signal without offering a model
+		# export path.  Deposit source specs always have an explicit cap, but this
+		# keeps the helper safe if a future fixed source omits one by mistake.
 		result["partial"] = True
-		result["note"] = _saved_note(result["result_id"], spec.get("limit"))
 	return result
 
 
@@ -244,7 +284,85 @@ def _saved_note(result_id: str, limit) -> str:
 def compile_spec(spec: dict):
 	"""Steps 1-6 of ``query``: validate the spec, run every permission gate, and
 	build the permission-woven qb query, NOT executed."""
+	from jarvis.chat.agent_scope import assert_active_fefo_query_scope
+
+	assert_active_fefo_query_scope(spec)
 	return _compile(spec)[0]
+
+
+def _spec_tables(spec: dict) -> dict:
+	"""``{spec alias: DocType}`` for the FROM and every join, spelled the way
+	``_build_from_and_aliases`` and the join loop key their alias map."""
+	from_dt = canonical_doctype(spec["from"])
+	tables = {spec.get("alias") or spec["from"]: from_dt}
+	for j in spec.get("joins") or []:
+		tables[j["alias"]] = canonical_doctype(j["doctype"])
+	return tables
+
+
+def _result_columns(spec: dict, tables: dict) -> list:
+	"""One export-style column per select entry, in order. A plain ``alias.field``
+	entry carries its table alias; an aggregate or expression carries none."""
+	from jarvis.tools._export.resolvers import _Column
+
+	from_alias = next(iter(tables))
+	columns = []
+	for item in spec.get("select") or ["name"]:
+		if isinstance(item, str):
+			alias, _, field = item.rpartition(".")
+			columns.append(_Column(field, tables.get(alias or from_alias), None, alias or from_alias))
+		else:
+			columns.append(_Column(item.get("as") or "", None, None))
+	return columns
+
+
+def _masking_for_rows(spec: dict, q) -> tuple[list, dict]:
+	"""``(columns, masked)`` for ``masking.mask_rows`` over this query's rows.
+
+	The tool builds its SELECT with the query builder directly, so Frappe 16's
+	masking of a ``mask=1`` field for a user without the mask permission never
+	sees it. Same rule as a spec export: a plain masked column is masked value by
+	value, a computed column over a masked field is refused. A child table takes
+	its masking from the parent its rows are scoped to. Empty on Frappe 15 (no
+	masking feature) and for Administrator, who is never masked."""
+	if masking.mask_field_value is None or frappe.session.user == "Administrator":
+		return [], {}
+	tables = _spec_tables(spec)
+	alias_map = {alias: (dt, None) for alias, dt in tables.items()}  # the resolver reads the DocType only
+	child_parents = {
+		alias: _child_scoping_parent(dt, alias, spec, alias_map)
+		for alias, dt in tables.items()
+		if frappe.get_meta(dt).istable
+	}
+	masked = masking.masked_fields(tables, child_parents)
+	columns = _result_columns(spec, tables)
+	if masked:
+		_assert_masking_maps_to_rows(columns, q, masked)
+	masking.refuse_masked_expressions(columns, q, masked)
+	return columns, masked
+
+
+def _assert_masking_maps_to_rows(columns: list, q, masked: dict) -> None:
+	"""Refuse, while anything is masked, a select whose entries do not line up with
+	the built query's terms, or whose plain columns share a row key. Masking works
+	per row key, so a masked value must never sit under an unmasked column's key."""
+	if len(columns) != len(q._selects):
+		raise InvalidArgumentError(
+			"cannot apply field masking to this select list. Select the masked field "
+			"on its own, without computed columns beside it."
+		)
+	seen = {}
+	for column in columns:
+		if column.alias is not None:
+			seen.setdefault(column.key, []).append(column)
+	for key, same_key in seen.items():
+		if len(same_key) > 1 and any(c.key in masked.get(c.alias, {}) for c in same_key):
+			raise InvalidArgumentError(
+				f"column {key!r} is selected from more than one table and one of them is masked "
+				f"for you (you lack the mask permission), so the values would share a row key. "
+				f"Select the masked field on its own, or give each column its own name with "
+				f'{{"expr": {{"field": "<alias>.{key}"}}, "as": "<new_name>"}}.'
+			)
 
 
 def compile_spec_for_export(spec: dict, export_limit: int) -> tuple:
@@ -264,6 +382,9 @@ def compile_spec_for_export(spec: dict, export_limit: int) -> tuple:
 	``_weave_record_gate`` scopes it to), so its Export permission is that
 	parent's, exactly as Desk exports a child through its parent. Administrator
 	has no scoping parent and exports everything anyway."""
+	from jarvis.chat.agent_scope import assert_active_fefo_query_scope
+
+	assert_active_fefo_query_scope(spec)
 	q, alias_map = _compile(spec, export_limit=export_limit)
 	tables = {alias: dt for alias, (dt, _table) in alias_map.items()}
 	export_doctypes = []
@@ -888,6 +1009,9 @@ def _make_permission_engine(query_builder, tables: list, doctype: str):
 	- ``tables`` — some ``permission_query_conditions`` hooks consult it;
 	- ``doctype`` — hooks format the main table name as ``f"tab{self.doctype}"``,
 	  so an unset value crashes the first such hook with AttributeError.
+	- ``reference_doctype``: v16 reads it for every User Permission row with
+	  ``applicable_for`` set, so an unset value raises AttributeError. Frappe 15's
+	  Engine never reads it; the attribute is inert there.
 
 	Factored from the three call sites: the outer step-6 weave, the EXISTS
 	sub-query weave, and the child-scope subquery build.
@@ -901,6 +1025,7 @@ def _make_permission_engine(query_builder, tables: list, doctype: str):
 	engine.query = query_builder
 	engine.tables = list(tables)
 	engine.doctype = doctype
+	engine.reference_doctype = doctype
 	return engine
 
 
@@ -923,10 +1048,18 @@ def _weave_record_gate(q, engine, alias: str, resolved_dt: str, table, node_spec
 		if frappe.session.user == "Administrator":
 			return q
 		parent_dt = _child_scoping_parent(resolved_dt, alias, node_spec, alias_map)
+		# Read on the parent covers permlevel 0 only; the parent's Table field
+		# holding this child can sit at a higher permlevel.
+		from jarvis.tools.get_list import assert_child_table_field_readable
+
+		assert_child_table_field_readable(resolved_dt, parent_dt)
 		cond = _child_record_scope(table, resolved_dt, parent_dt)
 		if cond is not None:
 			q = q.where(cond)
 		return q
+	# One engine serves every alias; User Permission ``applicable_for`` rows are
+	# matched against the DocType whose table is being gated.
+	engine.reference_doctype = resolved_dt
 	try:
 		cond = compat.permission_conditions(engine, resolved_dt, table)
 	except frappe.PermissionError:
@@ -947,7 +1080,10 @@ def _child_scoping_parent(child_dt: str, child_alias: str, node_spec: dict, alia
 	1. Explicit signals (join ``parent``/``name`` link or ``parenttype``
 	   literal) → exactly 1 distinct owning parent: use it IF the caller can
 	   read the child through it, else DENY; >1 (conflicting) → DENY ambiguous.
-	2. No signals → the parents the caller can read the child through: 0 → DENY
+	2. Signals that name only DocTypes which do not own the child (a Sales Team
+	   joined to a Quotation, which has no Sales Team table) → InvalidArgumentError
+	   naming the real parents: the query is wrong, not the caller's access.
+	3. No signals → the parents the caller can read the child through: 0 → DENY
 	   (defensive; step 3 already gates this), 1 → use it, >1 → DENY ambiguous.
 	"""
 	from jarvis.tools.get_list import _child_table_parents, _readable_child_parents
@@ -955,6 +1091,12 @@ def _child_scoping_parent(child_dt: str, child_alias: str, node_spec: dict, alia
 	owning_parents = _child_table_parents(child_dt)
 	owning = set(owning_parents)
 	signals = _collect_scoping_signals(child_dt, child_alias, node_spec, alias_map, owning)
+	if not signals:
+		named = _collect_scoping_signals(child_dt, child_alias, node_spec, alias_map, None)
+		if named:
+			raise InvalidArgumentError(
+				_not_a_parent_message(child_dt, child_alias, sorted(named), owning_parents)
+			)
 	if signals:
 		if len(signals) > 1:
 			raise PermissionDeniedError(_ambiguous_scope_message(child_dt, child_alias, sorted(signals)))
@@ -991,21 +1133,32 @@ def _ambiguous_scope_message(child_dt: str, child_alias: str, parents: list) -> 
 	)
 
 
-def _literal_owning_parent(ref, alias_map: dict, owning: set) -> str | None:
+def _not_a_parent_message(child_dt: str, child_alias: str, named: list, owning_parents: list) -> str:
+	"""A child alias tied to DocTypes that have no Table field for it: no row can
+	ever match, so say which DocTypes do own it instead of a permission denial."""
+	return (
+		f"{' / '.join(repr(dt) for dt in named)} has no '{child_dt}' table, so "
+		f"{child_alias}.parent never matches it: '{child_dt}' rows belong only to "
+		f"{', '.join(owning_parents) or 'no DocType'}. Join {child_alias}.parent to the name "
+		f"of one of those, or read the answer from a field of {named[0]!r} itself"
+	)
+
+
+def _literal_owning_parent(ref, alias_map: dict, owning: set | None) -> str | None:
 	"""``ref`` is a ``parenttype`` comparand. Mirror ``_build_on_criterion``'s
 	literal detection: a string is a field reference only when it is
 	``alias.field`` with a KNOWN alias — otherwise it is a literal. Return the
-	literal when it names an owning parent."""
+	literal when it names an owning parent (any literal when ``owning`` is None)."""
 	if not isinstance(ref, str):
 		return None
 	is_field_ref = "." in ref and ref.split(".", 1)[0] in alias_map
 	if is_field_ref:
 		return None
-	return ref if ref in owning else None
+	return ref if owning is None or ref in owning else None
 
 
 def _collect_scoping_signals(
-	child_dt: str, child_alias: str, node_spec: dict, alias_map: dict, owning: set
+	child_dt: str, child_alias: str, node_spec: dict, alias_map: dict, owning: set | None
 ) -> set:
 	"""Explicit scoping signals for THIS child alias, read structurally from
 	``node_spec``'s join ON dicts and TOP-LEVEL where equalities only:
@@ -1015,7 +1168,8 @@ def _collect_scoping_signals(
 	  correlated ``{"$field": "<outer_alias>.name"}`` form);
 	- ``<child_alias>.parenttype == <string literal>`` naming an owning parent.
 
-	Returns the set of distinct owning-parent doctypes signalled.
+	Returns the set of distinct owning-parent doctypes signalled. With ``owning``
+	None, every DocType so named is returned, owning or not.
 	"""
 	parent_ref = f"{child_alias}.parent"
 	parenttype_ref = f"{child_alias}.parenttype"
@@ -1025,7 +1179,11 @@ def _collect_scoping_signals(
 		# "<alias>.name" whose alias resolves to an owning-parent doctype.
 		if isinstance(ref, str) and ref.count(".") == 1:
 			other_alias, col = ref.split(".", 1)
-			if col == "name" and other_alias in alias_map and alias_map[other_alias][0] in owning:
+			if (
+				col == "name"
+				and other_alias in alias_map
+				and (owning is None or alias_map[other_alias][0] in owning)
+			):
 				return alias_map[other_alias][0]
 		return None
 
@@ -1058,7 +1216,7 @@ def _collect_scoping_signals(
 			continue
 		field = w.get("field")
 		value = w.get("value")
-		if field == parenttype_ref and isinstance(value, str) and value in owning:
+		if field == parenttype_ref and isinstance(value, str) and (owning is None or value in owning):
 			signals.add(value)
 		elif field == parent_ref and isinstance(value, dict) and "$field" in value:
 			# Correlated sub-spec form: c.parent = {"$field": "outer.name"}.
@@ -1127,8 +1285,13 @@ def _build_from_and_aliases(spec: dict) -> tuple[Any, dict]:
 
 def _bare_name_is_column(name: str, alias_map: dict) -> bool:
 	"""True when ``name`` is a real column of any table in scope, i.e. one MariaDB
-	could resolve an unqualified reference to."""
-	return any(name in frappe.get_meta(dt).get_valid_columns() for dt, _table in alias_map.values())
+	could resolve an unqualified reference to. MariaDB column names are
+	case-insensitive, so ``Rate`` collides with the ``rate`` column."""
+	folded = name.casefold()
+	return any(
+		folded in {column.casefold() for column in frappe.get_meta(dt).get_valid_columns()}
+		for dt, _table in alias_map.values()
+	)
 
 
 def _resolve_field(

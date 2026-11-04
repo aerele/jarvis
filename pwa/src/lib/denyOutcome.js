@@ -12,6 +12,18 @@
 // branch like Approve's, which is why this stays its own small function
 // instead of sharing Approve's.
 export function denyOutcome(response) {
+	// A close migration can revoke a legacy token while this sheet is open.
+	// This is terminal, not a retryable dismiss failure: DecisionSheet keeps a
+	// Done-only cancellation explanation open and excludes this token first.
+	if (response?.reason_code === "safety_update") {
+		return {
+			state: "cancelled",
+			error:
+				response.error?.message ||
+				"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
+			resolved: null,
+		};
+	}
 	if (response && response.ok === false) {
 		return {
 			state: "review",

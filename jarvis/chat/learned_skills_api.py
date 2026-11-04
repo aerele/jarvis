@@ -51,7 +51,7 @@ _LOCK_NAME = "jarvis_learned_skills_push"
 _PENDING_STATUS = "pending: applying learned skills"
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_learned_skills_sync_status() -> dict:
 	"""Lightweight poller mirroring ``get_custom_skills_sync_status``."""

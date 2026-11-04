@@ -9,9 +9,10 @@ disappears when the answer lands. The runtime delivers step text in two shapes:
   reply text right before a tool call, so it also ends up in the final reply.
 
 For the second shape ``relay_mux`` treats the text written since the last tool
-call as a step only when ``is_step`` says it is one short sentence, hides it
-from the live reply with ``remove_steps``, and cleans the saved reply with
-``strip_steps``. Anything longer stays in the reply, as it did before.
+call as a step only when ``is_step`` says it is a short run of narration (up to
+three sentences on one line), hides it from the live reply with
+``remove_steps``, and cleans the saved reply with ``strip_steps``. Anything
+longer stays in the reply, as it did before.
 """
 
 from __future__ import annotations
@@ -20,15 +21,20 @@ import re
 
 from jarvis.chat.learned_api import _excerpt
 
-# One line in the chat's activity row, and the longest text counted as a step.
+# One line in the chat's activity row (display_line truncates to it).
 MAX_STEP_CHARS = 160
+
+# Most sentences ``is_step`` accepts. The Claude subscription route writes
+# narration such as "Links all resolve. Now the invoice checks: ..." before a
+# tool call; one sentence was too narrow and left it at the top of the answer.
+MAX_STEP_SENTENCES = 3
 
 # Longest text a RUNTIME-FLAGGED preamble (events.parse_event's kind=="step",
 # the "item/kind=preamble" frame) may be and still count as a step arriving
-# early in the reply (R4 owner decision, default 320). Looser than
-# MAX_STEP_CHARS/is_step: the runtime already told us this text is narration,
-# so a two-sentence preamble is accepted, only structural text is rejected
-# (see is_preamble_step). It is offered on the step line and taken out of the
+# early in the reply (R4 owner decision, default 320). Looser than is_step: the
+# runtime already told us this text is narration, so a preamble of any number
+# of sentences is accepted, only structural text is rejected (see
+# is_preamble_step). It is offered on the step line and taken out of the
 # live reply the same as any step, and stripped from the SAVED reply too
 # (strip_preambles) unless nothing else would remain. 0 rejects every
 # preamble, which restores today's pre-feature behaviour: a flagged preamble
@@ -36,6 +42,11 @@ MAX_STEP_CHARS = 160
 # hidden from the reply early, never flagged). Keep in lockstep with
 # MAX_CANDIDATE_CHARS in frontend/src/lib/liveTurn.js.
 MAX_PREAMBLE_STEP_CHARS = 320
+
+# Longest unflagged text ``is_step`` accepts. Same value as the preamble limit
+# but its own constant, so the preamble killswitch above (0) never switches off
+# the tool-boundary step rule too.
+MAX_STEP_TEXT_CHARS = 320
 
 _TABLE_RULE = re.compile(r"^[\s|:\-]+$")
 _LEADING_MARK = re.compile(r"^(?:#{1,6}\s+|[-*+]\s+|>\s*|\d+[.)]\s+)")
@@ -57,19 +68,26 @@ def display_line(text: str) -> str:
 	return _excerpt(_INLINE_MARK.sub("", _LEADING_MARK.sub("", prose[-1])), MAX_STEP_CHARS)
 
 
-def is_step(text: str) -> bool:
-	"""True for one short sentence of narration ("I'll count them now.").
+def _is_prose_line(text: str, limit: int) -> bool:
+	"""One line of prose within ``limit`` chars: no table, list, heading, quote or code start."""
+	if not text or len(text) > limit or "\n" in text:
+		return False
+	return not (text.startswith(("|", "#", ">", "```")) or _LEADING_MARK.match(text))
 
-	Deliberately narrow: two sentences, a table, a list or a long line may be
-	part of the answer (an answer written before a card or chart tool call), so
-	they stay in the reply.
+
+def is_step(text: str) -> bool:
+	"""True for a few sentences of narration ("Links all resolve. Now the checks.").
+
+	Deliberately narrow: more than ``MAX_STEP_SENTENCES`` sentences, a line over
+	``MAX_STEP_TEXT_CHARS``, a table, a list or a heading may be part of the
+	answer (an answer written before a card or chart tool call), so they stay in
+	the reply. ``strip_steps`` still keeps the final whole when what remains is
+	shorter than what was removed.
 	"""
 	text = (text or "").strip()
-	if not text or len(text) > MAX_STEP_CHARS or "\n" in text:
+	if not _is_prose_line(text, MAX_STEP_TEXT_CHARS):
 		return False
-	if text.startswith(("|", "#", ">", "```")) or _LEADING_MARK.match(text):
-		return False
-	return not _INNER_SENTENCE_END.search(text)
+	return len(_INNER_SENTENCE_END.findall(text)) + 1 <= MAX_STEP_SENTENCES
 
 
 def is_preamble_step(text: str) -> bool:
@@ -85,12 +103,7 @@ def is_preamble_step(text: str) -> bool:
 	(relay_mux._record_preamble_step); the saved reply then drops it too, see
 	``strip_preambles``.
 	"""
-	text = (text or "").strip()
-	if not text or len(text) > MAX_PREAMBLE_STEP_CHARS or "\n" in text:
-		return False
-	if text.startswith(("|", "#", ">", "```")) or _LEADING_MARK.match(text):
-		return False
-	return True
+	return _is_prose_line((text or "").strip(), MAX_PREAMBLE_STEP_CHARS)
 
 
 def remove_steps(text: str, steps: list[str]) -> str:

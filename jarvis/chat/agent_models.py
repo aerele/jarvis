@@ -592,14 +592,14 @@ def _model_view(listing) -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_agent_model(agent: str) -> dict:
 	"""The agent's tenant-wide model, its requirement and whether an Apply is pending."""
 	return _model_view(_read_gate(agent))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def get_eligible_models(agent: str) -> dict:
 	"""The models the agent may run on here, best-first. ``catalog: unknown`` means

@@ -1611,7 +1611,8 @@ class TestRelayMuxSteps(FrappeTestCase):
 		# last tool call. A short preamble that merely occurs mid-answer keeps
 		# today's path (step line only) and the answer stays intact.
 		answer = (
-			"Based on what I see, the total is 500 INR across three invoices. Let me check the due dates."
+			"Based on what I see, the total is 500 INR across three invoices. Let me check the due dates. "
+			"Then I will compare them. After that I will summarise."
 		)
 		rec = self._run(
 			[
@@ -1641,14 +1642,15 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual(rec.step_raws, [None])
 		self.assertEqual(rec.terminal[1]["text"], "Found it.")
 
-	def test_two_sentence_preamble_up_to_320_is_hidden_live_and_stripped_from_final(self):
+	def test_four_sentence_preamble_up_to_320_is_hidden_live_and_stripped_from_final(self):
 		# A runtime-flagged preamble up to MAX_PREAMBLE_STEP_CHARS is looser than
-		# is_step (one sentence only): hidden live even when it is more than one
-		# sentence, and stripped from the saved reply too (strip_preambles), so
+		# is_step (three sentences at most): hidden live even when it is more than three
+		# sentences, and stripped from the saved reply too (strip_preambles), so
 		# the live view and the saved reply agree and no reshow is needed.
 		step = (
 			"I'll identify customers whose invoices are overdue. "
-			"Then I'll check each customer's outstanding balance."
+			"Then I'll check each customer's outstanding balance. "
+			"After that I will rank them. Finally I will total each."
 		)
 		answer = (
 			"Three customers currently have overdue invoices: AlphaCo Corp, BetaCo Inc and GammaCo "
@@ -1679,8 +1681,8 @@ class TestRelayMuxSteps(FrappeTestCase):
 		# answer opening could be flagged; the owner chose consistency with the
 		# live view instead).
 		preamble = (
-			"I checked the sales ledger and found twelve invoices raised this quarter. "
-			"Three of them are now more than sixty days past due and need immediate follow-up."
+			"I checked the sales ledger and found twelve invoices. Three are sixty days late. "
+			"They need follow-up. I will pull the aging next."
 		)
 		continuation = (
 			"Looking at the aging report, AlphaCo owes 82 days, BetaCo owes 71 days and "
@@ -1740,10 +1742,13 @@ class TestRelayMuxSteps(FrappeTestCase):
 
 	def test_reseeded_preamble_flags_still_strip_after_a_hop(self):
 		# /code-review finding: a pump hop (at most 90 s apart) used to re-seed the
-		# step texts without their flags, so a two-sentence preamble recorded
+		# step texts without their flags, so a four-sentence preamble recorded
 		# before the hop came back into the saved answer. The pump now caches the
 		# flags too (pump._read_run_preambles) and re-seeds them.
-		step = "I found the standard report. I'm checking its filters before running it."
+		step = (
+			"I found the standard report. I'm checking its filters. "
+			"Then I will run it. After that I will total it."
+		)
 		answer = "Three invoices are overdue, the oldest by 42 days."
 		full = f"{step}\n\n{answer}"
 		self.assertFalse(is_step(step))
@@ -1759,9 +1764,12 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual(rec.terminal[1]["text"], answer)
 
 	def test_reseeded_steps_without_flags_fall_back_to_the_is_step_rule(self):
-		# A flag lost with the pump's cache: a two-sentence step recorded before
+		# A flag lost with the pump's cache: a four-sentence step recorded before
 		# the hop is not is_step, so it stays in the saved reply as before.
-		step = "I found the standard report. I'm checking its filters before running it."
+		step = (
+			"I found the standard report. I'm checking its filters. "
+			"Then I will run it. After that I will total it."
+		)
 		answer = "Three invoices are overdue, the oldest by 42 days."
 		full = f"{step}\n\n{answer}"
 		self.assertFalse(is_step(step))
@@ -1803,7 +1811,9 @@ class TestRelayMuxSteps(FrappeTestCase):
 	# -- T1 (R6): the saved-reply glue for a separator-free segment boundary --
 
 	def test_glue_inserted_at_a_segment_boundary_in_the_final(self):
-		first = "I checked the ledger but found no results. I'll try the archive next."
+		first = (
+			"I checked the ledger but found no results. I'll try the archive. It may be slower. Please wait."
+		)
 		second = "The archive has three matching entries."
 		final_text = first + second  # the runtime glues per-call segments with no separator
 		rec = self._run(
@@ -1815,7 +1825,7 @@ class TestRelayMuxSteps(FrappeTestCase):
 			],
 			final_text,
 		)
-		self.assertEqual(rec.steps, [])  # two sentences: not a step, stays in the reply
+		self.assertEqual(rec.steps, [])  # four sentences: not a step, stays in the reply
 		self.assertEqual(rec.terminal[1]["text"], f"{first}\n\n{second}")
 
 	def test_parallel_lookups_record_one_step(self):
@@ -1841,9 +1851,11 @@ class TestRelayMuxSteps(FrappeTestCase):
 		self.assertEqual(rec.terminal[1]["text"], "Hello there")
 
 	def test_answer_written_before_the_last_lookup_survives(self):
-		# A reply that ends by opening a confirmation card: two sentences, so
+		# A reply that ends by opening a confirmation card: four sentences, so
 		# never a step, and never hidden.
-		answer = "I have prepared a payment reminder. Please review it and confirm."
+		answer = (
+			"I have prepared a payment reminder. It covers three invoices. Please review it. Then confirm."
+		)
 		rec = self._run(
 			[
 				("assistant", {"text": answer, "delta": answer}),

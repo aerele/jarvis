@@ -27,8 +27,13 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.chat.agent_client import AgentSession
+from jarvis.chat.agent_client import (
+	AgentSession,
+	is_definitive_refusal,
+	is_session_changed,
+)
 from jarvis.chat.device import ChatDeviceCredentials
+from jarvis.chat.socket_io import SendNotStarted, SendUncertain
 from jarvis.exceptions import AgentUnreachableError
 
 # --- helpers --------------------------------------------------------------
@@ -446,24 +451,33 @@ class TestStreamAgentTurn(FrappeTestCase):
 		self.assertEqual(params["message"], "hi")
 		self.assertEqual(params["sessionKey"], "sess-1")
 
-	def test_agent_payload_includes_model_and_provider_when_set(self):
-		"""Per-turn model override threads into the agent RPC params."""
+	def _scripted_oneshot(self, run_id: str):
+		"""A session whose next frames ack a sessions.patch, ack the agent RPC, end the run."""
 		sess, ws = _build_session()
 
-		def _ack():
-			req_id = ws.sent[-1]["id"]
-			return _frame({"type": "res", "id": req_id, "ok": True, "payload": {"runId": "r2"}})
+		def _ack(payload):
+			def _frame_for_last_request():
+				return _frame({"type": "res", "id": ws.sent[-1]["id"], "ok": True, "payload": payload})
 
-		ws._frames.append(_ack)
+			return _frame_for_last_request
+
+		ws._frames.append(_ack({"ok": True}))
+		ws._frames.append(_ack({"runId": run_id}))
 		ws._frames.append(
 			_frame(
 				{
 					"type": "event",
 					"event": "agent.event",
-					"payload": {"runId": "r2", "stream": "lifecycle", "data": {"phase": "end"}},
+					"payload": {"runId": run_id, "stream": "lifecycle", "data": {"phase": "end"}},
 				}
 			)
 		)
+		return sess, ws
+
+	def test_model_and_provider_ride_sessions_patch_not_the_agent_rpc(self):
+		"""A non-admin caller may not send model/provider on the agent RPC, so the
+		override is set on the session first and the agent params stay clean."""
+		sess, ws = self._scripted_oneshot("r2")
 		list(
 			sess.stream_agent_turn(
 				"sess-2",
@@ -473,33 +487,29 @@ class TestStreamAgentTurn(FrappeTestCase):
 				provider="openai-codex",
 			)
 		)
-		agent_req = [s for s in ws.sent if s.get("method") == "agent"][0]
-		params = agent_req["params"]
-		self.assertEqual(params["model"], "gpt-5.4-mini")
-		self.assertEqual(params["provider"], "openai-codex")
+		methods = [s["method"] for s in ws.sent if "method" in s and s["method"] != "connect"]
+		self.assertEqual(methods, ["sessions.patch", "agent"])
+		patch_req = [s for s in ws.sent if s.get("method") == "sessions.patch"][0]
+		self.assertEqual(patch_req["params"], {"key": "sess-2", "model": "openai-codex/gpt-5.4-mini"})
+		params = [s for s in ws.sent if s.get("method") == "agent"][0]["params"]
+		self.assertNotIn("model", params)
+		self.assertNotIn("provider", params)
 
-	def test_agent_payload_includes_only_model_when_provider_omitted(self):
-		"""Either kwarg may be set independently; absent ones aren't emitted."""
-		sess, ws = _build_session()
-
-		def _ack():
-			req_id = ws.sent[-1]["id"]
-			return _frame({"type": "res", "id": req_id, "ok": True, "payload": {"runId": "r3"}})
-
-		ws._frames.append(_ack)
-		ws._frames.append(
-			_frame(
-				{
-					"type": "event",
-					"event": "agent.event",
-					"payload": {"runId": "r3", "stream": "lifecycle", "data": {"phase": "end"}},
-				}
-			)
-		)
+	def test_bare_model_is_patched_without_a_provider_prefix(self):
+		sess, ws = self._scripted_oneshot("r3")
 		list(sess.stream_agent_turn("sess-3", "hi", "idem-3", model="gpt-5.5"))
-		agent_req = [s for s in ws.sent if s.get("method") == "agent"][0]
-		params = agent_req["params"]
-		self.assertEqual(params["model"], "gpt-5.5")
+		patch_req = [s for s in ws.sent if s.get("method") == "sessions.patch"][0]
+		self.assertEqual(patch_req["params"], {"key": "sess-3", "model": "gpt-5.5"})
+		params = [s for s in ws.sent if s.get("method") == "agent"][0]["params"]
+		self.assertNotIn("model", params)
+		self.assertNotIn("provider", params)
+
+	def test_a_provider_without_a_model_patches_nothing(self):
+		sess, ws = self._scripted_oneshot("r4")
+		ws._frames.pop(0)  # no sessions.patch ack is needed
+		list(sess.stream_agent_turn("sess-4", "hi", "idem-4", provider="openai"))
+		self.assertEqual([s["method"] for s in ws.sent if s.get("method") == "sessions.patch"], [])
+		params = [s for s in ws.sent if s.get("method") == "agent"][0]["params"]
 		self.assertNotIn("provider", params)
 
 
@@ -1197,6 +1207,160 @@ class TestCompactSession(FrappeTestCase):
 		with self.assertRaises(AgentUnreachableError) as cm:
 			sess.compact_session(key, None, timeout_s=5)
 		self.assertEqual(cm.exception.code, "compact-timeout")
+
+
+class TestSessionRepairCalls(FrappeTestCase):
+	"""#753: the two gateway calls the pre-send session repair uses, and the two
+	classifiers that decide which failures are final. Frames and timeouts are pinned
+	exactly, because a patch that silently dropped ``expectedSessionId`` would
+	restore the wrong incarnation of a session."""
+
+	KEY = "agent:main:dashboard:u1"
+
+	def _timeouts(self, sess):
+		"""Record the timeout_s each ``_request`` was called with, then delegate."""
+		seen = []
+		real = sess._request
+
+		def _spy(method, params, *, timeout_s, **kw):
+			seen.append((method, timeout_s))
+			return real(method, params, timeout_s=timeout_s, **kw)
+
+		sess._request = _spy
+		return seen
+
+	def test_describe_session_sends_key_and_unwraps_session(self):
+		row = {"key": self.KEY, "sessionId": "sid-1", "archived": True}
+		sess = _session_with_scripted_frames([{"type": "res", "ok": True, "payload": {"session": row}}])
+		seen = self._timeouts(sess)
+
+		self.assertEqual(sess.describe_session(self.KEY), row)
+
+		sent = sess._ws.sent[-1]
+		self.assertEqual((sent["method"], sent["params"]), ("sessions.describe", {"key": self.KEY}))
+		self.assertEqual(seen, [("sessions.describe", 5)])
+
+	def test_describe_session_timeout_is_overridable(self):
+		sess = _session_with_scripted_frames([{"type": "res", "ok": True, "payload": {"session": {}}}])
+		seen = self._timeouts(sess)
+		sess.describe_session(self.KEY, timeout_s=2)
+		self.assertEqual(seen, [("sessions.describe", 2)])
+
+	def test_describe_session_null_session_is_none(self):
+		sess = _session_with_scripted_frames([{"type": "res", "ok": True, "payload": {"session": None}}])
+		self.assertIsNone(sess.describe_session(self.KEY))
+
+	def test_describe_session_non_dict_payload_is_none(self):
+		for payload in ({"session": "gone"}, {"session": ["x"]}, {}, None):
+			with self.subTest(payload=payload):
+				sess = _session_with_scripted_frames([{"type": "res", "ok": True, "payload": payload}])
+				self.assertIsNone(sess.describe_session(self.KEY))
+
+	def test_restore_session_patches_archived_false_with_expected_session_id(self):
+		sess = _session_with_scripted_frames([{"type": "res", "ok": True, "payload": {"ok": True}}])
+		seen = self._timeouts(sess)
+
+		self.assertIsNone(sess.restore_session(self.KEY, "sid-1"))
+
+		sent = sess._ws.sent[-1]
+		self.assertEqual(sent["method"], "sessions.patch")
+		self.assertEqual(sent["params"], {"key": self.KEY, "archived": False, "expectedSessionId": "sid-1"})
+		self.assertEqual(seen, [("sessions.patch", 5)])
+
+	def test_the_agent_session_has_no_reset_call(self):
+		# sessions.reset needs operator.admin, which the bench does not hold.
+		self.assertFalse(hasattr(AgentSession, "reset_session"))
+
+	def test_gateway_refusal_propagates_with_rejected_method(self):
+		sess = _session_with_scripted_frames(
+			[{"type": "res", "ok": False, "error": {"code": "INVALID_REQUEST", "message": "nope"}}]
+		)
+		with self.assertRaises(AgentUnreachableError) as cm:
+			sess.restore_session(self.KEY, "sid-1")
+		self.assertEqual(cm.exception.rejected_method, "sessions.patch")
+		self.assertTrue(is_definitive_refusal(cm.exception))
+
+	def test_ack_timeout_is_temporary(self):
+		# No response frame: _request times out with the ambiguous ack-timeout code.
+		sess, _ws = _build_session()
+		with self.assertRaises(AgentUnreachableError) as cm:
+			sess.describe_session(self.KEY, timeout_s=0.05)
+		self.assertEqual(cm.exception.code, "ack-timeout")
+		self.assertFalse(is_definitive_refusal(cm.exception))
+
+	def test_real_send_not_started_is_temporary(self):
+		sess, _ws = _build_session()
+		sess.abort_transport()
+		with self.assertRaises(SendNotStarted) as cm:
+			sess.describe_session(self.KEY)
+		self.assertEqual(cm.exception.code, "send-not-started")
+		self.assertFalse(is_definitive_refusal(cm.exception))
+
+	# -- classifiers (pure) ------------------------------------------------
+
+	def test_is_definitive_refusal_requires_an_explicit_rejection(self):
+		for code in ("INVALID_REQUEST", "FORBIDDEN", "NOT_PAIRED", "SOMETHING_NEW"):
+			with self.subTest(code=code):
+				err = AgentUnreachableError("x", code=code, rejected_method="sessions.patch")
+				self.assertTrue(is_definitive_refusal(err))
+
+	def test_is_definitive_refusal_unavailable_is_temporary_even_when_rejected(self):
+		err = AgentUnreachableError("x", code="UNAVAILABLE", rejected_method="sessions.patch")
+		self.assertFalse(is_definitive_refusal(err))
+
+	def test_is_definitive_refusal_agent_timeout_is_temporary_even_when_rejected(self):
+		err = AgentUnreachableError("x", code="AGENT_TIMEOUT", rejected_method="sessions.patch")
+		self.assertFalse(is_definitive_refusal(err))
+
+	def test_is_definitive_refusal_requires_a_code_even_when_rejected(self):
+		for code in (None, ""):
+			with self.subTest(code=code):
+				err = AgentUnreachableError("x", code=code, rejected_method="sessions.patch")
+				self.assertFalse(is_definitive_refusal(err))
+
+	def test_is_definitive_refusal_everything_else_is_temporary(self):
+		for err in (
+			AgentUnreachableError("x", code="UNAVAILABLE"),
+			AgentUnreachableError("x", code="ack-timeout"),
+			AgentUnreachableError("x", code="send-not-started"),
+			SendNotStarted("busy", reason="busy"),
+			SendUncertain("write failed"),
+			AgentUnreachableError("x"),
+			# A rejection code with no rejected_method is not an answer to THIS rpc.
+			AgentUnreachableError("x", code="INVALID_REQUEST"),
+		):
+			with self.subTest(err=repr(err)):
+				self.assertFalse(is_definitive_refusal(err))
+
+	def test_is_session_changed(self):
+		def mk(code, details):
+			return AgentUnreachableError("x", code=code, details=details, rejected_method="sessions.patch")
+
+		self.assertTrue(is_session_changed(mk("INVALID_REQUEST", {"reason": "session-changed"})))
+		self.assertFalse(is_session_changed(mk("INVALID_REQUEST", {"reason": "other"})))
+		self.assertFalse(is_session_changed(mk("INVALID_REQUEST", None)))
+		self.assertFalse(is_session_changed(mk("INVALID_REQUEST", {})))
+		self.assertFalse(is_session_changed(mk("FORBIDDEN", {"reason": "session-changed"})))
+		self.assertFalse(is_session_changed(AgentUnreachableError("x")))
+
+	def test_session_changed_survives_the_wire(self):
+		sess = _session_with_scripted_frames(
+			[
+				{
+					"type": "res",
+					"ok": False,
+					"error": {
+						"code": "INVALID_REQUEST",
+						"message": "session changed",
+						"details": {"reason": "session-changed"},
+					},
+				}
+			]
+		)
+		with self.assertRaises(AgentUnreachableError) as cm:
+			sess.restore_session(self.KEY, "stale-sid")
+		self.assertTrue(is_session_changed(cm.exception))
+		self.assertTrue(is_definitive_refusal(cm.exception))
 
 
 # --- Mechanism A: connect-first device pairing ------------------------------

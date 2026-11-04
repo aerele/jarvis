@@ -54,6 +54,7 @@ from jarvis.permissions import (
 QUESTION = "Jarvis Personalise Question"
 RULE = "Jarvis Personalise Question Rule"
 NOTE = "Jarvis Voice Note"
+CONVERSATION = "Jarvis Conversation"
 WIKI = "Jarvis Wiki Page"
 SETTINGS = "Jarvis Settings"
 
@@ -221,7 +222,7 @@ def _single_int(field: str, default: int) -> int:
 # --------------------------------------------------------------------------- #
 # probe / status
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_skills_area_caps() -> dict:
 	"""Single tab-gating probe for the whole Skills area (DESIGN.md section 6:
 	"single get_skills_area_caps probe ... replaces boolean pair"). Any desk
@@ -279,7 +280,7 @@ def get_skills_area_caps() -> dict:
 # --------------------------------------------------------------------------- #
 # questions
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_questions_page(
 	status: str = "Unanswered",
 	search: str = "",
@@ -348,7 +349,7 @@ def list_questions_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_question(name: str) -> dict:
 	"""The caller's own single question (owner-only), same field shape as a
 	``list_questions_page`` row (incl. ``context_md``) so the SPA can rehydrate
@@ -390,7 +391,7 @@ def get_question(name: str) -> dict:
 	return row
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def answer_question(
 	name: str,
 	text: str = "",
@@ -443,7 +444,7 @@ def answer_question(
 	return {"ok": True, "note": note.name, "question_status": "Answered"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def ignore_question(name: str) -> dict:
 	"""Owner-only "not now": Ignored is snooze-like, NOT terminal - the row
 	stays listed and answerable (DESIGN.md section 6). There is no separate
@@ -469,7 +470,7 @@ def ignore_question(name: str) -> dict:
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def delete_question(name: str) -> dict:
 	"""Owner-only soft-delete: status -> "Deleted" (audit trail kept; every
 	list/probe endpoint excludes it; also suppresses a generator from ever
@@ -502,16 +503,52 @@ def _derive_kind(url: str, attachment: str, duration_s: int) -> str:
 
 
 def _validate_and_resolve_attachment(file_url: str) -> str:
-	"""Resolve + object-level-authorize an uploaded ``file_url`` (the
-	``filebox.drop_file`` idiom): the caller must not be able to hand back
-	someone else's private file_url and have its contents land in their own
-	note. Returns the File doc's name."""
-	fdoc = frappe.db.get_value("File", {"file_url": file_url}, "name")
-	if not fdoc:
+	"""Resolve + object-level-authorize an uploaded ``file_url``: only the
+	caller's own files qualify, so nobody can hand back someone else's file_url
+	and have its contents land in their own note. A File qualifies when it is the
+	caller's own upload attached to no record, or is attached to one of the
+	caller's own Jarvis chats. Several File rows can share a ``file_url`` (an
+	identical re-upload, a copy attached elsewhere), so every row is considered
+	and a qualifying one is returned (a bare own upload first, so the caller's
+	upload is the one the note takes). Returns the File doc's name."""
+	me = frappe.session.user
+	# Not permission-filtered on purpose (frappe.qb): the ownership rule below is
+	# the gate, so an unreadable foreign row must surface as "Not permitted", not
+	# as "unknown".
+	file = frappe.qb.DocType("File")
+	conv = frappe.qb.DocType(CONVERSATION)
+	note = frappe.qb.DocType(NOTE)
+	rows = (
+		frappe.qb.from_(file)
+		.left_join(conv)
+		.on((file.attached_to_doctype == CONVERSATION) & (file.attached_to_name == conv.name))
+		.left_join(note)
+		.on((file.attached_to_doctype == NOTE) & (file.attached_to_name == note.name))
+		.select(
+			file.name,
+			file.owner,
+			file.attached_to_doctype,
+			file.attached_to_name,
+			conv.owner.as_("conv_owner"),
+			note.owner.as_("note_owner"),
+		)
+		.where(file.file_url == file_url)
+		.orderby(file.creation, order=frappe.qb.desc)
+		.limit(50)
+	).run(as_dict=True)
+	if not rows:
 		frappe.throw(_("Unknown attachment - upload it first."))
-	if not frappe.has_permission("File", "read", doc=fdoc):
-		frappe.throw(_("Not permitted."), frappe.PermissionError)
-	return fdoc
+	record_row = None
+	for row in rows:
+		if not row.attached_to_doctype and not row.attached_to_name:
+			if row.owner == me:
+				return row.name
+		elif record_row is None and me in (row.conv_owner, row.note_owner):
+			# Attached to the caller's own chat or own earlier note.
+			record_row = row.name
+	if record_row:
+		return record_row
+	frappe.throw(_("Not permitted."), frappe.PermissionError)
 
 
 def _extract_attachment_text(file_name: str | None) -> str:
@@ -645,15 +682,25 @@ def _create_note(
 	doc.insert(ignore_permissions=True)
 
 	if fdoc_name:
-		# Durable reparent (filebox.drop_file's idiom): the file now belongs
-		# to this note, not a bare upload with no owning record.
+		# Durable reparent (filebox.drop_file's idiom), for the caller's own BARE
+		# upload only. A File already attached to a record is never moved: the
+		# note just references its file_url (extraction and display read by url).
 		try:
-			frappe.db.set_value(
-				"File",
-				fdoc_name,
-				{"attached_to_doctype": NOTE, "attached_to_name": doc.name},
-				update_modified=False,
+			row = frappe.db.get_value(
+				"File", fdoc_name, ["owner", "attached_to_doctype", "attached_to_name"], as_dict=True
 			)
+			if (
+				row
+				and row.owner == frappe.session.user
+				and not row.attached_to_doctype
+				and not row.attached_to_name
+			):
+				frappe.db.set_value(
+					"File",
+					fdoc_name,
+					{"attached_to_doctype": NOTE, "attached_to_name": doc.name},
+					update_modified=False,
+				)
 		except Exception:
 			pass
 
@@ -662,7 +709,7 @@ def _create_note(
 	return doc
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_note(
 	text: str = "",
 	url: str = "",
@@ -681,7 +728,7 @@ def save_note(
 	return {"ok": True, "note": note.name}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_notes_page(
 	kind: str = "",
 	status: str = "",
@@ -748,7 +795,7 @@ def list_notes_page(
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_note(name: str) -> dict:
 	"""Note detail (owner-only): full fields plus the answered question's
 	text (if linked) and up to 5 Wiki pages whose ``sources`` JSON trail
@@ -805,7 +852,7 @@ def get_note(name: str) -> dict:
 	return doc
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_note(name: str) -> dict:
 	"""Owner-only delete. Alias of ``voice_notes_api.delete_voice_note``
@@ -820,7 +867,7 @@ def delete_note(name: str) -> dict:
 # --------------------------------------------------------------------------- #
 # Personalisation Settings (admin set)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_personalisation_settings() -> dict:
 	"""Admin-only read of the Personalisation Single fields, plus the read-only
 	chat-mining run status so an operator can see the daily sweep is alive."""
@@ -835,7 +882,7 @@ def get_personalisation_settings() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_personalisation_settings(payload: str | dict | None = None) -> dict:
 	"""Admin-only write. Only the two known keys are accepted; unknown keys
 	are refused (``learned_api.set_learning_settings``'s idiom). Writes via
@@ -871,7 +918,7 @@ def set_personalisation_settings(payload: str | dict | None = None) -> dict:
 	return get_personalisation_settings()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def generate_chat_questions_now() -> dict:
 	"""Admin-only: run the chat-transcript question miner immediately over the
 	recent backlog (the manual counterpart to the daily sweep). Refuses when
@@ -891,7 +938,7 @@ def generate_chat_questions_now() -> dict:
 # Question Rules (admin set) - materialization itself is
 # jarvis.learning.questions's job (PIPELINE agent); this is CRUD only.
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_role_options() -> list[str]:
 	"""Admin-only: desk Role names selectable as a question-rule ``target_role``
 	(Role scope). Returns every enabled Role that has desk access, minus the
@@ -912,7 +959,7 @@ def list_role_options() -> list[str]:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_question_rules() -> list[dict]:
 	"""Admin-only: every configured rule. A flat, unpaginated list - the
 	Personalisation Settings editor is a small admin-managed table, not a
@@ -933,7 +980,7 @@ def list_question_rules() -> list[dict]:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def save_question_rule(payload: str | dict | None = None) -> dict:
 	"""Admin-only create/update. ``payload["name"]`` present -> update that
 	rule; absent -> create a new one. Saved with ``ignore_permissions=True``
@@ -970,7 +1017,7 @@ def save_question_rule(payload: str | dict | None = None) -> dict:
 	return {"ok": True, "name": doc.name}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def delete_question_rule(name: str) -> dict:
 	"""Admin-only hard delete. Rules have no soft-delete semantics of their
 	own (unlike questions): deleting a rule is a real retraction, and any

@@ -33,6 +33,7 @@ from jarvis.chat.events import publish_to_user
 
 APPROVAL = "Jarvis Approval Request"
 CONV = "Jarvis Conversation"
+GRANT = "Jarvis Approval Reviewer"
 
 # Port of the client fence grammar (ChatView.vue:1457 ``_ASK_RE``):
 # ```jarvis-ask, optional spaces/tabs, newline, non-greedy body, closing
@@ -42,6 +43,9 @@ CONV = "Jarvis Conversation"
 _ASK_RE = re.compile(r"```jarvis-ask[ \t]*\n([\s\S]*?)```")
 
 _FIELD_TYPES = ("date", "datetime", "field", "link", "select", "text")
+
+# Types a model may put in ``kind`` instead of ``type`` (chatAsk.js ASK_KINDS).
+_ASK_KINDS = ("single", "multi", "yesno", "boolean", *_FIELD_TYPES)
 
 # Same identifier guards as the client parser (chatAsk.js DOCTYPE_RE/FIELDNAME_RE).
 _DOCTYPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]*")
@@ -67,12 +71,45 @@ def ask_label(question: dict) -> str:
 	return question["q"] or humanize_fieldname(question.get("fieldname"))
 
 
+def _ask_text(q: dict) -> str:
+	"""Port of chatAsk.js ``askText``: the first non-empty of the keys a model
+	may use for the question text."""
+	for key in ("q", "question", "label", "title", "prompt"):
+		value = "" if q.get(key) is None else str(q[key]).strip()
+		if value:
+			return value
+	return ""
+
+
+def _nested_field(value):
+	"""Port of chatAsk.js ``nestedField``: a ``{doctype, fieldname}`` dict naming at
+	least one of the two, else None (a list or an empty dict is no field reference)."""
+	if not isinstance(value, dict):
+		return None
+	return value if value.get("doctype") or value.get("fieldname") else None
+
+
+def _ask_items(parsed):
+	"""Port of chatAsk.js ``askItems``: a bare list, ``{questions: [...]}``, or
+	one question object on its own (a list of one)."""
+	if isinstance(parsed, list):
+		return parsed
+	if not isinstance(parsed, dict):
+		return None
+	if "questions" in parsed:
+		return parsed["questions"]
+	return [parsed] if _ask_text(parsed) or parsed.get("type") or parsed.get("kind") else None
+
+
 def parse_ask(content: str | None) -> list[dict]:
 	"""Normalized questions ``[{q, type, options, doctype, fieldname}]`` from
 	the LAST ```jarvis-ask``` fence in ``content``, or ``[]``.
 
-	Mirrors chatAsk.js ``parseAsk`` exactly: JSON body is a list or
-	``{questions: [...]}``; at most 6 questions; ``type`` normalized
+	Mirrors chatAsk.js ``parseAsk`` exactly: JSON body is a list,
+	``{questions: [...]}`` or one question object; the text is the first of
+	``q``/``question``/``label``/``title``/``prompt``, the type is ``type`` else
+	a known ``kind``, and a nested ``field: {doctype, fieldname}`` makes a
+	``field`` question; at most 6 questions; ``type`` normalized
 	("boolean" -> "yesno", unknown -> "single"); at most 8 string options
 	(200 for ``select``, which with none degrades to ``text``); a ``field``
 	question needs a plain-identifier doctype and fieldname (else it degrades
@@ -87,19 +124,17 @@ def parse_ask(content: str | None) -> list[dict]:
 		parsed = json.loads(matches[-1].strip())
 	except Exception:
 		return []
-	if isinstance(parsed, list):
-		raw = parsed
-	elif isinstance(parsed, dict):
-		raw = parsed.get("questions")
-	else:
-		raw = None
+	raw = _ask_items(parsed)
 	if not isinstance(raw, list):
 		return []
 	out: list[dict] = []
 	for q in raw[:6]:
 		if not isinstance(q, dict):
 			continue
-		qtype = q.get("type")
+		nested = _nested_field(q.get("field"))
+		qtype = q.get("kind") if q.get("type") is None and q.get("kind") in _ASK_KINDS else q.get("type")
+		if nested:
+			qtype = "field"
 		if qtype == "boolean":
 			qtype = "yesno"
 		if qtype not in ("single", "multi", "yesno", *_FIELD_TYPES):
@@ -109,13 +144,29 @@ def parse_ask(content: str | None) -> list[dict]:
 		options = [str(o) for o in options[:cap]] if isinstance(options, list) else []
 		if qtype == "select" and not options:
 			qtype = "text"
-		text = str(q.get("q") or q.get("question") or "").strip()
+		text = _ask_text(q)
 		if qtype == "field":
-			doctype = str(q.get("doctype") or "").strip()
-			fieldname = str(q.get("fieldname") or "").strip()
-			if _DOCTYPE_RE.fullmatch(doctype) and _FIELDNAME_RE.fullmatch(fieldname):
+			source = nested or q
+			doctype = str(source.get("doctype") or "").strip()
+			fieldname = str(source.get("fieldname") or "").strip()
+			parent = str(source.get("parent") or "").strip()
+			parentfield = str(source.get("parentfield") or "").strip()
+			if (
+				_DOCTYPE_RE.fullmatch(doctype)
+				and _FIELDNAME_RE.fullmatch(fieldname)
+				and (not parent or _DOCTYPE_RE.fullmatch(parent))
+				and (not parentfield or (parent and _FIELDNAME_RE.fullmatch(parentfield)))
+			):
 				out.append(
-					{"q": text, "type": qtype, "options": [], "doctype": doctype, "fieldname": fieldname}
+					{
+						"q": text,
+						"type": qtype,
+						"options": [],
+						"doctype": doctype,
+						"fieldname": fieldname,
+						**({"parent": parent} if parent else {}),
+						**({"parentfield": parentfield} if parentfield else {}),
+					}
 				)
 				continue
 			# a bad identifier degrades to a typed answer instead of vanishing
@@ -207,6 +258,7 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 		owner,
 		{
 			"kind": "approval:new",
+			"source": "Chat",
 			"conversation_id": conversation,
 			"origin_page": conversation_meta.origin_page or "",
 			"name": doc.name,
@@ -216,13 +268,18 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	return doc.name
 
 
-def resolve_on_user_message(conversation: str) -> None:
+def resolve_on_user_message(conversation: str, seed_message: str | None = None) -> None:
 	"""The user sent a message in ``conversation``: any Pending chat-sourced
 	approval there is now answered in chat — flip it to "Answered" so the
 	board row never goes stale or double-answered. One indexed UPDATE
 	(conversation is search_index'd); decided rows are untouched, so a
 	board decide() that resumes the chat never re-flips its own row. A File Box
-	sheet's question is answered with its sheet, never here."""
+	sheet's question is answered with its sheet, never here.
+
+	``seed_message`` is the turn's triggering message. When it is a board answer
+	(one decided question sent to the chat), another Pending question that has
+	its own tagged reviewers stays open for them; the requester's own messages
+	and untagged questions settle as before."""
 	from jarvis.jarvis.doctype.jarvis_approval_request.jarvis_approval_request import sheet_ready
 
 	open_filter = {"conversation": conversation, "status": "Pending", "source": "Chat"}
@@ -230,22 +287,53 @@ def resolve_on_user_message(conversation: str) -> None:
 		open_filter["sheet"] = ["is", "not set"]
 	if not frappe.db.exists(APPROVAL, open_filter):
 		return
+	# Lock exactly the Pending rows that this answer wins. A simultaneous
+	# reviewer decision cannot be announced as answered or resumed twice.
+	a = frappe.qb.DocType(APPROVAL)
+	where = (a.conversation == conversation) & (a.status == "Pending") & (a.source == "Chat")
+	if sheet_ready():
+		from frappe.query_builder.functions import Coalesce
+
+		where &= Coalesce(a.sheet, "") == ""
+	if (
+		seed_message
+		and frappe.db.get_value("Jarvis Chat Message", seed_message, "origin") == "board_answer"
+		and frappe.db.table_exists(GRANT)
+	):
+		from pypika.terms import ExistsCriterion
+
+		g = frappe.qb.DocType(GRANT)
+		where &= ~ExistsCriterion(frappe.qb.from_(g).select(1).where(g.approval == a.name))
+	rows = frappe.qb.from_(a).select(a.name).where(where).for_update().run(pluck=True)
+	if not rows:
+		return
 	frappe.db.sql(
 		"""update `tabJarvis Approval Request`
 		set status='Answered', decision=%(decision)s,
 			decided_by=%(user)s, decided_at=%(now)s
-		where conversation=%(conversation)s
-		and status='Pending' and source='Chat'"""
-		+ (" and IFNULL(sheet, '')=''" if sheet_ready() else ""),
+		where name in %(names)s
+		and status='Pending' and source='Chat'""",
 		{
 			"decision": _ANSWERED_DECISION,
 			"user": frappe.session.user,
 			"now": frappe.utils.now_datetime(),
-			"conversation": conversation,
+			"names": tuple(rows),
 		},
 	)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before realtime publish
-	# The board badge counted it: tell the owner's shell to re-count.
-	owner = frappe.db.get_value(CONV, conversation, "owner")
-	if owner:
-		publish_to_user(owner, {"kind": "action:settled", "conversation_id": conversation})
+	from jarvis.chat.approval_reviewers import log_bounded, notify_settled
+
+	# The board badge counted it: tell the owner's shell to re-count. Best effort: a
+	# failed delivery never skips the reviewers below (the log names the kind only).
+	try:
+		owner = frappe.db.get_value(CONV, conversation, "owner")
+		if owner:
+			publish_to_user(owner, {"kind": "action:settled", "conversation_id": conversation})
+	except Exception:
+		log_bounded("jarvis.approval.notify_failed", "action:settled")
+	for name in rows:
+		try:
+			doc = frappe.get_doc(APPROVAL, name)
+		except Exception:
+			continue
+		notify_settled(doc, include_requester=False)

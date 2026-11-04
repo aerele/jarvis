@@ -40,15 +40,15 @@ def save_export_file(
 	owner-only, so an export is readable only by the user who ran it. Pass
 	``dt``/``dn`` only to attach to a record the same audience may already read
 	(never for content rendered with the caller's own field-level access)."""
+	import frappe
 	from frappe.exceptions import ValidationError
-	from frappe.utils.file_manager import save_file
 
 	from jarvis.exceptions import InvalidArgumentError
 
 	ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "bin"
 	fname = f"{_safe_base(title)}.{ext}"
 	try:
-		fdoc = save_file(fname, content, dt, dn, is_private=1)
+		fdoc = _insert_own_file(fname, content, dt, dn)
 	except ValidationError as e:
 		# save_file raises ValidationError for a File-save constraint - notably
 		# MaxFileSizeReachedError when the bytes exceed the site's max_file_size,
@@ -68,6 +68,37 @@ def save_export_file(
 		"size_bytes": int(fdoc.file_size or len(content)),
 		"name": fdoc.name,
 	}
+
+
+def _insert_own_file(fname: str, content: bytes, dt: str | None, dn: str | None):
+	"""A private File of the caller's own, even when another user already holds a
+	File with the very same bytes.
+
+	Frappe de-duplicates Files by content hash: ``File.save_file`` reuses the
+	existing blob's URL and ``validate_duplicate_entry`` then refuses when that File
+	is private and owned by someone else ("You do not have permission to access
+	this file"). An export is deterministic bytes for deterministic data (a CSV of
+	the same report, the same filters), so two users exporting the same thing hit
+	that refusal, and the second one got no file (#2102 e2e). Writing our own blob
+	first, with the existing-file check off, gives this File its own URL; the
+	duplicate-entry check is then skipped because sharing nothing with the other
+	File is the point. The size limit (``MaxFileSizeReachedError``) still applies."""
+	import frappe
+
+	fdoc = frappe.new_doc("File")
+	fdoc.update(
+		{
+			"file_name": fname,
+			"is_private": 1,
+			"attached_to_doctype": dt,
+			"attached_to_name": dn,
+			"content": content,
+		}
+	)
+	fdoc.save_file(content=content, ignore_existing_file_check=True)
+	fdoc.flags.ignore_duplicate_entry_error = True
+	fdoc.insert()
+	return fdoc
 
 
 # --- render-inputs sidecar (per-document template override) -------------------

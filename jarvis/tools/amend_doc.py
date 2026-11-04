@@ -62,6 +62,9 @@ def amend_doc(doctype: str, name: str | None = None, names: list | None = None) 
 def _amend_one(doctype: str, name: str) -> "frappe.model.document.Document":
 	"""Guards + amend for ONE doc. Returns the new Draft Document. Shared by
 	the single and batch paths so the guards never drift."""
+	from jarvis.tools._delegate_write_caps import enforce_closed_agent_direct_write
+
+	enforce_closed_agent_direct_write("amend", doctype)
 	meta = frappe.get_meta(doctype)
 	if not meta.is_submittable:
 		raise InvalidArgumentError(
@@ -92,6 +95,10 @@ def _amend_one(doctype: str, name: str) -> "frappe.model.document.Document":
 	new_doc = frappe.copy_doc(source)
 	new_doc.amended_from = source.name
 	new_doc.docstatus = 0
+	if doctype == "Landed Cost Voucher":
+		from jarvis.tools._lcv_source_tax import gate_lcv, source_names
+
+		gate_lcv(new_doc, lock=True, previous_links=set(source_names(source)))
 	new_doc.insert()  # runs validate(); autoname appends suffix
 	return new_doc
 

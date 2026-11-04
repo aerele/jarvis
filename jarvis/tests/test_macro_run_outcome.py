@@ -582,17 +582,20 @@ class TestTheOwnerIsTold(MacroRunOutcomeBase):
 		self.assertEqual(len(notes), 1, notes)
 		self.assertIn("confirmation is waiting", notes[0].email_content)
 
-	def test_a_manual_run_does_not_write_a_notification(self):
+	def test_a_manual_run_that_fails_notifies_its_owner_too(self):
+		# A run's chat is not in the chat list: whoever started it may have left it.
 		run, conv, _ = self._mk_run(steps=2, at_step=1)
 		step_turn, _, _ = self._turn(conv, state="errored", error="The model is overloaded.")
 		macros.advance_after_turn(conv, errored=True, run_id=step_turn)
-		self.assertEqual(self._notes(), [])
+		(note,) = self._notes()
+		self.assertIn("Step 1 failed: The model is overloaded.", note.email_content)
 
-	def test_a_scheduled_run_that_completes_cleanly_does_not_notify(self):
+	def test_a_scheduled_run_that_completes_cleanly_notifies_once(self):
 		run, conv, _ = self._mk_run(steps=1, at_step=1, trigger="scheduled")
 		step_turn, _, _ = self._turn(conv)
 		macros.advance_after_turn(conv, errored=False, run_id=step_turn)
-		self.assertEqual(self._notes(), [])
+		(note,) = self._notes()
+		self.assertTrue(note.subject.startswith("Macro run finished: "), note.subject)
 
 
 # --------------------------------------------------------------------------- #

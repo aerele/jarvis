@@ -20,6 +20,7 @@ import time
 import frappe
 import requests
 
+from jarvis.chat import site_pin
 from jarvis.exceptions import (
 	AdminAmbiguousError,
 	AdminAuthError,
@@ -544,6 +545,43 @@ def _is_real_public_host(host: str) -> bool:
 	return tld.isalpha() and tld not in _RESERVED_TLDS
 
 
+# Advertised in the signup body only when this bench is in Private mode (contract 4.2).
+PRIVATE_NETWORK_CAPABILITY = "v1"
+
+
+def _private_network_settings() -> tuple[str, str]:
+	"""``(network_mode, public_address)`` from Jarvis Settings, blank when unset.
+
+	Read with get_single_value (no document load). ``cache=False`` so a value written
+	earlier in the same process is seen. Never raises: between a code deploy and its
+	``bench migrate`` the fields do not exist and get_single_value throws, and a bench in
+	that state is simply not private."""
+	try:
+		mode = (frappe.db.get_single_value("Jarvis Settings", "network_mode", cache=False) or "").strip()
+		address = (frappe.db.get_single_value("Jarvis Settings", "public_address", cache=False) or "").strip()
+	except Exception:
+		return "", ""
+	return mode, address
+
+
+def private_public_address() -> str:
+	"""The canonical public address when this bench finished the private setup (mode is
+	Private AND the address passes the rules), else ``""``. Reads stored settings only -
+	never the request Host, which is spoofable."""
+	from jarvis.network_address import check_public_address, private_test_mode
+
+	mode, address = _private_network_settings()
+	if mode != "Private":
+		return ""
+	normalized, problem = check_public_address(address, test_mode=private_test_mode())
+	return "" if problem else normalized
+
+
+def is_private_mode() -> bool:
+	"""True when the private setup is complete (see ``private_public_address``)."""
+	return bool(private_public_address())
+
+
 def _public_origin(trust_host: bool = False) -> str:
 	"""The public origin the bench sends admin as ``frappe_site_url``. A configured ``host_name``
 	(https) always wins; else ``get_url`` derives it from the request Host only when
@@ -552,7 +590,15 @@ def _public_origin(trust_host: bool = False) -> str:
 	Only ``signup`` passes ``trust_host=True`` - a NEW account, so trusting the authenticated
 	admin's own Host is self-scoped. Reconnect / replacement / lead keep it OFF: they target an
 	EXISTING account by email, so a spoofed Host must not choose its URL. A real public domain
-	reached over http is normalized to https."""
+	reached over http is normalized to https.
+
+	In Private mode (a completed private-network setup) the customer's confirmed public
+	address wins over everything else: it is the only address the Jarvis server can use to
+	call this site, and ``host_name`` keeps pointing at the private address for the links
+	Frappe builds for staff (design 5.2)."""
+	private = private_public_address()
+	if private:
+		return private
 	from urllib.parse import urlsplit
 
 	host_name = (frappe.conf.get("host_name") or frappe.conf.get("hostname") or "").strip()
@@ -579,7 +625,32 @@ def _public_origin(trust_host: bool = False) -> str:
 	return base
 
 
-def _onboarding_host_ok() -> bool:
+def _request_origin() -> str:
+	"""``scheme://host[:port]`` of the CURRENT browser request, as Frappe's own
+	``get_host_name_from_request`` reads it: the first ``X-Forwarded-Proto`` token when it is
+	http or https, else the request scheme; the request host. Lowercase, user info and default
+	port dropped, no path. Blank when there is no request or the scheme is not http or https."""
+	from urllib.parse import urlsplit
+
+	request = getattr(frappe.local, "request", None)
+	if request is None:
+		return ""
+	forwarded = (frappe.get_request_header("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+	scheme = forwarded if forwarded in ("http", "https") else (request.scheme or "").lower()
+	try:
+		parts = urlsplit(f"{scheme}://{request.host or ''}")
+		host, port = (parts.hostname or "").lower(), parts.port
+	except ValueError:
+		return ""
+	if scheme not in ("http", "https") or not host:
+		return ""
+	if ":" in host:
+		host = f"[{host}]"
+	default = 443 if scheme == "https" else 80
+	return f"{scheme}://{host}" + (f":{port}" if port and port != default else "")
+
+
+def _public_host_configured() -> bool:
 	"""True only when this bench has a CONFIGURED public https host. Reads only
 	site_config ``host_name`` (never the request Host header, which is
 	spoofable). Accepts public domains and globally routable IPv4 addresses.
@@ -622,6 +693,17 @@ def _onboarding_host_ok() -> bool:
 		return address.version == 4 and address.is_global and not address.is_multicast
 	except Exception:
 		return True
+
+
+def _onboarding_host_ok() -> bool:
+	"""May this bench onboard? True with a configured public host (the original rule,
+	``_public_host_configured``) OR a completed private-network setup (design 5.3). Drives
+	``assert_public_onboarding_host`` in ``start_signup``. The boot flag
+	``jarvis_public_host_ok`` deliberately does NOT use this: it keeps meaning "a public
+	host is configured", and the SPA reads ``jarvis_network_mode`` for the private case."""
+	if _public_host_configured():
+		return True
+	return is_private_mode()
 
 
 def assert_public_onboarding_host() -> None:
@@ -691,12 +773,15 @@ def signup(
 	one), so there is no "omit when absent" case to preserve; an older admin that
 	does not declare either kwarg drops it silently, same as any unknown kwarg.
 	"""
+	# Read once: two reads could straddle a settings change and send a Private-mode body
+	# with a non-private URL (or the reverse).
+	private_address = private_public_address()
 	body = {
 		"email": email,
 		"company_name": company_name,
 		"plan": plan,
 		# signup is the only trust_host=True caller (new account, self-scoped).
-		"frappe_site_url": _public_origin(trust_host=True),
+		"frappe_site_url": private_address or _public_origin(trust_host=True),
 		"supported_providers": list(SUPPORTED_PROVIDERS),
 		"client_capabilities": _client_capabilities(),
 		"terms_accepted": terms_accepted,
@@ -710,6 +795,20 @@ def signup(
 		body["billing"] = billing
 	if partner_code:
 		body["partner_code"] = partner_code
+	if private_address:
+		# Contract 4.2: network_mode only in Private mode, with the capability that admin
+		# requires for it (CLIENT_UPGRADE_REQUIRED otherwise). frappe_site_url above is
+		# the customer's ``private_address``, not the browser origin.
+		body["network_mode"] = "private"
+		body["client_capabilities"] = {
+			**_client_capabilities(),
+			"private_network": PRIVATE_NETWORK_CAPABILITY,
+		}
+		# Where this customer's staff open the bench: admin returns the browser there after
+		# payment, as the public address is often unreachable from the customer's own network.
+		staff_origin = _request_origin()
+		if staff_origin:
+			body["staff_origin"] = staff_origin
 	return _post_guest(path=_m("billing.signup.signup"), body=body)
 
 
@@ -877,6 +976,43 @@ def check_signup_payment_status() -> dict:
 		path=_m("billing.signup.check_signup_payment_status"),
 		body={},
 	)
+
+
+def private_setup_info(*, timeout_s: int = 8) -> dict:
+	"""Guest: is private-network onboarding on offer, and which public address does admin
+	see this bench calling from? Returns ``{"enabled": bool, "caller_ip": str}`` (contract
+	4.1). ``caller_ip`` is what the PublicAddress screen pre-fills. Short timeout: the
+	callers run on a network that may DROP traffic to admin, and a long wait would freeze
+	the first screen the customer sees."""
+	return _post_guest(path=_m("api.network.private_setup_info"), body={}, timeout_s=timeout_s)
+
+
+def reserve_private_host(*, timeout_s: int = 60) -> dict:
+	"""Authenticated: the fleet host admin holds for this private-network customer, as
+	``{"host_ip", "reach_url", "hold_until"}`` (contract 4.3). Admin makes the hold when the
+	email link is clicked; this call makes it synchronously if the job has not yet. For a
+	customer who already has a tenant it returns that tenant's host with ``hold_until`` null.
+	Refusals arrive as ``AdminContractError`` carrying ``NOT_PRIVATE_CUSTOMER``,
+	``EMAIL_NOT_CONFIRMED``, ``PRIVATE_HOLD_UNAVAILABLE`` or ``RATE_LIMITED_PRIVATE_NETWORK``.
+	The 60 s budget covers admin probing candidate hosts."""
+	return _post(path=_m("api.network.reserve_private_host"), body={}, timeout_s=timeout_s)
+
+
+def start_connection_check(site_name: str, *, timeout_s: int = 30) -> dict:
+	"""Authenticated: start the inbound half of the connection test. ``site_name`` is this
+	bench's own ``frappe.local.site`` - the owner's claim about which Frappe site must
+	answer, which admin binds to the customer's credentials. Returns ``{"check":
+	"JCC-000123"}`` to poll with ``get_connection_check``."""
+	return _post(
+		path=_m("api.network.start_connection_check"), body={"site_name": site_name}, timeout_s=timeout_s
+	)
+
+
+def get_connection_check(check: str, *, timeout_s: int = 15) -> dict:
+	"""Authenticated: the state of one test as ``{"status", "reason", "checked_at"}``.
+	``status`` is Checking, Verified, Failed, Unreachable or Unsupported; a customer can read
+	only their own checks."""
+	return _post(path=_m("api.network.get_connection_check"), body={"check": check}, timeout_s=timeout_s)
 
 
 def get_billing_payment_state() -> dict:
@@ -1207,7 +1343,7 @@ def get_integration_status(*, deep: bool = False, timeout_s: int = 20) -> dict:
 	)
 
 
-def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
+def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S, proof_nonce: str | None = None) -> dict:
 	"""Fetch the assigned container connection (fallback / scheduled sync).
 
 	``timeout_s`` is keyword-only and defaults to DEFAULT_TIMEOUT_S so existing
@@ -1228,6 +1364,8 @@ def get_connection(*, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	from jarvis.source_version import source_details
 
 	body = {"jarvis_version": __version__}
+	if proof_nonce:
+		body["proof_nonce"] = proof_nonce
 	source = source_details()
 	# A value Git confirmed is sent even when empty, so a checkout that moved off a
 	# branch or tag clears stale metadata upstream. A value Git could not give in
@@ -1434,6 +1572,7 @@ def _authenticated_raw(path: str, body: dict, *, timeout_s: int):
 	can't be reused for streamed media). DRIFT-GUARD: this replicates _post's ladder; mirror any
 	change to _post's auth ladder here too. Error status routing is in _raise_for_admin_raw."""
 	settings = frappe.get_single("Jarvis Settings")
+	site_pin.assert_not_copy(admin=True)  # a copied site must not act as the tenant
 	admin_url = _admin_url(settings)
 	url = admin_url + path
 
@@ -1558,7 +1697,7 @@ def post_rotate_llm_secret(secret: str) -> dict:
 	)
 
 
-def post_rotate_agent_token(new_token: str) -> dict:
+def post_rotate_agent_token(new_token: str, proof_nonce: str | None = None) -> dict:
 	"""POST a rotated plugin agent_token to admin's /tenant/rotate-agent-token.
 
 	C2 PR-3C orchestrator. Called from rotate_agent_token (this module's
@@ -1578,7 +1717,7 @@ def post_rotate_agent_token(new_token: str) -> dict:
 	"""
 	return _post(
 		path=_m("api.tenant.rotate_agent_token"),
-		body={"new_token": new_token},
+		body=_with_proof({"new_token": new_token}, proof_nonce),
 		timeout_s=180,
 	)
 
@@ -2086,10 +2225,10 @@ def post_disconnect_llm() -> dict:
 	)
 
 
-def unpair_chat_devices() -> dict:
+def unpair_chat_devices(proof_nonce: str | None = None) -> dict:
 	"""Drop the container's paired devices. Idempotent; a file op on the agent,
 	so it needs none of the disconnect budget above."""
-	return _post(path=_m("api.tenant.unpair_chat_devices"), body={}, timeout_s=60)
+	return _post(path=_m("api.tenant.unpair_chat_devices"), body=_with_proof({}, proof_nonce), timeout_s=60)
 
 
 # --------------------------------------------------------------------------- #
@@ -2255,11 +2394,12 @@ def push_usage_rollup(rollup: dict) -> dict:
 	return _post(path=_m("api.tenant.ingest_usage_rollup"), body={"rollup": rollup})
 
 
-def push_error_rollup(errors: list) -> dict:
+def push_error_rollup(errors: list, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	"""Push a batch of scrubbed tenant errors (UI + code-level) to admin for the
-	per-tenant Errors feed. Called best-effort from the error_push */5 cron.
+	per-tenant Errors feed. Called best-effort from the error_push */5 cron, which
+	passes a short ``timeout_s`` (it holds a lock while the call is out).
 	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
-	return _post(path=_m("api.tenant.ingest_error_rollup"), body={"errors": errors})
+	return _post(path=_m("api.tenant.ingest_error_rollup"), body={"errors": errors}, timeout_s=timeout_s)
 
 
 def push_bench_heartbeat(heartbeat: dict) -> dict:
@@ -2267,6 +2407,17 @@ def push_bench_heartbeat(heartbeat: dict) -> dict:
 	dead-man's-switch. Called best-effort from the heartbeat */5 cron.
 	Raises AdminAuthError / AdminUnreachableError / AdminValidationError."""
 	return _post(path=_m("api.tenant.ingest_bench_heartbeat"), body={"heartbeat": heartbeat})
+
+
+def report_foreign_session(count: int, last_seen_at: str) -> dict:
+	"""Tell admin how many plugin sessions this site never started (a restored copy
+	is probably using this site's agent). Count and time only, never a session key.
+	Raises AdminAuthError / AdminUnreachableError / AdminValidationError /
+	AdminRateLimitedError."""
+	return _post(
+		path=_m("api.tenant.ingest_foreign_session"),
+		body={"report": {"count": count, "last_seen_at": last_seen_at}},
+	)
 
 
 # Short timeout for the three feedback pushes below. Admin's ingest is a single
@@ -2316,7 +2467,9 @@ def push_pulse_feedback(item: dict) -> dict:
 	)
 
 
-def pair_chat_device(public_key: str, device_id: str, *, request_timeout_s: int = 30) -> dict:
+def pair_chat_device(
+	public_key: str, device_id: str, *, request_timeout_s: int = 30, proof_nonce: str | None = None
+) -> dict:
 	"""POST customer's chat device pubkey to admin; admin asks the fleet-agent
 	to write a PairedDevice record into the customer's agent container and
 	returns the issued bearer device-token. Customer keeps the private key.
@@ -2332,15 +2485,20 @@ def pair_chat_device(public_key: str, device_id: str, *, request_timeout_s: int 
 	"""
 	return _post(
 		path=_m("api.tenant.pair_chat_device"),
-		body={
-			"public_key": public_key,
-			"device_id": device_id,
-			"request_timeout_s": request_timeout_s,
-		},
+		body=_with_proof(
+			{
+				"public_key": public_key,
+				"device_id": device_id,
+				"request_timeout_s": request_timeout_s,
+			},
+			proof_nonce,
+		),
 	)
 
 
-def request_chat_pairing(public_key: str, device_id: str, *, request_timeout_s: int = 30) -> dict:
+def request_chat_pairing(
+	public_key: str, device_id: str, *, request_timeout_s: int = 30, proof_nonce: str | None = None
+) -> dict:
 	"""Additive successor to ``pair_chat_device`` for the agent 9.3
 	device-pairing fix (Mechanism A). POSTs the customer's chat device pubkey to
 	the CP, which decides - per its own per-tenant gate - HOW this tenant pairs
@@ -2364,11 +2522,14 @@ def request_chat_pairing(public_key: str, device_id: str, *, request_timeout_s: 
 	(the CP clamps it), same contract as ``pair_chat_device``."""
 	return _post(
 		path=_m("api.tenant.request_chat_pairing"),
-		body={
-			"public_key": public_key,
-			"device_id": device_id,
-			"request_timeout_s": request_timeout_s,
-		},
+		body=_with_proof(
+			{
+				"public_key": public_key,
+				"device_id": device_id,
+				"request_timeout_s": request_timeout_s,
+			},
+			proof_nonce,
+		),
 	)
 
 
@@ -2638,7 +2799,39 @@ def has_credentials() -> bool:
 	return bool(username and password) or _has_legacy_credentials(settings)
 
 
-def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
+def _with_proof(body: dict, proof_nonce: str | None) -> dict:
+	"""The body with ``proof_nonce`` added only when one was passed."""
+	if proof_nonce:
+		body["proof_nonce"] = proof_nonce
+	return body
+
+
+def verify_site(proof_nonce: str, instance_id: str | None = None) -> dict:
+	"""Ask admin to prove, through the tenant container, that this is the registered
+	site. Allowed on a blocked site: it is the way back from a false block.
+
+	``instance_id`` is this site's own id (``""`` when it cannot be read). Admin that
+	supports it rebinds the agent's pinned id to it once the proof passes and answers
+	``pin_rebound``. An older admin drops the argument (Frappe ignores kwargs a
+	whitelisted method does not declare) and answers ``proved`` alone."""
+	body = {"proof_nonce": proof_nonce}
+	if instance_id is not None:
+		body["instance_id"] = instance_id
+	return _post(path=_m("api.tenant.verify_site"), body=body, allow_copy=True)
+
+
+def confirm_callback_key(key_digest: str) -> dict:
+	"""Tell admin this site stored the callback key, by digest (see
+	``onboarding.callback_key_digest``). Not allowed on a flagged copy: only the real
+	site confirms. An admin without the endpoint answers Frappe's missing-method 417
+	(``is_method_not_found``); the caller treats that as "not supported yet"."""
+	return _post(
+		path=_m("api.tenant.confirm_callback_key"),
+		body={"key_digest": key_digest},
+	)
+
+
+def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S, allow_copy: bool = False) -> dict:
 	"""Authenticated POST. Prefers a short-lived OAuth bearer token (password
 	grant, cached in Redis) and falls back to the legacy native
 	api_key:api_secret for customers onboarded before OAuth. Raises
@@ -2651,6 +2844,8 @@ def _post(path: str, body: dict, *, timeout_s: int = DEFAULT_TIMEOUT_S) -> dict:
 	bearer->401-remint->403-terminal->legacy ladder; mirror any change here there too.
 	"""
 	settings = frappe.get_single("Jarvis Settings")
+	if not allow_copy:
+		site_pin.assert_not_copy(admin=True)  # a copied site must not act as the tenant
 	admin_url = _admin_url(settings)
 
 	# Preferred path: OAuth bearer. Retry once on a token rejection (revoked,
@@ -2891,6 +3086,27 @@ def is_handover_unsupported(exc: Exception) -> bool:
 	return _METHOD_NOT_FOUND_MARKER in text or _SUBSCRIPTION_HANDOVER_METHOD in text
 
 
+# Admin's private-network refusal codes (contract 4.3), plus the generic INVALID_REQUEST it
+# raises for a malformed argument on the same endpoints. ``_do_post`` reads these BEFORE the
+# HTTP-status / exc_type routing: admin sends them as 403 PermissionError, 409
+# DuplicateEntryError, 400 InvalidRequestError and 429, and the status routing alone would
+# turn the 403s into AdminAuthError (code lost) and a 503 into AdminUnreachableError.
+PRIVATE_NETWORK_CODES = frozenset(
+	{
+		"PRIVATE_NETWORK_DISABLED",
+		"PRIVATE_ADDRESS_INVALID",
+		"PRIVATE_ADDRESS_TAKEN",
+		"NOT_PRIVATE_CUSTOMER",
+		"EMAIL_NOT_CONFIRMED",
+		"PRIVATE_HOLD_UNAVAILABLE",
+		"CONNECTION_CHECK_BUSY",
+		"RATE_LIMITED_PRIVATE_NETWORK",
+		"INVALID_REQUEST",
+	}
+)
+_PRIVATE_NETWORK_CODES = PRIVATE_NETWORK_CODES  # old private name, kept for any importer
+
+
 def _rejection(message: str, *, payload, status: int, exc_type: str = "") -> AdminValidationError:
 	"""Build the known-4xx rejection, preserving admin's contract when it sent
 	one (returned for the caller to ``raise``).
@@ -3042,7 +3258,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			title="admin_client: non-JSON response",
 			message=f"url={url!r} status={resp.status_code} body={resp.text[:1000]!r}",
 		)
-		raise AdminUnreachableError(f"admin returned non-JSON response (status {resp.status_code})")
+		raise AdminUnreachableError(
+			f"admin returned non-JSON response (status {resp.status_code})", status_code=resp.status_code
+		)
 
 	envelope = payload.get("message", payload) if isinstance(payload, dict) else payload
 
@@ -3060,6 +3278,20 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		# _envelope_error_message already scrubs; clean is already scrubbed
 		# (it came from _extract_frappe_message). Falling back to "" is fine.
 		return _envelope_error_message(envelope) or clean or ""
+
+	# Code first: a private-network refusal carries its machine code whatever status or
+	# exception class admin used. A 429 keeps the rate-limit path below (it carries the
+	# code and retry_after_seconds itself).
+	if resp.status_code != 429:
+		contract = _contract_error(payload)
+		code = contract.get("code")
+		if isinstance(code, str) and code in PRIVATE_NETWORK_CODES:
+			raise _rejection(
+				_envelope_message() or f"admin returned {resp.status_code}",
+				payload=payload,
+				status=resp.status_code,
+				exc_type=exc_type,
+			)
 
 	# Status-based routing for the three unambiguous wire signals.
 	# The 2026-06-16 review caught that the previous shape ran the
@@ -3113,6 +3345,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 			# unknown-exc_type branch and logging a spurious error on every rejected
 			# partner code.
 			"PartnerCodeRejected",
+			# Admin's 400 for a malformed argument (private-network address, site_name).
+			# A plain refusal; unlisted it logged an Error Log row per rejection.
+			"InvalidRequestError",
 		):
 			# The THROWN wire shape: admin's contract ``error`` object rides at
 			# the top level next to exc_type. Both survive here - the code for a
@@ -3146,7 +3381,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 				status=resp.status_code,
 				exc_type=exc_type,
 			)
-		raise AdminUnreachableError(clean or f"admin returned an unrecognised error: {exc_type}")
+		raise AdminUnreachableError(
+			clean or f"admin returned an unrecognised error: {exc_type}", status_code=resp.status_code
+		)
 	# Sprint-3 PR-8 (2026-06-16 review): a 4xx response with the
 	# structured envelope ({"ok": false, "error": {...}}) is a
 	# user-input / business-rule error, NOT an "admin is unreachable"
@@ -3189,7 +3426,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 				code=rejected,
 				detail=msg,
 			)
-		raise AdminUnreachableError(f"admin returned a {resp.status_code} error: {msg}")
+		raise AdminUnreachableError(
+			f"admin returned a {resp.status_code} error: {msg}", status_code=resp.status_code
+		)
 	if isinstance(envelope, dict) and not envelope.get("ok", True):
 		err = envelope.get("error", {}) or {}
 		code = err.get("code") or "?"
@@ -3205,7 +3444,7 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		# omitted - the bench knows where it's pointing.
 		if _permanent_rejection_code(envelope):
 			raise AdminRejectedError(f"{code}: {msg}", code=code, detail=msg)
-		raise AdminUnreachableError(f"{code}: {msg}")
+		raise AdminUnreachableError(f"{code}: {msg}", status_code=resp.status_code)
 	from jarvis.chat.runtime_profile import private_connection
 
 	return private_connection(envelope.get("data", envelope) if isinstance(envelope, dict) else envelope)

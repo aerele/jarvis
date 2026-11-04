@@ -135,6 +135,13 @@
 					Notifications are blocked for this site. Allow them in your browser settings to
 					turn this on.
 				</p>
+				<ToggleRow
+					title="Show holiday touches"
+					help="Holiday and birthday greetings on the welcome screen."
+					:modelValue="showHolidayTouches"
+					:disabled="!holidayTouchesLoaded || holidayTouchesSaving"
+					@update:modelValue="onToggleHolidayTouches"
+				/>
 			</div>
 
 			<hr class="my-8" />
@@ -182,8 +189,8 @@
 						>Delete all chat history</span
 					>
 					<span class="max-w-lg text-p-sm text-ink-gray-6">
-						Every conversation and message, permanently. Chats still waiting for a
-						reply are kept. Macros and skills stay.
+						Every conversation and message, permanently. Chats with a reply in progress
+						or physical count evidence are kept. Macros and skills stay.
 					</span>
 					<!-- clearAllHistory is registered by ChatView at runtime, so it is
 					     absent on non-chat routes. Say why rather than showing a dead
@@ -239,7 +246,12 @@
 						class="w-full rounded-md border bg-surface-white p-2 text-p-sm text-ink-gray-8"
 						placeholder="What's wrong? (optional)"
 					/>
-					<label class="mt-3 flex cursor-pointer items-start gap-2.5">
+					<!-- System Manager only, like Reset to onboarding below: the server
+					     (request_workspace_reset) refuses a data wipe from a Jarvis Admin. -->
+					<label
+						v-if="isSystemManager"
+						class="mt-3 flex cursor-pointer items-start gap-2.5"
+					>
 						<input v-model="wipeData" type="checkbox" class="mt-0.5" />
 						<span>
 							<span class="block text-p-sm font-medium text-ink-gray-8">
@@ -325,6 +337,7 @@ import ToggleRow from "@/components/settings/ToggleRow.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { brand } from "@/branding";
+import { holidayTouch } from "@/holidayTouch";
 import * as api from "@/api";
 import { errHtml } from "@/lib/errors";
 import { fmtTokens, contextReading } from "@/lib/tokens.js";
@@ -556,6 +569,12 @@ const statusTheme = computed(() => {
 
 // Estimated token usage — the dialog fetches its own data on open.
 const usage = ref(null);
+// Personal switch for the holiday touches (worn item, greeting, advance wish). The
+// server row is the truth (default on); the row stays disabled until it has answered
+// (so it never shows "on" for a user who turned it off) and while a save is running.
+const showHolidayTouches = ref(true);
+const holidayTouchesLoaded = ref(false);
+const holidayTouchesSaving = ref(false);
 // This chat's context reading (usage.context, from get_usage()'s
 // per-conversation block).
 const context = computed(() => contextReading(usage.value));
@@ -578,9 +597,18 @@ async function loadSettings() {
 	// not deployed yet, network error) — never blocks or errors the pane.
 	try {
 		const res = await api.getMySettings();
-		if (res && res.ok !== false && res.data) store.syncSettingsFromServer(res.data);
+		if (res && res.ok !== false && res.data) {
+			store.syncSettingsFromServer(res.data);
+			if (res.data.show_holiday_touches !== undefined) {
+				showHolidayTouches.value = !!res.data.show_holiday_touches;
+				holidayTouch.setShown(showHolidayTouches.value);
+			}
+		}
 	} catch (e) {
 		/* prefs stay on the localStorage cache */
+	} finally {
+		// Settled, one way or the other: the holiday switch can be used now.
+		holidayTouchesLoaded.value = true;
 	}
 }
 // The three fetches are independent, so they run together instead of one
@@ -634,6 +662,24 @@ const notifyBlocked = computed(() => notifyPermission.value === "denied");
 async function onToggleNotify() {
 	await store.toggleNotify();
 	if (notifySupported) notifyPermission.value = Notification.permission;
+}
+
+// The page's own answer follows the saved preference, so turning it on never refetches
+// before the preference is stored.
+async function onToggleHolidayTouches(value) {
+	if (holidayTouchesSaving.value) return;
+	const previous = showHolidayTouches.value;
+	showHolidayTouches.value = !!value;
+	holidayTouchesSaving.value = true;
+	try {
+		await api.updateMySettings({ show_holiday_touches: value ? 1 : 0 });
+		holidayTouch.setShown(value);
+	} catch (e) {
+		showHolidayTouches.value = previous;
+		toast.error(errHtml(e));
+	} finally {
+		holidayTouchesSaving.value = false;
+	}
 }
 
 // Delete all history → danger-zone action registered by ChatView.

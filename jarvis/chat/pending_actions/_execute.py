@@ -26,6 +26,7 @@ from jarvis.chat.pending_actions import _seal
 from jarvis.chat.pending_actions._park import target_state
 from jarvis.chat.pending_actions._settle import outcome_for, settle, with_reference
 from jarvis.chat.pending_actions._store import (
+	CANCELLED,
 	CONV,
 	EXECUTED,
 	EXECUTING,
@@ -84,6 +85,10 @@ _IDENTITY = (
 	"identity_refused",
 	"This action can no longer run as the user it was proposed for. Nothing ran.",
 )
+_SAFETY_UPDATE = (
+	"safety_update",
+	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.",
+)
 
 
 def authorize(
@@ -95,6 +100,12 @@ def authorize(
 	acted on. A caller-passed conversation must be the row's, or an owned
 	conversation a conversation-less card adopts (D9)."""
 	if not row or row.kind != kind or (acting and kind == SHEET and row.get("collecting")):
+		return False, None
+	from jarvis.chat.collaboration import is_collaborative
+
+	# C1 rollback boundary, before claim/unseal/dispatch. Covers individual,
+	# batch, typed-confirm and approve-and-run callers, including card adoption.
+	if is_collaborative(row.conversation) or is_collaborative(conversation):
 		return False, None
 	if row.owner_user != approver and not (
 		kind in _SM_KINDS and _SYSTEM_MANAGER in frappe.get_roles(approver)
@@ -457,7 +468,7 @@ def _fail_unrun(row, approver: str, code: str, binding: str = "", *, batch_id=No
 			title=f"jarvis.pending_action.{code}", message=f"{row.name}: failed binding {binding}"
 		)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
-	if row.kind == "chat":
+	if row.kind == "chat" and not row.get("collaboration_binding"):
 		# A card that fails before it runs ends an approved skill run, as one that
 		# fails when it runs does (``_claim_and_run``).
 		from jarvis.chat import turn_message_binding
@@ -466,6 +477,44 @@ def _fail_unrun(row, approver: str, code: str, binding: str = "", *, batch_id=No
 	if not defer:
 		settle(row.name)
 	return _refusal(code, REASON_TEXT[code], pa_status=FAILED, outcome="failed")
+
+
+def _cancel_unrun_safety_update(row, approver: str, *, batch_id=None, defer=False) -> dict:
+	"""Cancel a stale generic card before it can be claimed or dispatched."""
+	cols = {"batch_id": batch_id} if batch_id else {}
+	_terminal_update(row.name, [PENDING], CANCELLED, reason_code="safety_update", decided_by=approver, **cols)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
+	if row.kind == "chat" and not row.get("collaboration_binding"):
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.end_skill_autorun_if_open(row.conversation, "card_failed")
+	if not defer:
+		settle(row.name)
+	return _refusal(
+		*_SAFETY_UPDATE,
+		pa_status=CANCELLED,
+		outcome=outcome_of(CANCELLED, "safety_update", row.tool),
+	)
+
+
+def _cancel_claimed_safety_update(row, approver: str, *, batch_id=None, defer=False) -> dict:
+	"""Cancel a claimed card when a close lands before final dispatch."""
+	cols = {"batch_id": batch_id} if batch_id else {}
+	_terminal_update(
+		row.name, [EXECUTING], CANCELLED, reason_code="safety_update", decided_by=approver, **cols
+	)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
+	if row.kind == "chat" and not row.get("collaboration_binding"):
+		from jarvis.chat import turn_message_binding
+
+		turn_message_binding.end_skill_autorun_if_open(row.conversation, "card_failed")
+	if not defer:
+		settle(row.name)
+	return _refusal(
+		*_SAFETY_UPDATE,
+		pa_status=CANCELLED,
+		outcome=outcome_of(CANCELLED, "safety_update", row.tool),
+	)
 
 
 def execute(
@@ -503,10 +552,23 @@ def execute(
 
 
 def _execute_locked(
-	name: str, approver: str, adopt: str | None, *, defer_continuation: bool, batch_id, arm
+	name: str,
+	approver: str,
+	adopt: str | None,
+	*,
+	defer_continuation: bool,
+	batch_id,
+	arm,
+	lock_authorizer=None,
+	row_authorizer=None,
 ) -> dict:
 	"""Steps 3-5: lock, preflight, unseal, staleness; then ``_claim_and_run``."""
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- end snapshot before lock
+	# An old generic chat card has no reliable agent identity. It must never reach
+	# a generic tool, including during the code-before-migration drain window.
+
+	if lock_authorizer:
+		lock_authorizer()
 	try:
 		row = get_row(name, lock="nowait")
 	except (frappe.QueryTimeoutError, frappe.QueryDeadlockError):
@@ -514,11 +576,20 @@ def _execute_locked(
 		return _refusal(*_BUSY)
 	if not row:
 		return _refusal(*_NOT_FOUND)
+	if row_authorizer:
+		row_authorizer(row)
 	if row.status != PENDING:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
 		if row.status in TERMINAL and not row.settled:
 			settle(name)
 		return handled(row)
+	from jarvis.chat.agent_closure import confirmation_is_current
+
+	# Generic chat cards cannot be attributed to a closed agent after the fact.
+	# Check before claim under the shared fence lock; malformed, partial, and
+	# code-before-migration maps all fail closed.
+	if not confirmation_is_current(row, lock=True):
+		return _cancel_unrun_safety_update(row, approver, batch_id=batch_id, defer=defer_continuation)
 
 	refused = _preflight(row, approver, arm)
 	if refused:
@@ -595,12 +666,19 @@ def _claim_and_run(
 			frappe.log_error(title="jarvis.pending_action.arm_claimed_failed", message=frappe.get_traceback())
 			frappe.db.commit()
 
-	if row.kind == "chat":
+	if row.kind == "chat" and not row.get("collaboration_binding"):
 		# A card of an approved skill run: the wait for this click does not count
 		# against the run (outside the row lock; the claim is committed).
 		from jarvis.chat import turn_message_binding
 
 		turn_message_binding.keep_skill_autorun_open(row.conversation)
+	from jarvis.chat.agent_closure import confirmation_is_current
+
+	# Claiming and the approved-run helper may commit. Re-lock immediately before
+	# the only generic dispatch so a migration between claim and dispatch cannot
+	# execute an old card.
+	if not confirmation_is_current(row, lock=True):
+		return _cancel_claimed_safety_update(row, approver, batch_id=batch_id, defer=defer_continuation)
 	args = call.get("args") or {}
 	with ExitStack() as stamped:
 		if structure is not None:
@@ -613,7 +691,7 @@ def _claim_and_run(
 	if crash_tb or not (isinstance(result, dict) and result.get("ok")):
 		_discard_failed_dispatch(row, args, crash_tb, result=result, record=structure is None)
 	ok = not crash_tb and bool(isinstance(result, dict) and result.get("ok"))
-	if not ok and row.kind == "chat":
+	if not ok and row.kind == "chat" and not row.get("collaboration_binding"):
 		# ...and a card that fails ends the run, as a failed write does.
 		from jarvis.chat import turn_message_binding
 

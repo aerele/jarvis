@@ -260,22 +260,41 @@
 						v-else-if="!shownMessages.length && !stream.live && !thinking"
 						class="jvp-welcome"
 					>
-						<div class="jvp-hero" :class="{ 'jvp-sleeping': maintenanceActive }">
+						<!-- Holiday particles drift here for a few seconds on a played day or birthday
+						     (panel_welcome_fx.mjs). Empty the rest of the time. -->
+						<svg
+							ref="fxEl"
+							class="jvp-fx"
+							viewBox="0 0 350 260"
+							preserveAspectRatio="xMidYMin slice"
+							focusable="false"
+							aria-hidden="true"
+						></svg>
+						<WelcomeHero
+							:sleeping="maintenanceActive"
+							:smiling="heroSmiling"
+							:clickable="heroClickable"
+							:design="holidayView.design"
+							:item-markup="heroItemMarkup"
+							:layer-box="heroLayerBox"
+							:style="heroStyle"
+							@replay="welcomeFx?.replay()"
+						>
 							<!-- Upgrading: the hero mark sleeps too, so it matches the header
 							     avatar instead of showing a wide-awake face during a hold. -->
-							<span v-if="maintenanceActive" class="jvp-face" aria-hidden="true">
-								<i class="jvp-eye"></i><i class="jvp-eye"></i>
-							</span>
-							<span v-if="maintenanceActive" class="jvp-zzz" aria-hidden="true"
-								><i>z</i><i>z</i><i>z</i></span
-							>
-							<svg v-else viewBox="0 0 24 24" fill="#fff" aria-hidden="true">
-								<path
-									d="M12 2.5 L14 10 L21.5 12 L14 14 L12 21.5 L10 14 L2.5 12 L10 10 Z"
-								/>
-							</svg>
-						</div>
-						<div class="jvp-greet">{{ greeting }}</div>
+							<template #sleeping>
+								<span class="jvp-face" aria-hidden="true">
+									<i class="jvp-eye"></i><i class="jvp-eye"></i>
+								</span>
+								<span class="jvp-zzz" aria-hidden="true"
+									><i>z</i><i>z</i><i>z</i></span
+								>
+							</template>
+						</WelcomeHero>
+						<div class="jvp-greet">{{ welcomeText.greeting }}</div>
+						<p v-if="welcomeText.leadupLine" class="jvp-greet-sub jvp-greet-leadup">
+							{{ welcomeText.leadupLine }}
+						</p>
 						<p class="jvp-greet-sub">
 							<template v-if="contextText">
 								Jarvis can see <b>{{ contextText }}</b> while you are on this page.
@@ -525,7 +544,23 @@
 				</div>
 			</div>
 
-			<div v-if="stream.pending.length" class="jvp-pending" role="status" aria-live="polite">
+			<div
+				v-if="settledNotice || orderedPending.length"
+				class="jvp-pending"
+				role="status"
+				aria-live="polite"
+			>
+				<!-- A safety update has already cancelled this token. Keep its terminal
+				     explanation in the confirmation area until the person acknowledges it;
+				     do not make a generic retry banner look like a usable recovery path. -->
+				<div v-if="settledNotice" class="jvp-pending-row">
+					<div class="jvp-pending-txt">{{ settledNotice.message }}</div>
+					<div class="jvp-pending-acts">
+						<button class="jvp-btn-solid" type="button" @click="dismissSettledNotice">
+							Done
+						</button>
+					</div>
+				</div>
 				<div v-for="(p, pi) in orderedPending" :key="p.token" class="jvp-pending-row">
 					<div class="jvp-pending-txt">
 						<b v-if="orderedPending.length > 1"
@@ -561,7 +596,9 @@
 					</div>
 				</div>
 				<!-- Both ways to approve, shown once under the stack. -->
-				<div class="jvp-typehint">{{ typedApprovalHint }}</div>
+				<div v-if="orderedPending.length" class="jvp-typehint">
+					{{ typedApprovalHint }}
+				</div>
 			</div>
 
 			<!-- Jump to latest. stickToBottom already refuses to drag a reader who
@@ -788,9 +825,23 @@ import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import { renderReply } from "./panel_markdown.mjs";
 import { isShowCardRequest } from "./showCardRequest.mjs";
 import { resizeFrom } from "./panel_size.mjs";
-import { greetingLine, suggestionsFor } from "./panel_welcome.mjs";
+import {
+	HERO_PX,
+	HERO_RADIUS_PX,
+	greetingLine,
+	heroTopRoom,
+	isWelcomeOpen,
+	suggestionsFor,
+	welcomeLines,
+} from "./panel_welcome.mjs";
+import { createWelcomeFx } from "./panel_welcome_fx.mjs";
+import WelcomeHero from "./WelcomeHero.vue";
+import { wornLayerBox } from "./fab_worn.mjs";
+import { tileUnits } from "../../shared/holiday/worn-room.mjs";
+import { prefersReduced, watchReducedMotion } from "./reduced_motion.mjs";
 import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
 import { sendRefusalMessage } from "./panel_send_copy.mjs";
+import { advanceViewGeneration, isViewCurrent } from "./view_generation.mjs";
 import { maintenance, foldSend, startPollIfHeld } from "./maintenance_state.mjs";
 import {
 	emptyStream,
@@ -806,6 +857,8 @@ import {
 	keepEarlier,
 	keptCardMessage,
 	markCardsEarlier,
+	settledReasonMessage,
+	safetyUpdateTransition,
 	sortPendingCards,
 	typedApprovalHint as hintFor,
 	withExcluded,
@@ -838,6 +891,8 @@ const props = defineProps({
 	// fullscreen (see .jvp-root--expanding) so the transition reads as the panel
 	// growing INTO the big chat rather than a hard cut.
 	leaving: { type: Boolean, default: false },
+	// The Desk holiday touch (holiday_state.mjs), or null when the widget has none.
+	holiday: { type: Object, default: null },
 });
 const emit = defineEmits(["close", "open-full", "dismiss-context", "resize", "resize-commit"]);
 
@@ -919,6 +974,15 @@ const bodyEl = ref(null);
 const textareaEl = ref(null);
 
 const convId = ref("");
+// `startNewChat()` clears the current view while network work from the old view
+// can still be in flight. A conversation id alone is not enough to identify the
+// view: a later load can legitimately select the same id again. Keep a monotonic
+// view generation so old reads, sends, confirmations, and polls cannot repaint a
+// fresh chat.
+let viewGeneration = 0;
+function isCurrentView(generation, conversation) {
+	return isViewCurrent(generation, conversation, viewGeneration, convId.value);
+}
 const messages = ref([]);
 const stream = ref(emptyStream());
 const loading = ref(false);
@@ -960,15 +1024,78 @@ const draft = ref("");
 const sending = ref(false);
 const composerFocused = ref(false);
 const resolving = ref("");
+// A server safety update consumes a card. Keep the terminal explanation in the
+// confirmation area until the person sees and dismisses it; this has no retry.
+const settledNotice = ref(null);
+const settledNoticeQueue = ref([]);
 // D1: tokens a typed "no" discarded (dropDiscarded, below). messages.value keeps
 // tool_status "pending" for that row until the next load(), so resyncPending's
 // rowItems must not rebuild the card from it while stale. Persists past a
 // single resync - reset only on a conversation switch (startNewChat).
 let settledTokens = new Set();
+// This is deliberately separate from settledTokens. A typed discard suppresses
+// a stale card, but it must not suppress a future terminal safety explanation.
+let safetyNoticeTokens = new Set();
 // A typed "confirm 2" binds to the token shown as number 2 here (approval_tokens),
 // so the numbering must be stable: the shared, unit-tested comparator orders by
 // (created_at, token by code unit), whatever order the store listed them in.
-const orderedPending = computed(() => sortPendingCards(stream.value.pending || []));
+const orderedPending = computed(() => {
+	const cards = sortPendingCards(stream.value.pending || []);
+	return cards.filter((card) => !settledTokens.has(card.token));
+});
+const SAFETY_UPDATE_COPY =
+	"This confirmation was cancelled during an agent safety update. Submit the action again if it is still needed.";
+function passiveSafetyUpdate(row) {
+	if (row?.role !== "tool" || row.action_outcome !== "cancelled" || !row.tool_call_id)
+		return null;
+	let result = row.tool_result;
+	if (typeof result === "string") {
+		try {
+			result = JSON.parse(result);
+		} catch {
+			return null;
+		}
+	}
+	if (result?.reason_code !== "safety_update") return null;
+	return {
+		token: row.tool_call_id,
+		message: result?.error?.message || SAFETY_UPDATE_COPY,
+	};
+}
+function enqueueSettledNotice(notice) {
+	if (!settledNotice.value) {
+		settledNotice.value = notice;
+		return;
+	}
+	settledNoticeQueue.value = [...settledNoticeQueue.value, notice];
+}
+function settleSafetyUpdate(notice) {
+	if (!notice?.token) return false;
+	const next = safetyUpdateTransition(
+		{
+			settledTokens,
+			safetyNoticeTokens,
+			pending: stream.value.pending || [],
+		},
+		notice.token
+	);
+	settledTokens = next.settledTokens;
+	safetyNoticeTokens = next.safetyNoticeTokens;
+	// Always drop the terminal token, even when a passive receipt already
+	// queued its notice before this direct response arrived.
+	stream.value = { ...stream.value, pending: next.pending };
+	if (next.shouldEnqueue) enqueueSettledNotice(notice);
+	return next.shouldEnqueue;
+}
+function observePassiveSafetyUpdates(rows) {
+	for (const row of rows || []) {
+		const notice = passiveSafetyUpdate(row);
+		if (!notice) continue;
+		// A stale list can land before its terminal transcript receipt. Remove
+		// every settled token immediately, including a receipt waiting in FIFO.
+		settleSafetyUpdate(notice);
+	}
+}
 // Typed approval works in the widget too. An "Earlier" card never gets the
 // bare-phrase hint: only its number binds it (pending_order.mjs).
 const typedApprovalHint = computed(() => hintFor(orderedPending.value));
@@ -1188,6 +1315,62 @@ const greeting = computed(() => {
 });
 const suggestions = computed(() => suggestionsFor(props.context));
 
+// ---- Holiday touch in the welcome: the words, the hero's room, smile and particles. All
+// of it is inert without props.holiday, and nothing here runs under the upgrade hold. ----
+const holidayView = computed(() => props.holiday?.view.value || { kind: "none", hasItem: false });
+const welcomeText = computed(() =>
+	welcomeLines(greeting.value, props.holiday ? holidayView.value : null, {
+		hold: maintenanceActive.value,
+	})
+);
+const heroSmiling = ref(false);
+const fxEl = ref(null);
+// Reactive, so the hero stops being a button the moment the user asks for less motion.
+const reducedMotion = ref(prefersReduced());
+const stopWatchingMotion = watchReducedMotion((reduced) => {
+	reducedMotion.value = reduced;
+});
+const hasHolidayItem = computed(
+	() =>
+		!!props.holiday &&
+		!maintenanceActive.value &&
+		holidayView.value.hasItem === true &&
+		["leadup", "day", "birthday"].includes(holidayView.value.kind)
+);
+// Room above the hero for the item, taken from the answer (not from the art) so the hero never
+// jumps: the room is there before the art arrives, and stays if the art is blocked. A blocked
+// art leaves an empty gap above the hero on Christmas, which is the lesser evil next to a
+// hero that moves a few px just as the greeting begins.
+const heroStyle = computed(() => {
+	const room = hasHolidayItem.value ? heroTopRoom(holidayView.value.design) : 0;
+	return room ? { marginTop: `${room}px` } : undefined;
+});
+// A replay is motion, so under reduced motion the hero is inert: no role, no tab stop.
+const heroClickable = computed(
+	() => hasHolidayItem.value && holidayView.value.itemReady === true && !reducedMotion.value
+);
+const heroLayerBox = wornLayerBox(HERO_PX);
+const heroItemMarkup = computed(() => {
+	const art = props.holiday?.art.value;
+	if (!heroSmiling.value || !hasHolidayItem.value || !holidayView.value.itemReady || !art)
+		return "";
+	return art.wornMarkup(holidayView.value.design, {
+		idPrefix: "jvwp",
+		radius: tileUnits(HERO_RADIUS_PX, HERO_PX),
+		motion: !prefersReduced(),
+	});
+});
+const welcomeFx = props.holiday
+	? createWelcomeFx({
+			holiday: props.holiday,
+			getFxEl: () => fxEl.value,
+			setSmiling: (on) => {
+				heroSmiling.value = on;
+			},
+			reduced: prefersReduced,
+	  })
+	: null;
+
 // Lucide-shaped paths for the starter-card chips, indexed alongside suggestions.
 const CARD_ICONS = [
 	"M3 3v18h18M7 15l4-4 3 3 5-6", // trending analysis
@@ -1240,9 +1423,9 @@ const hint = computed(() => {
 	return ""; // idle needs no caption
 });
 
-async function scrollToBottom() {
+async function scrollToBottom(stillCurrent = () => true) {
 	await nextTick();
-	if (bodyEl.value) bodyEl.value.scrollTop = bodyEl.value.scrollHeight;
+	if (stillCurrent() && bodyEl.value) bodyEl.value.scrollTop = bodyEl.value.scrollHeight;
 }
 
 // Sticky-bottom guard: auto-scroll ONLY while the reader is already at the newest
@@ -1267,11 +1450,14 @@ function onBodyScroll() {
 	showScrollDown.value = d > 140;
 }
 function stickToBottom() {
+	const generation = viewGeneration;
+	const conversation = convId.value;
+	const current = () => isCurrentView(generation, conversation);
 	// Growing content must never RE-PIN a reader who scrolled up: only their own
 	// scroll does that (onBodyScroll, on the @scroll listener). Just keep the
 	// jump-to-latest arrow's visibility honest as the panel grows.
 	if (pinnedToBottom.value) {
-		scrollToBottom();
+		scrollToBottom(current);
 		// Following means we are at the newest text: clear any arrow a mid-growth
 		// scroll event flipped on, or it lingers pointing nowhere.
 		showScrollDown.value = false;
@@ -1279,9 +1465,11 @@ function stickToBottom() {
 }
 // Arrow click: re-pin so the panel follows the rest of the reply again.
 function jumpToBottom() {
+	const generation = viewGeneration;
+	const conversation = convId.value;
 	pinnedToBottom.value = true;
 	showScrollDown.value = false;
-	scrollToBottom();
+	scrollToBottom(() => isCurrentView(generation, conversation));
 }
 // The arrow has to track the CONTENT, not the delivery path. stickToBottom()
 // runs only on live realtime frames (see onRealtime), so when a reply lands via
@@ -1329,6 +1517,7 @@ function autoGrow() {
 // - so a resync never re-fetches the whole conversation. `source` tags the call for the
 // server's per-layer rescue signal. Best-effort: chat works without it.
 async function resyncPending(source) {
+	const generation = viewGeneration;
 	const cid = convId.value;
 	if (!cid) return;
 	try {
@@ -1342,6 +1531,7 @@ async function resyncPending(source) {
 					m.role === "tool" &&
 					m.tool_status === "pending" &&
 					m.pending_card &&
+					m.pending_card_safe === true &&
 					m.tool_call_id
 			)
 			.map((m) => ({
@@ -1356,26 +1546,31 @@ async function resyncPending(source) {
 				expires_at: toEpoch(m.expires_at),
 				approve_run: !!(m.pending_card && m.pending_card.approve_run),
 				recent: m.recent !== false,
+				pending_card_safe: true,
 			}));
 		const pc = await listPendingConfirmations(cid, source);
 		// A resync in flight across a startNewChat / conversation switch must not write the
-		// previous conversation's cards onto the new one (freshness guard, mirrors the SPA).
-		if (convId.value !== cid) return;
+		// previous conversation's cards onto the new one. The generation matters when a
+		// fresh view later resolves back to the same conversation id.
+		if (!isCurrentView(generation, cid)) return;
 		// Only a CLEAN ok:true read is authoritative. ok:false (a transient store blip) or a
 		// missing/malformed body keeps the current cards as the base so a live-only card is
 		// not wiped; the durable rowItems ALWAYS apply (this is also the open-seed path, so a
 		// blip on open must still show a parked card's durable row). Mirrors the PWA.
-		const clean = !!(pc && pc.ok !== false && pc.data);
+		const clean = !!(pc && pc.ok !== false && Array.isArray(pc.data?.pending));
 		const backstop = clean
-			? (pc.data.pending || []).map((r) => ({
-					token: r.token,
-					tool: r.tool || "",
-					summary: r.summary || r.preview || "",
-					created_at: r.created_at ?? null,
-					expires_at: r.expires_at ?? null,
-					approve_run: pendingApproveRun(r.preview),
-					recent: r.recent !== false,
-			  }))
+			? pc.data.pending
+					.filter((r) => r?.pending_card_safe === true)
+					.map((r) => ({
+						token: r.token,
+						tool: r.tool || "",
+						summary: r.summary || r.preview || "",
+						created_at: r.created_at ?? null,
+						expires_at: r.expires_at ?? null,
+						approve_run: pendingApproveRun(r.preview),
+						recent: r.recent !== false,
+						pending_card_safe: true,
+					}))
 			: [];
 		const base = clean ? [] : stream.value.pending || [];
 		const byToken = new Map();
@@ -1388,9 +1583,21 @@ async function resyncPending(source) {
 			rowItems,
 			backstop
 		);
+		const removedByCleanResync =
+			clean &&
+			(stream.value.pending || []).some(
+				(card) =>
+					card?.token &&
+					!settledTokens.has(card.token) &&
+					!merged.some((candidate) => candidate.token === card.token)
+			);
 		// A token settled locally (a typed "no") must not be resurrected by
 		// rowItems' still-stale transcript row (D1).
 		stream.value = { ...stream.value, pending: withoutTokens(merged, settledTokens) };
+		// A clean list can be the first sign that a cached card was cancelled by
+		// a close migration. Read its durable terminal receipt for the Done-only
+		// notice. The replacement queue makes the follow-up load inert.
+		if (removedByCleanResync) void load();
 	} catch (e) {
 		/* leave whatever the live stream captured */
 	}
@@ -1437,6 +1644,7 @@ function onVisiblePending() {
 }
 
 async function load() {
+	const generation = viewGeneration;
 	// Only blank the panel when there is nothing on screen yet; a refresh over
 	// an existing thread should be invisible.
 	loading.value = messages.value.length === 0;
@@ -1448,17 +1656,23 @@ async function load() {
 	const _hadThread = messages.value.length > 0;
 	const _keepScrollTop =
 		_hadThread && !pinnedToBottom.value && bodyEl.value ? bodyEl.value.scrollTop : null;
+	let requestedConversation = _convAtEntry;
 	try {
 		if (!convId.value) {
 			const list = await listConversations();
+			if (viewGeneration !== generation || convId.value) return;
 			convId.value = Array.isArray(list) && list.length ? list[0].name : "";
 		}
-		if (!convId.value) {
+		requestedConversation = convId.value;
+		if (!requestedConversation) {
+			if (viewGeneration !== generation) return;
 			if (!messages.value.length) messages.value = [];
 			return;
 		}
-		const conv = await getConversation(convId.value);
+		const conv = await getConversation(requestedConversation);
+		if (!isCurrentView(generation, requestedConversation)) return;
 		messages.value = Array.isArray(conv?.messages) ? conv.messages : [];
+		observePassiveSafetyUpdates(messages.value);
 		// Seed recall from what was actually asked in this conversation. The panel
 		// is usually opened fresh on a Desk page, so without this Up would do
 		// nothing until you had already sent something in this page load.
@@ -1470,18 +1684,26 @@ async function load() {
 		// Resync open write confirmations (rows-first + Redis backstop). A routine
 		// open / turn-settle refresh, so untagged. Best-effort: chat works without it.
 		await resyncPending();
-		if (_keepScrollTop !== null && bodyEl.value && convId.value === _convAtEntry) {
+		if (!isCurrentView(generation, requestedConversation)) return;
+		if (_keepScrollTop !== null && bodyEl.value && requestedConversation === _convAtEntry) {
 			// In-place refresh of the thread already on screen, with the reader
 			// parked somewhere in it. Put them back exactly where they were and
 			// leave the blank run alone so it keeps trimming as the answer grows.
 			await nextTick();
+			if (!isCurrentView(generation, requestedConversation)) return;
 			// Re-apply for a moment: the message list was just replaced, so on this
 			// tick the panel is still short and a single assignment clamps against a
 			// small scrollHeight, which would strand the reader near the top.
 			bodyEl.value.scrollTop = _keepScrollTop;
 			const deadline = Date.now() + 900;
 			const hold = () => {
-				if (!bodyEl.value || pinnedToBottom.value || Date.now() > deadline) return;
+				if (
+					!isCurrentView(generation, requestedConversation) ||
+					!bodyEl.value ||
+					pinnedToBottom.value ||
+					Date.now() > deadline
+				)
+					return;
 				if (Math.abs(bodyEl.value.scrollTop - _keepScrollTop) > 2) {
 					bodyEl.value.scrollTop = _keepScrollTop;
 				}
@@ -1494,29 +1716,50 @@ async function load() {
 			// A genuinely fresh open: land on the newest message.
 			pinnedToBottom.value = true;
 			showScrollDown.value = false;
-			await scrollToBottom();
+			await scrollToBottom(() => isCurrentView(generation, requestedConversation));
+			if (!isCurrentView(generation, requestedConversation)) return;
 		}
 	} catch (e) {
-		loadError.value = "Could not load your conversation.";
+		if (
+			viewGeneration === generation &&
+			(!requestedConversation || convId.value === requestedConversation)
+		)
+			loadError.value = "Could not load your conversation.";
 	} finally {
-		loading.value = false;
+		if (
+			viewGeneration === generation &&
+			(!requestedConversation || convId.value === requestedConversation)
+		)
+			loading.value = false;
 	}
 }
 
 function startNewChat() {
+	viewGeneration = advanceViewGeneration(viewGeneration);
+	abortRecording();
 	stopPendingPoll(); // a poll from the conversation being left must not carry over
+	stopPolling();
 	convId.value = "";
 	messages.value = [];
 	settledTokens = new Set(); // a settled token belonged to the conversation being left
+	safetyNoticeTokens = new Set();
+	settledNotice.value = null;
+	settledNoticeQueue.value = [];
 	// Keep the fence watermarks: the panel can rebind to the SAME conversation
 	// (list[0]) on reopen, and a wiped fence would readmit a superseded pump's
 	// straggler — the dead-banner resurrection the fence exists to prevent.
 	// New runs get fresh entries; old entries are three ints per run_id.
 	stream.value = { ...emptyStream(), fence: stream.value.fence };
+	loading.value = false;
+	sending.value = false;
+	uploading.value = false;
+	transcribing.value = false;
+	resolving.value = "";
 	loadError.value = "";
 	// The failure belonged to the conversation being left behind.
 	clearTurnError();
 	draft.value = "";
+	attachments.value = [];
 	// Recall belongs to the conversation you are in, not to the panel.
 	promptHistory.value = [];
 	histIdx.value = null;
@@ -1534,16 +1777,21 @@ async function onFilePicked(e) {
 	const files = Array.from(e.target.files || []);
 	e.target.value = ""; // let the same file be picked again
 	if (!files.length) return;
+	const generation = viewGeneration;
+	const conversation = convId.value;
 	uploading.value = true;
 	loadError.value = "";
 	try {
 		for (const f of files) {
-			attachments.value.push(await uploadFile(f));
+			const uploaded = await uploadFile(f);
+			if (!isCurrentView(generation, conversation)) return;
+			attachments.value.push(uploaded);
 		}
 	} catch (err) {
-		loadError.value = "That file could not be attached.";
+		if (isCurrentView(generation, conversation))
+			loadError.value = err?.serverReason || "That file could not be attached.";
 	} finally {
-		uploading.value = false;
+		if (isCurrentView(generation, conversation)) uploading.value = false;
 	}
 }
 
@@ -1658,8 +1906,14 @@ async function toggleVoice() {
 		loadError.value = "Recording is not supported in this browser.";
 		return;
 	}
+	const generation = viewGeneration;
+	const conversation = convId.value;
 	try {
 		const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+		if (!isCurrentView(generation, conversation)) {
+			stream.getTracks().forEach((t) => t.stop());
+			return;
+		}
 		recChunks = [];
 		recStartedAt = Date.now();
 		recorder = new MediaRecorder(stream);
@@ -1667,14 +1921,19 @@ async function toggleVoice() {
 			if (ev.data && ev.data.size) recChunks.push(ev.data);
 		};
 		recorder.onstop = async () => {
-			recording.value = false;
 			stream.getTracks().forEach((t) => t.stop());
+			if (!isCurrentView(generation, conversation)) {
+				recChunks = [];
+				return;
+			}
+			recording.value = false;
 			const blob = new Blob(recChunks, { type: recorder.mimeType || "audio/webm" });
 			recChunks = [];
 			if (!blob.size) return;
 			transcribing.value = true;
 			try {
 				const res = await transcribeAudio(blob, (Date.now() - recStartedAt) / 1000);
+				if (!isCurrentView(generation, conversation)) return;
 				const text = (res && res.text) || "";
 				if (text) {
 					draft.value = draft.value ? `${draft.value} ${text}` : text;
@@ -1683,19 +1942,23 @@ async function toggleVoice() {
 					textareaEl.value?.focus();
 				}
 			} catch (err) {
-				loadError.value = "Could not transcribe that recording.";
+				if (isCurrentView(generation, conversation))
+					loadError.value = "Could not transcribe that recording.";
 			} finally {
-				transcribing.value = false;
+				if (isCurrentView(generation, conversation)) transcribing.value = false;
 			}
 		};
 		recorder.start();
 		recording.value = true;
 	} catch (err) {
-		loadError.value = "Microphone permission was refused.";
+		if (isCurrentView(generation, conversation))
+			loadError.value = "Microphone permission was refused.";
 	}
 }
 
 async function send() {
+	const generation = viewGeneration;
+	const sentConversation = convId.value;
 	// Belt and braces: the composer is hidden whenever readiness is "gate" or
 	// still unresolved (see the template), but a stray call (e.g. Enter fired
 	// before that re-render) must not reach the backend for a workspace that was
@@ -1717,9 +1980,11 @@ async function send() {
 		const forConv = convId.value;
 		const before = (stream.value.pending || []).length;
 		await resyncPending("typed");
-		if (convId.value === forConv && (stream.value.pending || []).length > before) {
+		if (!isCurrentView(generation, forConv)) return;
+		if ((stream.value.pending || []).length > before) {
 			draft.value = "";
 			await nextTick();
+			if (!isCurrentView(generation, forConv)) return;
 			autoGrow();
 			return;
 		}
@@ -1748,12 +2013,14 @@ async function send() {
 	draft.value = "";
 	attachments.value = [];
 	await nextTick();
+	if (!isCurrentView(generation, sentConversation)) return;
 	autoGrow();
 	// Land on the new turn first, so you see your question and the answer start
 	// without reaching for the arrow — then STOP following, so the answer grows
 	// downward instead of sliding its own opening up out of the panel as it is
 	// written. Staying pinned is what made a long reply unreadable here too.
-	await scrollToBottom();
+	await scrollToBottom(() => isCurrentView(generation, sentConversation));
+	if (!isCurrentView(generation, sentConversation)) return;
 	pinnedToBottom.value = false;
 	showScrollDown.value = false;
 
@@ -1764,7 +2031,8 @@ async function send() {
 		// Tokens of the parked cards in the order shown, so a typed "confirm 2"
 		// binds to the card at that number rather than a server-side re-fetch.
 		const approvalTokens = orderedPending.value.map((p) => p.token);
-		const res = await sendMessage(convId.value, text, props.context, atts, approvalTokens);
+		const res = await sendMessage(sentConversation, text, props.context, atts, approvalTokens);
+		if (!isCurrentView(generation, sentConversation)) return;
 		if (res?.conversation_id) convId.value = res.conversation_id;
 		// A typed "no" discarded these cards server-side, even on a send that was then
 		// refused; they must not stay on screen as live offers.
@@ -1826,6 +2094,7 @@ async function send() {
 		ensureRealtime();
 		startPolling();
 	} catch (e) {
+		if (!isCurrentView(generation, sentConversation)) return;
 		sending.value = false;
 		loadError.value = "Could not send. Your message was not delivered.";
 	}
@@ -1853,19 +2122,47 @@ async function stop() {
 
 async function resolvePending(token) {
 	if (resolving.value) return;
+	const generation = viewGeneration;
+	const cid = convId.value;
+	const actionIsCurrent = () =>
+		isCurrentView(generation, cid) &&
+		(resolving.value === token ||
+			(stream.value.pending || []).some((card) => card.token === token));
 	resolving.value = token;
 	try {
-		const kept = keptCardMessage(await confirmTool(token, convId.value));
+		const result = await confirmTool(token, cid);
+		// A passive terminal receipt can remove this card while its direct RPC is
+		// in flight. The matching in-flight token still owns that terminal result;
+		// another card or a new chat never does.
+		if (!actionIsCurrent()) return;
+		const kept = keptCardMessage(result);
 		if (kept) {
 			loadError.value = kept;
 			return;
 		}
+		// A cancelled safety-update card is terminal. Show its no-action message
+		// in the confirmation area before removing it, rather than offering a retry
+		// or silently resolving it away.
+		const settled = settledReasonMessage(result);
+		if (settled) {
+			settleSafetyUpdate({ token, message: settled });
+			return;
+		}
 		stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
 	} catch (e) {
+		if (!actionIsCurrent()) return;
 		loadError.value = "Could not confirm that action.";
 	} finally {
-		resolving.value = "";
+		if (actionIsCurrent() && resolving.value === token) resolving.value = "";
 	}
+}
+
+function dismissSettledNotice() {
+	const token = settledNotice.value?.token;
+	if (!token) return;
+	stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
+	settledNotice.value = settledNoticeQueue.value[0] || null;
+	settledNoticeQueue.value = settledNoticeQueue.value.slice(1);
 }
 
 // The Desk already holds an authenticated socket, so the panel joins it rather
@@ -1893,7 +2190,11 @@ function onRealtime(payload) {
 	// Auto-heal: arm the run-scoped pending poll on a turn start / a card push (mirrors the
 	// SPA/PWA). Arming here - not only in send() - covers a cold-start turn whose run:start
 	// lands after the send-armed poll would have idled out, and a turn not locally initiated.
-	if (payload.kind === "run:start" || payload.kind === "action:pending") startPendingPoll();
+	if (
+		payload.kind === "run:start" ||
+		(payload.kind === "action:pending" && payload.pending_card_safe === true)
+	)
+		startPendingPoll();
 
 	// NB: we deliberately do NOT stop polling when a realtime frame arrives.
 	// Realtime gives the smooth live stream, but the relay can drop the TAIL
@@ -1930,6 +2231,33 @@ function onRealtime(payload) {
 	}
 }
 
+// A "welcome open": the welcome block becomes visible while the panel is open (a first open
+// with no conversation, or a new chat). A restored conversation never shows it, so the
+// welcome counts only once this open's load has finished (the empty frame before it is not one).
+const openSettled = ref(false);
+const welcomeShown = computed(() =>
+	isWelcomeOpen({
+		open: props.open,
+		settled: openSettled.value,
+		enabled: !!welcomeFx,
+		maintenance: maintenanceActive.value,
+		readiness: readiness.value,
+		loading: loading.value,
+		hasMessages: shownMessages.value.length > 0,
+		loadError: !!loadError.value,
+		streaming: !!stream.value.live,
+		thinking: !!thinking.value,
+	})
+);
+watch(
+	welcomeShown,
+	(on) => {
+		if (on) welcomeFx.open();
+		else welcomeFx?.close();
+	},
+	{ flush: "post" }
+);
+
 // Load lazily on first open, not at mount: the FAB is on every Desk page and
 // most page views never open the panel.
 // Refresh on EVERY open, not just the first. A reply can land while the panel
@@ -1940,9 +2268,11 @@ watch(
 	() => props.open,
 	async (isOpen) => {
 		if (!isOpen) {
+			openSettled.value = false;
 			unwatchBodyGrowth();
 			return;
 		}
+		props.holiday?.onPanelOpen(); // capped by the store's gap: the answer survives a reopen
 		await nextTick();
 		watchBodyGrowth();
 		// Focus the box, not the panel shell: opening the widget is always a
@@ -1951,6 +2281,7 @@ watch(
 		(textareaEl.value || panelEl.value)?.focus();
 		ensureRealtime();
 		await load();
+		openSettled.value = props.open;
 		// The composer only renders once readiness resolves, so on a cold open the
 		// textarea did not exist for the focus above. Claim it now that it does,
 		// unless the reader has already put focus somewhere else in the panel.
@@ -2016,8 +2347,10 @@ function settle() {
 
 function startPolling() {
 	stopPolling();
+	const generation = viewGeneration;
 	const before = shownMessages.value.length;
 	pollTimer = window.setInterval(async () => {
+		if (viewGeneration !== generation) return;
 		pollTicks += 1;
 		// ~2 minutes, then give up rather than hammer the site forever.
 		if (pollTicks > 48) {
@@ -2030,9 +2363,11 @@ function startPolling() {
 			if (gaveUp) loadError.value = "Jarvis did not reply. Try again.";
 			return;
 		}
-		if (!convId.value) return;
+		const cid = convId.value;
+		if (!cid) return;
 		try {
-			const conv = await getConversation(convId.value);
+			const conv = await getConversation(cid);
+			if (!isCurrentView(generation, cid)) return;
 			const msgs = Array.isArray(conv && conv.messages) ? conv.messages : [];
 			const next = visibleMessages(msgs);
 			// A COMPLETE assistant turn landed (streaming=0): adopt it and stop.
@@ -2079,6 +2414,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+	stopWatchingMotion();
+	welcomeFx?.close(); // no smile timer or particle animation outlives the panel
 	// A live recording outlives this component otherwise: the mic stays hot and
 	// the getUserMedia tracks are never released.
 	abortRecording();
@@ -2584,13 +2921,39 @@ defineExpose({ load, startNewChat, convId });
 
 /* ---- welcome ---- */
 .jvp-welcome {
+	position: relative; /* the particle layer is absolutely placed against it */
 	min-width: 0;
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	padding: 24px 9px 8px;
 }
-.jvp-hero {
+/* Holiday particles: behind the welcome's own content, never in the way of a click. */
+.jvp-fx {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+	--snow: #a5b4fc;
+}
+.jvp-panel--dark .jvp-fx {
+	--snow: #e0e7ff;
+}
+.jvp-fx :deep(.mfx) {
+	transform-box: fill-box;
+	transform-origin: 50% 50%;
+}
+.jvp-fx :deep(.mfx-snow) {
+	stroke: var(--snow);
+}
+.jvp-welcome > :not(.jvp-fx) {
+	position: relative;
+}
+/* :deep too: WelcomeHero's root does not carry this component's scope attribute in the Desk
+   build, so the bare selector alone never reaches it. */
+.jvp-hero,
+:deep(.jvp-hero) {
 	/* position: relative so the sleepy .jvp-face (position:absolute) centres inside
 	   this 52px tile, not against the whole panel - matching .jvp-avatar. */
 	position: relative;
@@ -2621,6 +2984,11 @@ defineExpose({ load, startNewChat, convId });
 	line-height: 1.55;
 	color: var(--jv-ink-2);
 	text-align: center;
+}
+/* The lead-up wish sits closer to the greeting than the sub-line does. Needs both classes to
+   outrank .jvp-greet-sub above. */
+.jvp-greet-sub.jvp-greet-leadup {
+	margin-top: 4px;
 }
 .jvp-greet-sub b {
 	font-weight: 600;

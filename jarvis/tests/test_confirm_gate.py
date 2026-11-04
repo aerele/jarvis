@@ -1651,10 +1651,13 @@ class TestFileBoxWikiWriteBack(FrappeTestCase):
 		self.assertNotEqual((r.get("data") or {}).get("status"), "pending_confirmation")
 
 	def test_file_box_draft_update_still_auto_applies(self):
-		# A single update_doc of a submittable draft auto-applies (provenance=auto_apply),
-		# no card - unregressed by the update_wiki branch.
+		# A single update_doc of a submittable draft this run created auto-applies
+		# (provenance=auto_apply), no card - unregressed by the update_wiki branch.
+		from jarvis.chat import held_writes
+
 		dt = draft_doctype() or self.skipTest("no submittable doctype installed")
 		conv = self._conv(file_box=1)
+		held_writes.note_created_draft(conv, dt, "DRAFT-FAKE")
 		with patch(
 			"jarvis.api.dispatch_confirmed",
 			return_value={"ok": True, "data": {"name": "DRAFT-FAKE"}},

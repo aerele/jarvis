@@ -106,6 +106,7 @@ def _att_canvas_item(att: dict) -> dict:
 		"name": frappe.generate_hash(length=10),
 		"type": kind,
 		"file_url": att["file_url"],
+		"file_id": att.get("file_id"),
 		"title": att.get("file_name") or ("image" if kind == "image" else "file"),
 	}
 
@@ -195,7 +196,7 @@ def _origin_page_from_context(context: str | dict | None) -> str:
 	return origin if origin in _BUILDER_ORIGINS else ""
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_tools() -> list[str]:
 	"""Tool names the agent can call, from the bench registry (the agent
 	plugin registers one ``jarvis__<name>`` per entry). Drives the chat's
@@ -207,14 +208,16 @@ def list_tools() -> list[str]:
 	return _registry_list_tools()
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def list_conversations(refresh: bool = False) -> list[dict]:
 	"""Return active, non-empty conversations owned by the current user, newest
 	first.
 
 	Empty conversations (a "New Chat" opened and abandoned with no message) are
 	hidden so a stray draft never lingers in the sidebar; it surfaces the moment
-	it gets its first message (the send path reloads this list). ``message_count``
+	it gets its first message (the send path reloads this list). A macro run's
+	chat is hidden too: it is a run log, opened from the Runs page, its macro's
+	page or the run's notification, and still opens at its own URL. ``message_count``
 	is still returned for the UI, and is always >= 1 given the EXISTS filter.
 	``activity`` carries unfinished run/message identities. ``refresh`` is an
 	observational sidebar reconciliation: it never queues billed prewarming.
@@ -247,6 +250,10 @@ def list_conversations(refresh: bool = False) -> list[dict]:
 		  AND EXISTS (
 		    SELECT 1 FROM `tabJarvis Chat Message` m2
 		    WHERE m2.conversation = c.name
+		  )
+		  AND NOT EXISTS (
+		    SELECT 1 FROM `tabJarvis Macro Run` r
+		    WHERE r.conversation = c.name
 		  )
 		ORDER BY c.starred DESC, c.last_active_at DESC
 		""",
@@ -298,7 +305,7 @@ def list_conversations(refresh: bool = False) -> list[dict]:
 	return rows
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def search_conversations(search: str = "", start: int = 0, page_length: int = 20) -> dict:
 	"""Title-only search over the caller's ACTIVE conversations (⌘K palette,
 	DESIGN-V3 §8.2 / D40). Owner-scoped in SQL; LIKE wildcards escaped; empty
@@ -318,6 +325,7 @@ def search_conversations(search: str = "", start: int = 0, page_length: int = 20
 
 	c = frappe.qb.DocType("Jarvis Conversation")
 	m = frappe.qb.DocType("Jarvis Chat Message")
+	r = frappe.qb.DocType("Jarvis Macro Run")
 	query = (
 		frappe.qb.from_(c)
 		.where(c.owner == me)
@@ -326,8 +334,10 @@ def search_conversations(search: str = "", start: int = 0, page_length: int = 20
 		# leak into the general chat palette. Other origin markers retain their
 		# established behavior.
 		.where(Coalesce(c.origin_page, "") != "dashboards")
-		# Hide empty (message-less) drafts, mirroring list_conversations.
+		# Hide empty (message-less) drafts and macro run chats, mirroring
+		# list_conversations.
 		.where(ExistsCriterion(frappe.qb.from_(m).select(1).where(m.conversation == c.name)))
+		.where(ExistsCriterion(frappe.qb.from_(r).select(1).where(r.conversation == c.name)).negate())
 	)
 	if search:
 		escaped = (search or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -607,7 +617,7 @@ def _search_records(search: str, limit: int) -> list[dict]:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def search_workspace(search: str = "", limit: int = 6) -> dict:
 	"""Full desk search over the caller's Frappe desk for the ⌘K palette,
@@ -655,7 +665,7 @@ def _undo_first_send_auto_mode(conversation: str, conv_changes: dict) -> None:
 		frappe.db.set_value(CONV, conversation, {"auto_mode": 0, "auto_mode_at": None}, update_modified=False)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_or_focus_empty(origin_page: str = "") -> str:
 	"""Return an empty active conversation for the current user, creating
 	one only if no empty conversation already exists.
@@ -721,7 +731,7 @@ def create_or_focus_empty(origin_page: str = "") -> str:
 	return create_conversation(origin_page=origin)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_conversation(
 	conversation: str, limit: int = 0, before: int = 0, refresh: str | None = None, after: int = 0
 ) -> dict:
@@ -733,6 +743,9 @@ def get_conversation(
 	"""
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	return _conversation_history(doc, limit, before, refresh, after)
 
 
@@ -802,7 +815,16 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 	# are shaped exactly like the thread's own.
 	rows = messages + page.get("older_pending", []) + page.get("refreshed", [])
 	# A pending-action card renders from its row's card (the sealed record's own copy).
-	_pending_action_cards(rows)
+	pending_action_tokens = _pending_action_cards(rows, owner=doc.owner, conversation=conversation)
+	# A legacy card's transcript row is display-only; Redis remains its execution
+	# authority. Fence it before the row reaches any client so getConversation
+	# winning a reload race cannot resurrect a close-revoked confirmation.
+	_fence_legacy_pending_cards(
+		rows,
+		owner=doc.owner,
+		conversation=conversation,
+		pending_action_tokens=pending_action_tokens,
+	)
 	_pending_recency(conversation, rows)
 	# T2 (live-turn-steps, R3): a still-streaming row's stored content keeps its
 	# step text by design (the RAW streaming mirror) - strip it and carry the
@@ -870,7 +892,19 @@ TOOL_RESULT_INLINE_MAX = 2048
 # lib/docRefs.js, actionSummary.toolFailureCopy): everything else waits for
 # get_tool_detail, which the Activity view calls when a tool row is expanded.
 _COMPACT_RESULT_KEYS = ("ok", "error")
-_COMPACT_DATA_KEYS = ("doctype", "name", "report_scope", "prepared_report", "status", "as_of", "row_note")
+_COMPACT_DATA_KEYS = (
+	"doctype",
+	"name",
+	"report_scope",
+	"prepared_report",
+	"status",
+	"as_of",
+	"row_note",
+	"read_status",
+	"preview_complete",
+	"coverage",
+	"run",
+)
 
 
 def _history_page(conversation: str, fields: list, limit, before, refresh, after=0) -> dict:
@@ -1093,7 +1127,7 @@ def _doc_refs(rows: list) -> list:
 	return refs
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_tool_detail(message: str) -> dict:
 	"""The whole input and output of one tool row a history page sent compact
 	(``tool_result_compact``). Gated like ``get_conversation``: the caller must own
@@ -1107,15 +1141,23 @@ def get_tool_detail(message: str) -> dict:
 	if not row or row.role != "tool" or frappe.utils.cint(row.hidden):
 		frappe.throw(_t("message not found"), frappe.DoesNotExistError)
 	_get_owned_conversation(row.conversation)  # non-owner: PermissionError
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(row.conversation)
 	return {"name": message, "tool_args": row.tool_args, "tool_result": row.tool_result}
 
 
-def _pending_action_cards(messages: list) -> None:
-	"""Every still-pending row carries epoch ``created_at`` (the clients' age label and
-	order; no timezone guessing): a legacy card its row's own creation (stamped with
-	the mint), a chat pending action its mint time plus its ``card`` (that column is
-	never sealed and never holds args)."""
-	from jarvis.chat.pending_confirm import _epoch
+def _pending_action_cards(messages: list, *, owner: str, conversation: str) -> set[str]:
+	"""Attach only positively-attested durable cards to a history response.
+
+	A transcript row can outlive its Pending Action, its full close-fence map, or
+	the bounded migration cleanup. Treat the action table as authority: any known
+	durable token that is not a current chat ``Pending`` action for this owner and
+	conversation becomes a terminal no-action response. Return *all* durable
+	tokens, including unsafe ones, so the legacy path cannot re-enable one.
+	"""
+	from jarvis.chat.agent_closure import PENDING_ACTION_FENCE_FIELD, pending_action_fences_ready
+	from jarvis.chat.pending_confirm import _epoch, pending_action_is_safe_to_render
 
 	pending = [m for m in messages if m.get("tool_status") == "pending" and m.get("tool_call_id")]
 	for m in pending:
@@ -1123,24 +1165,82 @@ def _pending_action_cards(messages: list) -> None:
 			m["created_at"] = _epoch(m.creation)
 	tokens = [m.tool_call_id for m in pending]
 	if not tokens:
-		return
+		return set()
 	from jarvis.chat.pending_actions._store import table_ready
 
 	if not table_ready():
-		return
-	cards = {
-		r.name: r
-		for r in frappe.db.sql(
-			"SELECT name, card, creation FROM `tabJarvis Pending Action` WHERE kind='chat' AND name IN %(t)s",
-			{"t": tuple(tokens)},
-			as_dict=True,
-		)
-	}
-	for m in messages:
-		row = cards.get(m.get("tool_call_id")) if m.get("tool_status") == "pending" else None
-		if row:
-			m["pending_card"] = row.card
-			m["created_at"] = _epoch(row.creation)
+		return set()
+	columns = ["name", "kind", "status", "owner_user", "conversation", "card", "creation"]
+	if pending_action_fences_ready():
+		columns.append(PENDING_ACTION_FENCE_FIELD)
+	try:
+		cards = {
+			r.name: r
+			for r in frappe.db.sql(
+				"SELECT "
+				+ ", ".join(f"`{column}`" for column in columns)
+				+ " FROM `tabJarvis Pending Action` WHERE name IN %(t)s",
+				{"t": tuple(tokens)},
+				as_dict=True,
+			)
+		}
+	except Exception:
+		# A table/fence read uncertainty must not turn an old transcript payload
+		# into Confirm. Keep every token out of the legacy fallback too.
+		frappe.log_error(title="jarvis.chat.pending_action_card_read_failed", message=frappe.get_traceback())
+		for message in pending:
+			_redact_unsafe_pending_card(message)
+		return set(tokens)
+
+	for message in pending:
+		row = cards.get(message.get("tool_call_id"))
+		if not row:
+			continue
+		if pending_action_is_safe_to_render(row, owner=owner, conversation=conversation):
+			message["pending_card"] = row.card
+			message["created_at"] = _epoch(row.creation)
+			message["pending_card_safe"] = True
+			continue
+		_redact_unsafe_pending_card(message)
+	return set(cards)
+
+
+def _redact_unsafe_pending_card(row) -> None:
+	"""Return a terminal, no-card response for an unsafe transcript card."""
+	from jarvis.chat.agent_closure import _SAFETY_UPDATE_RECEIPT
+
+	row["tool_args"] = {}
+	row["tool_result"] = dict(_SAFETY_UPDATE_RECEIPT)
+	row["tool_status"] = ""
+	row["action_outcome"] = "cancelled"
+	row["pending_card"] = None
+	row["pending_card_safe"] = False
+	row["content"] = f"{row.get('tool_name') or 'action'} → cancelled"
+
+
+def _fence_legacy_pending_cards(
+	messages: list, *, owner: str, conversation: str, pending_action_tokens: set[str]
+) -> None:
+	"""Stamp or redact every pending transcript card before history leaves the server.
+
+	Pending Action rows have their own durable sealed lifecycle. Every other pending
+	chat row is a legacy Redis confirmation, so it must pass the shared close fence
+	before it can be used as a UI card. This is deliberately in the history/read
+	path, not the later resync path: both PWA loads begin concurrently.
+	"""
+	from jarvis.chat.agent_closure import legacy_confirmation_is_safe_to_render
+
+	for row in messages:
+		if row.get("role") != "tool" or row.get("tool_status") != "pending" or not row.get("tool_call_id"):
+			continue
+		# This set is private read-path state. Do not infer the durable lifecycle
+		# from a client-visible row field or from a transcript token alone.
+		if row.get("tool_call_id") in pending_action_tokens:
+			continue
+		if legacy_confirmation_is_safe_to_render(row.tool_call_id, owner=owner, conversation=conversation):
+			row["pending_card_safe"] = True
+			continue
+		_redact_unsafe_pending_card(row)
 
 
 def _pending_recency(conversation: str, messages: list) -> None:
@@ -1223,7 +1323,7 @@ def _live_turn_steps(messages: list) -> None:
 		m["turn_state"] = turn.state
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_canvas(message: str, name: str | None = None, dark: int = 0) -> dict:
 	"""Return one canvas artifact's render-ready content for inline display.
 
@@ -1240,6 +1340,9 @@ def get_canvas(message: str, name: str | None = None, dark: int = 0) -> dict:
 	if not row:
 		frappe.throw(_t("message not found"), frappe.DoesNotExistError)
 	_get_owned_conversation(row.conversation)  # non-owner: PermissionError
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(row.conversation)
 
 	items = frappe.parse_json(row.canvas) if row.canvas else []
 	if not isinstance(items, list) or not items:
@@ -1314,7 +1417,7 @@ def _artifact_mime(item: dict) -> str:
 	}.get(ext, "application/octet-stream")
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def preview_file(file_url: str) -> dict:
 	"""Render-ready preview for the artifact side panel.
 
@@ -1328,9 +1431,22 @@ def preview_file(file_url: str) -> dict:
 		return {"kind": "binary"}
 	from jarvis import compat
 	from jarvis.chat.xlsx_charts import extract_charts, preview_cell
+	from jarvis.tools._docx_text import DocxReadError
 	from jarvis.tools.read_file import _resolve_file, read_file
 
-	data = read_file(file_url=file_url, max_rows=300, max_chars=8000, preview=True)
+	try:
+		data = read_file(file_url=file_url, max_rows=300, max_chars=8000, preview=True)
+	except DocxReadError as exc:
+		from jarvis.tools._file_scan_worker import RESOURCE_ERROR
+
+		error = str(exc)
+		if error == RESOURCE_ERROR:
+			error = "This DOCX is too complex to preview. Split or simplify it, or download the original."
+		return {"kind": "binary", "error": error, "format": "docx"}
+	if data.get("format") == "docx":
+		from jarvis.tools._docx_preview import document_view
+
+		return {"kind": "text", "text": data["text"], "document": document_view(data)}
 	kind = data.get("kind")
 	if kind == "table":
 		sheets = [
@@ -1351,7 +1467,7 @@ def preview_file(file_url: str) -> dict:
 	return {"kind": kind or "binary"}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def create_conversation(origin_page: str = "") -> str:
 	"""Create an empty conversation owned by the current user; return its name."""
 	require_jarvis_access()
@@ -1473,6 +1589,10 @@ _DELETED = "deleted"
 _ALREADY_GONE = "already gone"
 # The delete raised: not deleted, and not "kept" (no reply is in progress).
 _FAILED = "failed"
+# An approved Cycle-Count plan or submitted observation keeps the conversation
+# that supplies its owner boundary.  This is a normal kept outcome, like a
+# reply in progress; it must not be surfaced as a failed history clear.
+_CYCLE_COUNT_EVIDENCE_RETAINED = "cycle_count_evidence_retained"
 # This many chats failing one after another reads as a fault common to all of them
 # (a broken trash hook, a held lock), not as one bad chat: the request stops there.
 # It bounds the Error Log rows of one request (each is forwarded off the bench with
@@ -1484,16 +1604,17 @@ _FAILURES_IN_A_ROW_THAT_END_THE_REQUEST = 3
 def clear_chat_history() -> dict:
 	"""Permanently delete the current user's conversations and messages (the
 	settings "Danger zone" action), except a conversation that is waiting for a
-	reply: that one is left whole and counted in ``skipped``, to be deleted once
-	the reply has finished. Macros, skills and settings are untouched; macro-run
+	reply or retains a Cycle-Count plan/fact: it is left whole and counted in
+	``skipped``. Macros, skills and settings are untouched; macro-run
 	history rows survive but drop their (now deleted) conversation reference.
 
 	``deleted`` counts the conversations this request deleted. ``kept`` names the
-	skipped ones (kept because a reply is in progress, nothing else), ``failed``
-	counts and ``failed_names`` names the ones an error left undeleted. The names are
-	there so the client can tell whether the chat it has open still exists without
-	reading the list again. Every listed conversation is in exactly one of deleted,
-	skipped, failed, or already gone (deleted by someone else meanwhile, not reported).
+	skipped ones (kept because a reply is in progress or retained count evidence), and
+	``retained_count_plan_names`` identifies the latter subset when it is nonempty.
+	``failed`` counts and ``failed_names`` names the ones an error left undeleted. The
+	names let the client tell whether its open chat still exists without reading the
+	list again. Every listed conversation is in exactly one of deleted, skipped,
+	failed, or already gone (deleted by someone else meanwhile, not reported).
 
 	One conversation at a time, each in its own transaction. A conversation whose
 	delete fails is rolled back, logged by name and counted as failed, and the rest
@@ -1507,6 +1628,7 @@ def clear_chat_history() -> dict:
 	names = frappe.get_all(CONV, filters={"owner": frappe.session.user}, pluck="name")
 	deleted = 0
 	kept: list[str] = []
+	retained_count_plan_names: list[str] = []
 	failed: list[str] = []
 	failures_in_a_row = 0
 	for at, name in enumerate(names):
@@ -1532,7 +1654,9 @@ def clear_chat_history() -> dict:
 			failed.append(name)
 		elif outcome != _ALREADY_GONE:
 			kept.append(name)
-	return {
+			if outcome == _CYCLE_COUNT_EVIDENCE_RETAINED:
+				retained_count_plan_names.append(name)
+	result = {
 		"ok": True,
 		"deleted": deleted,
 		"skipped": len(kept),
@@ -1540,6 +1664,11 @@ def clear_chat_history() -> dict:
 		"failed": len(failed),
 		"failed_names": failed,
 	}
+	if retained_count_plan_names:
+		# Optional for a compatible response shape on older client releases. A
+		# client that does not know this field keeps its existing generic notice.
+		result["retained_count_plan_names"] = retained_count_plan_names
+	return result
 
 
 def _delete_idle_conversation(conversation: str) -> str:
@@ -1581,6 +1710,10 @@ def _delete_idle_conversation(conversation: str) -> str:
 		reason = admission.reply_in_progress(conversation)
 		if reason:
 			return reason
+		from jarvis.chat.cycle_count_permissions import conversation_has_retained_count_plan
+
+		if conversation_has_retained_count_plan(conversation):
+			return _CYCLE_COUNT_EVIDENCE_RETAINED
 		frappe.db.delete(MSG, {"conversation": conversation})
 		_unlink_macro_runs(conversation)
 		frappe.delete_doc(CONV, conversation, force=True, ignore_permissions=True)
@@ -1617,7 +1750,7 @@ def _unlink_macro_runs(conversation: str) -> None:
 		)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def rename_conversation(conversation: str, title: str) -> dict:
 	"""Rename a conversation (owner-only, enforced explicitly)."""
 	require_jarvis_access()
@@ -1644,7 +1777,7 @@ def rename_conversation(conversation: str, title: str) -> dict:
 	return {"ok": True, "data": {"title": title}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_star(conversation: str, starred: str | int | bool) -> dict:
 	"""Star/unstar a conversation (owner-only, enforced explicitly). Starred
 	chats are listed first and grouped under 'Starred' in the sidebar."""
@@ -1674,7 +1807,7 @@ import uuid
 
 from frappe import _
 
-from jarvis.chat import role_profiles
+from jarvis.chat import device, role_profiles
 from jarvis.chat.agent_client import AgentSession
 from jarvis.chat.entities import scrub
 from jarvis.chat.policy import blocking_limit_period, validate_can_send
@@ -1689,6 +1822,10 @@ def _send_rejection(user: str, reason: str) -> dict:
 	monthly) fires the same code but leaves the window out, and the SPA keeps
 	its period-neutral copy."""
 	out = {"ok": False, "reason": reason}
+	if reason == "site_is_copy":
+		from jarvis.chat import site_pin
+
+		out["message"] = site_pin.copy_message(site_pin.status()["paired_site"])
 	if reason == "usage_limit":
 		period = blocking_limit_period(user)
 		if period:
@@ -2404,11 +2541,17 @@ def send_message(
 	# track. PermissionError (someone else's conversation) always propagates.
 	try:
 		conv_doc = _get_owned_conversation(conversation)
+		from jarvis.chat.collaboration import require_legacy_conversation
+
+		require_legacy_conversation(conversation)
 	except frappe.DoesNotExistError:
 		if _delegated:
 			raise
 		conversation = create_or_focus_empty(origin_page=requested_origin)
 		conv_doc = _get_owned_conversation(conversation)
+		from jarvis.chat.collaboration import require_legacy_conversation
+
+		require_legacy_conversation(conversation)
 
 	# Builder threads are application-scoped workspaces, not aliases for main
 	# chat. A direct /c/<id> visit therefore cannot post into one without the
@@ -3121,7 +3264,7 @@ def _subscription_connect_providers() -> list[dict]:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_model_catalog_ui() -> dict:
 	"""Catalog slice the pool editor and subscription card need, independent of
 	get_chat_ui_settings so the onboarding wizard (which never calls that) works.
@@ -3142,7 +3285,7 @@ def get_model_catalog_ui() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_chat_ui_settings() -> dict:
 	"""Return the bench-side LLM settings the chat UI needs to render the
 	model picker (provider label, current default model, auth mode, and the
@@ -3436,7 +3579,7 @@ def _tool_runs(conversation: str) -> list[dict]:
 	return runs
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_tool_activity(conversation: str, limit: int = 20) -> dict:
 	"""Recent tool runs in ``conversation`` for the Settings Activity pane.
 
@@ -3447,6 +3590,9 @@ def get_tool_activity(conversation: str, limit: int = 20) -> dict:
 	"""
 	require_jarvis_access()
 	_get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	from frappe.utils import cint
 
 	runs = _tool_runs(conversation)
@@ -3510,7 +3656,7 @@ def _measured_usage(user: str) -> dict | None:
 	return measured
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_usage(conversation: str | None = None) -> dict:
 	"""Estimated token usage for the current user — this chat, this month, and
 	all-time — plus the monthly budget so the UI can draw a meter.
@@ -3568,12 +3714,15 @@ def get_usage(conversation: str | None = None) -> dict:
 	return out
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_conversation_context(conversation: str) -> dict:
 	"""Context-window meter for one conversation (owner only). Bench snapshot
 	only; never calls the runtime."""
 	require_jarvis_access()
 	_get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	from jarvis.chat import compaction
 
 	payload = compaction.context_payload(conversation)
@@ -3602,13 +3751,16 @@ def _cap_reading(user: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def compact_conversation(conversation: str, hint: str | None = None) -> dict:
 	"""Summarise older turns of one conversation (owner only). Refuses with a
 	typed reason while a turn or another compaction is in flight; otherwise
 	takes the lock and enqueues jarvis.chat.compaction.run_compact."""
 	require_jarvis_access()
 	doc = _get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	from jarvis.chat import compaction
 
 	if doc.get("skip_confirmation"):
@@ -3648,7 +3800,7 @@ def compact_conversation(conversation: str, hint: str | None = None) -> dict:
 	return compaction.start_compaction(conversation, frappe.session.user, clean)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 	"""Set or clear the per-conversation model override.
 
@@ -3717,7 +3869,7 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 	return {"ok": True, "data": {"effective_model": model}}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def warm_session() -> dict:
 	"""Fire-and-forget: warm this tenant's agent prefix cache so the next
 	new-chat first turn skips the cold prefill. Best-effort; always ok.
@@ -3736,7 +3888,7 @@ def warm_session() -> dict:
 	return {"ok": True, "enqueued": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def set_conversation_thinking(conversation: str, thinking: str | None = None) -> dict:
 	"""Set or clear the per-conversation thinking effort (low/medium/high).
 
@@ -3810,6 +3962,9 @@ def retry_message(message: str) -> dict:
 	# A retry is a human turn-entry too, so an armed macro-run conversation refuses
 	# it (T4): re-running a step there would run the covered set uncarded on demand.
 	_reject_send_into_armed_conversation(_get_owned_conversation(doc.conversation))
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(doc.conversation)
 	# Flag ON: _retry_errored refuses a retry while another turn runs, and accept_or_queue
 	# queues it when the site is at capacity; flag OFF keeps the legacy single-flight reject.
 	if admission.turn_machine_enabled():
@@ -4079,6 +4234,9 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 	refuse_in_tool_dispatch()
 	require_jarvis_access()
 	conv = _get_owned_conversation(conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conversation)
 	if run_id and _stop_is_late(conversation, run_id):
 		return {"ok": False, "reason": _("That reply has already finished, so nothing was stopped.")}
 	# A reply still queued for a slot has nothing with the agent to abort, so Stop
@@ -4424,7 +4582,33 @@ def _dispatch_turn(
 			_gate_ts.reset_lock_tracking()
 			return _reroute_legacy_to_pump(enqueue_kwargs, interactive, exempt_overload=exempt_overload)
 	try:
-		if (frappe.conf.get("socketio_backend") or "").strip().lower() == "python":
+		from jarvis.chat.collaboration import is_collaborative
+
+		shared = is_collaborative(enqueue_kwargs.get("conversation_id"))
+		if shared:
+			from jarvis.chat import collaboration as c
+			from jarvis.chat.collaboration_turn import binding_for_run
+
+			binding = binding_for_run(enqueue_kwargs.get("run_id"))
+			row = frappe.db.get_value(
+				"Jarvis Chat Turn",
+				enqueue_kwargs.get("run_id"),
+				["seed_message", "collaboration_executor", "state"],
+				as_dict=True,
+			)
+			if (
+				not binding
+				or not row
+				or (binding.conversation, row.seed_message, row.collaboration_executor, row.state)
+				!= (
+					enqueue_kwargs.get("conversation_id"),
+					enqueue_kwargs.get("message_id"),
+					"rq",
+					"dispatching",
+				)
+			):
+				c._deny()
+		if not shared and (frappe.conf.get("socketio_backend") or "").strip().lower() == "python":
 			from jarvis.chat import dispatch
 
 			# Mismatch guard: pub/sub is fire-and-forget, so publishing with no
@@ -4539,6 +4723,9 @@ def _enqueue_turn(
 	written. Elsewhere (the pump off, or draining) there is no row to meet on and the
 	turn gets a random id, as before."""
 	conv_doc = frappe.get_doc(CONV, conversation)
+	from jarvis.chat.collaboration import require_legacy_conversation
+
+	require_legacy_conversation(conv_doc)
 	# Every field this call changes on the conversation row is collected here and
 	# persisted as ONE locked, targeted write below, right before msg_doc.insert(),
 	# the same reasoning as send_message's targeted write (see there): a
@@ -4955,6 +5142,29 @@ _TYPED_REPLY_SUFFIX = (
 )
 
 
+def continuation_prompt(receipt: str, *, outcome=None, spans=None, failed=False, applied=None) -> str:
+	"""Format untrusted receipt data without admission, identity or bypass state."""
+	from jarvis.chat.turn_handler import _safe_label_name
+
+	spans = dict(spans or {})
+	if set(spans) - MIXED_SPANS:
+		raise ValueError(f"enqueue_continuation: unknown span(s) {sorted(set(spans) - MIXED_SPANS)}")
+	if applied is not None:
+		spans.setdefault("applied", applied)
+	spans.setdefault("not_fixable", receipt)
+	outcome = _resolve_outcome(outcome, failed, spans.get("applied"))
+	safe = _safe_label_name(receipt)
+	if outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
+		prompt = _CONTINUATION_PROMPT_UNKNOWN.format(receipt=safe)
+	elif outcome == OUTCOME_MIXED:
+		prompt = _mixed_prompt(spans)
+	elif outcome in _FAILED_SCAFFOLDS:
+		prompt = _FAILED_SCAFFOLDS[outcome].format(receipt=safe)
+	else:
+		prompt = _CONTINUATION_PROMPT.format(receipt=safe)
+	return prompt
+
+
 def enqueue_continuation(
 	conversation: str,
 	receipt: str,
@@ -4996,22 +5206,7 @@ def enqueue_continuation(
 	A typed approval in flight (``TYPED_REPLY_FLAG``) appends the user's words as DATA."""
 	from jarvis.chat.turn_handler import _safe_label_name
 
-	spans = dict(spans or {})
-	if set(spans) - MIXED_SPANS:
-		raise ValueError(f"enqueue_continuation: unknown span(s) {sorted(set(spans) - MIXED_SPANS)}")
-	if applied is not None:
-		spans.setdefault("applied", applied)
-	spans.setdefault("not_fixable", receipt)
-	outcome = _resolve_outcome(outcome, failed, spans.get("applied"))
-	safe = _safe_label_name(receipt)
-	if outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
-		prompt = _CONTINUATION_PROMPT_UNKNOWN.format(receipt=safe)
-	elif outcome == OUTCOME_MIXED:
-		prompt = _mixed_prompt(spans)
-	elif outcome in _FAILED_SCAFFOLDS:
-		prompt = _FAILED_SCAFFOLDS[outcome].format(receipt=safe)
-	else:
-		prompt = _CONTINUATION_PROMPT.format(receipt=safe)
+	prompt = continuation_prompt(receipt, outcome=outcome, spans=spans, failed=failed, applied=applied)
 	typed = frappe.flags.get(TYPED_REPLY_FLAG)
 	if typed:
 		prompt += _TYPED_REPLY_SUFFIX.format(typed=_safe_label_name(typed))
@@ -5103,8 +5298,9 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile:
 		# create_session/sessions.create entirely: a totally unconfigured
 		# agent must still fail fast here, not silently mint a key nothing
 		# can ever connect to.
-		gateway_token = settings.get_password("agent_token")
-		if not gateway_url or not gateway_token:
+		# A profile pick skips the connect, so check here that the agent is reachable in
+		# principle: an agent_url and a paired chat device (never the owner token).
+		if not gateway_url or not device.has_paired_token(settings):
 			frappe.throw(_("agent is not configured"))
 		# ":dashboard:" is the SAME chat-session namespace marker the gateway
 		# stamps into every legacy-minted key - session_lifecycle.py's
@@ -5119,8 +5315,9 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile:
 		# deduplicates sessions by label and rejects collisions.
 		session_key = sess.create_session(label=f"jarvis-chat-{user}-{int(time.time() * 1000)}")
 	else:
-		gateway_token = settings.get_password("agent_token")
-		if not gateway_url or not gateway_token:
+		# AgentSession.connect pairs the chat device on first use, so only the URL
+		# can be checked up front; a device that cannot pair fails the connect itself.
+		if not gateway_url:
 			frappe.throw(_("agent is not configured"))
 
 		one_shot = AgentSession.connect(gateway_url)
@@ -5179,25 +5376,56 @@ _NON_EDIT_FIELDTYPES = {
 }
 
 
-@frappe.whitelist()
-def get_doctype_fields(doctype: str) -> dict:
-	"""Field metadata (fieldtype + options) for a DocType, so the chat SPA can
-	render the record-edit card with proper controls (Link → searchable picker,
-	Select → dropdown, Date → date input) instead of plain text boxes.
+@frappe.whitelist(methods=["POST"])
+def get_doctype_fields(
+	doctype: str, parent_doctype: str | None = None, parentfield: str | None = None
+) -> dict:
+	"""Readable field metadata for the chat's field-backed clarifying questions.
+	Child fields require their real parent/table context, including for admins.
 
-	Returns only editable, data-bearing fields (layout/display fieldtypes are
+	Returns data-bearing fields (layout/display fieldtypes are
 	dropped). Read-only structural info — gated on the caller being able to read
 	the DocType so it can't be used to enumerate arbitrary schemas."""
 	require_jarvis_access()
 	doctype = (doctype or "").strip()
 	if not doctype or not frappe.db.exists("DocType", doctype):
 		return {"ok": False, "reason": _("unknown doctype"), "fields": []}
-	if not frappe.has_permission(doctype, "read"):
-		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
 	meta = frappe.get_meta(doctype)
+	parent_doctype, parentfield = (parent_doctype or "").strip(), (parentfield or "").strip()
+	if parent_doctype or parentfield:
+		if not meta.istable or not parent_doctype or not frappe.db.exists("DocType", parent_doctype):
+			return {"ok": False, "reason": _("invalid parent"), "fields": []}
+		parent_meta = frappe.get_meta(parent_doctype)
+		tables = [
+			df
+			for df in parent_meta.get_table_fields()
+			if df.options == doctype and (not parentfield or df.fieldname == parentfield)
+		]
+		if parent_meta.istable or len(tables) != 1:
+			return {"ok": False, "reason": _("invalid parent"), "fields": []}
+		parentfield = tables[0].fieldname
+		if (
+			frappe.session.user != "Administrator"
+			and tables[0].permlevel
+			and tables[0].permlevel not in parent_meta.get_permlevel_access(permission_type="read")
+		):
+			frappe.throw(_("You don't have access to this table."), frappe.PermissionError)
+	if not frappe.has_permission(doctype, "read", parent_doctype=parent_doctype or None):
+		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
+	if meta.istable and not parent_doctype:
+		return {"ok": False, "reason": _("parent required"), "fields": []}
+	from jarvis.chat.link_filters import draft_link_query_filters
+
+	levels = (
+		None
+		if frappe.session.user == "Administrator"
+		else set(meta.get_permlevel_access(permission_type="read", parenttype=parent_doctype or None))
+	)
 	fields = []
 	for df in meta.fields:
 		if df.fieldtype in _NON_EDIT_FIELDTYPES or not df.fieldname:
+			continue
+		if levels is not None and df.permlevel and df.permlevel not in levels:
 			continue
 		fields.append(
 			{
@@ -5206,6 +5434,10 @@ def get_doctype_fields(doctype: str) -> dict:
 				"fieldtype": df.fieldtype,
 				"options": df.options or "",
 				"reqd": int(df.reqd or 0),
+				"link_filters": df.get("link_filters") or "",
+				"link_query_filters": draft_link_query_filters(
+					doctype, df, parent_doctype or None, parentfield or None
+				),
 			}
 		)
 	return {"ok": True, "doctype": doctype, "fields": fields}

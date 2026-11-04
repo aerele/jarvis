@@ -136,7 +136,7 @@
    "fieldname": "phase",
    "fieldtype": "Select",
    "label": "Phase",
-   "options": "\nfinalizing",
+   "options": "\nfinalizing\ngenerating",
    "read_only": 1
   },
   {

@@ -3,6 +3,7 @@ supplies itself instead of asking the customer to type them."""
 
 import hashlib
 import hmac
+import re
 
 import frappe
 
@@ -23,10 +24,93 @@ def _open_lead_statuses(inst):
 	return sorted(names) or None
 
 
+def _statutory_schema(inst):
+	"""Describe existing columns. Do not read payroll or identity values."""
+	identity = ("pan_number", "provident_fund_account", "ifsc_code", "micr_code")
+	return {
+		"india_fields_present": {field: frappe.db.has_column("Employee", field) for field in identity},
+		"component_fields": [
+			field
+			for field in ("component_type", "accrual_component")
+			if frappe.db.has_column("Salary Component", field)
+		],
+		"detail_fields": [
+			field for field in ("accrual_component",) if frappe.db.has_column("Salary Detail", field)
+		],
+		"assignment_fields": [
+			field
+			for field in (
+				"epf_applicable",
+				"contribute_on_actual_pf_wage",
+				"employment_state",
+				"is_person_with_disability",
+				"lwf_exempted",
+			)
+			if frappe.db.has_column("Salary Structure Assignment", field)
+		],
+	}
+
+
+def _tax_withholding_model(inst):
+	invoice = frappe.get_meta("Purchase Invoice")
+	if not invoice.has_field("tax_withholding_entries"):
+		return "legacy_supplier_unverified"
+	field = invoice.get_field("tax_withholding_entries")
+	if field.fieldtype != "Table" or field.options != "Tax Withholding Entry":
+		return "entry_table_unrecognized"
+	entry = frappe.get_meta("Tax Withholding Entry")
+	required = {
+		"company",
+		"party_type",
+		"party",
+		"tax_id",
+		"tax_withholding_category",
+		"tax_withholding_group",
+		"taxable_amount",
+		"tax_rate",
+		"withholding_amount",
+		"taxable_doctype",
+		"taxable_name",
+		"taxable_date",
+		"withholding_doctype",
+		"withholding_name",
+		"withholding_date",
+		"under_withheld_reason",
+		"lower_deduction_certificate",
+		"status",
+	}
+	if not all(entry.has_field(name) for name in required):
+		return "entry_table_unrecognized"
+	if not {"Duplicate", "Cancelled"} <= set((entry.get_field("status").options or "").splitlines()):
+		return "entry_table_unrecognized"
+	return "entry_table_v16"
+
+
+SUPPORTED = {"tax_withholding_model": {"entry_table_v16"}}
+MIN_BUNDLE_VERSION = {"tax_withholding_model": (0, 4, 0)}
+
+
+def unsupported_reason(namespaces, inst):
+	"""Recheck declared schema guards at writeback; a failed check stays closed."""
+	for key in sorted(set(namespaces) & set(SUPPORTED)):
+		version = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", str(inst.get("installed_version") or ""))
+		if not version or tuple(int(part) for part in version.groups()) < MIN_BUNDLE_VERSION[key]:
+			return "auditor bundle version"
+		try:
+			value = PROVIDERS[key][0](inst)
+		except Exception:
+			return "unavailable " + key.replace("_", " ")
+		if value not in SUPPORTED[key]:
+			return key.replace("_", " ")
+	return None
+
+
 # key -> (provider, customer value wins?)
 PROVIDERS = {
 	"fingerprint_salt": (_fingerprint_salt, False),
 	"open_workable_status_set": (_open_lead_statuses, True),
+	"statutory_schema": (_statutory_schema, False),
+	"tax_withholding_model": (_tax_withholding_model, False),
 }
 
 

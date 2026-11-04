@@ -28,7 +28,7 @@ def _branding_payload(agent_name: str, logo: str, favicon: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def get_branding() -> dict:
 	"""Current whitelabel identity for the Branding pane. Tenant-admin only."""
 	require_jarvis_admin()
@@ -39,7 +39,7 @@ def get_branding() -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def update_branding(agent_name: str = "", logo_url: str = "", favicon_url: str = "") -> dict:
 	"""Set the whitelabel identity. Writes the Single fields directly (no full
 	doc.save, so it never trips the LLM-sync machinery in on_update, which can
