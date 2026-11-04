@@ -116,6 +116,72 @@ restored on every exit; this context must never run in a threaded web request.
 Tripwires check the required helper-cache paths and source precision. Schema,
 hooks and permission metadata remain part of the maintained versioned contract.
 
+## Visibility
+
+The SPA shows the Payment Calendar link (welcome screen) and card (Dashboards,
+Saved tab) only when the boot flag `can_view_payment_calendar` is `true`.
+`jarvis/www/jarvis.py` sets it from
+`jarvis.payment_calendar.visibility.can_view_payment_calendar()`. A direct visit
+to `/dashboards/payment-calendar` with the flag off redirects, without a
+message, to `/dashboards#saved`. The flag is `true` only when all four rules
+hold, checked in this order:
+
+1. ERPNext is installed (`jarvis.chat.agent_installability.installed_apps`).
+2. The Frappe/ERPNext pair passes `sources.check_contract()`. This covers an
+   unsupported version pair and ERPNext source drift. Only a pass or a
+   deterministic `CalendarSourceUnavailable` is remembered, per process and per
+   version pair; a deploy restarts workers and resets it. Any other result
+   (ERPNext cannot be imported, `AttributeError`, an `ImportError` from the
+   Jarvis modules) hides the entry points but is not remembered, so the next
+   page load tries again.
+3. The user can run the standard Accounts Payable report: it exists, is enabled,
+   is a standard Accounts script report, the user has a role it allows (Custom
+   Role included) and report permission on its reference DocType. Accounts
+   Receivable is not required.
+4. The user can see at least one Company (`frappe.get_list`).
+
+Every failure gives `false`. The flag is a UX hint only. The calendar API keeps
+its own gate (`authorize_scope`, `require_report`), so a stale flag cannot grant
+data; it can only show the in-page "Finance access required" or "unavailable"
+state. Those states also remain for cases the boot check does not cover: more
+than 500 visible companies, native field masks and `has_permission` hooks on
+Company. A role change shows after the user reloads.
+
+Quiet cases, with no log row: ERPNext absent, a missing or inaccessible report,
+and a user who cannot read Company (`frappe.PermissionError` from the Company
+list). Everything else writes one deferred Error Log row at most once an hour
+per site and per kind (`jarvis.holiday_touch.report`). There are three kinds:
+
+- `payment_calendar_visibility:contract`: the source contract. A
+  `CalendarSourceUnavailable` is reported once, when it is first remembered,
+  with a title that names the Frappe and ERPNext versions. An unexpected error
+  or an ERPNext import failure is reported on each attempt (not remembered).
+- `payment_calendar_visibility:check`: an unexpected exception in the other steps.
+- `payment_calendar_visibility:boot`: an exception that reached the boot code
+  in `jarvis/www/jarvis.py`, including an import error of the package.
+
+`message_log` is saved and restored, so the check adds nothing to the page
+response.
+
+Support recipe, when a user reports a missing calendar:
+
+```python
+# bench --site <site> console
+import frappe
+frappe.set_user("<user>")
+from jarvis.payment_calendar import sources, visibility
+visibility.can_view_payment_calendar()
+```
+
+To see which step hides it, call the steps one by one:
+`from jarvis.chat.agent_installability import installed_apps; "erpnext" in installed_apps()`
+(rule 1), `visibility._source_contract_ok()`
+(rule 2), `visibility._can_run_ap_report()` (rule 3) and
+`frappe.get_list("Company", pluck="name", limit=1)` (rule 4). If rule 2 is
+`False`, the Error Log row may be an hour old; call `sources.check_contract()` directly to see the
+error. After a fix, `visibility.reset_contract_cache()` clears the remembered
+result in the console process; restart workers to clear it for the site.
+
 ## API, retention and recovery
 
 `jarvis.payment_calendar.api` exposes POST-only capabilities, preferences,

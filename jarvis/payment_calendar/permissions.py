@@ -27,6 +27,13 @@ def require_company(company: str) -> dict:
 	return values
 
 
+def is_standard_accounts_report(report) -> bool:
+	"""True only for the shipped Accounts script report, not a custom or relocated one."""
+	return (
+		report.report_type == "Script Report" and report.is_standard == "Yes" and report.module == "Accounts"
+	)
+
+
 def require_report(company: str, account_type: str):
 	from frappe.desk.query_report import get_report_doc
 
@@ -34,7 +41,7 @@ def require_report(company: str, account_type: str):
 		raise frappe.ValidationError("Choose payables or receivables.")
 	require_company(company)
 	report = get_report_doc(REPORTS[account_type])
-	if report.report_type != "Script Report" or report.is_standard != "Yes" or report.module != "Accounts":
+	if not is_standard_accounts_report(report):
 		raise frappe.PermissionError("The standard accounting report is unavailable.")
 	return report
 
