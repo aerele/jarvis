@@ -40,7 +40,7 @@
 				<!-- full detail: mono pre-wrap block -->
 				<pre
 					v-if="row.detail"
-					class="mt-4 max-h-72 overflow-auto whitespace-pre-wrap rounded bg-surface-gray-2 p-3 font-mono text-sm text-ink-gray-8"
+					class="mt-4 max-h-72 overflow-auto whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded bg-surface-gray-2 p-3 font-mono text-sm text-ink-gray-8"
 					>{{ row.detail }}</pre
 				>
 
@@ -114,8 +114,9 @@
 // ActivityDetailDialog - full detail for one trigger-activity row (opened by
 // ActivityTab's row click and TriggerDetail's Recent-activity rows).
 // Everything renders from the list row itself - the backend has no per-row
-// endpoint. `detail` is optional (list_activity_page's current SQL omits it);
-// its mono block appears the moment the rows carry the field.
+// endpoint. `detail` is optional: list_activity_page returns it (clipped to
+// 4000 chars) only to trigger managers (System Manager / Jarvis Admin); other
+// users never receive it, so its mono block appears only when the row has it.
 import { computed } from "vue";
 import { Badge, Dialog, FeatherIcon, Tooltip } from "frappe-ui";
 import { timeAgo, exactDate } from "@/utils/datetime";

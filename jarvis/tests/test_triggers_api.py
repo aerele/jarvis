@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
+from frappe.utils import strip_html
 
 from jarvis.chat.triggers_api import (
 	activity_stats,
@@ -590,6 +591,117 @@ class TestActivityFeed(_TriggersApiTestCase):
 		)["data"]
 		self.assertEqual([r["name"] for r in page["rows"]], [hidden])
 
+	def test_failed_script_summary_does_not_leak_record_values_to_search(self):
+		# A script error carries a record value (KeyError(<value>)). The Activity
+		# summary is LIKE-searchable by non-managers who can read the target
+		# doc, so the Failed row must hold the exception class only.
+		from jarvis.triggers.engine import dispatch
+
+		# The target goes in first so its own insert does not fire the trigger.
+		todo = frappe.get_doc(
+			{"doctype": "ToDo", "description": "leak target", "allocated_to": PLAIN_USER}
+		).insert(ignore_permissions=True)
+		self._todos.append(todo.name)
+		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
+			trig = frappe.get_doc(
+				{
+					"doctype": TRIGGER,
+					"trigger_name": f"leak-{frappe.generate_hash(length=8)}",
+					"target_doctype": "ToDo",
+					"doc_event": "on_update",
+					"action_type": "Script",
+					"script_body": 'd = {}\nd["SECRET-123"]',
+				}
+			).insert(ignore_permissions=True)
+		self._triggers.append(trig.name)
+		with patch("frappe.utils.safe_exec.is_safe_exec_enabled", return_value=True):
+			dispatch(todo, "on_update")  # fail-open: must not raise
+
+		frappe.set_user(PLAIN_USER)
+		flt = frappe.as_json({"trigger": trig.name})
+		rows = list_activity_page(filters=flt)["data"]["rows"]
+		self.assertEqual(len(rows), 1)  # the plain user can read the target, so sees the row
+		self.assertEqual(rows[0]["status"], "Failed")
+		self.assertEqual(rows[0]["summary"], "script error: KeyError (save not blocked)")
+		found = list_activity_page(search="SECRET-123", filters=flt)["data"]["rows"]
+		self.assertEqual(found, [])
+
+	def test_failed_llm_summary_does_not_leak_error_text_to_search(self):
+		# Lookups OFF: the row is visible to anyone who can read the target doc, and
+		# its summary is LIKE-searchable. The Failed summary is a fixed text.
+		from jarvis.triggers import llm_action
+		from jarvis.triggers.llm_task_client import LLMTaskError
+
+		todo = frappe.get_doc(
+			{"doctype": "ToDo", "description": "llm leak target", "allocated_to": PLAIN_USER}
+		).insert(ignore_permissions=True)
+		self._todos.append(todo.name)
+		name = self._create_as_admin()
+		frappe.set_user(self._orig_user)
+		with patch(
+			"jarvis.triggers.llm_task_client.llm_task_complete",
+			side_effect=LLMTaskError("malformed response: SECRET-123"),
+		):
+			llm_action.run_llm_action(
+				trigger=name,
+				doctype="ToDo",
+				docname=todo.name,
+				doc_event="on_update",
+				snapshot_json="{}",
+				fired_by="Administrator",
+			)
+
+		frappe.set_user(PLAIN_USER)
+		flt = frappe.as_json({"trigger": name})
+		rows = list_activity_page(filters=flt)["data"]["rows"]
+		self.assertEqual(len(rows), 1)  # visible without any search term
+		self.assertEqual(rows[0]["status"], "Failed")
+		self.assertEqual(rows[0]["summary"], llm_action._LLM_FAILED_SUMMARY)
+		self.assertNotIn("detail", rows[0])
+		found = list_activity_page(search="SECRET-123", filters=flt)["data"]["rows"]
+		self.assertEqual(found, [])
+
+	def test_manager_gets_detail_clipped_at_the_cap_keeping_the_head(self):
+		from jarvis.chat.triggers_api import _ACTIVITY_DETAIL_CAP
+
+		head = "HEAD-MARKER "
+		detail = head + "x" * (_ACTIVITY_DETAIL_CAP + 500)
+		name = self._create_as_admin()
+		row = self._insert_activity_row(trigger=name, status="Failed", detail=detail)
+		short = self._insert_activity_row(trigger=name, status="Failed", detail="short detail")
+		frappe.set_user(ADMIN_USER)
+		rows = {
+			r["name"]: r
+			for r in list_activity_page(filters=frappe.as_json({"trigger": name}))["data"]["rows"]
+		}
+		clipped = rows[row]["detail"]
+		self.assertEqual(len(clipped), _ACTIVITY_DETAIL_CAP + 1)
+		self.assertTrue(clipped.startswith(head))
+		self.assertTrue(clipped.endswith("\u2026"))
+		self.assertEqual(rows[short]["detail"], "short detail")  # not cut, no ellipsis
+
+	def test_jarvis_admin_who_is_not_system_manager_gets_detail(self):
+		name = self._create_as_admin()
+		row = self._insert_activity_row(trigger=name, status="Failed", detail="the raw error")
+		frappe.set_user(JADMIN_USER)
+		self.assertNotIn("System Manager", frappe.get_roles(JADMIN_USER))
+		rows = list_activity_page(filters=frappe.as_json({"trigger": name}))["data"]["rows"]
+		self.assertEqual([r["detail"] for r in rows if r["name"] == row], ["the raw error"])
+
+	def test_non_manager_rows_have_no_detail_key(self):
+		todo = frappe.get_doc(
+			{"doctype": "ToDo", "description": "no detail target", "allocated_to": PLAIN_USER}
+		).insert(ignore_permissions=True)
+		self._todos.append(todo.name)
+		name = self._create_as_admin()
+		self._insert_activity_row(
+			trigger=name, target_docname=todo.name, status="Failed", detail="the raw error"
+		)
+		frappe.set_user(PLAIN_USER)
+		rows = list_activity_page(filters=frappe.as_json({"trigger": name}))["data"]["rows"]
+		self.assertEqual(len(rows), 1)
+		self.assertNotIn("detail", rows[0])
+
 	def test_unknown_filter_and_sort_throw(self):
 		frappe.set_user(PLAIN_USER)
 		self.assertRaises(frappe.ValidationError, list_activity_page, filters=frappe.as_json({"bogus": 1}))
@@ -681,3 +793,76 @@ class TestScriptActionAuthoring(_TriggersApiTestCase):
 			doc.insert(ignore_permissions=True)
 		self._triggers.append(doc.name)
 		self.assertTrue(frappe.db.exists(TRIGGER, doc.name))
+
+
+class TestSetEnabledUnsafeAttributes(_TriggersApiTestCase):
+	"""Turning a trigger ON re-checks its stored code (#818): a body or condition
+	that was saved before the check existed must not be re-armed. set_trigger_enabled
+	is a raw db_set, so it runs the same check as validate. Turning OFF never does."""
+
+	BAD_BODY = 'x = "PO {}".format(doc.name)\n'
+	BAD_COND = '"{}".format(doc.description) if doc.description else False'
+
+	def _stored_bad_script_trigger(self) -> str:
+		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
+			doc = frappe.get_doc(
+				{
+					"doctype": TRIGGER,
+					"trigger_name": f"script-{frappe.generate_hash(length=8)}",
+					"target_doctype": "ToDo",
+					"doc_event": "on_update",
+					"action_type": "Script",
+					"script_body": "x = 1",
+				}
+			)
+			doc.insert(ignore_permissions=True)
+		self._triggers.append(doc.name)
+		frappe.db.set_value(TRIGGER, doc.name, {"script_body": self.BAD_BODY, "enabled": 1})
+		return doc.name
+
+	def test_toggle_on_refuses_stored_format_script_and_off_still_works(self):
+		name = self._stored_bad_script_trigger()
+		frappe.set_user(ADMIN_USER)
+		self.assertEqual(set_trigger_enabled(name, 0)["data"]["enabled"], 0)
+		with self.assertRaises(frappe.ValidationError) as cm:
+			set_trigger_enabled(name, 1)
+		self.assertIn("blocks: line 1", strip_html(str(cm.exception)))
+		# the refused toggle changed nothing
+		self.assertEqual(int(frappe.db.get_value(TRIGGER, name, "enabled")), 0)
+
+	def test_toggle_off_on_a_bad_enabled_trigger_works(self):
+		name = self._stored_bad_script_trigger()
+		frappe.set_user(ADMIN_USER)
+		self.assertEqual(set_trigger_enabled(name, 0)["data"]["enabled"], 0)
+
+	def test_toggle_on_refuses_llm_trigger_with_stored_format_condition(self):
+		name = self._create_as_admin()
+		frappe.db.set_value(TRIGGER, name, {"condition": self.BAD_COND, "enabled": 0})
+		frappe.set_user(ADMIN_USER)
+		with self.assertRaises(frappe.ValidationError) as cm:
+			set_trigger_enabled(name, 1)
+		self.assertIn("Invalid Condition:", str(cm.exception))
+		self.assertEqual(int(frappe.db.get_value(TRIGGER, name, "enabled")), 0)
+
+	def test_toggle_on_refuses_script_trigger_with_clean_script_and_bad_stored_condition(self):
+		name = self._stored_bad_script_trigger()
+		frappe.db.set_value(TRIGGER, name, {"script_body": "x = 1", "condition": self.BAD_COND, "enabled": 0})
+		frappe.set_user(ADMIN_USER)
+		with self.assertRaises(frappe.ValidationError) as cm:
+			set_trigger_enabled(name, 1)
+		self.assertIn("Invalid Condition:", str(cm.exception))
+		self.assertEqual(int(frappe.db.get_value(TRIGGER, name, "enabled")), 0)
+
+	def test_toggle_on_llm_trigger_ignores_leftover_script_body(self):
+		# script_body is only code for a Script action; an LLM trigger that still
+		# holds an old body must not be refused.
+		name = self._create_as_admin()
+		frappe.db.set_value(TRIGGER, name, {"script_body": self.BAD_BODY, "enabled": 0})
+		frappe.set_user(ADMIN_USER)
+		self.assertEqual(set_trigger_enabled(name, 1)["data"]["enabled"], 1)
+
+	def test_toggle_on_clean_trigger_works(self):
+		name = self._create_as_admin()
+		frappe.db.set_value(TRIGGER, name, "enabled", 0)
+		frappe.set_user(ADMIN_USER)
+		self.assertEqual(set_trigger_enabled(name, 1)["data"]["enabled"], 1)

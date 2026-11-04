@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import frappe
 from frappe import _
-from frappe.query_builder import Order
+from frappe.query_builder import CustomFunction, Order
 from frappe.query_builder.functions import Count, IfNull
 from frappe.utils import add_to_date, cint, getdate, now_datetime
 from frappe.utils.safe_exec import is_safe_exec_enabled
@@ -82,6 +82,12 @@ _ACTIVITY_SORTABLE = {
 # were permission-checked.
 _ACTIVITY_SCAN_CAP = 400
 
+# Managers also get ``detail`` (tracebacks, lookup notes) in the feed, clipped
+# here so a page of 20000-char rows stays small. Keeps the head: the lookup
+# marker leads ``detail``.
+_ACTIVITY_DETAIL_CAP = 4000
+_SUBSTRING = CustomFunction("SUBSTRING", ["col", "start", "length"])
+
 _ACTIVITY_FIELDS = (
 	"name",
 	"trigger",
@@ -101,6 +107,14 @@ _ACTIVITY_FIELDS = (
 # --------------------------------------------------------------------------- #
 # shared guards / helpers
 # --------------------------------------------------------------------------- #
+def _clip_detail(detail: str | None) -> str:
+	"""``detail`` clipped to ``_ACTIVITY_DETAIL_CAP`` (head kept, ``…`` appended when cut)."""
+	detail = detail or ""
+	if len(detail) <= _ACTIVITY_DETAIL_CAP:
+		return detail
+	return detail[:_ACTIVITY_DETAIL_CAP] + "\u2026"
+
+
 def _can_manage(user: str | None = None) -> bool:
 	"""System Manager / Jarvis Admin (Administrator implicit) may manage."""
 	return has_jarvis_admin_access(user)
@@ -363,12 +377,16 @@ def update_trigger(name: str, payload: str) -> dict:
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def set_trigger_enabled(name: str, enabled: int) -> dict:
-	"""Quick enable/disable toggle (manage-gated): raw db_set — no revalidation
-	of an unchanged trigger — plus the engine-cache bust the controller would
-	have done."""
+	"""Quick enable/disable toggle (manage-gated): raw db_set — no full
+	revalidation of an unchanged trigger — plus the engine-cache bust the
+	controller would have done. Turning a trigger ON re-checks its stored code
+	for sandbox-blocked attributes; turning it off never does."""
 	_require_manage()
 	value = _bool01(enabled)
 	doc = frappe.get_doc(TRIGGER, name)
+	if value:
+		# db_set skips validate: re-check the stored code before arming it (#818).
+		doc.check_unsafe_attributes()
 	doc.db_set("enabled", value)
 	clear_cache()
 	_publish_changed()
@@ -705,9 +723,14 @@ def list_activity_page(
 
 	if _can_manage():
 		total = query.select(Count("*")).run()[0][0]
-		rows = ordered.limit(pl).offset(start).run(as_dict=True)
+		# ``detail`` is selected for managers only; it is never in _ACTIVITY_FIELDS.
+		# Cut in SQL at cap + 1 chars (enough to tell whether it was cut) so a page of
+		# 20000-char rows is not read in full.
+		detail = _SUBSTRING(frappe.qb.DocType(ACTIVITY).detail, 1, _ACTIVITY_DETAIL_CAP + 1).as_("detail")
+		rows = ordered.select(detail).limit(pl).offset(start).run(as_dict=True)
 		for r in rows:
 			r["creation"] = str(r["creation"])
+			r["detail"] = _clip_detail(r.get("detail"))
 		return {
 			"ok": True,
 			"data": {

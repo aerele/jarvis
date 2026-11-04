@@ -234,6 +234,8 @@ _VIEWS: tuple[ListView, ...] = (
 		endpoints=("jarvis.chat.triggers_api.list_activity_page",),
 		surface="frontend/src/pages/triggers/ActivityTab.vue",
 		wave=1,
+		# `detail` stays out of the filter catalog; list_activity_page still returns
+		# a clipped `detail` to managers in its rows.
 		excluded_fields=("detail",),
 		curated_filters={
 			"trigger": "trigger",

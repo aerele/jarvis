@@ -135,8 +135,8 @@
 // triggers_api.list_activity_page (search · status quick filters ·
 // status/action/event/daterange FilterButton defs · Load-More pagination).
 // Row click opens the detail Dialog fed from the row itself (there is no
-// per-row fetch endpoint; the mono `detail` block renders whenever the
-// backend ships that field on rows). Realtime: "trigger:activity" frames silently
+// per-row fetch endpoint; the mono `detail` block renders only for trigger
+// managers, the only users whose rows carry a clipped `detail`). Realtime: "trigger:activity" frames silently
 // refresh page 1 when the viewer sits unfiltered on it (the MacrosList
 // live-refresh manner); admin stat strip from activity_stats.
 import { ref, computed, watch, inject, onMounted, onBeforeUnmount } from "vue";
