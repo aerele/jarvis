@@ -58,6 +58,16 @@ class TestOpenWaits(PendingActionTestMixin, FrappeTestCase):
 			(held, "Create Supplier Acme", f"/approvals?held={held}"),
 		)
 
+	def test_each_wait_carries_its_creation_so_the_chat_can_place_it_under_its_reply(self):
+		conv = self._filebox_conv()
+		ar = self._ar(conv)
+		held = self.park(conv, kind="file_box_held", summary="Create Supplier Acme", waiters=[conv])
+		items = {i["src"]: i for i in self._waits(conv)}
+		self.assertEqual(items["ar"]["creation"], frappe.db.get_value(APPROVAL, ar, "creation"))
+		self.assertEqual(
+			items["pa"]["creation"], frappe.db.get_value("Jarvis Pending Action", held, "creation")
+		)
+
 	def test_a_wiki_note_and_a_decided_question_are_not_listed(self):
 		conv = self._filebox_conv()
 		self._ar(conv, source="File Box Wiki")
