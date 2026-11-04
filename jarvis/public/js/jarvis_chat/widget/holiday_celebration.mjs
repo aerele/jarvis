@@ -2,7 +2,8 @@
 // The rules are the desktop scene's (frontend/src/lib/useHolidayScene.js), kept in one
 // place so the panel only asks and then draws:
 //
-//  * only on a day or birthday whose scene is on (`scene`), whose cadence allows it
+//  * only when today's answer has a scene (`scene`: a lead-up day, a birthday or the first
+//    day of a run; the server decides), whose cadence allows it
 //    (`may_play`), with motion allowed and this browser's own memory agreeing;
 //  * the art loads first, then the server is asked (`record_shown`) for the slot, both
 //    inside ONE deadline from the ask. Past it there is no call and no play;
@@ -36,8 +37,7 @@ export function createCelebrator({
 
   // Why not, or null when the rules allow a try.
   function refusal(a) {
-    if (!a || (a.kind !== "day" && a.kind !== "birthday")) return "kind";
-    if (a.scene !== true) return "scene";
+    if (!a || a.scene !== true) return "scene";
     if (a.may_play === false) return "may_play";
     if (reduced()) return "reduced";
     if (latched === a) return "latched";

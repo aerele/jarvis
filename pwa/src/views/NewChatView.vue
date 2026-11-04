@@ -85,6 +85,9 @@ const greeting = computed(() => {
 const words = computed(() =>
 	heroWords(holidayTouch.answer.value, { greeting: greeting.value, firstName })
 );
+// Only a day or birthday swaps the greeting for the day heading while a scene plays. A
+// lead-up keeps one heading (the normal greeting) and the advance line stays under it.
+const swaps = (stage) => stage.active && !words.value.leadup;
 // The worn item hangs above the mark: keep room for all of it (and a gap) below the top of
 // the hero, so it is never cut off under the app bar. Nothing extra when it wears nothing.
 const heroRoom = computed(() => {
@@ -421,11 +424,11 @@ onUnmounted(() => {
 			/>
 			<h1
 				class="jv-greeting"
-				:class="{ 'is-grid': stage.active }"
+				:class="{ 'is-grid': swaps(stage) }"
 				data-hs="heading"
 				data-testid="welcome-greeting"
 			>
-				<template v-if="stage.active">
+				<template v-if="swaps(stage)">
 					<span
 						class="jv-greeting-t"
 						:class="swapClass(!stage.showDay, stage.instant)"
@@ -437,7 +440,7 @@ onUnmounted(() => {
 				</template>
 				<template v-else>{{ words.heading }}</template>
 			</h1>
-			<p v-if="words.leadup" class="jv-leadup" data-testid="welcome-leadup">
+			<p v-if="words.leadup" class="jv-leadup" data-hs="leadup" data-testid="welcome-leadup">
 				{{ words.leadup }}
 			</p>
 		</div>

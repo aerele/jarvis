@@ -64,7 +64,8 @@ export function createHolidayScene({
 	const phase = ref("idle");
 	// What the mark shows: the face, the item, the smile, and where the eyes look.
 	const mark = reactive({ face: false, item: false, happy: false, look: null });
-	// The greeting: swapped to the day heading, and whether that swap is instant.
+	// The greeting: swapped to the day heading, and whether that swap is instant. A lead-up
+	// day has no day heading: the stage ignores this flag there and keeps the normal greeting.
 	const text = reactive({ swapped: false, instant: false });
 	const fadeMs = ref(0);
 	const glideMs = ref(0);
@@ -89,8 +90,7 @@ export function createHolidayScene({
 
 	function mayPlay() {
 		const a = answer();
-		if (!a || (a.kind !== "day" && a.kind !== "birthday")) return false;
-		if (a.scene !== true || a.may_play === false) return false;
+		if (!a || a.scene !== true || a.may_play === false) return false;
 		if (!hasScene(a.design) || spentFor === a || reduced() || !composerEmpty()) return false;
 		return storage ? mayPlayLocal(storage, now(), a.tz) : true;
 	}

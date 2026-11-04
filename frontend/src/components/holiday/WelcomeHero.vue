@@ -12,7 +12,8 @@
 // The empty-chat greeting: the brand mark beside the heading, plus on a lead-up day the
 // advance wish above the orienting line ChatView renders next. On the day itself, or a
 // birthday, the heading is the day heading from first paint, and the lead-up line is
-// gone. The scene, the stage layout and the festive card are not part of this.
+// gone. The scene, the stage layout (HolidayStage.vue, which draws the same advance wish
+// itself on a lead-up day with a scene) and the festive card are not part of this.
 //
 // The mark sits beside the h1, not inside it: on a holiday the mark is a button, and a
 // button inside a heading would be read out as part of it. The h1 is only the greeting.

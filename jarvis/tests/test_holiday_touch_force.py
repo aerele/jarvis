@@ -126,7 +126,7 @@ class TestForcedAnswer(_Base):
 		user = _user()
 		self.force("diwali:leadup")
 		payload = resolve.answer(user, NOW)
-		self.assertEqual((payload["kind"], payload["scene"]), ("leadup", False))
+		self.assertEqual((payload["kind"], payload["scene"]), ("leadup", True))
 		self.force("birthday")
 		self.assertEqual(resolve.answer(user, NOW)["design"], "birthday")
 

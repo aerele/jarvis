@@ -23,13 +23,17 @@
 // which this is the phone twin of. How it differs:
 //  - It does not own the welcome markup: the new-chat view keeps its hero and starter cards and
 //    gets the scene's state through the default slot. It finds the pieces to measure by their
-//    data-hs attributes: "hero", "mark", "heading" and "cards" (absent when not shown).
+//    data-hs attributes: "hero", "mark", "heading", "cards" (absent when not shown) and "leadup"
+//    (the advance line, on a lead-up day only; part of the hero box so the art keeps off it).
 //  - The art layer is fixed to the screen, from its top to the top of the composer.
 //  - The hero never moves (no centring, no glide), so the starters fade (visibility) instead of
 //    the hero shifting; a replay fades them too, because the floor row stands in their band.
 //  - It asks whether the screen has room before any art or showing is used (landscape, a short
 //    phone: rest), and gives way to the top banners (install, announcement, update).
 //  - A change of the screen's size ends a scene only when the window really changed size.
+//
+// A lead-up day plays like a day, but its words never swap: the heading stays the normal
+// greeting and the advance line sits under it (the view's job, see NewChatView.vue).
 //
 // While a scene may still play, the greeting is the person's normal one and the starters are
 // hidden (visibility, so a tap does not reach them and nothing moves). A tap, key or touch
@@ -110,9 +114,10 @@ function getBoxes() {
 	const mark = rel(piece("mark"));
 	const heading = rel(piece("heading"));
 	const cardsEl = piece("cards");
+	const advanceEl = piece("leadup");
 	return sceneBoxes({
 		host: { w: base.width, h: base.height },
-		hero: heroBox(mark, heading),
+		hero: heroBox(mark, heading, advanceEl ? rel(advanceEl) : null),
 		mark,
 		heading,
 		cards: cardsEl ? rel(cardsEl) : null,

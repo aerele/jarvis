@@ -32,7 +32,9 @@ Support recipe, when a user says "I did not get a greeting" or "I got one by mis
    ``placeholder_dob``, ``no_hrms``, ``no_list``, ``no_rows``, ``no_match``, ``tie``,
    ``lookback``, ``holiday_error``) or how a hit was found. Pass ``now=datetime(2026, 11, 8,
    6, 0)`` (UTC) to preview another date. ``resolve.answer("<user>")`` is the payload the
-   client gets, after the switches below.
+   client gets, after the switches below. Its ``scene`` is true on the three lead-up days, on a
+   birthday, and on the first day of a holiday run (never on a later day of a run, never for
+   a white label site); the client plays it at most twice a day (``cadence``).
 2. Check the three switches and the policy mirror above.
    To see what the browser itself holds (the answer the page booted with, the one it shows
    after its own day check, the personal switch, the last fetch error and time), open the

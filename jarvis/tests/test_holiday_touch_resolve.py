@@ -302,7 +302,7 @@ class TestHolidays(_Base):
 		user = self.person([(date(2027, 1, 1), "New Year's Day", 0)])
 		self.assertEqual(resolve.answer(user, _now(date(2027, 1, 1)))["year"], 2027)
 		lead = resolve.answer(user, _now(date(2026, 12, 30)))
-		self.assertEqual((lead["kind"], lead["year"]), ("leadup", 2027))
+		self.assertEqual((lead["kind"], lead["year"], lead["scene"]), ("leadup", 2027, True))
 
 	def test_weekly_off_sunday_row_with_an_india_list_is_diwali(self):
 		user = self.person([(DIWALI, "Sunday", 1)], list_country="India")
@@ -348,9 +348,9 @@ class TestHolidays(_Base):
 			self.kinds(user, _days(4, 11)),
 			[
 				(4, "none", None),
-				(5, "leadup", False),
-				(6, "leadup", False),
-				(7, "leadup", False),
+				(5, "leadup", True),
+				(6, "leadup", True),
+				(7, "leadup", True),
 				(8, "day", True),
 				(9, "none", None),  # lookback: no "in advance" right after the day
 				(10, "day", False),  # a second day of the run: words, no scene
@@ -747,10 +747,30 @@ class TestSwitchesAndPolicy(_Base):
 		out = resolve.answer(user, _now(DIWALI))
 		self.assertEqual((out["kind"], out["worn"], out["scene"]), ("birthday", False, False))
 
-	def test_leadup_never_has_a_scene(self):
+	def test_leadup_has_a_scene(self):
 		user = self._holiday_user()
 		out = resolve.answer(user, _now(date(2026, 11, 6)))
-		self.assertEqual((out["kind"], out["worn"], out["scene"]), ("leadup", True, False))
+		self.assertEqual((out["kind"], out["worn"], out["scene"]), ("leadup", True, True))
+
+	def test_white_label_leadup_has_no_scene(self):
+		_set("agent_name", "Acme Assistant")
+		user = self._holiday_user()
+		out = resolve.answer(user, _now(date(2026, 11, 6)))
+		self.assertEqual((out["kind"], out["worn"], out["scene"]), ("leadup", False, False))
+
+	def test_the_leadup_fallback_of_a_birthday_winner_has_a_scene(self):
+		# A birthday on 6 Nov wins over the Diwali lead-up. When the birthday switch is off, or the
+		# birthday design is blocked, the lead-up shows and it plays its scene.
+		user = self._holiday_user(dob="1990-11-06")
+		on = _now(date(2026, 11, 6))
+		self.assertEqual(resolve.answer(user, on)["kind"], "birthday")
+		_set("birthday_greetings_enabled", 0)
+		out = resolve.answer(user, on)
+		self.assertEqual((out["kind"], out["design"], out["scene"]), ("leadup", "diwali", True))
+		_set("birthday_greetings_enabled", 1)
+		_set("holiday_policy_disabled_designs", json.dumps(["birthday"]))
+		out = resolve.answer(user, on)
+		self.assertEqual((out["kind"], out["design"], out["scene"]), ("leadup", "diwali", True))
 
 
 class TestAdminNames(_Base):
