@@ -32,6 +32,8 @@ Desk chat, dashboard chat, and mobile chat use the shared formatter.
 | Timeout | Retry or reduce request size; check an identified provider's status |
 | Connection / DNS / TLS failure | Retry, then have an administrator check the connection |
 | Worker exception | Retry; send persistent error details to support |
+| Chat session archived | Retry; if it fails again, start a new chat |
+| Chat session ended during restart recovery | Start a new chat; there is no Retry |
 | Empty reply from the model | Retry; if it returns, start a new chat or choose another model |
 | Empty reply after tool actions | Check for completed actions, then retry |
 | Cancelled | Muted cancellation, without retry advice |
@@ -92,6 +94,107 @@ streaming row after the failed reply. Desktop chat hides that row and shows
 Retry; the server refuses with `busy` while the row is fresh
 (`_INFLIGHT_FRESH_SECONDS`), then with `not_latest`. There the row is the only
 guard against a duplicate run.
+
+### Archived or ended chat sessions
+
+The agent runtime can refuse new work on a chat's session in two ways.
+
+- **Archived** (`Session "<key>" is archived. Restore it before starting new
+  work.`). The `session-archived` rule matches the plain text, the `Error: `
+  prefixed form and the `chat.send rejected: INVALID_REQUEST: ...` wrapper, and
+  reads "This chat needs to reconnect" with Retry. Before each send the bench
+  restores an archived session on the same key
+  (`jarvis/chat/session_repair.py`), so the chat heals on the user's next
+  message. The error card shows only when that repair could not run in time: the
+  session was archived between the check and the send, the check itself failed,
+  or the runtime refused the restore.
+- **Ended after restart recovery gave up** (`... ended during restart recovery.
+  Use /new or /reset ...`). The `session-ended` rule reads "This chat can't
+  continue / Start a new chat to keep going." with no Retry. These chats
+  cannot heal yet: the only fix is a session reset, which needs a gateway admin
+  scope the bench does not hold (it connects with read and write only). The bench
+  makes no repair call for them. A signed reset route, built like
+  `/jarvis/sessions/delete`, is a follow-up.
+
+Both rules sit right after `internal`, so a role-profile key containing
+`billing`, `quota`, `rate-limit-timeout` or `forbidden` cannot send the text to a
+rule that shows the wrong copy or hides Retry.
+
+What heals an archived chat, per client:
+
+- Desktop and dashboard chat: Retry runs the turn again through the repair.
+- Desk widget: Retry re-sends the message, which heals it. The widget shows no
+  banner for an error persisted before a reload.
+- Mobile PWA: it has no Retry button for turn errors; sending the message again
+  heals it.
+- Chats that were already stuck before an upgrade get the new copy on desktop
+  after reload, because persisted errors are classified again from their text. An
+  archived one gets Retry and heals on the next message; an ended one gets the
+  "can't continue" copy.
+
+A restore bumps the session's `updatedAt`, so the runtime's session cap does not
+archive the same session again at once; it may archive another dormant one, which
+heals on its own next message.
+
+The 7-day automatic archive of stale dashboard sessions is switched off on the
+fleet by the procedure in `docs/dashboard-archive-off.md` in
+`Aerele-RnD/jarvis-fleet-agent`; a tenant the procedure skipped still archives.
+Sessions archived before that stay archived until their next message restores
+them.
+
+#### On-call: session repair
+
+Each turn that reaches the check writes one INFO line on the logger
+`jarvis.chat.latency` (`logs/jarvis.chat.latency.log`):
+
+```
+session_repair outcome=<o> step=<s> probe_ms=<n> repair_ms=<n> path=<pump|legacy> run_id=<id> [archive_reason=<r>] [recovery=<r>]
+```
+
+`run_id` joins to the `Jarvis Chat Turn` row of the turn. The line never carries
+the session key. Outcomes, and what to do:
+
+| `outcome` | Meaning | Next step |
+|---|---|---|
+| `skipped` | The kill switch is off, the key is empty, or it is a shared (collab) chat key. No gateway call was made. | None. If you did not expect it, check the switch below. |
+| `healthy` | The session exists and is usable. | None. |
+| `absent` | The gateway has no such session yet (a key whose first send never arrived, an eagerly-minted macro key). | None; the send creates it. |
+| `restored` | The session was archived and has been restored on the same key. | None. `archive_reason` says why it was archived. |
+| `unrepairable` | The session is tombstoned (`recovery=tombstoned`). No call was made, no Error Log row is written, and the send fails. | The user sees "This chat can't continue". Tell them to start a new chat. |
+| `refused` | The gateway explicitly refused the restore. An Error Log row `jarvis.chat.session_repair.refused` is written. | Read the row's step and code. The send then fails into the "needs to reconnect" copy, and Retry tries again. |
+| `failsoft` | The check itself failed (a temporary probe error or an unexpected bug), so the send went ahead as before. | If it repeats, look for a `.probe_failed` or `.probe_refused` Error Log row. |
+| `unreachable` | A restore hit a temporary error (log-only, no Error Log row). The turn shows the retryable "unreachable" error. | Retry; the next turn repeats the repair. If it persists, check the gateway. |
+
+To see only the turns that needed attention:
+
+```
+grep "session_repair outcome=" logs/jarvis.chat.latency.log | grep -v outcome=healthy
+```
+
+Error Log titles:
+
+- `jarvis.chat.session_repair.refused`: the gateway refused the restore.
+- `jarvis.chat.session_repair.probe_failed`: an unexpected exception inside the
+  check. This is a bug; report it with the row's step and exception class.
+- `jarvis.chat.session_repair.probe_refused`: the gateway refused the describe
+  call itself, so the repair is effectively off for that tenant. Check the
+  gateway version and the scopes the bench connects with.
+
+Chats the repair does not fix:
+
+- Shared (collab) chats, which are skipped.
+- Tombstoned chats (`unrepairable`), which need the reset route above.
+- Pump-path stale-device keys. The port of the stale-device fix (#712) is a
+  follow-up.
+- `/compact` on a stuck chat, which fails the same way until a normal message
+  restores the session.
+
+Kill switch: `bench --site <site> set-config jarvis_session_repair_enabled 0`
+(also `false`, `off`, `no` or an empty value) stops the check and every restore;
+the error copy and Retry are unaffected. Absent means on. It is read for each
+turn, so no restart is needed. To confirm it took effect, send a message in a
+chat and look for `outcome=skipped` on the next line for its `run_id`; with the
+switch off there are no other outcomes and no `sessions.describe` calls.
 
 ### Empty reply: one automatic re-send
 
@@ -251,6 +354,10 @@ site `logs/`):
   rows could not be read; the breaker counts as open.
 - `empty_reply breaker_alert_failed target=<relay target>` (WARNING, with the
   traceback): the Error Log could not be written; the breaker still refused.
+- `session_repair outcome=<o> step=<s> probe_ms=<n> repair_ms=<n>
+  path=<pump|legacy> run_id=<id>`, with optional `archive_reason=` and
+  `recovery=`: one line per turn that reaches the session check, before the
+  send. See "On-call: session repair" above for the outcomes.
 - `pump turn_finalized run_id=<id> errored=<0|1>`: one line per finalized turn.
   For a turn sent again for an empty reply it ends with
   `redispatch_reason=empty_reply`. The refused-session re-send adds no reason;
