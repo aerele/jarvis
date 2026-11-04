@@ -675,3 +675,259 @@ class TestMaybeApplyLlmSwitch(FrappeTestCase):
 		self.assertIn("commit", names)
 		self.assertIn("poke", names)
 		self.assertLess(names.index("commit"), names.index("poke"))
+
+
+class TestSessionRepairLegacy(FrappeTestCase):
+	"""jarvis-admin-v2#753: the pre-send self-repair on the legacy path. It runs inside
+	the pooled checkout, after the #712 stale-device heal and before the mint branch."""
+
+	KEY = "agent:fake"
+
+	def setUp(self):
+		agent_session_pool._POOL.clear()
+		_ensure_test_user()
+		self._orig_user = frappe.session.user
+		frappe.set_user(TEST_USER)
+		_cleanup_user_conversations()
+		self.conv, self.user_msg = _make_conversation_with_user_message("hello there")
+		self.info_lines: list[str] = []
+		logger = MagicMock()
+		logger.info.side_effect = lambda *a, **k: self.info_lines.append(a[0] % a[1:] if a[1:] else a[0])
+		p = patch("jarvis.chat.latency.get_logger", return_value=logger)
+		p.start()
+		self.addCleanup(p.stop)
+		self._conf_prev = frappe.local.conf.get("jarvis_session_repair_enabled", "<absent>")
+		frappe.local.conf.pop("jarvis_session_repair_enabled", None)
+		self._clear_error_log()
+
+	def tearDown(self):
+		if self._conf_prev == "<absent>":
+			frappe.local.conf.pop("jarvis_session_repair_enabled", None)
+		else:
+			frappe.local.conf["jarvis_session_repair_enabled"] = self._conf_prev
+		self._clear_error_log()
+		_cleanup_user_conversations()
+		frappe.set_user(self._orig_user)
+
+	@staticmethod
+	def _clear_error_log():
+		frappe.db.delete("Error Log", {"method": ["like", "jarvis.chat.session_repair.%"]})
+		frappe.db.delete("Jarvis Chat Session", {"session_key": ["like", "agent:minted-%"]})
+		frappe.db.commit()
+
+	@staticmethod
+	def _rows(title):
+		return frappe.db.count("Error Log", {"method": f"jarvis.chat.session_repair.{title}"})
+
+	def _run(self, *, describe=None, restore=None, run_id="r-rep"):
+		"""Drive one turn against a MagicMock session. ``describe`` / ``restore``:
+		a value to return, or an exception instance to raise. Returns
+		(fake_sess, publish mock)."""
+		fake_sess = MagicMock()
+		for name, effect in (
+			("describe_session", describe),
+			("restore_session", restore),
+		):
+			method = getattr(fake_sess, name)
+			if isinstance(effect, BaseException):
+				method.side_effect = effect
+			elif effect is not None:
+				method.return_value = effect
+		fake_sess.create_session.return_value = f"agent:minted-{frappe.generate_hash(length=6)}"
+		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
+		fake_sess.relay_turn_events.return_value = _fake_event_stream(
+			[{"kind": "lifecycle", "phase": "end"}, {"kind": "relay:final", "text": None}]
+		)
+		with (
+			patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess),
+			patch("jarvis.chat.worker.publish_to_user") as pub,
+			patch.object(turn_handler, "_session_model_patch", return_value=(True, "p/m")),
+		):
+			turn_handler.handle_chat_send(
+				{"conversation_id": self.conv, "message_id": self.user_msg, "run_id": run_id}
+			)
+		return fake_sess, pub
+
+	def _repair_lines(self):
+		return [ln for ln in self.info_lines if ln.startswith("session_repair ")]
+
+	@staticmethod
+	def _names(fake_sess):
+		return [c[0] for c in fake_sess.method_calls if c[0] in _GATEWAY_STEPS]
+
+	@staticmethod
+	def _sent(fake_sess) -> str:
+		return fake_sess.chat_send.call_args.args[1]
+
+	@staticmethod
+	def _waking(pub):
+		return [
+			c.args[1]
+			for c in pub.call_args_list
+			if c.args[1].get("kind") == "run:status" and c.args[1].get("status") == "waking"
+		]
+
+	def test_healthy_session_is_probed_once_and_sent_unchanged(self):
+		fake, pub = self._run(describe={"sessionId": "s1", "archived": False})
+		self.assertEqual(self._names(fake), ["describe_session", "set_session_model", "chat_send"])
+		self.assertEqual(fake.chat_send.call_args.args[0], self.KEY)
+		self.assertEqual(self._waking(pub), [])
+		self.assertEqual(self._rows("probe_failed"), 0)
+
+	def test_magicmock_row_is_absent_not_a_repair(self):
+		fake, _pub = self._run()
+		self.assertNotIn("restore_session", self._names(fake))
+		self.assertEqual(self._rows("probe_failed"), 0)
+
+	def test_archived_session_is_restored_before_the_model_patch_on_the_same_key(self):
+		fake, pub = self._run(describe={"sessionId": "sid-9", "archived": True, "archivedAt": 1})
+		self.assertEqual(
+			self._names(fake), ["describe_session", "restore_session", "set_session_model", "chat_send"]
+		)
+		fake.restore_session.assert_called_once_with(self.KEY, "sid-9")
+		self.assertEqual(fake.chat_send.call_args.args[0], self.KEY)
+		self.assertEqual(frappe.db.get_value("Jarvis Conversation", self.conv, "session_key"), self.KEY)
+		fake.create_session.assert_not_called()
+		self.assertEqual(len(self._waking(pub)), 1)
+
+	def test_tombstoned_session_makes_no_mutating_call_and_still_sends(self):
+		# Tombstone alone, and tombstone + archived: UNREPAIRABLE. No restore, no waking,
+		# no Error Log row; the send goes ahead and fails into the "session-ended" copy.
+		for archived in (False, True):
+			with self.subTest(archived=archived):
+				agent_session_pool._POOL.clear()
+				_cleanup_user_conversations()
+				self.conv, self.user_msg = _make_conversation_with_user_message("hello there")
+				fake, pub = self._run(
+					describe={
+						"sessionId": "sid-9",
+						"archived": archived,
+						"restartRecoveryStatus": "tombstoned",
+					},
+					run_id=f"r-tomb-{archived}",
+				)
+				self.assertEqual(self._names(fake), ["describe_session", "set_session_model", "chat_send"])
+				self.assertEqual(fake.chat_send.call_args.args[0], self.KEY)
+				self.assertIn("hello there", self._sent(fake))
+				self.assertEqual(self._waking(pub), [])
+				for title in ("refused", "probe_refused", "probe_failed"):
+					self.assertEqual(self._rows(title), 0)
+				self.assertIn("outcome=unrepairable", self._repair_lines()[-1])
+
+	def test_a_stale_device_key_is_minted_not_probed_and_waking_is_published_once(self):
+		session_doctype = "Jarvis Chat Session"
+		frappe.get_doc(
+			{
+				"doctype": session_doctype,
+				"session_key": self.KEY,
+				"user": TEST_USER,
+				"chat_device_id": "old-device-before-repair",
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		settings = frappe.get_single("Jarvis Settings")
+		original_device_id = settings.chat_device_id
+		settings.db_set("chat_device_id", "new-device-after-repair")
+		frappe.db.commit()
+		try:
+			fake, pub = self._run(describe={"sessionId": "s", "archived": True})
+			fake.describe_session.assert_not_called()
+			fake.restore_session.assert_not_called()
+			fake.create_session.assert_called_once()
+			self.assertEqual(len(self._waking(pub)), 1, "the #712 block's waking is the only one")
+		finally:
+			settings.db_set("chat_device_id", original_device_id)
+			frappe.db.commit()
+			frappe.db.delete(session_doctype, {"session_key": self.KEY})
+			frappe.db.commit()
+
+	def test_a_conversation_without_a_key_mints_and_is_never_probed(self):
+		frappe.db.set_value("Jarvis Conversation", self.conv, "session_key", "")
+		frappe.db.commit()
+		fake, pub = self._run(describe={"sessionId": "s", "archived": True})
+		fake.describe_session.assert_not_called()
+		fake.create_session.assert_called_once()
+		self.assertEqual(len(self._waking(pub)), 1)
+
+	def test_a_temporary_restore_failure_is_todays_retryable_unreachable_error(self):
+		err = AgentUnreachableError("sessions.patch timed out", code="ack-timeout")
+		with patch.object(turn_handler, "_admission_settle") as settle:
+			fake, pub = self._run(describe={"sessionId": "sid-9", "archived": True}, restore=err)
+		fake.chat_send.assert_not_called()
+		settle.assert_called_once()
+		self.assertEqual(settle.call_args.args[:2], ("r-rep", "errored"))
+		errors = [c.args[1] for c in pub.call_args_list if c.args[1].get("kind") == "run:error"]
+		self.assertEqual(len(errors), 1)
+		self.assertEqual(errors[0].get("code"), "unreachable")
+		self.assertIs(errors[0].get("changed_data"), False)
+		row = frappe.get_all(
+			MSG, filters={"conversation": self.conv, "role": "assistant"}, fields=["error", "streaming"]
+		)[0]
+		self.assertEqual(row["streaming"], 0)
+		self.assertTrue(row["error"])
+
+	def test_a_definitive_refusal_still_sends_and_logs_one_refused_row(self):
+		err = AgentUnreachableError(
+			"sessions.patch rejected: INVALID_REQUEST: nope",
+			code="INVALID_REQUEST",
+			rejected_method="sessions.patch",
+		)
+		fake, _pub = self._run(describe={"sessionId": "sid-9", "archived": True}, restore=err)
+		fake.chat_send.assert_called_once()
+		self.assertEqual(self._rows("refused"), 1)
+		rows = frappe.get_all("Error Log", {"method": "jarvis.chat.session_repair.refused"}, pluck="error")
+		self.assertNotIn(self.KEY, str(rows))
+
+	def test_a_collab_key_is_never_probed(self):
+		frappe.db.set_value(
+			"Jarvis Conversation", self.conv, "session_key", "agent:main:dashboard:collab:abc"
+		)
+		frappe.db.commit()
+		fake, _pub = self._run(describe={"sessionId": "s", "archived": True})
+		fake.describe_session.assert_not_called()
+		fake.restore_session.assert_not_called()
+		self.assertIn("outcome=skipped", self._repair_lines()[-1])
+
+	def test_a_temporary_probe_failure_changes_nothing(self):
+		err = AgentUnreachableError("unavailable", code="UNAVAILABLE")
+		fake, _pub = self._run(describe=err)
+		fake.chat_send.assert_called_once()
+		self.assertNotIn("restore_session", self._names(fake))
+		self.assertEqual(self._rows("probe_failed"), 0)
+
+	def test_the_session_repair_info_line_names_the_legacy_path_and_run_id(self):
+		self._run(describe={"sessionId": "sid-9", "archived": True}, run_id="r-line")
+		lines = [ln for ln in self.info_lines if ln.startswith("session_repair ")]
+		self.assertEqual(len(lines), 1)
+		self.assertIn("outcome=restored", lines[0])
+		self.assertIn("path=legacy", lines[0])
+		self.assertIn("run_id=r-line", lines[0])
+		self.assertNotIn(self.KEY, lines[0])
+
+	def test_kill_switch_off_sends_no_describe(self):
+		for token in ("", 0, "0", False, "false", "off", "no"):
+			with self.subTest(token=token):
+				# One turn per conversation, and a fresh pool (it caches the first fake).
+				agent_session_pool._POOL.clear()
+				_cleanup_user_conversations()
+				self.conv, self.user_msg = _make_conversation_with_user_message("hello there")
+				frappe.local.conf["jarvis_session_repair_enabled"] = token
+				fake, _pub = self._run(
+					describe={"sessionId": "s", "archived": True, "restartRecoveryStatus": "tombstoned"},
+					run_id=f"r-off-{token!r}",
+				)
+				fake.describe_session.assert_not_called()
+				fake.chat_send.assert_called_once()
+
+	def test_flag_absent_probes(self):
+		fake, _pub = self._run(describe={"sessionId": "s", "archived": False})
+		fake.describe_session.assert_called_once_with(self.KEY)
+
+
+_GATEWAY_STEPS = {
+	"describe_session",
+	"restore_session",
+	"set_session_model",
+	"chat_send",
+	"create_session",
+}

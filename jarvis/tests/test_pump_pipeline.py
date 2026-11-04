@@ -34,10 +34,20 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 
-from jarvis.chat import admission, empty_reply_recovery, finalize, prepare, pump, settlement, txn
+from jarvis.chat import (
+	admission,
+	empty_reply_recovery,
+	finalize,
+	prepare,
+	pump,
+	settlement,
+	turn_handler,
+	txn,
+)
 from jarvis.chat import api as chat_api
 from jarvis.chat import turn_state as ts
 from jarvis.chat.error_taxonomy import classify_error_text
+from jarvis.exceptions import AgentUnreachableError
 from jarvis.tests._empty_reply_fixtures import MARKER_ONLY, ResendOn
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile, transcript_message
 from jarvis.tests._write_conflicts import set_value_conflict
@@ -81,14 +91,33 @@ class _FakeSess:
 		self._key = None
 		self.model_patches: list = []
 		self.created = 0
+		# jarvis-admin-v2#753 self-repair surface. ``calls`` is the ordered gateway log;
+		# describe defaults to a HEALTHY row so every existing test stays a plain probe.
+		self.calls: list = []
+		self.describe_result: object = {"sessionId": "s1", "archived": False}
+		self.restore_error: BaseException | None = None
 
 	def create_session(self, label: str = "x") -> str:
 		self.created += 1
+		self.calls.append(("create",))
 		self._key = "sess-" + frappe.generate_hash(length=8)
 		return self._key
 
 	def set_session_model(self, key, ref):
+		self.calls.append(("patch", key))
 		self.model_patches.append((key, ref))
+
+	def describe_session(self, key, *, timeout_s=5):
+		self.calls.append(("describe", key))
+		if isinstance(self.describe_result, BaseException):
+			raise self.describe_result
+		return self.describe_result
+
+	def restore_session(self, key, session_id, *, timeout_s=5):
+		self.calls.append(("restore", key, session_id))
+		if self.restore_error is not None:
+			raise self.restore_error
+		return {}
 
 	def get_session_messages(self, key, limit=5):
 		return []
@@ -3647,3 +3676,222 @@ class TestEmptyReplyOutcome(_EmptyReplyCase):
 		ctx, rs = self._streaming("pmp_ero_next")
 		self._terminal(ctx, rs)
 		self.assertEqual(self._decisions(), [("resent", "plain")], "the breaker counts the rows")
+
+
+# --------------------------------------------------------------------------- #
+# jarvis-admin-v2#753: pre-send gateway-session self-repair (pump call site)
+# --------------------------------------------------------------------------- #
+
+
+def _repair_refusal(method="sessions.patch") -> AgentUnreachableError:
+	return AgentUnreachableError(
+		f"{method} rejected: INVALID_REQUEST: nope", code="INVALID_REQUEST", rejected_method=method
+	)
+
+
+_UNSET = object()
+
+
+class TestPrepareSessionRepair(_PipelineCase):
+	KEY = "agent:main:dashboard:repair-key"
+
+	def setUp(self):
+		super().setUp()
+		self.info_lines: list[str] = []
+		self.logger = MagicMock()
+		self.logger.info.side_effect = lambda *a, **k: self.info_lines.append(a[0] % a[1:] if a[1:] else a[0])
+		p = patch("jarvis.chat.latency.get_logger", return_value=self.logger)
+		p.start()
+		self.addCleanup(p.stop)
+		self._conf_prev = frappe.local.conf.get("jarvis_session_repair_enabled", "<absent>")
+		frappe.local.conf.pop("jarvis_session_repair_enabled", None)
+		self.addCleanup(self._restore_conf)
+		frappe.db.delete("Error Log", {"method": ["like", "jarvis.chat.session_repair.%"]})
+		frappe.db.commit()
+
+	def _restore_conf(self):
+		if self._conf_prev == "<absent>":
+			frappe.local.conf.pop("jarvis_session_repair_enabled", None)
+		else:
+			frappe.local.conf["jarvis_session_repair_enabled"] = self._conf_prev
+		frappe.db.delete("Error Log", {"method": ["like", "jarvis.chat.session_repair.%"]})
+		frappe.db.commit()
+
+	def _repair_lines(self):
+		return [ln for ln in self.info_lines if ln.startswith("session_repair ")]
+
+	def _rows(self, title="probe_failed"):
+		return frappe.db.count("Error Log", {"method": f"jarvis.chat.session_repair.{title}"})
+
+	def _prepare(
+		self,
+		*,
+		key=_UNSET,
+		describe=_UNSET,
+		restore_error=None,
+		message="hello",
+	):
+		conv = self._mk_conv()
+		# Conversation.session_key is unique, so every call gets its own key.
+		self.key = f"{self.KEY}-{frappe.generate_hash(length=6)}" if key is _UNSET else key
+		if self.key:
+			frappe.db.set_value(CONV, conv, "session_key", self.key, update_modified=False)
+			frappe.db.commit()
+		seed = self._mk_msg(conv, content=message)
+		rid = "pmp_rep_" + frappe.generate_hash(length=6)
+		self._mk_turn(conv, rid, seed, "queued", version=1, reserved=1)
+		fake = _FakeSess()
+		if describe is not _UNSET:
+			fake.describe_result = describe
+		fake.restore_error = restore_error
+		with (
+			self._gateway(fake),
+			self._pump_on(),
+			patch.object(turn_handler, "_session_model_patch", return_value=(True, "p/m")),
+		):
+			res = prepare.run_prepare(rid, self._target)
+		return conv, rid, fake, res
+
+	def _payload(self, rid):
+		return json.loads(self._val(rid, "dispatch_payload"))
+
+	def _names(self, fake):
+		return [c[0] for c in fake.calls]
+
+	def test_healthy_session_is_probed_once_and_logs_nothing(self):
+		conv, rid, fake, res = self._prepare()
+		self.assertTrue(res.get("ready"))
+		self.assertEqual(self._names(fake), ["describe", "patch"])
+		self.assertEqual(self._rows("probe_failed"), 0)
+		self.assertEqual(self._rows("refused"), 0)
+		payload = self._payload(rid)
+		self.assertEqual(payload["session_key"], self.key)
+		self.assertTrue(payload["message"].endswith("hello"))
+
+	def test_archived_session_is_restored_before_the_model_patch(self):
+		row = {"sessionId": "sid-9", "archived": True, "archivedAt": 1700000000000}
+		conv, rid, fake, res = self._prepare(describe=row)
+		self.assertTrue(res.get("ready"))
+		self.assertEqual(self._names(fake), ["describe", "restore", "patch"])
+		self.assertEqual(fake.calls[1], ("restore", self.key, "sid-9"))
+		self.assertEqual(self._payload(rid)["session_key"], self.key)
+		self.assertEqual(frappe.db.get_value(CONV, conv, "session_key"), self.key)
+		self.assertEqual(fake.created, 0)
+		# A restore keeps the transcript: the message goes out untouched.
+		self.assertTrue(self._payload(rid)["message"].endswith("\n\nhello"))
+		self.assertEqual(self._rows("probe_failed"), 0)
+
+	def test_tombstoned_session_makes_no_mutating_call_and_proceeds(self):
+		# Tombstone alone, and tombstone + archived: UNREPAIRABLE. No restore, no waking,
+		# no Error Log row; the send goes ahead and fails into the "session-ended" copy.
+		for archived in (False, True):
+			with self.subTest(archived=archived):
+				row = {"sessionId": "sid-9", "archived": archived, "restartRecoveryStatus": "tombstoned"}
+				self._pubs.clear()
+				conv, rid, fake, res = self._prepare(describe=row, message="what next?")
+				self.assertTrue(res.get("ready"))
+				self.assertEqual(self._names(fake), ["describe", "patch"])
+				payload = self._payload(rid)
+				self.assertEqual(payload["session_key"], self.key)
+				self.assertTrue(payload["message"].endswith("\n\nwhat next?"))
+				self.assertEqual([p for p in self._pubs if p.get("status") == "waking"], [])
+				for title in ("refused", "probe_refused", "probe_failed"):
+					self.assertEqual(self._rows(title), 0)
+				self.assertIn("outcome=unrepairable", self._repair_lines()[-1])
+
+	def test_a_definitive_restore_refusal_still_readies_the_turn_and_writes_one_refused_row(self):
+		row = {"sessionId": "sid-9", "archived": True}
+		conv, rid, fake, res = self._prepare(describe=row, restore_error=_repair_refusal())
+		self.assertTrue(res.get("ready"))
+		self.assertEqual(self._names(fake), ["describe", "restore", "patch"])
+		self.assertEqual(self._rows("refused"), 1)
+		self.assertEqual(self._rows("probe_failed"), 0)
+		self.assertEqual(self._payload(rid)["session_key"], self.key)
+		self.assertNotIn(self.key, " ".join(self.info_lines))
+		self.assertIn("outcome=refused", self._repair_lines()[-1])
+
+	def test_a_collab_key_is_never_probed(self):
+		conv, rid, fake, res = self._prepare(
+			key=f"agent:main:dashboard:collab:{frappe.generate_hash(length=6)}"
+		)
+		self.assertTrue(res.get("ready"))
+		self.assertEqual(self._names(fake), ["patch"])
+		self.assertIn("outcome=skipped", self._repair_lines()[-1])
+
+	def test_a_key_minted_this_turn_is_never_probed(self):
+		conv, rid, fake, res = self._prepare(key="")
+		self.assertTrue(res.get("ready"))
+		self.assertEqual(fake.created, 1)
+		self.assertNotIn("describe", self._names(fake))
+		self.assertTrue(self._payload(rid)["message"].endswith("\n\nhello"))
+		self.assertEqual(self._rows("probe_failed"), 0)
+
+	def test_eagerly_minted_macro_key_with_no_gateway_row_proceeds_without_error_log(self):
+		# The gateway creates the session on the first send, so a null row is not a fault.
+		conv, rid, fake, res = self._prepare(describe=None)
+		self.assertTrue(res.get("ready"))
+		self.assertEqual(self._names(fake), ["describe", "patch"])
+		self.assertEqual(self._rows("probe_failed"), 0)
+		self.assertEqual(self._rows("refused"), 0)
+		self.assertTrue(self._payload(rid)["message"].endswith("\n\nhello"))
+
+	def test_a_temporary_restore_failure_is_todays_retryable_prepare_error(self):
+		row = {"sessionId": "sid-9", "archived": True}
+		err = AgentUnreachableError("sessions.patch timed out", code="ack-timeout")
+		conv, rid, fake, res = self._prepare(describe=row, restore_error=err)
+		self.assertEqual(res, {"ok": False, "reason": "unreachable"})
+		self.assertEqual(self._state(rid), "errored")
+		self.assertIsNone(self._val(rid, "dispatch_payload"))
+		self.assertEqual(int(self._val(rid, "reserved")), 0, "credit released: the turn is not stuck")
+		self.assertNotIn("patch", self._names(fake))
+		run_error = next(p for p in self._pubs if p.get("kind") == "run:error")
+		self.assertEqual(run_error.get("code"), "unreachable")
+		self.assertIs(run_error.get("changed_data"), False)
+
+	def test_a_temporary_probe_failure_changes_nothing(self):
+		err = AgentUnreachableError("unavailable", code="UNAVAILABLE")
+		conv, rid, fake, res = self._prepare(describe=err)
+		self.assertTrue(res.get("ready"))
+		self.assertEqual(self._names(fake), ["describe", "patch"])
+		self.assertEqual(self._rows("probe_failed"), 0)
+
+	def test_waking_is_published_before_the_first_mutating_call(self):
+		row = {"sessionId": "sid-9", "archived": True}
+		conv, rid, fake, res = self._prepare(describe=row)
+		waking = [p for p in self._pubs if p.get("kind") == "run:status" and p.get("status") == "waking"]
+		self.assertEqual(len(waking), 1)
+		self.assertEqual(waking[0].get("run_id"), rid)
+		self.assertEqual(waking[0].get("message_id"), self._val(rid, "assistant_message"))
+
+	def test_a_healthy_session_publishes_no_waking(self):
+		conv, rid, fake, res = self._prepare()
+		self.assertEqual([p for p in self._pubs if p.get("status") == "waking"], [])
+
+	def test_a_failing_waking_publish_never_breaks_the_repair(self):
+		row = {"sessionId": "sid-9", "archived": True}
+		with patch.object(ts, "publish_fenced", side_effect=RuntimeError("redis down")):
+			conv, rid, fake, res = self._prepare(describe=row)
+		self.assertTrue(res.get("ready"))
+		self.assertIn("restore", self._names(fake))
+
+	def test_the_session_repair_info_line_is_logged_with_the_pump_path_and_run_id(self):
+		row = {"sessionId": "sid-9", "archived": True}
+		conv, rid, fake, res = self._prepare(describe=row)
+		lines = [ln for ln in self.info_lines if ln.startswith("session_repair ")]
+		self.assertEqual(len(lines), 1)
+		self.assertIn("outcome=restored", lines[0])
+		self.assertIn("path=pump", lines[0])
+		self.assertNotIn(self.key, lines[0])
+
+	def test_kill_switch_off_sends_no_describe(self):
+		for token in ("", 0, "0", False, "false", "off", "no"):
+			with self.subTest(token=token):
+				frappe.local.conf["jarvis_session_repair_enabled"] = token
+				conv, rid, fake, res = self._prepare(describe={"sessionId": "s", "archived": True})
+				self.assertTrue(res.get("ready"))
+				self.assertEqual(self._names(fake), ["patch"])
+				self.assertTrue(self._payload(rid)["message"].endswith("\n\nhello"))
+
+	def test_flag_absent_probes(self):
+		conv, rid, fake, res = self._prepare()
+		self.assertEqual(self._names(fake)[0], "describe")

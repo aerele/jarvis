@@ -25,6 +25,17 @@ class TestErrorTaxonomy(unittest.TestCase):
 		codes = [code for code, _, _ in _RULES]
 		self.assertLess(codes.index("empty-reply-tools"), codes.index("empty-reply"))
 
+	def test_session_rules_sit_right_after_internal_and_before_every_rule_their_text_could_match(self):
+		# The gateway wrapper says INVALID_REQUEST and a role-profile key can carry words like
+		# billing, quota, forbidden or rate-limit-timeout. Reordering would show those chats a
+		# different error, and the shared fixture pins the texts.
+		codes = [code for code, _, _ in _RULES]
+		self.assertEqual(codes.index("session-archived"), codes.index("internal") + 1)
+		self.assertEqual(codes.index("session-ended"), codes.index("session-archived") + 1)
+		for earlier in ("session-archived", "session-ended"):
+			for later in ("billing", "quota", "rate-limit", "timeout", "permission", "invalid-request"):
+				self.assertLess(codes.index(earlier), codes.index(later), f"{earlier} before {later}")
+
 	def test_structured_error(self):
 		self.assertEqual(classify_error_text({"error": {"type": "overloaded_error"}}), "service-unavailable")
 
