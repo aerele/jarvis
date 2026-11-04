@@ -12,12 +12,14 @@ import { FLOOR_ROW, floorFit } from "../scene-geometry.mjs";
 import {
   boxes,
   contractSuite,
+  replayFloorTest,
   floorTransformOf,
   run,
 } from "./day-scene-fakes.test-support.mjs";
 
 // The shared contract, with Diwali's floor row: the same checks every other scene passes.
 contractSuite("diwali", scene, { row: FLOOR_ROW });
+replayFloorTest("diwali", scene);
 
 const P = "t-";
 

@@ -104,15 +104,17 @@
 <script setup>
 // The scene-day welcome layout (a lead-up day, the first day of a run or a birthday): a big
 // Jarvis and the greeting, with the scene's art on a layer over it, above a bottom block
-// (starter cards, Payment Calendar link, capability catalog). ChatView uses this only when
-// lib/holidayStage.js says so; otherwise the normal WelcomeHero layout is untouched.
+// (the welcome starter cards). ChatView uses this only when lib/holidayStage.js says so;
+// otherwise the normal WelcomeHero layout is untouched.
 //
 // Where the hero sits: at rest, at a 0.6 / 0.4 split of the space above the bottom block.
 // While a scene may still play it is centred in the whole stage instead, never above the
 // toran (lib/holidayScenes.js sceneClearance; the scene keeps its fireworks below the
-// toran itself). When the scene ends it glides up to its rest place. The move is a
-// transform on the hero, so layout and the scroll height never change; the worn item is
-// inside the mark, so it moves with it.
+// toran itself). When the scene ends it glides up to its rest place. A replay from the mark
+// does the same as the first play: the bottom block hides at once, the hero glides back down
+// to its centred place (the scene starts when it has arrived), and at the end the hero glides
+// up as the cards fade in. The move is a transform on the hero, so layout and the scroll
+// height never change; the worn item is inside the mark, so it moves with it.
 //
 // The worn item (a hat, an umbrella, a crescent) hangs above the mark's top. The whole of it
 // plus 12 px stays below the top of the stage, so it never slides under the page's top bar:
@@ -120,8 +122,9 @@
 // space above the hero (--rest-lift). Its reach is the real box of the drawn layer when it
 // is mounted, else the table in scene-geometry.mjs (WORN_OVERHANG).
 //
-// While a scene may still play the greeting is the person's normal one and the bottom
-// block is hidden (visibility, so Tab skips it and nothing moves). The scene, its deadline
+// While a scene may still play, or a replay runs, the bottom block is hidden (visibility, so
+// Tab skips it and nothing moves); the first play also keeps the person's normal greeting
+// until its swap (a replay finds the day heading already up and keeps it). The scene, its deadline
 // and what ends it live in lib/useHolidayScene.js; this file is the DOM around it.
 import {
 	computed,
@@ -211,8 +214,9 @@ const heroStyle = computed(() => {
 	const centred = scene.centred.value;
 	return {
 		transform: `translateY(${centred ? centredShift.value : 0}px)`,
-		// No glide while centred (a re-measure must not drift); the way up at the end.
-		"--glide": `${centred ? 0 : scene.glideMs.value}ms`,
+		// No glide while centred (a re-measure must not drift), except the way down at the start
+		// of a replay; and the way up at the end.
+		"--glide": `${!centred || scene.phase.value === "centring" ? scene.glideMs.value : 0}ms`,
 	};
 });
 // The layout sizes measureHero reads, as one string: what the centring was computed from.
@@ -280,12 +284,32 @@ const scene = createHolidayScene({
 	host: () => hostEl.value,
 	getBoxes,
 	composerEmpty: () => props.composerEmpty,
+	beforePlay: finishGlide,
 	reduced: prefersReduced,
 	idPrefix: `jvs${uid}`,
 	fontsReady: () =>
 		document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve(),
 });
 
+// A replay centres the hero again: from the top of the stage (the art layer does not scroll
+// with it, and heroOffset works from the top), and from the layout as it is now, because at
+// rest the shift is only what it was when the layout was last measured. The pre flush runs
+// this before the render that applies the shift.
+watch(
+	() => scene.phase.value,
+	(phase) => phase === "centring" && prepareReplay()
+);
+function prepareReplay() {
+	if (scrollEl.value) scrollEl.value.scrollTop = 0;
+	measureHero();
+}
+// The descent is over and the art is about to read the mark's place: finish a glide that
+// is still running (a transition does not restart when --glide changes mid-way).
+function finishGlide() {
+	const hero = heroEl.value;
+	if (hero && typeof hero.getAnimations === "function")
+		hero.getAnimations().forEach((animation) => animation.finish());
+}
 // Boxes of the hero (mark, heading and sub-line), the mark, the heading and the bottom block,
 // in px relative to the art layer. The hero's bottom is where the floor row keeps clear.
 function getBoxes() {
@@ -331,7 +355,14 @@ watch(
 	() => scene.settle("early")
 );
 
-const onKey = () => scene.settle("early");
+// A key anywhere ends the scene. Enter or Space on the replay button also starts the click
+// that would replay it, which the scene swallows; a held key's repeats are ignored.
+function onKey(event) {
+	const onMark = event.target instanceof Node && markEl.value?.contains(event.target);
+	const startsMarkClick = !!onMark && (event.key === "Enter" || event.key === " ");
+	scene.onKeyDown(startsMarkClick, !!event.repeat);
+}
+const onScroll = () => scene.settle("early");
 const SCROLLS = ["wheel", "touchmove"];
 let sizes = new Map();
 let observer = null;
@@ -385,7 +416,8 @@ onMounted(async () => {
 	window.addEventListener("pointerdown", scene.onPointerDown, { capture: true, passive: true });
 	window.addEventListener("keydown", onKey, { capture: true, passive: true });
 	// Scrolling the stage moves the page under the art, which does not follow it.
-	for (const type of SCROLLS) scrollEl.value?.addEventListener(type, onKey, { passive: true });
+	for (const type of SCROLLS)
+		scrollEl.value?.addEventListener(type, onScroll, { passive: true });
 	scene.begin();
 	await nextTick();
 	// The scale just set (and any font that has swapped since) is on the page now; the first
@@ -407,7 +439,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
 	window.removeEventListener("pointerdown", scene.onPointerDown, { capture: true });
 	window.removeEventListener("keydown", onKey, { capture: true });
-	for (const type of SCROLLS) scrollEl.value?.removeEventListener(type, onKey);
+	for (const type of SCROLLS) scrollEl.value?.removeEventListener(type, onScroll);
 	if (observer) observer.disconnect();
 	if (wornWatch) wornWatch.disconnect();
 	scene.stop();
