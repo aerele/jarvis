@@ -197,7 +197,8 @@ if (scene) {
 	watch(bannerShown, (shown) => shown && scene.settle("early"));
 }
 
-// Enter or Space on the mark also starts the click that would replay it.
+// Enter or Space on the mark also starts the click that would replay it. A key held down
+// repeats keydown; the scene ignores the repeats (`event.repeat` is passed down with the key).
 function startsMarkClick(event) {
 	const mark = piece("mark");
 	if (!mark || !(event.target instanceof Node) || !mark.contains(event.target)) return false;
@@ -223,7 +224,7 @@ const endEarly = () => scene.settle("early");
 const POINTER = { capture: true, passive: true };
 const ENDERS = [
 	["pointerdown", () => scene.onPointerDown(), POINTER],
-	["keydown", (event) => scene.onKeyDown(startsMarkClick(event)), POINTER],
+	["keydown", (event) => scene.onKeyDown(startsMarkClick(event), !!event.repeat), POINTER],
 	["touchmove", endEarly, POINTER],
 	["wheel", endEarly, POINTER],
 	["resize", onWindowResize, { passive: true }],

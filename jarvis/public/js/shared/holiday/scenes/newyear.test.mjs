@@ -32,6 +32,7 @@ import {
 import {
   boxes,
   contractSuite,
+  replayFloorTest,
   edgeDrift,
   floorTransformOf,
   run,
@@ -39,6 +40,7 @@ import {
 } from "./day-scene-fakes.test-support.mjs";
 
 contractSuite("newyear", scene, { launch: 2300 });
+replayFloorTest("newyear", scene);
 
 const text = (r) => r.host.svg.querySelector(".t-yr");
 
@@ -371,16 +373,25 @@ test("the party hat leaves the right cannon and lands on the mark, handing over"
   r.end();
 });
 
-test("a replay has no cannons; the hat then comes in from the bottom right corner", () => {
-  const r = run(scene, { replay: true });
-  assert.equal(r.host.svg.querySelectorAll(".t-cl").length, 0);
-  r.tick(2301);
-  const a = r.host.svg.animations.find((x) =>
-    x.node.classes.includes("t-drop")
-  );
-  assert.ok(a, "the hat still flies");
-  r.api.settle("instant");
-  r.end();
+test("a replay has the cannons, their confetti and the hat from the right cannon, as the first play does", () => {
+  // What each run's cannons and hat did: the confetti animations and the hat's keyframes.
+  const cannons = (over) => {
+    const r = run(scene, over);
+    const row = r.host.svg.querySelector(".t-floor");
+    const pieces = row.querySelectorAll(".t-cl").length;
+    r.tick(2301);
+    const anims = r.host.svg.animations;
+    const confetti = anims.filter((x) => x.node.classes.includes("t-cl"));
+    const hat = anims.find((x) => x.node.classes.includes("t-drop"));
+    r.api.settle("instant");
+    r.end();
+    return { pieces, confetti: confetti.length, frames: hat && hat.frames };
+  };
+  const first = cannons({});
+  const replay = cannons({ replay: true });
+  assert.equal(replay.pieces, 44, "the cannons are drawn");
+  assert.ok(replay.confetti > 0, "the cannons fire their confetti");
+  assert.deepEqual(replay, first, "the same cannons, confetti and hat path");
 });
 
 // ---- photosensitivity --------------------------------------------------------------------

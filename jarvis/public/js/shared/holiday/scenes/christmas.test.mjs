@@ -25,12 +25,14 @@ import {
 import {
   boxes,
   contractSuite,
+  replayFloorTest,
   edgeDrift,
   floorTransformOf,
   run,
 } from "./day-scene-fakes.test-support.mjs";
 
 contractSuite("christmas", scene, { launch: 1950 });
+replayFloorTest("christmas", scene);
 
 // The sleigh's bounding box at u, in stage units, after scale, tilt and move.
 function sleighBox(plan, u) {

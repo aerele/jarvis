@@ -382,6 +382,8 @@ describe("PWA HolidayStage", () => {
 		expect(made[1].opts.replay).toBe(true);
 		expect(cardsHidden()).toBe(true); // the floor row stands in their band
 		expect(api.recordHolidayShown).toHaveBeenCalledTimes(1); // a replay is uncounted
+		// Hidden, the starters keep their place: the floor row is drawn in their band.
+		expect(made[1].opts.getBoxes().cards).toEqual({ x: 14, y: 520, w: 362, h: 190 });
 		made[1].opts.onBeat("settle", "end");
 		await flushPromises();
 		expect(cardsHidden()).toBe(false);
@@ -613,6 +615,43 @@ describe("PWA HolidayStage", () => {
 				expect(mod.play).toHaveBeenCalledTimes(1);
 			}
 		);
+
+		it("a repeating key on the mark does not lift the swallow of the click the first key started", async () => {
+			await today_is(answer());
+			const { mod, made } = fakeScenes();
+			mountStage({}, { attachTo: document.body });
+			await flushPromises();
+			const target = wrapper.get('[data-hs="mark"]').element;
+			press("Enter", target);
+			expect(made[0].settle).toHaveBeenCalledWith("early");
+			target.dispatchEvent(
+				new KeyboardEvent("keydown", { key: "Enter", repeat: true, bubbles: true })
+			);
+			slot.onMarkTap(); // the click that follows the held key
+			await flushPromises();
+			expect(mod.play).toHaveBeenCalledTimes(1);
+		});
+
+		it("a held key on the mark leaves a running replay alone: the repeats neither end it nor start another", async () => {
+			await today_is(answer());
+			const { mod, made } = fakeScenes();
+			mountStage({}, { attachTo: document.body });
+			await flushPromises();
+			window.dispatchEvent(new Event("pointerdown")); // ends the scene
+			window.dispatchEvent(new Event("pointerdown")); // the next gesture, at rest
+			slot.onMarkTap(); // the replay starts
+			await flushPromises();
+			expect(mod.play).toHaveBeenCalledTimes(2);
+			const target = wrapper.get('[data-hs="mark"]').element;
+			for (let i = 0; i < 3; i++) {
+				target.dispatchEvent(
+					new KeyboardEvent("keydown", { key: "Enter", repeat: true, bubbles: true })
+				);
+			}
+			await flushPromises();
+			expect(made[1].settle).not.toHaveBeenCalled();
+			expect(mod.play).toHaveBeenCalledTimes(2);
+		});
 
 		it("a key elsewhere ends the scene and leaves the mark's next tap alone", async () => {
 			await today_is(answer());

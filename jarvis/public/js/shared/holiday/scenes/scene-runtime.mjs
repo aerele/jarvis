@@ -19,8 +19,8 @@
 //   relayout(boxes): the page changed size while it plays; boxes as getBoxes().
 //   settle(mode): "end" fades the art over 600 ms, "early" over 250 ms and lands the item,
 //     "instant" does nothing visible. `done` always resolves and never rejects.
-//   `replay` plays again over a screen whose cards are showing: no floor props, no greeting
-//   swap.
+//   `replay` plays the scene again on a page that already shows the day greeting: everything is
+//   drawn as on the first play, but no `swap` beat is sent.
 // A play() that throws leaves nothing mounted. The desktop and phone layouts with motion get
 // the scene; reduced motion and any other layout get the resting state at once. (Whether a
 // phone screen has room for the scene is the page's call, scene-phone.mjs phoneSceneFits: it

@@ -268,6 +268,10 @@ describe("createHolidayScene", () => {
 			expect(scene.phase.value).toBe("rest");
 			expect(options.report).toHaveBeenCalledTimes(1);
 			expect(scene.reason.value).toBe("threw");
+			// The centred hero still rises and the cards still fade in, as after a scene's early end.
+			expect(scene.cardsHidden.value).toBe(false);
+			expect(scene.fadeMs.value).toBe(400);
+			expect(scene.glideMs.value).toBe(250);
 		});
 
 		it("a failure report names the design and keeps the error's stack", async () => {
@@ -593,19 +597,280 @@ describe("createHolidayScene", () => {
 			const ctx = setup();
 			ctx.scene.begin();
 			await tick(10);
+			ctx.made[0].opts.onBeat("deliver"); // a real scene lands the item by its end
 			ctx.scene.settle("early");
 			await tick(300); // the scene is over and the hero has risen (250 ms)
 			return ctx;
 		}
 
-		it("plays again with the cards still showing, and does not record", async () => {
+		it("a click at rest hides the cards and centres the hero at once, then plays the scene after the descent, unrecorded", async () => {
 			const { scene, mod, options } = await atRest();
 			await scene.replay();
+			expect(scene.phase.value).toBe("centring");
+			expect(scene.centred.value).toBe(true);
+			expect(scene.cardsHidden.value).toBe(true);
+			expect(scene.glideMs.value).toBe(600);
+			expect(scene.mark.item).toBe(true); // the worn item rides down with the mark
+			expect(mod.play).toHaveBeenCalledTimes(1); // no scene while the hero moves
+			await tick(700);
 			expect(mod.play).toHaveBeenCalledTimes(2);
 			expect(mod.play.mock.calls[1][1].replay).toBe(true);
 			expect(scene.phase.value).toBe("replaying");
-			expect(scene.cardsHidden.value).toBe(false);
+			expect(scene.centred.value).toBe(true);
+			expect(scene.cardsHidden.value).toBe(true);
+			expect(scene.mark.item).toBe(false);
 			expect(options.recordShown).toHaveBeenCalledTimes(1);
+		});
+
+		it("the replay's end is the first play's end: the cards fade in and the hero glides up", async () => {
+			const end = await atRest();
+			await end.scene.replay();
+			await tick(700);
+			end.made[1].opts.onBeat("settle", "end");
+			expect(end.scene.phase.value).toBe("rest");
+			expect(end.scene.cardsHidden.value).toBe(false);
+			expect(end.scene.fadeMs.value).toBe(600);
+			expect(end.scene.glideMs.value).toBe(600);
+			end.made[1].finish(); // the art is gone: a normal end already went to rest
+			await tick(0);
+			expect(end.scene.fadeMs.value).toBe(600);
+			expect(end.scene.glideMs.value).toBe(600);
+
+			const early = await atRest();
+			await early.scene.replay();
+			await tick(700);
+			early.made[1].opts.onBeat("settle", "early");
+			expect(early.scene.fadeMs.value).toBe(400);
+			expect(early.scene.glideMs.value).toBe(250);
+		});
+
+		it("a pointerdown during the descent ends it: cards back, hero up, no scene, its click swallowed", async () => {
+			const { scene, mod } = await atRest();
+			await scene.replay();
+			scene.onPointerDown();
+			expect(scene.phase.value).toBe("rest");
+			expect(scene.cardsHidden.value).toBe(false);
+			expect(scene.centred.value).toBe(false);
+			expect(scene.fadeMs.value).toBe(400);
+			expect(scene.glideMs.value).toBe(250);
+			await scene.replay(); // the click the pointerdown starts
+			await tick(1000);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+			expect(scene.phase.value).toBe("rest");
+			expect(scene.reason.value).toBe("loaded");
+		});
+
+		it("a key during the replay brings the cards back with the early fade and glide", async () => {
+			const { scene } = await atRest();
+			await scene.replay();
+			await tick(700);
+			scene.onKeyDown();
+			expect(scene.phase.value).toBe("rest");
+			expect(scene.cardsHidden.value).toBe(false);
+			expect(scene.fadeMs.value).toBe(400);
+			expect(scene.glideMs.value).toBe(250);
+		});
+
+		describe.each(["centring", "replaying"])(
+			"every abort during %s reaches rest",
+			(during) => {
+				it.each([
+					["settle early", (s) => s.settle("early")],
+					["settle instant", (s) => s.settle("instant")],
+					["a pointerdown", (s) => s.onPointerDown()],
+					["a key", (s) => s.onKeyDown()],
+				])("%s", async (_, end) => {
+					const { scene, mod } = await atRest();
+					await scene.replay();
+					if (during === "replaying") await tick(700);
+					expect(scene.phase.value).toBe(during);
+					end(scene);
+					expect(scene.phase.value).toBe("rest");
+					expect(scene.centred.value).toBe(false);
+					expect(scene.cardsHidden.value).toBe(false);
+					expect(scene.reason.value).toBe("loaded");
+					await tick(1000);
+					expect(scene.phase.value).toBe("rest");
+					expect(mod.play).toHaveBeenCalledTimes(during === "replaying" ? 2 : 1);
+				});
+			}
+		);
+
+		it("a descent that was ended and clicked again starts its scene only at the second descent's end", async () => {
+			const { scene, mod } = await atRest();
+			await scene.replay(); // the first descent ends at 650 ms
+			await tick(300);
+			scene.settle("early"); // the rise takes 250 ms
+			await tick(300);
+			await scene.replay(); // 600 ms in: a second descent, ending at 1250 ms
+			await tick(400); // 1000 ms in: the first descent's timer must be gone
+			expect(scene.phase.value).toBe("centring");
+			expect(mod.play).toHaveBeenCalledTimes(1);
+			await tick(400);
+			expect(mod.play).toHaveBeenCalledTimes(2);
+			expect(scene.phase.value).toBe("replaying");
+		});
+
+		it("a replay with text in the composer only smiles, then the smile ends", async () => {
+			let draft = false;
+			const { scene, mod, options } = setup({ composerEmpty: () => !draft });
+			scene.begin();
+			await tick(10);
+			scene.settle("early");
+			await tick(300);
+			draft = true;
+			await scene.replay();
+			expect(scene.phase.value).toBe("rest");
+			expect(scene.cardsHidden.value).toBe(false);
+			expect(scene.mark.happy).toBe(true);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+			expect(options.load).toHaveBeenCalledTimes(1);
+			await tick(1600);
+			expect(scene.mark.happy).toBe(false);
+		});
+
+		it("an art chunk that fails to load on a replay smiles, and nothing moves", async () => {
+			const { mod, made } = fakeScene();
+			let loads = 0;
+			const { scene } = setup({ load: vi.fn(async () => (++loads === 1 ? mod : null)) });
+			scene.begin();
+			await tick(10);
+			scene.settle("early");
+			await tick(300);
+			await scene.replay();
+			expect(scene.phase.value).toBe("rest");
+			expect(scene.cardsHidden.value).toBe(false);
+			expect(scene.centred.value).toBe(false);
+			expect(scene.mark.happy).toBe(true);
+			expect(made).toHaveLength(1);
+			await tick(1600);
+			expect(vi.getTimerCount()).toBe(0);
+		});
+
+		it("a scene that throws on a replay start comes back to rest: cards fade in, hero rises", async () => {
+			let plays = 0;
+			const { mod, made } = fakeScene();
+			const load = vi.fn(async () => ({
+				play: (...args) => {
+					if (++plays === 2) throw new Error("boom");
+					return mod.play(...args);
+				},
+			}));
+			const { scene, options } = setup({ load });
+			scene.begin();
+			await tick(10);
+			made[0].opts.onBeat("settle", "end"); // fade and glide 600, so 400 and 250 are the throw's own
+			made[0].finish();
+			await tick(700);
+			await scene.replay();
+			await tick(700);
+			expect(plays).toBe(2);
+			expect(scene.phase.value).toBe("rest");
+			expect(scene.cardsHidden.value).toBe(false);
+			expect(scene.centred.value).toBe(false);
+			expect(scene.fadeMs.value).toBe(400);
+			expect(scene.glideMs.value).toBe(250);
+			expect(scene.reason.value).toBe("threw");
+			expect(scene.mark).toMatchObject({ face: true, item: true });
+			expect(options.report).toHaveBeenCalledTimes(1);
+		});
+
+		it("a replay whose descent ends in a hidden tab rests instead of playing", async () => {
+			const tab = {
+				visibilityState: "visible",
+				addEventListener: vi.fn(),
+				removeEventListener: vi.fn(),
+			};
+			const { scene, mod, made } = setup({ doc: tab });
+			scene.begin();
+			await tick(10);
+			made[0].opts.onBeat("deliver");
+			scene.settle("early");
+			await tick(300);
+			await scene.replay();
+			tab.visibilityState = "hidden";
+			await tick(700);
+			expect(scene.phase.value).toBe("rest");
+			expect(scene.cardsHidden.value).toBe(false);
+			expect(scene.glideMs.value).toBe(0);
+			expect(scene.fadeMs.value).toBe(0);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+			expect(scene.mark.item).toBe(true);
+		});
+
+		it("a replay with no host to draw into rests at once, with the item back", async () => {
+			let el = document.createElement("div");
+			const { scene, mod, made } = setup({ host: () => el });
+			scene.begin();
+			await tick(10);
+			made[0].opts.onBeat("deliver");
+			scene.settle("early");
+			await tick(300);
+			await scene.replay();
+			el = null;
+			await tick(700);
+			expect(scene.phase.value).toBe("rest");
+			expect(scene.cardsHidden.value).toBe(false);
+			expect(scene.glideMs.value).toBe(0);
+			expect(scene.mark.item).toBe(true);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+		});
+
+		it("lets the page finish moving once the descent is over, just before the scene starts", async () => {
+			const beforePlay = vi.fn();
+			const { scene, mod } = setup({ beforePlay });
+			scene.begin();
+			await tick(10);
+			scene.settle("early");
+			await tick(300);
+			await scene.replay();
+			await tick(100);
+			expect(beforePlay).not.toHaveBeenCalled();
+			await tick(600);
+			expect(beforePlay).toHaveBeenCalledTimes(1);
+			expect(beforePlay.mock.invocationCallOrder[0]).toBeLessThan(
+				mod.play.mock.invocationCallOrder[1]
+			);
+		});
+
+		it("stop() during the descent leaves no timer", async () => {
+			const { scene, mod } = await atRest();
+			await scene.replay();
+			scene.stop();
+			expect(vi.getTimerCount()).toBe(0);
+			await tick(1000);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+		});
+
+		describe("Enter or Space on the replay button", () => {
+			it.each(["centring", "replaying"])(
+				"mid-%s ends it and the click the key fires does not replay again",
+				async (during) => {
+					const { scene, mod } = await atRest();
+					await scene.replay();
+					if (during === "replaying") await tick(700);
+					scene.onKeyDown(true);
+					expect(scene.phase.value).toBe("rest");
+					await scene.replay(); // the click the key fires
+					await tick(1000);
+					expect(mod.play).toHaveBeenCalledTimes(during === "replaying" ? 2 : 1);
+				}
+			);
+
+			it("a repeating key is ignored: it does not end a replay, and does not undo the swallow", async () => {
+				const { scene, mod } = await atRest();
+				await scene.replay();
+				await tick(700);
+				scene.onKeyDown(true, true);
+				scene.onKeyDown(false, true);
+				expect(scene.phase.value).toBe("replaying");
+				scene.onKeyDown(true); // the key goes down: ends it, and swallows its click
+				expect(scene.phase.value).toBe("rest");
+				scene.onKeyDown(true, true); // the key is held: a repeat at rest
+				await scene.replay(); // the click the key fires
+				await tick(1000);
+				expect(mod.play).toHaveBeenCalledTimes(2);
+			});
 		});
 
 		it("a click on the mark mid-scene only settles it", async () => {
@@ -627,6 +892,7 @@ describe("createHolidayScene", () => {
 			await tick(300); // the hero has risen
 			scene.onPointerDown(); // a new gesture at rest
 			await scene.replay();
+			await tick(700); // the descent
 			expect(mod.play).toHaveBeenCalledTimes(2);
 		});
 
@@ -643,6 +909,8 @@ describe("createHolidayScene", () => {
 				await tick(10);
 				expect(mod.play).toHaveBeenCalledTimes(1); // the hero is still rising
 				await tick(600);
+				expect(mod.play).toHaveBeenCalledTimes(1); // the hero glides down first
+				await tick(700);
 				expect(mod.play).toHaveBeenCalledTimes(2);
 				expect(mod.play.mock.calls[1][1].replay).toBe(true);
 			});
@@ -659,7 +927,9 @@ describe("createHolidayScene", () => {
 				await tick(10);
 				await scene.replay(); // clicked during the rise
 				expect(mod.play).toHaveBeenCalledTimes(1);
-				await tick(700); // the rise (600 ms) is over
+				await tick(700); // the rise (600 ms) is over; the descent follows
+				expect(mod.play).toHaveBeenCalledTimes(1);
+				await tick(700);
 				expect(mod.play).toHaveBeenCalledTimes(2);
 				expect(mod.play.mock.calls[1][1].replay).toBe(true);
 			});
@@ -671,7 +941,9 @@ describe("createHolidayScene", () => {
 				made[0].opts.onBeat("settle", "end");
 				made[0].finish();
 				await tick(700);
-				await scene.replay();
+				await scene.replay(); // starts the descent at once
+				expect(scene.phase.value).toBe("centring");
+				await tick(700);
 				expect(mod.play).toHaveBeenCalledTimes(2);
 			});
 
@@ -706,7 +978,52 @@ describe("createHolidayScene", () => {
 				scene.settle("early");
 				await tick(300);
 				await scene.replay();
+				await tick(700);
 				expect(made[0].settle).toHaveBeenLastCalledWith("instant");
+			});
+
+			it.each([
+				["a key", (s) => s.onKeyDown()],
+				["composer text or a hold (settle)", (s) => s.settle("early")],
+			])(
+				"%s before then forgets the waiting click: the cards are never hidden",
+				async (_, gesture) => {
+					const { scene, mod, made } = setup();
+					scene.begin();
+					await tick(10);
+					made[0].opts.onBeat("settle", "end");
+					await scene.replay(); // kept: the hero is still rising
+					gesture(scene);
+					made[0].finish();
+					await tick(1000);
+					expect(mod.play).toHaveBeenCalledTimes(1);
+					expect(scene.phase.value).toBe("rest");
+					expect(scene.cardsHidden.value).toBe(false);
+				}
+			);
+
+			it.each([
+				["composer text", { composerEmpty: () => false }],
+				["reduced motion", { reduced: () => true }],
+			])("%s by the time the click is run only smiles", async (_, rule) => {
+				let live = false;
+				const gated = Object.fromEntries(
+					Object.entries(rule).map(([k, f]) => [k, () => live && f()])
+				);
+				if (gated.composerEmpty) gated.composerEmpty = () => !live;
+				const { scene, mod, made } = setup(gated);
+				scene.begin();
+				await tick(10);
+				made[0].opts.onBeat("settle", "end");
+				made[0].finish();
+				await tick(10);
+				await scene.replay(); // clicked during the rise: allowed then
+				live = true; // the rule starts to hold before the click is run
+				await tick(700);
+				expect(mod.play).toHaveBeenCalledTimes(1);
+				expect(scene.phase.value).toBe("rest");
+				expect(scene.cardsHidden.value).toBe(false);
+				expect(scene.mark.happy).toBe(true);
 			});
 		});
 

@@ -63,18 +63,16 @@ class OnamScene extends Scene {
   inner(geo) {
     const { p } = this;
     // The pookalam is left out when the hero leaves it no room even at the row's smallest.
-    const floor = this.opts.replay
-      ? ""
-      : this.floorGroup(
-          this.onGround(
-            floorProps(
-              p,
-              !geo.floor.tight,
-              (x, lamp) => this.edge(x, lamp),
-              (x, hw) => squeezeX(x, geo, { hw, g: LAMP_GROW })
-            )
-          )
-        );
+    const floor = this.floorGroup(
+      this.onGround(
+        floorProps(
+          p,
+          !geo.floor.tight,
+          (x, lamp) => this.edge(x, lamp),
+          (x, hw) => squeezeX(x, geo, { hw, g: LAMP_GROW })
+        )
+      )
+    );
     return `${floor}${this.item("onam", { crownOnly: true })}${petalsSVG(
       p,
       geo.from,
