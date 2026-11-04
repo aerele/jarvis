@@ -1,4 +1,6 @@
-"""One place the holiday touch writes an Error Log row.
+"""One place a feature writes a rate-limited Error Log row. Shared: the holiday touch and the
+Payment Calendar visibility check (``jarvis.payment_calendar.visibility``, kinds
+``payment_calendar_visibility:*``) both report through it.
 
 Two rules, both learnt from incidents on request paths:
 

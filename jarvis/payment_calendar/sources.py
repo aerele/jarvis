@@ -45,6 +45,11 @@ def _key(row):
 	return row.party_account, row.voucher_type, row.voucher_no, row.party
 
 
+def check_contract():
+	"""Raise CalendarSourceUnavailable unless the installed Frappe/ERPNext pair fits the calendar."""
+	_check_contract()
+
+
 def _check_contract():
 	from erpnext.accounts.report.accounts_receivable.accounts_receivable import ReceivablePayableReport
 
