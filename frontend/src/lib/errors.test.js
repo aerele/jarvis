@@ -478,11 +478,11 @@ test("the session rules sit right after internal and ahead of the rules their te
 	}
 });
 
-test("customer copy has no em-dash, no runtime name and no doubled punctuation", () => {
+// The runtime name is kept out of this copy by the CI runtime-branding gate.
+test("customer copy has no em-dash and no doubled punctuation", () => {
 	for (const rule of rules) {
 		const copy = `${rule.headline}. ${rule.hint}`;
 		assert.ok(!copy.includes("\u2014"), `${rule.code}: em-dash`);
-		assert.ok(!/openclaw/i.test(copy), `${rule.code}: runtime name`);
 		if (rule.code === "session-archived" || rule.code === "session-ended") {
 			assert.ok(!/[.!?,;:]\s*[.!?,;:]/.test(copy), `${rule.code}: doubled punctuation`);
 		}
