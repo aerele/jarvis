@@ -129,6 +129,9 @@ const heading = (w) => {
 	const h1 = w.get("h1");
 	return document.getElementById(h1.attributes("aria-labelledby")).textContent.trim();
 };
+// A real key on an element (the replay button): bubbles up to the window's capturing listener.
+const press = (el, init) =>
+	el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
 const dispatch = (type) => {
 	const event = new Event(type, { bubbles: true, cancelable: true });
 	const stop = vi.spyOn(event, "stopPropagation");
@@ -625,18 +628,144 @@ describe("HolidayStage", () => {
 		expect(mod.play).not.toHaveBeenCalled();
 	});
 
-	it("the mark is a labelled replay button over the mark's box; at rest a click replays", async () => {
+	it("the mark is a labelled replay button over the mark's box; at rest a click replays the whole scene with the cards hidden", async () => {
 		state.record = vi.fn(async () => ({ play: false }));
 		wrapper = stage();
-		await tick(10);
+		await tick(300); // the give-up rise (250 ms) is over
 		const button = wrapper.get('[data-testid="stage-replay"]');
 		expect(button.attributes("aria-label")).toBe("Replay the greeting");
 		expect(button.element.parentElement.classList.contains("jv-stage-mark")).toBe(true);
+		expect(hidden(wrapper)).toBe(false);
 		await button.trigger("click");
-		await tick(300); // the click waits for the hero to finish rising (250 ms)
+		await tick(10);
+		expect(wrapper.attributes("data-phase")).toBe("centring");
+		expect(hidden(wrapper)).toBe(true); // at once, as on the first play
+		expect(mod.play).not.toHaveBeenCalled(); // the hero is still gliding down
+		await tick(700);
 		expect(mod.play).toHaveBeenCalledTimes(1);
 		expect(mod.play.mock.calls[0][1].replay).toBe(true);
-		expect(hidden(wrapper)).toBe(false);
+		expect(wrapper.attributes("data-phase")).toBe("replaying");
+		expect(hidden(wrapper)).toBe(true);
+		sceneApi.settle("end");
+		await wrapper.vm.$nextTick();
+		expect(hidden(wrapper)).toBe(false); // the cards come back at the end
+		expect(state.record).toHaveBeenCalledTimes(1); // the first play's; a replay records nothing
+	});
+
+	describe("a replay from the mark", () => {
+		const replay = (w) => w.get('[data-testid="stage-replay"]');
+		const atRest = async () => {
+			state.record = vi.fn(async () => ({ play: false }));
+			wrapper = stage();
+			await tick(300);
+		};
+
+		it("a hold starting during the descent ends it, and the replay button goes", async () => {
+			await atRest();
+			await replay(wrapper).trigger("click");
+			await tick(10);
+			expect(wrapper.attributes("data-phase")).toBe("centring");
+			await wrapper.setProps({ holdActive: true });
+			expect(wrapper.attributes("data-phase")).toBe("rest");
+			expect(hidden(wrapper)).toBe(false);
+			expect(wrapper.find('[data-testid="stage-replay"]').exists()).toBe(false);
+			await tick(1000);
+			expect(mod.play).not.toHaveBeenCalled();
+		});
+
+		it("a day replay keeps 'Happy Diwali, Priya' the whole time, and the day sub-line", async () => {
+			await atRest();
+			const seen = [];
+			const read = () => seen.push([wrapper.attributes("data-phase"), heading(wrapper)]);
+			read();
+			await replay(wrapper).trigger("click");
+			await tick(10);
+			read();
+			await tick(700);
+			read();
+			sceneApi.settle("early");
+			await tick(10);
+			read();
+			expect(seen.map((row) => row[0])).toEqual(["rest", "centring", "replaying", "rest"]);
+			for (const [, h] of seen) expect(h).toBe("Happy Diwali, Priya");
+			expect(wrapper.find(".jv-stage-subd").exists()).toBe(true);
+		});
+
+		it("a lead-up replay keeps the normal heading and the advance line, with no Happy anywhere", async () => {
+			state.answer.value = { ...DAY, kind: "leadup", date: "2026-11-06" };
+			await atRest();
+			const seen = [];
+			const read = () =>
+				seen.push([
+					wrapper.attributes("data-phase"),
+					heading(wrapper),
+					wrapper.get('[data-testid="stage-leadup"]').text(),
+					/Happy Diwali, Priya/.test(wrapper.text()),
+				]);
+			read();
+			await replay(wrapper).trigger("click");
+			await tick(10);
+			read();
+			await tick(700);
+			sceneApi.opts.onBeat("swap", { instant: false }); // ignored on a lead-up day
+			await wrapper.vm.$nextTick();
+			read();
+			expect(seen.map((row) => row[0])).toEqual(["rest", "centring", "replaying"]);
+			for (const [, h, line, day] of seen) {
+				expect([h, line, day]).toEqual([
+					"Good morning, Priya",
+					"Wishing you a happy Diwali in advance!",
+					false,
+				]);
+			}
+		});
+
+		describe("Enter or Space on the focused replay button", () => {
+			it.each(["centring", "replaying"])(
+				"mid-%s ends it, and the click the key fires does not replay again",
+				async (during) => {
+					await atRest();
+					await replay(wrapper).trigger("click");
+					await tick(during === "replaying" ? 700 : 10);
+					expect(wrapper.attributes("data-phase")).toBe(during);
+					press(replay(wrapper).element, { key: "Enter" });
+					await wrapper.vm.$nextTick();
+					expect(wrapper.attributes("data-phase")).toBe("rest");
+					await replay(wrapper).trigger("click"); // the click the key fires
+					await tick(1000);
+					expect(wrapper.attributes("data-phase")).toBe("rest");
+					expect(mod.play).toHaveBeenCalledTimes(during === "replaying" ? 1 : 0);
+				}
+			);
+
+			it("Space does the same, and a held (repeating) key ends nothing", async () => {
+				await atRest();
+				await replay(wrapper).trigger("click");
+				await tick(700);
+				press(replay(wrapper).element, { key: "Enter", repeat: true });
+				await wrapper.vm.$nextTick();
+				expect(wrapper.attributes("data-phase")).toBe("replaying");
+				press(replay(wrapper).element, { key: " " });
+				await wrapper.vm.$nextTick();
+				expect(wrapper.attributes("data-phase")).toBe("rest");
+				await replay(wrapper).trigger("click");
+				await tick(1000);
+				expect(mod.play).toHaveBeenCalledTimes(1);
+			});
+
+			it("a key on anything else is just a key: it ends the replay and swallows no later click", async () => {
+				await atRest();
+				await replay(wrapper).trigger("click");
+				await tick(700);
+				press(document.body, { key: "Enter" });
+				await wrapper.vm.$nextTick();
+				expect(wrapper.attributes("data-phase")).toBe("rest");
+				await tick(300);
+				await replay(wrapper).trigger("click"); // a real click at rest replays
+				await tick(700);
+				expect(mod.play).toHaveBeenCalledTimes(2);
+			});
+		});
 	});
 
 	it.each([
@@ -876,18 +1005,101 @@ describe("HolidayStage", () => {
 			expect(shift(wrapper)).toBe("translateY(0px)");
 		});
 
-		it("a replay from the mark at rest keeps the hero where it is", async () => {
-			state.record = vi.fn(async () => ({ play: false }));
-			wrapper = stage();
-			await tick(10);
-			await wrapper.get('[data-testid="stage-replay"]').trigger("click");
-			await tick(300);
-			expect(wrapper.attributes("data-phase")).toBe("replaying");
-			expect(shift(wrapper)).toBe("translateY(0px)");
-			state.resize.fireOne(hero(wrapper), 400, 240);
-			state.resize.fireOne(hero(wrapper), 400, 300);
-			await wrapper.vm.$nextTick();
-			expect(shift(wrapper)).toBe("translateY(0px)");
+		describe("a replay from the mark", () => {
+			const replayButton = (w) => w.get('[data-testid="stage-replay"]');
+			const atRest = async () => {
+				state.record = vi.fn(async () => ({ play: false }));
+				wrapper = stage();
+				await tick(300);
+				expect(shift(wrapper)).toBe("translateY(0px)");
+			};
+
+			it("glides the hero down to its centred place, then plays; the end glides it back up", async () => {
+				await atRest();
+				sizes.heroH = 300; // the layout changed at rest: the old shift (130) is stale
+				await replayButton(wrapper).trigger("click");
+				await tick(10);
+				expect(wrapper.attributes("data-phase")).toBe("centring");
+				expect(shift(wrapper)).toBe("translateY(100px)"); // (700 - 300) / 2 - 100, measured now
+				expect(glide(wrapper)).toBe("600ms");
+				expect(mod.play).not.toHaveBeenCalled();
+				await tick(700);
+				expect(wrapper.attributes("data-phase")).toBe("replaying");
+				expect(shift(wrapper)).toBe("translateY(100px)");
+				expect(glide(wrapper)).toBe("0ms"); // no drift while the scene plays
+				sceneApi.settle("end");
+				await wrapper.vm.$nextTick();
+				expect(shift(wrapper)).toBe("translateY(0px)");
+				expect(glide(wrapper)).toBe("600ms");
+			});
+
+			it("a key mid-replay sends the hero up in 250 ms", async () => {
+				await atRest();
+				await replayButton(wrapper).trigger("click");
+				await tick(700);
+				dispatch("keydown");
+				await wrapper.vm.$nextTick();
+				expect(shift(wrapper)).toBe("translateY(0px)");
+				expect(glide(wrapper)).toBe("250ms");
+			});
+
+			it("a pointerdown during the descent sends it up again, with no scene", async () => {
+				await atRest();
+				await replayButton(wrapper).trigger("click");
+				await tick(300);
+				dispatch("pointerdown");
+				await wrapper.vm.$nextTick();
+				expect(shift(wrapper)).toBe("translateY(0px)");
+				expect(glide(wrapper)).toBe("250ms");
+				await tick(1000);
+				expect(mod.play).not.toHaveBeenCalled();
+			});
+
+			it("a hero resize mid-replay measures again, with no glide", async () => {
+				await atRest();
+				await replayButton(wrapper).trigger("click");
+				await tick(700);
+				state.resize.fireOne(hero(wrapper), 400, 240); // the baseline
+				sizes.heroH = 300;
+				state.resize.fireOne(hero(wrapper), 400, 300);
+				await wrapper.vm.$nextTick();
+				expect(wrapper.attributes("data-phase")).toBe("replaying");
+				expect(shift(wrapper)).toBe("translateY(100px)");
+				expect(glide(wrapper)).toBe("0ms");
+			});
+
+			it("scrolls the stage back to the top before it centres, without ending the replay", async () => {
+				await atRest();
+				const scroller = wrapper.get(".jv-stage-scroll").element;
+				const set = vi.fn();
+				Object.defineProperty(scroller, "scrollTop", {
+					configurable: true,
+					get: () => 80,
+					set,
+				});
+				await replayButton(wrapper).trigger("click");
+				await tick(10);
+				expect(set).toHaveBeenCalledWith(0);
+				expect(wrapper.attributes("data-phase")).toBe("centring");
+				await tick(700);
+				expect(wrapper.attributes("data-phase")).toBe("replaying");
+			});
+
+			it("finishes a running hero glide before the scene starts", async () => {
+				await atRest();
+				const finish = vi.fn();
+				hero(wrapper).getAnimations = () => [{ finish }];
+				mod.play.mockImplementationOnce(() => {
+					expect(finish).toHaveBeenCalledTimes(1);
+					throw new Error("stop here");
+				});
+				await replayButton(wrapper).trigger("click");
+				await tick(10);
+				expect(finish).not.toHaveBeenCalled();
+				await tick(700);
+				expect(finish).toHaveBeenCalledTimes(1);
+				expect(mod.play).toHaveBeenCalledTimes(1);
+			});
 		});
 
 		it("the shift is a transform only: the layout (and the scroll height) is untouched", async () => {

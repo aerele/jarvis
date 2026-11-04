@@ -5,15 +5,20 @@
 //
 // Phases: pending (the scene may still play: cards hidden, normal greeting) -> playing ->
 // rest. Or pending -> rest at once when the answer is no, the deadline passes or the art
-// will not load. A scene never restarts and never hides the cards again: the replay on the
-// mark runs as "replaying", with the cards showing. A replay clicked while the last scene is
-// still fading out or the hero is still gliding waits for both (one click is kept).
+// will not load. The first play never restarts. The replay on the mark plays the whole scene
+// again like the first play: centring (the cards hide at once and the hero glides back to its
+// centred place; no scene yet, so the art is drawn for a mark that is not moving) ->
+// replaying -> rest. A replay clicked while the last scene is still fading out or the hero is
+// still gliding waits for both (one click is kept). Any ender (a key, a pointerdown, composer
+// text, a hold, a resize) takes a centring or replaying phase to rest the same way as it
+// takes a playing one: the cards fade in and the hero glides up.
 //
 // A tab opened hidden does not begin until it is shown, so a day's showing is not spent on
 // a scene nobody sees. `reason` says why the scene is or is not playing, for support.
 //
-// The hero (mark and greeting) is centred in the stage while the scene is pending or playing
-// (`centred`) and glides up to its rest place over `glideMs` when the scene ends.
+// The hero (mark and greeting) is centred in the stage while the scene is pending, centring,
+// playing or replaying (`centred`) and glides up to its rest place over `glideMs` when the
+// scene ends.
 import { computed, reactive, ref } from "vue";
 import { mayPlayLocal, recordLocal } from "@jsshared/holiday/cadence.mjs";
 import { recordHolidayShown } from "@/api";
@@ -23,6 +28,8 @@ import { hasScene, loadScene } from "@/lib/holidayScenes";
 
 export const DEADLINE_MS = 2500; // import() then record_shown, from mount
 const SMILE_MS = 1500;
+const DESCENT_MS = 600; // the hero glides back to its centred place before a replay's scene starts
+const DESCENT_MARGIN_MS = 50; // the frame before the CSS transition starts
 const FADE_MS = { end: 600, early: 400, instant: 0 }; // how the cards come back
 const GLIDE_MS = { end: 600, early: 250, instant: 0 }; // how the hero rises to its rest place
 
@@ -60,6 +67,7 @@ export function createHolidayScene({
 	deadlineMs = DEADLINE_MS,
 	fontsReady = () => Promise.resolve(), // () => a promise: the page's fonts are loaded
 	doc = typeof document === "undefined" ? null : document, // for the tab's visibility
+	beforePlay = () => {}, // a replay's descent is over: let the page finish moving before the art reads it
 }) {
 	const phase = ref("idle");
 	// What the mark shows: the face, the item, the smile, and where the eyes look.
@@ -72,7 +80,13 @@ export function createHolidayScene({
 	// Why the scene is or is not playing: loaded | load-failed | deadline | declined | threw |
 	// hidden (null until something is known).
 	const reason = ref(null);
-	const centred = computed(() => phase.value === "pending" || phase.value === "playing");
+	const centred = computed(
+		() =>
+			phase.value === "pending" ||
+			phase.value === "playing" ||
+			phase.value === "centring" ||
+			phase.value === "replaying"
+	);
 	const cardsHidden = centred;
 
 	let scene = null;
@@ -85,6 +99,8 @@ export function createHolidayScene({
 	let swallowClick = false;
 	let rising = false; // the hero is still rising to its rest place
 	let glideTimer = null; // ends the rise (and runs a replay clicked during it)
+	let descentTimer = null; // ends a replay's descent, when its scene starts
+	let descents = 0; // bumped whenever a descent starts or ends: a stale timer ignores itself
 	let queuedReplay = false; // a replay was clicked before the last scene was over
 	let waitingToShow = false; // begin() is waiting for the tab to be shown
 
@@ -123,10 +139,20 @@ export function createHolidayScene({
 
 	function onSettle(mode) {
 		if (phase.value !== "playing" && phase.value !== "replaying") return;
-		if (phase.value === "playing") {
-			fadeMs.value = FADE_MS[mode] ?? 0;
-			glide(mode);
-		}
+		toRest(mode);
+	}
+
+	/**
+	 * The one way out of every centred phase (the first play, a replay and its descent): the
+	 * cards fade in and the hero glides up over the mode's times. Not giveUp: that is a no-op
+	 * outside `pending`.
+	 */
+	function toRest(mode) {
+		descents++;
+		clearTimeout(descentTimer);
+		descentTimer = null;
+		fadeMs.value = FADE_MS[mode] ?? 0;
+		glide(mode);
 		phase.value = "rest";
 	}
 
@@ -230,7 +256,11 @@ export function createHolidayScene({
 		clearTimeout(deadline);
 		deadline = null;
 		const el = host();
-		if (!el) return giveUp(run, "early", "declined");
+		if (!el) {
+			if (phase.value !== "centring") return giveUp(run, "early", "declined");
+			rest(); // the item left for the descent's end: back on the mark
+			return toRest("instant");
+		}
 		// The scenes before this one are over (a replay waits for that); this closes their
 		// last timer (the smile's) and drops them.
 		started.splice(0).forEach((old) => old.settle("instant"));
@@ -256,15 +286,17 @@ export function createHolidayScene({
 			failed(a.design, error);
 			scene = null;
 			rest();
-			phase.value = "rest";
+			toRest("early");
 		}
 	}
 
 	function finish() {
 		scene = null;
+		// Only while still playing: a normal end already went to rest through the settle beat,
+		// and going again would cut the running fade and rise short.
 		if (phase.value === "playing" || phase.value === "replaying") {
 			rest();
-			phase.value = "rest";
+			toRest("early");
 		}
 		drain();
 	}
@@ -277,18 +309,14 @@ export function createHolidayScene({
 	// ---- ending it -------------------------------------------------------------------
 	/** End the scene: "early" (input, resize, ...) or "instant". Does nothing at rest. */
 	function settle(mode = "early") {
+		queuedReplay = false; // anything that ends a scene also forgets a click still waiting
 		if (phase.value === "pending") return giveUp(run, mode);
+		if (phase.value === "centring") return toRest(mode); // no scene yet, only the descent
 		if (phase.value !== "playing" && phase.value !== "replaying") return;
 		const was = phase.value;
 		if (scene) scene.settle(mode);
-		if (phase.value === was) {
-			// A scene that did not announce its ending still ends here.
-			if (was === "playing") {
-				fadeMs.value = FADE_MS[mode] ?? 0;
-				glide(mode);
-			}
-			phase.value = "rest";
-		}
+		// A scene that did not announce its ending still ends here.
+		if (phase.value === was) toRest(mode);
 	}
 
 	/** The page layout changed under a playing scene: let it read the boxes again. */
@@ -304,14 +332,27 @@ export function createHolidayScene({
 		settle("early");
 	}
 
-	/** Clicking the mark at rest replays it with the cards showing; mid-scene it only settled. */
+	/**
+	 * A key anywhere ends the scene. Enter or Space on the mark (`startsMarkClick`) is also the
+	 * start of the click that would replay it, so that click is swallowed like a tap's. A key
+	 * held down repeats: the repeats are ignored, so they neither end the replay a click on the
+	 * held key started nor undo the swallow.
+	 */
+	function onKeyDown(startsMarkClick = false, repeat = false) {
+		if (repeat) return;
+		if (startsMarkClick) swallowClick = phase.value !== "rest" && phase.value !== "idle";
+		settle("early");
+	}
+
+	/** Clicking the mark at rest replays the whole scene, cards hidden; mid-scene it only settled. */
 	async function replay() {
 		if (swallowClick) {
 			swallowClick = false;
 			return;
 		}
 		if (phase.value !== "rest") return;
-		if (reduced()) return smile();
+		// A draft takes over the welcome area like the first play's rule: smile only.
+		if (reduced() || !composerEmpty()) return smile();
 		// The last scene is still fading out, or the hero still rising: start after both.
 		if (scene || rising) {
 			queuedReplay = true;
@@ -327,11 +368,39 @@ export function createHolidayScene({
 		void playReplay();
 	}
 
+	// The module is loaded while the page is still at rest, so a chunk that will not load costs
+	// nothing but a smile. The rules are asked again after the wait: a click kept for the end of
+	// the last scene obeys what holds when it runs, not when it was clicked.
 	async function playReplay() {
 		const a = answer();
 		const mod = await load(a.design);
-		if (!mod || phase.value !== "rest" || stopped || scene || rising) return;
+		if (phase.value !== "rest" || stopped || scene || rising) return;
+		if (reduced() || !composerEmpty() || !mod) return smile();
+		descend(mod, a);
+	}
+
+	/**
+	 * Hide the cards and glide the hero back to its centred place. The scene starts when that
+	 * is over: the art reads the mark's place as it draws, so it must not be moving. A timer,
+	 * not a transition event or a clock reading, for the same reason the rise uses one.
+	 */
+	function descend(mod, a) {
+		clearTimeout(descentTimer);
+		const mine = ++descents;
+		phase.value = "centring";
+		fadeMs.value = 0;
+		glideMs.value = DESCENT_MS;
+		descentTimer = setTimeout(() => descended(mine, mod, a), DESCENT_MS + DESCENT_MARGIN_MS);
+	}
+
+	function descended(mine, mod, a) {
+		if (mine !== descents) return; // a descent that was ended: its timer is stale
+		descentTimer = null;
+		if (phase.value !== "centring" || stopped) return;
+		// A hidden tab does not run the transition: no scene nobody sees.
+		if (doc && doc.visibilityState !== "visible") return toRest("instant");
 		mark.item = false;
+		beforePlay();
 		startScene(mod, a, true);
 	}
 
@@ -352,9 +421,12 @@ export function createHolidayScene({
 		clearTimeout(deadline);
 		clearTimeout(smileTimer);
 		clearTimeout(glideTimer);
+		clearTimeout(descentTimer);
+		descents++;
 		deadline = null;
 		smileTimer = null;
 		glideTimer = null;
+		descentTimer = null;
 		rising = false;
 		queuedReplay = false;
 		stopWaiting();
@@ -376,6 +448,7 @@ export function createHolidayScene({
 		settle,
 		relayout,
 		onPointerDown,
+		onKeyDown,
 		replay,
 		stop,
 	};

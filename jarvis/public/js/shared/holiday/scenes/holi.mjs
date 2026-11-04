@@ -71,15 +71,13 @@ class HoliScene extends Scene {
   inner(geo) {
     const { p } = this;
     const onFloor = (s) => s.band === "low";
-    const low = this.opts.replay
-      ? ""
-      : this.floorGroup(
-          this.onGround(
-            splatsSVG(p, geo.splats.filter(onFloor), (x, splat) =>
-              this.edge(x, splat)
-            )
-          )
-        );
+    const low = this.floorGroup(
+      this.onGround(
+        splatsSVG(p, geo.splats.filter(onFloor), (x, splat) =>
+          this.edge(x, splat)
+        )
+      )
+    );
     const air = splatsSVG(
       p,
       geo.splats.filter((s) => !onFloor(s))

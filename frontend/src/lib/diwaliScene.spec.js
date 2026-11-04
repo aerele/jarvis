@@ -143,14 +143,14 @@ describe("the Diwali scene", () => {
 		expect(beats).toHaveLength(count);
 	});
 
-	it("the replay has no floor props and no greeting swap", async () => {
+	it("the replay draws the floor props and sends no greeting swap", async () => {
 		const normal = run();
 		const withFloor = host.querySelectorAll("[class*=dflame]").length;
 		normal.settle("instant");
 		beats = [];
 		const again = run({ replay: true });
 		expect(withFloor).toBeGreaterThan(0);
-		expect(host.querySelectorAll("[class*=dflame]").length).toBe(0);
+		expect(host.querySelectorAll("[class*=dflame]").length).toBe(withFloor);
 		await vi.advanceTimersByTimeAsync(END_MS + 700);
 		expect(names()).not.toContain("swap");
 		await again.done;

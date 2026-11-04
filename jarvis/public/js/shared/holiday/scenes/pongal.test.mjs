@@ -25,12 +25,14 @@ import {
 
 import {
   contractSuite,
+  replayFloorTest,
   floorTransformOf,
   run,
   stageBoxes as boxes,
 } from "./day-scene-fakes.test-support.mjs";
 
 contractSuite("pongal", scene, { row: FLOOR_ROW });
+replayFloorTest("pongal", scene);
 
 // The scene most recently started, for the helpers below.
 let current = null;
@@ -52,14 +54,14 @@ const tick = (ms) => {
 };
 const scaleOf = (el) => Number(/scale\(([\d.]+)\)/.exec(el.attrs.transform)[1]);
 
-test("a replay has no floor props and never swaps the greeting", async () => {
+test("a replay has the floor props and never swaps the greeting", async () => {
   const { scene, names, svg } = start({ replay: true });
   tick(END_MS + 700);
   await scene.done;
   assert.ok(!names().includes("swap"));
   assert.ok(names().includes("deliver"));
-  assert.equal(svg.querySelectorAll(".t-floor").length, 0);
-  assert.equal(svg.querySelectorAll(".t-kl").length, 0);
+  assert.equal(svg.querySelectorAll(".t-floor").length, 1);
+  assert.equal(svg.querySelectorAll(".t-kl").length, 3);
   assert.ok(svg.querySelector(".t-toran"), "the sky art still plays");
 });
 
