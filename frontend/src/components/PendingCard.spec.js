@@ -229,6 +229,42 @@ describe("email attachments", () => {
 		expect(messages[0].text()).not.toContain("summary.pdf");
 		expect(messages[1].text()).toContain("summary.pdf");
 	});
+	it("lists every recipient of a merge, and the merge's left-out line", () => {
+		const all = Array.from({ length: 171 }, (_, i) => `p${i}@example.invalid`);
+		const w = mount(PendingCard, {
+			props: {
+				card: {
+					kind: "bulk_email",
+					count: 171,
+					messages: all
+						.slice(0, 20)
+						.map((r) => ({ recipients: r, subject: "Happy Diwali" })),
+					extra: 151,
+					all_recipients: all,
+					warning: { merge: { rows: 172, no_email: 1, duplicate: 0 } },
+				},
+				details: "",
+			},
+		});
+		expect(w.text()).toContain("All 171 recipients");
+		expect(w.text()).toContain("p170@example.invalid");
+		expect(w.text()).not.toContain("full list in Details");
+		expect(w.text()).toContain("1 row has no valid email and is left out.");
+	});
+	it("keeps the Details pointer for a typed batch without the full list", () => {
+		const w = mount(PendingCard, {
+			props: {
+				card: {
+					kind: "bulk_email",
+					count: 25,
+					messages: [{ recipients: "a@example.invalid" }],
+					extra: 24,
+				},
+				details: "",
+			},
+		});
+		expect(w.text()).toContain("+24 more · full list in Details");
+	});
 });
 
 // Round 2, J1-cards: the risk banner (sensitive / structural), the ONE trial warning
