@@ -47,6 +47,8 @@ SCRIPT_USER = "jarvis-trigger-scriptmgr@example.com"
 # The controller imports is_safe_exec_enabled at module scope, so patch it there
 # to let Script triggers validate on a bench without server_script_enabled.
 _CTRL = "jarvis.jarvis.doctype.jarvis_trigger.jarvis_trigger"
+# Shared instruction for the duplicate-guard tests (#816); other tests get a unique one.
+SAME = "Check this todo."
 
 
 def _ensure_user(email: str, roles: list[str]) -> None:
@@ -102,7 +104,8 @@ class _TriggersApiTestCase(FrappeTestCase):
 			"target_doctype": "ToDo",
 			"doc_event": "on_update",
 			"action_type": "LLM",
-			"llm_instruction": "Check this todo.",
+			# Unique per call: identical enabled triggers are refused (#816).
+			"llm_instruction": f"Check this todo {frappe.generate_hash(length=8)}.",
 		}
 		fields.update(overrides)
 		return fields
@@ -1010,10 +1013,12 @@ class TestDuplicateTriggers(_TriggersApiTestCase):
 		return frappe.get_doc(fields)
 
 	def test_same_type_duplicate_refused_across_users(self):
-		first = self._create_as_admin(condition="doc.priority == 'High'")
+		first = self._create_as_admin(condition="doc.priority == 'High'", llm_instruction=SAME)
 		frappe.set_user(JADMIN_USER)
 		with self.assertRaises(frappe.ValidationError):
-			create_trigger(frappe.as_json(self._llm_payload(condition="doc.priority == 'High'")))
+			create_trigger(
+				frappe.as_json(self._llm_payload(condition="doc.priority == 'High'", llm_instruction=SAME))
+			)
 		self.assertEqual(
 			frappe.db.count(TRIGGER, {"target_doctype": "ToDo", "condition": "doc.priority == 'High'"}), 1
 		)
@@ -1021,39 +1026,45 @@ class TestDuplicateTriggers(_TriggersApiTestCase):
 
 	def test_refusal_names_existing_trigger_only_if_readable(self):
 		# JADMIN (Jarvis Admin) can read the row, so the title is shown.
-		self._create_as_admin(trigger_name="Flag big discounts", condition="doc.priority == 'Low'")
+		self._create_as_admin(
+			trigger_name="Flag big discounts", condition="doc.priority == 'Low'", llm_instruction=SAME
+		)
 		frappe.set_user(JADMIN_USER)
 		with self.assertRaises(frappe.ValidationError) as cm:
-			create_trigger(frappe.as_json(self._llm_payload(condition="doc.priority == 'Low'")))
+			create_trigger(
+				frappe.as_json(self._llm_payload(condition="doc.priority == 'Low'", llm_instruction=SAME))
+			)
 		self.assertIn("Flag big discounts", str(cm.exception))
 		# A user with no read permission on Jarvis Trigger gets a generic message.
-		dup = frappe.get_doc({"doctype": TRIGGER, **self._llm_payload(condition="doc.priority == 'Low'")})
+		dup_fields = self._llm_payload(condition="doc.priority == 'Low'", llm_instruction=SAME)
+		dup = frappe.get_doc({"doctype": TRIGGER, **dup_fields})
 		with patch("frappe.has_permission", return_value=False):
 			with self.assertRaises(frappe.ValidationError) as cm:
 				dup.insert()
 		self.assertNotIn("Flag big discounts", str(cm.exception))
 
 	def test_whitespace_only_condition_difference_is_duplicate(self):
-		self._create_as_admin(condition="doc.priority  ==   'High'")
+		self._create_as_admin(condition="doc.priority  ==   'High'", llm_instruction=SAME)
 		frappe.set_user(ADMIN_USER)
 		with self.assertRaises(frappe.ValidationError):
-			create_trigger(frappe.as_json(self._llm_payload(condition="  doc.priority == 'High'\n")))
+			dup = self._llm_payload(condition="  doc.priority == 'High'\n", llm_instruction=SAME)
+			create_trigger(frappe.as_json(dup))
 
 	def test_different_instruction_is_not_duplicate(self):
-		self._create_as_admin(llm_instruction="Check this todo.")
+		self._create_as_admin(llm_instruction=SAME)
 		name = self._create_as_admin(llm_instruction="Summarise this todo.")
 		self.assertTrue(frappe.db.exists(TRIGGER, name))
 
 	def test_disabled_existing_trigger_does_not_block(self):
-		first = self._create_as_admin()
+		first = self._create_as_admin(llm_instruction=SAME)
 		set_trigger_enabled(first, 0)
-		second = self._create_as_admin()
+		second = self._create_as_admin(llm_instruction=SAME)
 		self.assertTrue(frappe.db.exists(TRIGGER, second))
 
 	def test_enabling_a_duplicate_is_refused(self):
-		first = self._create_as_admin()
+		first = self._create_as_admin(llm_instruction=SAME)
 		set_trigger_enabled(first, 0)
-		second = self._create_as_admin()
+		second = self._create_as_admin(llm_instruction=SAME)
 		with self.assertRaises(frappe.ValidationError):
 			set_trigger_enabled(first, 1)
 		self.assertEqual(frappe.db.get_value(TRIGGER, first, "enabled"), 0)
@@ -1066,10 +1077,10 @@ class TestDuplicateTriggers(_TriggersApiTestCase):
 		self.assertNotIn("warning", updated)
 
 	def test_edit_into_a_duplicate_is_refused(self):
-		self._create_as_admin(llm_instruction="Check this todo.")
+		self._create_as_admin(llm_instruction=SAME)
 		other = self._create_as_admin(llm_instruction="Something else.")
 		with self.assertRaises(frappe.ValidationError):
-			update_trigger(other, frappe.as_json({"llm_instruction": "Check this todo."}))
+			update_trigger(other, frappe.as_json({"llm_instruction": SAME}))
 
 	def test_cross_type_is_allowed_with_warning(self):
 		self._create_as_admin(condition="doc.priority == 'High'")
