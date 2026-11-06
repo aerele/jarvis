@@ -23,8 +23,10 @@ import frappe
 from jarvis.exceptions import InvalidArgumentError
 
 # One call's ceiling for a bench-resolved merge. A model-typed ``messages`` list keeps
-# the shared 20 (jarvis.tools._bulk._MAX_BATCH).
+# the shared 20 (jarvis.tools._bulk._MAX_BATCH), and so does a merge that runs without a
+# card (UNCARDED_MAX).
 MAX_MERGE = 500
+UNCARDED_MAX = 20
 
 _KEYS = frozenset({"result_id", "spec", "email_field", "name_field", "doctype"})
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
@@ -59,7 +61,15 @@ def assert_unchanged(args: dict) -> list:
 		content=args.get("content"),
 		shared={k: args[k] for k in _SHARED if args.get(k) is not None},
 	)
-	if args.get("messages") is not None and _comparable(fresh) != _comparable(args["messages"]):
+	if args.get("messages") is None:
+		# No card: an armed macro or an approved skill run sends without a person reading
+		# the list, so it keeps the typed batch's ceiling. Only a reviewed card goes past it.
+		if len(fresh) > UNCARDED_MAX:
+			raise InvalidArgumentError(
+				f"this merge has {len(fresh)} recipients; without a confirmation card at most "
+				f"{UNCARDED_MAX} can be emailed in one call. Narrow the query."
+			)
+	elif _comparable(fresh) != _comparable(args["messages"]):
 		raise InvalidArgumentError(
 			"the recipient list changed since the confirmation card was shown (a contact was "
 			"added, removed or edited). Nothing was sent. Run the send again to show a new card."
@@ -133,6 +143,7 @@ def build_messages(src, *, subject, content, shared: dict) -> tuple[list, dict]:
 		)
 	if not messages:
 		raise InvalidArgumentError("no row has a valid email address")
+	_assert_references(doctype, [m["name"] for m in messages], name_field)
 	note = {"rows": len(rows), "no_email": no_email, "duplicate": duplicate, "limited": limited}
 	return messages, note
 
@@ -163,6 +174,26 @@ def _source(src) -> tuple[dict, str, str, str]:
 	if not isinstance(doctype, str) or not doctype:
 		raise InvalidArgumentError("recipients_from.doctype is required when the spec has no from")
 	return spec, email_field, name_field, doctype
+
+
+def _assert_references(doctype: str, names: list, name_field: str) -> None:
+	"""Every email is logged against its record, and send_email refuses one the user cannot
+	read. Check them all now, so a wrong ``name_field`` is refused at the card, not after
+	Confirm. A query that selects two tables' ``name`` keeps only the last one (the
+	usual cause): select only the reference table's name, or name the column with
+	``name_field``."""
+	if not frappe.has_permission(doctype, "read"):
+		raise InvalidArgumentError(f"you cannot read {doctype}, so no email can be logged against it")
+	readable = set(
+		frappe.get_list(doctype, filters={"name": ["in", list(set(names))]}, pluck="name", limit=0)
+	)
+	missing = [n for n in names if n not in readable]
+	if missing:
+		raise InvalidArgumentError(
+			f"{len(missing)} of {len(names)} {name_field!r} values are not {doctype} records you can read "
+			f"(e.g. {missing[0]!r}). Select the {doctype}'s own name for {name_field!r}: when two joined "
+			f"tables both select name, only the last is kept."
+		)
 
 
 def _fill(text: str, row: dict) -> str:
