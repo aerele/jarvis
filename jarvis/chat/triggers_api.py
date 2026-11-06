@@ -107,12 +107,16 @@ _ACTIVITY_FIELDS = (
 # --------------------------------------------------------------------------- #
 # shared guards / helpers
 # --------------------------------------------------------------------------- #
-def _clip_detail(detail: str | None) -> str:
-	"""``detail`` clipped to ``_ACTIVITY_DETAIL_CAP`` (head kept, ``…`` appended when cut)."""
+def _clip_detail(detail: str | None) -> tuple[str, bool]:
+	"""``(clipped text, was_cut)``: ``detail`` kept to ``_ACTIVITY_DETAIL_CAP`` chars
+	(head kept, ``…`` appended when cut). One compare decides both values, so the
+	text and the flag cannot drift apart. The caller selects ``_ACTIVITY_DETAIL_CAP + 1``
+	chars from the DB, so ``len(detail) > _ACTIVITY_DETAIL_CAP`` means the stored
+	value was longer than the cap (it was cut)."""
 	detail = detail or ""
 	if len(detail) <= _ACTIVITY_DETAIL_CAP:
-		return detail
-	return detail[:_ACTIVITY_DETAIL_CAP] + "\u2026"
+		return detail, False
+	return detail[:_ACTIVITY_DETAIL_CAP] + "\u2026", True
 
 
 def _can_manage(user: str | None = None) -> bool:
@@ -316,6 +320,28 @@ def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
 		detail["script_body"] = redacted
 		detail["llm_instruction"] = redacted
 	return detail
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def get_activity_detail(name: str) -> dict:
+	"""Full stored ``detail`` of one activity row, for managers only.
+
+	The feed (``list_activity_page``) cuts ``detail`` at ``_ACTIVITY_DETAIL_CAP``
+	and flags it with ``detail_truncated``; this returns the whole stored value on
+	demand. ``Jarvis Trigger Activity`` read is System Manager only, so the gate is
+	``_require_manage()`` (checked before any read, so a non-manager gets the same
+	error for a real and a missing name) and the row is read with ``get_value``,
+	never ``get_doc().check_permission`` / ``get_list``."""
+	_require_manage()
+	# ``from __future__ import annotations`` makes Frappe's whitelist type check skip
+	# this module, so a non-str is rejected here.
+	if not isinstance(name, str) or not name.strip():
+		frappe.throw(_("Activity name is required."))
+	row = frappe.db.get_value(ACTIVITY, name.strip(), ["name", "detail"], as_dict=True)
+	if not row:
+		frappe.throw(_("That activity no longer exists."), frappe.DoesNotExistError)
+	return {"ok": True, "data": {"name": row.name, "detail": row.detail or ""}}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -730,7 +756,7 @@ def list_activity_page(
 		rows = ordered.select(detail).limit(pl).offset(start).run(as_dict=True)
 		for r in rows:
 			r["creation"] = str(r["creation"])
-			r["detail"] = _clip_detail(r.get("detail"))
+			r["detail"], r["detail_truncated"] = _clip_detail(r.get("detail"))
 		return {
 			"ok": True,
 			"data": {
