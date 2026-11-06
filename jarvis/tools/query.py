@@ -266,6 +266,33 @@ def _execute_query(spec: dict, *, confirm_large: bool, model_output: bool) -> di
 	return result
 
 
+def query_rows(spec: dict, *, max_rows: int) -> tuple[list, dict, bool]:
+	"""Every row of ``spec`` for a server-side consumer (the send_email merge), as
+	``(rows, masked, limited)``.
+
+	The same gates as ``query``: compile_spec's DocType read, allowlist, field-level
+	ACL and record-level weave, and Frappe 16 masking applied value by value. No
+	model-facing byte budget and no saved-result id: the rows never reach the model.
+	A spec ``limit`` below ``max_rows`` still applies, and ``limited`` says whether it
+	cut the result. More than ``max_rows`` rows is refused, never silently cut."""
+	q = compile_spec(spec)
+	columns, masked = _masking_for_rows(spec, q)
+	own_limit = int(spec.get("limit") or 0)
+	cap = min(own_limit, max_rows) if own_limit else max_rows
+	rows = q.limit(cap + 1).run(as_dict=True)
+	limited = False
+	if len(rows) > cap:
+		if not own_limit or own_limit > max_rows:
+			raise InvalidArgumentError(
+				f"this query matches more than {max_rows} rows; narrow it with a filter "
+				f"(at most {max_rows} recipients per call)."
+			)
+		limited = True
+		rows = rows[:cap]
+	masking.mask_rows(columns, rows, masked)
+	return rows, masked, limited
+
+
 # Budget events that mean the answer was cut (see _result_guard.enforce_result_budget).
 _CUTTING_EVENTS = ("truncated", "uncapped_nonrow")
 
