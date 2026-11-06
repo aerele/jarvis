@@ -30,8 +30,11 @@ UNCARDED_MAX = 20
 
 _KEYS = frozenset({"result_id", "spec", "email_field", "name_field", "doctype"})
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
-# Fields the merge copies onto every message from the call itself.
-_SHARED = ("cc", "bcc", "print_format", "send_me_a_copy", "attachments")
+# Fields the merge copies onto every message from the call itself: each recipient's own copy of the file.
+_SHARED = ("print_format", "attachments")
+# Fields a merge refuses: copied onto every one of up to MAX_MERGE emails, a cc, a bcc or "send me a copy" would put
+# one email per recipient into the same inbox (a 229-customer greeting = 229 copies to the sender, review 7 Nov).
+_PER_EMAIL_COPIES = ("cc", "bcc", "send_me_a_copy")
 
 
 def expand(args: dict) -> tuple[dict, dict]:
@@ -43,6 +46,7 @@ def expand(args: dict) -> tuple[dict, dict]:
 		raise InvalidArgumentError("pass recipients or recipients_from, not both")
 	if args.get("messages") is not None:
 		raise InvalidArgumentError("pass messages or recipients_from, not both")
+	refuse_copies(args)
 	messages, note = build_messages(
 		args.get("recipients_from"),
 		subject=args.get("subject"),
@@ -55,6 +59,7 @@ def expand(args: dict) -> tuple[dict, dict]:
 def assert_unchanged(args: dict) -> list:
 	"""Re-run the query at send time and return the messages, refusing when they differ
 	from the ones the card showed (``args["messages"]``, set by ``expand``)."""
+	refuse_copies(args)
 	fresh, _note = build_messages(
 		args.get("recipients_from"),
 		subject=args.get("subject"),
@@ -75,6 +80,17 @@ def assert_unchanged(args: dict) -> list:
 			"added, removed or edited). Nothing was sent. Run the send again to show a new card."
 		)
 	return fresh
+
+
+def refuse_copies(args: dict) -> None:
+	"""A merge sends one email per row; a cc, bcc or "send me a copy" would ride on every one of them."""
+	asked = [k for k in _PER_EMAIL_COPIES if args.get(k)]
+	if asked:
+		raise InvalidArgumentError(
+			f"{', '.join(asked)} cannot be used with recipients_from: it would be added to every one of the "
+			"emails, so that inbox would get one copy per recipient. Send the merge without it; if someone "
+			"needs a copy, send them one separate email."
+		)
 
 
 def build_messages(src, *, subject, content, shared: dict) -> tuple[list, dict]:
