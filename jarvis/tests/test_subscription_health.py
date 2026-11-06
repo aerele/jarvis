@@ -829,6 +829,35 @@ class TestFallbackLabel(unittest.TestCase):
 			self.assertEqual(sh.fallback_label({"ACC_gpt-5.6"}), "")
 
 
+class TestFallbackModel(unittest.TestCase):
+	"""``fallback_model``: the model id of the row ``fallback_label`` names, so the SPA can pin to it."""
+
+	def _with(self, *rows):
+		return patch.object(sh, "_settings", return_value=frappe._dict(models=list(rows)))
+
+	def test_names_the_model_id_of_the_first_answering_row(self):
+		rows = (_row("gpt-5.6", order=1), _row("claude-sonnet-4-5", upstream="anthropic", order=2))
+		with self._with(*rows):
+			self.assertEqual(sh.fallback_model({"ACC_gpt-5.6"}), "claude-sonnet-4-5")
+
+	def test_an_api_key_row_answers_under_its_model_id(self):
+		rows = (_row("gpt-5.6", order=1), _row("gemini-2.5-pro", sub=False, order=2))
+		with self._with(*rows):
+			self.assertEqual(sh.fallback_model({"ACC_gpt-5.6"}), "gemini-2.5-pro")
+
+	def test_empty_when_nothing_can_answer(self):
+		with self._with(_row("gpt-5.6")):
+			self.assertEqual(sh.fallback_model({"ACC_gpt-5.6"}), "")
+
+	def test_notice_entries_carry_the_fallback_model(self):
+		rows = (_row("gpt-5.6", order=1), _row("claude-sonnet-4-5", upstream="anthropic", order=2))
+		entry = {"account_ref": "ACC_gpt-5.6", "upstream": "openai"}
+		with self._with(*rows):
+			out = sh._with_fallbacks([entry], sh._enabled_rows())
+		self.assertEqual(out[0]["fallback"], "Anthropic")
+		self.assertEqual(out[0]["fallback_model"], "claude-sonnet-4-5")
+
+
 class TestSkippedEntries(_Base):
 	"""``skipped``: the entry's own row is AFTER the answering row, so Auto never used it."""
 
