@@ -80,12 +80,12 @@ describe("humaniseSyncStatus", () => {
 	it("turns a relayed fleet error code into plain copy, with no plumbing", () => {
 		const out = humaniseSyncStatus(
 			"failed: admin unreachable: admin returned a 502 error: reload_failed: " +
-				"the old text of the message, which must never be shown",
+				"the old text of the message, which must never be shown"
 		);
 		expect(out.kind).toBe("failed");
 		expect(out.text).toBe("Last sync failed");
 		expect(out.detail).toBe(
-			"Could not apply the new AI key. Jarvis is still using the old one. Try saving again.",
+			"Could not apply the new AI key. Jarvis is still using the old one. Try saving again."
 		);
 		expect(out.detail).not.toMatch(/admin|502|reload_failed|returned/i);
 	});
@@ -104,7 +104,7 @@ describe("humaniseSyncStatus", () => {
 
 	it("leaves statuses that are already customer copy untouched", () => {
 		expect(humaniseSyncStatus("failed: validation: Model is required").detail).toBe(
-			"validation: Model is required",
+			"validation: Model is required"
 		);
 	});
 
