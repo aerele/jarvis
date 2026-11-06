@@ -792,9 +792,10 @@ class TestDuplicateTriggers(_TriggersApiTestCase):
 			create_trigger(frappe.as_json(self._llm_payload(condition="doc.priority == 'Low'")))
 		self.assertIn("Flag big discounts", str(cm.exception))
 		# A user with no read permission on Jarvis Trigger gets a generic message.
+		dup = frappe.get_doc({"doctype": TRIGGER, **self._llm_payload(condition="doc.priority == 'Low'")})
 		with patch("frappe.has_permission", return_value=False):
 			with self.assertRaises(frappe.ValidationError) as cm:
-				frappe.get_doc({"doctype": TRIGGER, **self._llm_payload(condition="doc.priority == 'Low'")}).insert()
+				dup.insert()
 		self.assertNotIn("Flag big discounts", str(cm.exception))
 
 	def test_whitespace_only_condition_difference_is_duplicate(self):
