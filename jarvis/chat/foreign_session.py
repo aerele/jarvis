@@ -58,11 +58,15 @@ def is_known_key(session_key: str) -> bool:
 
 	A run's chat-session row is deleted when the run finishes, and a shared session can
 	fail to resolve (retired binding, bumped epoch, revoked share) while still being ours,
-	so the audit trails count too. Fails SAFE: a lookup error answers True, which means
-	"do not alert".
+	so the audit trails count too. Throwaway sessions (prewarm, chat titles, polish,
+	preflight) never get a row, only a site claim from ``create_session``, so a claim
+	counts as known as well. Fails SAFE: a row or claim lookup error answers True, which
+	means "do not alert".
 	"""
+	from jarvis.chat import session_claims
+
 	try:
-		return has_row_for_key(session_key)
+		return has_row_for_key(session_key) or session_claims.is_claimed_strict(session_key)
 	except Exception:
 		frappe.logger("jarvis.foreign_session").warning("known-session lookup failed", exc_info=True)
 		return True
