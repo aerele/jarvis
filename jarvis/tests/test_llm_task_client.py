@@ -295,7 +295,9 @@ class TestLLMTaskFailover(unittest.TestCase):
 				raise out
 			return out
 
-		upstream = serving or (lambda model, provider: {"claude-a": "anthropic", "gpt-b": "openai"}.get(model, ""))
+		upstream = serving or (
+			lambda model, provider: {"claude-a": "anthropic", "gpt-b": "openai"}.get(model, "")
+		)
 		refs_patch = (
 			patch.object(lt, "pool_model_refs", side_effect=refs)
 			if isinstance(refs, Exception)
@@ -304,7 +306,9 @@ class TestLLMTaskFailover(unittest.TestCase):
 		with (
 			patch.object(lt, "llm_task_complete", side_effect=fake),
 			refs_patch,
-			patch("jarvis.subscription_health.expired_entries", return_value=[{"upstream": u} for u in expired]),
+			patch(
+				"jarvis.subscription_health.expired_entries", return_value=[{"upstream": u} for u in expired]
+			),
 			patch("jarvis.subscription_health.upstream_for_serving", side_effect=upstream),
 			patch("jarvis.subscription_health.note_turn_error") as note,
 		):
@@ -322,9 +326,7 @@ class TestLLMTaskFailover(unittest.TestCase):
 		self.assertEqual(note.call_args.args[1], "subscription-expired")
 
 	def test_upstream_already_flagged_expired_is_skipped(self):
-		out, calls, _note, _err = self._run(
-			[lt.LLMTaskError(_EXPIRED), "from grok"], expired=("openai",)
-		)
+		out, calls, _note, _err = self._run([lt.LLMTaskError(_EXPIRED), "from grok"], expired=("openai",))
 		self.assertEqual(out, "from grok")
 		self.assertEqual(calls, [None, {"provider": "xai", "model": "grok-c"}])
 
@@ -377,7 +379,13 @@ class TestLLMTaskFailover(unittest.TestCase):
 
 	def test_pool_model_refs_reads_the_plugin_route_in_pool_order(self):
 		body = json.dumps(
-			{"ok": True, "models": [{"ref": "a-0/m1", "provider": "a-0", "model": "m1"}, {"ref": "b-1/m2", "provider": "b-1", "model": "m2"}]}
+			{
+				"ok": True,
+				"models": [
+					{"ref": "a-0/m1", "provider": "a-0", "model": "m1"},
+					{"ref": "b-1/m2", "provider": "b-1", "model": "m2"},
+				],
+			}
 		).encode()
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
