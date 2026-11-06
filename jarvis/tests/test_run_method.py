@@ -6,10 +6,10 @@ server-script map are the real security boundary; exercising them for real
 is more meaningful than mocking them)."""
 
 import frappe
-from frappe.tests.classes.context_managers import enable_safe_exec
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.tests._safe_exec import enable_safe_exec
 from jarvis.tools.run_method import run_method
 
 # An API-type Server Script created once for the whole class. Its api_method
