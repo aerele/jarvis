@@ -273,5 +273,141 @@ class TestLLMTaskComplete(unittest.TestCase):
 		self.assertNotIn("super-secret-token", str(ctx.exception))
 
 
+_EXPIRED = "Anthropic: not logged in. Please run /login"
+_POOL = [
+	{"provider": "anthropic", "model": "claude-a"},
+	{"provider": "openai-1", "model": "gpt-b"},
+	{"provider": "xai", "model": "grok-c"},
+]
+
+
+class TestLLMTaskFailover(unittest.TestCase):
+	"""jarvis-admin-v2#826: a trigger whose primary model's sign-in died must walk the pool."""
+
+	def _run(self, attempts, *, refs=_POOL, expired=(), serving=None, **kwargs):
+		"""``attempts``: one entry per llm_task_complete call - a str reply or an Exception."""
+		calls = []
+
+		def fake(prompt, input_payload, timeout=60, expect_object=False, model_ref=None):
+			calls.append(model_ref)
+			out = attempts[len(calls) - 1]
+			if isinstance(out, Exception):
+				raise out
+			return out
+
+		upstream = serving or (lambda model, provider: {"claude-a": "anthropic", "gpt-b": "openai"}.get(model, ""))
+		refs_patch = (
+			patch.object(lt, "pool_model_refs", side_effect=refs)
+			if isinstance(refs, Exception)
+			else patch.object(lt, "pool_model_refs", return_value=refs)
+		)
+		with (
+			patch.object(lt, "llm_task_complete", side_effect=fake),
+			refs_patch,
+			patch("jarvis.subscription_health.expired_entries", return_value=[{"upstream": u} for u in expired]),
+			patch("jarvis.subscription_health.upstream_for_serving", side_effect=upstream),
+			patch("jarvis.subscription_health.note_turn_error") as note,
+		):
+			try:
+				return lt.llm_task_complete_with_failover("p", "i", **kwargs), calls, note, None
+			except lt.LLMTaskError as e:
+				return None, calls, note, e
+
+	def test_expired_primary_retries_on_next_pool_model_and_feeds_health(self):
+		out, calls, note, err = self._run([lt.LLMTaskError(_EXPIRED), "found it"])
+		self.assertEqual(out, "found it")
+		self.assertIsNone(err)
+		self.assertEqual(calls, [None, {"provider": "openai-1", "model": "gpt-b"}])
+		note.assert_called_once()
+		self.assertEqual(note.call_args.args[1], "subscription-expired")
+
+	def test_upstream_already_flagged_expired_is_skipped(self):
+		out, calls, _note, _err = self._run(
+			[lt.LLMTaskError(_EXPIRED), "from grok"], expired=("openai",)
+		)
+		self.assertEqual(out, "from grok")
+		self.assertEqual(calls, [None, {"provider": "xai", "model": "grok-c"}])
+
+	def test_flagged_primary_is_not_called_at_all(self):
+		out, calls, _note, _err = self._run(["from gpt"], expired=("anthropic",))
+		self.assertEqual(out, "from gpt")
+		self.assertEqual(calls, [{"provider": "openai-1", "model": "gpt-b"}])
+
+	def test_override_refused_keeps_the_original_error(self):
+		refused = lt.LLMTaskError("Plugin LLM completion cannot override the target model.")
+		_out, calls, _note, err = self._run([lt.LLMTaskError(_EXPIRED), refused])
+		self.assertEqual(str(err), _EXPIRED)
+		self.assertEqual(len(calls), 2)
+
+	def test_pool_route_missing_keeps_the_original_error(self):
+		_out, calls, _note, err = self._run(
+			[lt.LLMTaskError(_EXPIRED)], refs=lt.LLMTaskNotAvailableError("not found")
+		)
+		self.assertEqual(str(err), _EXPIRED)
+		self.assertEqual(calls, [None])
+
+	def test_non_credential_error_does_not_retry(self):
+		_out, calls, note, err = self._run([lt.LLMTaskError("llm-task request timed out")])
+		self.assertEqual(str(err), "llm-task request timed out")
+		self.assertEqual(calls, [None])
+		note.assert_not_called()
+
+	def test_every_model_failing_raises_the_first_error(self):
+		attempts = [lt.LLMTaskError(_EXPIRED)] * 3
+		_out, calls, _note, err = self._run(attempts)
+		self.assertEqual(str(err), _EXPIRED)
+		self.assertEqual(len(calls), 3)
+
+	def test_not_available_is_never_retried(self):
+		_out, calls, _note, err = self._run([lt.LLMTaskNotAvailableError("tool not available")])
+		self.assertIsInstance(err, lt.LLMTaskNotAvailableError)
+		self.assertEqual(calls, [None])
+
+	def test_model_ref_is_sent_as_provider_and_model(self):
+		body = json.dumps({"ok": True, "result": {"details": {"json": "ok"}}}).encode()
+		with (
+			patch("frappe.get_cached_doc", return_value=_settings()),
+			patch("jarvis.chat.plugin_routes.signed_route_headers", return_value={"X-Jarvis-Token": "k"}),
+			patch("jarvis.chat.session_claims.claim"),
+			patch("requests.request", return_value=_streamed_response(body=body)) as post,
+		):
+			lt.llm_task_complete("p", "i", model_ref={"provider": "openai-1", "model": "gpt-b"})
+		args = _sent_json(post.call_args.kwargs)["args"]
+		self.assertEqual((args["provider"], args["model"]), ("openai-1", "gpt-b"))
+
+	def test_pool_model_refs_reads_the_plugin_route_in_pool_order(self):
+		body = json.dumps(
+			{"ok": True, "models": [{"ref": "a-0/m1", "provider": "a-0", "model": "m1"}, {"ref": "b-1/m2", "provider": "b-1", "model": "m2"}]}
+		).encode()
+		with (
+			patch("frappe.get_cached_doc", return_value=_settings()),
+			patch("jarvis.chat.plugin_routes.signed_route_headers", return_value={"X-Jarvis-Token": "k"}),
+			patch("jarvis.chat.session_claims.claim"),
+			patch("requests.request", return_value=_streamed_response(body=body)) as post,
+		):
+			refs = lt.pool_model_refs()
+		self.assertEqual(post.call_args.args, ("POST", "http://agent.host:9000/jarvis/llm-task/models"))
+		self.assertEqual(refs, [{"provider": "a-0", "model": "m1"}, {"provider": "b-1", "model": "m2"}])
+
+	def test_pool_model_refs_404_is_not_available(self):
+		with (
+			patch("frappe.get_cached_doc", return_value=_settings()),
+			patch("jarvis.chat.plugin_routes.signed_route_headers", return_value={"X-Jarvis-Token": "k"}),
+			patch("jarvis.chat.session_claims.claim"),
+			patch("requests.request", return_value=_streamed_response(status=404, body=b"nope")),
+		):
+			with self.assertRaises(lt.LLMTaskNotAvailableError):
+				lt.pool_model_refs()
+
+
+class TestEvaluateUsesFailover(unittest.TestCase):
+	def test_trigger_evaluation_goes_through_the_failover_entry_point(self):
+		from jarvis.triggers import llm_action
+
+		with patch.object(lt, "llm_task_complete_with_failover", return_value="finding") as f:
+			self.assertEqual(llm_action._evaluate("p", "i", []), ("finding", None))
+		f.assert_called_once()
+
+
 if __name__ == "__main__":
 	unittest.main()
