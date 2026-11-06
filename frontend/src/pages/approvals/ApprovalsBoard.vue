@@ -632,9 +632,18 @@
 
 					<div class="mt-4">
 						<!-- 3. context -->
-						<DocSection v-if="selected.context_md" label="Context">
+						<DocSection v-if="selected.context_md" :label="contextLabel">
+							<!-- #793: a Chat ask's lead-in is agent-derived text, so it is shown as
+							     literal text: no Markdown, no live link, no v-html -->
+							<div
+								v-if="contextIsPlain"
+								data-testid="approval-context-plain"
+								dir="auto"
+								class="prose prose-sm max-w-none whitespace-pre-wrap [overflow-wrap:anywhere]"
+								v-text="selected.context_md"
+							/>
 							<!-- O1: renderMarkdown from @/markdown (escapes HTML first - safe) -->
-							<div class="prose prose-sm max-w-none" v-html="contextHtml" />
+							<div v-else class="prose prose-sm max-w-none" v-html="contextHtml" />
 						</DocSection>
 
 						<!-- 4. decision -->
@@ -917,6 +926,7 @@ import { timeAgo, exactDate } from "@/utils/datetime";
 import { getApproval } from "@/api/approvals";
 import * as api from "@/api";
 import { renderMarkdown } from "@/markdown";
+import { brand } from "@/branding";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { APPROVE_RE, REJECT_RE } from "@/lib/approvalVerbs";
 import { isPermissionDenied } from "@/lib/wikiReview";
@@ -1324,6 +1334,12 @@ const refUrl = computed(() => {
 	const dt = selected.value.ref_doctype.toLowerCase().replace(/ /g, "-");
 	return `/app/${dt}/${encodeURIComponent(selected.value.ref_name)}`;
 });
+// Chat asks carry agent-derived context_md; every other source keeps Markdown
+const contextIsPlain = computed(() => !!selected.value && sourceOf(selected.value) === "Chat");
+// Whose words the Chat lead-in is: the (white-label) assistant's, said just before it asked
+const contextLabel = computed(() =>
+	contextIsPlain.value ? `What ${brand.agentName} said before asking` : "Context"
+);
 const contextHtml = computed(() =>
 	selected.value && selected.value.context_md ? renderMarkdown(selected.value.context_md) : ""
 );
