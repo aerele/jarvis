@@ -719,6 +719,13 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 		"aggregate counters over Trigger Activity (a stats rollup), not a row "
 		"collection — the browsable feed is the registered trigger_activity view"
 	),
+	# One Trigger Activity row's full stored `detail`, fetched by name for the row's
+	# expanded view. Manager-only; no filter, sort or page contract. Companion of the
+	# registered trigger_activity view (list_activity_page), not a collection.
+	"jarvis.chat.triggers_api.get_activity_detail": (
+		"one activity row's full stored detail by name (manager-only), companion of "
+		"the trigger_activity view's list_activity_page — a detail read, not a collection"
+	),
 	"jarvis.chat.api.clear_chat_history": (
 		"a MUTATION that deletes the caller's conversations — collection-shaped by "
 		"name (the 'history' token) but it returns nothing to page, sort or filter"
