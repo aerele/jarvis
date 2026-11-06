@@ -21,6 +21,10 @@ from __future__ import annotations
 import ast
 import re
 
+# `dotted` is aliased: _namespace_errors / _ast_scan use a local variable of that name.
+from jarvis.tools._sandbox_attrs import dotted as _dotted
+from jarvis.tools._sandbox_attrs import unsafe_attribute_errors
+
 # frappe attribute chains that compile fine but are BANNED for Jarvis-authored
 # scripts because they read past User Permissions (cross-company/branch leak).
 _PERMISSION_BYPASS = {"frappe.get_all", "frappe.db.get_all", "frappe.db.sql"}
@@ -32,20 +36,6 @@ _FIELD_READ_METHODS = {"get_list", "get_all", "get_value", "get_values"}
 _SQL_FUNC_FIELD = re.compile(
 	r"\b(sum|count|avg|min|max|group_concat|std|variance|stddev)\s*\(", re.IGNORECASE
 )
-
-
-def _dotted(node: ast.Attribute) -> str | None:
-	"""Reconstruct a static attribute chain (frappe.db.sql). None if the base
-	isn't a plain name (so aliased/indexed access is left to the compile pass)."""
-	parts = []
-	cur: ast.AST = node
-	while isinstance(cur, ast.Attribute):
-		parts.append(cur.attr)
-		cur = cur.value
-	if not isinstance(cur, ast.Name):
-		return None
-	parts.append(cur.id)
-	return ".".join(reversed(parts))
 
 
 def _agg_field_warnings(call: ast.Call) -> list[str]:
@@ -178,9 +168,11 @@ def validate_script(code, script_type=None) -> dict:
 	RestrictedPython compile error (the exact compile safe_exec runs). It never
 	executes the code. Also flags `frappe.<attr>` calls outside the safe_exec
 	namespace (e.g. `frappe.defaults` / `frappe.get_user_default` - use
-	`frappe.db.get_default`). Warns on SQL functions passed as `get_list` string
-	fields (`sum(...) as x`), and on `result = [columns, ...]` (a Script Report's
-	columns/rows pair goes in `data`, not `result`, or it renders blank).
+	`frappe.db.get_default`). Flags the blocked attribute reads `.format` /
+	`.format_map` / `frappe.format` (use f-strings or % formatting instead). Warns on
+	SQL functions passed as `get_list` string fields (`sum(...) as x`), and on
+	`result = [columns, ...]` (a Script Report's columns/rows pair goes in `data`,
+	not `result`, or it renders blank).
 
 	- ``code``: the script body (str).
 	- ``script_type``: optional hint ("Script Report", "DocType Event", "API",
@@ -206,6 +198,8 @@ def validate_script(code, script_type=None) -> dict:
 	scan_errors, scan_warnings = _ast_scan(tree)
 	errors.extend(scan_errors)
 	warnings.extend(scan_warnings)
+	# Attribute reads the sandbox blocks (.format etc.); reuses the parsed tree.
+	errors.extend(unsafe_attribute_errors(tree))
 
 	# Flag frappe.* attributes absent from the real safe_exec namespace (best-effort:
 	# needs a frappe context, so guard it; the AST scan + compile pass stand without it).

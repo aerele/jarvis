@@ -234,6 +234,8 @@ _VIEWS: tuple[ListView, ...] = (
 		endpoints=("jarvis.chat.triggers_api.list_activity_page",),
 		surface="frontend/src/pages/triggers/ActivityTab.vue",
 		wave=1,
+		# `detail` stays out of the filter catalog; list_activity_page still returns
+		# a clipped `detail` to managers in its rows.
 		excluded_fields=("detail",),
 		curated_filters={
 			"trigger": "trigger",
@@ -716,6 +718,13 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 	"jarvis.chat.triggers_api.activity_stats": (
 		"aggregate counters over Trigger Activity (a stats rollup), not a row "
 		"collection — the browsable feed is the registered trigger_activity view"
+	),
+	# One Trigger Activity row's full stored `detail`, fetched by name for the row's
+	# expanded view. Manager-only; no filter, sort or page contract. Companion of the
+	# registered trigger_activity view (list_activity_page), not a collection.
+	"jarvis.chat.triggers_api.get_activity_detail": (
+		"one activity row's full stored detail by name (manager-only), companion of "
+		"the trigger_activity view's list_activity_page — a detail read, not a collection"
 	),
 	"jarvis.chat.api.clear_chat_history": (
 		"a MUTATION that deletes the caller's conversations — collection-shaped by "
