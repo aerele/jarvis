@@ -1,5 +1,5 @@
 <template>
-	<SettingsPane title="Keyboard shortcuts" description="Keyboard shortcuts available in chat.">
+	<SettingsPane title="Keyboard shortcuts" description="Speed up chat with these keys.">
 		<h3 class="text-base font-semibold text-ink-gray-9">Composer</h3>
 		<div class="mt-2">
 			<KvRow label="Recall previous / next prompt">
