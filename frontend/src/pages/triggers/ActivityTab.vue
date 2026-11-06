@@ -134,11 +134,13 @@
 // ActivityTab - /triggers#activity: ListPage + useListPage against
 // triggers_api.list_activity_page (search · status quick filters ·
 // status/action/event/daterange FilterButton defs · Load-More pagination).
-// Row click opens the detail Dialog fed from the row itself (there is no
-// per-row fetch endpoint; the mono `detail` block renders only for trigger
-// managers, the only users whose rows carry a clipped `detail`). Realtime: "trigger:activity" frames silently
-// refresh page 1 when the viewer sits unfiltered on it (the MacrosList
-// live-refresh manner); admin stat strip from activity_stats.
+// Row click opens the detail Dialog fed from the row itself; the mono
+// `detail` block renders only for trigger managers, the only users whose rows
+// carry a clipped `detail`. For a row with `detail_truncated` the Dialog
+// fetches the full log on open (get_activity_detail). Realtime:
+// "trigger:activity" frames silently refresh page 1 when the viewer sits
+// unfiltered on it (the MacrosList live-refresh manner); admin stat strip
+// from activity_stats.
 import { ref, computed, watch, inject, onMounted, onBeforeUnmount } from "vue";
 import { Badge, FeatherIcon, Tooltip } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";

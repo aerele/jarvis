@@ -9,6 +9,7 @@ tearDown; no LLM/network calls anywhere on these paths.
 from unittest.mock import patch
 
 import frappe
+from frappe.exceptions import FrappeTypeError
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import strip_html
 
@@ -17,6 +18,7 @@ from jarvis.chat.triggers_api import (
 	create_trigger,
 	delete_trigger,
 	delete_triggers_bulk,
+	get_activity_detail,
 	get_trigger,
 	get_triggers_caps,
 	list_activity_page,
@@ -702,6 +704,46 @@ class TestActivityFeed(_TriggersApiTestCase):
 		self.assertEqual(len(rows), 1)
 		self.assertNotIn("detail", rows[0])
 
+	def _manager_rows(self, trigger: str) -> dict:
+		frappe.set_user(ADMIN_USER)
+		rows = list_activity_page(filters=frappe.as_json({"trigger": trigger}))["data"]["rows"]
+		return {r["name"]: r for r in rows}
+
+	def test_manager_detail_truncated_flag_boundary_4000_vs_4001(self):
+		from jarvis.chat.triggers_api import _ACTIVITY_DETAIL_CAP
+
+		name = self._create_as_admin()
+		exact = self._insert_activity_row(trigger=name, status="Failed", detail="y" * _ACTIVITY_DETAIL_CAP)
+		over = self._insert_activity_row(
+			trigger=name, status="Failed", detail="y" * (_ACTIVITY_DETAIL_CAP + 1)
+		)
+		rows = self._manager_rows(name)
+		self.assertIs(rows[exact]["detail_truncated"], False)
+		self.assertEqual(rows[exact]["detail"], "y" * _ACTIVITY_DETAIL_CAP)
+		self.assertIs(rows[over]["detail_truncated"], True)
+		self.assertEqual(rows[over]["detail"], "y" * _ACTIVITY_DETAIL_CAP + "\u2026")
+
+	def test_manager_null_detail_is_empty_and_not_truncated(self):
+		name = self._create_as_admin()
+		row = self._insert_activity_row(trigger=name, status="Failed", detail="x")
+		frappe.db.set_value(ACTIVITY, row, "detail", None)
+		rows = self._manager_rows(name)
+		self.assertEqual(rows[row]["detail"], "")
+		self.assertIs(rows[row]["detail_truncated"], False)
+
+	def test_non_manager_rows_have_no_detail_truncated_key(self):
+		todo = frappe.get_doc(
+			{"doctype": "ToDo", "description": "no flag target", "allocated_to": PLAIN_USER}
+		).insert(ignore_permissions=True)
+		self._todos.append(todo.name)
+		name = self._create_as_admin()
+		self._insert_activity_row(trigger=name, target_docname=todo.name, status="Failed", detail="z" * 5000)
+		frappe.set_user(PLAIN_USER)
+		rows = list_activity_page(filters=frappe.as_json({"trigger": name}))["data"]["rows"]
+		self.assertEqual(len(rows), 1)
+		self.assertNotIn("detail", rows[0])
+		self.assertNotIn("detail_truncated", rows[0])
+
 	def test_unknown_filter_and_sort_throw(self):
 		frappe.set_user(PLAIN_USER)
 		self.assertRaises(frappe.ValidationError, list_activity_page, filters=frappe.as_json({"bogus": 1}))
@@ -725,6 +767,89 @@ class TestActivityFeed(_TriggersApiTestCase):
 		self.assertIn("total_rows", data)
 		self.assertGreaterEqual(data["last_24h"]["Success"], 1)
 		self.assertGreaterEqual(data["last_24h"]["Failed"], 1)
+
+
+class TestGetActivityDetail(_TriggersApiTestCase):
+	def _row(self, detail: str = "the full error") -> str:
+		return self._insert_activity_row(trigger=self._create_as_admin(), status="Failed", detail=detail)
+
+	def test_system_manager_gets_the_full_detail(self):
+		detail = "head " + "q" * 6000
+		row = self._row(detail)
+		frappe.set_user(ADMIN_USER)
+		out = get_activity_detail(row)
+		self.assertEqual(out, {"ok": True, "data": {"name": row, "detail": detail}})
+
+	def test_jarvis_admin_who_is_not_system_manager_gets_the_full_detail(self):
+		row = self._row("raw error for jarvis admin")
+		frappe.set_user(JADMIN_USER)
+		self.assertNotIn("System Manager", frappe.get_roles(JADMIN_USER))
+		out = get_activity_detail(row)
+		self.assertEqual(out["data"], {"name": row, "detail": "raw error for jarvis admin"})
+
+	def test_null_detail_returns_empty_string(self):
+		row = self._row("x")
+		frappe.db.set_value(ACTIVITY, row, "detail", None)
+		frappe.set_user(ADMIN_USER)
+		self.assertEqual(get_activity_detail(row)["data"]["detail"], "")
+
+	def test_non_manager_gets_the_same_permission_error_for_real_and_missing_names(self):
+		row = self._row()
+		frappe.set_user(PLAIN_USER)
+		messages = []
+		for name in (row, "no-such-activity-zz"):
+			with self.assertRaises(frappe.PermissionError) as ctx:
+				get_activity_detail(name)
+			messages.append(str(ctx.exception))
+		self.assertEqual(messages[0], messages[1])
+		self.assertNotIn(row, messages[0])
+
+	def test_manager_missing_name_is_does_not_exist_without_echoing_the_name(self):
+		frappe.set_user(ADMIN_USER)
+		missing = "no-such-activity-zz"
+		with self.assertRaises(frappe.DoesNotExistError) as ctx:
+			get_activity_detail(missing)
+		self.assertNotIn(missing, str(ctx.exception))
+
+	def test_blank_name_is_an_error(self):
+		frappe.set_user(ADMIN_USER)
+		for blank in ("", "   "):
+			with self.assertRaises(frappe.ValidationError):
+				get_activity_detail(blank)
+
+	def test_non_string_name_is_rejected_before_any_read(self):
+		# Frappe's whitelist type check (FrappeTypeError) is a no-op for this module:
+		# ``from __future__ import annotations`` makes the annotations strings, which
+		# frappe.utils.typing_validations skips. So the body must reject a non-str
+		# itself (ValidationError). Either error is accepted, as in test_pulse_feedback;
+		# call with keyword arguments and the request condition, as Frappe does.
+		frappe.set_user(ADMIN_USER)
+		with patch.object(frappe, "in_test", True):
+			for bad in (None, 7, ["a"], {"a": 1}):
+				with self.subTest(name=bad):
+					# wraps: the permission gate reads through get_value too
+					with patch.object(frappe.db, "get_value", wraps=frappe.db.get_value) as get_value:
+						with self.assertRaises((FrappeTypeError, frappe.ValidationError)):
+							get_activity_detail(name=bad)
+						self.assertFalse(
+							[c for c in get_value.call_args_list if c.args and c.args[0] == ACTIVITY],
+							"the Activity table must not be read for a non-str name",
+						)
+
+	def test_stored_value_longer_than_the_engine_cap_is_returned_whole(self):
+		# Frappe sanitizes Long Text that contains a tag (frappe/utils/html_utils.py),
+		# and nh3 escapes every bare "<" to "&lt;", so the stored value can be longer
+		# than the engine's 20000-char cut. The endpoint returns the DB value as is.
+		name = self._create_as_admin()
+		raw = "<b>x</b>" + "<" * 19990
+		self.assertLessEqual(len(raw), 20000)
+		engine._insert_activity(trigger=name, status="Failed", detail=raw)
+		row = frappe.get_all(ACTIVITY, filters={"trigger": name}, pluck="name")[0]
+		self._activities.append(row)
+		stored = frappe.db.get_value(ACTIVITY, row, "detail")
+		self.assertGreater(len(stored), 20000)
+		frappe.set_user(ADMIN_USER)
+		self.assertEqual(get_activity_detail(row)["data"]["detail"], stored)
 
 
 class TestScriptActionAuthoring(_TriggersApiTestCase):
