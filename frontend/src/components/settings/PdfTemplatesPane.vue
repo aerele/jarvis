@@ -9,9 +9,14 @@
 	     click from the gallery and never depends on the editor's state. -->
 	<SettingsPane
 		title="PDF Templates"
-		description="The look Jarvis applies to the PDFs it generates. Pick the workspace default here or build your own; anyone can reformat a single document from its download card."
+		description="The look of the PDFs Jarvis generates."
 		:error="error"
 	>
+		<template #title-suffix>
+			<Tooltip text="Pick the workspace default or build your own. Anyone can reformat a single document from its download card.">
+				<FeatherIcon name="info" class="size-3.5 text-ink-gray-5" />
+			</Tooltip>
+		</template>
 		<template v-if="isAdmin && loaded && !loading" #actions>
 			<Button variant="solid" iconLeft="plus" label="New template" @click="newTemplate" />
 		</template>
