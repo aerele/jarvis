@@ -861,7 +861,9 @@ describe("subscriptionExpiredBanner switch for a pinned chat (jarvis-admin-v2#81
 
 	it("a chat pinned to the dead model is told it will not switch and offered both switches", () => {
 		const b = subscriptionExpiredBanner([entry], true, "claude-sonnet-4-5");
-		expect(b.message).toBe("This chat is pinned to claude-sonnet-4-5, so it will not switch on its own.");
+		expect(b.message).toBe(
+			"This chat is pinned to claude-sonnet-4-5, so it will not switch on its own."
+		);
 		expect(b.switchModel).toBe("gpt-5.6");
 		expect(b.canUseAuto).toBe(true);
 	});
