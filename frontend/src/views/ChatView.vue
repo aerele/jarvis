@@ -2481,14 +2481,6 @@
 				>
 					<template v-if="subscriptionExpired.showReconnect" #action>
 						<button
-							v-if="subscriptionExpired.canUseAuto"
-							class="jv-btn jv-btn--sm"
-							style="margin-right: 6px"
-							@click="selectModel('')"
-						>
-							Use Auto
-						</button>
-						<button
 							v-if="subscriptionExpired.switchModel"
 							class="jv-btn jv-btn--sm"
 							style="margin-right: 6px"

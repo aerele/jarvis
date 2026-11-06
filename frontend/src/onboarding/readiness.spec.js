@@ -859,20 +859,19 @@ describe("subscriptionExpiredBanner switch for a pinned chat (jarvis-admin-v2#81
 		models: ["claude-sonnet-4-5"],
 	};
 
-	it("a chat pinned to the dead model is told it will not switch and offered both switches", () => {
+	it("a chat pinned to the dead model is told it will not switch and offered the switch", () => {
 		const b = subscriptionExpiredBanner([entry], true, "claude-sonnet-4-5");
 		expect(b.message).toBe(
 			"This chat is pinned to claude-sonnet-4-5, so it will not switch on its own."
 		);
 		expect(b.switchModel).toBe("gpt-5.6");
-		expect(b.canUseAuto).toBe(true);
+		expect(b.canUseAuto).toBeUndefined();
 	});
 
 	it("an unpinned chat keeps the Auto line and gets no switch", () => {
 		const b = subscriptionExpiredBanner([entry], true, "");
 		expect(b.message).toBe("Auto uses OpenAI until you reconnect.");
 		expect(b.switchModel).toBeFalsy();
-		expect(b.canUseAuto).toBeFalsy();
 	});
 
 	it("a chat pinned to a healthy model keeps the Auto line and gets no switch", () => {

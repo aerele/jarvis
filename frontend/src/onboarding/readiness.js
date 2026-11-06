@@ -430,6 +430,6 @@ export function subscriptionExpiredBanner(expired, isAdmin, pinnedModel = "") {
 		upstream: entry.upstream,
 		accountRef: entry.account_ref || "",
 		showReconnect: true,
-		...(pinnedDead ? { switchModel: entry.fallback_model || "", canUseAuto: true } : {}),
+		...(pinnedDead ? { switchModel: entry.fallback_model || "" } : {}),
 	};
 }
