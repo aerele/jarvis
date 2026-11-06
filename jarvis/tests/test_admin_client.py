@@ -2949,6 +2949,21 @@ class TestOAuthGrantRefused(FrappeTestCase):
 		self.assertEqual({h["Authorization"] for h in cap["api_headers"]}, {"token legacy-key:legacy-secret"})
 		self.assertEqual(self._refused_flag(), "invalid_grant")
 
+	def test_refusal_survives_the_watchdog_cache_clear(self):
+		# The pump watchdog runs a full frappe.clear_cache() every five minutes. A
+		# marker outside persistent_cache_keys was wiped by it, so each */5 admin
+		# call re-sent the refused grant and logged a fresh Error Log row.
+		self.assertIn(admin_client._OAUTH_REFUSED_KEY, frappe.get_hooks("persistent_cache_keys"))
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		cap = {}
+		route = self._route(token_response=self._refused, api_capture=cap)
+		with patch("requests.post", side_effect=route):
+			admin_client.get_connection()
+			frappe.clear_cache()
+			admin_client.get_connection()
+		self.assertEqual(len(cap["token_calls"]), 1)
+		self.assertEqual(self._refused_flag(), "invalid_grant")
+
 	def test_remembered_refusal_still_uses_a_cached_refresh_token(self):
 		# Frappe 16.35 still honours refresh_token: a bench holding one keeps its
 		# bearer; only the refused password grant is skipped.
