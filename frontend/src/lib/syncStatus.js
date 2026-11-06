@@ -75,10 +75,39 @@ export function isSyncDisconnected(raw) {
 	return humaniseSyncStatus(raw).kind === "disconnected";
 }
 
+// admin-v2#645: when the control plane relays a fleet failure, the stored status is
+// "failed: admin unreachable: admin returned a 502 error: <code>: <message>". The
+// prefix is transport plumbing and the message is written for operators, so none of
+// it goes on screen. The machine code is the stable part: it maps to plain copy here,
+// and anything unmapped falls back to a generic line. The raw text stays in the
+// Error Log, where support reads it.
+const RELAY_PREFIX = /^(admin unreachable|admin returned)\b/i;
+const RELAY_STATUS = /^admin unreachable:?\s*/i;
+const RELAY_HTTP = /^admin returned(?: an? \d{3} error| \d{3})?:?\s*/i;
+const RELAY_CODE = /^([a-z][a-z0-9_]*):\s/;
+const RELAY_GENERIC = "Could not reach Jarvis just now. Try again in a minute.";
+const RELAY_CODE_COPY = {
+	reload_failed:
+		"Could not apply the new AI key. Jarvis is still using the old one. Try saving again.",
+	rotate_failed: "Could not save the new AI key. Try saving again.",
+	restart_failed: "Could not restart Jarvis to apply your changes. Try again in a minute.",
+	write_failed: "Could not save your changes. Try again in a minute.",
+	chown_failed: "Could not save your changes. Try again in a minute.",
+	clear_failed: "Could not clear your saved data. Try again in a minute.",
+	doctor_failed: "Could not update Jarvis's saved sign-ins. Try again in a minute.",
+};
+
+/** Plain copy for a relayed admin/fleet failure body ("admin unreachable: ..."). */
+function relayedFailureCopy(body) {
+	const rest = body.replace(RELAY_STATUS, "").replace(RELAY_HTTP, "");
+	const code = RELAY_CODE.exec(rest.toLowerCase() + " ");
+	return (code && RELAY_CODE_COPY[code[1]]) || RELAY_GENERIC;
+}
+
 /**
  * The reason behind a "failed:" status, cleaned up for display: prefix stripped,
  * newlines collapsed (a traceback would otherwise blow out whatever it lands in)
- * and length-capped.
+ * and length-capped. A relayed admin/fleet failure becomes plain copy.
  */
 function failureDetail(s) {
 	const body = s
@@ -86,5 +115,6 @@ function failureDetail(s) {
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!body) return "";
+	if (RELAY_PREFIX.test(body)) return relayedFailureCopy(body);
 	return body.length > MAX_DETAIL ? body.slice(0, MAX_DETAIL - 1).trimEnd() + "…" : body;
 }
