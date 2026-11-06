@@ -53,6 +53,13 @@ class _Base(TestCase):
 		self.db = start("frappe.db", new=MagicMock())
 		self.db.exists.return_value = True
 		start("frappe.has_permission", return_value=True)
+		self.readable = None  # None: every row's name is a readable record
+		start(
+			"frappe.get_list",
+			side_effect=lambda dt, filters, pluck, limit: [
+				n for n in filters["name"][1] if self.readable is None or n in self.readable
+			],
+		)
 		self.make = start("frappe.core.doctype.communication.email.make", return_value={"name": "MOCK-COMM"})
 		start("frappe.sendmail", side_effect=AssertionError("real email forbidden"))
 		start("frappe.enqueue", side_effect=AssertionError("queueing forbidden"))
@@ -125,6 +132,12 @@ class TestBuildMessages(_Base):
 		with self.assertRaisesRegex(InvalidArgumentError, "1 recipient.*no full_name"):
 			_email_merge.expand(self.call())
 
+	def test_a_name_that_is_not_the_reference_record_is_refused_at_the_card(self):
+		# SELECT cu.name, co.name keeps the Contact's name: caught before any card, not after Confirm
+		self.readable = {"CUST-000", "CUST-002"}
+		with self.assertRaisesRegex(InvalidArgumentError, "1 of 3 'name' values are not Customer records"):
+			_email_merge.expand(self.call())
+
 	def test_no_valid_address_at_all(self):
 		self.rows = _rows(2, r0={"email_id": ""}, r1={"email_id": None})
 		with self.assertRaisesRegex(InvalidArgumentError, "no row has a valid email"):
@@ -158,6 +171,12 @@ class TestSend(_Base):
 		result = send_email(**self.call())
 		self.assertEqual(result["count"], 3)
 
+	def test_an_uncarded_run_keeps_the_typed_cap_of_20(self):
+		self.rows = _rows(21)
+		with self.assertRaisesRegex(InvalidArgumentError, "without a confirmation card at most 20"):
+			send_email(**self.call())
+		self.make.assert_not_called()
+
 	def test_typed_messages_keep_the_cap_of_20(self):
 		typed = [
 			{
@@ -185,6 +204,9 @@ class TestCard(_Base):
 		self.assertEqual(card["extra"], 151)
 		self.assertEqual(card["messages"][0]["recipients"], "p0@example.invalid")
 		self.assertIn("Dear Person 0", card["messages"][0]["body"])
+		# every address Confirm will email, not only the 20 shown in full
+		self.assertEqual(len(card["all_recipients"]), 171)
+		self.assertEqual(card["all_recipients"][170], "p170@example.invalid")
 
 
 class TestQueryRows(TestCase):

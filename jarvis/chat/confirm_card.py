@@ -1100,12 +1100,20 @@ def _bulk_email_card(messages: list) -> dict | None:
 		)
 	if not shown:
 		return None
-	return {
+	card = {
 		"kind": "bulk_email",
 		"count": len(messages),
 		"messages": shown,
 		"extra": max(0, len(messages) - len(shown)),
 	}
+	if card["extra"]:
+		# Every address Confirm will email, not only the first _MAX_ROWS messages: a
+		# merge from a query (send_email recipients_from) can hold hundreds, and a
+		# reviewer must be able to read who gets one before confirming.
+		card["all_recipients"] = [
+			fmt(_recips(m.get("recipients") or "")) for m in messages if isinstance(m, dict)
+		]
+	return card
 
 
 def _skill_card(args: dict) -> dict:
