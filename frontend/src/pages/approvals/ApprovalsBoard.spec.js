@@ -97,7 +97,7 @@ vi.mock("@/components/JvSpinner.vue", () => ({
 	default: { template: '<span class="spinner"/>' },
 }));
 vi.mock("@/components/doc/DocSection.vue", () => ({
-	default: { props: ["label"], template: "<section><slot/></section>" },
+	default: { props: ["label"], template: '<section :data-label="label"><slot/></section>' },
 }));
 vi.mock("@/components/doc/DocMetaPanel.vue", () => ({ default: { template: "<div/>" } }));
 vi.mock("@/components/doc/CommentsSection.vue", () => ({ default: { template: "<div/>" } }));
@@ -532,6 +532,98 @@ describe("ApprovalsBoard one inbox", () => {
 			"Review acknowledged: no posting authorised",
 			1
 		);
+	});
+
+	// #793: a Chat ask's context_md is agent-derived text. It reaches the pane as
+	// literal text, never through the Markdown renderer (which would make a link live).
+	describe("context section", () => {
+		const LEAD =
+			"Send the outstanding email. See [docs](https://example.com) and <b>bold</b>\n```\nfence\n```\n" +
+			"x".repeat(200);
+		const openWith = async (over) => {
+			state.ar = [ar("AR-1", over.row || {})];
+			approvals.getApproval.mockImplementation(async (name) => ({
+				...ar(name, over.row || {}),
+				can_act: 1,
+				question: "Which recipients?",
+				context_md: over.context_md,
+			}));
+			const w = await board();
+			return pane(w);
+		};
+
+		// the DocSection stub exposes its label as data-label
+		const labels = (p) =>
+			p.findAll("section[data-label]").map((e) => e.attributes("data-label"));
+
+		it("renders a Chat row's context_md as literal text with no anchor or element", async () => {
+			const p = await openWith({ context_md: LEAD });
+			const block = p.get('[data-testid="approval-context-plain"]');
+			expect(block.element.textContent).toBe(LEAD);
+			expect(block.find("a").exists()).toBe(false);
+			expect(block.find("b").exists()).toBe(false);
+			expect(block.classes()).toEqual(
+				expect.arrayContaining(["whitespace-pre-wrap", "[overflow-wrap:anywhere]"])
+			);
+		});
+
+		it("labels a Chat row's lead-in with the assistant name and sets dir=auto", async () => {
+			const p = await openWith({ context_md: LEAD });
+			expect(labels(p)).toContain("What Jarvis said before asking");
+			expect(labels(p)).not.toContain("Context");
+			expect(p.get('[data-testid="approval-context-plain"]').attributes("dir")).toBe("auto");
+		});
+
+		it("uses the white-label assistant name in the Chat label", async () => {
+			const { brand } = await import("@/branding");
+			const before = brand.name;
+			brand.name = "Acme";
+			try {
+				const p = await openWith({ context_md: LEAD });
+				expect(labels(p)).toContain("What Acme said before asking");
+				expect(labels(p)).not.toContain("What Jarvis said before asking");
+			} finally {
+				brand.name = before;
+			}
+		});
+
+		it("keeps the Context label on a non-Chat row", async () => {
+			const p = await openWith({
+				row: { source: "File Box" },
+				context_md: "Plain note",
+			});
+			expect(labels(p)).toContain("Context");
+			expect(labels(p)).not.toContain("What Jarvis said before asking");
+		});
+
+		it("keeps Markdown for an Agent Review row", async () => {
+			const p = await openWith({
+				row: { source: "Agent Review" },
+				context_md: "See [docs](https://example.com) and **bold**",
+			});
+			expect(p.find('[data-testid="approval-context-plain"]').exists()).toBe(false);
+			expect(p.find(".prose a").attributes("href")).toBe("https://example.com");
+			expect(p.find(".prose strong").exists()).toBe(true);
+			expect(labels(p)).toContain("Context");
+		});
+
+		it("omits the section for a Chat row with an empty context_md", async () => {
+			const p = await openWith({ context_md: "" });
+			expect(p.find('[data-testid="approval-context-plain"]').exists()).toBe(false);
+			expect(labels(p)).not.toContain("Context");
+			expect(labels(p)).not.toContain("What Jarvis said before asking");
+		});
+
+		it("keeps Markdown rendering for a File Box row", async () => {
+			const p = await openWith({
+				row: { source: "File Box" },
+				context_md: "See [docs](https://example.com) and **bold**",
+			});
+			expect(p.find('[data-testid="approval-context-plain"]').exists()).toBe(false);
+			const a = p.get(".prose a");
+			expect(a.attributes("href")).toBe("https://example.com");
+			expect(p.find(".prose strong").exists()).toBe(true);
+		});
 	});
 
 	it("shows source recovery when a saved File Box decision cannot resume", async () => {

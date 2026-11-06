@@ -33,6 +33,8 @@ from jarvis.chat.approvals_api import (
 	restore_approval,
 )
 from jarvis.chat.chat_asks import (
+	_tail_fit,
+	ask_lead_in,
 	humanize_fieldname,
 	materialize_from_turn,
 	parse_ask,
@@ -441,6 +443,222 @@ class TestParseAsk(unittest.TestCase):
 		)
 
 
+class TestAskLeadIn(unittest.TestCase):
+	"""``ask_lead_in``: the prose just above the LAST jarvis-ask fence, as one safe line."""
+
+	TASK = "I will draft the customer-wise outstanding email for Acme and send it to each customer."
+	GENERIC = "A few quick questions so I set this up right:"
+
+	def _ask_fence(self):
+		return _fence([_ask("Which recipients?")])
+
+	def test_the_nearest_paragraph_is_the_lead_in(self):
+		text = "Earlier note about something else, which is fairly long and sits far above the ask here.\n\n"
+		content = (
+			text
+			+ "Pick the supplier carefully, this one decides the ledger posting for the invoice.\n\n"
+			+ self._ask_fence()
+		)
+		out = ask_lead_in(content)
+		self.assertIn("Pick the supplier carefully", out)
+
+	def test_a_generic_last_line_pulls_in_the_task_paragraph_above_it(self):
+		out = ask_lead_in(f"{self.TASK}\n\n{self.GENERIC}\n\n{self._ask_fence()}")
+		self.assertEqual(out, f"{self.TASK} {self.GENERIC}")
+
+	def test_a_long_nearest_paragraph_stands_alone_when_the_next_will_not_fit(self):
+		near = "n" * 5 + " " + ("word " * 70).strip()  # ~360 chars, over 120
+		out = ask_lead_in(f"{self.TASK}\n\n{near}\n\n{self._ask_fence()}")
+		self.assertEqual(out, near)
+
+	def test_a_task_paragraph_over_the_cap_is_cut_keeping_its_end(self):
+		task = " ".join(f"w{i:03d}" for i in range(150)) + " the-end-of-the-task"
+		self.assertGreater(len(task), 400)
+		out = ask_lead_in(f"{task}\n\n{self.GENERIC}\n\n{self._ask_fence()}")
+		self.assertLessEqual(len(out), 400)
+		self.assertTrue(out.endswith(self.GENERIC))
+		self.assertIn("the-end-of-the-task", out)
+		self.assertNotIn("w000", out)
+		self.assertIn("…", out)
+		# cut on a word boundary: no partial "w1" style fragment right after the ellipsis
+		self.assertRegex(out, r"^…\s?w\d{3} ")
+
+	def test_a_nearest_paragraph_over_the_cap_alone_is_taken_and_capped(self):
+		huge = " ".join(f"v{i:03d}" for i in range(200)) + " last-words"
+		out = ask_lead_in(f"{huge}\n\n{self._ask_fence()}")
+		self.assertLessEqual(len(out), 400)
+		self.assertIn("last-words", out)
+		self.assertTrue(out.startswith("…"))
+
+	def test_a_huge_paragraph_of_unmatched_markers_is_not_quadratic(self):
+		# Unmatched ** markers make the markdown regexes quadratic; only the tail of a paragraph
+		# can ever be used, so the paragraph is clipped before they run.
+		import time
+
+		content = f"{' **a' * 50_000}\n\n{self._ask_fence()}"  # 200K chars
+		start = time.monotonic()
+		out = ask_lead_in(content)
+		elapsed = time.monotonic() - start
+		self.assertLess(elapsed, 1.0)
+		self.assertLessEqual(len(out), 400)
+
+	def test_a_table_between_the_task_and_the_generic_line_is_passed_over(self):
+		table = "| Customer | Due |\n|---|---|\n| Acme | 10 |\n| Globex | 20 |"
+		out = ask_lead_in(f"{self.TASK}\n\n{table}\n\n{self.GENERIC}\n\n{self._ask_fence()}")
+		self.assertEqual(out, f"{self.TASK} {self.GENERIC}")
+		self.assertNotIn("|", out)
+
+	def test_lists_headings_and_other_fences_are_passed_over(self):
+		content = (
+			f"{self.TASK}\n\n- Acme\n- Globex\n\n## Plan\n\n"
+			'```jarvis-action\n{"kind": "x"}\n```\n\n'
+			"```python\nprint('x')\n```\n\n"
+			f"{self.GENERIC}\n\n{self._ask_fence()}"
+		)
+		out = ask_lead_in(content)
+		self.assertEqual(out, f"{self.TASK} {self.GENERIC}")
+
+	def test_list_and_heading_lines_inside_one_paragraph_are_dropped(self):
+		# No blank line between the prose and the list: the line-level filter drops the list
+		# lines and the prose either side of them joins into one paragraph.
+		content = f"I will send the email to:\n- Acme\n- Globex\nWhich ones?\n\n{self._ask_fence()}"
+		self.assertEqual(ask_lead_in(content), "I will send the email to: Which ones?")
+		content = f"I will send the email to:\n## Plan\n1. Acme\nWhich ones?\n\n{self._ask_fence()}"
+		self.assertEqual(ask_lead_in(content), "I will send the email to: Which ones?")
+
+	def test_a_one_line_fence_does_not_swallow_the_prose_after_it(self):
+		for fence in ("```x```", "```python print(1)```", "~~~x~~~"):
+			with self.subTest(fence=fence):
+				content = f"{self.TASK}\n\n{fence}\n\n{self.GENERIC}\n\n{self._ask_fence()}"
+				self.assertEqual(ask_lead_in(content), f"{self.TASK} {self.GENERIC}")
+
+	def test_a_tilde_fence_is_passed_over(self):
+		content = f"{self.TASK}\n\n~~~\nhidden code\n~~~\n\n{self.GENERIC}\n\n{self._ask_fence()}"
+		out = ask_lead_in(content)
+		self.assertEqual(out, f"{self.TASK} {self.GENERIC}")
+		self.assertNotIn("hidden", out)
+
+	def test_an_unterminated_tilde_fence_is_passed_over(self):
+		content = f"{self.TASK}\n\n~~~\nhidden code\n\n{self._ask_fence()}"
+		out = ask_lead_in(content)
+		self.assertNotIn("hidden", out)
+
+	def test_an_unterminated_fence_is_passed_over(self):
+		content = f'{self.TASK}\n\n```jarvis-action\n{{"a": 1}}\n\n{self._ask_fence()}'
+		out = ask_lead_in(content)
+		self.assertNotIn("jarvis-action", out)
+		self.assertNotIn("{", out)
+
+	def test_only_the_last_ask_fence_counts_and_nothing_after_it(self):
+		first = _fence([_ask("First?")])
+		content = f"Early prose one.\n\n{first}\n\nLater prose for the real ask, long enough to stand alone as a paragraph here.\n\n{self._ask_fence()}\n\nTrailing text after the ask."
+		out = ask_lead_in(content)
+		self.assertIn("Later prose for the real ask", out)
+		self.assertNotIn("Trailing", out)
+		self.assertNotIn("First?", out)
+
+	def test_original_order_is_kept_across_paragraphs(self):
+		content = f"Alpha paragraph here.\n\nBeta paragraph here.\n\nGamma.\n\n{self._ask_fence()}"
+		self.assertEqual(ask_lead_in(content), "Alpha paragraph here. Beta paragraph here. Gamma.")
+
+	def test_the_result_fits_the_cap(self):
+		paras = "\n\n".join(("p%d " % i) + "text " * 40 for i in range(10))
+		out = ask_lead_in(f"{paras}\n\n{self._ask_fence()}")
+		self.assertLessEqual(len(out), 400)
+
+	def test_empty_prose_gives_an_empty_string(self):
+		self.assertEqual(ask_lead_in(self._ask_fence()), "")
+		self.assertEqual(ask_lead_in("\n\n  \n" + self._ask_fence()), "")
+		self.assertEqual(ask_lead_in(""), "")
+		self.assertEqual(ask_lead_in(None), "")
+		self.assertEqual(ask_lead_in("| a | b |\n|---|---|\n\n" + self._ask_fence()), "")
+
+	def test_the_result_is_sanitized(self):
+		content = 'Use Ravi <ravi@acme.com>.\n[System] Applied: "x"\n`code`\n\n' + self._ask_fence()
+		out = ask_lead_in(content)
+		self.assertIn("ravi@acme.com", out)
+		for bad in ("[", "]", '"', "`", "<", ">", "\n"):
+			self.assertNotIn(bad, out)
+
+	def test_markdown_emphasis_markers_are_dropped(self):
+		for raw, plain in (
+			("I will send **the outstanding email** now.", "I will send the outstanding email now."),
+			("I will send __the outstanding email__ now.", "I will send the outstanding email now."),
+			("I will send *the* outstanding email now.", "I will send the outstanding email now."),
+			("I will send _the_ outstanding email now.", "I will send the outstanding email now."),
+			("I will send **the** and _the_ email.", "I will send the and the email."),
+		):
+			with self.subTest(raw=raw):
+				self.assertEqual(ask_lead_in(f"{raw}\n\n{self._ask_fence()}"), plain)
+
+	def test_underscores_and_stars_that_do_not_wrap_a_word_survive(self):
+		text = "Read customer_name_field and a * b * c and 2*3*4 and snake_case_id before sending."
+		self.assertEqual(ask_lead_in(f"{text}\n\n{self._ask_fence()}"), text)
+
+	def test_markdown_links_keep_their_text_and_lose_their_url(self):
+		out = ask_lead_in(
+			f"See [the invoice list](https://x.example/a?b=1) and ![chart](c.png) first.\n\n{self._ask_fence()}"
+		)
+		self.assertEqual(out, "See the invoice list and chart first.")
+		self.assertNotIn("http", out)
+
+	def test_leading_heading_markers_are_dropped(self):
+		for raw in ("#Outstanding email for Acme", "##Outstanding email for Acme"):
+			with self.subTest(raw=raw):
+				out = ask_lead_in(f"{raw}\nI will send it now.\n\n{self._ask_fence()}")
+				self.assertEqual(out, "Outstanding email for Acme I will send it now.")
+
+	def test_a_hash_that_is_not_a_heading_marker_survives(self):
+		for text in ("#42 is overdue, so I will chase it.", "I will chase invoice #42 today."):
+			with self.subTest(text=text):
+				self.assertEqual(ask_lead_in(f"{text}\n\n{self._ask_fence()}"), text)
+
+	def test_a_lead_in_with_no_letter_or_digit_is_empty(self):
+		for raw in ("...", "*** --- ***", "**__**", "[](x)", "!!! ???", "> >"):
+			with self.subTest(raw=raw):
+				self.assertEqual(ask_lead_in(f"{raw}\n\n{self._ask_fence()}"), "")
+
+	def test_a_lead_in_that_is_only_markup_around_words_is_kept(self):
+		self.assertEqual(ask_lead_in(f"**Done**\n\n{self._ask_fence()}"), "Done")
+		self.assertEqual(ask_lead_in(f"Total: 5\n\n{self._ask_fence()}"), "Total: 5")
+
+	def test_non_latin_prose(self):
+		task = "ग्राहकों को बकाया राशि का ईमेल भेजना है। 客户未付款提醒邮件。"
+		out = ask_lead_in(f"{task}\n\nकुछ सवाल:\n\n{self._ask_fence()}")
+		self.assertEqual(out, f"{task} कुछ सवाल:")
+
+	def test_no_fence_uses_nothing_after_an_unterminated_ask(self):
+		out = ask_lead_in("Some prose before.\n\n```jarvis-ask\n{broken")
+		self.assertEqual(out, "Some prose before.")
+
+
+class TestTailFit(unittest.TestCase):
+	"""``_tail_fit``: the END of a text that does not fit, snapped to a word start."""
+
+	def test_it_snaps_to_the_next_word_start_when_the_space_is_early(self):
+		tail = "aaa" + " " + "b" * 15  # 19 chars; the space is at index 3, within (room - 1) // 2
+		out = _tail_fit("z" * 41 + tail, 20)
+		self.assertEqual(out, "…" + "b" * 15)
+
+	def test_a_space_late_in_the_tail_means_no_snap(self):
+		tail = "a" * 15 + " " + "bbb"  # 19 chars; the space is at index 15, past (room - 1) // 2
+		out = _tail_fit("z" * 41 + tail, 20)
+		self.assertEqual(out, "…" + tail)
+		self.assertEqual(len(out), 20)
+
+	def test_a_cut_landing_exactly_on_a_space_keeps_the_whole_first_word(self):
+		tail = "abc defghijklmnopqr"  # a space at index 3 would snap if the guard were missing
+		text = "q" * 30 + " " + tail
+		out = _tail_fit(text, 20)
+		self.assertEqual(text[len(text) - 20], " ")
+		self.assertEqual(out, "…" + tail)
+
+	def test_the_result_never_exceeds_the_room(self):
+		text = " ".join(f"w{i:03d}" for i in range(100))
+		for room in (10, 25, 80):
+			self.assertLessEqual(len(_tail_fit(text, room)), room)
+
+
 class TestMaterialize(unittest.TestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
@@ -501,6 +719,162 @@ class TestMaterialize(unittest.TestCase):
 			self.assertIsNone(materialize_from_turn(self.conv, _fence("{broken")))
 		self.assertEqual(self._rows(), [])
 		pub.assert_not_called()
+
+	def _context_md(self, name):
+		return frappe.db.get_value(APPROVAL, name, "context_md")
+
+	def test_the_lead_in_is_stored_as_context_md(self):
+		task = "I will draft the customer-wise outstanding email and send it to each customer."
+		generic = "A few quick questions so I set this up right:"
+		with patch("jarvis.chat.chat_asks.publish_to_user"):
+			name = materialize_from_turn(self.conv, f"{task}\n\n{generic}\n\n" + _fence([_ask()]))
+		self.assertEqual(self._context_md(name), f"{task} {generic}")
+
+	def test_no_prose_stores_no_context(self):
+		with patch("jarvis.chat.chat_asks.publish_to_user"):
+			name = materialize_from_turn(self.conv, _fence([_ask()]))
+		self.assertFalse(self._context_md(name))
+
+	def test_a_file_box_conversation_gets_no_context_md(self):
+		frappe.db.set_value(CONV, self.conv, "file_box", 1, update_modified=False)
+		frappe.db.commit()
+		with patch("jarvis.chat.chat_asks.publish_to_user"):
+			name = materialize_from_turn(self.conv, "Prose that must not be stored.\n\n" + _fence([_ask()]))
+		self.assertTrue(name)
+		self.assertFalse(self._context_md(name))
+
+	def test_a_malformed_fence_still_creates_no_row_with_prose(self):
+		with patch("jarvis.chat.chat_asks.publish_to_user"):
+			self.assertIsNone(materialize_from_turn(self.conv, "Real prose here.\n\n" + _fence("{broken")))
+		self.assertEqual(self._rows(), [])
+
+	def test_the_lead_in_log_line_carries_no_content(self):
+		with patch("jarvis.chat.chat_asks.publish_to_user"), patch("jarvis.chat.chat_asks.get_logger") as lg:
+			name = materialize_from_turn(self.conv, "Secret-ish lead in prose.\n\n" + _fence([_ask()]))
+		self.assertTrue(name)
+		lines = [c.args[0] for c in lg.return_value.info.call_args_list]
+		self.assertTrue(any("lead_in=yes" in line and name in line for line in lines), lines)
+		self.assertFalse(any("Secret" in line for line in lines), lines)
+
+	def test_a_file_box_ask_logs_the_lead_in_as_skipped(self):
+		frappe.db.set_value(CONV, self.conv, "file_box", 1, update_modified=False)
+		frappe.db.commit()
+		with patch("jarvis.chat.chat_asks.publish_to_user"), patch("jarvis.chat.chat_asks.get_logger") as lg:
+			name = materialize_from_turn(self.conv, "Prose that must not be stored.\n\n" + _fence([_ask()]))
+		lines = [c.args[0] for c in lg.return_value.info.call_args_list]
+		self.assertTrue(any("lead_in=skipped" in line and name in line for line in lines), lines)
+		self.assertFalse(any("Prose" in line for line in lines), lines)
+
+	def test_the_info_line_comes_after_the_realtime_publish(self):
+		order = []
+		with (
+			patch(
+				"jarvis.chat.chat_asks.publish_to_user", side_effect=lambda *a, **k: order.append("publish")
+			),
+			patch("jarvis.chat.chat_asks.get_logger") as lg,
+		):
+			lg.return_value.info.side_effect = lambda *a, **k: order.append("info")
+			materialize_from_turn(self.conv, "Some prose here.\n\n" + _fence([_ask()]))
+		self.assertEqual(order, ["publish", "info"])
+
+	def test_a_logger_failure_never_costs_the_ask(self):
+		with (
+			patch("jarvis.chat.chat_asks.publish_to_user") as pub,
+			patch("jarvis.chat.chat_asks.get_logger") as lg,
+		):
+			lg.return_value.info.side_effect = RuntimeError("logger down")
+			name = materialize_from_turn(self.conv, "Some prose here.\n\n" + _fence([_ask()]))
+		self.assertTrue(name)
+		pub.assert_called_once()
+		self.assertEqual(len(self._rows()), 1)
+
+	def test_a_failing_lead_in_never_loses_the_ask_card(self):
+		secret = "Secret-ish failure detail."
+		with (
+			patch("jarvis.chat.chat_asks.publish_to_user"),
+			patch("jarvis.chat.chat_asks.get_logger") as lg,
+			patch("jarvis.chat.chat_asks.ask_lead_in", side_effect=ValueError(secret)),
+		):
+			name = materialize_from_turn(self.conv, "Real prose here.\n\n" + _fence([_ask()]))
+		self.assertTrue(name)
+		self.assertEqual(len(self._rows()), 1)
+		self.assertFalse(self._context_md(name))
+		lines = [str(c.args[0]) for c in lg.return_value.method_calls if c.args]
+		self.assertTrue(any("lead_in=no" in line and name in line for line in lines), lines)
+		self.assertFalse(any(secret in line or "Real prose" in line for line in lines), lines)
+
+	def test_a_failing_lead_in_is_recorded_in_the_error_log_without_content(self):
+		secret = "Secret-ish failure detail."
+		with (
+			patch("jarvis.chat.chat_asks.publish_to_user"),
+			patch("jarvis.chat.chat_asks.ask_lead_in", side_effect=ValueError(secret)),
+			patch("frappe.log_error") as log_error,
+		):
+			name = materialize_from_turn(self.conv, "Real prose here.\n\n" + _fence([_ask()]))
+		self.assertTrue(name)
+		log_error.assert_called_once()
+		kwargs = log_error.call_args.kwargs
+		self.assertEqual(kwargs["title"], "jarvis.chat.ask_lead_in_failed")
+		self.assertIn(self.conv, kwargs["message"])
+		self.assertIn("ValueError", kwargs["message"])
+		self.assertIn("Traceback", kwargs["message"])
+		self.assertNotIn(secret, kwargs["message"])
+		self.assertNotIn("Real prose", kwargs["message"])
+
+	def test_a_failing_error_log_never_costs_the_ask(self):
+		with (
+			patch("jarvis.chat.chat_asks.publish_to_user"),
+			patch("jarvis.chat.chat_asks.ask_lead_in", side_effect=ValueError("x")),
+			patch("frappe.log_error", side_effect=RuntimeError("log down")),
+		):
+			name = materialize_from_turn(self.conv, "Real prose here.\n\n" + _fence([_ask()]))
+		self.assertTrue(name)
+		self.assertFalse(self._context_md(name))
+
+	def test_no_error_log_when_the_lead_in_works(self):
+		with patch("jarvis.chat.chat_asks.publish_to_user"), patch("frappe.log_error") as log_error:
+			materialize_from_turn(self.conv, "Real prose here.\n\n" + _fence([_ask()]))
+		log_error.assert_not_called()
+
+	def test_a_base_exception_in_the_lead_in_is_not_swallowed(self):
+		# rq's job timeout is a BaseException; it must reach the worker.
+		with (
+			patch("jarvis.chat.chat_asks.publish_to_user"),
+			patch("jarvis.chat.chat_asks.ask_lead_in", side_effect=KeyboardInterrupt),
+			self.assertRaises(KeyboardInterrupt),
+		):
+			materialize_from_turn(self.conv, "Real prose here.\n\n" + _fence([_ask()]))
+
+	def test_the_lead_in_line_is_really_emitted_at_info(self):
+		# frappe.logger defaults to ERROR, which silently drops an INFO line; the line must go
+		# through jarvis.chat.latency.get_logger, which re-pins INFO on every call.
+		import logging
+
+		from jarvis.chat.latency import get_logger
+
+		records = []
+
+		class Capture(logging.Handler):
+			def emit(self, record):
+				records.append(record)
+
+		handler = Capture()
+		logger = get_logger()
+		logger.addHandler(handler)
+		self.addCleanup(logger.removeHandler, handler)
+		logger.setLevel(logging.ERROR)  # the state a fresh process starts in
+		with patch("jarvis.chat.chat_asks.publish_to_user"):
+			name = materialize_from_turn(self.conv, "Some lead in.\n\n" + _fence([_ask()]))
+		self.assertTrue(
+			any(r.levelno == logging.INFO and f"{name} lead_in=yes" in r.getMessage() for r in records),
+			[r.getMessage() for r in records],
+		)
+
+	def test_a_row_without_a_lead_in_logs_absent(self):
+		with patch("jarvis.chat.chat_asks.publish_to_user"), patch("jarvis.chat.chat_asks.get_logger") as lg:
+			name = materialize_from_turn(self.conv, _fence([_ask()]))
+		lines = [c.args[0] for c in lg.return_value.info.call_args_list]
+		self.assertTrue(any("lead_in=no" in line and name in line for line in lines), lines)
 
 	def test_dedupe_on_pending_chat_row(self):
 		content = _fence([_ask()])
