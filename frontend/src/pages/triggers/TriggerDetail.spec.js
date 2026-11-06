@@ -172,14 +172,19 @@ async function mountDetail(id = "TRG-1") {
 	return wrapper;
 }
 
+// A failed load logs a console.warn on purpose. Every test stubs it, so a run prints no
+// stderr noise; the tests that care assert the calls on `warn`.
+let warn;
 beforeEach(() => {
 	vi.clearAllMocks();
 	apiTr.listActivityPage.mockReset();
+	warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 afterEach(() => {
 	if (wrapper) wrapper.unmount();
 	wrapper = null;
 	document.body.innerHTML = "";
+	warn.mockRestore();
 });
 
 const block = (w) => w.find('[data-testid="recent-block"]');
@@ -257,6 +262,7 @@ describe("TriggerDetail Recent activity: Load more", () => {
 	it("a burst of new runs does not stall the list (the cursor counts server rows)", async () => {
 		// 80 runs. Page 3 (start 30) is answered with 20 rows already on screen, as it
 		// is when 20 runs were made meanwhile; the cursor must still move on to 50.
+		// (PM-1: that all-duplicate page is followed at once by the next one, in the same click.)
 		const byStart = {
 			0: answer(rowsOf(0, 10), { start: 0, total: 80, has_more: true }),
 			10: answer(rowsOf(10, 20), { start: 10, total: 80, has_more: true }),
@@ -267,9 +273,7 @@ describe("TriggerDetail Recent activity: Load more", () => {
 		await mountDetail();
 		await click(wrapper, MOUSE); // 30 shown
 		expect(rowEls(wrapper)).toHaveLength(30);
-		await click(wrapper, MOUSE); // 20 duplicates: nothing added
-		expect(rowEls(wrapper)).toHaveLength(30);
-		await click(wrapper, MOUSE); // the next click goes on from 50
+		await click(wrapper, MOUSE); // 20 duplicates, then the page from 50 in the same click
 		expect(apiTr.listActivityPage.mock.calls.map((c) => c[0].start)).toEqual([0, 10, 30, 50]);
 		expect(rowEls(wrapper)).toHaveLength(50);
 	});
@@ -417,6 +421,7 @@ describe("TriggerDetail Recent activity: a page that fails", () => {
 		expect(rowEls(wrapper)).toHaveLength(10);
 		expect(moreBtn(wrapper).attributes("data-label")).toBe("Try again");
 		expect(alertText(wrapper)).toEqual(["Server said no"]);
+		expect(warn).toHaveBeenCalledTimes(1);
 		await click(wrapper, MOUSE);
 		// The retry asked for the same page.
 		expect(apiTr.listActivityPage.mock.calls[2][0].start).toBe(10);
@@ -458,6 +463,7 @@ describe("TriggerDetail Recent activity: first load", () => {
 		await mountDetail();
 		expect(block(wrapper).text()).not.toContain("No activity yet");
 		expect(alertText(wrapper)).toEqual(["Could not reach the server"]);
+		expect(warn).toHaveBeenCalledTimes(1);
 		expect(moreBtn(wrapper).attributes("data-label")).toBe("Try again");
 		await click(wrapper, MOUSE);
 		expect(apiTr.listActivityPage.mock.calls[1][0].start).toBe(0);
@@ -795,11 +801,10 @@ describe("TriggerDetail Recent activity: focus is left alone", () => {
 	});
 
 	it("focus stays on the button when every row of the page was shown already", async () => {
+		// Every page is rows already on screen (PM-1: the click asks up to 3 more times).
 		apiTr.listActivityPage
-			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 40, has_more: true }))
-			.mockResolvedValueOnce(
-				answer(rowsOf(0, 10), { start: 10, total: 40, has_more: true })
-			);
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 400, has_more: true }))
+			.mockResolvedValue(answer(rowsOf(0, 10), { start: 10, total: 400, has_more: true }));
 		await mountDetail();
 		const btn = moreBtn(wrapper).element;
 		btn.focus();
@@ -815,7 +820,7 @@ describe("TriggerDetail Recent activity: answers that are nobody's", () => {
 	for (const kind of ["resolving", "rejecting"]) {
 		it(`a late ${kind} answer after the page is gone changes nothing`, async () => {
 			const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
-			const warnLog = vi.spyOn(console, "warn").mockImplementation(() => {});
+			const warnLog = warn;
 			const slow = defer();
 			apiTr.listActivityPage
 				.mockResolvedValueOnce(
@@ -841,7 +846,6 @@ describe("TriggerDetail Recent activity: answers that are nobody's", () => {
 			expect(errorLog).not.toHaveBeenCalled();
 			expect(warnLog).not.toHaveBeenCalled();
 			errorLog.mockRestore();
-			warnLog.mockRestore();
 		});
 	}
 
@@ -898,14 +902,6 @@ describe("TriggerDetail Recent activity: a manager's page comes back empty", () 
 });
 
 describe("TriggerDetail Recent activity: a failure is logged", () => {
-	let warn;
-	beforeEach(() => {
-		warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-	});
-	afterEach(() => {
-		warn.mockRestore();
-	});
-
 	it("a failed first load warns with the trigger and the start", async () => {
 		const err = new Error("Could not reach the server");
 		apiTr.listActivityPage.mockRejectedValue(err);
@@ -963,24 +959,521 @@ describe("TriggerDetail Recent activity: odd answers", () => {
 		expect(rowEls(wrapper)).toHaveLength(30);
 	});
 
-	it("a null first answer shows No activity yet and does not crash", async () => {
-		apiTr.listActivityPage.mockResolvedValue(null);
-		await mountDetail();
-		expect(rowEls(wrapper)).toHaveLength(0);
-		expect(emptyLine(wrapper).exists()).toBe(true);
-		expect(alertText(wrapper)).toEqual([]);
-		expect(moreBtn(wrapper)).toBeUndefined();
-	});
+	// PM-3 (replaces the PF-4 expectations): a null / non-object answer is a failed
+	// load, not "No activity yet" and not "the list ended".
+	for (const bad of [null, undefined, "oops", 42]) {
+		it(`a ${
+			bad === null ? "null" : typeof bad
+		} first answer is a failed load with Try again`, async () => {
+			apiTr.listActivityPage
+				.mockResolvedValueOnce(bad)
+				.mockResolvedValueOnce(
+					answer(rowsOf(0, 3), { start: 0, total: 3, has_more: false })
+				);
+			await mountDetail();
+			expect(rowEls(wrapper)).toHaveLength(0);
+			expect(emptyLine(wrapper).exists()).toBe(false);
+			expect(block(wrapper).text()).not.toContain("No activity yet");
+			expect(alertText(wrapper)).toEqual(["Could not load the activity. Try again."]);
+			expect(moreBtn(wrapper).attributes("data-label")).toBe("Try again");
+			expect(warn).toHaveBeenCalledTimes(1);
+			await click(wrapper, MOUSE);
+			expect(rowEls(wrapper)).toHaveLength(3);
+			expect(alertText(wrapper)).toEqual([]);
+		});
+	}
 
-	it("a null Load more answer keeps the rows and ends the list", async () => {
+	it("a null Load more answer keeps the rows and is a failed page with Try again", async () => {
 		apiTr.listActivityPage
 			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 40, has_more: true }))
-			.mockResolvedValueOnce(null);
+			.mockResolvedValueOnce(null)
+			.mockResolvedValueOnce(
+				answer(rowsOf(10, 20), { start: 10, total: 40, has_more: true })
+			);
 		await mountDetail();
 		await click(wrapper, MOUSE);
 		expect(rowEls(wrapper)).toHaveLength(10);
+		expect(moreBtn(wrapper).attributes("data-label")).toBe("Try again");
+		expect(count(wrapper).text()).toBe("Showing 10 of 40");
+		expect(alertText(wrapper)).toEqual(["Could not load more activity. Try again."]);
+		await click(wrapper, MOUSE);
+		expect(apiTr.listActivityPage.mock.calls[2][0].start).toBe(10);
+		expect(rowEls(wrapper)).toHaveLength(30);
+		expect(alertText(wrapper)).toEqual([]);
+	});
+
+	// PM-4: has_more counts only when it is the boolean true.
+	it("a has_more that is not the boolean true counts as no more", async () => {
+		apiTr.listActivityPage.mockResolvedValue(
+			answer(rowsOf(0, 10), { start: 0, total: 40, has_more: 1 })
+		);
+		await mountDetail();
 		expect(moreBtn(wrapper)).toBeUndefined();
 		expect(count(wrapper).text()).toBe("Showing all 10");
+	});
+});
+
+describe("TriggerDetail Recent activity: a page of rows already shown (PM-1)", () => {
+	const dupPage = (start, total = 400) =>
+		answer(rowsOf(0, 10), { start, total, has_more: true });
+
+	it("asks for the next page at once, in the same click", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 40, has_more: true }))
+			.mockResolvedValueOnce(dupPage(10, 40))
+			.mockResolvedValueOnce(
+				answer(rowsOf(10, 20), { start: 20, total: 40, has_more: true })
+			);
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		// The cursor moved by the rows the server sent: 10, then 20.
+		expect(apiTr.listActivityPage.mock.calls.map((c) => c[0].start)).toEqual([0, 10, 20]);
+		expect(apiTr.listActivityPage.mock.calls[2][0].page_length).toBe(NEXT_PAGE);
+		expect(rowEls(wrapper)).toHaveLength(30);
+		expect(count(wrapper).text()).toBe("Showing 30 of 40");
+	});
+
+	it("asks at most 3 extra times per click, then stops with the button still there", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 400, has_more: true }))
+			.mockImplementation(async (p) => dupPage(p.start));
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		expect(apiTr.listActivityPage.mock.calls.map((c) => c[0].start)).toEqual([
+			0, 10, 20, 30, 40,
+		]);
+		expect(rowEls(wrapper)).toHaveLength(10);
+		expect(count(wrapper).text()).toBe("Showing 10 of 400");
+		expect(moreBtn(wrapper).attributes("data-label")).toBe("Load more");
+		// The next click goes on from the cursor, with the same bound.
+		await click(wrapper, MOUSE);
+		expect(apiTr.listActivityPage.mock.calls.map((c) => c[0].start).slice(5)).toEqual([
+			50, 60, 70, 80,
+		]);
+	});
+
+	it("does not ask again when the page added a row", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 400, has_more: true }))
+			.mockResolvedValueOnce(
+				answer([...rowsOf(5, 5), row(10)], { start: 10, total: 400, has_more: true })
+			);
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		expect(apiTr.listActivityPage).toHaveBeenCalledTimes(2);
+		expect(rowEls(wrapper)).toHaveLength(11);
+	});
+
+	it("keeps the button disabled and the count line unchanged until the last page is in", async () => {
+		const seen = [];
+		const second = defer();
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 40, has_more: true }))
+			.mockResolvedValueOnce(dupPage(10, 41))
+			.mockReturnValueOnce(second.promise);
+		await mountDetail();
+		const observer = new MutationObserver(() => seen.push(count(wrapper).text()));
+		observer.observe(count(wrapper).element, {
+			childList: true,
+			subtree: true,
+			characterData: true,
+		});
+		press(moreBtn(wrapper).element, MOUSE);
+		await flushPromises();
+		// The all-duplicate page is in, the next one is still on its way.
+		expect(apiTr.listActivityPage).toHaveBeenCalledTimes(3);
+		expect(moreBtn(wrapper).element.disabled).toBe(true);
+		expect(count(wrapper).text()).toBe("Showing 10 of 40");
+		second.resolve(answer(rowsOf(10, 20), { start: 20, total: 45, has_more: true }));
+		await flushPromises();
+		observer.disconnect();
+		// The live region changed once, to the final text.
+		expect(seen).toEqual(["Showing 30 of 45"]);
+		expect(moreBtn(wrapper).element.disabled).toBe(false);
+	});
+
+	it("a failure on an extra page keeps the rows, shows Try again, and stops asking", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 400, has_more: true }))
+			.mockResolvedValueOnce(dupPage(10))
+			.mockRejectedValueOnce(new Error("Server said no"))
+			.mockResolvedValueOnce(
+				answer(rowsOf(10, 20), { start: 20, total: 400, has_more: true })
+			);
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		expect(apiTr.listActivityPage).toHaveBeenCalledTimes(3);
+		expect(rowEls(wrapper)).toHaveLength(10);
+		expect(alertText(wrapper)).toEqual(["Server said no"]);
+		expect(moreBtn(wrapper).attributes("data-label")).toBe("Try again");
+		await click(wrapper, MOUSE);
+		// The cursor kept what the all-duplicate page had moved it to.
+		expect(apiTr.listActivityPage.mock.calls[3][0].start).toBe(20);
+		expect(rowEls(wrapper)).toHaveLength(30);
+	});
+
+	it("an all-duplicate page followed by an empty one ends the list as usual", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 30, has_more: true }))
+			.mockResolvedValueOnce(dupPage(10, 30))
+			.mockResolvedValueOnce(answer([], { start: 20, total: 30, has_more: true }));
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		expect(moreBtn(wrapper)).toBeUndefined();
+		expect(count(wrapper).text()).toBe("Showing all 10");
+	});
+
+	it("a key press still moves focus to the first NEW row the click brought", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 40, has_more: true }))
+			.mockResolvedValueOnce(dupPage(10, 40))
+			.mockResolvedValueOnce(
+				answer(rowsOf(10, 20), { start: 20, total: 40, has_more: true })
+			);
+		await mountDetail();
+		moreBtn(wrapper).element.focus();
+		await click(wrapper, KEY);
+		expect(rowEls(wrapper)).toHaveLength(30);
+		expect(document.activeElement).toBe(rowEls(wrapper)[10].element);
+	});
+
+	it("a switch of trigger during the extra pages drops them", async () => {
+		const slow = defer();
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(
+				answer(rowsOf(0, 10, "A"), { start: 0, total: 400, has_more: true })
+			)
+			.mockResolvedValueOnce(
+				answer(rowsOf(0, 10, "A"), { start: 10, total: 400, has_more: true })
+			)
+			.mockReturnValueOnce(slow.promise)
+			.mockResolvedValueOnce(
+				answer(rowsOf(0, 4, "B"), { start: 0, total: 4, has_more: false })
+			);
+		await mountDetail("TRG-1");
+		press(moreBtn(wrapper).element, MOUSE);
+		await flushPromises();
+		await wrapper.setProps({ id: "TRG-2" });
+		await flushPromises();
+		slow.resolve(answer(rowsOf(10, 20, "A"), { start: 20, total: 400, has_more: true }));
+		await flushPromises();
+		expect(rowEls(wrapper).map((r) => r.attributes("data-name"))).toEqual(
+			rowsOf(0, 4, "B").map((r) => r.name)
+		);
+		// No further request was made for the old trigger.
+		expect(apiTr.listActivityPage).toHaveBeenCalledTimes(4);
+	});
+});
+
+describe("TriggerDetail Recent activity: a request that takes too long (PM-2)", () => {
+	const TOO_LONG = "Loading the activity took too long. Try again.";
+	beforeEach(() => {
+		// Only the timers: flushPromises waits on setImmediate.
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+	const tick = async (ms) => {
+		await vi.advanceTimersByTimeAsync(ms);
+		await flushPromises();
+	};
+
+	it("the first load fails after 30 s with a message and Try again, not before", async () => {
+		apiTr.listActivityPage.mockReturnValue(defer().promise);
+		await mountDetail();
+		await tick(29999);
 		expect(alertText(wrapper)).toEqual([]);
+		expect(block(wrapper).text()).toContain("Loading activity");
+		await tick(1);
+		expect(alertText(wrapper)).toEqual([TOO_LONG]);
+		expect(block(wrapper).find('[data-testid="recent-error"]').exists()).toBe(true);
+		expect(block(wrapper).text()).not.toContain("Loading activity");
+		expect(block(wrapper).text()).not.toContain("No activity yet");
+		expect(moreBtn(wrapper).attributes("data-label")).toBe("Try again");
+		expect(moreBtn(wrapper).element.disabled).toBe(false);
+		expect(warn).toHaveBeenCalledTimes(1);
+	});
+
+	it("its late answer is dropped, and Try again works", async () => {
+		const late = defer();
+		apiTr.listActivityPage
+			.mockReturnValueOnce(late.promise)
+			.mockResolvedValueOnce(
+				answer(rowsOf(0, 3, "R"), { start: 0, total: 3, has_more: false })
+			);
+		await mountDetail();
+		await tick(30000);
+		late.resolve(answer(rowsOf(0, 10, "LATE"), { start: 0, total: 10, has_more: false }));
+		await flushPromises();
+		expect(rowEls(wrapper)).toHaveLength(0);
+		expect(alertText(wrapper)).toEqual([TOO_LONG]);
+		await click(wrapper, MOUSE);
+		expect(rowEls(wrapper).map((r) => r.attributes("data-name"))).toEqual(
+			rowsOf(0, 3, "R").map((r) => r.name)
+		);
+		expect(alertText(wrapper)).toEqual([]);
+	});
+
+	it("a late answer after the retry has started does not replace the retry's", async () => {
+		const late = defer();
+		const retry = defer();
+		apiTr.listActivityPage
+			.mockReturnValueOnce(late.promise)
+			.mockReturnValueOnce(retry.promise);
+		await mountDetail();
+		await tick(30000);
+		press(moreBtn(wrapper).element, MOUSE);
+		await flushPromises();
+		late.resolve(answer(rowsOf(0, 10, "LATE"), { start: 0, total: 10, has_more: false }));
+		await flushPromises();
+		expect(rowEls(wrapper)).toHaveLength(0);
+		retry.resolve(answer(rowsOf(0, 3, "R"), { start: 0, total: 3, has_more: false }));
+		await flushPromises();
+		expect(rowEls(wrapper).map((r) => r.attributes("data-name"))).toEqual(
+			rowsOf(0, 3, "R").map((r) => r.name)
+		);
+	});
+
+	it("a Load more fails after 30 s beside the button; the rows stay; its late answer is dropped", async () => {
+		const late = defer();
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 40, has_more: true }))
+			.mockReturnValueOnce(late.promise)
+			.mockResolvedValueOnce(
+				answer(rowsOf(10, 20), { start: 10, total: 40, has_more: true })
+			);
+		await mountDetail();
+		press(moreBtn(wrapper).element, MOUSE);
+		await flushPromises();
+		expect(moreBtn(wrapper).element.disabled).toBe(true);
+		await tick(30000);
+		expect(alertText(wrapper)).toEqual([TOO_LONG]);
+		expect(moreBtn(wrapper).attributes("data-label")).toBe("Try again");
+		expect(moreBtn(wrapper).element.disabled).toBe(false);
+		expect(rowEls(wrapper)).toHaveLength(10);
+		late.resolve(answer(rowsOf(10, 20, "LATE"), { start: 10, total: 40, has_more: true }));
+		await flushPromises();
+		expect(rowEls(wrapper)).toHaveLength(10);
+		await click(wrapper, MOUSE);
+		expect(apiTr.listActivityPage.mock.calls[2][0].start).toBe(10);
+		expect(rowEls(wrapper)).toHaveLength(30);
+		expect(alertText(wrapper)).toEqual([]);
+	});
+
+	it("each request of an all-duplicate chain has its own 30 s", async () => {
+		const third = defer();
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 400, has_more: true }))
+			.mockResolvedValueOnce(
+				answer(rowsOf(0, 10), { start: 10, total: 400, has_more: true })
+			)
+			.mockReturnValueOnce(third.promise);
+		await mountDetail();
+		press(moreBtn(wrapper).element, MOUSE);
+		await tick(0);
+		await tick(29000);
+		expect(alertText(wrapper)).toEqual([]);
+		await tick(1000);
+		expect(alertText(wrapper)).toEqual([TOO_LONG]);
+	});
+
+	it("a quick answer clears the timer", async () => {
+		serverOf(37);
+		await mountDetail();
+		expect(vi.getTimerCount()).toBe(0);
+		await click(wrapper, MOUSE);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("a failed request clears the timer", async () => {
+		apiTr.listActivityPage.mockRejectedValue(new Error("Server said no"));
+		await mountDetail();
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("the timer is cleared when the page goes away, and nothing is shown after", async () => {
+		apiTr.listActivityPage.mockReturnValue(defer().promise);
+		await mountDetail();
+		expect(vi.getTimerCount()).toBe(1);
+		const vm = wrapper.vm;
+		wrapper.unmount();
+		wrapper = null;
+		expect(vi.getTimerCount()).toBe(0);
+		await tick(60000);
+		expect(vm.recentError).toBe("");
+		expect(warn).not.toHaveBeenCalled();
+	});
+});
+
+describe("TriggerDetail Recent activity: rows without a name (PM-5)", () => {
+	const noName = (tag) => ({ status: "Success", summary: `Run ${tag}`, creation: "2026-01-01" });
+	const duplicateKeyWarnings = () =>
+		warn.mock.calls.filter((c) => String(c[0]).includes("Duplicate keys"));
+
+	it("a Load more page keeps every row that has no name, and shows no duplicate-key warning", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 40, has_more: true }))
+			.mockResolvedValueOnce(
+				answer([noName("x"), noName("y"), row(10)], {
+					start: 10,
+					total: 40,
+					has_more: true,
+				})
+			);
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		expect(rowEls(wrapper)).toHaveLength(13);
+		expect(block(wrapper).text()).toContain("Run x");
+		expect(block(wrapper).text()).toContain("Run y");
+		expect(duplicateKeyWarnings()).toEqual([]);
+	});
+
+	it("a named row is still shown once next to nameless ones", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 40, has_more: true }))
+			.mockResolvedValueOnce(
+				answer([noName("x"), row(3), noName("y")], {
+					start: 10,
+					total: 40,
+					has_more: true,
+				})
+			);
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		expect(rowEls(wrapper)).toHaveLength(12);
+	});
+
+	it("nameless rows on the first page all show", async () => {
+		apiTr.listActivityPage.mockResolvedValue(
+			answer([noName("x"), noName("y")], { start: 0, total: 2, has_more: false })
+		);
+		await mountDetail();
+		expect(rowEls(wrapper)).toHaveLength(2);
+		expect(duplicateKeyWarnings()).toEqual([]);
+	});
+});
+
+describe("TriggerDetail Recent activity: an empty list that a non-manager sees (PM-6)", () => {
+	it("says No runs you can view yet for an approximate, complete, empty list", async () => {
+		apiTr.listActivityPage.mockResolvedValue(
+			answer([], { start: 0, total: 0, has_more: false, approximate: true })
+		);
+		await mountDetail();
+		expect(emptyLine(wrapper).exists()).toBe(true);
+		expect(emptyLine(wrapper).text()).toBe("No runs you can view yet.");
+		expect(block(wrapper).text()).not.toContain("No activity yet");
+		expect(emptyLine(wrapper).attributes("tabindex")).toBe("-1");
+	});
+
+	it("a manager keeps No activity yet", async () => {
+		apiTr.listActivityPage.mockResolvedValue(
+			answer([], { start: 0, total: 0, has_more: false })
+		);
+		await mountDetail();
+		expect(emptyLine(wrapper).text()).toBe(
+			"No activity yet - runs appear here when the trigger fires."
+		);
+	});
+
+	it("a key retry that finds an empty non-manager list focuses that line", async () => {
+		apiTr.listActivityPage
+			.mockRejectedValueOnce(new Error("Could not reach the server"))
+			.mockResolvedValueOnce(answer([], { start: 0, has_more: false, approximate: true }));
+		await mountDetail();
+		moreBtn(wrapper).element.focus();
+		await click(wrapper, KEY);
+		expect(emptyLine(wrapper).text()).toBe("No runs you can view yet.");
+		expect(document.activeElement).toBe(emptyLine(wrapper).element);
+	});
+});
+
+describe("TriggerDetail Recent activity: the loading line (PM-7)", () => {
+	it("is a status region", async () => {
+		apiTr.listActivityPage.mockReturnValue(defer().promise);
+		await mountDetail();
+		const loading = block(wrapper)
+			.findAll("div")
+			.find((d) => d.text().startsWith("Loading activity"));
+		expect(loading.attributes("role")).toBe("status");
+	});
+});
+
+describe("TriggerDetail: the form follows the newest init only (PM-8)", () => {
+	const nameInput = (w) => w.find('input[aria-label="Name"]');
+	const docPageLoading = (w) => w.findComponent({ name: "DocPage" }).props("loading");
+	function mountSlow(slow) {
+		apiTr.getTrigger.mockImplementation(() => slow.promise);
+		apiTr.getTriggersCaps.mockResolvedValue({ can_manage: true });
+		apiTr.listActivityPage.mockResolvedValue(
+			answer(rowsOf(0, 2, "B"), { start: 0, total: 2, has_more: false })
+		);
+		wrapper = mount(TriggerDetail, {
+			props: { id: "TRG-1", isNew: false },
+			attachTo: document.body,
+			global: { provide: { $socket: null } },
+		});
+	}
+
+	it("trigger A answers late: the form stays B's and the page is not loading", async () => {
+		const slow = defer();
+		mountSlow(slow);
+		await flushPromises();
+		expect(docPageLoading(wrapper)).toBe(true);
+		apiTr.getTrigger.mockImplementation(async (name) => trigger(name));
+		await wrapper.setProps({ id: "TRG-2" });
+		await flushPromises();
+		expect(nameInput(wrapper).element.value).toBe("Big invoice TRG-2");
+		expect(docPageLoading(wrapper)).toBe(false);
+		slow.resolve(trigger("TRG-1"));
+		await flushPromises();
+		expect(nameInput(wrapper).element.value).toBe("Big invoice TRG-2");
+		expect(docPageLoading(wrapper)).toBe(false);
+	});
+
+	it("trigger A answers while B is still loading: A seeds nothing and loading stays", async () => {
+		const slowA = defer();
+		const slowB = defer();
+		mountSlow(slowA);
+		await flushPromises();
+		apiTr.getTrigger.mockImplementation(() => slowB.promise);
+		await wrapper.setProps({ id: "TRG-2" });
+		await flushPromises();
+		slowA.resolve(trigger("TRG-1"));
+		await flushPromises();
+		expect(nameInput(wrapper).element.value).toBe("");
+		expect(docPageLoading(wrapper)).toBe(true);
+		slowB.resolve(trigger("TRG-2"));
+		await flushPromises();
+		expect(nameInput(wrapper).element.value).toBe("Big invoice TRG-2");
+		expect(docPageLoading(wrapper)).toBe(false);
+	});
+
+	it("A answers late after the page became New: the form stays blank, not loading", async () => {
+		const slow = defer();
+		mountSlow(slow);
+		await flushPromises();
+		await wrapper.setProps({ isNew: true });
+		await flushPromises();
+		expect(nameInput(wrapper).element.value).toBe("");
+		expect(docPageLoading(wrapper)).toBe(false);
+		slow.resolve(trigger("TRG-1"));
+		await flushPromises();
+		expect(nameInput(wrapper).element.value).toBe("");
+		expect(wrapper.vm.form.target_doctype).toBe("");
+		expect(docPageLoading(wrapper)).toBe(false);
+	});
+
+	it("A fails late after the page moved on: no error on the new page", async () => {
+		const slow = defer();
+		mountSlow(slow);
+		await flushPromises();
+		apiTr.getTrigger.mockImplementation(async (name) => trigger(name));
+		await wrapper.setProps({ id: "TRG-2" });
+		await flushPromises();
+		slow.reject(new Error("Not found"));
+		await flushPromises();
+		expect(wrapper.findComponent({ name: "DocPage" }).props("error")).toBe("");
+		expect(nameInput(wrapper).element.value).toBe("Big invoice TRG-2");
 	});
 });

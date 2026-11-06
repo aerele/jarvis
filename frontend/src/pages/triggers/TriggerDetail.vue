@@ -231,7 +231,7 @@
 				<div ref="recentEl" class="flex flex-col" data-testid="recent-block">
 					<button
 						v-for="(r, i) in recentRows"
-						:key="r.name"
+						:key="r.name || 'row-' + i"
 						data-testid="recent-row"
 						:data-name="r.name"
 						class="flex w-full items-center gap-3 px-1 py-2 text-left hover:bg-surface-gray-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3"
@@ -258,6 +258,7 @@
 					     load never reads as "No activity yet". -->
 					<div
 						v-if="!recentRows.length && recentLoading && !recentError"
+						role="status"
 						class="text-sm text-ink-gray-5"
 					>
 						Loading activity...
@@ -291,7 +292,7 @@
 						class="rounded text-sm text-ink-gray-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-outline-gray-3"
 						data-testid="recent-empty"
 					>
-						No activity yet - runs appear here when the trigger fires.
+						{{ recentEmptyText }}
 					</div>
 
 					<!-- Always here, so the live region exists before its first text. -->
@@ -616,7 +617,20 @@ function onDoctypePick(opt) {
 // counter that cancels a focus move) but not its paging: it pages by the shown count.
 const RECENT_FIRST = 10;
 const RECENT_MORE = 20;
+// A Load more page that brings only rows already shown asks for the next page at once,
+// at most this many extra times per click.
+const RECENT_EXTRA_PAGES = 3;
+// A request that has not answered by then fails (a stuck request must not spin forever).
+const RECENT_TIMEOUT_MS = 30000;
+const RECENT_TOO_LONG = "Loading the activity took too long. Try again.";
 const recentRows = ref([]);
+// Flags of a loaded list - at most one of these three is true at a time:
+//   recentHasMore   the server has older runs and the button asks for them;
+//   recentEnded     (approximate list only) the scan limit stopped the list: older runs
+//                   exist but are not listed, and the count line says so;
+//   recentComplete  the server has no more: every run it lets this user see is shown.
+// All three are false before the first answer (loading, or failed: see recentError).
+// recentMoreFailed is true only together with a recentError (a failed Load more).
 const recentNextStart = ref(0);
 const recentHasMore = ref(false);
 const recentTotal = ref(0);
@@ -639,7 +653,10 @@ const recentEmptyEl = ref(null);
 const recentFailures = ref(0);
 let recentLatest = 0;
 let recentUnmounted = false;
+const recentTimers = new Set();
 
+// "Showing n so far" is the line of an approximate list that may still grow; when the
+// scan limit ends it (recentEnded), the same live region adds "Older runs are not listed here."
 const recentCountText = computed(() => {
 	const n = recentRows.value.length;
 	if (recentComplete.value) return `Showing all ${n}`;
@@ -647,6 +664,14 @@ const recentCountText = computed(() => {
 		return `Showing ${n} of ${recentTotal.value}`;
 	return `Showing ${n} so far`;
 });
+
+// A non-manager's list is approximate: when it is empty and whole, say what is true for
+// them (runs they may not view are not counted), not that the trigger never fired.
+const recentEmptyText = computed(() =>
+	recentApprox.value
+		? "No runs you can view yet."
+		: "No activity yet - runs appear here when the trigger fires."
+);
 
 function resetRecent() {
 	recentLatest++; // an answer still on its way is nobody's now
@@ -674,47 +699,96 @@ function recentArgs(start, pageLength) {
 	};
 }
 
-// Takes the paging facts of an answer. `asked`: the page length that was asked for.
-function applyRecentPage(res, sentStart, asked) {
+// An error whose message is shown as it is (not the server's words).
+const recentFailure = (text) => Object.assign(new Error(text), { recentText: text });
+
+// The answer of `promise`, or a failure after RECENT_TIMEOUT_MS. The race drops a late
+// answer: once the timer won, nobody listens to the request any more.
+function withRecentTimeout(promise) {
+	let timer;
+	const timeout = new Promise((_, reject) => {
+		timer = setTimeout(() => reject(recentFailure(RECENT_TOO_LONG)), RECENT_TIMEOUT_MS);
+		recentTimers.add(timer);
+	});
+	return Promise.race([promise, timeout]).finally(() => {
+		clearTimeout(timer);
+		recentTimers.delete(timer);
+	});
+}
+
+// The paging facts of an answer. `asked`: the page length that was asked for.
+function recentPageFacts(res, sentStart, asked) {
 	const got = (res.rows || []).length;
 	const start = typeof res.start === "number" ? res.start : sentStart;
-	recentNextStart.value = start + got;
-	recentTotal.value = Number(res.total) || 0;
-	recentApprox.value = !!res.approximate;
+	const approx = !!res.approximate;
+	const more = res.has_more === true;
 	// Fewer rows than asked, with more behind them, can only be the scan limit of an
 	// approximate list (an exact one fills every page it has more after): stop here,
 	// so the user never clicks for nothing.
-	if (recentApprox.value && res.has_more === true && got < asked) recentEnded.value = true;
-	// A page with no rows ends the list even when the server says there is more.
-	recentHasMore.value = !!res.has_more && got > 0 && !recentEnded.value;
-	// Whole when the server says no more. Also whole when an exact list gets an empty
-	// page although it said more: the rows were deleted after the count, and nothing
-	// lies past the cursor. (An approximate list that ended says so in recentEnded.)
-	recentComplete.value = !res.has_more || (got === 0 && !recentEnded.value);
+	const ended = approx && more && got < asked;
+	return {
+		got,
+		nextStart: start + got,
+		total: Number(res.total) || 0,
+		approx,
+		ended,
+		// A page with no rows ends the list even when the server says there is more.
+		hasMore: more && got > 0 && !ended,
+		// Whole when the server says no more. Also whole when an exact list gets an empty
+		// page although it said more: the rows were deleted after the count, and nothing
+		// lies past the cursor. (An approximate list that ended says so in recentEnded.)
+		complete: !more || (got === 0 && !ended),
+	};
+}
+
+function applyRecentFacts(f) {
+	recentNextStart.value = f.nextStart;
+	recentTotal.value = f.total;
+	recentApprox.value = f.approx;
+	if (f.ended) recentEnded.value = true;
+	recentHasMore.value = f.hasMore;
+	recentComplete.value = f.complete;
 	recentError.value = "";
 	recentMoreFailed.value = false;
 	recentLoaded.value = true;
 }
 
-// One load of a page: `merge(res)` puts its rows in the list; `failText` is the
-// message when the server gave none; `more`: the page is a Load more (its failure
-// is shown beside that button). Returns the load's number when its answer (or error)
-// was kept, 0 when it was dropped (another trigger, load or the page itself took over).
-async function runRecentLoad(start, asked, merge, failText, more) {
+// One load: `merge(rows)` puts a page's rows in the list and returns how many it added;
+// `failText` is the message when the server gave none; `more`: the load is a Load more
+// (its failure is shown beside that button). `extraPages`: how often a page that added
+// nothing (rows already shown, more behind them) is followed at once by the next one.
+// The shown state (count line, flags) changes once, with the last page; the cursor moves
+// with each. Returns the load's number when its answer (or error) was kept, 0 when it was
+// dropped (another trigger, load or the page itself took over).
+async function runRecentLoad(start, asked, merge, failText, more, extraPages = 0) {
 	const mine = ++recentLatest;
 	const id = props.id;
 	const dropped = () => mine !== recentLatest || id !== props.id || recentUnmounted;
 	recentLoading.value = true;
+	let from = start;
 	try {
-		const res = (await apiTriggers.listActivityPage(recentArgs(start, asked))) || {};
-		if (dropped()) return 0;
-		merge(res.rows || []);
-		applyRecentPage(res, start, asked);
-		return mine;
+		for (let extra = 0; ; extra++) {
+			const res = await withRecentTimeout(
+				apiTriggers.listActivityPage(recentArgs(from, asked))
+			);
+			if (dropped()) return 0;
+			// Nothing, or something that is not an answer: a failed load, never an empty list.
+			if (!res || typeof res !== "object" || Array.isArray(res))
+				throw recentFailure(failText);
+			const added = merge(res.rows || []);
+			const facts = recentPageFacts(res, from, asked);
+			if (facts.got > 0 && added === 0 && facts.hasMore && extra < extraPages) {
+				from = facts.nextStart;
+				recentNextStart.value = from;
+				continue;
+			}
+			applyRecentFacts(facts);
+			return mine;
+		}
 	} catch (e) {
 		if (dropped()) return 0;
-		console.warn("[TriggerDetail] activity load failed", { trigger: id, start }, e);
-		recentError.value = errMsg(e, failText);
+		console.warn("[TriggerDetail] activity load failed", { trigger: id, start: from }, e);
+		recentError.value = (e && e.recentText) || errMsg(e, failText);
 		recentMoreFailed.value = more;
 		recentFailures.value += 1;
 		return mine;
@@ -729,6 +803,7 @@ const loadRecent = () =>
 		RECENT_FIRST,
 		(rows) => {
 			recentRows.value = rows;
+			return rows.length;
 		},
 		"Could not load the activity. Try again.",
 		false
@@ -739,18 +814,24 @@ const pageMoreRecent = () =>
 		recentNextStart.value,
 		RECENT_MORE,
 		(rows) => {
-			// Runs made meanwhile move rows down: a row seen twice is listed once.
-			const seen = new Set(recentRows.value.map((r) => r.name));
+			// Runs made meanwhile move rows down: a row seen twice is listed once. Rows
+			// without a name cannot be told apart: all of them are kept.
+			const named = (r) => r.name != null && r.name !== "";
+			const seen = new Set(recentRows.value.filter(named).map((r) => r.name));
 			const added = [];
 			for (const r of rows) {
-				if (seen.has(r.name)) continue;
-				seen.add(r.name);
+				if (named(r)) {
+					if (seen.has(r.name)) continue;
+					seen.add(r.name);
+				}
 				added.push(r);
 			}
 			recentRows.value = [...recentRows.value, ...added];
+			return added.length;
 		},
 		"Could not load more activity. Try again.",
-		true
+		true,
+		RECENT_EXTRA_PAGES
 	);
 
 // A button that is loading is disabled and the browser may take focus off it, so a
@@ -767,10 +848,13 @@ onBeforeUnmount(() => {
 	document.removeEventListener("pointerdown", onRecentPointer, true);
 	recentUnmounted = true;
 	recentLatest++;
+	for (const t of recentTimers) clearTimeout(t);
+	recentTimers.clear();
 });
 
 // Runs `load` (loadRecent or pageMoreRecent) and, for a key press, puts focus where
-// `pick(at, rows, before)` says once it has answered. `at`: the element that had focus.
+// `pick({ at, rows, before })` says once it has answered. `at`: the element that had
+// focus; `rows`: the row elements now; `before`: how many rows there were before the load.
 async function loadWithRecentFocus(event, load, pick) {
 	if (recentLoading.value) return;
 	const at = document.activeElement;
@@ -787,14 +871,14 @@ async function loadWithRecentFocus(event, load, pick) {
 	// The user moved focus themselves, or a dialog took it: leave it alone.
 	if ((!focusLost() && document.activeElement !== at) || activityOpen.value) return;
 	const rows = recentEl.value.querySelectorAll('[data-testid="recent-row"]');
-	const target = pick(at, rows, before);
+	const target = pick({ at, rows, before });
 	if (target && target.isConnected && !target.disabled) target.focus();
 }
 
 // Load more: the next Tab carries on down the list from the first row the page
 // brought; with none, stay on the button, or on the count line when it went away.
 const loadMoreRecent = (event) =>
-	loadWithRecentFocus(event, pageMoreRecent, (at, rows, before) => {
+	loadWithRecentFocus(event, pageMoreRecent, ({ at, rows, before }) => {
 		if (rows.length > before) return rows[before];
 		return at && at.isConnected && !at.disabled ? at : recentCountEl.value;
 	});
@@ -802,7 +886,7 @@ const loadMoreRecent = (event) =>
 // Try again after a failed first load: the first row, the error line again, or the
 // line that says there is nothing.
 const retryRecent = (event) =>
-	loadWithRecentFocus(event, loadRecent, (at, rows) => {
+	loadWithRecentFocus(event, loadRecent, ({ at, rows }) => {
 		if (rows.length) return rows[0];
 		if (recentError.value) return recentErrorEl.value;
 		// No runs: the empty-state line, or the count line holding the end message.
@@ -829,29 +913,40 @@ function seed(data) {
 
 let bypassGuard = false;
 
+// Only the newest init may seed the form or clear `loading`: an older one that answers
+// late (the page moved to another trigger, or to New) is nobody's.
+let initSeq = 0;
+
 async function init() {
+	const mine = ++initSeq;
 	bypassGuard = false;
 	loadError.value = "";
 	// Before the first await: the trigger left must not keep its rows on screen
 	// while this one loads (or when it fails to), and its late answers are dropped.
 	resetRecent();
 	if (props.isNew) {
+		loading.value = false; // an older init may still be loading; it will not clear this
 		seed({ enabled: 1, action_type: "LLM", llm_daily_cap: 25 });
 		return;
 	}
-	if (!props.id) return;
+	if (!props.id) {
+		loading.value = false;
+		return;
+	}
 	loading.value = true;
 	const id = props.id;
+	// A newer init took over, or the props moved on before the watcher ran.
+	const stale = () => mine !== initSeq || props.id !== id || props.isNew;
 	try {
 		const full = await apiTriggers.getTrigger(id);
+		if (stale()) return;
 		seed(full || {});
-		// The page moved to another trigger, or to New, while this one loaded: that
-		// init (or none) loads the activity.
-		if (props.id === id && !props.isNew) loadRecent();
+		loadRecent();
 	} catch (e) {
+		if (stale()) return;
 		loadError.value = errMsg(e);
 	} finally {
-		loading.value = false;
+		if (mine === initSeq) loading.value = false;
 	}
 }
 
