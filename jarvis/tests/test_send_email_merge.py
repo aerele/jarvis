@@ -122,6 +122,21 @@ class TestBuildMessages(_Base):
 			with self.subTest(words), self.assertRaisesRegex(InvalidArgumentError, words):
 				_email_merge.expand(self.call(**over))
 
+	def test_cc_bcc_and_a_copy_to_me_are_refused_not_repeated_on_every_email(self):
+		# one email per row: a cc / bcc / send_me_a_copy would put one copy per recipient in that inbox
+		for over in (
+			{"cc": "manager@example.invalid"},
+			{"bcc": ["audit@example.invalid"]},
+			{"send_me_a_copy": True},
+		):
+			with self.subTest(over), self.assertRaisesRegex(InvalidArgumentError, "one copy per recipient"):
+				_email_merge.expand(self.call(**over))
+
+	def test_an_empty_cc_or_a_false_copy_flag_is_fine(self):
+		stored, _ = _email_merge.expand(self.call(cc="", bcc=None, send_me_a_copy=False))
+		self.assertEqual(len(stored["messages"]), 3)
+		self.assertNotIn("cc", stored["messages"][0])
+
 	def test_a_masked_email_column_is_refused(self):
 		self.masked = {"co": {"email_id": object()}}
 		with self.assertRaisesRegex(InvalidArgumentError, "masked"):
@@ -170,6 +185,11 @@ class TestSend(_Base):
 	def test_an_uncarded_run_sends_what_the_query_gives(self):
 		result = send_email(**self.call())
 		self.assertEqual(result["count"], 3)
+
+	def test_an_uncarded_run_with_a_copy_to_me_sends_nothing(self):
+		with self.assertRaisesRegex(InvalidArgumentError, "one copy per recipient"):
+			send_email(**self.call(send_me_a_copy=True))
+		self.make.assert_not_called()
 
 	def test_an_uncarded_run_keeps_the_typed_cap_of_20(self):
 		self.rows = _rows(21)
