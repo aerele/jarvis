@@ -13,7 +13,9 @@
 		:error="error"
 	>
 		<template #title-suffix>
-			<Tooltip text="Pick the workspace default or build your own. Anyone can reformat a single document from its download card.">
+			<Tooltip
+				text="Pick the workspace default or build your own. Anyone can reformat a single document from its download card."
+			>
 				<FeatherIcon name="info" class="size-3.5 text-ink-gray-5" />
 			</Tooltip>
 		</template>
