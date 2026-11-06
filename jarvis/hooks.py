@@ -1135,6 +1135,12 @@ has_permission.update(
 # re-seeds the next lane from it, and settlement strips the saved reply and saves the step
 # list from it. Without it the watchdog tick wiped a long turn's steps mid-turn, so the saved
 # reply kept the narration and showed no steps. Every key keeps its one-hour TTL.
+#
+# jarvis:admin_oauth_grant_refused (2026-11-06): ``admin_client``'s "the admin refused the
+# password grant, use api_key:api_secret for an hour" marker. Without it the watchdog tick
+# wiped the marker, so on a Frappe 16.35+ control plane every */5 admin call
+# (``reconcile_pending_llm_sync``) re-sent the doomed grant and logged an
+# "oauth token request rejected" Error Log row every five minutes. Its one-hour TTL still applies.
 persistent_cache_keys = [
 	"jarvis:pairing_proof:",  # One-time site-proof nonces: 600 s TTL must survive watchdog clears.
 	"jarvis:key_resync:",  # The 10-minute stale-key self-heal throttle must survive the 5-minute clear.
@@ -1155,6 +1161,7 @@ persistent_cache_keys = [
 	"jarvis:pump:preambles:",
 	"jarvis:session_claim:",  # Claims must outlive the 5-minute watchdog cache clear.
 	"jarvis:foreign_session:",  # Once-a-day throttles must survive the 5-minute watchdog cache clear.
+	"jarvis:admin_oauth_grant_refused",  # The password-grant refusal must hold for its hour.
 ]
 
 # Durable background export state is owner-scoped, including direct REST reads.
