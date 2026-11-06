@@ -189,6 +189,7 @@ const moreBtn = (w) =>
 	block(w)
 		.findAll("button")
 		.find((b) => ["Load more", "Try again"].includes(b.attributes("data-label")));
+const emptyLine = (w) => block(w).find('[data-testid="recent-empty"]');
 const alertText = (w) =>
 	block(w)
 		.findAll('[role="alert"]')
@@ -389,6 +390,18 @@ describe("TriggerDetail Recent activity: counts and the end of the list", () => 
 		expect(block(wrapper).text()).not.toContain("No activity yet");
 		expect(moreBtn(wrapper)).toBeUndefined();
 	});
+
+	it("a manager at the end of the list sees Showing all n, even if the total grew", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 12, has_more: true }))
+			.mockResolvedValueOnce(
+				answer(rowsOf(10, 2), { start: 10, total: 15, has_more: false })
+			);
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		expect(moreBtn(wrapper)).toBeUndefined();
+		expect(count(wrapper).text()).toBe("Showing all 12");
+	});
 });
 
 describe("TriggerDetail Recent activity: a page that fails", () => {
@@ -410,6 +423,20 @@ describe("TriggerDetail Recent activity: a page that fails", () => {
 		expect(rowEls(wrapper)).toHaveLength(30);
 		expect(alertText(wrapper)).toEqual([]);
 		expect(moreBtn(wrapper).attributes("data-label")).toBe("Load more");
+	});
+
+	it("a repeated failure of Load more is announced again (the alert is re-created)", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 40, has_more: true }))
+			.mockRejectedValueOnce(new Error("Server said no"))
+			.mockRejectedValueOnce(new Error("Server said no"));
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		const first = block(wrapper).find('[role="alert"]').element;
+		await click(wrapper, MOUSE);
+		const second = block(wrapper).find('[role="alert"]').element;
+		expect(second).not.toBe(first);
+		expect(second.textContent.trim()).toBe("Server said no");
 	});
 });
 
@@ -437,6 +464,30 @@ describe("TriggerDetail Recent activity: first load", () => {
 		expect(apiTr.listActivityPage.mock.calls[1][0].page_length).toBe(FIRST_PAGE);
 		expect(rowEls(wrapper)).toHaveLength(3);
 		expect(alertText(wrapper)).toEqual([]);
+	});
+
+	it("the count line exists, empty, before the first answer", async () => {
+		apiTr.listActivityPage.mockReturnValue(defer().promise);
+		await mountDetail();
+		expect(count(wrapper).exists()).toBe(true);
+		expect(count(wrapper).attributes("aria-live")).toBe("polite");
+		expect(count(wrapper).text()).toBe("");
+	});
+
+	it("says it is loading while the first page is on its way", async () => {
+		const first = defer();
+		apiTr.listActivityPage.mockReturnValue(first.promise);
+		await mountDetail();
+		expect(block(wrapper).text()).toContain("Loading activity");
+		first.resolve(answer(rowsOf(0, 3), { start: 0, total: 3, has_more: false }));
+		await flushPromises();
+		expect(block(wrapper).text()).not.toContain("Loading activity");
+	});
+
+	it("does not say it is loading while an error is shown", async () => {
+		apiTr.listActivityPage.mockRejectedValue(new Error("Could not reach the server"));
+		await mountDetail();
+		expect(block(wrapper).text()).not.toContain("Loading activity");
 	});
 });
 
@@ -491,6 +542,45 @@ describe("TriggerDetail Recent activity: switching trigger", () => {
 		expect(rowEls(wrapper)).toHaveLength(0);
 		expect(block(wrapper).text()).not.toContain("Load more");
 	});
+
+	it("a slow getTrigger of the trigger left does not load the activity again", async () => {
+		const slowTrigger = defer();
+		apiTr.getTrigger.mockImplementation(() => slowTrigger.promise);
+		apiTr.getTriggersCaps.mockResolvedValue({ can_manage: true });
+		apiTr.listActivityPage.mockResolvedValue(
+			answer(rowsOf(0, 4, "B"), { start: 0, total: 4, has_more: false })
+		);
+		wrapper = mount(TriggerDetail, {
+			props: { id: "TRG-1", isNew: false },
+			attachTo: document.body,
+			global: { provide: { $socket: null } },
+		});
+		await flushPromises();
+		apiTr.getTrigger.mockImplementation(async (name) => trigger(name));
+		await wrapper.setProps({ id: "TRG-2" });
+		await flushPromises();
+		expect(apiTr.listActivityPage).toHaveBeenCalledTimes(1);
+		slowTrigger.resolve(trigger("TRG-1"));
+		await flushPromises();
+		expect(apiTr.listActivityPage).toHaveBeenCalledTimes(1);
+		expect(apiTr.listActivityPage.mock.calls[0][0].filters).toEqual({ trigger: "TRG-2" });
+	});
+
+	it("a slow getTrigger does not load activity once the page became New", async () => {
+		const slowTrigger = defer();
+		apiTr.getTrigger.mockImplementation(() => slowTrigger.promise);
+		apiTr.getTriggersCaps.mockResolvedValue({ can_manage: true });
+		wrapper = mount(TriggerDetail, {
+			props: { id: "TRG-1", isNew: false },
+			attachTo: document.body,
+			global: { provide: { $socket: null } },
+		});
+		await flushPromises();
+		await wrapper.setProps({ isNew: true });
+		slowTrigger.resolve(trigger("TRG-1"));
+		await flushPromises();
+		expect(apiTr.listActivityPage).not.toHaveBeenCalled();
+	});
 });
 
 describe("TriggerDetail Recent activity: saving", () => {
@@ -514,6 +604,19 @@ describe("TriggerDetail Recent activity: saving", () => {
 });
 
 describe("TriggerDetail Recent activity: focus", () => {
+	it("a row, where focus lands after Load more, has the inset focus ring", async () => {
+		serverOf(37);
+		await mountDetail();
+		const cls = rowEls(wrapper)[0].attributes("class");
+		for (const c of [
+			"focus-visible:outline-none",
+			"focus-visible:ring-2",
+			"focus-visible:ring-inset",
+			"focus-visible:ring-outline-gray-3",
+		])
+			expect(cls).toContain(c);
+	});
+
 	it("a mouse click never moves focus to a row", async () => {
 		serverOf(37);
 		await mountDetail();
@@ -561,6 +664,25 @@ describe("TriggerDetail Recent activity: focus", () => {
 		expect(rowEls(wrapper)).toHaveLength(30);
 		expect(rowEls(wrapper).map((r) => r.element)).not.toContain(document.activeElement);
 	});
+
+	it("the count line keeps a visible focus outline", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 30, has_more: true }))
+			.mockResolvedValueOnce(answer([], { start: 10, total: 30, has_more: true }));
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		const cls = count(wrapper).attributes("class");
+		expect(cls).toContain("focus-visible:outline");
+		expect(cls).not.toContain("outline-none");
+	});
+
+	it("the first-load error line keeps a visible focus outline", async () => {
+		apiTr.listActivityPage.mockRejectedValue(new Error("Could not reach the server"));
+		await mountDetail();
+		const cls = block(wrapper).find('[data-testid="recent-error"]').attributes("class");
+		expect(cls).toContain("focus-visible:outline");
+		expect(cls).not.toContain("outline-none");
+	});
 });
 
 describe("TriggerDetail Recent activity: first-load Try again, by key", () => {
@@ -595,6 +717,19 @@ describe("TriggerDetail Recent activity: first-load Try again, by key", () => {
 		await click(wrapper, MOUSE);
 		expect(rowEls(wrapper)).toHaveLength(3);
 		expect(rowEls(wrapper).map((r) => r.element)).not.toContain(document.activeElement);
+	});
+
+	it("a key retry that finds no runs focuses the No activity yet line", async () => {
+		apiTr.listActivityPage
+			.mockRejectedValueOnce(new Error("Could not reach the server"))
+			.mockResolvedValueOnce(answer([], { start: 0, total: 0, has_more: false }));
+		await mountDetail();
+		moreBtn(wrapper).element.focus();
+		await click(wrapper, KEY);
+		expect(emptyLine(wrapper).exists()).toBe(true);
+		expect(emptyLine(wrapper).attributes("tabindex")).toBe("-1");
+		expect(emptyLine(wrapper).attributes("class")).toContain("focus-visible:outline");
+		expect(document.activeElement).toBe(emptyLine(wrapper).element);
 	});
 });
 
@@ -680,6 +815,7 @@ describe("TriggerDetail Recent activity: answers that are nobody's", () => {
 	for (const kind of ["resolving", "rejecting"]) {
 		it(`a late ${kind} answer after the page is gone changes nothing`, async () => {
 			const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+			const warnLog = vi.spyOn(console, "warn").mockImplementation(() => {});
 			const slow = defer();
 			apiTr.listActivityPage
 				.mockResolvedValueOnce(
@@ -693,15 +829,19 @@ describe("TriggerDetail Recent activity: answers that are nobody's", () => {
 			wrapper.unmount();
 			wrapper = null;
 			errorLog.mockClear();
+			warnLog.mockClear();
 			if (kind === "resolving")
 				slow.resolve(answer(rowsOf(10, 20), { start: 10, total: 40, has_more: true }));
 			else slow.reject(new Error("Server said no"));
 			await flushPromises();
+			expect(vm.recentRows).toBeDefined();
 			expect(vm.recentRows).toHaveLength(10);
 			expect(vm.recentError).toBe("");
 			expect(vm.recentMoreFailed).toBe(false);
 			expect(errorLog).not.toHaveBeenCalled();
+			expect(warnLog).not.toHaveBeenCalled();
 			errorLog.mockRestore();
+			warnLog.mockRestore();
 		});
 	}
 
@@ -731,139 +871,116 @@ describe("TriggerDetail Recent activity: answers that are nobody's", () => {
 	});
 });
 
-describe("TriggerDetail Recent activity: count when a manager's page comes back empty", () => {
-	it("says Showing n of total, not Showing all n", async () => {
+describe("TriggerDetail Recent activity: a manager's page comes back empty", () => {
+	// The count said more, but the rows were deleted before the page was read. The
+	// empty page at the cursor means nothing lies past it, so the list is whole:
+	// "Showing all n" is true, and the stale total (30) is not.
+	it("ends the list as Showing all n, with no button and no stale total", async () => {
 		apiTr.listActivityPage
 			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 30, has_more: true }))
 			.mockResolvedValueOnce(answer([], { start: 10, total: 30, has_more: true }));
 		await mountDetail();
 		await click(wrapper, MOUSE);
 		expect(moreBtn(wrapper)).toBeUndefined();
-		expect(count(wrapper).text()).toBe("Showing 10 of 30");
+		expect(count(wrapper).text()).toBe("Showing all 10");
+		expect(block(wrapper).text()).not.toContain("Older runs are not listed here.");
+		expect(rowEls(wrapper)).toHaveLength(10);
+	});
+
+	it("an empty first page with has_more says No activity yet, not a dead end", async () => {
+		apiTr.listActivityPage.mockResolvedValue(
+			answer([], { start: 0, total: 5, has_more: true })
+		);
+		await mountDetail();
+		expect(moreBtn(wrapper)).toBeUndefined();
+		expect(emptyLine(wrapper).exists()).toBe(true);
 	});
 });
 
-describe("TriggerDetail Recent activity: fix wave 1", () => {
-	const emptyLine = (w) => block(w).find('[data-testid="recent-empty"]');
-
-	it("FX-2: the focus targets keep a visible focus ring", async () => {
-		apiTr.listActivityPage
-			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 30, has_more: true }))
-			.mockResolvedValueOnce(answer([], { start: 10, total: 30, has_more: true }));
-		await mountDetail();
-		await click(wrapper, MOUSE);
-		const cls = count(wrapper).attributes("class");
-		expect(cls).toContain("focus-visible:outline");
-		expect(cls).not.toContain("outline-none");
+describe("TriggerDetail Recent activity: a failure is logged", () => {
+	let warn;
+	beforeEach(() => {
+		warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+	});
+	afterEach(() => {
+		warn.mockRestore();
 	});
 
-	it("FX-2: so does the first-load error line", async () => {
-		apiTr.listActivityPage.mockRejectedValue(new Error("Could not reach the server"));
-		await mountDetail();
-		const cls = block(wrapper).find('[data-testid="recent-error"]').attributes("class");
-		expect(cls).toContain("focus-visible:outline");
-		expect(cls).not.toContain("outline-none");
+	it("a failed first load warns with the trigger and the start", async () => {
+		const err = new Error("Could not reach the server");
+		apiTr.listActivityPage.mockRejectedValue(err);
+		await mountDetail("TRG-7");
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn).toHaveBeenCalledWith(
+			"[TriggerDetail] activity load failed",
+			{ trigger: "TRG-7", start: 0 },
+			err
+		);
 	});
 
-	it("FX-3: a key retry that finds no runs focuses the No activity yet line", async () => {
-		apiTr.listActivityPage
-			.mockRejectedValueOnce(new Error("Could not reach the server"))
-			.mockResolvedValueOnce(answer([], { start: 0, total: 0, has_more: false }));
-		await mountDetail();
-		moreBtn(wrapper).element.focus();
-		await click(wrapper, KEY);
-		expect(emptyLine(wrapper).exists()).toBe(true);
-		expect(emptyLine(wrapper).attributes("tabindex")).toBe("-1");
-		expect(emptyLine(wrapper).attributes("class")).toContain("focus-visible:outline");
-		expect(document.activeElement).toBe(emptyLine(wrapper).element);
-	});
-
-	it("FX-4: a repeated failure of Load more is announced again (the alert is re-created)", async () => {
+	it("a failed Load more warns with the start it asked for", async () => {
+		const err = new Error("Server said no");
 		apiTr.listActivityPage
 			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 40, has_more: true }))
-			.mockRejectedValueOnce(new Error("Server said no"))
-			.mockRejectedValueOnce(new Error("Server said no"));
+			.mockRejectedValueOnce(err);
 		await mountDetail();
 		await click(wrapper, MOUSE);
-		const first = block(wrapper).find('[role="alert"]').element;
-		await click(wrapper, MOUSE);
-		const second = block(wrapper).find('[role="alert"]').element;
-		expect(second).not.toBe(first);
-		expect(second.textContent.trim()).toBe("Server said no");
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn).toHaveBeenCalledWith(
+			"[TriggerDetail] activity load failed",
+			{ trigger: "TRG-1", start: 10 },
+			err
+		);
 	});
 
-	it("FX-5: the count line exists, empty, before the first answer", async () => {
-		apiTr.listActivityPage.mockReturnValue(defer().promise);
-		await mountDetail();
-		expect(count(wrapper).exists()).toBe(true);
-		expect(count(wrapper).attributes("aria-live")).toBe("polite");
-		expect(count(wrapper).text()).toBe("");
-	});
-
-	it("FX-6: says it is loading while the first page is on its way", async () => {
-		const first = defer();
-		apiTr.listActivityPage.mockReturnValue(first.promise);
-		await mountDetail();
-		expect(block(wrapper).text()).toContain("Loading activity");
-		first.resolve(answer(rowsOf(0, 3), { start: 0, total: 3, has_more: false }));
-		await flushPromises();
-		expect(block(wrapper).text()).not.toContain("Loading activity");
-	});
-
-	it("FX-6: not while an error is shown", async () => {
-		apiTr.listActivityPage.mockRejectedValue(new Error("Could not reach the server"));
-		await mountDetail();
-		expect(block(wrapper).text()).not.toContain("Loading activity");
-	});
-
-	it("FX-7: a manager at the end of the list sees Showing all n, even if the total grew", async () => {
+	it("a failure that arrives after a newer load took over is not logged", async () => {
+		const slow = defer();
 		apiTr.listActivityPage
-			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 12, has_more: true }))
+			.mockReturnValueOnce(slow.promise)
+			.mockResolvedValueOnce(answer(rowsOf(0, 3), { start: 0, total: 3, has_more: false }));
+		await mountDetail("TRG-1");
+		await wrapper.setProps({ isNew: true });
+		await wrapper.setProps({ isNew: false });
+		await flushPromises();
+		slow.reject(new Error("Late failure"));
+		await flushPromises();
+		expect(warn).not.toHaveBeenCalled();
+	});
+});
+
+describe("TriggerDetail Recent activity: odd answers", () => {
+	it("an answer without start: the next request uses the start sent plus the rows returned", async () => {
+		const noStart = answer(rowsOf(0, 10), { total: 40, has_more: true });
+		delete noStart.start;
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(noStart)
 			.mockResolvedValueOnce(
-				answer(rowsOf(10, 2), { start: 10, total: 15, has_more: false })
+				answer(rowsOf(10, 20), { start: 10, total: 40, has_more: true })
 			);
 		await mountDetail();
 		await click(wrapper, MOUSE);
+		expect(apiTr.listActivityPage.mock.calls[1][0].start).toBe(10);
+		expect(rowEls(wrapper)).toHaveLength(30);
+	});
+
+	it("a null first answer shows No activity yet and does not crash", async () => {
+		apiTr.listActivityPage.mockResolvedValue(null);
+		await mountDetail();
+		expect(rowEls(wrapper)).toHaveLength(0);
+		expect(emptyLine(wrapper).exists()).toBe(true);
+		expect(alertText(wrapper)).toEqual([]);
 		expect(moreBtn(wrapper)).toBeUndefined();
-		expect(count(wrapper).text()).toBe("Showing all 12");
 	});
 
-	it("FX-8: a slow getTrigger of the trigger left does not load the activity again", async () => {
-		const slowTrigger = defer();
-		apiTr.getTrigger.mockImplementation(() => slowTrigger.promise);
-		apiTr.getTriggersCaps.mockResolvedValue({ can_manage: true });
-		apiTr.listActivityPage.mockResolvedValue(
-			answer(rowsOf(0, 4, "B"), { start: 0, total: 4, has_more: false })
-		);
-		wrapper = mount(TriggerDetail, {
-			props: { id: "TRG-1", isNew: false },
-			attachTo: document.body,
-			global: { provide: { $socket: null } },
-		});
-		await flushPromises();
-		apiTr.getTrigger.mockImplementation(async (name) => trigger(name));
-		await wrapper.setProps({ id: "TRG-2" });
-		await flushPromises();
-		expect(apiTr.listActivityPage).toHaveBeenCalledTimes(1);
-		slowTrigger.resolve(trigger("TRG-1"));
-		await flushPromises();
-		expect(apiTr.listActivityPage).toHaveBeenCalledTimes(1);
-		expect(apiTr.listActivityPage.mock.calls[0][0].filters).toEqual({ trigger: "TRG-2" });
-	});
-
-	it("FX-8: a slow getTrigger does not load activity once the page became New", async () => {
-		const slowTrigger = defer();
-		apiTr.getTrigger.mockImplementation(() => slowTrigger.promise);
-		apiTr.getTriggersCaps.mockResolvedValue({ can_manage: true });
-		wrapper = mount(TriggerDetail, {
-			props: { id: "TRG-1", isNew: false },
-			attachTo: document.body,
-			global: { provide: { $socket: null } },
-		});
-		await flushPromises();
-		await wrapper.setProps({ isNew: true });
-		slowTrigger.resolve(trigger("TRG-1"));
-		await flushPromises();
-		expect(apiTr.listActivityPage).not.toHaveBeenCalled();
+	it("a null Load more answer keeps the rows and ends the list", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 40, has_more: true }))
+			.mockResolvedValueOnce(null);
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		expect(rowEls(wrapper)).toHaveLength(10);
+		expect(moreBtn(wrapper)).toBeUndefined();
+		expect(count(wrapper).text()).toBe("Showing all 10");
+		expect(alertText(wrapper)).toEqual([]);
 	});
 });

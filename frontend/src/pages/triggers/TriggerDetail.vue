@@ -234,7 +234,7 @@
 						:key="r.name"
 						data-testid="recent-row"
 						:data-name="r.name"
-						class="flex w-full items-center gap-3 px-1 py-2 text-left hover:bg-surface-gray-1"
+						class="flex w-full items-center gap-3 px-1 py-2 text-left hover:bg-surface-gray-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3"
 						:class="i ? 'border-t' : ''"
 						@click="openActivityRow(r)"
 					>
@@ -687,7 +687,10 @@ function applyRecentPage(res, sentStart, asked) {
 	if (recentApprox.value && res.has_more === true && got < asked) recentEnded.value = true;
 	// A page with no rows ends the list even when the server says there is more.
 	recentHasMore.value = !!res.has_more && got > 0 && !recentEnded.value;
-	recentComplete.value = !res.has_more;
+	// Whole when the server says no more. Also whole when an exact list gets an empty
+	// page although it said more: the rows were deleted after the count, and nothing
+	// lies past the cursor. (An approximate list that ended says so in recentEnded.)
+	recentComplete.value = !res.has_more || (got === 0 && !recentEnded.value);
 	recentError.value = "";
 	recentMoreFailed.value = false;
 	recentLoaded.value = true;
@@ -710,6 +713,7 @@ async function runRecentLoad(start, asked, merge, failText, more) {
 		return mine;
 	} catch (e) {
 		if (dropped()) return 0;
+		console.warn("[TriggerDetail] activity load failed", { trigger: id, start }, e);
 		recentError.value = errMsg(e, failText);
 		recentMoreFailed.value = more;
 		recentFailures.value += 1;
