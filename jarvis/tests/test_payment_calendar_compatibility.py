@@ -28,6 +28,15 @@ class TestPaymentCalendarCompatibility(TestCase):
 
 		bank_balance_arguments(get_balance_on)
 
+	def test_earlier_audited_source_revisions_stay_accepted(self):
+		profiles = compatibility._PROFILES
+		self.assertIn(
+			"da22739f601983c4070b44a73bdefb683286145aefc89c2374f684aed32bd0f3",
+			profiles["16"].payment_schedule_hashes,
+		)
+		self.assertEqual(len(profiles["16"].payment_schedule_hashes), 2)
+		self.assertEqual(len(profiles["15"].payment_schedule_hashes), 1)
+
 	def test_matching_supported_framework_pairs_reach_the_allocation_contract(self):
 		for major in ("15", "16"):
 			with (
