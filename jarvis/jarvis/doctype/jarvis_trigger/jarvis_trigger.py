@@ -163,9 +163,7 @@ class JarvisTrigger(NotRenamable, Document):
 				"'{0}'. Edit or disable it instead of creating a duplicate."
 			).format(row.trigger_name)
 		else:
-			msg = _(
-				"An enabled trigger with the same DocType, event, condition and action already exists."
-			)
+			msg = _("An enabled trigger with the same DocType, event, condition and action already exists.")
 		frappe.throw(msg, frappe.ValidationError)
 
 	def _warn_cross_type(self, row):
