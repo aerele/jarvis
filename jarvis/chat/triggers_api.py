@@ -332,6 +332,14 @@ def _parse_payload(payload: str) -> dict:
 	return out
 
 
+def _with_warning(response: dict, doc) -> dict:
+	"""Add the controller's cross-type duplicate warning (#816), if any."""
+	warning = doc.flags.get("duplicate_warning")
+	if warning:
+		response["warning"] = warning
+	return response
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def create_trigger(payload: str) -> dict:
@@ -344,7 +352,7 @@ def create_trigger(payload: str) -> dict:
 	doc = frappe.get_doc({"doctype": TRIGGER, **fields})
 	doc.insert()
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
-	return {"ok": True, "data": _trigger_detail(doc)}
+	return _with_warning({"ok": True, "data": _trigger_detail(doc)}, doc)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -357,7 +365,7 @@ def update_trigger(name: str, payload: str) -> dict:
 	doc.update(fields)
 	doc.save()
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
-	return {"ok": True, "data": _trigger_detail(doc)}
+	return _with_warning({"ok": True, "data": _trigger_detail(doc)}, doc)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -369,6 +377,15 @@ def set_trigger_enabled(name: str, enabled: int) -> dict:
 	_require_manage()
 	value = _bool01(enabled)
 	doc = frappe.get_doc(TRIGGER, name)
+<<<<<<< HEAD
+=======
+	if value:
+		# db_set skips validate: re-check the stored code before arming it (#818).
+		doc.check_unsafe_attributes()
+		# db_set skips validate, so re-enabling must re-run the duplicate guard.
+		doc.enabled = 1
+		doc.check_duplicates()
+>>>>>>> 7b163f8 (fix: refuse duplicate enabled Jarvis Triggers (#816))
 	doc.db_set("enabled", value)
 	clear_cache()
 	_publish_changed()
