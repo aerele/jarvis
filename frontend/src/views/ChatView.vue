@@ -2476,6 +2476,22 @@
 				>
 					<template v-if="subscriptionExpired.showReconnect" #action>
 						<button
+							v-if="subscriptionExpired.canUseAuto"
+							class="jv-btn jv-btn--sm"
+							style="margin-right: 6px"
+							@click="selectModel('')"
+						>
+							Use Auto
+						</button>
+						<button
+							v-if="subscriptionExpired.switchModel"
+							class="jv-btn jv-btn--sm"
+							style="margin-right: 6px"
+							@click="selectModel(subscriptionExpired.switchModel)"
+						>
+							Switch to {{ subscriptionExpired.switchModel }}
+						</button>
+						<button
 							class="jv-btn jv-btn--sm"
 							@click="goReconnectSubscription(subscriptionExpired.upstream)"
 						>
@@ -5155,7 +5171,7 @@ function goConnectModel() {
 // refetched on the jarvis:subscription_health realtime event (see onMounted / onBeforeUnmount).
 let unwatchSubscriptionNotice = () => {};
 const subscriptionExpired = computed(() =>
-	subscriptionExpiredBanner(subscriptionNotice.expired, canConnectModel)
+	subscriptionExpiredBanner(subscriptionNotice.expired, canConnectModel, modelOverride.value)
 );
 // The card and the banner know the upstream, the pool knows account_refs: take the first expired
 // account of that upstream. No match opens the pane without the link.
