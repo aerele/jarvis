@@ -332,7 +332,9 @@ class TestPatchRules(_EditBase):
 
 	def test_a_permlevel_field_is_refused_not_silently_reset(self):
 		df = frappe.get_meta("Supplier").get_field("supplier_details")
-		with patch.object(df, "permlevel", 1):
+		# Level 2, not 1: newer ERPNext gives Purchase Master Manager (the only role that
+		# may create a Supplier, so the approver needs it) write access at level 1.
+		with patch.object(df, "permlevel", 2):
 			self.assertIn(
 				"higher access", self.refused(_missing(), {"supplier_details": "x"}, "supplier_details")
 			)

@@ -17,6 +17,7 @@ from frappe.permissions import get_role_permissions
 
 from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.permission_hooks import effective_hooks
 from jarvis.tools._file_source import FileCapacityError, read_bounded
 from jarvis.tools._report_query_data import CONTRACT, MAX_COMPRESSED, encode
 from jarvis.tools._report_scope import _assert_company_readable
@@ -67,7 +68,7 @@ def _visible_names(doctype, names, deadline):
 					doctype, filters={"name": ["in", sorted(names)]}, pluck="name", limit_page_length=0
 				)
 			)
-		hooks = frappe.get_hooks("has_permission")
+		hooks = effective_hooks("has_permission")
 		if hooks.get(doctype) or hooks.get("*"):
 			ptype = "select" if frappe.only_has_select_perm(doctype) else "read"
 			visible = set()
@@ -321,8 +322,11 @@ class ReportSource:
 			if self.user != "Administrator"
 			else {}
 		)
-		hooks = frappe.get_hooks("permission_query_conditions") or {}
-		doc_hooks = frappe.get_hooks("has_permission") or {}
+		# ERPNext's own Company Restriction "*" hooks are dropped here only for a user
+		# without a Company User Permission (they cannot narrow anything for that user);
+		# any other "*" hook, or a restricted user, still demands a row-level proof.
+		hooks = effective_hooks("permission_query_conditions", self.user) or {}
+		doc_hooks = effective_hooks("has_permission", self.user) or {}
 		# Match restrictions on the source DocType's links, not only links the
 		# report happened to include. Otherwise fresh inspection can bless old
 		# rows after a Branch/Cost Center restriction was added.
