@@ -74,6 +74,40 @@ describe("humaniseSyncStatus", () => {
 		});
 	});
 
+	// admin-v2#645: the admin's error envelope reaches last_sync_status as
+	// "failed: admin unreachable: admin returned a 502 error: <code>: <message>".
+	// That is plumbing plus a machine code, not something a customer can act on.
+	it("turns a relayed fleet error code into plain copy, with no plumbing", () => {
+		const out = humaniseSyncStatus(
+			"failed: admin unreachable: admin returned a 502 error: reload_failed: " +
+				"the old text of the message, which must never be shown",
+		);
+		expect(out.kind).toBe("failed");
+		expect(out.text).toBe("Last sync failed");
+		expect(out.detail).toBe(
+			"Could not apply the new AI key. Jarvis is still using the old one. Try saving again.",
+		);
+		expect(out.detail).not.toMatch(/admin|502|reload_failed|returned/i);
+	});
+
+	it("never shows the relay prefix for an unmapped code or a bare transport error", () => {
+		const generic = "Could not reach Jarvis just now. Try again in a minute.";
+		for (const raw of [
+			"failed: admin unreachable: admin returned a 502 error: some_new_code: raw text",
+			"failed: admin unreachable: admin returned 503",
+			"failed: admin unreachable: HTTPSConnectionPool(host='x', port=443): Max retries",
+		]) {
+			const { detail } = humaniseSyncStatus(raw);
+			expect(detail).toBe(generic);
+		}
+	});
+
+	it("leaves statuses that are already customer copy untouched", () => {
+		expect(humaniseSyncStatus("failed: validation: Model is required").detail).toBe(
+			"validation: Model is required",
+		);
+	});
+
 	it("flattens and caps a failure reason so a traceback cannot blow out the layout", () => {
 		const { detail } = humaniseSyncStatus("failed: line one\n  line two\n\tline three");
 		expect(detail).toBe("line one line two line three");
