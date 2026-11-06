@@ -418,13 +418,15 @@ export function subscriptionExpiredBanner(expired, isAdmin, pinnedModel = "") {
 	}
 	const pinnedDead =
 		!!pinnedModel && !!entry.fallback && (entry.models || []).includes(pinnedModel);
+	let message = "Chats that need it will fail until it is reconnected.";
+	if (pinnedDead) {
+		message = `This chat is pinned to ${pinnedModel}, so it will not switch on its own.`;
+	} else if (entry.fallback) {
+		message = autoLine(entry);
+	}
 	return {
 		title,
-		message: pinnedDead
-			? `This chat is pinned to ${pinnedModel}, so it will not switch on its own.`
-			: entry.fallback
-				? autoLine(entry)
-				: "Chats that need it will fail until it is reconnected.",
+		message,
 		upstream: entry.upstream,
 		accountRef: entry.account_ref || "",
 		showReconnect: true,
