@@ -19,21 +19,18 @@ def check_allocation_contract():
 	from erpnext.controllers.accounts_controller import AccountsController
 
 	profile = source_profile()
-	for method, expected in (
-		(
-			AccountsController.set_payment_schedule,
-			profile.payment_schedule_hash,
-		),
+	for method, accepted in (
+		(AccountsController.set_payment_schedule, profile.payment_schedule_hashes),
 		(
 			PurchaseInvoice.make_gl_entries_for_tax_withholding,
-			"eba00badaa00e40559423bad139e53041a90e94e2d27079cc903b18f49af2ee5",
+			("eba00badaa00e40559423bad139e53041a90e94e2d27079cc903b18f49af2ee5",),
 		),
 	):
 		try:
 			actual = sha256(getsource(method).encode()).hexdigest()
 		except (OSError, TypeError) as exc:
 			raise CalendarSourceUnavailable() from exc
-		if actual != expected:
+		if actual not in accepted:
 			raise CalendarSourceUnavailable()
 
 
