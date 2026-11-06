@@ -681,3 +681,183 @@ class TestScriptActionAuthoring(_TriggersApiTestCase):
 			doc.insert(ignore_permissions=True)
 		self._triggers.append(doc.name)
 		self.assertTrue(frappe.db.exists(TRIGGER, doc.name))
+<<<<<<< HEAD
+=======
+
+
+class TestSetEnabledUnsafeAttributes(_TriggersApiTestCase):
+	"""Turning a trigger ON re-checks its stored code (#818): a body or condition
+	that was saved before the check existed must not be re-armed. set_trigger_enabled
+	is a raw db_set, so it runs the same check as validate. Turning OFF never does."""
+
+	BAD_BODY = 'x = "PO {}".format(doc.name)\n'
+	BAD_COND = '"{}".format(doc.description) if doc.description else False'
+
+	def _stored_bad_script_trigger(self) -> str:
+		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
+			doc = frappe.get_doc(
+				{
+					"doctype": TRIGGER,
+					"trigger_name": f"script-{frappe.generate_hash(length=8)}",
+					"target_doctype": "ToDo",
+					"doc_event": "on_update",
+					"action_type": "Script",
+					"script_body": "x = 1",
+				}
+			)
+			doc.insert(ignore_permissions=True)
+		self._triggers.append(doc.name)
+		frappe.db.set_value(TRIGGER, doc.name, {"script_body": self.BAD_BODY, "enabled": 1})
+		return doc.name
+
+	def test_toggle_on_refuses_stored_format_script_and_off_still_works(self):
+		name = self._stored_bad_script_trigger()
+		frappe.set_user(ADMIN_USER)
+		self.assertEqual(set_trigger_enabled(name, 0)["data"]["enabled"], 0)
+		with self.assertRaises(frappe.ValidationError) as cm:
+			set_trigger_enabled(name, 1)
+		self.assertIn("blocks: line 1", strip_html(str(cm.exception)))
+		# the refused toggle changed nothing
+		self.assertEqual(int(frappe.db.get_value(TRIGGER, name, "enabled")), 0)
+
+	def test_toggle_off_on_a_bad_enabled_trigger_works(self):
+		name = self._stored_bad_script_trigger()
+		frappe.set_user(ADMIN_USER)
+		self.assertEqual(set_trigger_enabled(name, 0)["data"]["enabled"], 0)
+
+	def test_toggle_on_refuses_llm_trigger_with_stored_format_condition(self):
+		name = self._create_as_admin()
+		frappe.db.set_value(TRIGGER, name, {"condition": self.BAD_COND, "enabled": 0})
+		frappe.set_user(ADMIN_USER)
+		with self.assertRaises(frappe.ValidationError) as cm:
+			set_trigger_enabled(name, 1)
+		self.assertIn("Invalid Condition:", str(cm.exception))
+		self.assertEqual(int(frappe.db.get_value(TRIGGER, name, "enabled")), 0)
+
+	def test_toggle_on_refuses_script_trigger_with_clean_script_and_bad_stored_condition(self):
+		name = self._stored_bad_script_trigger()
+		frappe.db.set_value(TRIGGER, name, {"script_body": "x = 1", "condition": self.BAD_COND, "enabled": 0})
+		frappe.set_user(ADMIN_USER)
+		with self.assertRaises(frappe.ValidationError) as cm:
+			set_trigger_enabled(name, 1)
+		self.assertIn("Invalid Condition:", str(cm.exception))
+		self.assertEqual(int(frappe.db.get_value(TRIGGER, name, "enabled")), 0)
+
+	def test_toggle_on_llm_trigger_ignores_leftover_script_body(self):
+		# script_body is only code for a Script action; an LLM trigger that still
+		# holds an old body must not be refused.
+		name = self._create_as_admin()
+		frappe.db.set_value(TRIGGER, name, {"script_body": self.BAD_BODY, "enabled": 0})
+		frappe.set_user(ADMIN_USER)
+		self.assertEqual(set_trigger_enabled(name, 1)["data"]["enabled"], 1)
+
+	def test_toggle_on_clean_trigger_works(self):
+		name = self._create_as_admin()
+		frappe.db.set_value(TRIGGER, name, "enabled", 0)
+		frappe.set_user(ADMIN_USER)
+		self.assertEqual(set_trigger_enabled(name, 1)["data"]["enabled"], 1)
+
+class TestDuplicateTriggers(_TriggersApiTestCase):
+	"""#816: triggers are site-wide, so two enabled rows with the same target,
+	event, condition and action fire twice. Same-type duplicates are refused
+	whoever created the first one; a cross-type match only warns."""
+
+	def _script_doc(self, **overrides) -> "frappe.model.document.Document":
+		fields = {
+			"doctype": TRIGGER,
+			"trigger_name": f"dup-{frappe.generate_hash(length=8)}",
+			"target_doctype": "ToDo",
+			"doc_event": "on_update",
+			"action_type": "Script",
+			"script_body": "pass",
+		}
+		fields.update(overrides)
+		return frappe.get_doc(fields)
+
+	def test_same_type_duplicate_refused_across_users(self):
+		first = self._create_as_admin(condition="doc.priority == 'High'")
+		frappe.set_user(JADMIN_USER)
+		with self.assertRaises(frappe.ValidationError):
+			create_trigger(frappe.as_json(self._llm_payload(condition="doc.priority == 'High'")))
+		self.assertEqual(
+			frappe.db.count(TRIGGER, {"target_doctype": "ToDo", "condition": "doc.priority == 'High'"}), 1
+		)
+		self.assertTrue(frappe.db.exists(TRIGGER, first))
+
+	def test_refusal_names_existing_trigger_only_if_readable(self):
+		# JADMIN (Jarvis Admin) can read the row, so the title is shown.
+		self._create_as_admin(trigger_name="Flag big discounts", condition="doc.priority == 'Low'")
+		frappe.set_user(JADMIN_USER)
+		with self.assertRaises(frappe.ValidationError) as cm:
+			create_trigger(frappe.as_json(self._llm_payload(condition="doc.priority == 'Low'")))
+		self.assertIn("Flag big discounts", str(cm.exception))
+		# A user with no read permission on Jarvis Trigger gets a generic message.
+		with patch("frappe.has_permission", return_value=False):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				frappe.get_doc({"doctype": TRIGGER, **self._llm_payload(condition="doc.priority == 'Low'")}).insert()
+		self.assertNotIn("Flag big discounts", str(cm.exception))
+
+	def test_whitespace_only_condition_difference_is_duplicate(self):
+		self._create_as_admin(condition="doc.priority  ==   'High'")
+		frappe.set_user(ADMIN_USER)
+		with self.assertRaises(frappe.ValidationError):
+			create_trigger(frappe.as_json(self._llm_payload(condition="  doc.priority == 'High'\n")))
+
+	def test_different_instruction_is_not_duplicate(self):
+		self._create_as_admin(llm_instruction="Check this todo.")
+		name = self._create_as_admin(llm_instruction="Summarise this todo.")
+		self.assertTrue(frappe.db.exists(TRIGGER, name))
+
+	def test_disabled_existing_trigger_does_not_block(self):
+		first = self._create_as_admin()
+		set_trigger_enabled(first, 0)
+		second = self._create_as_admin()
+		self.assertTrue(frappe.db.exists(TRIGGER, second))
+
+	def test_enabling_a_duplicate_is_refused(self):
+		first = self._create_as_admin()
+		set_trigger_enabled(first, 0)
+		second = self._create_as_admin()
+		with self.assertRaises(frappe.ValidationError):
+			set_trigger_enabled(first, 1)
+		self.assertEqual(frappe.db.get_value(TRIGGER, first, "enabled"), 0)
+		self.assertTrue(frappe.db.exists(TRIGGER, second))
+
+	def test_editing_does_not_collide_with_itself(self):
+		name = self._create_as_admin(condition="doc.priority == 'High'")
+		updated = update_trigger(name, frappe.as_json({"description": "edited"}))
+		self.assertEqual(updated["data"]["description"], "edited")
+		self.assertNotIn("warning", updated)
+
+	def test_edit_into_a_duplicate_is_refused(self):
+		self._create_as_admin(llm_instruction="Check this todo.")
+		other = self._create_as_admin(llm_instruction="Something else.")
+		with self.assertRaises(frappe.ValidationError):
+			update_trigger(other, frappe.as_json({"llm_instruction": "Check this todo."}))
+
+	def test_cross_type_is_allowed_with_warning(self):
+		self._create_as_admin(condition="doc.priority == 'High'")
+		frappe.set_user(SCRIPT_USER)
+		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
+			payload = self._llm_payload(
+				condition="doc.priority == 'High'", action_type="Script", script_body="pass"
+			)
+			payload.pop("llm_instruction")
+			r = create_trigger(frappe.as_json(payload))
+		self._triggers.append(r["data"]["name"])
+		self.assertTrue(frappe.db.exists(TRIGGER, r["data"]["name"]))
+		self.assertIn("warning", r)
+		self.assertTrue(r["warning"])
+
+	def test_cross_type_desk_path_msgprints_orange(self):
+		self._create_as_admin(condition="doc.priority == 'High'")
+		frappe.set_user(SCRIPT_USER)
+		frappe.local.message_log = []
+		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
+			doc = self._script_doc(condition="doc.priority == 'High'")
+			doc.insert()
+		self._triggers.append(doc.name)
+		self.assertTrue(
+			any(m.get("indicator") == "orange" for m in map(frappe.parse_json, frappe.local.message_log))
+		)
+>>>>>>> f0f8e27 (test: Jarvis Trigger duplicate guard (#816), expected red)
