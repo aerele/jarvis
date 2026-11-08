@@ -9,6 +9,7 @@ from unittest.mock import patch
 import frappe
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.permission_hooks import AUDITED_WILDCARD_HOOKS
 
 TERRITORY_FILTER = {"fieldname": "territory", "fieldtype": "Link", "options": "Territory"}
 
@@ -128,6 +129,24 @@ class TestStoredReportPermissions(unittest.TestCase):
 			)
 			with self.assertRaises(InvalidArgumentError):
 				query_report(run.name, version=initial["version"], sql="SELECT c2 FROM report_rows")
+			# ERPNext's audited "*" Company Restriction hooks: a no-op for this user, so the
+			# run still reads; once they can restrict the user their rows are unprovable here.
+			original_hooks = frappe.get_hooks
+
+			def with_company_restriction(key=None, *args, **kwargs):
+				value = original_hooks(key, *args, **kwargs)
+				if key in AUDITED_WILDCARD_HOOKS:
+					return {**value, "*": sorted(AUDITED_WILDCARD_HOOKS[key])}
+				return value
+
+			with patch.object(frappe, "get_hooks", side_effect=with_company_restriction):
+				self.assertIn("version", query_report(run.name))
+				with (
+					patch("jarvis.permission_hooks.get_user_permissions", return_value={"Company": []}),
+					patch("jarvis.permission_hooks._restriction_configured", return_value=True),
+					self.assertRaises(PermissionDeniedError),
+				):
+					query_report(run.name)
 			frappe.set_user("Administrator")
 			territory = frappe.db.get_value("Territory", {}, "name")
 			if not territory:
