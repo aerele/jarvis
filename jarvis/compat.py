@@ -542,17 +542,21 @@ def permission_conditions(engine, doctype: str, table):
 	if not hasattr(engine, "get_permission_conditions"):  # Frappe 15
 		user = getattr(engine, "user", None) or frappe.session.user
 		return _permission_conditions_v15(doctype, table, user)
-	if _has_raw_permission_query_condition_hook(doctype):
+	if _has_raw_permission_query_condition_hook(doctype, getattr(engine, "user", None)):
 		return _permission_conditions_v16_with_hook(engine, doctype, table)
 	return engine.get_permission_conditions(doctype, table)
 
 
-def _has_raw_permission_query_condition_hook(doctype: str) -> bool:
+def _has_raw_permission_query_condition_hook(doctype: str, user: str | None = None) -> bool:
 	"""True iff any installed app registers a ``permission_query_conditions``
 	hook for this doctype (doctype-specific or the ``"*"`` wildcard) - the same
 	lookup ``Engine.get_permission_query_conditions`` makes internally, so this
-	probe sees exactly the hooks that would fire."""
-	hooks = frappe.get_hooks("permission_query_conditions", {})
+	probe sees exactly the hooks that would fire. ERPNext's own audited ``"*"``
+	hook does not count while it cannot restrict ``user`` (see
+	``jarvis.permission_hooks``); an unknown ``"*"`` hook always does."""
+	from jarvis.permission_hooks import effective_hooks
+
+	hooks = effective_hooks("permission_query_conditions", user)
 	return bool(hooks.get(doctype) or hooks.get("*"))
 
 
