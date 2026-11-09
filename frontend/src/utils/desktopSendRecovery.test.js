@@ -257,7 +257,10 @@ test("the Payment Calendar capability rides the send context only when the boot 
 	none.s.connectorFocus.value = null;
 	none.f.setPrefill(null);
 	await none.f.send();
-	assert.ok(none.calls[0][4] == null, "no context at all (the harness copies undefined to null)");
+	assert.ok(
+		none.calls[0][4] == null,
+		"no context at all (the harness copies undefined to null)"
+	);
 });
 
 test("an accepted send records its run id as this tab's own; a rejected one does not", async () => {

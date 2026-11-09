@@ -850,7 +850,7 @@ test("gotoDashboards passes the message id through to the fired-stamp lookup", (
 	// dispatcher never touches the builder's prefill.
 	const dispatch = fnBody(
 		chatSrc,
-		"function openGotoAction(goto, action, messageId, { auto = false, runId = \"\" } = {})"
+		'function openGotoAction(goto, action, messageId, { auto = false, runId = "" } = {})'
 	);
 	assert.match(dispatch, /else gotoDashboards\(goto\.prompt, messageId\);/);
 	assert.match(dispatch, /if \(action === PAYMENT_CALENDAR_PAGE\) \{/);

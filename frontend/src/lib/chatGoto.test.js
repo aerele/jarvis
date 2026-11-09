@@ -77,7 +77,7 @@ test("only the shared goto pages are allowlisted - any other page parses to null
 
 test("parses a valid payment-calendar redirect", () => {
 	const goto = parseGoto(
-		fence('{"page":"payment-calendar","prompt":" Per-day payables and cash ","extra":1}'),
+		fence('{"page":"payment-calendar","prompt":" Per-day payables and cash ","extra":1}')
 	);
 	assert.deepEqual(goto, { page: "payment-calendar", prompt: "Per-day payables and cash" });
 });
@@ -127,7 +127,7 @@ test("chatBlocks strips jarvis-goto from the visible prose", () => {
 test("ChatView parses goto through the shared module, not a private copy", () => {
 	assert.match(
 		chatViewSrc,
-		/import \{\s*parseGoto,\s*gotoFiredKey,\s*claimGotoFire,\s*builderSeed,\s*requestBefore,\s*gotoDecision,\s*gotoCardCopy,\s*gotoPageInfo,\s*hasInteractiveFence,\s*focusInsideField,\s*modalIsOpen,\s*pruneGotoStamps,?\s*\} from "@\/lib\/chatGoto";/,
+		/import \{\s*parseGoto,\s*gotoFiredKey,\s*claimGotoFire,\s*builderSeed,\s*requestBefore,\s*gotoDecision,\s*gotoCardCopy,\s*gotoPageInfo,\s*hasInteractiveFence,\s*focusInsideField,\s*modalIsOpen,\s*pruneGotoStamps,?\s*\} from "@\/lib\/chatGoto";/
 	);
 	const gotoOf = fnBody(chatViewSrc, "function gotoOf(m)");
 	assert.match(gotoOf, /return parseGoto\(\(m && m\.content\) \|\| ""\);/);
@@ -160,7 +160,7 @@ test("encodeFiredStamp/parseFiredStamp round-trip once a conversation is recorde
 });
 
 test("the card renders the subtitle and one button, all from the page map", () => {
-	assert.match(chatViewSrc, /v-if="gotoCardOf\(m\)" class="jv-macrocard jv-macrocard--goto"/);
+	assert.match(chatViewSrc, /v-if="gotoCardOf\(m\)"\s+class="jv-macrocard jv-macrocard--goto"/);
 	// prettier may wrap the interpolation onto its own line, so match loosely
 	assert.match(chatViewSrc, /\{\{\s*gotoCardOf\(m\)\.title\s*\}\}/);
 	assert.match(chatViewSrc, /\{\{\s*gotoCardOf\(m\)\.sub\s*\}\}/);
@@ -174,7 +174,7 @@ test("the card renders the subtitle and one button, all from the page map", () =
 	const card = fnBody(chatViewSrc, "function gotoCardOf(m)");
 	assert.match(
 		card,
-		/gotoCardCopy\(goto, gotoDecision\(goto, \{ canView: canViewCalendar\(\) \}\)\)/,
+		/gotoCardCopy\(goto, gotoDecision\(goto, \{ canView: canViewCalendar\(\) \}\)\)/
 	);
 });
 
@@ -199,7 +199,7 @@ test("gotoCardCopy: Dashboards keeps the restated request as its subtitle", () =
 	// the calendar boot flag changes nothing for a Dashboards goto
 	assert.deepEqual(
 		gotoCardCopy(dash, gotoDecision(dash, { canView: false })),
-		gotoCardCopy(dash, gotoDecision(dash, { canView: true })),
+		gotoCardCopy(dash, gotoDecision(dash, { canView: true }))
 	);
 });
 
@@ -223,7 +223,7 @@ test("gotoCardCopy: no goto, or no card, gives nothing; copy is translated when 
 		const copy = gotoCardCopy(CALENDAR, gotoDecision(CALENDAR, { canView: true }));
 		assert.equal(
 			copy.sub,
-			"[xx] Day-by-day supplier dues, cash and collections, one month at a time.",
+			"[xx] Day-by-day supplier dues, cash and collections, one month at a time."
 		);
 		const off = gotoCardCopy(CALENDAR, gotoDecision(CALENDAR, { canView: false }));
 		assert.equal(off.sub, "[xx] The Payment Calendar isn't available for your account.");
@@ -240,7 +240,7 @@ test("the card click dispatches on the decision's action and is not limited by t
 	assert.doesNotMatch(click, /claimGotoFire|autoOpen/);
 	const act = fnBody(
 		chatViewSrc,
-		'function openGotoAction(goto, action, messageId, { auto = false, runId = "" } = {})',
+		'function openGotoAction(goto, action, messageId, { auto = false, runId = "" } = {})'
 	);
 	assert.match(act, /if \(action === PAYMENT_CALENDAR_PAGE\) \{/);
 	assert.match(act, /if \(auto\) ownRuns\.delete\(runId\);/);
@@ -252,7 +252,7 @@ test("gotoPaymentCalendar: fixed route only - no prefill, no builder seed, no cl
 	const fn = fnBody(chatViewSrc, "function gotoPaymentCalendar(messageId)");
 	assert.match(
 		fn,
-		/router\s*\.push\(\{ \.\.\.gotoPageInfo\(PAYMENT_CALENDAR_PAGE\)\.route, state: \{ fromChat: true \} \}\)/,
+		/router\s*\.push\(\{ \.\.\.gotoPageInfo\(PAYMENT_CALENDAR_PAGE\)\.route, state: \{ fromChat: true \} \}\)/
 	);
 	assert.doesNotMatch(fn, /setDashboardPrefill/);
 	assert.doesNotMatch(fn, /builderSeed|requestBefore/);
@@ -270,7 +270,7 @@ test("gotoPaymentCalendar: fixed route only - no prefill, no builder seed, no cl
 test("a replayed run:end does not re-open the calendar: the first open consumes the ownership token", () => {
 	const dispatch = fnBody(
 		chatViewSrc,
-		'function openGotoAction(goto, action, messageId, { auto = false, runId = "" } = {})',
+		'function openGotoAction(goto, action, messageId, { auto = false, runId = "" } = {})'
 	);
 	const opened = [];
 	const ownRuns = new Set(["RUN-1", "RUN-2"]);
@@ -279,8 +279,13 @@ test("a replayed run:end does not re-open the calendar: the first open consumes 
 		"ownRuns",
 		"gotoPaymentCalendar",
 		"gotoDashboards",
-		dispatch + "\n}\nreturn openGotoAction;",
-	)(PAYMENT_CALENDAR_PAGE, ownRuns, (id) => opened.push(id), () => opened.push("dash"));
+		dispatch + "\n}\nreturn openGotoAction;"
+	)(
+		PAYMENT_CALENDAR_PAGE,
+		ownRuns,
+		(id) => opened.push(id),
+		() => opened.push("dash")
+	);
 	const runEnd = (runId) => {
 		// what the run:end handler does: decide from the live inputs, then open
 		const d = gotoDecision(CALENDAR, { ...OPEN, ownTurn: ownRuns.has(runId) });
@@ -382,10 +387,16 @@ test("a refused calendar auto-open consumes the ownership: a replayed run:end do
 	// the refusal leg of the handler, executed: the text after `let redirected`
 	// is not importable (SFC), so run the two refusal statements it contains
 	const refusal = runEnd.match(
-		/if \(!redirected && (goto && goto\.page === PAYMENT_CALENDAR_PAGE)\) (ownRuns\.delete\(p\.run_id\);)/,
+		/if \(!redirected && (goto && goto\.page === PAYMENT_CALENDAR_PAGE)\)\s+(ownRuns\.delete\(p\.run_id\);)/
 	);
 	assert.ok(refusal, "the refused path consumes the calendar ownership");
-	const consume = new Function("goto", "PAYMENT_CALENDAR_PAGE", "ownRuns", "p", `if (${refusal[1]}) ${refusal[2]}`);
+	const consume = new Function(
+		"goto",
+		"PAYMENT_CALENDAR_PAGE",
+		"ownRuns",
+		"p",
+		`if (${refusal[1]}) ${refusal[2]}`
+	);
 	const decide = (runId, draft) =>
 		gotoDecision(CALENDAR, { ...OPEN, ownTurn: ownRuns.has(runId), draft });
 	// run:end with a draft in the composer: refused, so the handler consumes it
@@ -400,10 +411,10 @@ test("a refused calendar auto-open consumes the ownership: a replayed run:end do
 	// the hold-timer refusal consumes it as well
 	assert.match(
 		runEnd,
-		/\.autoOpen\s*\) \{[^}]*ownRuns\.delete\(p\.run_id\);\s*dropGotoMorph\(\);\s*return;/,
+		/\.autoOpen\s*\) \{[^}]*ownRuns\.delete\(p\.run_id\);\s*dropGotoMorph\(\);\s*return;/
 	);
 	// Dashboards logic is untouched: only a calendar goto consumes
-	assert.match(runEnd, /goto\.page === PAYMENT_CALENDAR_PAGE\) ownRuns\.delete/);
+	assert.match(runEnd, /goto\.page === PAYMENT_CALENDAR_PAGE\)\s+ownRuns\.delete/);
 });
 
 test("run:end auto-fires the redirect through gotoDecision: once, never errored or stopped", () => {
@@ -414,7 +425,7 @@ test("run:end auto-fires the redirect through gotoDecision: once, never errored 
 	assert.match(runEnd, /const goto = m \? gotoOf\(m\) : null;/);
 	assert.match(
 		runEnd,
-		/const decision = goto \? gotoDecision\(goto, gotoInputs\(m, p\.run_id\)\) : null;/,
+		/const decision = goto \? gotoDecision\(goto, gotoInputs\(m, p\.run_id\)\) : null;/
 	);
 	assert.match(runEnd, /if \(decision && decision\.autoOpen\) \{/);
 	// read-only: the stamp is an INPUT to the decision (a message already handled never
@@ -429,7 +440,7 @@ test("run:end auto-fires the redirect through gotoDecision: once, never errored 
 	assert.match(runEnd, /const open = \{ auto: true, runId: p\.run_id \};/);
 	assert.equal(
 		(runEnd.match(/openGotoAction\(goto, decision\.action, m\.name, open\);/g) || []).length,
-		2,
+		2
 	);
 	// a refused decision drops the latch, or the morph line would animate forever
 	assert.match(runEnd, /if \(!redirected\) dropGotoMorph\(\);/);
@@ -445,18 +456,17 @@ test("run:end auto-fires the redirect through gotoDecision: once, never errored 
 	// another interactive block in the same message, or a parked card of this turn
 	assert.match(
 		inputs,
-		/interactive: hasInteractiveFence\(m\.content\) \|\| turnHasParkedCard\(runId\),/,
+		/interactive: hasInteractiveFence\(m\.content\) \|\| turnHasParkedCard\(runId\),/
 	);
 });
 
 test("a parked confirmation of THIS turn, in THIS conversation, counts as interactive", () => {
 	const fn = fnBody(chatViewSrc, "function turnHasParkedCard(runId)");
 	const make = (cards, currentId) =>
-		new Function(
-			"pendingActions",
-			"currentId",
-			fn + "\n}\nreturn turnHasParkedCard;",
-		)({ value: cards }, { value: currentId });
+		new Function("pendingActions", "currentId", fn + "\n}\nreturn turnHasParkedCard;")(
+			{ value: cards },
+			{ value: currentId }
+		);
 	const cards = [
 		{ conversation: "C1", run_id: "R1", token: "t1" },
 		{ conversation: "C2", run_id: "R2", token: "t2" },
@@ -471,16 +481,16 @@ test("a parked confirmation of THIS turn, in THIS conversation, counts as intera
 test("the morph latch follows the decision, with the page's own morph text", () => {
 	const latch = chatViewSrc.slice(
 		chatViewSrc.indexOf("const gotoMorph = ref(null);"),
-		chatViewSrc.indexOf("const GOTO_MORPH_HOLD_MS"),
+		chatViewSrc.indexOf("const GOTO_MORPH_HOLD_MS")
 	);
 	assert.match(
 		latch,
-		/gotoDecision\(g, gotoInputs\(streamingMessage\.value, currentRunId\.value\)\)\.autoOpen/,
+		/gotoDecision\(g, gotoInputs\(streamingMessage\.value, currentRunId\.value\)\)\.autoOpen/
 	);
 	const override = fnBody(chatViewSrc, "function overrideFor(m)");
 	assert.match(
 		override,
-		/if \(gotoMorph\.value\) return \{ text: gotoPageInfo\(gotoMorph\.value\.page\)\.morph \};/,
+		/if \(gotoMorph\.value\) return \{ text: gotoPageInfo\(gotoMorph\.value\.page\)\.morph \};/
 	);
 	assert.doesNotMatch(override, /Taking you to the Dashboards builder/);
 });
@@ -488,27 +498,27 @@ test("the morph latch follows the decision, with the page's own morph text", () 
 test("a calendar auto-open is re-checked when the hold timer fires (the user may have started typing)", () => {
 	const runEnd = chatViewSrc.slice(
 		chatViewSrc.indexOf('case "run:end": {'),
-		chatViewSrc.indexOf('case "message:enriched": {'),
+		chatViewSrc.indexOf('case "message:enriched": {')
 	);
 	assert.match(
 		runEnd,
-		/goto\.page === PAYMENT_CALENDAR_PAGE &&\s*!gotoDecision\(goto, gotoInputs\(m, p\.run_id\)\)\.autoOpen/,
+		/goto\.page === PAYMENT_CALENDAR_PAGE &&\s*!gotoDecision\(goto, gotoInputs\(m, p\.run_id\)\)\.autoOpen/
 	);
 });
 
 test("the send context carries handoff_pages only under the boot flag, and no other key changes", () => {
 	const send = chatViewSrc.slice(
 		chatViewSrc.indexOf("let sendCtx = groundWiki"),
-		chatViewSrc.indexOf("// The confirmation cards currently on screen"),
+		chatViewSrc.indexOf("// The confirmation cards currently on screen")
 	);
 	assert.match(
 		send,
-		/if \(canViewCalendar\(\)\)\s*sendCtx = \{ \.\.\.\(sendCtx \|\| \{\}\), handoff_pages: \[PAYMENT_CALENDAR_PAGE\] \};/,
+		/if \(canViewCalendar\(\)\)\s*sendCtx = \{ \.\.\.\(sendCtx \|\| \{\}\), handoff_pages: \[PAYMENT_CALENDAR_PAGE\] \};/
 	);
 	// the existing keys are built exactly as before
 	assert.match(
 		send,
-		/let sendCtx = groundWiki \? \{ ground_wiki: 1 \} : _prefillSendContext \|\| undefined;/,
+		/let sendCtx = groundWiki \? \{ ground_wiki: 1 \} : _prefillSendContext \|\| undefined;/
 	);
 	assert.match(send, /sendCtx = \{ \.\.\.\(sendCtx \|\| \{\}\), page: "triggers" \};/);
 	assert.match(send, /focus_connector: \{ key: _sentFocus\.key, label: _sentFocus\.label \},/);
@@ -526,7 +536,7 @@ test("the goto card wraps on a narrow screen; the macro card is untouched (E8)",
 	const rule = chatViewSrc.slice(at, chatViewSrc.indexOf("\n}\n", at));
 	assert.match(
 		rule,
-		/\.jv-macrocard--goto \.jv-macrocard-title,\s*\.jv-macrocard--goto \.jv-macrocard-sub \{[^}]*white-space: normal;[^}]*overflow-wrap: anywhere;/,
+		/\.jv-macrocard--goto \.jv-macrocard-title,\s*\.jv-macrocard--goto \.jv-macrocard-sub \{[^}]*white-space: normal;[^}]*overflow-wrap: anywhere;/
 	);
 	assert.match(rule, /\.jv-macrocard--goto \.jv-macrocard-btn \{[^}]*flex: 1 1 100%;/);
 	assert.match(rule, /\.jv-macrocard--goto \{[^}]*flex-wrap: wrap;/);
@@ -539,7 +549,7 @@ test("an own-tab retry and a recovered send both record their run id, capped at 
 	assert.match(retry, /const r = await api\.retryMessage\(messageId\);/);
 	assert.match(
 		retry,
-		/if \(r && r\.ok !== false\) \{\n\t+if \(r\.run_id\) rememberOwnRun\(r\.run_id\);/,
+		/if \(r && r\.ok !== false\) \{\n\t+if \(r\.run_id\) rememberOwnRun\(r\.run_id\);/
 	);
 	const settle = fnBody(chatViewSrc, "async function settleRecoveredSend(m, r, view)");
 	assert.match(settle, /if \(r\.ok !== false && r\.run_id\) rememberOwnRun\(r\.run_id\);/);
@@ -547,7 +557,7 @@ test("an own-tab retry and a recovered send both record their run id, capped at 
 	const run = new Function(
 		"ownRuns",
 		"OWN_RUNS_MAX",
-		fnBody(chatViewSrc, "function rememberOwnRun(") + "\n}\nreturn rememberOwnRun;",
+		fnBody(chatViewSrc, "function rememberOwnRun(") + "\n}\nreturn rememberOwnRun;"
 	);
 	const set = new Set();
 	const remember = run(set, 50);
@@ -563,7 +573,7 @@ test("ownTurn comes from runs this tab sent: filled from the accepted send, neve
 	assert.match(chatViewSrc, /const ownRuns = new Set\(\);/);
 	assert.match(
 		chatViewSrc,
-		/if \(r && r\.ok !== false\) \{\n\t+if \(r\.run_id\) rememberOwnRun\(r\.run_id\);/,
+		/if \(r && r\.ok !== false\) \{\n\t+if \(r\.run_id\) rememberOwnRun\(r\.run_id\);/
 	);
 	const draft = fnBody(chatViewSrc, "function composerHasDraft()");
 	assert.match(draft, /input\.value\.trim\(\)\.length > 0/);
@@ -572,7 +582,7 @@ test("ownTurn comes from runs this tab sent: filled from the accepted send, neve
 	// any OTHER field being typed in, and any open dialog (teleported: whole document)
 	assert.match(
 		draft,
-		/focusInsideField\(document\.activeElement, rootEl\.value, composerRef\.value\?\.el\)/,
+		/focusInsideField\(document\.activeElement, rootEl\.value, composerRef\.value\?\.el\)/
 	);
 	assert.match(draft, /modalIsOpen\(document\)/);
 });
@@ -591,7 +601,7 @@ test("composerHasDraft: executed - an open dialog or a typed-in side field is a 
 			"document",
 			"rootEl",
 			"composerRef",
-			fn + "\n}\nreturn composerHasDraft;",
+			fn + "\n}\nreturn composerHasDraft;"
 		)(
 			{ value: text },
 			{ value: [] },
@@ -600,7 +610,7 @@ test("composerHasDraft: executed - an open dialog or a typed-in side field is a 
 			modalIsOpen,
 			{ activeElement: active, querySelector: () => (dialog ? {} : null) },
 			{ value: rootOf(composerEl, side) },
-			{ value: { el: composerEl } },
+			{ value: { el: composerEl } }
 		)();
 	assert.equal(build({ active: composerEl }), false, "focused but empty composer");
 	assert.equal(build({ active: composerEl, text: " hi " }), true, "composer text");
@@ -660,7 +670,7 @@ test("modalIsOpen: any role=dialog, aria-modal or open <dialog> on the page", ()
 
 test("hasInteractiveFence: jarvis-ask, jarvis-action and confirm blocks, closed or still streaming", () => {
 	assert.equal(hasInteractiveFence('Which month?\n```jarvis-ask\n{"q":"x"}\n```'), true);
-	assert.equal(hasInteractiveFence('Draft:\n```jarvis-action\n{}\n```'), true);
+	assert.equal(hasInteractiveFence("Draft:\n```jarvis-action\n{}\n```"), true);
 	assert.equal(hasInteractiveFence("Sure?\n```confirm\nSend it\n```"), true);
 	assert.equal(hasInteractiveFence("Sure?\n```confirm\nSend it"), true, "unterminated");
 	assert.equal(hasInteractiveFence("```jarvis-ask"), true, "opener at the very end");
@@ -668,7 +678,7 @@ test("hasInteractiveFence: jarvis-ask, jarvis-action and confirm blocks, closed 
 
 test("hasInteractiveFence: the goto itself, other blocks and plain code are not interactive", () => {
 	assert.equal(hasInteractiveFence(fence('{"page":"payment-calendar","prompt":"x"}')), false);
-	assert.equal(hasInteractiveFence('```jarvis-chart\n{}\n```'), false);
+	assert.equal(hasInteractiveFence("```jarvis-chart\n{}\n```"), false);
 	assert.equal(hasInteractiveFence("```js\nconst confirm = 1\n```"), false);
 	assert.equal(hasInteractiveFence("I will confirm that for you."), false);
 	assert.equal(hasInteractiveFence(""), false);
@@ -726,7 +736,7 @@ test("gotoDecision: Dashboards decisions are today's, whatever the calendar inpu
 		assert.deepEqual(
 			gotoDecision(DASH, input),
 			{ card: true, autoOpen: todayDashboardsAutoOpen(input), action: "dashboards" },
-			JSON.stringify(input),
+			JSON.stringify(input)
 		);
 	}
 	assert.equal(n, 128);
@@ -902,7 +912,7 @@ test("goto stamps: a throwing localStorage never breaks the hand-off", () => {
 	const write = new Function(
 		"localStorage",
 		"pruneGotoStamps",
-		writer + "\n}\nreturn writeGotoStamp;",
+		writer + "\n}\nreturn writeGotoStamp;"
 	)(broken, pruneGotoStamps);
 	assert.equal(read("k"), null, "an unreadable store reads as no stamp");
 	assert.doesNotThrow(() => write("k", "1"));
@@ -919,13 +929,13 @@ test("goto stamps: a throwing localStorage never breaks the hand-off", () => {
 	};
 	new Function("localStorage", "pruneGotoStamps", writer + "\n}\nreturn writeGotoStamp;")(
 		healthy,
-		pruneGotoStamps,
+		pruneGotoStamps
 	)("jarvis:goto-fired:M", "5");
 	assert.equal(
 		new Function("localStorage", reader + "\n}\nreturn readGotoStamp;")(healthy)(
-			"jarvis:goto-fired:M",
+			"jarvis:goto-fired:M"
 		),
-		"5",
+		"5"
 	);
 	// no goto path reads or writes localStorage directly any more
 	const gotoPaths = [
@@ -954,19 +964,19 @@ test("the page key is the shared constant, not a literal, in chatGoto.js, ChatVi
 		assert.doesNotMatch(
 			withoutComments(src),
 			/["']payment-calendar["']/,
-			`${name} must use PAYMENT_CALENDAR_PAGE`,
+			`${name} must use PAYMENT_CALENDAR_PAGE`
 		);
 		assert.match(src, /PAYMENT_CALENDAR_PAGE/, `${name} must import the constant`);
 	}
 	assert.doesNotMatch(
 		withoutComments(sources["chatGoto.js"]),
 		/["']dashboards["']/,
-		"chatGoto.js must use DASHBOARDS_PAGE",
+		"chatGoto.js must use DASHBOARDS_PAGE"
 	);
 	assert.match(sources["api.js"], /from "@jsshared\/goto_pages\.mjs";/);
 	assert.match(
 		sources["ChatView.vue"],
-		/from "\.\.\/\.\.\/\.\.\/jarvis\/public\/js\/shared\/goto_pages\.mjs";/,
+		/from "\.\.\/\.\.\/\.\.\/jarvis\/public\/js\/shared\/goto_pages\.mjs";/
 	);
 });
 

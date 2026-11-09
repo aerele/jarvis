@@ -79,7 +79,9 @@ describe("Native Payment Calendar page", () => {
 	});
 	it("hides the focus ring on the programmatically focused title, but keeps it for the keyboard", () => {
 		const css = fs.readFileSync(path.resolve(__dirname, "payment-calendar.css"), "utf8");
-		expect(css).toMatch(/#pcal-title:focus:not\(:focus-visible\)\s*\{\s*outline:\s*none;\s*\}/);
+		expect(css).toMatch(
+			/#pcal-title:focus:not\(:focus-visible\)\s*\{\s*outline:\s*none;\s*\}/
+		);
 		// only the not-focus-visible case: a plain `:focus` rule would hide the keyboard ring too
 		expect(css).not.toMatch(/#pcal-title:focus\s*\{/);
 	});

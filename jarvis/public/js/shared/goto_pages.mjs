@@ -19,6 +19,6 @@ export const DASHBOARDS_PAGE = "dashboards";
 export const PAYMENT_CALENDAR_PAGE = "payment-calendar";
 
 export const GOTO_PAGES = Object.freeze({
-	[DASHBOARDS_PAGE]: "DashboardsPage",
-	[PAYMENT_CALENDAR_PAGE]: "PaymentCalendar",
+  [DASHBOARDS_PAGE]: "DashboardsPage",
+  [PAYMENT_CALENDAR_PAGE]: "PaymentCalendar",
 });

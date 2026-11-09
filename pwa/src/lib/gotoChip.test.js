@@ -37,7 +37,10 @@ test("PWA ChatView: the chip is titled by the page the goto names", () => {
 	const at = chatViewSrc.indexOf("function chipTitle(v)");
 	assert.notEqual(at, -1);
 	const fn = chatViewSrc.slice(at, chatViewSrc.indexOf("\n}", at));
-	assert.match(fn, /return v\.gotoPage === "payment-calendar" \? "Payment Calendar" : "Dashboards";/);
+	assert.match(
+		fn,
+		/return v\.gotoPage === "payment-calendar" \? "Payment Calendar" : "Dashboards";/
+	);
 	assert.match(fn, /return "Diagram";/);
 });
 

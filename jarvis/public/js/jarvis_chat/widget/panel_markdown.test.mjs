@@ -28,11 +28,24 @@ test("strips a jarvis-goto block of either page: no chip, no raw JSON", () => {
     const block = `\`\`\`jarvis-goto\n{"page":"${page}","prompt":"Show the cash view"}\n\`\`\``;
     const src = `Opening that for you.\n\n${block}\n\nAnything else?`;
     const out = stripControlBlocks(src);
-    assert.equal(out, "Opening that for you.\n\nAnything else?", `${page} goto leaked`);
+    assert.equal(
+      out,
+      "Opening that for you.\n\nAnything else?",
+      `${page} goto leaked`
+    );
     const html = renderReply(src);
-    assert.ok(!html.includes("jarvis-goto"), `${page} fence leaked into the html`);
-    assert.ok(!html.includes("cash view"), `${page} prompt leaked into the html`);
-    assert.ok(!html.includes("data-open-full"), `${page} goto must not become a chip`);
+    assert.ok(
+      !html.includes("jarvis-goto"),
+      `${page} fence leaked into the html`
+    );
+    assert.ok(
+      !html.includes("cash view"),
+      `${page} prompt leaked into the html`
+    );
+    assert.ok(
+      !html.includes("data-open-full"),
+      `${page} goto must not become a chip`
+    );
   }
 });
 

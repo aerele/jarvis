@@ -1729,7 +1729,10 @@
 								     click resumes the builder conversation the first hand-off
 								     created instead of starting a new one. -->
 								<template v-if="hasCurrentMessageSnapshot">
-									<div v-if="gotoCardOf(m)" class="jv-macrocard jv-macrocard--goto">
+									<div
+										v-if="gotoCardOf(m)"
+										class="jv-macrocard jv-macrocard--goto"
+									>
 										<div class="jv-macrocard-ic">
 											<svg
 												width="16"
@@ -1752,10 +1755,7 @@
 												gotoCardOf(m).sub
 											}}</span>
 										</div>
-										<button
-											class="jv-macrocard-btn"
-											@click="openGotoCard(m)"
-										>
+										<button class="jv-macrocard-btn" @click="openGotoCard(m)">
 											{{ gotoCardOf(m).button }}
 										</button>
 									</div>
@@ -13049,7 +13049,8 @@ function onEvent(p) {
 			}
 			// A calendar auto-open refused for any reason (draft, fence, dialog...)
 			// consumes the run's ownership too: it must not open late on a replay.
-			if (!redirected && goto && goto.page === PAYMENT_CALENDAR_PAGE) ownRuns.delete(p.run_id);
+			if (!redirected && goto && goto.page === PAYMENT_CALENDAR_PAGE)
+				ownRuns.delete(p.run_id);
 			if (!redirected) dropGotoMorph();
 			break;
 		}

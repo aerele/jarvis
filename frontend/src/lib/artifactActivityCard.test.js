@@ -301,7 +301,10 @@ test("T5b: the standalone artifact card and the generic activity line are gone �
 test("the goto morph line latches on a complete streaming goto and survives run:end (does not derive from m.streaming)", () => {
 	assert.match(chatSrc, /const gotoMorph = ref\(null\);/);
 	const watchBody = fnBody(chatSrc, "watch(streamingGoto, (g) => {");
-	assert.match(watchBody, /gotoDecision\(g, gotoInputs\(streamingMessage\.value, currentRunId\.value\)\)\.autoOpen\)\s*gotoMorph\.value = g;/);
+	assert.match(
+		watchBody,
+		/gotoDecision\(g, gotoInputs\(streamingMessage\.value, currentRunId\.value\)\)\.autoOpen\)\s*gotoMorph\.value = g;/
+	);
 	// T5b: the morph line's own markup (JarvisMark + jv-goto-morph) is gone —
 	// one box per turn now — but the latch and its navigation are untouched,
 	// and the exact copy is reused verbatim as boxViewFor's top-precedence
