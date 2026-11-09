@@ -25,6 +25,7 @@ from frappe.utils import cint
 from frappe.utils.safe_exec import is_safe_exec_enabled
 
 from jarvis.permissions import NotRenamable
+from jarvis.tools._sandbox_attrs import capped, unsafe_attribute_errors
 from jarvis.triggers.engine import (
 	LLM_EVENTS,
 	SCRIPT_EVENT_MAP,
@@ -295,6 +296,10 @@ class JarvisTrigger(NotRenamable, Document):
 		self.condition = (self.condition or "").strip()
 		if not self.condition:
 			return
+		# Before the evaluation below: a short-circuiting condition never reaches
+		# the blocked attribute on a blank doc, yet fails on every real fire.
+		if self._unsafe_check_due("condition"):
+			self.check_unsafe_attributes(("condition",))
 		# Same check as frappe Webhook.validate_condition: compile + evaluate
 		# against an empty doc of the target doctype with the webhook context.
 		temp_doc = frappe.new_doc(self.target_doctype)
@@ -312,6 +317,51 @@ class JarvisTrigger(NotRenamable, Document):
 			pass
 		except Exception as e:
 			frappe.throw(_("Invalid Condition: {0}").format(str(e)))
+
+	def _unsafe_check_due(self, field: str) -> bool:
+		"""Whether the sandbox-attribute check must run on ``field`` for this save.
+
+		It runs for a new trigger, when the code or the action type changed, and
+		when the trigger is being turned on. A stored body or condition that was
+		saved before the check existed therefore stays editable and can be turned
+		off, but it cannot be turned back on while it would fail at run time."""
+		return bool(
+			self.is_new()
+			or self.has_value_changed(field)
+			or self.has_value_changed("action_type")
+			or (self.has_value_changed("enabled") and cint(self.enabled))
+		)
+
+	def check_unsafe_attributes(self, fields=("condition", "script_body")):
+		"""Refuse code that reads an attribute the server-script sandbox blocks
+		(for example ``"..".format(..)``), which would fail on every fire.
+
+		One method for save (``validate``) and for the enable toggle
+		(``triggers_api.set_trigger_enabled``). ``condition`` is checked for every
+		action type (as an expression); ``script_body`` only for a Script action
+		(as a script). A UX pre-check: the sandbox still enforces at run time."""
+		for field in fields:
+			if field == "condition":
+				code, mode = (self.condition or "").strip(), "eval"
+				lead_in, title = _("Invalid Condition:"), _("Condition cannot run")
+			elif field == "script_body":
+				if self.action_type != "Script":
+					continue  # leftover body of a non-Script trigger is not code
+				code, mode = self.script_body or "", "exec"
+				lead_in = _("The script uses an attribute that the sandbox blocks:")
+				title = _("Script cannot run")
+			else:
+				raise ValueError(f"check_unsafe_attributes: unknown field {field!r}")
+			errors = unsafe_attribute_errors(code, mode=mode) if code else []
+			if not errors:
+				continue
+			# Never the code itself, only where the refusal came from. A debug/dev-level
+			# trace: dropped at production log levels, so not an operator signal.
+			try:
+				frappe.logger("jarvis").info("unsafe-attr refusal doctype=%s path=%s", self.doctype, field)
+			except Exception:
+				pass
+			frappe.throw(lead_in + " <br>" + "; <br>".join(capped(errors)), title=title)
 
 	def _require_script_authoring_rights(self):
 		"""A Script action materializes a managed Server Script that runs with full
@@ -364,6 +414,8 @@ class JarvisTrigger(NotRenamable, Document):
 			# Frappe core only msgprint-warns on Server Script compile errors;
 			# a trigger script that cannot compile can never run, so throw.
 			frappe.throw(_("Script does not compile: {0}").format(str(e)))
+		if self._unsafe_check_due("script_body"):
+			self.check_unsafe_attributes(("script_body",))
 
 	def _validate_llm(self):
 		instruction = (self.llm_instruction or "").strip()

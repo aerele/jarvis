@@ -58,11 +58,17 @@ export const testTriggerCondition = (target_doctype, condition, docname = "") =>
 
 // ── activity ──────────────────────────────────────────────────────────────────
 // rows: {name, trigger, trigger_label, target_doctype, target_docname,
-//        doc_event, action_type, status, summary, detail, duration_ms,
-//        event_user, creation}; filters: trigger, status, action_type,
+//        doc_event, action_type, status, summary, detail, detail_truncated,
+//        duration_ms, event_user, creation}; `detail` (cut to 4000 chars) and
+//        `detail_truncated` (true when the stored log is longer) are sent to
+//        managers only; filters: trigger, status, action_type,
 //        target_doctype, doc_event, from_date, to_date. Non-admin `total` is
 //        approximate (the ListFooter count is best-effort for them).
 export const listActivityPage = (p) => call(TR + "list_activity_page", _page(p)).then(unwrap);
+
+// Managers only. -> {name, detail}: the full stored log of one activity row,
+// fetched when the dialog opens on a row with `detail_truncated`.
+export const getActivityDetail = (name) => call(TR + "get_activity_detail", { name }).then(unwrap);
 
 // -> {by_status: {...}, total} for admins, {} for everyone else
 export const activityStats = () => call(TR + "activity_stats").then(unwrap);
