@@ -11,6 +11,6 @@
 // Route names are those in frontend/src/router/index.js; goto_pages.test.mjs
 // fails when one is renamed there.
 export const GOTO_PAGES = Object.freeze({
-	dashboards: "DashboardsPage",
-	"payment-calendar": "PaymentCalendar",
+  dashboards: "DashboardsPage",
+  "payment-calendar": "PaymentCalendar",
 });
