@@ -5,6 +5,7 @@ from frappe.core.doctype.user_permission.user_permission import get_user_permiss
 from frappe.permissions import get_role_permissions
 
 from jarvis.exceptions import PermissionDeniedError
+from jarvis.permission_hooks import effective_hooks
 from jarvis.tools._company_scope import assert_company_permitted
 from jarvis.tools._ledger_access import gl_dimension_doctypes
 from jarvis.tools._report_scope import _assert_company_readable
@@ -27,6 +28,13 @@ def require_company(company: str) -> dict:
 	return values
 
 
+def is_standard_accounts_report(report) -> bool:
+	"""True only for the shipped Accounts script report, not a custom or relocated one."""
+	return (
+		report.report_type == "Script Report" and report.is_standard == "Yes" and report.module == "Accounts"
+	)
+
+
 def require_report(company: str, account_type: str):
 	from frappe.desk.query_report import get_report_doc
 
@@ -34,7 +42,7 @@ def require_report(company: str, account_type: str):
 		raise frappe.ValidationError("Choose payables or receivables.")
 	require_company(company)
 	report = get_report_doc(REPORTS[account_type])
-	if report.report_type != "Script Report" or report.is_standard != "Yes" or report.module != "Accounts":
+	if not is_standard_accounts_report(report):
 		raise frappe.PermissionError("The standard accounting report is unavailable.")
 	return report
 
@@ -65,7 +73,7 @@ def incomplete_scope_reasons() -> list[str]:
 		perms = get_role_permissions(frappe.get_meta(doctype), user)
 		if {"read", "report"}.intersection(perms.get("if_owner", {})):
 			reasons.append("owner_only_obligations")
-	query_hooks = frappe.get_hooks("permission_query_conditions")
+	query_hooks = effective_hooks("permission_query_conditions", user)
 	if any(
 		query_hooks.get(dt)
 		for dt in ("Purchase Invoice", "Sales Invoice", "Payment Ledger Entry", "GL Entry", "Account", "*")
@@ -90,7 +98,7 @@ def visible_names(doctype: str, names, filters: dict | None = None) -> set[str]:
 			)
 	except frappe.PermissionError:
 		return set()
-	hooks = frappe.get_hooks("has_permission")
+	hooks = effective_hooks("has_permission")
 	if hooks.get(doctype) or hooks.get("*"):
 		ptype = "select" if frappe.only_has_select_perm(doctype) else "read"
 		visible = set()
