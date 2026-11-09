@@ -480,6 +480,7 @@ _unrelated(
     create_trigger
     delete_trigger
     delete_triggers_bulk
+    get_activity_detail
     get_trigger
     get_triggers_caps
     list_activity_page
