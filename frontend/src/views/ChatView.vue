@@ -7738,8 +7738,11 @@ function render(text, streaming = false) {
 	const key = (streaming ? "S:" : "F:") + text;
 	const hit = _renderCache.get(key);
 	if (hit !== undefined) return hit;
-	// copyCode: each code block gets a copy button, handled by Message.vue (#2170).
-	const out = linkifyDocs(renderMarkdown(stripBlocks(text, streaming), { copyCode: true }));
+	// copyCode: each settled code block gets a copy button, handled by Message.vue
+	// (#2170). Not while streaming: the block may still be growing.
+	const out = linkifyDocs(
+		renderMarkdown(stripBlocks(text, streaming), { copyCode: !streaming })
+	);
 	if (_renderCache.size >= 800) _renderCache.clear();
 	_renderCache.set(key, out);
 	return out;

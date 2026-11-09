@@ -108,6 +108,17 @@ describe("plainText / prepareRich text flavour", () => {
 });
 
 describe("prepareRich html flavour", () => {
+	it("leaves out a code block's copy button (#2170 review)", () => {
+		const html = renderMarkdown("Run this:\n\n```\nSELECT 1;\n```", { copyCode: true });
+		expect(html).toContain("jv-code-copy");
+		const out = prepareRich(html);
+		expect(out.html).not.toMatch(/<button|<svg/);
+		expect(out.html).toContain("SELECT 1;");
+		expect(out.html).toMatch(/<pre[^>]*><code[^>]*>SELECT 1;<\/code><\/pre>/);
+		expect(out.text).toContain("SELECT 1;");
+		expect(out.text).not.toMatch(/copy/i);
+	});
+
 	it("keeps the formatting and makes links absolute and bare", () => {
 		const out = prepareRich(html()).html;
 		expect(out).toContain("<strong>6</strong>");
