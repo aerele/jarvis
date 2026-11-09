@@ -2,15 +2,23 @@
 //
 // The agent picks one of these keys; it never names a route. Navigation uses
 // only the route name from this table, so a block cannot send the user to an
-// arbitrary path. Placed under jarvis/public/js/shared/ so the desktop SPA, the
-// PWA and the Desk widget WILL read one list (the Desk widget is an esbuild
-// bundle that cannot reach frontend/src or the "@/" alias). They consume it from
-// task A3 (PR 2); in A0 only goto_pages.test.mjs reads it. .mjs so it is
-// unambiguously ESM regardless of the nearest package.json "type".
+// arbitrary path. Placed under jarvis/public/js/shared/ so every surface reads
+// one list. The real consumers today:
+//   - frontend/src/lib/chatGoto.js (parse allowlist, page map, decision), which
+//     the desktop SPA's ChatView and api.js use, and which the PWA reuses
+//     through pwa/src/lib/blocks.js (the chip);
+//   - the Desk widget only STRIPS the block from the prose; it does not read
+//     this table.
+// .mjs so it is unambiguously ESM regardless of the nearest package.json "type".
 //
 // Route names are those in frontend/src/router/index.js; goto_pages.test.mjs
 // fails when one is renamed there.
+
+// The page keys, as constants, so no consumer repeats the literal.
+export const DASHBOARDS_PAGE = "dashboards";
+export const PAYMENT_CALENDAR_PAGE = "payment-calendar";
+
 export const GOTO_PAGES = Object.freeze({
-	dashboards: "DashboardsPage",
-	"payment-calendar": "PaymentCalendar",
+	[DASHBOARDS_PAGE]: "DashboardsPage",
+	[PAYMENT_CALENDAR_PAGE]: "PaymentCalendar",
 });

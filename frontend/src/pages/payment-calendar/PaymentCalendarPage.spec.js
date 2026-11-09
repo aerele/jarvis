@@ -1,4 +1,6 @@
 import { vi, afterEach } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { mount, flushPromises } from "@vue/test-utils";
 vi.mock("@/api/paymentCalendar", async () =>
 	(await import("../../../tests/payment-calendar/fixtures")).fakeApi()
@@ -47,6 +49,39 @@ describe("Native Payment Calendar page", () => {
 		await wrapper.get(".pcal-tabs button:nth-child(3)").trigger("click");
 		await flushPromises();
 		expect(api.getDayDetail.mock.calls.at(-1)[2]).toBe("Receivable");
+	});
+	it("moves focus to the title on arrival from the chat hand-off, and only then", async () => {
+		const host = document.createElement("div");
+		document.body.appendChild(host);
+		try {
+			window.history.replaceState({}, "");
+			wrapper = mount(PaymentCalendarPage, { attachTo: host });
+			await flushPromises();
+			const title = wrapper.get("#pcal-title");
+			expect(title.attributes("tabindex")).toBe("-1");
+			expect(document.activeElement).not.toBe(title.element);
+			wrapper.unmount();
+			window.history.replaceState({ fromChat: true }, "");
+			wrapper = mount(PaymentCalendarPage, { attachTo: host });
+			await flushPromises();
+			expect(document.activeElement).toBe(wrapper.get("#pcal-title").element);
+			// one-shot: the flag is cleared, so a remount (reload / Forward) does not re-focus
+			expect(window.history.state?.fromChat).toBeUndefined();
+			wrapper.unmount();
+			(document.activeElement || document.body).blur?.();
+			wrapper = mount(PaymentCalendarPage, { attachTo: host });
+			await flushPromises();
+			expect(document.activeElement).not.toBe(wrapper.get("#pcal-title").element);
+		} finally {
+			window.history.replaceState({}, "");
+			host.remove();
+		}
+	});
+	it("hides the focus ring on the programmatically focused title, but keeps it for the keyboard", () => {
+		const css = fs.readFileSync(path.resolve(__dirname, "payment-calendar.css"), "utf8");
+		expect(css).toMatch(/#pcal-title:focus:not\(:focus-visible\)\s*\{\s*outline:\s*none;\s*\}/);
+		// only the not-focus-visible case: a plain `:focus` rule would hide the keyboard ring too
+		expect(css).not.toMatch(/#pcal-title:focus\s*\{/);
 	});
 	it("removes financial panels at expiry and offers explicit recovery", async () => {
 		await render();

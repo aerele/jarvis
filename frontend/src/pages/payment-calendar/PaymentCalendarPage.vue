@@ -7,7 +7,7 @@
 			<div class="pcal-title-row">
 				<div>
 					<p class="pcal-eyebrow">CASH PLANNING</p>
-					<h1 id="pcal-title">Payment Calendar</h1>
+					<h1 id="pcal-title" tabindex="-1">Payment Calendar</h1>
 					<p class="pcal-subtitle">
 						Know what is due. See the days that need attention.
 					</p>
@@ -412,5 +412,13 @@ watch(
 );
 onMounted(() => {
 	void model.initialize();
+	// Arriving from the chat hand-off (ChatView passes history state { fromChat: true }):
+	// move focus to the title so a keyboard / screen-reader user lands on the page,
+	// not on the chat they just left. The flag is one-shot: clear it so a reload or
+	// a Forward onto this entry does not pull focus again.
+	if (window.history.state?.fromChat === true) {
+		document.getElementById("pcal-title")?.focus();
+		window.history.replaceState({ ...window.history.state, fromChat: undefined }, "");
+	}
 });
 </script>

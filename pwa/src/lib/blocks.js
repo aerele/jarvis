@@ -25,7 +25,7 @@ const STRIP_RES = [
 	/```jarvis-skill[ \t]*\n[\s\S]*?```/g,
 	/```jarvis-macro[ \t]*\n[\s\S]*?```/g,
 	// A hand-off to a page of the web app. The phone cannot follow it; the chip from
-	// hasDashboardsGoto opens the conversation in the web chat instead.
+	// gotoChipPage opens the conversation in the web chat instead.
 	/```jarvis-goto[ \t]*\n[\s\S]*?```/g,
 	/```jarvis-chart[ \t]*\n[\s\S]*?```/g,
 	/```mermaid[ \t]*\n[ \t]*xychart-beta[\s\S]*?```/g,
@@ -53,14 +53,18 @@ export function countDiagrams(text) {
 }
 
 /**
- * Whether the reply carries a valid ```jarvis-goto``` for the Dashboards page (the
- * web chat's parseGoto rules). Only that page gets a chip here: the phone sends no
- * payment-calendar capability, so it is never offered one, and a block for any
- * other page is stripped with no chip.
+ * The page a valid ```jarvis-goto``` names (the web chat's parseGoto rules), or
+ * null. Both pages get the "Open in web chat" chip: the phone cannot follow a
+ * hand-off, and a calendar lead-in ("Opening the Payment Calendar for you") with
+ * no way through would dead-end. The phone itself never sends the payment-calendar
+ * capability; the chip only helps when the agent emits one anyway (it opens the
+ * web chat, where the card offers the page). A block for any other page is
+ * stripped with no chip.
+ * @returns {"dashboards"|"payment-calendar"|null}
  */
-export function hasDashboardsGoto(content) {
-	if (!content || !content.includes("jarvis-goto")) return false;
-	return parseGoto(content)?.page === "dashboards";
+export function gotoChipPage(content) {
+	if (!content || !content.includes("jarvis-goto")) return null;
+	return parseGoto(content)?.page || null;
 }
 
 /** ```jarvis-cards``` → {title, cards:[{title, subtitle, doctype, name, fields}]}. */

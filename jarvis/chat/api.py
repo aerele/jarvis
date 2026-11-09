@@ -2920,7 +2920,10 @@ def send_message(
 	# query-report route, OR {page: "triggers"|"dashboards"} when the user is
 	# on the Triggers / Dashboards page, OR {focus_connector: {key, label}}
 	# when the composer's connector-focus pill is armed (binding for the turn:
-	# jarvis.chat.connector_focus gates the tools too). Only forwarded when
+	# jarvis.chat.connector_focus gates the tools too), OR {handoff_pages:
+	# ["payment-calendar"]} when the web chat can open the Payment Calendar
+	# page (a capability, not a viewing context; see the allow-list below
+	# and turn_handler._payment_calendar_clause). Only forwarded when
 	# present, for the same not-yet-reloaded worker safety as attachments
 	# above. The narrowing here is deliberate (allow-list, not passthrough) so
 	# a compromised / stale frontend can't smuggle arbitrary keys into the
@@ -2948,12 +2951,24 @@ def send_message(
 				if isinstance(_focus_raw, dict) and _focus_raw.get("key") and _focus_raw.get("label")
 				else None
 			)
+			# Payment Calendar hand-off capability: the web chat names the pages it
+			# can open. A literal allow-list of ONE value (never a passthrough): the
+			# server hint (turn_handler._payment_calendar_clause) only checks that
+			# this one literal is present, and still gates on the switch and on the
+			# user's own visibility. Anything else the client sends is dropped.
+			_pages_raw = ctx.get("handoff_pages") if isinstance(ctx, dict) else None
+			handoff_pages = (
+				["payment-calendar"]
+				if isinstance(_pages_raw, list) and "payment-calendar" in _pages_raw
+				else []
+			)
 			if isinstance(ctx, dict) and (
 				ctx.get("doctype")
 				or ctx.get("report_name")
 				or ground_wiki
 				or ctx.get("page") in ("triggers", "dashboards")
 				or focus_connector
+				or handoff_pages
 			):
 				enqueue_kwargs["context"] = {
 					"doctype": ctx.get("doctype") or "",
@@ -2972,6 +2987,8 @@ def send_message(
 				# this pill existed (mirrors how `page` below is handled).
 				if focus_connector:
 					enqueue_kwargs["context"]["focus_connector"] = focus_connector
+				if handoff_pages:
+					enqueue_kwargs["context"]["handoff_pages"] = handoff_pages
 				# `page` is a literal allow-list of two values (not a
 				# passthrough) — the prompt-side only consumes "triggers"
 				# and "dashboards".

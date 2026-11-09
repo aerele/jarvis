@@ -32,7 +32,7 @@ import * as api from "../api";
 import { store } from "../store";
 import {
 	countDiagrams,
-	hasDashboardsGoto,
+	gotoChipPage,
 	parseAction,
 	parseCards,
 	parseCharts,
@@ -483,8 +483,9 @@ const view = (m) => {
 		charts,
 		// Mermaid diagrams can't be drawn here; surface a chip to the web chat.
 		diagrams: countDiagrams(content),
-		// A hand-off to the Dashboards page can't be followed here either; same chip.
-		dashboardsGoto: hasDashboardsGoto(content),
+		// A hand-off to the Dashboards page or the Payment Calendar can't be followed
+		// here either; same chip ("dashboards" | "payment-calendar" | null).
+		gotoPage: gotoChipPage(content),
 		action: parseAction(content),
 		skills: parseSkillsUsed(content),
 		took: spanBetween(m.creation, m.modified),
@@ -508,10 +509,11 @@ const view = (m) => {
 	};
 };
 
-// Title of the "Open in web chat" chip: the diagram count, else the Dashboards hand-off.
+// Title of the "Open in web chat" chip: the diagram count, else the page the goto names.
 function chipTitle(v) {
 	if (v.diagrams > 1) return v.diagrams + " diagrams";
-	return v.diagrams ? "Diagram" : "Dashboards";
+	if (v.diagrams) return "Diagram";
+	return v.gotoPage === "payment-calendar" ? "Payment Calendar" : "Dashboards";
 }
 
 // Mirrors ChatView.vue's (desktop) errorInfo(): a live run:error's code, when
@@ -1675,7 +1677,7 @@ onUnmounted(() => {
 					<RecordCards v-if="it.view.cards" :data="it.view.cards" />
 					<ChartCard v-for="(c, ci) in it.view.charts" :key="ci" :spec="c" />
 					<a
-						v-if="it.view.diagrams || it.view.dashboardsGoto"
+						v-if="it.view.diagrams || it.view.gotoPage"
 						class="jv-diagram-chip"
 						:href="webChatUrl"
 						target="_blank"

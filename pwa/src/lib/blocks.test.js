@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
 	countDiagrams,
-	hasDashboardsGoto,
+	gotoChipPage,
 	parseCards,
 	stripAgentBlocks,
 	toolStatus,
@@ -117,32 +117,39 @@ test("stripAgentBlocks: a goto naming an unknown page is stripped too", () => {
 	assert.equal(stripAgentBlocks(`Hi\n${goto("settings")}`), "Hi");
 });
 
-test("hasDashboardsGoto: true only for a valid dashboards goto", () => {
-	assert.equal(hasDashboardsGoto(`Opening it.\n${goto("dashboards")}`), true);
-	// Extra keys are ignored; surrounding whitespace in the values is trimmed.
+test("gotoChipPage: the page a valid goto names, trimmed, extra keys ignored", () => {
+	assert.equal(gotoChipPage(`Opening it.\n${goto("dashboards")}`), "dashboards");
 	assert.equal(
-		hasDashboardsGoto(fence("jarvis-goto", '{"page":" dashboards ","prompt":" x ","y":1}')),
-		true
+		gotoChipPage(fence("jarvis-goto", '{"page":" dashboards ","prompt":" x ","y":1}')),
+		"dashboards"
 	);
 });
 
-test("hasDashboardsGoto: payment-calendar gets no chip (the phone sends no capability)", () => {
-	assert.equal(hasDashboardsGoto(goto("payment-calendar")), false);
+// A0's rule was "no chip for payment-calendar (the phone sends no capability)". It is
+// intentionally REPLACED: the lead-in the agent writes before the block would otherwise
+// be a dead end on the phone, so a valid calendar goto gets the web-chat chip too.
+test("gotoChipPage: a valid payment-calendar goto gets the chip as well", () => {
+	assert.equal(gotoChipPage(goto("payment-calendar")), "payment-calendar");
+	assert.equal(
+		gotoChipPage(`Opening the Payment Calendar.\n${goto("payment-calendar", " per day ")}`),
+		"payment-calendar"
+	);
+	assert.equal(gotoChipPage(goto("payment-calendar", "   ")), null, "blank prompt");
 });
 
-test("hasDashboardsGoto: an invalid goto gets no chip", () => {
-	assert.equal(hasDashboardsGoto(goto("settings")), false, "unknown page");
-	assert.equal(hasDashboardsGoto(goto("dashboards", "   ")), false, "blank prompt");
-	assert.equal(hasDashboardsGoto(fence("jarvis-goto", '{"page":"dashboards"}')), false);
-	assert.equal(hasDashboardsGoto(fence("jarvis-goto", "{not json")), false, "bad JSON");
-	assert.equal(hasDashboardsGoto(fence("jarvis-goto", "[1]")), false, "not an object");
-	assert.equal(hasDashboardsGoto(fence("jarvis-goto", "null")), false, "null");
+test("gotoChipPage: an invalid goto gets no chip", () => {
+	assert.equal(gotoChipPage(goto("settings")), null, "unknown page");
+	assert.equal(gotoChipPage(goto("dashboards", "   ")), null, "blank prompt");
+	assert.equal(gotoChipPage(fence("jarvis-goto", '{"page":"dashboards"}')), null);
+	assert.equal(gotoChipPage(fence("jarvis-goto", "{not json")), null, "bad JSON");
+	assert.equal(gotoChipPage(fence("jarvis-goto", "[1]")), null, "not an object");
+	assert.equal(gotoChipPage(fence("jarvis-goto", "null")), null, "null");
 	assert.equal(
-		hasDashboardsGoto('```jarvis-goto\n{"page":"dashboards","prompt":"x"}'),
-		false,
+		gotoChipPage('```jarvis-goto\n{"page":"dashboards","prompt":"x"}'),
+		null,
 		"unclosed fence"
 	);
-	assert.equal(hasDashboardsGoto("no block here"), false);
-	assert.equal(hasDashboardsGoto(""), false);
-	assert.equal(hasDashboardsGoto(null), false);
+	assert.equal(gotoChipPage("no block here"), null);
+	assert.equal(gotoChipPage(""), null);
+	assert.equal(gotoChipPage(null), null);
 });

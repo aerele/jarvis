@@ -301,7 +301,7 @@ test("T5b: the standalone artifact card and the generic activity line are gone �
 test("the goto morph line latches on a complete streaming goto and survives run:end (does not derive from m.streaming)", () => {
 	assert.match(chatSrc, /const gotoMorph = ref\(null\);/);
 	const watchBody = fnBody(chatSrc, "watch(streamingGoto, (g) => {");
-	assert.match(watchBody, /if \(g\) gotoMorph\.value = g;/);
+	assert.match(watchBody, /gotoDecision\(g, gotoInputs\(streamingMessage\.value, currentRunId\.value\)\)\.autoOpen\)\s*gotoMorph\.value = g;/);
 	// T5b: the morph line's own markup (JarvisMark + jv-goto-morph) is gone —
 	// one box per turn now — but the latch and its navigation are untouched,
 	// and the exact copy is reused verbatim as boxViewFor's top-precedence
@@ -311,7 +311,7 @@ test("the goto morph line latches on a complete streaming goto and survives run:
 	const overrideFn = fnBody(chatSrc, "function overrideFor(m) {");
 	assert.match(
 		overrideFn,
-		/if \(gotoMorph\.value\) return \{ text: "Taking you to the Dashboards builder" \};/
+		/if \(gotoMorph\.value\) return \{ text: gotoPageInfo\(gotoMorph\.value\.page\)\.morph \};/
 	);
 	// cleared on the next turn / an error / a stop / leaving the conversation —
 	// deliberately NOT cleared in run:end, since surviving that instant (up to
@@ -358,8 +358,20 @@ test("the goto morph line latches on a complete streaming goto and survives run:
 	assert.match(runEnd, /gotoMorph\.value = goto;/);
 	assert.match(runEnd, /prefers-reduced-motion/);
 	assert.match(runEnd, /GOTO_MORPH_HOLD_MS/);
-	assert.match(runEnd, /if \(gotoMorph\.value\) gotoDashboards\(goto\.prompt, m\.name\);/);
+	assert.match(runEnd, /if \(!gotoMorph\.value\) return;/);
+	assert.match(runEnd, /openGotoAction\(goto, decision\.action, m\.name, open\);/);
 	assert.match(runEnd, /if \(!redirected\) dropGotoMorph\(\);/);
+	// a duplicate run:end inside the hold must not leave a second live timer:
+	// the pending one is cleared BEFORE gotoNavTimer is reassigned (clearing
+	// after the reassignment would cancel the new timer and never navigate)
+	const clearAt = runEnd.indexOf("clearTimeout(gotoNavTimer);");
+	const setAt = runEnd.indexOf("gotoNavTimer = setTimeout(");
+	assert.notEqual(clearAt, -1, "run:end must clear the pending hold timer");
+	assert.notEqual(setAt, -1, "run:end must arm the hold timer");
+	assert.ok(
+		clearAt < setAt,
+		"clearTimeout(gotoNavTimer) must run before gotoNavTimer is reassigned"
+	);
 	// the unconditional clear must come AFTER the redirect gate, not before it
 	assert.ok(
 		runEnd.indexOf("if (!redirected) dropGotoMorph();") > runEnd.indexOf("redirected = true;"),

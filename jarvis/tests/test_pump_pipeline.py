@@ -546,6 +546,30 @@ class TestPrepareBindsConnectorFocus(_PipelineCase):
 		self.assertIsNone(connector_focus.current(conv))
 
 
+class TestPrepareForwardsRunIdToTheHandoffHint(_PipelineCase):
+	"""The pump is the default transport: prepare must hand its run_id to the prompt
+	assembly, or the Payment Calendar hand-off hint lines carry run_id null."""
+
+	def test_the_hint_telemetry_line_carries_the_turns_run_id(self):
+		from jarvis import telemetry
+
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="what do I owe suppliers per day")
+		payload = json.dumps({"context": {"handoff_pages": ["payment-calendar"]}})
+		self._mk_turn(conv, "pmp_pc_run", seed, "queued", version=1, reserved=1, dispatch_payload=payload)
+		with (
+			self._gateway(_FakeSess()),
+			self._pump_on(),
+			patch("jarvis.chat.turn_handler.payment_calendar_handoff_enabled", return_value=True),
+			patch("jarvis.chat.turn_handler._visible_as", return_value=True),
+			patch.object(telemetry, "_emit") as emit,
+		):
+			prepare.run_prepare("pmp_pc_run", self._target)
+		self.assertEqual(self._state("pmp_pc_run"), "ready")
+		lines = [c.args[0] for c in emit.call_args_list if c.args[0]["kind"] == "pc_handoff_hint"]
+		self.assertEqual([(ln["outcome"], ln["run_id"]) for ln in lines], [("on", "pmp_pc_run")])
+
+
 class TestPanel5PrepareKill(_PipelineCase):
 	def test_kill_during_preparing_recovers_and_session_at_most_once(self):
 		conv = self._mk_conv()

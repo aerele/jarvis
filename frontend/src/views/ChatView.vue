@@ -1716,16 +1716,20 @@
 								</div>
 								<!-- redirect card: dashboard builds no longer run inline in main
 								     chat (jarvis#884) - the agent restates the request and points
-								     here with ```jarvis-goto. Stays clickable in history so an
-								     old transcript still has a way through, even though the
-								     redirect itself only auto-fires once, live (see gotoDashboards
-								     / the run:end handler). jarvis#912: every click on an old card
-								     hands off through the same fired-stamp lookup as the live
-								     redirect, so a second/third click resumes the builder
-								     conversation the first hand-off created instead of starting a
-								     new one. -->
+								     here with ```jarvis-goto (to Dashboards, or to the Payment
+								     Calendar; the copy comes from the page map in lib/chatGoto.js).
+								     The Dashboards subtitle is the agent's restated request; the
+								     Payment Calendar's is fixed copy (gotoCardCopy), because the
+								     calendar does not apply the restatement.
+								     Stays clickable in history so an old transcript still has a way
+								     through, even though the redirect itself only auto-fires once,
+								     live (see openGotoAction / the run:end handler). jarvis#912:
+								     every click on an old Dashboards card hands off through the
+								     same fired-stamp lookup as the live redirect, so a second/third
+								     click resumes the builder conversation the first hand-off
+								     created instead of starting a new one. -->
 								<template v-if="hasCurrentMessageSnapshot">
-									<div v-if="gotoOf(m)" class="jv-macrocard">
+									<div v-if="gotoCardOf(m)" class="jv-macrocard jv-macrocard--goto">
 										<div class="jv-macrocard-ic">
 											<svg
 												width="16"
@@ -1741,18 +1745,18 @@
 											</svg>
 										</div>
 										<div class="jv-macrocard-txt">
-											<span class="jv-macrocard-title"
-												>Continue in Dashboards</span
-											>
+											<span class="jv-macrocard-title">{{
+												gotoCardOf(m).title
+											}}</span>
 											<span class="jv-macrocard-sub">{{
-												gotoOf(m).prompt
+												gotoCardOf(m).sub
 											}}</span>
 										</div>
 										<button
 											class="jv-macrocard-btn"
-											@click="gotoDashboards(gotoOf(m).prompt, m.name)"
+											@click="openGotoCard(m)"
 										>
-											Open Dashboards
+											{{ gotoCardOf(m).button }}
 										</button>
 									</div>
 								</template>
@@ -4767,11 +4771,18 @@ import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTool
 import {
 	parseGoto,
 	gotoFiredKey,
-	parseFiredStamp,
 	claimGotoFire,
 	builderSeed,
 	requestBefore,
+	gotoDecision,
+	gotoCardCopy,
+	gotoPageInfo,
+	hasInteractiveFence,
+	focusInsideField,
+	modalIsOpen,
+	pruneGotoStamps,
 } from "@/lib/chatGoto";
+import { PAYMENT_CALENDAR_PAGE } from "../../../jarvis/public/js/shared/goto_pages.mjs";
 import { normaliseAction } from "@/lib/chatAction";
 import { isSilentRun, shouldStopSpinning, streamingRowIsLive } from "@/lib/silentRun";
 import { markMissing, panelField as _panelField } from "@/lib/docFields";
@@ -7638,9 +7649,11 @@ function askOf(m) {
 function gotoOf(m) {
 	return parseGoto((m && m.content) || "");
 }
-// Shared by the card's button and the run:end auto-redirect below: stash the
-// restated request for the Dashboards builder to pick up on its own mount,
-// then navigate there.
+// The Dashboards leg of openGotoAction (the card's button and the run:end
+// auto-redirect both reach it through that dispatcher): stash the restated
+// request for the Dashboards builder to pick up on its own mount, then navigate
+// there. A calendar goto lands here too when the user cannot open the calendar
+// (gotoDecision's action is then "dashboards"), with the same prompt.
 //
 // jarvis#912: the card button has no per-click guard (the run:end
 // auto-redirect fires once, live, but the card stays clickable on every
@@ -7650,7 +7663,7 @@ function gotoOf(m) {
 // (see lib/chatGoto.js) now remembers which builder conversation the FIRST
 // hand-off for this message landed on: a later trigger navigates there
 // instead of building again. `messageId` is optional only for callers that
-// predate #912's stamp lookup; every real caller below passes it.
+// predate #912's stamp lookup; every real caller passes it.
 //
 // jarvis#912 round 2: TWO triggers for the same message this close together
 // (a double-click - the card still has no per-click guard) used to both read
@@ -7665,37 +7678,125 @@ function gotoOf(m) {
 //
 // The builder is sent the restatement with the user's own words under it
 // (builderSeed), so a detail the restatement dropped still reaches the build.
+//
+// Storage can throw (private mode, blocked site data): a failed read counts as
+// "no stamp" and a failed write is skipped, so the hand-off itself still works.
+function readGotoStamp(key) {
+	try {
+		return localStorage.getItem(key);
+	} catch (e) {
+		return null;
+	}
+}
+function writeGotoStamp(key, value) {
+	try {
+		localStorage.setItem(key, value);
+		pruneGotoStamps(localStorage);
+	} catch (e) {
+		// the stamp is a guard against repeats, not a requirement for the hand-off
+	}
+}
 function gotoDashboards(prompt, messageId) {
 	const view = captureChatView(messageId || "");
 	if (!messageActionIsCurrent(view)) return;
 	const text = builderSeed(prompt, requestBefore(messages.value, messageId));
 	const key = messageId ? gotoFiredKey(messageId) : null;
-	const claim = key ? claimGotoFire(localStorage.getItem(key)) : { build: true };
+	const claim = key ? claimGotoFire(readGotoStamp(key)) : { build: true };
 	if (claim.build) {
-		if (key) {
-			localStorage.setItem(key, claim.stamp);
-			// Bounded stamp set: these keys are write-once per redirect and
-			// would otherwise accumulate for the life of the origin. Keep the
-			// newest ~50 (the fired-stamp check above is the real guard; this
-			// only defends reloads of RECENT transcripts).
-			const stamps = [];
-			for (let i = 0; i < localStorage.length; i++) {
-				const k = localStorage.key(i);
-				if (k && k.startsWith("jarvis:goto-fired:")) {
-					const parsed = parseFiredStamp(localStorage.getItem(k));
-					stamps.push([k, parsed ? parsed.t : 0]);
-				}
-			}
-			stamps
-				.sort((a, b) => b[1] - a[1])
-				.slice(50)
-				.forEach(([k]) => localStorage.removeItem(k));
-		}
+		if (key) writeGotoStamp(key, claim.stamp);
 		setDashboardPrefill({ text, autoSend: true, messageId });
 	} else if (claim.conv) {
 		setDashboardPrefill({ text, resume: true, conv: claim.conv, messageId });
 	}
 	router.push("/dashboards");
+}
+// The calendar hand-off: navigate to the fixed route from the page map. Nothing is
+// stashed for a builder (the calendar reads no prefill), a card click is never
+// limited by the 45 s claim window above - it always navigates - and no stamp is
+// written: the automatic open's exactly-once is the ownership token openGotoAction
+// consumes. `fromChat` lets the page move focus to its title on arrival. A failed
+// navigation (a stale route chunk, say) drops the morph line instead of leaving it.
+function gotoPaymentCalendar(messageId) {
+	const view = captureChatView(messageId || "");
+	if (!messageActionIsCurrent(view)) return;
+	router
+		.push({ ...gotoPageInfo(PAYMENT_CALENDAR_PAGE).route, state: { fromChat: true } })
+		.catch(() => dropGotoMorph());
+}
+// The one dispatcher for a goto's navigation: the card click and the run:end
+// auto-open both go through it, with the action gotoDecision chose. `auto` is the
+// run:end auto-open: for the calendar it consumes this run's ownership token FIRST
+// (before anything can fail), so a replayed run:end or a reload finds no ownership
+// and the page never opens twice; a card click never touches it.
+function openGotoAction(goto, action, messageId, { auto = false, runId = "" } = {}) {
+	if (action === PAYMENT_CALENDAR_PAGE) {
+		if (auto) ownRuns.delete(runId);
+		gotoPaymentCalendar(messageId);
+	} else gotoDashboards(goto.prompt, messageId);
+}
+// The existing boot flag, strictly: the page itself re-checks it in its route
+// guard and the backend gates the data. Read at call time (it is not reactive).
+function canViewCalendar() {
+	return window.can_view_payment_calendar === true;
+}
+// Run ids of the turns THIS tab sent (filled from the accepted send's response).
+// A second tab, a reload, and a turn started by anything else are not "own", so
+// they get the card only.
+const ownRuns = new Set();
+// A long session must not grow the set without bound: keep the newest runs only
+// (a Set iterates in insertion order, so the first entry is the oldest).
+const OWN_RUNS_MAX = 50;
+function rememberOwnRun(runId) {
+	ownRuns.add(runId);
+	while (ownRuns.size > OWN_RUNS_MAX) ownRuns.delete(ownRuns.values().next().value);
+}
+// Something half-written or open that an automatic page change would destroy: the
+// composer's text, an attachment, or a recording; any OTHER field in the chat view
+// being typed in (the focused composer alone is not a draft - its text is checked
+// above, and it keeps focus after every send); or a dialog open anywhere (dialogs
+// are teleported out of the chat view, so the whole document is searched).
+function composerHasDraft() {
+	return (
+		input.value.trim().length > 0 ||
+		pendingFiles.value.length > 0 ||
+		micState.value === "recording" ||
+		focusInsideField(document.activeElement, rootEl.value, composerRef.value?.el) ||
+		modalIsOpen(document)
+	);
+}
+// A parked confirmation of THIS turn is on screen: the user has a card to answer.
+function turnHasParkedCard(runId) {
+	return pendingActions.value.some(
+		(pa) => pa.conversation === currentId.value && !!runId && pa.run_id === runId
+	);
+}
+// The inputs gotoDecision needs for a LIVE turn (the streaming latch and run:end).
+function gotoInputs(m, runId) {
+	return {
+		canView: canViewCalendar(),
+		ownTurn: ownRuns.has(runId),
+		draft: composerHasDraft(),
+		queued: !!queuedTurn.value,
+		interactive: hasInteractiveFence(m.content) || turnHasParkedCard(runId),
+		live: true,
+		error: !!m.error,
+		stopped: !!m.stopped,
+		stamp: readGotoStamp(gotoFiredKey(m.name)),
+	};
+}
+// What the card shows for a message. The copy follows the decision's ACTION, so a
+// calendar goto the user can no longer open reads as Dashboards (with the prompt,
+// and a line saying why); see gotoCardCopy.
+function gotoCardOf(m) {
+	const goto = gotoOf(m);
+	return gotoCardCopy(goto, gotoDecision(goto, { canView: canViewCalendar() }));
+}
+// Every click on the card navigates, however old the message.
+function openGotoCard(m) {
+	const goto = gotoOf(m);
+	if (!goto) return;
+	const decision = gotoDecision(goto, { canView: canViewCalendar() });
+	openGotoAction(goto, decision.action, m.name);
 }
 // Canonicalised at the single _ACTION_RE parse point so every consumer (render
 // gate, build watcher, buildDraftModel, edit panel, apply) sees ONE shape. See
@@ -9876,21 +9977,24 @@ const dashboardBuildTurn = computed(() =>
 );
 // ---- pre-redirect morph line (jarvis#884) ─────────────────────────────────
 // The moment the turn CURRENTLY streaming into this conversation carries a
-// COMPLETE ```jarvis-goto block, the generic "Working on it…" line morphs in
-// place into a branded "Taking you to the Dashboards builder" line. gotoOf
-// only returns truthy once the closing fence has actually arrived (chatGoto.js
-// requires it), so "complete" falls out of the existing parser for free —
-// nothing here holds back an unterminated block itself.
+// COMPLETE ```jarvis-goto block that will actually navigate (gotoDecision's
+// autoOpen, off the live inputs), the generic "Working on it…" line morphs in
+// place into the page's own line ("Taking you to the Dashboards builder" / "…the
+// Payment Calendar"; see gotoPageInfo). gotoOf only returns truthy once the
+// closing fence has actually arrived (chatGoto.js requires it), so "complete"
+// falls out of the existing parser for free - nothing here holds back an
+// unterminated block itself.
 //
 // Rendering off `streamingGoto` directly would drop the line the instant
-// run:end flips `m.streaming` false (line ~8668), which lands BEFORE
-// gotoDashboards() fires a few statements later — exactly the "instant
-// between run:end and navigation" the line is required to survive, and a
-// lazy-loaded /dashboards route chunk can turn that instant into a real
-// visible gap. So this is a LATCH: once a turn earns the morph, `gotoMorph`
-// stays truthy until the next turn starts, errors, is stopped, or the
-// conversation is left — never cleared by run:end itself, since surviving
-// that is the entire point.
+// run:end flips `m.streaming` false, which lands BEFORE openGotoAction() fires
+// a few statements later (immediately, or after the hold below) - exactly the
+// "instant between run:end and navigation" the line is required to survive, and
+// a lazy-loaded route chunk can turn that instant into a real visible gap. So
+// this is a LATCH: once a turn earns the morph, `gotoMorph` stays truthy until
+// the next turn starts, errors, is stopped, the conversation is left, a failed
+// calendar navigation, or the run:end handler finds no navigation coming
+// (dropGotoMorph) - never cleared by run:end itself when it DOES navigate, since
+// surviving that is the entire point.
 const streamingMessage = computed(
 	() => [...messages.value].reverse().find((m) => m.role === "assistant" && m.streaming) || null
 );
@@ -9900,7 +10004,9 @@ const streamingGoto = computed(() => {
 });
 const gotoMorph = ref(null);
 watch(streamingGoto, (g) => {
-	if (g) gotoMorph.value = g;
+	// Only a goto that will actually navigate earns the morph line.
+	if (g && gotoDecision(g, gotoInputs(streamingMessage.value, currentRunId.value)).autoOpen)
+		gotoMorph.value = g;
 });
 // The goto block usually lands with the reply's LAST tokens, so without a
 // short hold the morph line gets a sub-frame of screen time before the
@@ -9956,7 +10062,7 @@ const MEDIA_YIELD_TOOLS = new Set([
 // The live box's `override`: whichever state currently owns the CURRENT
 // step, in precedence order. Only one ever applies to a given row at a time.
 function overrideFor(m) {
-	if (gotoMorph.value) return { text: "Taking you to the Dashboards builder" };
+	if (gotoMorph.value) return { text: gotoPageInfo(gotoMorph.value.page).morph };
 	if (recovering.value && m && recovering.value.message_id === m.name) {
 		// agent-yield after a media tool means the model handed back control
 		// waiting on the asset (image/video/music), not a stalled connection.
@@ -11414,6 +11520,7 @@ async function retry(messageId) {
 			}
 		}
 		if (r && r.ok !== false) {
+			if (r.run_id) rememberOwnRun(r.run_id);
 			workersWarnShown.value = false; // a retry got through: workers are back
 			// A retry that got through also proves any maintenance hold lifted.
 			clearHold();
@@ -11569,6 +11676,7 @@ async function settleRecoveredSend(m, r, view) {
 		m.deliveryNote = r.message || sendRejectionCopy(r.reason, brand.agentName, r).message;
 		return;
 	}
+	if (r.ok !== false && r.run_id) rememberOwnRun(r.run_id);
 	consumeRecoveredContext(m.sendRequest, scope);
 	voiceStore?.acknowledge(m.voiceAck || []);
 	for (const id of m.failedVoiceIds || []) voiceStore?.markSentWithout(id);
@@ -11904,6 +12012,11 @@ async function send(textArg, resendAck) {
 			...(sendCtx || {}),
 			focus_connector: { key: _sentFocus.key, label: _sentFocus.label },
 		};
+	// Hand-off capability: tells the server this client can open the Payment Calendar
+	// (the existing boot flag - no new one). Only ever ADDS a key; a client without it
+	// sends none and gets today's behaviour.
+	if (canViewCalendar())
+		sendCtx = { ...(sendCtx || {}), handoff_pages: [PAYMENT_CALENDAR_PAGE] };
 	// The confirmation cards currently on screen, in the order the numbers are
 	// shown, so a typed "confirm 2" binds to the card the user actually sees.
 	// Deliberately confirm-only (step-by-step): send_message forwards these
@@ -12140,6 +12253,7 @@ async function send(textArg, resendAck) {
 			return;
 		}
 		if (r && r.ok !== false) {
+			if (r.run_id) rememberOwnRun(r.run_id);
 			_pendingSends.remove(_pendingSends.scopeOf(_optBubble), _optBubble.name);
 			_optBubble.deliveryState = undefined;
 			// An accepted send proves the CP-side gate passed, i.e. any upgrade
@@ -12869,12 +12983,15 @@ function onEvent(p) {
 				scheduleMermaid(captureChatView(), 900);
 			}
 			// jarvis#884: a ```jarvis-goto block on the turn that just ENDED, live,
-			// in THIS mounted view, auto-redirects to the Dashboards builder exactly
-			// once. Gated the same way markAnswerLanded is above (never a stopped or
-			// errored row), plus a durable stamp so a later reload/revisit of the
-			// same transcript never re-fires it. Only the live socket terminal ever
-			// reaches this branch, so an old message opened again never gets here at
-			// all, but the stamp is the belt-and-braces the spec asks for.
+			// in THIS mounted view, auto-redirects exactly once, as gotoDecision (see
+			// lib/chatGoto.js) decides: to the Dashboards builder, or - only for a turn
+			// this tab sent, with an empty composer and no queued turn, by a user who
+			// can open it - to the Payment Calendar. Gated the same way markAnswerLanded
+			// is above (never a stopped or errored row), plus a durable stamp so a later
+			// reload/revisit of the same transcript never re-fires it. Only the live
+			// socket terminal ever reaches this branch, so an old message opened again
+			// never gets here at all, but the stamp is the belt-and-braces the spec
+			// asks for.
 			//
 			// jarvis#912 round 2: this check is READ-ONLY. The stamp itself is
 			// claimed inside gotoDashboards (via claimGotoFire - see lib/chatGoto.js)
@@ -12892,29 +13009,47 @@ function onEvent(p) {
 			// must drop it, or the morph line would animate forever with no
 			// redirect coming.
 			let redirected = false;
-			if (m && !m.error && !m.stopped) {
-				const goto = gotoOf(m);
-				if (goto && !localStorage.getItem(gotoFiredKey(m.name))) {
-					redirected = true;
-					// Latch explicitly: when the block lands WITH the terminal, the
-					// streaming watcher never saw it, and the hold below is the
-					// morph line's only screen time.
-					gotoMorph.value = goto;
-					const reducedMotion =
-						window.matchMedia &&
-						window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-					if (reducedMotion) {
-						gotoDashboards(goto.prompt, m.name);
-					} else {
-						gotoNavTimer = setTimeout(() => {
-							gotoNavTimer = null;
-							// dropGotoMorph() clearing the latch (new turn, chat switch,
-							// unmount) is the cancel signal for this pending navigation.
-							if (gotoMorph.value) gotoDashboards(goto.prompt, m.name);
-						}, GOTO_MORPH_HOLD_MS);
-					}
+			const goto = m ? gotoOf(m) : null;
+			const decision = goto ? gotoDecision(goto, gotoInputs(m, p.run_id)) : null;
+			if (decision && decision.autoOpen) {
+				redirected = true;
+				// Latch explicitly: when the block lands WITH the terminal, the
+				// streaming watcher never saw it, and the hold below is the
+				// morph line's only screen time.
+				gotoMorph.value = goto;
+				const reducedMotion =
+					window.matchMedia &&
+					window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+				const open = { auto: true, runId: p.run_id };
+				if (reducedMotion) {
+					openGotoAction(goto, decision.action, m.name, open);
+				} else {
+					// A duplicate run:end inside the hold must not leave a second timer.
+					clearTimeout(gotoNavTimer);
+					gotoNavTimer = setTimeout(() => {
+						gotoNavTimer = null;
+						// dropGotoMorph() clearing the latch (new turn, chat switch,
+						// unmount) is the cancel signal for this pending navigation.
+						if (!gotoMorph.value) return;
+						// The calendar open also needs a still-empty composer: the user
+						// may have started typing during the hold. (Dashboards: unchanged.)
+						if (
+							goto.page === PAYMENT_CALENDAR_PAGE &&
+							!gotoDecision(goto, gotoInputs(m, p.run_id)).autoOpen
+						) {
+							// Refused: the ownership goes with it, or a replayed run:end
+							// after the composer clears would open the page late.
+							ownRuns.delete(p.run_id);
+							dropGotoMorph();
+							return;
+						}
+						openGotoAction(goto, decision.action, m.name, open);
+					}, GOTO_MORPH_HOLD_MS);
 				}
 			}
+			// A calendar auto-open refused for any reason (draft, fence, dialog...)
+			// consumes the run's ownership too: it must not open late on a replay.
+			if (!redirected && goto && goto.page === PAYMENT_CALENDAR_PAGE) ownRuns.delete(p.run_id);
 			if (!redirected) dropGotoMorph();
 			break;
 		}
@@ -17647,6 +17782,24 @@ onUnmounted(() => {
 }
 .jv-macrocard-btn:hover {
 	opacity: 0.9;
+}
+/* Narrow screens: the redirect card wraps instead of ellipsising the restated
+   request, and its button takes its own full-width row. Scoped to the goto card
+   so the save-as-macro card keeps its single-row layout. */
+@media (max-width: 400px) {
+	.jv-macrocard--goto {
+		flex-wrap: wrap;
+	}
+	.jv-macrocard--goto .jv-macrocard-title,
+	.jv-macrocard--goto .jv-macrocard-sub {
+		white-space: normal;
+		overflow: visible;
+		text-overflow: clip;
+		overflow-wrap: anywhere;
+	}
+	.jv-macrocard--goto .jv-macrocard-btn {
+		flex: 1 1 100%;
+	}
 }
 .jv-macro-merged-badge {
 	margin-left: 7px;

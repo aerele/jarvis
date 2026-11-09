@@ -207,6 +207,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 				context=context,
 				attachments=attachments,
 				user=owner,
+				run_id=run_id,
 			)
 	except SourceLost as exc:
 		_prepare_error(

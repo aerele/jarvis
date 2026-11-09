@@ -1,10 +1,18 @@
 """Customization-discovery telemetry: JSON lines to a dedicated logger
-(never-raise, like jarvis/audit.py). Two kinds:
+(never-raise, like jarvis/audit.py). Kinds:
 
   {"kind": "tool", ts, site, user_hash, conversation, tool, duration_ms,
    result_chars, custom_target}
   {"kind": "turn", ts, site, conversation, run_id, duration_ms, touched_custom,
    queue_ms, approval_wait_ms, active_ms}
+  {"kind": "result_budget", ...}     (record_budget_event)
+  {"kind": "export", ...}            (record_export_event; record_export_intent
+                                      emits it with mode "intent")
+  {"kind": "pc_handoff_hint", ts, site, user_hash, run_id, outcome}
+  {"kind": "pc_handoff_goto", ts, site, conversation, run_id, count}
+
+The two pc_handoff kinds (Payment Calendar chat hand-off) carry ids only, never prompt or
+reply text; ``run_id`` joins the hint and the goto of one turn.
 
 A turn's duration_ms is the measured run:start -> terminal span (the same
 baseline as the persisted reply_duration_ms), or null when a timestamp is
@@ -22,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 
 import frappe
 
@@ -151,6 +160,100 @@ def record_export_event(
 		if detail:
 			entry["detail"] = str(detail)[:200]
 		_emit(entry)
+	except Exception:
+		pass
+
+
+_PC_HANDOFF_OUTCOMES = frozenset({"on", "no_capability", "not_visible", "error"})
+# The web chat's GOTO_RE (frontend/src/lib/chatGoto.js) requires a bare "\n" after the fence.
+_GOTO_FENCE_RE = re.compile(r"```jarvis-goto[ \t]*\n(.*?)```", re.DOTALL)
+# JS String.prototype.trim also strips U+FEFF.
+_JS_TRIM = " \t\n\r\v\f\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+
+def _reject_json_constant(name: str):
+	"""``json.loads`` parse_constant: JSON has no NaN or Infinity, and neither has JSON.parse."""
+	raise ValueError(f"invalid JSON constant {name}")
+
+
+def _js_text(value) -> str:
+	"""JavaScript ``String(value || "")`` for a parsed JSON value."""
+	if value is None or value is False or value == 0 or value == "":
+		return ""
+	if isinstance(value, str):
+		return value
+	if value is True:
+		return "true"
+	if isinstance(value, list):
+		return ",".join(_js_text(item) for item in value)
+	if isinstance(value, dict):
+		return "[object Object]"
+	return str(value)
+
+
+def _has_calendar_goto(reply: str) -> bool:
+	"""Count-only approximation of the web chat's ``parseGoto`` (chatGoto.js): the first
+	``jarvis-goto`` block of the reply is a JSON object whose ``page`` is ``payment-calendar``
+	and whose ``prompt`` is non-blank, both coerced the way JavaScript's ``String(x || "")``
+	does, and NaN / Infinity rejected like ``JSON.parse`` does. It only decides whether to
+	count; the page parses the block itself."""
+	match = _GOTO_FENCE_RE.search(reply)
+	if not match:
+		return False
+	try:
+		block = json.loads(match.group(1).strip(_JS_TRIM), parse_constant=_reject_json_constant)
+	except (ValueError, RecursionError):
+		return False
+	if not block or not isinstance(block, dict):
+		return False
+	return _js_text(block.get("page")).strip(_JS_TRIM) == "payment-calendar" and bool(
+		_js_text(block.get("prompt")).strip(_JS_TRIM)
+	)
+
+
+def record_pc_handoff_hint(outcome: str, chat_user: str | None, run_id: str | None = None) -> None:
+	"""One line per Payment Calendar hand-off hint decision (the switch is on): ``outcome``
+	is ``on`` (hint added), ``no_capability`` (client cannot open the page),
+	``not_visible`` (the user cannot see the calendar) or ``error``. The user is hashed
+	with ``_user_hash(chat_user)`` - the turn's sender, not ``frappe.session.user``, which
+	can be a worker identity. ``run_id`` joins this line to the turn's ``pc_handoff_goto``.
+	No prompt text. Never raises."""
+	try:
+		if outcome not in _PC_HANDOFF_OUTCOMES:
+			return
+		_emit(
+			{
+				"kind": "pc_handoff_hint",
+				"ts": frappe.utils.now(),
+				"site": getattr(frappe.local, "site", None),
+				"user_hash": _user_hash(chat_user),
+				"run_id": run_id,
+				"outcome": outcome,
+			}
+		)
+	except Exception:
+		pass
+
+
+def record_pc_handoff_goto(
+	reply: str | None, conversation: str | None = None, run_id: str | None = None
+) -> None:
+	"""Count-only line when a finished assistant reply carries a ``payment-calendar``
+	``jarvis-goto`` block. Ids only (``conversation``, ``run_id``): nothing from the reply
+	is logged. Never raises."""
+	try:
+		if not reply or "jarvis-goto" not in reply or not _has_calendar_goto(reply):
+			return
+		_emit(
+			{
+				"kind": "pc_handoff_goto",
+				"ts": frappe.utils.now(),
+				"site": getattr(frappe.local, "site", None),
+				"conversation": conversation,
+				"run_id": run_id,
+				"count": 1,
+			}
+		)
 	except Exception:
 		pass
 
