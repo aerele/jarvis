@@ -777,6 +777,33 @@ class TestWorkflowPark(_WfBase):
 		name = self.park_wf(states=[first, {**state, "update_value": "doc.who"}])
 		self.assertNotIn(CODE_LINE, self.card(name)["risk_line"], "an allowed expression is shown whole")
 
+	def test_a_condition_reading_a_field_named_format_is_refused(self):
+		"""jarvis-admin-v2#818 (T4): ``doc.format`` is a real field here, so the
+		expression check lets it through, but the sandbox refuses to read ``.format``."""
+		fields = {**wg._fields_of(self.dt), "format": wg.TEXT}
+		t = {"state": self.s_open, "action": self.a_ok, "next_state": self.s_ok, "allowed": "System Manager"}
+		with patch.object(wg, "_fields_of", return_value=fields):
+			self.assertIsNone(wg.expression_problem('doc.format == "x"', self.dt))
+			r = self.create_wf(transitions=[{**t, "condition": 'doc.format == "x"'}])
+			self.assert_refused(
+				r, "InvalidArgumentError", ["is not set from chat", "line 1: .format is blocked"]
+			)
+			self.assert_no_workflow()
+			# The same field read with doc.get() is allowed.
+			self.park_wf(transitions=[{**t, "condition": 'doc.get("format") == "x"'}])
+
+	def test_compiles_runs_the_unsafe_attribute_check(self):
+		self.assertIn("line 1: .format is blocked", wg._compiles('doc.format == "x"'))
+		self.assertIsNone(wg._compiles('doc.get("format") == "x"'))
+
+	def test_compiles_uses_condition_wording(self):
+		"""FX-6: a condition is not a script; no f-string hint, the doc.get hint stays."""
+		text = wg._compiles('doc.format == "x"')
+		self.assertIn(".format is blocked in Frappe's restricted expression evaluator", text)
+		self.assertNotIn("f-string", text)
+		self.assertNotIn("server-script sandbox", text)
+		self.assertIn('doc.get("format")', text)
+
 	def test_a_state_field_that_cannot_be_added_is_refused_at_park(self):
 		"""Lesson 8: what could only fail at Confirm is refused at park."""
 		frappe.db.sql_ddl(f"ALTER TABLE `tab{self.dt}` ADD COLUMN `jwf_state` varchar(140)")

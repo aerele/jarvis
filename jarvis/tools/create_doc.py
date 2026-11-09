@@ -35,6 +35,7 @@ from jarvis.tools._bulk import _MAX_BATCH, run_atomic_batch
 from jarvis.tools._delegate_write_caps import enforce_create
 from jarvis.tools._doc_parts import check_write_fields, refuse_fields_with_batch, write_result
 from jarvis.tools._field_values import cast_numbers, check_values
+from jarvis.tools._sandbox_attrs import check_sandbox_code
 
 # `name` is intentionally NOT in this list: DocTypes that use autoname=prompt
 # (or autoname=field:<x>) need it set in `values`. Frappe's autoname handling
@@ -109,6 +110,7 @@ def build_doc(doctype: str, values: dict) -> "frappe.model.document.Document":
 	the way Frappe stores them, then the title. Shared by every insert and dry run."""
 	values = check_values(doctype, values)
 	doc = frappe.new_doc(doctype)
+	check_sandbox_code(doc.doctype, values)
 	for field, value in values.items():
 		doc.set(field, value)
 	if doctype == "Landed Cost Voucher":
