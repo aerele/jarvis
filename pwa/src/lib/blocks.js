@@ -8,6 +8,9 @@
 //
 // Keep the STRIP list a superset of what we render: an unrendered block must
 // still disappear from the prose rather than leak.
+//
+// A relative import, not the @shared alias, so bare `node --test` can run this file.
+import { parseGoto } from "../../../frontend/src/lib/chatGoto.js";
 
 const CARDS_RE = /```jarvis-cards[ \t]*\n([\s\S]*?)```/;
 const SKILL_RE = /```jarvis-skill[ \t]*\n([\s\S]*?)```/;
@@ -21,6 +24,9 @@ const STRIP_RES = [
 	/```jarvis-cards[ \t]*\n[\s\S]*?```/g,
 	/```jarvis-skill[ \t]*\n[\s\S]*?```/g,
 	/```jarvis-macro[ \t]*\n[\s\S]*?```/g,
+	// A hand-off to a page of the web app. The phone cannot follow it; the chip from
+	// hasDashboardsGoto opens the conversation in the web chat instead.
+	/```jarvis-goto[ \t]*\n[\s\S]*?```/g,
 	/```jarvis-chart[ \t]*\n[\s\S]*?```/g,
 	/```mermaid[ \t]*\n[ \t]*xychart-beta[\s\S]*?```/g,
 	// A mermaid block that is NOT xychart-beta is a DIAGRAM (flowchart etc.) the
@@ -44,6 +50,17 @@ export function countDiagrams(text) {
 	if (!text || !text.includes("```mermaid")) return 0;
 	const m = text.match(DIAGRAM_RE);
 	return m ? m.length : 0;
+}
+
+/**
+ * Whether the reply carries a valid ```jarvis-goto``` for the Dashboards page (the
+ * web chat's parseGoto rules). Only that page gets a chip here: the phone sends no
+ * payment-calendar capability, so it is never offered one, and a block for any
+ * other page is stripped with no chip.
+ */
+export function hasDashboardsGoto(content) {
+	if (!content || !content.includes("jarvis-goto")) return false;
+	return parseGoto(content)?.page === "dashboards";
 }
 
 /** ```jarvis-cards``` → {title, cards:[{title, subtitle, doctype, name, fields}]}. */

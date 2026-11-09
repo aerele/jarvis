@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { countDiagrams, parseCards, stripAgentBlocks, toolStatus } from "./blocks.js";
+import {
+	countDiagrams,
+	hasDashboardsGoto,
+	parseCards,
+	stripAgentBlocks,
+	toolStatus,
+} from "./blocks.js";
 
 const fence = (kind, body) => "```" + kind + "\n" + body + "\n```";
 
@@ -15,6 +21,7 @@ test("stripAgentBlocks: removes every control fence from the prose", () => {
 		"jarvis-skill",
 		"jarvis-macro",
 		"jarvis-chart",
+		"jarvis-goto",
 	]) {
 		const out = stripAgentBlocks(`Before\n${fence(kind, '{"a":1}')}\nAfter`);
 		assert.equal(out, "Before\n\nAfter", `${kind} leaked into the prose`);
@@ -91,4 +98,51 @@ test("toolStatus: anything else settles as done", () => {
 	assert.equal(toolStatus(""), "done");
 	assert.equal(toolStatus(null), "done");
 	assert.equal(toolStatus(undefined), "done");
+});
+
+const goto = (page, prompt = "Show cash by month") =>
+	fence("jarvis-goto", JSON.stringify({ page, prompt }));
+
+// jarvis-goto hands a request to a page of the web app. The phone cannot follow
+// it, so the block must never reach the prose as raw JSON.
+test("stripAgentBlocks: a goto block of either page leaves the prose and no JSON", () => {
+	for (const page of ["dashboards", "payment-calendar"]) {
+		const out = stripAgentBlocks(`Before\n${goto(page)}\nAfter`);
+		assert.equal(out, "Before\n\nAfter", `${page} goto leaked into the prose`);
+		assert.ok(!out.includes("jarvis-goto") && !out.includes("{"), `${page} JSON leaked`);
+	}
+});
+
+test("stripAgentBlocks: a goto naming an unknown page is stripped too", () => {
+	assert.equal(stripAgentBlocks(`Hi\n${goto("settings")}`), "Hi");
+});
+
+test("hasDashboardsGoto: true only for a valid dashboards goto", () => {
+	assert.equal(hasDashboardsGoto(`Opening it.\n${goto("dashboards")}`), true);
+	// Extra keys are ignored; surrounding whitespace in the values is trimmed.
+	assert.equal(
+		hasDashboardsGoto(fence("jarvis-goto", '{"page":" dashboards ","prompt":" x ","y":1}')),
+		true
+	);
+});
+
+test("hasDashboardsGoto: payment-calendar gets no chip (the phone sends no capability)", () => {
+	assert.equal(hasDashboardsGoto(goto("payment-calendar")), false);
+});
+
+test("hasDashboardsGoto: an invalid goto gets no chip", () => {
+	assert.equal(hasDashboardsGoto(goto("settings")), false, "unknown page");
+	assert.equal(hasDashboardsGoto(goto("dashboards", "   ")), false, "blank prompt");
+	assert.equal(hasDashboardsGoto(fence("jarvis-goto", '{"page":"dashboards"}')), false);
+	assert.equal(hasDashboardsGoto(fence("jarvis-goto", "{not json")), false, "bad JSON");
+	assert.equal(hasDashboardsGoto(fence("jarvis-goto", "[1]")), false, "not an object");
+	assert.equal(hasDashboardsGoto(fence("jarvis-goto", "null")), false, "null");
+	assert.equal(
+		hasDashboardsGoto('```jarvis-goto\n{"page":"dashboards","prompt":"x"}'),
+		false,
+		"unclosed fence"
+	);
+	assert.equal(hasDashboardsGoto("no block here"), false);
+	assert.equal(hasDashboardsGoto(""), false);
+	assert.equal(hasDashboardsGoto(null), false);
 });

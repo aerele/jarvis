@@ -15,6 +15,7 @@ const STRIP_FENCES = [
   "jarvis-ask",
   "jarvis-skill",
   "jarvis-macro",
+  "jarvis-goto",
 ];
 
 // Rich CONTENT this text-only mini panel cannot draw: record cards, data charts,

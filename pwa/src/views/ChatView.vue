@@ -32,6 +32,7 @@ import * as api from "../api";
 import { store } from "../store";
 import {
 	countDiagrams,
+	hasDashboardsGoto,
 	parseAction,
 	parseCards,
 	parseCharts,
@@ -482,6 +483,8 @@ const view = (m) => {
 		charts,
 		// Mermaid diagrams can't be drawn here; surface a chip to the web chat.
 		diagrams: countDiagrams(content),
+		// A hand-off to the Dashboards page can't be followed here either; same chip.
+		dashboardsGoto: hasDashboardsGoto(content),
 		action: parseAction(content),
 		skills: parseSkillsUsed(content),
 		took: spanBetween(m.creation, m.modified),
@@ -504,6 +507,12 @@ const view = (m) => {
 			!m.stopped,
 	};
 };
+
+// Title of the "Open in web chat" chip: the diagram count, else the Dashboards hand-off.
+function chipTitle(v) {
+	if (v.diagrams > 1) return v.diagrams + " diagrams";
+	return v.diagrams ? "Diagram" : "Dashboards";
+}
 
 // Mirrors ChatView.vue's (desktop) errorInfo(): a live run:error's code, when
 // this session saw it, always wins over reclassifying the persisted string
@@ -1666,7 +1675,7 @@ onUnmounted(() => {
 					<RecordCards v-if="it.view.cards" :data="it.view.cards" />
 					<ChartCard v-for="(c, ci) in it.view.charts" :key="ci" :spec="c" />
 					<a
-						v-if="it.view.diagrams"
+						v-if="it.view.diagrams || it.view.dashboardsGoto"
 						class="jv-diagram-chip"
 						:href="webChatUrl"
 						target="_blank"
@@ -1682,14 +1691,20 @@ onUnmounted(() => {
 							stroke-linejoin="round"
 							aria-hidden="true"
 						>
-							<rect x="3" y="3" width="7" height="6" rx="1" />
-							<rect x="14" y="15" width="7" height="6" rx="1" />
-							<path d="M6.5 9v4a2 2 0 0 0 2 2H14" />
+							<template v-if="it.view.diagrams">
+								<rect x="3" y="3" width="7" height="6" rx="1" />
+								<rect x="14" y="15" width="7" height="6" rx="1" />
+								<path d="M6.5 9v4a2 2 0 0 0 2 2H14" />
+							</template>
+							<template v-else>
+								<rect x="3" y="3" width="7" height="9" rx="1" />
+								<rect x="14" y="3" width="7" height="5" rx="1" />
+								<rect x="14" y="12" width="7" height="9" rx="1" />
+								<rect x="3" y="16" width="7" height="5" rx="1" />
+							</template>
 						</svg>
 						<span class="jv-diagram-chip-tx">
-							<span class="jv-diagram-chip-t">{{
-								it.view.diagrams > 1 ? it.view.diagrams + " diagrams" : "Diagram"
-							}}</span>
+							<span class="jv-diagram-chip-t">{{ chipTitle(it.view) }}</span>
 							<span class="jv-diagram-chip-s">Open in web chat</span>
 						</span>
 						<svg
