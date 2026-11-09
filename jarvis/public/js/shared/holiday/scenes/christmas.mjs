@@ -81,17 +81,15 @@ class ChristmasScene extends Scene {
         colour
       );
     }).join("");
-    const floor = this.opts.replay
-      ? ""
-      : this.floorGroup(
-          this.onGround(
-            floorSVG(
-              p,
-              (x, prop) => this.edge(x, prop),
-              (x, hw) => squeezeX(x, geo, { hw, g: FLOOR_GROW })
-            )
-          )
-        );
+    const floor = this.floorGroup(
+      this.onGround(
+        floorSVG(
+          p,
+          (x, prop) => this.edge(x, prop),
+          (x, hw) => squeezeX(x, geo, { hw, g: FLOOR_GROW })
+        )
+      )
+    );
     return `${floor}<g>${flakes}</g><g class="${p}trail">${trail}</g>
         ${this.item("christmas")}
         <g class="${p}sleigh"><g transform="scale(${r2(

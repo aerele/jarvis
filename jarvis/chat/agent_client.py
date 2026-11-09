@@ -401,6 +401,42 @@ def _is_not_paired(err: Exception) -> bool:
 	return details.get("reason") in _NOT_PAIRED_REASONS
 
 
+# --- Session repair classifiers (#753) ----------------------------------------
+#
+# The pre-send repair (jarvis.chat.session_repair) must tell "the gateway said no
+# to this call" from "we do not know what happened". Only the first is final.
+# ``rejected_method`` is set ONLY from an explicit ``ok:false`` answer to this
+# exact RPC (exceptions.AgentUnreachableError), so a missing value proves nothing
+# was refused: ack-timeout (``SendUncertain`` included), send-not-started
+# (``SendNotStarted``, e.g. a busy pooled connection) and a code-less transport
+# error all stay temporary. ``UNAVAILABLE`` is the gateway asking us to retry, so
+# it stays temporary even when explicit, as does ``AGENT_TIMEOUT``, and a refusal
+# with no code at all proves nothing about the cause.
+
+_TEMPORARY_REFUSAL_CODES = frozenset({"UNAVAILABLE", "AGENT_TIMEOUT"})
+
+
+def is_definitive_refusal(err: Exception) -> bool:
+	"""True iff the gateway explicitly refused this RPC with a non-retry code
+	(INVALID_REQUEST, FORBIDDEN, NOT_PAIRED, ...). Everything else is temporary:
+	no ``rejected_method``, no code, or a code that asks us to retry
+	(``UNAVAILABLE``, ``AGENT_TIMEOUT``)."""
+	if getattr(err, "rejected_method", None) is None:
+		return False
+	code = getattr(err, "code", None)
+	return bool(code) and code not in _TEMPORARY_REFUSAL_CODES
+
+
+def is_session_changed(err: Exception) -> bool:
+	"""True iff a ``sessions.patch`` guarded by ``expectedSessionId`` lost the race:
+	the session was replaced between our describe and our patch. Typed on code and
+	``details.reason`` only, never on message text."""
+	if getattr(err, "code", None) != "INVALID_REQUEST":
+		return False
+	details = getattr(err, "details", None) or {}
+	return isinstance(details, dict) and details.get("reason") == "session-changed"
+
+
 def _chat_final_text(payload: dict) -> str | None:
 	"""Authoritative final text from a chat final event: joined text blocks
 	of payload.message.content; None for silent finals."""
@@ -1401,6 +1437,34 @@ class AgentSession:
 		self._request(
 			"sessions.patch",
 			{"key": session_key, "model": model_ref},
+			timeout_s=timeout_s,
+		)
+
+	# -- Session repair calls (#753) -----------------------------------------
+	# Used only by jarvis.chat.session_repair, before a send. A refusal raises an
+	# AgentUnreachableError carrying ``rejected_method``; see is_definitive_refusal.
+
+	def describe_session(self, session_key: str, *, timeout_s: float = 5) -> dict | None:
+		"""Read one session row via ``sessions.describe`` without creating it.
+
+		Returns the row dict, or None when the gateway has no such session
+		(``{"session": null}``) or answers with anything that is not a dict.
+		Unwrapped like ``collaboration_lifecycle``'s existing describe call."""
+		res = self._request("sessions.describe", {"key": session_key}, timeout_s=timeout_s)
+		payload = res.get("payload") or res
+		row = payload.get("session") if isinstance(payload, dict) else None
+		return row if isinstance(row, dict) else None
+
+	def restore_session(self, session_key: str, session_id: str, *, timeout_s: float = 5) -> None:
+		"""Un-archive a session via ``sessions.patch``. ``expectedSessionId`` makes the
+		gateway refuse (reason ``session-changed``) if the session was replaced since
+		we described it, so we never restore a different incarnation than we looked at.
+
+		Call only for a key ``describe_session`` just returned: ``sessions.patch`` on an
+		absent key creates an entry."""
+		self._request(
+			"sessions.patch",
+			{"key": session_key, "archived": False, "expectedSessionId": session_id},
 			timeout_s=timeout_s,
 		)
 

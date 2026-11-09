@@ -41,11 +41,32 @@ from jarvis.chat import seq_watermark, txn
 from jarvis.chat import turn_state as ts
 from jarvis.chat.filebox_source import SourceLost
 from jarvis.chat.runtime_profile import get_profile
+from jarvis.chat.session_repair import Repair, ensure_session_usable
 from jarvis.exceptions import AgentUnreachableError
 
 TURN = "Jarvis Chat Turn"
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
+
+
+def _repair_session(sess, conv, owner, conversation, run_id, assistant_msg) -> Repair:
+	"""``session_repair.ensure_session_usable`` for the pump path: ``waking`` goes out as
+	a fenced ``run:status`` (the same shape as the cold-start publish in ``run_prepare``).
+	``ensure_session_usable`` swallows a failing ``on_waking``. Raises only a TEMPORARY
+	restore ``AgentUnreachableError``, which ``run_prepare`` handles as a retryable
+	prepare error."""
+
+	def _on_waking() -> None:
+		ts.publish_fenced(
+			owner,
+			"run:status",
+			conversation_id=conversation,
+			run_id=run_id,
+			message_id=assistant_msg,
+			status="waking",
+		)
+
+	return ensure_session_usable(sess, conv, on_waking=_on_waking, path="pump", run_id=run_id)
 
 
 def _claim_preparing_unit(run_id: str) -> dict:
@@ -236,7 +257,14 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 	try:
 		with agent_session_pool.checkout(gateway_url) as sess:
 			session_key = conv.session_key
-			if not session_key:
+			if session_key:
+				# jarvis-admin-v2#753: heal an archived gateway session
+				# BEFORE the mint branch and the model patch, for a key that existed at turn
+				# start. A key minted just below is brand new and never probed. Only a
+				# TEMPORARY restore failure escapes (an AgentUnreachableError, handled as
+				# today's retryable prepare error below).
+				_repair_session(sess, conv, owner, conversation, run_id, assistant_msg)
+			else:
 				# (#22) create the session on THIS pooled connection and persist the
 				# Jarvis Chat Session row + CONV.session_key BEFORE the first tool
 				# callback can fire (the plugin sessionKey->user moat, jarvis/api.py:55).

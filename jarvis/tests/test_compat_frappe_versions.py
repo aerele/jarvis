@@ -455,7 +455,45 @@ class TestPermissionConditionsAcrossMajors(FrappeTestCase):
 		Frappe 16. No mocking: reads the real installed hooks, same lookup
 		``Engine.get_permission_query_conditions`` makes internally."""
 		self.assertTrue(compat._has_raw_permission_query_condition_hook("ToDo"))
-		self.assertFalse(compat._has_raw_permission_query_condition_hook("Currency"))
+		# Holds with or without ERPNext's own audited "*" hook: it is inert for a user
+		# without a Company User Permission (Administrator has none).
+		self.assertFalse(compat._has_raw_permission_query_condition_hook("Currency", "Administrator"))
+
+	def test_hook_probe_counts_an_unknown_wildcard_and_a_live_audited_one(self):
+		from jarvis.permission_hooks import AUDITED_WILDCARD_HOOKS
+
+		audited = sorted(AUDITED_WILDCARD_HOOKS["permission_query_conditions"])
+		original = frappe.get_hooks
+
+		def with_wildcard(paths):
+			def get_hooks(key=None, *args, **kwargs):
+				value = original(key, *args, **kwargs)
+				if key != "permission_query_conditions":
+					return value
+				return {**{k: v for k, v in value.items() if k != "*"}, "*": paths}
+
+			return get_hooks
+
+		no_company = patch("jarvis.permission_hooks.get_user_permissions", return_value={})
+		company = patch("jarvis.permission_hooks.get_user_permissions", return_value={"Company": []})
+		configured = patch("jarvis.permission_hooks._restriction_configured", return_value=True)
+		probe = compat._has_raw_permission_query_condition_hook
+		with patch.object(frappe, "get_hooks", side_effect=with_wildcard(audited)):
+			with no_company:
+				self.assertFalse(probe("Currency", "someone@example.com"))
+				self.assertTrue(probe("ToDo", "someone@example.com"))
+			with company, configured:
+				self.assertTrue(probe("Currency", "someone@example.com"))
+			with company, patch("jarvis.permission_hooks._restriction_configured", return_value=False):
+				self.assertFalse(probe("Currency", "someone@example.com"))
+		with patch.object(frappe, "get_hooks", side_effect=with_wildcard(["other_app.hooks.slice"])):
+			with no_company:
+				self.assertTrue(probe("Currency", "someone@example.com"))
+		with patch.object(
+			frappe, "get_hooks", side_effect=with_wildcard([*audited, "other_app.hooks.slice"])
+		):
+			with no_company:
+				self.assertTrue(probe("Currency", "someone@example.com"))
 
 	def test_unreadable_doctype_is_denied_cleanly(self):
 		"""frappe.PermissionError from the framework must arrive as our own

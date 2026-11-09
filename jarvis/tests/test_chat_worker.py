@@ -1182,11 +1182,14 @@ class TestRunAgentTurnRelayStreamTelemetry(FrappeTestCase):
 				with patch("jarvis.chat.latency.get_logger", return_value=fake_logger):
 					run_agent_turn(self.conv, self.user_msg, run_id="r1")
 
-		fake_logger.info.assert_called_once()
+		# The session-repair probe (#753) logs its own single INFO line on the same logger;
+		# this test is about the per-turn latency line.
+		turn_lines = [c for c in fake_logger.info.call_args_list if c.args[0].startswith("turn run_id=")]
+		self.assertEqual(len(turn_lines), 1)
 		# _lat.info(fmt, run_id, first_turn, queue_wait_ms, checkout_ms,
 		#           session_create_ms, first_event_ms, first_delta_ms,
 		#           pre_reply_tool_calls, turn_total_ms)
-		args = fake_logger.info.call_args.args
+		args = turn_lines[0].args
 		first_event_ms, first_delta_ms, pre_reply_tool_calls = args[6], args[7], args[8]
 		self.assertGreaterEqual(first_event_ms, 0)
 		self.assertGreaterEqual(first_delta_ms, 0)

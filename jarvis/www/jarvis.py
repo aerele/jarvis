@@ -155,6 +155,25 @@ def get_context(context):
 			"kind": "none",
 		}
 
+	# Payment Calendar entry points: shown only where the calendar can work for this user (an
+	# ERPNext site, a supported source, the Accounts Payable report, a visible Company). A UX
+	# flag only: the calendar API keeps its own gate. Any error, even an import error of the
+	# package, means hidden and never fails boot.
+	try:
+		from jarvis.payment_calendar import visibility
+
+		context.boot["can_view_payment_calendar"] = visibility.can_view_payment_calendar()
+	except Exception:
+		context.boot["can_view_payment_calendar"] = False
+		try:
+			from jarvis.holiday_touch import report
+
+			report.report(
+				kind="payment_calendar_visibility:boot", title="Payment Calendar visibility failed at boot"
+			)
+		except Exception:
+			pass
+
 	# Support panel gating (Plan 3 B5). Support access rides the base Jarvis roles
 	# (support_scope: Jarvis User => own, Jarvis Admin => all), so there's nothing to grant —
 	# just expose the per-user access flag and the fleet kill switch.

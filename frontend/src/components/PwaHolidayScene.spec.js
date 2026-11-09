@@ -71,6 +71,7 @@ function setup(overrides = {}) {
 	return { scene: createHolidayScene(options), options, mod, made };
 }
 const tick = (ms = 0) => vi.advanceTimersByTimeAsync(ms);
+let empty = true; // the composer-empty / room switch of the kept-tap tests
 
 describe("PWA createHolidayScene", () => {
 	beforeEach(() => {
@@ -261,6 +262,179 @@ describe("PWA createHolidayScene", () => {
 		expect(scene.fadeMs.value).toBe(600);
 	});
 
+	describe("a replay obeys the same rules as the first play", () => {
+		it("a replay with a draft in the composer smiles and hides nothing", async () => {
+			let empty = true;
+			const { scene, mod, options } = setup({ composerEmpty: () => empty });
+			scene.begin();
+			await tick(50);
+			scene.settle("instant");
+			empty = false;
+			await scene.replay();
+			await tick(50);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+			expect(scene.mark.happy).toBe(true);
+			expect(scene.cardsHidden.value).toBe(false);
+			expect(options.recordShown).toHaveBeenCalledTimes(1);
+		});
+
+		it("a replay whose art will not load smiles and hides nothing", async () => {
+			let broken = false;
+			const { mod, made } = fakeScene();
+			const { scene, options } = setup({ load: vi.fn(async () => (broken ? null : mod)) });
+			scene.begin();
+			await tick(50);
+			scene.settle("instant");
+			broken = true;
+			await scene.replay();
+			await tick(50);
+			expect(made).toHaveLength(1);
+			expect(scene.mark.happy).toBe(true);
+			expect(scene.cardsHidden.value).toBe(false);
+			expect(options.recordShown).toHaveBeenCalledTimes(1);
+		});
+
+		it("a replay tapped in a hidden tab smiles", async () => {
+			const doc = {
+				visibilityState: "visible",
+				addEventListener() {},
+				removeEventListener() {},
+			};
+			const { scene, mod } = setup({ doc });
+			scene.begin();
+			await tick(50);
+			scene.settle("instant");
+			doc.visibilityState = "hidden";
+			await scene.replay();
+			await tick(50);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+			expect(scene.mark.happy).toBe(true);
+		});
+
+		it("a replay with no place to draw returns to rest with the item and the cards back", async () => {
+			let el = document.createElement("div");
+			const { scene, mod } = setup({ host: () => el });
+			scene.begin();
+			await tick(50);
+			scene.settle("instant");
+			el = null;
+			await scene.replay();
+			await tick(50);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+			expect(scene.phase.value).toBe("rest");
+			expect(scene.mark.item).toBe(true);
+			expect(scene.cardsHidden.value).toBe(false);
+		});
+
+		it("a scene that throws when a replay starts brings the starters back softly", async () => {
+			let broken = false;
+			const { mod } = fakeScene();
+			const play = mod.play.getMockImplementation();
+			mod.play.mockImplementation((host, opts) => {
+				if (broken) throw new Error("boom");
+				return play(host, opts);
+			});
+			const { scene, options } = setup({ load: vi.fn(async () => mod) });
+			scene.begin();
+			await tick(50);
+			scene.settle("instant");
+			broken = true;
+			await scene.replay();
+			await tick(50);
+			expect(scene.phase.value).toBe("rest");
+			expect(scene.reason.value).toBe("threw");
+			expect(scene.fadeMs.value).toBe(400);
+			expect(scene.mark.item).toBe(true);
+			expect(scene.cardsHidden.value).toBe(false);
+			expect(options.report).toHaveBeenCalledTimes(1);
+		});
+
+		it("a replay that ends without a settle beat fades the starters back at 400", async () => {
+			const finishes = [];
+			const mod = {
+				play: vi.fn((host, opts) => {
+					let finish;
+					const done = new Promise((resolve) => (finish = resolve));
+					finishes.push(finish);
+					return { opts, done, settle: vi.fn(), relayout: vi.fn() }; // never announces a settle
+				}),
+			};
+			const { scene } = setup({ load: vi.fn(async () => mod) });
+			scene.begin();
+			await tick(50);
+			scene.settle("instant");
+			finishes[0]();
+			await tick(50);
+			await scene.replay();
+			await tick(50);
+			expect(scene.phase.value).toBe("replaying");
+			finishes[1]();
+			await tick(50);
+			expect(scene.phase.value).toBe("rest");
+			expect(scene.fadeMs.value).toBe(400);
+			expect(scene.cardsHidden.value).toBe(false);
+		});
+	});
+
+	describe("a replay tapped while the last scene fades out (one tap is kept)", () => {
+		// A scene whose done only resolves when the test says so (the fade-out still running).
+		function slowScenes() {
+			const finishes = [];
+			const mod = {
+				play: vi.fn((host, opts) => {
+					let finish;
+					const done = new Promise((resolve) => (finish = resolve));
+					finishes.push(finish);
+					return {
+						opts,
+						done,
+						settle: vi.fn((mode) => opts.onBeat("settle", mode)),
+						relayout: vi.fn(),
+					};
+				}),
+			};
+			return { mod, finishes };
+		}
+		async function fadingWithOneTapKept(over = {}) {
+			const { mod, finishes } = slowScenes();
+			const made = setup({ load: vi.fn(async () => mod), ...over });
+			made.scene.begin();
+			await tick(50);
+			made.scene.settle("early");
+			await made.scene.replay(); // still fading: the tap is kept
+			return { ...made, mod, finishes };
+		}
+
+		it.each([
+			["a key", (scene) => scene.onKeyDown(false)],
+			["a pointerdown", (scene) => scene.onPointerDown()],
+			["a settle (typing, a hold, a route change)", (scene) => scene.settle("early")],
+		])("%s before the fade-out is over forgets the kept tap", async (_name, gesture) => {
+			const { scene, mod, finishes } = await fadingWithOneTapKept();
+			gesture(scene);
+			finishes[0]();
+			await tick(50);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+			expect(scene.cardsHidden.value).toBe(false);
+		});
+
+		it.each([
+			["a draft", { composerEmpty: () => empty }],
+			["reduced motion", { reduced: () => !empty }],
+			["no room", { fits: () => empty }],
+		])("%s by the time the fade-out ends smiles instead of replaying", async (_name, over) => {
+			// `empty` is true while the first play runs and flips before the drain.
+			empty = true;
+			const { scene, mod, finishes } = await fadingWithOneTapKept(over);
+			empty = false;
+			finishes[0]();
+			await tick(50);
+			expect(mod.play).toHaveBeenCalledTimes(1);
+			expect(scene.mark.happy).toBe(true);
+			expect(scene.cardsHidden.value).toBe(false);
+		});
+	});
+
 	it("a screen with no room does not use up the day: the next new chat may still play", async () => {
 		const answer = { ...DAY };
 		const first = setup({ answer: () => answer, fits: () => false });
@@ -293,6 +467,26 @@ describe("PWA createHolidayScene", () => {
 		expect(mod.play).toHaveBeenCalledTimes(1);
 		await scene.replay(); // a later activation at rest does replay
 		await tick(50);
+		expect(mod.play).toHaveBeenCalledTimes(2);
+	});
+
+	it("a repeating key is ignored: it does not end a replay, and does not undo the swallow", async () => {
+		const { scene, mod } = setup();
+		scene.begin();
+		await tick(10);
+		scene.settle("early");
+		await tick(300); // the scene is over and the hero has risen
+		await scene.replay();
+		await tick(700);
+		expect(scene.phase.value).toBe("replaying");
+		scene.onKeyDown(true, true);
+		scene.onKeyDown(false, true);
+		expect(scene.phase.value).toBe("replaying");
+		scene.onKeyDown(true); // the key goes down: ends it, and swallows its click
+		expect(scene.phase.value).toBe("rest");
+		scene.onKeyDown(true, true); // the key is held: a repeat at rest
+		await scene.replay(); // the click the key fires
+		await tick(1000);
 		expect(mod.play).toHaveBeenCalledTimes(2);
 	});
 

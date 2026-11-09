@@ -346,5 +346,53 @@
   {
     "error": "Output token limit reached for this reply",
     "code": "gateway"
+  },
+  {
+    "error": "Session \"agent:main:dashboard:3f2b1c9e-5a4d-4e7b-9c1a-2d8e6f0a7b34\" is archived. Restore it before starting new work.",
+    "code": "session-archived"
+  },
+  {
+    "error": "Error: Session \"agent:main:dashboard:3f2b1c9e-5a4d-4e7b-9c1a-2d8e6f0a7b34\" is archived. Restore it before starting new work.",
+    "code": "session-archived"
+  },
+  {
+    "error": "chat.send rejected: INVALID_REQUEST: Session \"agent:main:dashboard:3f2b1c9e-5a4d-4e7b-9c1a-2d8e6f0a7b34\" is archived. Restore it before starting new work.",
+    "code": "session-archived"
+  },
+  {
+    "error": "Session \"agent:main:dashboard:3f2b1c9e-5a4d-4e7b-9c1a-2d8e6f0a7b34\" ended during restart recovery. Use /new or /reset to start a replacement session.",
+    "code": "session-ended"
+  },
+  {
+    "error": "chat.send rejected: INVALID_REQUEST: Session \"agent:main:dashboard:3f2b1c9e-5a4d-4e7b-9c1a-2d8e6f0a7b34\" ended during restart recovery. Use /new or /reset to start a replacement session.",
+    "code": "session-ended"
+  },
+  {
+    "error": "chat.send rejected: INVALID_REQUEST: Session \"agent:billing:dashboard:3f2b1c9e-5a4d-4e7b-9c1a-2d8e6f0a7b34\" is archived. Restore it before starting new work.",
+    "code": "session-archived"
+  },
+  {
+    "error": "chat.send rejected: INVALID_REQUEST: Session \"agent:quota:dashboard:3f2b1c9e-5a4d-4e7b-9c1a-2d8e6f0a7b34\" is archived. Restore it before starting new work.",
+    "code": "session-archived"
+  },
+  {
+    "error": "chat.send rejected: INVALID_REQUEST: Session \"agent:rate-limit-timeout:dashboard:3f2b1c9e-5a4d-4e7b-9c1a-2d8e6f0a7b34\" is archived. Restore it before starting new work.",
+    "code": "session-archived"
+  },
+  {
+    "error": "chat.send rejected: INVALID_REQUEST: Session \"agent:forbidden:dashboard:3f2b1c9e-5a4d-4e7b-9c1a-2d8e6f0a7b34\" is archived. Restore it before starting new work.",
+    "code": "session-archived"
+  },
+  {
+    "error": "chat.send rejected: INVALID_REQUEST: Session \"agent:billing-quota:dashboard:3f2b1c9e-5a4d-4e7b-9c1a-2d8e6f0a7b34\" is archived. Restore it before starting new work.",
+    "code": "session-archived"
+  },
+  {
+    "error": "chat.send rejected: INVALID_REQUEST: Session \"agent:billing:dashboard:3f2b1c9e-5a4d-4e7b-9c1a-2d8e6f0a7b34\" ended during restart recovery. Use /new or /reset to start a replacement session.",
+    "code": "session-ended"
+  },
+  {
+    "error": "chat.send rejected: INVALID_REQUEST: message is required",
+    "code": "invalid-request"
   }
 ]
