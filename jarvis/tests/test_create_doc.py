@@ -65,6 +65,8 @@ class TestCreateDocValidation(FrappeTestCase):
 		def fake_new_doc(dt):
 			class _Stub:
 				doctype = dt
+				name = "generated"
+				docstatus = 0
 				# What cast_numbers and apply_tax_template read: no numeric fields, no tax template field.
 				meta = frappe._dict(fields=[], get_field=lambda name: None)
 
@@ -86,7 +88,7 @@ class TestCreateDocValidation(FrappeTestCase):
 				def apply_fieldlevel_read_permissions(self):
 					pass
 
-				def as_dict(self):
+				def as_dict(self, **_):
 					return {"doctype": dt, "name": "generated", **self._values}
 
 			return _Stub()
@@ -98,7 +100,7 @@ class TestCreateDocValidation(FrappeTestCase):
 					doctype=NOTE_DT,
 					values={"name": "custom-id", "title": "x"},
 				)
-				self.assertEqual(result["title"], "x")
+				self.assertEqual(result, {"doctype": NOTE_DT, "name": "generated", "docstatus": 0})
 
 
 class TestCreateDocPermissions(FrappeTestCase):
@@ -146,10 +148,11 @@ class TestCreateDocHappyPath(FrappeTestCase):
 	def tearDown(self):
 		_cleanup_created()
 
-	def test_inserts_row_and_returns_full_doc(self):
+	def test_inserts_row_and_returns_the_asked_fields(self):
 		result = create_doc(
 			doctype=NOTE_DT,
 			values={"title": "jarvis-create-test", "content": "hello", "public": 1},
+			fields=["title", "content"],
 		)
 		_created_in_test.append(result["name"])
 
@@ -222,6 +225,6 @@ class TestCreateDocSandboxCode(FrappeTestCase):
 		self.assertFalse(frappe.db.exists("Report", f"zz818 rep {self.tag}"))
 
 	def test_clean_report_script_is_created(self):
-		result = create_doc(doctype="Report", values=self._report('x = f"{1}"\n'))
+		result = create_doc(doctype="Report", values=self._report('x = f"{1}"\n'), fields=["report_script"])
 		self.assertEqual(result["report_script"], 'x = f"{1}"\n')
 		self.assertTrue(frappe.db.exists("Report", f"zz818 rep {self.tag}"))
