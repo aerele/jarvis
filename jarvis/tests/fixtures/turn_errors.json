@@ -394,5 +394,13 @@
   {
     "error": "chat.send rejected: INVALID_REQUEST: message is required",
     "code": "invalid-request"
+  },
+  {
+    "error": "Model and runtime changes are not available in chat.",
+    "code": "directive_refused"
+  },
+  {
+    "error": "The message contains a character that cannot be sent. Remove it and try again.",
+    "code": "directive_refused"
   }
 ]

@@ -34,6 +34,14 @@ export default [
     "status": false
   },
   {
+    "code": "directive_refused",
+    "pattern": "^(model and runtime changes are not available in chat|the message contains a character that cannot be sent)",
+    "headline": "This message was not sent",
+    "hint": "Remove the model or runtime command, or the unusual character, and send it again.",
+    "retryable": false,
+    "status": false
+  },
+  {
     "code": "subscription-expired",
     "pattern": "refresh_token_(reused|expired|invalidated|revoked)|auth_unavailable[\\s\\S]{0,600}unauthori[sz]ed|please run /login|\\bnot logged in\\b|(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)[\\s\\S]{0,400}(invalid_grant|oauth token has expired|token expired)|(invalid_grant|oauth token has expired|token expired)[\\s\\S]{0,400}(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)",
     "headline": "{provider} sign-in expired",
