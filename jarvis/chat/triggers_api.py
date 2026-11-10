@@ -377,15 +377,10 @@ def set_trigger_enabled(name: str, enabled: int) -> dict:
 	_require_manage()
 	value = _bool01(enabled)
 	doc = frappe.get_doc(TRIGGER, name)
-<<<<<<< HEAD
-=======
 	if value:
-		# db_set skips validate: re-check the stored code before arming it (#818).
-		doc.check_unsafe_attributes()
 		# db_set skips validate, so re-enabling must re-run the duplicate guard.
 		doc.enabled = 1
 		doc.check_duplicates()
->>>>>>> 7b163f8 (fix: refuse duplicate enabled Jarvis Triggers (#816))
 	doc.db_set("enabled", value)
 	clear_cache()
 	_publish_changed()
