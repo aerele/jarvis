@@ -2826,10 +2826,11 @@ def _run_preview(tool: str, args: dict) -> dict:
 	Raises ``PreviewSandboxLost`` when the dry run could not be undone cleanly;
 	every caller turns that into a refusal (see the class)."""
 	from jarvis.tools import _write_risk
+	from jarvis.tools._doc_parts import full_write_results
 	from jarvis.tools._preview_sandbox import preview_sandbox, will_queue_summary
 
 	_write_risk.take_refusal()
-	with preview_sandbox() as dropped:
+	with preview_sandbox() as dropped, full_write_results():
 		would = dispatch(tool, args)
 	hidden = _write_risk.take_refusal()
 	if hidden is not None:

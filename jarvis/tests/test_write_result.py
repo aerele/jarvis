@@ -26,11 +26,11 @@ class TestWriteResult(FrappeTestCase):
 		return keys
 
 	def test_create_default_is_compact(self):
-		res = create_doc("ToDo", {"description": "jwr create"})
+		res = create_doc("ToDo", {"description": "jwr create", "priority": "High"})
 		self.assertEqual(set(res), self._compact("ToDo", res["name"]))
 		self.assertIn("status", res)
 		self.assertEqual((res["doctype"], res["docstatus"]), ("ToDo", 0))
-		self.assertNotIn("description", res)
+		self.assertNotIn("priority", res)  # a sent value that is not the title
 
 	def test_title_field_is_returned_under_its_own_name(self):
 		res = create_doc("Note", {"title": "jwr title", "content": "body"})
@@ -38,10 +38,10 @@ class TestWriteResult(FrappeTestCase):
 
 	def test_update_default_is_compact(self):
 		name = self._todo()
-		res = update_doc("ToDo", name, {"description": "jwr update"})
+		res = update_doc("ToDo", name, {"priority": "High"})
 		self.assertEqual(set(res), self._compact("ToDo", name))
 		self.assertEqual(res["name"], name)
-		self.assertNotIn("description", res)
+		self.assertNotIn("priority", res)
 
 	def test_empty_fields_is_the_compact_default(self):
 		name = self._todo()
@@ -55,13 +55,20 @@ class TestWriteResult(FrappeTestCase):
 			"ToDo", {"description": "jwr f", "priority": "High"}, fields=["description", "priority"]
 		)
 		self.assertEqual(
-			res, {"doctype": "ToDo", "name": res["name"], "description": "jwr f", "priority": "High"}
+			res,
+			{
+				"doctype": "ToDo",
+				"name": res["name"],
+				"docstatus": 0,
+				"description": "jwr f",
+				"priority": "High",
+			},
 		)
 
 	def test_update_fields_returns_identity_and_those_fields(self):
 		name = self._todo()
 		res = update_doc("ToDo", name, {"priority": "Low"}, fields=["priority"])
-		self.assertEqual(res, {"doctype": "ToDo", "name": name, "priority": "Low"})
+		self.assertEqual(res, {"doctype": "ToDo", "name": name, "docstatus": 0, "priority": "Low"})
 
 	def test_unknown_field_is_refused_before_the_write(self):
 		before = frappe.db.count("ToDo")
