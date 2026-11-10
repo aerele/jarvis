@@ -21,6 +21,8 @@ const rows = vi.hoisted(() => [
 	{ name: "S3", skill_name: "any-type", use_in_file_box: 1, file_box_creates: null },
 	{ name: "S4", skill_name: "held", admin_hold: 1, admin_hold_reason: "Emails customers" },
 	{ name: "S5", skill_name: "held-quietly", admin_hold: 1, admin_hold_reason: "" },
+	{ name: "S6", skill_name: "from-asha", mine: 0, shared_by: "Asha Rao" },
+	{ name: "S7", skill_name: "my-own", mine: 1, shared_by: "" },
 ]);
 // What the list page gave useListPage, so a test can answer as the server would.
 const list = vi.hoisted(() => ({ onEnvelope: null }));
@@ -51,8 +53,9 @@ vi.mock("@/composables/useListPage", async () => {
 });
 vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
-		props: ["rows"],
-		template: `<div><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row" :data-name="row.name"><slot name="cell-skill_name" :row="row" /></div></div>`,
+		name: "ListPage",
+		props: ["rows", "columns"],
+		template: `<div><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row" :data-name="row.name"><slot name="cell-skill_name" :row="row" /><span class="cell-shared-by"><slot name="cell-shared_by" :row="row" /></span></div></div>`,
 	},
 }));
 vi.mock("@/pages/list/listFetchers", () => ({ skillsListFetch: vi.fn() }));
@@ -76,6 +79,28 @@ describe("SkillsList: the File Box chip", () => {
 		expect(chips("S1")).toEqual(["File Box → Purchase Invoice"]);
 		expect(chips("S2")).toEqual([]);
 		expect(chips("S3")).toEqual([]);
+		w.unmount();
+	});
+});
+
+describe("SkillsList: the Shared by column (#804)", () => {
+	it("is a column of the list, after Owner", async () => {
+		const w = mount(SkillsList);
+		await flushPromises();
+		const labels = w
+			.findComponent({ name: "ListPage" })
+			.props("columns")
+			.map((c) => c.label);
+		expect(labels.indexOf("Shared by")).toBe(labels.indexOf("Owner") + 1);
+		w.unmount();
+	});
+
+	it("names who shared a skill with you, and shows - for your own", async () => {
+		const w = mount(SkillsList);
+		await flushPromises();
+		const cell = (name) => w.find(`.row[data-name="${name}"] .cell-shared-by`).text();
+		expect(cell("S6")).toBe("Asha Rao");
+		expect(cell("S7")).toBe("-");
 		w.unmount();
 	});
 });

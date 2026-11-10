@@ -112,6 +112,14 @@
 			</div>
 		</template>
 
+		<template #cell-shared_by="{ row }">
+			<div v-if="!row.mine && row.shared_by" class="flex items-center gap-2 overflow-hidden">
+				<Avatar size="sm" :label="row.shared_by" />
+				<div class="truncate text-base">{{ row.shared_by }}</div>
+			</div>
+			<span v-else class="text-base text-ink-gray-4">-</span>
+		</template>
+
 		<template #cell-shared_count="{ row }">
 			<div class="flex w-full items-center justify-center">
 				<Badge
@@ -194,6 +202,9 @@ const columns = [
 	{ label: "Name", key: "skill_name", width: 2 },
 	{ label: "Description", key: "description", width: 3 },
 	{ label: "Owner", key: "owner_display", width: 1 },
+	// Who shared a skill with you (#804): your own rows show "-". A share records only
+	// its recipient, and only the owner can share, so the sharer is the owner.
+	{ label: "Shared by", key: "shared_by", width: 1 },
 	{ label: "Shared", key: "shared_count", width: "6rem", align: "center" },
 	{ label: "Status", key: "enabled", width: "7rem" },
 	{ label: "Updated", key: "modified", width: "8rem", align: "right" },
