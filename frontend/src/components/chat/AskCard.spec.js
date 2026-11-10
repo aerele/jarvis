@@ -5,6 +5,9 @@ vi.mock("frappe-ui", () => ({
 	FormControl: { template: "<input />" },
 	LoadingIndicator: { template: "<span>Loading</span>" },
 	Select: { template: "<select />" },
+	DatePicker: { template: "<input />" },
+	DateTimePicker: { template: "<input />" },
+	TimePicker: { template: "<input />" },
 }));
 vi.mock("@/api", () => ({ getDoctypeFields: vi.fn(), searchLink: vi.fn() }));
 

@@ -1,4 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+// frappe-ui's pickers (DateControl, #833) do not load under jsdom.
+vi.mock("frappe-ui", () => ({
+	DatePicker: { name: "DatePicker", template: "<input />" },
+	DateTimePicker: { name: "DateTimePicker", template: "<input />" },
+	TimePicker: { name: "TimePicker", template: "<input />" },
+}));
+
 import { mount } from "@vue/test-utils";
 import { nextTick, reactive } from "vue";
 import DraftRowForm from "./DraftRowForm.vue";

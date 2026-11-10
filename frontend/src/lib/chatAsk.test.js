@@ -341,8 +341,8 @@ test("an answered ask stays inert: every control disables on `answered`, not jus
 	const disabledOnAnswered = (askCardSrc.match(/:disabled="answered"/g) || []).length;
 	assert.equal(
 		disabledOnAnswered,
-		9,
-		"yesno + single/multi option buttons, date, datetime, text, select, number, link and Other inputs must all gate on `answered`"
+		8,
+		"yesno + single/multi option buttons, the date/datetime picker (one DateControl, #833), text, select, number, link and Other inputs must all gate on `answered`"
 	);
 });
 

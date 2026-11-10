@@ -1,7 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+// frappe-ui's pickers do not load under jsdom; DateControl's own logic is lib/dateControl.
+vi.mock("frappe-ui", () => ({
+	DatePicker: { name: "DatePicker", template: "<input />" },
+	DateTimePicker: { name: "DateTimePicker", template: "<input />" },
+	TimePicker: { name: "TimePicker", template: "<input />" },
+}));
 import { mount } from "@vue/test-utils";
 import { reactive } from "vue";
 import DraftCell from "./DraftCell.vue";
+import DateControl from "@/components/forms/DateControl.vue";
 
 const F = (fieldname, fieldtype, extra = {}) => ({
 	fieldname,
@@ -33,11 +40,14 @@ describe("one editable value of a child row", () => {
 			n: "5",
 			r: "0.6",
 		});
-		expect(cell(F("d", "Date"), row).find("input").attributes("type")).toBe("date");
-		expect(cell(F("dt", "Datetime"), row).find("input").attributes("type")).toBe(
-			"datetime-local"
-		);
-		expect(cell(F("t", "Time"), row).find("input").attributes("type")).toBe("time");
+		// Date / Datetime / Time use frappe-ui's pickers through DateControl (#833)
+		const picker = (f) => cell(f, row).findComponent(DateControl);
+		expect([
+			picker(F("d", "Date")).props("kind"),
+			picker(F("d", "Date")).props("modelValue"),
+		]).toEqual(["date", "2026-01-02"]);
+		expect(picker(F("dt", "Datetime")).props("kind")).toBe("datetime");
+		expect(picker(F("t", "Time")).props("kind")).toBe("time");
 		expect(cell(F("n", "Currency"), row).find("input").attributes("type")).toBe("number");
 		expect(cell(F("r", "Rating"), row).find("input").attributes("type")).toBe("number");
 	});

@@ -28,6 +28,21 @@ vi.mock("frappe-ui", () => ({
 		template: "<input class='fui-control' />",
 	},
 	LoadingIndicator: { name: "LoadingIndicator", template: "<span class='fui-loading' />" },
+	DatePicker: {
+		name: "DatePicker",
+		props: ["modelValue"],
+		template: "<input class='fui-date' />",
+	},
+	DateTimePicker: {
+		name: "DateTimePicker",
+		props: ["modelValue"],
+		template: "<input class='fui-datetime' />",
+	},
+	TimePicker: {
+		name: "TimePicker",
+		props: ["modelValue"],
+		template: "<input class='fui-time' />",
+	},
 }));
 
 import { Select } from "frappe-ui";
@@ -211,7 +226,8 @@ test("an all-field-type ask renders as the compact mini-form", async () => {
 	expect(w.find(".jv-ask").classes()).toContain("jv-ask--form");
 	// field questions have no Other box
 	expect(w.findAll("input.jv-ask-other")).toHaveLength(0);
-	await w.find('input[type="date"]').setValue("2026-07-27");
+	w.findComponent({ name: "DatePicker" }).vm.$emit("update:modelValue", "2026-07-27");
+	await w.vm.$nextTick();
 	expect(submit(w).attributes("disabled")).toBeDefined();
 	await w.find('input[type="text"]').setValue("quarter close");
 	expect(submit(w).attributes("disabled")).toBeUndefined();
@@ -296,12 +312,14 @@ test("field: a Link field renders the record picker over its DocType", async () 
 	expect(searchLink).toHaveBeenLastCalledWith("Customer", "");
 });
 
-test("field: Date and Datetime fields render the date pickers", async () => {
-	expect((await fieldCard({ fieldtype: "Date" })).find('input[type="date"]').exists()).toBe(
-		true
-	);
+test("field: Date and Datetime fields render frappe-ui's date pickers (#833)", async () => {
 	expect(
-		(await fieldCard({ fieldtype: "Datetime" })).find('input[type="datetime-local"]').exists()
+		(await fieldCard({ fieldtype: "Date" })).findComponent({ name: "DatePicker" }).exists()
+	).toBe(true);
+	expect(
+		(await fieldCard({ fieldtype: "Datetime" }))
+			.findComponent({ name: "DateTimePicker" })
+			.exists()
 	).toBe(true);
 });
 

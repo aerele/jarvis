@@ -3,7 +3,14 @@
 // wires the REAL DraftRowBlock / DraftRowForm / DraftCell to the same helpers ChatView
 // calls (lib/rowFormFocus.js, draftLinkSearch) and the specs drive it with real
 // keyboard events on the focused element.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+// frappe-ui's pickers (DateControl, #833) do not load under jsdom.
+vi.mock("frappe-ui", () => ({
+	DatePicker: { name: "DatePicker", template: "<input />" },
+	DateTimePicker: { name: "DateTimePicker", template: "<input />" },
+	TimePicker: { name: "TimePicker", template: "<input />" },
+}));
+
 import { mount } from "@vue/test-utils";
 import { nextTick, reactive } from "vue";
 import DraftRowBlock from "./DraftRowBlock.vue";
