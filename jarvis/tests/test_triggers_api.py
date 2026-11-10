@@ -995,6 +995,7 @@ class TestSetEnabledUnsafeAttributes(_TriggersApiTestCase):
 		frappe.set_user(ADMIN_USER)
 		self.assertEqual(set_trigger_enabled(name, 1)["data"]["enabled"], 1)
 
+
 class TestDuplicateTriggers(_TriggersApiTestCase):
 	"""#816: triggers are site-wide, so two enabled rows with the same target,
 	event, condition and action fire twice. Same-type duplicates are refused
