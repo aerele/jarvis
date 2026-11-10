@@ -214,12 +214,12 @@ export function gotoPageInfo(page) {
  * payment-calendar: FIXED copy, never the prompt. The restatement reads as the
  * request done ("Per-day payables for May"), and the calendar does not apply it,
  * so showing it would promise something the page does not do. When the user
- * cannot open the calendar the card falls back to Dashboards, titled "Use
- * Dashboards instead", and says why (`note`: the card shows an info mark).
+ * cannot open the calendar the card is information only: it says so, with the
+ * info icon and `button: null` (no button, no hand-off to Dashboards).
  *
  * @param {{page: string, prompt: string}|null} goto from parseGoto
  * @param {{card: boolean, action: string|null}|null} decision from gotoDecision
- * @returns {{title: string, button: string, sub: string, icon: "calendar"|"chart", note: boolean}|null}
+ * @returns {{title: string, button: string|null, sub: string, icon: "calendar"|"chart"|"info", note: boolean}|null}
  */
 export function gotoCardCopy(goto, decision) {
 	if (!goto || !decision || !decision.card) return null;
@@ -227,18 +227,21 @@ export function gotoCardCopy(goto, decision) {
 	if (!info) return null;
 	let sub = goto.prompt;
 	// the card title is the page name; the button carries the verb
-	let title = info.name;
-	let note = false;
+	const title = info.name;
 	if (goto.page === PAYMENT_CALENDAR_PAGE) {
-		if (decision.action === PAYMENT_CALENDAR_PAGE) {
-			sub = __("Day-by-day supplier dues, cash and collections, one month at a time.");
-		} else {
-			sub = __("The Payment Calendar isn't available for your account.");
-			title = __("Use Dashboards instead");
-			note = true;
+		if (decision.action !== PAYMENT_CALENDAR_PAGE) {
+			// information only: no button, no hand-off to Dashboards
+			return {
+				title: __("You don't have access to the Payment Calendar."),
+				sub: __("Ask your admin for access."),
+				button: null,
+				icon: "info",
+				note: true,
+			};
 		}
+		sub = __("Day-by-day supplier dues, cash and collections, one month at a time.");
 	}
-	return { title, button: info.button, sub, icon: info.icon, note };
+	return { title, button: info.button, sub, icon: info.icon, note: false };
 }
 
 /**

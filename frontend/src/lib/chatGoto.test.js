@@ -208,15 +208,15 @@ test("gotoCardCopy: Dashboards keeps the restated request as its subtitle", () =
 	);
 });
 
-test("gotoCardCopy: a calendar goto the user cannot open is the Dashboards card with its reason", () => {
+test("gotoCardCopy: a calendar goto the user cannot open is an info-only card with no button", () => {
 	const calendar = { page: PAYMENT_CALENDAR_PAGE, prompt: "Per-day payables for May" };
 	for (const canView of [false, undefined]) {
 		const copy = gotoCardCopy(calendar, gotoDecision(calendar, { canView }));
 		assert.deepEqual(copy, {
-			title: "Use Dashboards instead",
-			button: "Open Dashboards",
-			sub: "The Payment Calendar isn't available for your account.",
-			icon: "chart",
+			title: "You don't have access to the Payment Calendar.",
+			button: null,
+			sub: "Ask your admin for access.",
+			icon: "info",
 			note: true,
 		});
 	}
@@ -233,8 +233,8 @@ test("gotoCardCopy: no goto, or no card, gives nothing; copy is translated when 
 			"[xx] Day-by-day supplier dues, cash and collections, one month at a time."
 		);
 		const off = gotoCardCopy(CALENDAR, gotoDecision(CALENDAR, { canView: false }));
-		assert.equal(off.sub, "[xx] The Payment Calendar isn't available for your account.");
-		assert.equal(off.title, "[xx] Use Dashboards instead");
+		assert.equal(off.sub, "[xx] Ask your admin for access.");
+		assert.equal(off.title, "[xx] You don't have access to the Payment Calendar.");
 	} finally {
 		delete globalThis.window;
 	}
@@ -255,6 +255,32 @@ test("the card click dispatches on the decision's action and is not limited by t
 	// the push promise comes back, so the countdown can see a navigation failure
 	assert.match(act, /return gotoPaymentCalendar\(messageId\);/);
 	assert.match(act, /return gotoDashboards\(goto\.prompt, messageId\);/);
+});
+
+test("the card click does nothing for a calendar goto the reader cannot open", () => {
+	const click = fnBody(chatViewSrc, "function openGotoCard(m)");
+	const opened = [];
+	const run = (canView) =>
+		new Function(
+			"gotoOf",
+			"gotoDecision",
+			"canViewCalendar",
+			"openGotoAction",
+			"PAYMENT_CALENDAR_PAGE",
+			click + "\n}\nreturn openGotoCard;"
+		)(
+			() => ({ page: PAYMENT_CALENDAR_PAGE, prompt: "x" }),
+			gotoDecision,
+			() => canView,
+			(...args) => opened.push(args),
+			PAYMENT_CALENDAR_PAGE
+		)({ name: "m1" });
+	run(false);
+	assert.deepEqual(opened, [], "no access: no navigation of any kind");
+	run(true);
+	assert.deepEqual(opened, [
+		[{ page: PAYMENT_CALENDAR_PAGE, prompt: "x" }, PAYMENT_CALENDAR_PAGE, "m1"],
+	]);
 });
 
 test("gotoPaymentCalendar: fixed route only - no prefill, no builder seed, no claim, no stamp", () => {

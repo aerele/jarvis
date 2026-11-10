@@ -407,15 +407,18 @@ test("Open now opens the CURRENT goto: its own page and the action for what the 
 		PAYMENT_CALENDAR_PAGE,
 		"not the state's stale action"
 	);
+});
 
-	// the user lost calendar access meanwhile: the action falls back to Dashboards
+test("Open now on a calendar countdown whose access was lost does not hand off: settles refused", () => {
 	const lost = exitScope({ messages: { value: [{ name: "M1", goto: CAL }] } });
 	lost.calls.canView = false;
-	load(EXIT_FNS, EXIT_NAMES, lost).onGotoOpenNow(
-		state({ page: PAYMENT_CALENDAR_PAGE, action: PAYMENT_CALENDAR_PAGE })
-	);
-	assert.equal(lost.calls.opened[0].action, DASHBOARDS_PAGE);
-	assert.equal(lost.gotoOpening.value.page, DASHBOARDS_PAGE, "the card says what really opens");
+	const cdState = state({ page: PAYMENT_CALENDAR_PAGE, action: PAYMENT_CALENDAR_PAGE });
+	lost.gotoCdState.value = cdState;
+	load(EXIT_FNS, EXIT_NAMES, lost).onGotoOpenNow(cdState);
+	assert.equal(lost.calls.opened.length, 0, "no navigation, to Dashboards or anywhere");
+	assert.equal(lost.gotoOpening.value, null);
+	assert.equal(lost.calls.debug[0][1].reason, "refused");
+	assertSettledEmpty(lost, "lost access");
 });
 
 test("Open now that throws still settles", () => {

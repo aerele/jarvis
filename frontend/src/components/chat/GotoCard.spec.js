@@ -21,11 +21,12 @@ const CHART = {
 	icon: "chart",
 	note: false,
 };
-const NO_ACCESS = {
-	title: "Use Dashboards instead",
-	button: "Open Dashboards",
-	sub: "Show payments due",
-	icon: "chart",
+// The info-only card: no button at all (gotoCardCopy gives button: null).
+const INFO_ONLY = {
+	title: "You don't have access to the Payment Calendar.",
+	button: null,
+	sub: "Ask your admin for access.",
+	icon: "info",
 	note: true,
 };
 const COUNTDOWN = {
@@ -86,13 +87,24 @@ describe("GotoCard rendering", () => {
 	});
 
 	it("shows the info icon for the no-access note", () => {
-		const w = card({ copy: NO_ACCESS });
+		const w = card({ copy: INFO_ONLY });
 		const svg = w.find(".jv-gcard-ic svg");
 		expect(svg.attributes("aria-hidden")).toBe("true");
 		expect(svg.attributes("data-icon")).toBe("info");
 		expect(svg.find("circle").attributes("r")).toBe("10");
 		expect(svg.html()).toContain("M12 16v-4M12 8h.01");
 		expect(w.findAll(".jv-gcard-ic svg")).toHaveLength(1);
+	});
+
+	it("renders no button, and nothing focusable, when button is null", () => {
+		const w = card({ copy: INFO_ONLY });
+		expect(w.find("button").exists()).toBe(false);
+		expect(w.find("[tabindex], a, input, select, textarea").exists()).toBe(false);
+		expect(w.find(".jv-gcard-title").text()).toBe(
+			"You don't have access to the Payment Calendar."
+		);
+		expect(w.find(".jv-gcard-sub").text()).toBe("Ask your admin for access.");
+		expect(w.find(".jv-gcard-ic svg").attributes("data-icon")).toBe("info");
 	});
 
 	it("emits open from the open button", async () => {

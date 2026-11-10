@@ -6,7 +6,7 @@ import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { PAUSE } from "@/lib/gotoCountdown";
 
 const props = defineProps({
-	// gotoCardCopy(): { title, button, sub, icon: "calendar" | "chart", note: boolean }
+	// gotoCardCopy(): { title, button (null = information only), sub, icon: "calendar" | "chart" | "info", note }
 	copy: { type: Object, required: true },
 	// null, or { visible, srText, stay, openNow, openNowLabel } while a countdown runs
 	countdown: { type: Object, default: null },
@@ -156,7 +156,7 @@ defineExpose({ focusOpen });
 					<span v-if="copy.sub" class="jv-gcard-sub">{{ copy.sub }}</span>
 				</div>
 				<button
-					v-if="!countdown"
+					v-if="copy.button && !countdown"
 					ref="openBtn"
 					type="button"
 					class="jv-gcard-btn"

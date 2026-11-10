@@ -7788,9 +7788,8 @@ function gotoInputs(m, runId) {
 		stamp: readGotoStamp(gotoFiredKey(m.name)),
 	};
 }
-// What the card shows for a message. The copy follows the decision's ACTION, so a
-// calendar goto the user can no longer open reads as Dashboards (with the prompt,
-// and a line saying why); see gotoCardCopy.
+// What the card shows for a message. A calendar goto the user cannot open reads as
+// an information-only card (no button); see gotoCardCopy.
 function gotoCardOf(m) {
 	const goto = gotoOf(m);
 	return gotoCardCopy(goto, gotoDecision(goto, { canView: canViewCalendar() }));
@@ -7800,6 +7799,8 @@ function openGotoCard(m) {
 	const goto = gotoOf(m);
 	if (!goto) return;
 	const decision = gotoDecision(goto, { canView: canViewCalendar() });
+	// the no-access calendar card has no button; never hand off to Dashboards
+	if (goto.page === PAYMENT_CALENDAR_PAGE && decision.action !== PAYMENT_CALENDAR_PAGE) return;
 	openGotoAction(goto, decision.action, m.name);
 }
 // Canonicalised at the single _ACTION_RE parse point so every consumer (render
@@ -10160,15 +10161,16 @@ function onGotoExpire(state) {
 		settleGoto(state, outcome);
 	}
 }
-// Open now opens the goto as it is now: its own prompt, and the action for what this user can
-// open now (a calendar goto falls back to Dashboards when access was lost meanwhile).
+// Open now opens the goto as it is now: its own prompt. A calendar goto whose access was lost
+// meanwhile is refused (no hand-off to Dashboards), the same outcome the timer expiry gives.
 function onGotoOpenNow(state) {
 	let outcome = "refused";
 	try {
 		const found = resolveGotoFor(state);
 		if (!found) return;
 		const { action } = gotoDecision(found.goto, { canView: canViewCalendar() });
-		if (action) outcome = openGotoFromCountdown(state, found.goto, action);
+		const lost = found.goto.page === PAYMENT_CALENDAR_PAGE && action !== PAYMENT_CALENDAR_PAGE;
+		if (action && !lost) outcome = openGotoFromCountdown(state, found.goto, action);
 	} finally {
 		settleGoto(state, outcome);
 	}
