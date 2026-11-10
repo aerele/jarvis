@@ -61,8 +61,15 @@ const chooseScope = async (w, value) => {
 	await flushPromises();
 };
 
+// The role list is a dropdown (#803): focusing the search box opens it.
+const openList = async (w) => {
+	await w.find('input[placeholder="Search your roles"]').trigger("focusin");
+	await flushPromises();
+};
+
 // Type into the inline role search box (a plain input, clickable inside the Dialog).
 const typeSearch = async (w, value) => {
+	await openList(w);
 	const input = w.find('input[placeholder="Search your roles"]');
 	input.element.value = value;
 	await input.trigger("input");
@@ -72,6 +79,7 @@ const typeSearch = async (w, value) => {
 // The role list is inline clickable options (role="option"), not a portaled popover.
 const roleOptionTexts = (w) => w.findAll('[role="option"]').map((b) => b.text());
 const pickRole = async (w, name) => {
+	await openList(w);
 	const btn = w.findAll('[role="option"]').find((b) => b.text() === name);
 	await btn.trigger("click");
 	await flushPromises();
@@ -88,6 +96,7 @@ describe("PromotionRequestDialog role picker", () => {
 	it("lists the requester's own targetable roles when the scope becomes Role", async () => {
 		const w = await openDialog();
 		await chooseScope(w, "Role");
+		await openList(w);
 		expect(roleOptionTexts(w)).toEqual(["Sales Manager", "Accounts"]);
 	});
 
@@ -129,6 +138,74 @@ describe("PromotionRequestDialog role picker", () => {
 	});
 });
 
+describe("PromotionRequestDialog role list closes like a dropdown (#803)", () => {
+	const mountAttached = async (multiple) => {
+		const w = mount(PromotionRequestDialog, {
+			props: { modelValue: false, noun: "skill", multiple },
+			attachTo: document.body,
+		});
+		await w.setProps({ modelValue: true });
+		await flushPromises();
+		await chooseScope(w, "Role");
+		return w;
+	};
+	const listShown = (w) => w.find('[role="group"], [role="listbox"]').exists();
+
+	it("stays closed until the search box is focused", async () => {
+		const w = await mountAttached(true);
+		expect(listShown(w)).toBe(false);
+		await openList(w);
+		expect(listShown(w)).toBe(true);
+		w.unmount();
+	});
+
+	it("closes on a click outside the picker, keeping the picks", async () => {
+		const w = await mountAttached(true);
+		await openList(w);
+		await w.findAll('[role="checkbox"]')[1].trigger("click");
+		// a click inside the list keeps it open
+		w.find('[role="group"]').element.dispatchEvent(
+			new Event("pointerdown", { bubbles: true })
+		);
+		await flushPromises();
+		expect(listShown(w)).toBe(true);
+		document.body.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+		await flushPromises();
+		expect(listShown(w)).toBe(false);
+		expect(w.text()).toContain("1 role selected: Accounts");
+		w.unmount();
+	});
+
+	it("Esc closes the open list without reaching the Dialog; a closed list lets Esc through", async () => {
+		const w = await mountAttached(true);
+		await openList(w);
+		const esc = () => {
+			const e = new KeyboardEvent("keydown", {
+				key: "Escape",
+				bubbles: true,
+				cancelable: true,
+			});
+			w.find('input[placeholder="Search your roles"]').element.dispatchEvent(e);
+			return e;
+		};
+		const first = esc();
+		await flushPromises();
+		expect(listShown(w)).toBe(false);
+		expect(first.defaultPrevented).toBe(true);
+		const second = esc();
+		expect(second.defaultPrevented).toBe(false);
+		w.unmount();
+	});
+
+	it("a single pick closes the list and shows the choice", async () => {
+		const w = await mountAttached(false);
+		await pickRole(w, "Accounts");
+		expect(listShown(w)).toBe(false);
+		expect(w.text()).toContain("Selected: Accounts");
+		w.unmount();
+	});
+});
+
 describe("PromotionRequestDialog multiselect (skills only)", () => {
 	const openMulti = async () => {
 		const w = mount(PromotionRequestDialog, {
@@ -141,6 +218,7 @@ describe("PromotionRequestDialog multiselect (skills only)", () => {
 	// In multiselect mode the rows are checkboxes, not single-select options.
 	const boxes = (w) => w.findAll('[role="checkbox"]');
 	const pickBox = async (w, name) => {
+		await openList(w);
 		const b = boxes(w).find((x) => x.text() === name);
 		await b.trigger("click");
 		await flushPromises();
@@ -150,6 +228,7 @@ describe("PromotionRequestDialog multiselect (skills only)", () => {
 	it("renders roles as toggleable checkboxes and counts the selection", async () => {
 		const w = await openMulti();
 		await chooseScope(w, "Role");
+		await openList(w);
 		expect(boxes(w).map((b) => b.text())).toEqual(["Sales Manager", "Accounts"]);
 		await pickBox(w, "Sales Manager");
 		await pickBox(w, "Accounts");
