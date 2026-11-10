@@ -328,7 +328,15 @@ defineProps({
 	imagesAsChips: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["edit", "copy", "retry", "dismiss", "retry-same", "open-attachment"]);
+const emit = defineEmits([
+	"edit",
+	"copy",
+	"retry",
+	"dismiss",
+	"retry-same",
+	"open-attachment",
+	"code-copy",
+]);
 
 // When a consumer supplies #below-body it OWNS the whole post-body region
 // (chat does — its activity/cards/metabar live there, byte-identical), so the
@@ -345,6 +353,9 @@ function onBodyClick(event) {
 	const code = btn.parentElement?.querySelector("pre code");
 	if (!code) return;
 	copyPlain(code.textContent || "").then((ok) => {
+		// The title change is not read out, so the parent announces it in its own
+		// live region (the chat's, shared with the reply Copy).
+		emit("code-copy", ok);
 		btn.classList.toggle("is-copied", ok);
 		btn.title = ok ? "Copied" : "Copy failed";
 		setTimeout(() => {

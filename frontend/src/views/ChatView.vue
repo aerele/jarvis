@@ -865,6 +865,7 @@
 							:timestampFull="msgTimeFull(m)"
 							:copied="copiedId === m.name"
 							@copy="copyReplyMsg(m.name, m.content)"
+							@code-copy="announceCodeCopy"
 							@open-attachment="openArtifact(m, $event)"
 						>
 							<template #avatar>
@@ -9598,6 +9599,11 @@ function copyReplyMsg(id, content) {
 				conversation: currentId.value,
 			}),
 	});
+}
+// A code block's copy button (Message.vue) has no text of its own to change, so
+// its result is read out through the same live region as the reply Copy.
+function announceCodeCopy(ok) {
+	announceSR(ok ? "Code copied." : "Couldn't copy the code. Select it and copy it instead.");
 }
 function replyCopyLabel(id) {
 	if (copiedId.value === id) return "Copied";
