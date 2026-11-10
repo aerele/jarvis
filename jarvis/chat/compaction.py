@@ -26,7 +26,7 @@ import uuid
 import frappe
 from frappe import _
 
-from jarvis.chat import txn
+from jarvis.chat import directive_filter, txn
 from jarvis.chat.events import publish_to_user
 
 CONV = "Jarvis Conversation"
@@ -46,12 +46,17 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 def sanitize_hint(hint: str | None) -> str:
 	"""Trim, strip control characters, collapse whitespace, cap the length.
 	A hint starting with ``/`` would be read by the runtime as ANOTHER
-	command, so it is refused outright."""
+	command, so it is refused outright.
+
+	F-Q8: the runtime reads every inline directive in ``/compact <hint>`` before it
+	runs the command, so a hint is typed text and a ``/model`` token refuses it. The
+	check runs on the FINAL hint, after the length cut: the cut can leave a token
+	that the longer text did not hold."""
 	text = _CONTROL_CHARS.sub("", str(hint or ""))
 	text = " ".join(text.split())
 	if text.startswith("/"):
 		frappe.throw(_("The hint cannot start with a slash."), frappe.ValidationError)
-	return text[:HINT_MAX_CHARS]
+	return directive_filter.refuse_typed(text[:HINT_MAX_CHARS])
 
 
 def _is_fresh_lock(since) -> bool:
