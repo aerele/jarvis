@@ -1,8 +1,8 @@
-"""Keep OpenClaw runtime directives out of the text that jarvis-app sends.
+"""Keep agent runtime directives out of the text that jarvis-app sends.
 
 Plan: .claude/workflow/plans/2026-11-10-fq8-jarvis-app-directive-filter.md (rev 2, F-Q8).
 
-OpenClaw (9.3) reads inline directives from the whole message body, as an
+The agent runtime (9.3) reads inline directives from the whole message body, as an
 authorized sender. A tenant who types ``/model openai/x --runtime codex`` could
 move the session to a runtime that cannot redact source data. The same text can
 arrive inside content that jarvis adds: an attachment, shared history, a
