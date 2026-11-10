@@ -31,8 +31,7 @@ import { advanceViewGeneration, isViewCurrent } from "../lib/viewGeneration.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
-	countDiagrams,
-	gotoChipPage,
+	messageChips,
 	parseAction,
 	parseCards,
 	parseCharts,
@@ -481,11 +480,9 @@ const view = (m) => {
 		html,
 		cards,
 		charts,
-		// Mermaid diagrams can't be drawn here; surface a chip to the web chat.
-		diagrams: countDiagrams(content),
-		// A hand-off to the Dashboards page or the Payment Calendar can't be followed
-		// here either; same chip ("dashboards" | "payment-calendar" | null).
-		gotoPage: gotoChipPage(content),
+		// Mermaid diagrams and page hand-offs can't be drawn or followed here; each
+		// gets its own chip to the web chat.
+		chips: messageChips(content),
 		action: parseAction(content),
 		skills: parseSkillsUsed(content),
 		took: spanBetween(m.creation, m.modified),
@@ -508,13 +505,6 @@ const view = (m) => {
 			!m.stopped,
 	};
 };
-
-// Title of the "Open in web chat" chip: the diagram count, else the page the goto names.
-function chipTitle(v) {
-	if (v.diagrams > 1) return v.diagrams + " diagrams";
-	if (v.diagrams) return "Diagram";
-	return v.gotoPage === "payment-calendar" ? "Payment Calendar" : "Dashboards";
-}
 
 // Mirrors ChatView.vue's (desktop) errorInfo(): a live run:error's code, when
 // this session saw it, always wins over reclassifying the persisted string
@@ -1677,7 +1667,8 @@ onUnmounted(() => {
 					<RecordCards v-if="it.view.cards" :data="it.view.cards" />
 					<ChartCard v-for="(c, ci) in it.view.charts" :key="ci" :spec="c" />
 					<a
-						v-if="it.view.diagrams || it.view.gotoPage"
+						v-for="chip in it.view.chips"
+						:key="chip.kind"
 						class="jv-diagram-chip"
 						:href="webChatUrl"
 						target="_blank"
@@ -1693,20 +1684,19 @@ onUnmounted(() => {
 							stroke-linejoin="round"
 							aria-hidden="true"
 						>
-							<template v-if="it.view.diagrams">
+							<template v-if="chip.icon === 'diagram'">
 								<rect x="3" y="3" width="7" height="6" rx="1" />
 								<rect x="14" y="15" width="7" height="6" rx="1" />
 								<path d="M6.5 9v4a2 2 0 0 0 2 2H14" />
 							</template>
-							<template v-else>
-								<rect x="3" y="3" width="7" height="9" rx="1" />
-								<rect x="14" y="3" width="7" height="5" rx="1" />
-								<rect x="14" y="12" width="7" height="9" rx="1" />
-								<rect x="3" y="16" width="7" height="5" rx="1" />
+							<template v-else-if="chip.icon === 'calendar'">
+								<rect x="3" y="4" width="18" height="18" rx="2" />
+								<path d="M16 2v4M8 2v4M3 10h18" />
 							</template>
+							<path v-else d="M18 20V10M12 20V4M6 20v-6" />
 						</svg>
 						<span class="jv-diagram-chip-tx">
-							<span class="jv-diagram-chip-t">{{ chipTitle(it.view) }}</span>
+							<span class="jv-diagram-chip-t">{{ chip.title }}</span>
 							<span class="jv-diagram-chip-s">Open in web chat</span>
 						</span>
 						<svg

@@ -852,13 +852,17 @@ test("gotoDashboards passes the message id through to the fired-stamp lookup", (
 		chatSrc,
 		'function openGotoAction(goto, action, messageId, { auto = false, runId = "" } = {})'
 	);
-	assert.match(dispatch, /else gotoDashboards\(goto\.prompt, messageId\);/);
+	assert.match(dispatch, /return gotoDashboards\(goto\.prompt, messageId\);/);
 	assert.match(dispatch, /if \(action === PAYMENT_CALENDAR_PAGE\) \{/);
-	assert.match(dispatch, /gotoPaymentCalendar\(messageId\);/);
+	assert.match(dispatch, /return gotoPaymentCalendar\(messageId\);/);
 	assert.doesNotMatch(dispatch, /setDashboardPrefill|builderSeed/);
-	assert.match(chatSrc, /openGotoAction\(goto, decision\.action, m\.name, open\);/);
+	// the auto-open (timer expiry and Open now) names the run it consumes; the card click does not
+	assert.match(
+		chatSrc,
+		/openGotoAction\(goto, action, state\.messageId, \{\s*auto: true,\s*runId: state\.runId,?\s*\}\)/
+	);
 	assert.match(chatSrc, /openGotoAction\(goto, decision\.action, m\.name\);/);
-	assert.match(chatSrc, /@click="openGotoCard\(m\)"/);
+	assert.match(chatSrc, /@open="openGotoCard\(m\)"/);
 	const calendar = fnBody(chatSrc, "function gotoPaymentCalendar(messageId)");
 	assert.doesNotMatch(calendar, /setDashboardPrefill|builderSeed|requestBefore/);
 });

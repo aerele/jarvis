@@ -28,6 +28,7 @@ import {
 	gotoDecision,
 	gotoCardCopy,
 	gotoPageInfo,
+	gotoCountdownCopy,
 	hasInteractiveFence,
 	focusInsideField,
 	modalIsOpen,
@@ -127,7 +128,7 @@ test("chatBlocks strips jarvis-goto from the visible prose", () => {
 test("ChatView parses goto through the shared module, not a private copy", () => {
 	assert.match(
 		chatViewSrc,
-		/import \{\s*parseGoto,\s*gotoFiredKey,\s*claimGotoFire,\s*builderSeed,\s*requestBefore,\s*gotoDecision,\s*gotoCardCopy,\s*gotoPageInfo,\s*hasInteractiveFence,\s*focusInsideField,\s*modalIsOpen,\s*pruneGotoStamps,?\s*\} from "@\/lib\/chatGoto";/
+		/import \{\s*parseGoto,\s*gotoFiredKey,\s*claimGotoFire,\s*builderSeed,\s*requestBefore,\s*gotoDecision,\s*gotoCardCopy,\s*gotoPageInfo,\s*gotoCountdownCopy,\s*hasInteractiveFence,\s*focusInsideField,\s*modalIsOpen,\s*pruneGotoStamps,?\s*\} from "@\/lib\/chatGoto";/
 	);
 	const gotoOf = fnBody(chatViewSrc, "function gotoOf(m)");
 	assert.match(gotoOf, /return parseGoto\(\(m && m\.content\) \|\| ""\);/);
@@ -159,16 +160,16 @@ test("encodeFiredStamp/parseFiredStamp round-trip once a conversation is recorde
 	assert.deepEqual(parseFiredStamp(encoded), { t: 456, conv: "conv-9" });
 });
 
-test("the card renders the subtitle and one button, all from the page map", () => {
-	assert.match(chatViewSrc, /v-if="gotoCardOf\(m\)"\s+class="jv-macrocard jv-macrocard--goto"/);
-	// prettier may wrap the interpolation onto its own line, so match loosely
-	assert.match(chatViewSrc, /\{\{\s*gotoCardOf\(m\)\.title\s*\}\}/);
-	assert.match(chatViewSrc, /\{\{\s*gotoCardOf\(m\)\.sub\s*\}\}/);
-	// the raw restatement is never interpolated: the calendar does not apply it
-	assert.doesNotMatch(chatViewSrc, /\{\{\s*gotoCardOf\(m\)\.prompt\s*\}\}/);
-	assert.match(chatViewSrc, /\{\{\s*gotoCardOf\(m\)\.button\s*\}\}/);
+test("the card is the GotoCard component, fed copy from the page map; the click goes through the one dispatcher", () => {
+	assert.match(chatViewSrc, /import GotoCard from "@\/components\/chat\/GotoCard\.vue";/);
+	assert.match(chatViewSrc, /<GotoCard\s+v-if="gotoCardOf\(m\)"/);
+	assert.match(chatViewSrc, /:copy="gotoCardOf\(m\)"/);
+	assert.match(chatViewSrc, /:countdown="gotoCountdownOf\(m\)"/);
 	// the click always navigates through the one dispatcher
-	assert.match(chatViewSrc, /@click="openGotoCard\(m\)"/);
+	assert.match(chatViewSrc, /@open="openGotoCard\(m\)"/);
+	// the old inline card, its copy and its CSS moved into GotoCard
+	assert.doesNotMatch(chatViewSrc, /jv-macrocard--goto/);
+	assert.doesNotMatch(chatViewSrc, /\{\{\s*gotoCardOf\(m\)\./);
 	assert.doesNotMatch(chatViewSrc, />\s*Continue in Dashboards\s*</);
 	assert.doesNotMatch(chatViewSrc, />\s*Open Dashboards\s*</);
 	const card = fnBody(chatViewSrc, "function gotoCardOf(m)");
@@ -182,9 +183,11 @@ test("gotoCardCopy: the calendar card says what the page is, never the agent's r
 	const calendar = { page: PAYMENT_CALENDAR_PAGE, prompt: "Per-day payables for May" };
 	const copy = gotoCardCopy(calendar, gotoDecision(calendar, { canView: true }));
 	assert.deepEqual(copy, {
-		title: "Continue in Payment Calendar",
+		title: "Payment Calendar",
 		button: "Open Payment Calendar",
 		sub: "Day-by-day supplier dues, cash and collections, one month at a time.",
+		icon: "calendar",
+		note: false,
 	});
 	assert.ok(!JSON.stringify(copy).includes("May"), "the restatement must not reach the card");
 });
@@ -192,9 +195,11 @@ test("gotoCardCopy: the calendar card says what the page is, never the agent's r
 test("gotoCardCopy: Dashboards keeps the restated request as its subtitle", () => {
 	const dash = { page: DASHBOARDS_PAGE, prompt: "Sales by month" };
 	assert.deepEqual(gotoCardCopy(dash, gotoDecision(dash, { canView: true })), {
-		title: "Continue in Dashboards",
+		title: "Dashboards",
 		button: "Open Dashboards",
 		sub: "Sales by month",
+		icon: "chart",
+		note: false,
 	});
 	// the calendar boot flag changes nothing for a Dashboards goto
 	assert.deepEqual(
@@ -208,9 +213,11 @@ test("gotoCardCopy: a calendar goto the user cannot open is the Dashboards card 
 	for (const canView of [false, undefined]) {
 		const copy = gotoCardCopy(calendar, gotoDecision(calendar, { canView }));
 		assert.deepEqual(copy, {
-			title: "Continue in Dashboards",
+			title: "Use Dashboards instead",
 			button: "Open Dashboards",
 			sub: "The Payment Calendar isn't available for your account.",
+			icon: "chart",
+			note: true,
 		});
 	}
 });
@@ -227,6 +234,7 @@ test("gotoCardCopy: no goto, or no card, gives nothing; copy is translated when 
 		);
 		const off = gotoCardCopy(CALENDAR, gotoDecision(CALENDAR, { canView: false }));
 		assert.equal(off.sub, "[xx] The Payment Calendar isn't available for your account.");
+		assert.equal(off.title, "[xx] Use Dashboards instead");
 	} finally {
 		delete globalThis.window;
 	}
@@ -244,15 +252,16 @@ test("the card click dispatches on the decision's action and is not limited by t
 	);
 	assert.match(act, /if \(action === PAYMENT_CALENDAR_PAGE\) \{/);
 	assert.match(act, /if \(auto\) ownRuns\.delete\(runId\);/);
-	assert.match(act, /gotoPaymentCalendar\(messageId\);/);
-	assert.match(act, /else gotoDashboards\(goto\.prompt, messageId\);/);
+	// the push promise comes back, so the countdown can see a navigation failure
+	assert.match(act, /return gotoPaymentCalendar\(messageId\);/);
+	assert.match(act, /return gotoDashboards\(goto\.prompt, messageId\);/);
 });
 
 test("gotoPaymentCalendar: fixed route only - no prefill, no builder seed, no claim, no stamp", () => {
 	const fn = fnBody(chatViewSrc, "function gotoPaymentCalendar(messageId)");
 	assert.match(
 		fn,
-		/router\s*\.push\(\{ \.\.\.gotoPageInfo\(PAYMENT_CALENDAR_PAGE\)\.route, state: \{ fromChat: true \} \}\)/
+		/router\s*\.push\(\{\s*\.\.\.gotoPageInfo\(PAYMENT_CALENDAR_PAGE\)\.route,\s*state: \{ fromChat: true, chatConv: view\.conversation \},?\s*\}\)/
 	);
 	assert.doesNotMatch(fn, /setDashboardPrefill/);
 	assert.doesNotMatch(fn, /builderSeed|requestBefore/);
@@ -260,8 +269,10 @@ test("gotoPaymentCalendar: fixed route only - no prefill, no builder seed, no cl
 	assert.doesNotMatch(fn, /router\.push\("/);
 	// the calendar writes no stamp and never prunes any: exactly-once is the ownership token
 	assert.doesNotMatch(fn, /localStorage|writeGotoStamp|pruneGotoStamps|encodeFiredStamp/);
-	// a failed navigation (stale route chunk) must not leave the morph line up
-	assert.match(fn, /\.catch\(\(\) => dropGotoMorph\(\)\);/);
+	// the push promise is returned (the countdown settles on a failure); a caller that
+	// ignores it must not leave an unhandled rejection
+	assert.match(fn, /const pushed = router\s*\.push\(/);
+	assert.match(fn, /pushed\.catch\(\(\) => \{\}\);\s*return pushed;/);
 });
 
 // Replays are the calendar's one-shot guard now that it keeps no stamp: the open
@@ -374,7 +385,7 @@ test("claimGotoFire: no stored value at all builds", () => {
 	assert.deepEqual(claimGotoFire("", 1), { build: true, stamp: "1" });
 });
 
-// A calendar open the guards refuse (draft, fence, dialog, queued turn, hold-timer
+// A calendar open the guards refuse (draft, fence, dialog, queued turn, expiry
 // re-check) must not keep its ownership: once the user clears the composer, a
 // replayed run:end would otherwise open the page late.
 test("a refused calendar auto-open consumes the ownership: a replayed run:end does not navigate", () => {
@@ -384,10 +395,12 @@ test("a refused calendar auto-open consumes the ownership: a replayed run:end do
 	);
 	const ownRuns = new Set(["RUN-1"]);
 	const opened = [];
-	// the refusal leg of the handler, executed: the text after `let redirected`
-	// is not importable (SFC), so run the two refusal statements it contains
-	const refusal = runEnd.match(
-		/if \(!redirected && (goto && goto\.page === PAYMENT_CALENDAR_PAGE)\)\s+(ownRuns\.delete\(p\.run_id\);)/
+	// the refusal leg of the handler, executed: the text after the countdown start
+	// is not importable (SFC), so run the one statement it contains
+	const giveUp = fnBody(chatViewSrc, "function giveUpGotoAtRunEnd(p, goto)");
+	assert.match(runEnd, /if \(nothingStarted\) giveUpGotoAtRunEnd\(p, goto\);/);
+	const refusal = giveUp.match(
+		/if \((goto && goto\.page === PAYMENT_CALENDAR_PAGE)\) (ownRuns\.delete\(p\.run_id\);)/
 	);
 	assert.ok(refusal, "the refused path consumes the calendar ownership");
 	const consume = new Function(
@@ -408,13 +421,11 @@ test("a refused calendar auto-open consumes the ownership: a replayed run:end do
 	assert.equal(replay.autoOpen, false);
 	if (replay.autoOpen) opened.push("MSG-1");
 	assert.deepEqual(opened, []);
-	// the hold-timer refusal consumes it as well
-	assert.match(
-		runEnd,
-		/\.autoOpen\s*\) \{[^}]*ownRuns\.delete\(p\.run_id\);\s*dropGotoMorph\(\);\s*return;/
-	);
-	// Dashboards logic is untouched: only a calendar goto consumes
-	assert.match(runEnd, /goto\.page === PAYMENT_CALENDAR_PAGE\)\s+ownRuns\.delete/);
+	// an expiry refusal consumes it as well (settleGoto: every exit but a successful open)
+	const settle = fnBody(chatViewSrc, "function settleGoto(state, outcome)");
+	assert.match(settle, /ownRuns\.delete\(state\.runId\);/);
+	// Dashboards logic is untouched: only a calendar goto consumes in the run:end tail
+	assert.match(giveUp, /goto\.page === PAYMENT_CALENDAR_PAGE\) ownRuns\.delete/);
 });
 
 test("run:end auto-fires the redirect through gotoDecision: once, never errored or stopped", () => {
@@ -425,9 +436,14 @@ test("run:end auto-fires the redirect through gotoDecision: once, never errored 
 	assert.match(runEnd, /const goto = m \? gotoOf\(m\) : null;/);
 	assert.match(
 		runEnd,
-		/const decision = goto \? gotoDecision\(goto, gotoInputs\(m, p\.run_id\)\) : null;/
+		/const decision =\s*goto && !gotoRepeat \? gotoDecision\(goto, gotoInputs\(m, p\.run_id\)\) : null;/
 	);
-	assert.match(runEnd, /if \(decision && decision\.autoOpen\) \{/);
+	// the decision starts the visible countdown; nothing navigates from run:end itself
+	assert.match(
+		runEnd,
+		/decision && decision\.autoOpen\s*\? startGotoCountdown\(m, goto, decision, p\.run_id\)\s*: null/
+	);
+	assert.doesNotMatch(runEnd, /openGotoAction\(/);
 	// read-only: the stamp is an INPUT to the decision (a message already handled never
 	// replays); the Dashboards claim itself happens in gotoDashboards (via claimGotoFire),
 	// and the calendar's exactly-once is the ownership token openGotoAction consumes -
@@ -435,15 +451,12 @@ test("run:end auto-fires the redirect through gotoDecision: once, never errored 
 	assert.doesNotMatch(runEnd, /localStorage\.setItem\(/);
 	// the navigation is the dispatcher's, never a direct gotoDashboards() call
 	assert.doesNotMatch(runEnd, /gotoDashboards\(/);
-	// both the reduced-motion path and the hold-timer path open as the auto-open,
-	// naming the run whose ownership they consume
-	assert.match(runEnd, /const open = \{ auto: true, runId: p\.run_id \};/);
-	assert.equal(
-		(runEnd.match(/openGotoAction\(goto, decision\.action, m\.name, open\);/g) || []).length,
-		2
-	);
 	// a refused decision drops the latch, or the morph line would animate forever
-	assert.match(runEnd, /if \(!redirected\) dropGotoMorph\(\);/);
+	assert.match(runEnd, /if \(nothingStarted\) giveUpGotoAtRunEnd\(p, goto\);/);
+	assert.match(
+		fnBody(chatViewSrc, "function giveUpGotoAtRunEnd(p, goto)"),
+		/dropGotoMorph\(\);/
+	);
 	const inputs = fnBody(chatViewSrc, "function gotoInputs(m, runId)");
 	assert.match(inputs, /error: !!m\.error,/);
 	assert.match(inputs, /stopped: !!m\.stopped,/);
@@ -479,10 +492,10 @@ test("a parked confirmation of THIS turn, in THIS conversation, counts as intera
 });
 
 test("the morph latch follows the decision, with the page's own morph text", () => {
-	const latch = chatViewSrc.slice(
-		chatViewSrc.indexOf("const gotoMorph = ref(null);"),
-		chatViewSrc.indexOf("const GOTO_MORPH_HOLD_MS")
-	);
+	const from = chatViewSrc.indexOf("const gotoMorph = ref(null);");
+	const to = chatViewSrc.indexOf("function dropGotoMorph(");
+	assert.ok(from !== -1 && to > from, "latch markers must exist");
+	const latch = chatViewSrc.slice(from, to);
 	assert.match(
 		latch,
 		/gotoDecision\(g, gotoInputs\(streamingMessage\.value, currentRunId\.value\)\)\.autoOpen/
@@ -495,14 +508,11 @@ test("the morph latch follows the decision, with the page's own morph text", () 
 	assert.doesNotMatch(override, /Taking you to the Dashboards builder/);
 });
 
-test("a calendar auto-open is re-checked when the hold timer fires (the user may have started typing)", () => {
-	const runEnd = chatViewSrc.slice(
-		chatViewSrc.indexOf('case "run:end": {'),
-		chatViewSrc.indexOf('case "message:enriched": {')
-	);
+test("a calendar auto-open is re-checked when the countdown expires (the user may have started typing)", () => {
+	const expire = fnBody(chatViewSrc, "function onGotoExpire(state)");
 	assert.match(
-		runEnd,
-		/goto\.page === PAYMENT_CALENDAR_PAGE &&\s*!gotoDecision\(goto, gotoInputs\(m, p\.run_id\)\)\.autoOpen/
+		expire,
+		/found\.goto\.page === PAYMENT_CALENDAR_PAGE\s*\? gotoDecision\(found\.goto, gotoInputs\(found\.m, state\.runId\)\)\.autoOpen/
 	);
 });
 
@@ -527,21 +537,18 @@ test("the send context carries handoff_pages only under the boot flag, and no ot
 	assert.match(flag, /return window\.can_view_payment_calendar === true;/);
 });
 
-test("the goto card wraps on a narrow screen; the macro card is untouched (E8)", () => {
-	// the modifier is on the goto card only; the save-as-macro card keeps the bare class
-	assert.equal((chatViewSrc.match(/class="jv-macrocard jv-macrocard--goto"/g) || []).length, 1);
+test("the goto card's narrow layout moved into GotoCard; the macro card is untouched (E8)", () => {
+	// the save-as-macro card keeps the bare class and its single-row rules
 	assert.equal((chatViewSrc.match(/class="jv-macrocard"/g) || []).length, 1);
-	const at = chatViewSrc.indexOf("@media (max-width: 400px) {\n\t.jv-macrocard--goto");
-	assert.notEqual(at, -1, "a 400px media rule scoped to .jv-macrocard--goto must exist");
-	const rule = chatViewSrc.slice(at, chatViewSrc.indexOf("\n}\n", at));
-	assert.match(
-		rule,
-		/\.jv-macrocard--goto \.jv-macrocard-title,\s*\.jv-macrocard--goto \.jv-macrocard-sub \{[^}]*white-space: normal;[^}]*overflow-wrap: anywhere;/
+	assert.doesNotMatch(chatViewSrc, /jv-macrocard--goto/);
+	assert.doesNotMatch(chatViewSrc, /@media \(max-width: 400px\) \{\s*\.jv-macrocard/);
+	for (const rule of [".jv-macrocard {", ".jv-macrocard-btn {", ".jv-macrocard-ic {"])
+		assert.ok(chatViewSrc.includes(rule), `${rule} stays for the macro card`);
+	const card = fs.readFileSync(
+		path.join(HERE, "..", "components", "chat", "GotoCard.vue"),
+		"utf8"
 	);
-	assert.match(rule, /\.jv-macrocard--goto \.jv-macrocard-btn \{[^}]*flex: 1 1 100%;/);
-	assert.match(rule, /\.jv-macrocard--goto \{[^}]*flex-wrap: wrap;/);
-	// no unscoped .jv-macrocard rule inside the media block
-	assert.doesNotMatch(rule.replace(/\.jv-macrocard--goto[\w .-]*/g, ""), /\.jv-macrocard/);
+	assert.match(card, /@container \(max-width: 479px\)/);
 });
 
 test("an own-tab retry and a recovered send both record their run id, capped at 50 (E3)", () => {
@@ -846,14 +853,16 @@ test("gotoDecision: no goto, or a page off the allowlist, gives no card and no a
 test("gotoPageInfo: labels, morph text and the fixed route for each page", () => {
 	assert.deepEqual(gotoPageInfo("payment-calendar"), {
 		page: "payment-calendar",
-		title: "Continue in Payment Calendar",
+		name: "Payment Calendar",
+		icon: "calendar",
 		button: "Open Payment Calendar",
 		morph: "Taking you to the Payment Calendar",
 		route: { name: "PaymentCalendar" },
 	});
 	assert.deepEqual(gotoPageInfo("dashboards"), {
 		page: "dashboards",
-		title: "Continue in Dashboards",
+		name: "Dashboards",
+		icon: "chart",
 		button: "Open Dashboards",
 		morph: "Taking you to the Dashboards builder",
 		route: { name: "DashboardsPage" },
@@ -881,14 +890,77 @@ test("gotoPageInfo: copy is translated when asked, not when the module loaded", 
 	};
 	try {
 		const info = gotoPageInfo("payment-calendar");
-		assert.equal(info.title, "[xx] Continue in Payment Calendar");
+		assert.equal(info.name, "[xx] Payment Calendar");
+		assert.equal(
+			"title" in info,
+			false,
+			"the page name is `name`; the card title comes from gotoCardCopy"
+		);
 		assert.equal(info.button, "[xx] Open Payment Calendar");
 		assert.equal(info.morph, "[xx] Taking you to the Payment Calendar");
 		assert.deepEqual(seen, [
-			"Continue in Payment Calendar",
+			"Payment Calendar",
 			"Open Payment Calendar",
 			"Taking you to the Payment Calendar",
 		]);
+	} finally {
+		delete globalThis.window;
+	}
+});
+
+test("gotoCountdownCopy: exact strings for the visible, paused, sr-only and announced text", () => {
+	const c = gotoCountdownCopy("payment-calendar", 2);
+	assert.deepEqual(c, {
+		visible: "Opening Payment Calendar in 2\u2026",
+		srText: "Opening Payment Calendar in a few seconds. Press Escape to stay in chat.",
+		announce: "Opening Payment Calendar. Press Escape to stay in chat.",
+		stay: "Stay in chat",
+		openNow: "Open now",
+		openNowLabel: "Open now: Payment Calendar",
+		opening: "Opening Payment Calendar\u2026",
+		failed: "Couldn't open Payment Calendar. Try again.",
+		staying: "Staying in chat.",
+	});
+	const paused = gotoCountdownCopy("payment-calendar", 2, true);
+	assert.equal(
+		paused.visible,
+		"Paused \u00b7 opening Payment Calendar in 2\u2026 Move away to continue."
+	);
+	// the sr-only sentence says it is paused, and keeps the instruction
+	assert.equal(
+		paused.srText,
+		"Paused. Opening Payment Calendar in a few seconds. Press Escape to stay in chat."
+	);
+	assert.equal(
+		gotoCountdownCopy("payment-calendar", 2).srText,
+		"Opening Payment Calendar in a few seconds. Press Escape to stay in chat."
+	);
+	assert.equal(gotoCountdownCopy("dashboards", 3).visible, "Opening Dashboards in 3\u2026");
+	assert.equal(gotoCountdownCopy("dashboards", 1, true).openNowLabel, "Open now: Dashboards");
+});
+
+test("gotoCountdownCopy: the accessible name of Open now starts with its visible text (WCAG 2.5.3)", () => {
+	const c = gotoCountdownCopy("dashboards", 3);
+	assert.ok(c.openNowLabel.startsWith(c.openNow));
+});
+
+test("gotoCountdownCopy: an unknown page gives nothing; copy is translated when asked", () => {
+	assert.equal(gotoCountdownCopy("triggers", 3), null);
+	assert.equal(gotoCountdownCopy("", 3), null);
+	globalThis.window = {
+		__: (text, args = []) => `[xx] ${text}`.replace(/\{(\d+)\}/g, (m, i) => args[i]),
+	};
+	try {
+		const c = gotoCountdownCopy("dashboards", 3);
+		assert.equal(c.visible, "[xx] Opening [xx] Dashboards in 3\u2026");
+		assert.equal(c.stay, "[xx] Stay in chat");
+		assert.equal(c.opening, "[xx] Opening [xx] Dashboards\u2026");
+		assert.equal(c.failed, "[xx] Couldn't open [xx] Dashboards. Try again.");
+		assert.equal(c.staying, "[xx] Staying in chat.");
+		assert.equal(
+			gotoCountdownCopy("dashboards", 2, true).visible,
+			"[xx] Paused \u00b7 opening [xx] Dashboards in 2\u2026 Move away to continue."
+		);
 	} finally {
 		delete globalThis.window;
 	}

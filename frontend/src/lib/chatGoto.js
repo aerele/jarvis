@@ -177,58 +177,108 @@ export function pruneGotoStamps(storage, keep = GOTO_STAMPS_KEPT) {
 
 // ── the page map and the decision ───────────────────────────────────────────
 //
-// One row per allowed page: the card's title and button, the morph line, and the
-// fixed SPA route. The route name comes only from GOTO_PAGES; the block never
-// supplies one. Copy goes through __() when asked for (at render time), not when
+// One row per allowed page: the display name, the card's button, the morph line, the
+// icon and the fixed SPA route. The route name comes only from GOTO_PAGES; the block
+// never supplies one. Copy goes through __() when asked for (at render time), not when
 // this module loads, so a page translator that arrives later still applies.
 const PAGE_COPY = {
 	[DASHBOARDS_PAGE]: () => ({
-		title: __("Continue in Dashboards"),
+		name: __("Dashboards"),
 		button: __("Open Dashboards"),
 		morph: __("Taking you to the Dashboards builder"),
+		icon: "chart",
 	}),
 	[PAYMENT_CALENDAR_PAGE]: () => ({
-		title: __("Continue in Payment Calendar"),
+		name: __("Payment Calendar"),
 		button: __("Open Payment Calendar"),
 		morph: __("Taking you to the Payment Calendar"),
+		icon: "calendar",
 	}),
 };
 
 /**
  * @param {string} page a key of GOTO_PAGES
- * @returns {{page: string, title: string, button: string, morph: string, route: {name: string}}|null}
+ * @returns {{page: string, name: string, icon: "calendar"|"chart", button: string, morph: string, route: {name: string}}|null}
  */
 export function gotoPageInfo(page) {
 	if (!ALLOWED_PAGES.has(page) || !PAGE_COPY[page]) return null;
-	return { page, ...PAGE_COPY[page](), route: { name: GOTO_PAGES[page] } };
+	const { name, button, morph, icon } = PAGE_COPY[page]();
+	return { page, name, icon, button, morph, route: { name: GOTO_PAGES[page] } };
 }
 
 /**
  * What the card says for a decision: the title and button of the page the button
- * will OPEN (the decision's action), and a subtitle.
+ * will OPEN (the decision's action), a subtitle and an icon.
  *
  * Dashboards: the subtitle is the agent's restated request, as before.
  * payment-calendar: FIXED copy, never the prompt. The restatement reads as the
  * request done ("Per-day payables for May"), and the calendar does not apply it,
  * so showing it would promise something the page does not do. When the user
- * cannot open the calendar the card falls back to Dashboards and says why.
+ * cannot open the calendar the card falls back to Dashboards, titled "Use
+ * Dashboards instead", and says why (`note`: the card shows an info mark).
  *
  * @param {{page: string, prompt: string}|null} goto from parseGoto
  * @param {{card: boolean, action: string|null}|null} decision from gotoDecision
- * @returns {{title: string, button: string, sub: string}|null}
+ * @returns {{title: string, button: string, sub: string, icon: "calendar"|"chart", note: boolean}|null}
  */
 export function gotoCardCopy(goto, decision) {
 	if (!goto || !decision || !decision.card) return null;
 	const info = gotoPageInfo(decision.action);
 	if (!info) return null;
 	let sub = goto.prompt;
+	// the card title is the page name; the button carries the verb
+	let title = info.name;
+	let note = false;
 	if (goto.page === PAYMENT_CALENDAR_PAGE) {
-		sub =
-			decision.action === PAYMENT_CALENDAR_PAGE
-				? __("Day-by-day supplier dues, cash and collections, one month at a time.")
-				: __("The Payment Calendar isn't available for your account.");
+		if (decision.action === PAYMENT_CALENDAR_PAGE) {
+			sub = __("Day-by-day supplier dues, cash and collections, one month at a time.");
+		} else {
+			sub = __("The Payment Calendar isn't available for your account.");
+			title = __("Use Dashboards instead");
+			note = true;
+		}
 	}
-	return { title: info.title, button: info.button, sub };
+	return { title, button: info.button, sub, icon: info.icon, note };
+}
+
+/**
+ * The words of the hand-off countdown, all through __() at call time. `visible`
+ * is the on-screen row (the paused row while the pointer or focus is in the card);
+ * `srText` sits in the card, not in a live region; `announce` is the one
+ * announceSR line per countdown, instruction first. `openNowLabel` starts with the
+ * visible "Open now" (WCAG 2.5.3 label in name). `opening` is the card's state
+ * between the open and the arrival, `failed` the toast and announcement when the
+ * navigation fails, `staying` the announcement after Stay / Esc / typing / a
+ * refused expiry.
+ *
+ * @param {string} page a key of GOTO_PAGES (the page that will open)
+ * @param {number} secondsLeft whole seconds, at least 1
+ * @param {boolean} [paused]
+ * @returns {{visible: string, srText: string, announce: string, stay: string, openNow: string, openNowLabel: string, opening: string, failed: string, staying: string}|null}
+ */
+export function gotoCountdownCopy(page, secondsLeft, paused = false) {
+	const info = gotoPageInfo(page);
+	if (!info) return null;
+	return {
+		visible: paused
+			? __("Paused \u00b7 opening {0} in {1}\u2026 Move away to continue.", [
+					info.name,
+					secondsLeft,
+			  ])
+			: __("Opening {0} in {1}\u2026", [info.name, secondsLeft]),
+		srText: paused
+			? __("Paused. Opening {0} in a few seconds. Press Escape to stay in chat.", [
+					info.name,
+			  ])
+			: __("Opening {0} in a few seconds. Press Escape to stay in chat.", [info.name]),
+		announce: __("Opening {0}. Press Escape to stay in chat.", [info.name]),
+		stay: __("Stay in chat"),
+		openNow: __("Open now"),
+		openNowLabel: __("Open now: {0}", [info.name]),
+		opening: __("Opening {0}\u2026", [info.name]),
+		failed: __("Couldn't open {0}. Try again.", [info.name]),
+		staying: __("Staying in chat."),
+	};
 }
 
 // An opener is enough: a half-streamed or later-closed block is still a card or a

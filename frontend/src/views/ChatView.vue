@@ -1721,44 +1721,28 @@
 								     The Dashboards subtitle is the agent's restated request; the
 								     Payment Calendar's is fixed copy (gotoCardCopy), because the
 								     calendar does not apply the restatement.
+								     A live auto-open is a visible, cancellable countdown ON this card
+								     (gotoCd; see startGotoCountdown / the run:end handler).
 								     Stays clickable in history so an old transcript still has a way
-								     through, even though the redirect itself only auto-fires once,
-								     live (see openGotoAction / the run:end handler). jarvis#912:
+								     through, even though the countdown only runs once, live, for a
+								     message (see openGotoAction). jarvis#912:
 								     every click on an old Dashboards card hands off through the
 								     same fired-stamp lookup as the live redirect, so a second/third
 								     click resumes the builder conversation the first hand-off
 								     created instead of starting a new one. -->
 								<template v-if="hasCurrentMessageSnapshot">
-									<div
+									<GotoCard
 										v-if="gotoCardOf(m)"
-										class="jv-macrocard jv-macrocard--goto"
-									>
-										<div class="jv-macrocard-ic">
-											<svg
-												width="16"
-												height="16"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.7"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<path d="M18 20V10M12 20V4M6 20v-6" />
-											</svg>
-										</div>
-										<div class="jv-macrocard-txt">
-											<span class="jv-macrocard-title">{{
-												gotoCardOf(m).title
-											}}</span>
-											<span class="jv-macrocard-sub">{{
-												gotoCardOf(m).sub
-											}}</span>
-										</div>
-										<button class="jv-macrocard-btn" @click="openGotoCard(m)">
-											{{ gotoCardOf(m).button }}
-										</button>
-									</div>
+										:ref="(el) => setGotoCardRef(m.name, el)"
+										:copy="gotoCardOf(m)"
+										:countdown="gotoCountdownOf(m)"
+										:opening="gotoOpeningOf(m)"
+										@open="openGotoCard(m)"
+										@stay="onGotoStay"
+										@open-now="gotoCd.openNow()"
+										@pause="onGotoCardPause(m, $event)"
+										@resume="onGotoCardResume(m, $event)"
+									/>
 								</template>
 								<!-- inline charts: ECharts rendered from the agent's jarvis-chart spec -->
 								<div
@@ -2070,10 +2054,11 @@
 					     exactly ONE JarvisMark + ONE StepsBox: the real row's box is
 					     boxViewByMsg[m.name], mounted in Message's #above-body above;
 					     the synthetic in-flight row below (inFlightRowVisible) covers
-					     the turn before that row exists. gotoMorph's own
-					     navigation/hold-timer logic (dropGotoMorph, streamingGoto watch,
-					     GOTO_MORPH_HOLD_MS) is untouched — only this line's markup is
-					     gone, the redirect it drives still fires off run:end; its copy
+					     the turn before that row exists. gotoMorph's latch
+					     (dropGotoMorph, streamingGoto watch, settleGoto) still feeds
+					     the steps-box override; only this line's markup is gone, and
+					     the redirect it announced is the visible, cancellable
+					     hand-off countdown on the card now (gotoCd); its copy
 					     ("Taking you to the Dashboards builder") is reused verbatim by
 					     boxViewFor's override (T5a). Recovering keeps its own steps too
 					     (T5a's overrideFor + liveStepsForRun, keyed off msgId, not just
@@ -4611,13 +4596,21 @@ import {
 	watch,
 	watchEffect,
 } from "vue";
-import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
+import {
+	useRoute,
+	useRouter,
+	onBeforeRouteLeave,
+	isNavigationFailure,
+	NavigationFailureType,
+} from "vue-router";
 import { Button, Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
 import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
 import DraftCell from "@/components/chat/DraftCell.vue";
 import DraftRowBlock from "@/components/chat/DraftRowBlock.vue";
 import ExportCard from "@/components/chat/ExportCard.vue";
+import GotoCard from "@/components/chat/GotoCard.vue";
+import { createGotoCountdown, GOTO_COUNTDOWN_MS, PAUSE } from "@/lib/gotoCountdown";
 import { exportSummary } from "@/lib/exportJobs.js";
 import ReportScope from "@/components/chat/ReportScope.vue";
 import { useConversationActivity } from "@/lib/useConversationActivity";
@@ -4777,6 +4770,7 @@ import {
 	gotoDecision,
 	gotoCardCopy,
 	gotoPageInfo,
+	gotoCountdownCopy,
 	hasInteractiveFence,
 	focusInsideField,
 	modalIsOpen,
@@ -7649,14 +7643,14 @@ function askOf(m) {
 function gotoOf(m) {
 	return parseGoto((m && m.content) || "");
 }
-// The Dashboards leg of openGotoAction (the card's button and the run:end
-// auto-redirect both reach it through that dispatcher): stash the restated
+// The Dashboards leg of openGotoAction (the card's button and the hand-off
+// countdown's open both reach it through that dispatcher): stash the restated
 // request for the Dashboards builder to pick up on its own mount, then navigate
 // there. A calendar goto lands here too when the user cannot open the calendar
 // (gotoDecision's action is then "dashboards"), with the same prompt.
 //
-// jarvis#912: the card button has no per-click guard (the run:end
-// auto-redirect fires once, live, but the card stays clickable on every
+// jarvis#912: the card button has no per-click guard (the countdown opens it
+// once, live, but the card stays clickable on every
 // later visit to the transcript), so a second/third click used to build a
 // brand-new builder conversation each time - discarding the in-progress one
 // and burning a fresh ~78k-token agent session per click. The fired stamp
@@ -7708,31 +7702,41 @@ function gotoDashboards(prompt, messageId) {
 	} else if (claim.conv) {
 		setDashboardPrefill({ text, resume: true, conv: claim.conv, messageId });
 	}
-	router.push("/dashboards");
+	// Caught like the calendar's push: a caller that ignores the promise must not leave an
+	// unhandled rejection; a caller that waits on it still sees the failure.
+	const pushed = router.push("/dashboards");
+	pushed.catch(() => {});
+	return pushed;
 }
 // The calendar hand-off: navigate to the fixed route from the page map. Nothing is
 // stashed for a builder (the calendar reads no prefill), a card click is never
 // limited by the 45 s claim window above - it always navigates - and no stamp is
 // written: the automatic open's exactly-once is the ownership token openGotoAction
-// consumes. `fromChat` lets the page move focus to its title on arrival. A failed
-// navigation (a stale route chunk, say) drops the morph line instead of leaving it.
+// consumes. `fromChat` lets the page move focus to its title on arrival. The push
+// promise is returned: the countdown settles on a failed navigation (a stale route
+// chunk, say), and a caller that ignores it must not leave an unhandled rejection.
 function gotoPaymentCalendar(messageId) {
 	const view = captureChatView(messageId || "");
 	if (!messageActionIsCurrent(view)) return;
-	router
-		.push({ ...gotoPageInfo(PAYMENT_CALENDAR_PAGE).route, state: { fromChat: true } })
-		.catch(() => dropGotoMorph());
+	const pushed = router.push({
+		...gotoPageInfo(PAYMENT_CALENDAR_PAGE).route,
+		state: { fromChat: true, chatConv: view.conversation },
+	});
+	pushed.catch(() => {});
+	return pushed;
 }
-// The one dispatcher for a goto's navigation: the card click and the run:end
-// auto-open both go through it, with the action gotoDecision chose. `auto` is the
-// run:end auto-open: for the calendar it consumes this run's ownership token FIRST
+// The one dispatcher for a goto's navigation: the card click and the countdown's
+// auto-open (timer expiry, Open now) both go through it, with the action
+// gotoDecision chose. It returns the push promise. `auto` is the countdown's
+// open: for the calendar it consumes this run's ownership token FIRST
 // (before anything can fail), so a replayed run:end or a reload finds no ownership
 // and the page never opens twice; a card click never touches it.
 function openGotoAction(goto, action, messageId, { auto = false, runId = "" } = {}) {
 	if (action === PAYMENT_CALENDAR_PAGE) {
 		if (auto) ownRuns.delete(runId);
-		gotoPaymentCalendar(messageId);
-	} else gotoDashboards(goto.prompt, messageId);
+		return gotoPaymentCalendar(messageId);
+	}
+	return gotoDashboards(goto.prompt, messageId);
 }
 // The existing boot flag, strictly: the page itself re-checks it in its route
 // guard and the backend gates the data. Read at call time (it is not reactive).
@@ -9986,15 +9990,16 @@ const dashboardBuildTurn = computed(() =>
 // unterminated block itself.
 //
 // Rendering off `streamingGoto` directly would drop the line the instant
-// run:end flips `m.streaming` false, which lands BEFORE openGotoAction() fires
-// a few statements later (immediately, or after the hold below) - exactly the
-// "instant between run:end and navigation" the line is required to survive, and
-// a lazy-loaded route chunk can turn that instant into a real visible gap. So
-// this is a LATCH: once a turn earns the morph, `gotoMorph` stays truthy until
-// the next turn starts, errors, is stopped, the conversation is left, a failed
-// calendar navigation, or the run:end handler finds no navigation coming
-// (dropGotoMorph) - never cleared by run:end itself when it DOES navigate, since
-// surviving that is the entire point.
+// run:end flips `m.streaming` false, which lands BEFORE the hand-off countdown
+// (below) runs out and opens the page - exactly the "instant between run:end and
+// navigation" the line is required to survive, and a lazy-loaded route chunk can
+// turn that instant into a real visible gap. So this is a LATCH: once a turn
+// earns the morph, `gotoMorph` stays truthy until the next turn starts, errors,
+// is stopped, the conversation is left, the countdown ends without opening
+// (Stay, Esc, typing, a refusal, a failed navigation: settleGoto), or the run:end
+// handler finds no navigation coming (dropGotoMorph) - never cleared by run:end
+// itself when it DOES start the countdown, since surviving that is the entire
+// point.
 const streamingMessage = computed(
 	() => [...messages.value].reverse().find((m) => m.role === "assistant" && m.streaming) || null
 );
@@ -10004,24 +10009,246 @@ const streamingGoto = computed(() => {
 });
 const gotoMorph = ref(null);
 watch(streamingGoto, (g) => {
-	// Only a goto that will actually navigate earns the morph line.
+	// Only a goto that will actually navigate earns the morph line. The latch carries its
+	// message id, so an exit only drops a latch that still belongs to it.
 	if (g && gotoDecision(g, gotoInputs(streamingMessage.value, currentRunId.value)).autoOpen)
-		gotoMorph.value = g;
+		gotoMorph.value = { ...g, messageId: streamingMessage.value?.name };
 });
-// The goto block usually lands with the reply's LAST tokens, so without a
-// short hold the morph line gets a sub-frame of screen time before the
-// redirect (measured live: under 400ms, one capture frame). The hold IS the
-// animation's screen time; reduced-motion users skip it and navigate at once.
-const GOTO_MORPH_HOLD_MS = 900;
-let gotoNavTimer = null;
-function dropGotoMorph() {
-	if (gotoNavTimer) {
-		clearTimeout(gotoNavTimer);
-		gotoNavTimer = null;
-	}
+// Cancels the running hand-off countdown as well: a cleared latch with a live
+// countdown would still redirect a user who moved on. `reason` is only for
+// the countdown's exit callback ("switch": a new turn or a chat switch).
+function dropGotoMorph(reason = "switch") {
 	gotoMorph.value = null;
+	gotoCd.cancel(reason);
 }
-onUnmounted(dropGotoMorph);
+onUnmounted(() => dropGotoMorph("unmount"));
+// ---- hand-off countdown (UX-D1) ───────────────────────────────────────────
+// The automatic open is a visible 3 s countdown on the card (lib/gotoCountdown.js
+// is the state machine, components/chat/GotoCard.vue the card). Stay, Esc, typing
+// and a new send cancel it; hovering or focusing the card, or a hidden tab, pause
+// it. `gotoCdState` mirrors the running countdown for the card; `gotoOpening` is
+// the card's "Opening…" state between the open and the arrival.
+const gotoCdState = ref(null);
+const gotoOpening = ref(null);
+const gotoCd = createGotoCountdown({
+	durationMs: GOTO_COUNTDOWN_MS,
+	// Monotonic: a system clock change cannot make the countdown early or late.
+	now: () => performance.now(),
+	setInterval: (fn, ms) => setInterval(fn, ms),
+	clearInterval: (id) => clearInterval(id),
+	onTick: (s) => {
+		gotoCdState.value = s;
+	},
+	onExpire: onGotoExpire,
+	onOpenNow: onGotoOpenNow,
+	onCancel: (s, reason) => settleGoto(s, reason),
+});
+// The mounted GotoCards by message id: to scroll one into view and to focus its Open button.
+const gotoCardRefs = new Map();
+function setGotoCardRef(id, el) {
+	if (el) gotoCardRefs.set(id, el);
+	else gotoCardRefs.delete(id);
+}
+// The card gets countdown copy only for the message that holds the countdown.
+function gotoCountdownOf(m) {
+	const s = gotoCdState.value;
+	return s && s.messageId === m.name ? gotoCountdownCopy(s.page, s.secondsLeft, s.paused) : null;
+}
+// ... and the Opening text only for the message that is opening.
+function gotoOpeningOf(m) {
+	const s = gotoOpening.value;
+	return s && s.messageId === m.name ? gotoCountdownCopy(s.page, 1)?.opening || "" : "";
+}
+function clearGotoOpening(messageId) {
+	if (gotoOpening.value?.messageId === messageId) gotoOpening.value = null;
+}
+// The ONE place every exit ends (cancel, expiry, Open now, navigation failure): the card
+// returns to normal, and unless the page really opened the run's ownership and the morph
+// latch go too - or a replayed run:end or a reload would open the page late. The state
+// guard keeps a late navigation failure from clearing another message's countdown, and the
+// latch is dropped only while it still belongs to this message.
+//
+// `outcome` is "opened" or the reason the page did not open ("stay", "esc", "typing",
+// "send", "switch", "unmount", "claimed", "refused", "navfail"). Only "opened" changes
+// behaviour; the rest differ in the debug line and in what the user is told.
+function settleGoto(state, outcome) {
+	window.removeEventListener("storage", onGotoStamp);
+	console.debug("jarvis goto", {
+		messageId: state.messageId,
+		page: state.page,
+		outcome: outcome === "opened" ? "opened" : "not-opened",
+		reason: outcome,
+	});
+	if (gotoCdState.value && gotoCdState.value.messageId === state.messageId)
+		gotoCdState.value = null;
+	if (outcome === "opened") return;
+	ownRuns.delete(state.runId);
+	if (gotoMorph.value?.messageId === state.messageId) gotoMorph.value = null;
+	// The user chose to stay (or the open was refused): say so once, so a screen-reader user
+	// is not left wondering whether the page will still open.
+	if (["stay", "esc", "typing", "refused"].includes(outcome)) {
+		const copy = gotoCountdownCopy(state.page, 1);
+		if (copy) announceSR(copy.staying);
+	}
+}
+// A second tab claimed this hand-off's Dashboards build while this one counted down: this tab
+// must not start another (E12). The storage event never fires in the tab that wrote the stamp.
+function onGotoStamp(e) {
+	const id = gotoCd.state()?.messageId;
+	if (id && e.key === gotoFiredKey(id) && e.newValue) gotoCd.cancel("claimed");
+}
+// The message a countdown belongs to, as it is NOW (a reload may have replaced it); null
+// when it or its goto is gone.
+function resolveGotoFor(state) {
+	const m = messages.value.find((x) => x.name === state.messageId);
+	const goto = m ? gotoOf(m) : null;
+	return goto ? { m, goto } : null;
+}
+// A navigation that failed for real (a stale route chunk, a guard that aborted): tell the user,
+// on both the toast and the live region, and let the card be clicked again. A cancelled or
+// duplicated navigation is not a failure (something else navigated, or we are already there).
+function gotoNavFailed(state, action, why) {
+	console.warn("Jarvis goto: navigation failed", action, why);
+	clearGotoOpening(state.messageId);
+	settleGoto(state, "navfail");
+	const copy = gotoCountdownCopy(action, 1);
+	if (!copy) return;
+	notify(copy.failed, { type: "error" });
+	announceSR(copy.failed);
+}
+// Runs only after the countdown has cleared itself. Returns "opened" when a navigation
+// started, else "refused" (the chat view moved on). The card shows "Opening…" until the push
+// settles.
+function openGotoFromCountdown(state, goto, action) {
+	const pushed = openGotoAction(goto, action, state.messageId, {
+		auto: true,
+		runId: state.runId,
+	});
+	if (!pushed) return "refused";
+	gotoOpening.value = { messageId: state.messageId, page: action };
+	Promise.resolve(pushed).then(
+		(result) => {
+			clearGotoOpening(state.messageId);
+			const failed =
+				isNavigationFailure(result) &&
+				!isNavigationFailure(
+					result,
+					NavigationFailureType.cancelled | NavigationFailureType.duplicated
+				);
+			if (failed) gotoNavFailed(state, action, result);
+		},
+		(err) => gotoNavFailed(state, action, err)
+	);
+	return "opened";
+}
+// Both exits settle in a finally: whatever throws, the row cannot stick and Esc is never
+// permanently swallowed.
+function onGotoExpire(state) {
+	let outcome = "refused";
+	try {
+		const found = resolveGotoFor(state);
+		if (!found || found.goto.page !== state.page) return;
+		// Only the timer is refused for a draft; the Open now button never is.
+		if (composerHasDraft()) return;
+		const stillOpen =
+			found.goto.page === PAYMENT_CALENDAR_PAGE
+				? gotoDecision(found.goto, gotoInputs(found.m, state.runId)).autoOpen
+				: // Dashboards: a second tab may have claimed the build while this one counted down.
+				  !readGotoStamp(gotoFiredKey(state.messageId));
+		if (stillOpen) outcome = openGotoFromCountdown(state, found.goto, state.action);
+	} finally {
+		settleGoto(state, outcome);
+	}
+}
+// Open now opens the goto as it is now: its own prompt, and the action for what this user can
+// open now (a calendar goto falls back to Dashboards when access was lost meanwhile).
+function onGotoOpenNow(state) {
+	let outcome = "refused";
+	try {
+		const found = resolveGotoFor(state);
+		if (!found) return;
+		const { action } = gotoDecision(found.goto, { canView: canViewCalendar() });
+		if (action) outcome = openGotoFromCountdown(state, found.goto, action);
+	} finally {
+		settleGoto(state, outcome);
+	}
+}
+// Only when the card is in the LAST message and the list follows the bottom: a user who
+// scrolled up to read must not be yanked back, and a card in older history is not where the
+// turn ended. 'auto' (not 'instant') under reduced motion: no animation either way.
+function scrollGotoCardIntoView(id) {
+	const last = messages.value[messages.value.length - 1];
+	if (!last || last.name !== id || !pinnedToBottom.value) return;
+	nextTick(() => {
+		const el = gotoCardRefs.get(id)?.$el;
+		const reduced =
+			window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+		el?.scrollIntoView?.({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
+	});
+}
+// Called from run:end once gotoDecision says autoOpen. Returns the countdown's copy when
+// one started (its announcement replaces "… replied."), else null. A tab nobody can see, or
+// a composer with a draft in it, gets the card only: a countdown could only run to a silent
+// refusal. The message is marked handled so no later run:end starts one.
+function startGotoCountdown(m, goto, decision, runId) {
+	if (document.visibilityState !== "visible" || composerHasDraft()) {
+		gotoCd.markHandled(m.name);
+		return null;
+	}
+	const started = gotoCd.start({
+		messageId: m.name,
+		runId,
+		page: goto.page,
+		action: decision.action,
+	});
+	if (!started) return null;
+	if (goto.page !== PAYMENT_CALENDAR_PAGE) window.addEventListener("storage", onGotoStamp);
+	// Latch explicitly: when the block lands WITH the terminal, the streaming watcher
+	// never saw it.
+	gotoMorph.value = { ...goto, messageId: m.name };
+	const copy = gotoCountdownCopy(goto.page, gotoCd.state().secondsLeft);
+	announceSR(copy.announce);
+	scrollGotoCardIntoView(m.name);
+	return copy;
+}
+// run:end that started no countdown for its message (and was no repeat): nothing opens by
+// itself, so a calendar run gives up its ownership - or a replayed run:end after the composer
+// clears would open the page late - and the morph latch goes, or the line would animate
+// forever with no redirect coming. A countdown running for ANOTHER message is not this
+// run's to cancel; only a latch that is not that countdown's goes.
+function giveUpGotoAtRunEnd(p, goto) {
+	if (goto && goto.page === PAYMENT_CALENDAR_PAGE) ownRuns.delete(p.run_id);
+	const running = gotoCd.state();
+	if (!running || running.messageId === p.message_id) dropGotoMorph();
+	else if (gotoMorph.value?.messageId !== running.messageId) gotoMorph.value = null;
+}
+// Stay (the button, or Esc): cancel and, when focus was in the card, give it back to the
+// Open button that the countdown row replaced.
+function stayInChat(focusCard, reason = "stay") {
+	const id = gotoCd.state()?.messageId;
+	gotoCd.cancel(reason);
+	if (focusCard && id) nextTick(() => gotoCardRefs.get(id)?.focusOpen?.());
+}
+// The Stay button: a keyboard activation (a click event with detail 0) returns focus to the
+// card's Open button; a pointer click hands it to the composer, where the user goes next.
+function onGotoStay(event) {
+	if (event && event.detail === 0) return stayInChat(true);
+	stayInChat(false);
+	nextTick(() => composerRef.value?.focusInput?.());
+}
+function gotoCardHasFocus() {
+	const id = gotoCd.state()?.messageId;
+	const el = id && gotoCardRefs.get(id)?.$el;
+	return !!el && el.contains(document.activeElement);
+}
+// Only the card that holds the countdown may pause or resume it: a late resume from an
+// older card (its countdown prop just went null) must not resume the new countdown.
+function onGotoCardPause(m, reason) {
+	if (gotoCd.state()?.messageId === m.name) gotoCd.pause(reason);
+}
+function onGotoCardResume(m, reason) {
+	if (gotoCd.state()?.messageId === m.name) gotoCd.resume(reason);
+}
 // ---- common artifact activity card (jarvis#884) ───────────────────────────
 // Generalizes the #874 dashboard-only live card to any artifact-producing
 // main-chat turn: whichever write tool actually ran (or the builder-origin
@@ -11306,7 +11533,7 @@ function resetRunState() {
 	mention.value = { ...mention.value, open: false };
 	histIdx.value = null;
 	histDraft.value = "";
-	dropGotoMorph(); // a latch (or pending hold-nav) from the chat we are leaving must not follow us in
+	dropGotoMorph(); // the latch and any running hand-off countdown of the chat we are leaving must not follow us in
 }
 // Stash the leaving chat's draft and restore the target chat's own, so unsent
 // text follows its conversation instead of bleeding into the next one. Both the
@@ -11821,6 +12048,10 @@ let _prefillSendRevision = 0;
 async function send(textArg, resendAck) {
 	// Restoration must choose the destination before a send captures its conversation scope.
 	if (booting.value) return;
+	// Any send attempt is a stay signal: cancel a running hand-off countdown synchronously,
+	// before any await. This runs before most refusals below on purpose - a send that is then
+	// refused (a hold, a dictation in flight) still means the user is here and acting.
+	gotoCd.cancel("send");
 	_recoveryRefreshEpoch++;
 	dismissFeedback(); // sending the next turn clears any pending feedback line
 	// Maintenance HARD block: once a hold is known, no send runs — this guards the paths that call
@@ -12619,7 +12850,7 @@ function onEvent(p) {
 			statusPhase.value = "model";
 			store.streamingConvId = p.conversation_id || currentId.value;
 			// A new turn starting must not inherit the previous turn's morph
-			// latch or its pending hold-navigation (jarvis#884) — only THIS
+			// latch or a running hand-off countdown (jarvis#884) — only THIS
 			// turn's own complete goto block may light it again.
 			dropGotoMorph();
 			break;
@@ -12964,7 +13195,35 @@ function onEvent(p) {
 			// (browser notification moved to the app-scoped global notifier —
 			// AppShell attaches it, so it fires on every route, not just here)
 			recovering.value = null;
-			announceSR(`${brand.agentName} replied.`);
+			// jarvis#884: a ```jarvis-goto block on the turn that just ENDED, live, in THIS
+			// mounted view, auto-opens its page as gotoDecision (see lib/chatGoto.js)
+			// decides: the Dashboards builder, or - only for a turn this tab sent, with an
+			// empty composer and no queued turn, by a user who can open it - the Payment
+			// Calendar. It is a visible, cancellable countdown on the card now (see
+			// startGotoCountdown), not an immediate jump. Gated like markAnswerLanded above
+			// (never a stopped or errored row), plus the durable Dashboards stamp so a later
+			// revisit of the same transcript never re-fires it. Only the live socket
+			// terminal ever reaches this branch.
+			//
+			// jarvis#912 round 2: this check is READ-ONLY. The stamp itself is claimed
+			// inside gotoDashboards (via claimGotoFire - see lib/chatGoto.js) when the
+			// page opens, the one place a manual card click races through too.
+			//
+			// A repeat run:end (a legacy terminal with no pump_epoch, a higher epoch) for a
+			// message the countdown already holds or has handled does nothing in the goto branch:
+			// no second countdown, no ownership or latch change.
+			const goto = m ? gotoOf(m) : null;
+			const gotoRepeat = !!goto && gotoCd.isHandled(m.name);
+			const replayDuringCountdown = gotoRepeat && gotoCd.state()?.messageId === m.name;
+			const decision =
+				goto && !gotoRepeat ? gotoDecision(goto, gotoInputs(m, p.run_id)) : null;
+			const countdown =
+				decision && decision.autoOpen
+					? startGotoCountdown(m, goto, decision, p.run_id)
+					: null;
+			// The countdown's own announcement replaces "… replied." (one live message); a
+			// replay while it runs must not talk over it.
+			if (!countdown && !replayDuringCountdown) announceSR(`${brand.agentName} replied.`);
 			store.loadConversations();
 			// SUX-6 identical-skip (OARF-7): the streamed deltas already painted the
 			// final cumulative text, so on the normal path a full reload would just
@@ -12982,76 +13241,10 @@ function onEvent(p) {
 				scheduleMermaid(captureChatView(), 300);
 				scheduleMermaid(captureChatView(), 900);
 			}
-			// jarvis#884: a ```jarvis-goto block on the turn that just ENDED, live,
-			// in THIS mounted view, auto-redirects exactly once, as gotoDecision (see
-			// lib/chatGoto.js) decides: to the Dashboards builder, or - only for a turn
-			// this tab sent, with an empty composer and no queued turn, by a user who
-			// can open it - to the Payment Calendar. Gated the same way markAnswerLanded
-			// is above (never a stopped or errored row), plus a durable stamp so a later
-			// reload/revisit of the same transcript never re-fires it. Only the live
-			// socket terminal ever reaches this branch, so an old message opened again
-			// never gets here at all, but the stamp is the belt-and-braces the spec
-			// asks for.
-			//
-			// jarvis#912 round 2: this check is READ-ONLY. The stamp itself is
-			// claimed inside gotoDashboards (via claimGotoFire - see lib/chatGoto.js)
-			// now, the one place a manual card click races through too, so there is
-			// exactly one place a fresh build ever gets stamped. Left here, this
-			// still stops the morph from replaying for a message already handled.
-			//
-			// `redirected` tracks whether THIS run:end is the one that actually
-			// navigates, so the gotoMorph latch below can tell the two cases apart:
-			// the navigating path keeps the latch (it must survive the instant up to
-			// navigation — the whole point of the latch), while every other path
-			// that reaches run:end with the latch still set — a second tab that lost
-			// the race on the localStorage stamp, an errored/stopped terminal, or a
-			// was_recovered replacement whose final text dropped the goto block —
-			// must drop it, or the morph line would animate forever with no
-			// redirect coming.
-			let redirected = false;
-			const goto = m ? gotoOf(m) : null;
-			const decision = goto ? gotoDecision(goto, gotoInputs(m, p.run_id)) : null;
-			if (decision && decision.autoOpen) {
-				redirected = true;
-				// Latch explicitly: when the block lands WITH the terminal, the
-				// streaming watcher never saw it, and the hold below is the
-				// morph line's only screen time.
-				gotoMorph.value = goto;
-				const reducedMotion =
-					window.matchMedia &&
-					window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-				const open = { auto: true, runId: p.run_id };
-				if (reducedMotion) {
-					openGotoAction(goto, decision.action, m.name, open);
-				} else {
-					// A duplicate run:end inside the hold must not leave a second timer.
-					clearTimeout(gotoNavTimer);
-					gotoNavTimer = setTimeout(() => {
-						gotoNavTimer = null;
-						// dropGotoMorph() clearing the latch (new turn, chat switch,
-						// unmount) is the cancel signal for this pending navigation.
-						if (!gotoMorph.value) return;
-						// The calendar open also needs a still-empty composer: the user
-						// may have started typing during the hold. (Dashboards: unchanged.)
-						if (
-							goto.page === PAYMENT_CALENDAR_PAGE &&
-							!gotoDecision(goto, gotoInputs(m, p.run_id)).autoOpen
-						) {
-							// Refused: the ownership goes with it, or a replayed run:end
-							// after the composer clears would open the page late.
-							ownRuns.delete(p.run_id);
-							dropGotoMorph();
-							return;
-						}
-						openGotoAction(goto, decision.action, m.name, open);
-					}, GOTO_MORPH_HOLD_MS);
-				}
-			}
-			// A calendar auto-open refused for any reason (draft, fence, dialog...)
-			// consumes the run's ownership too: it must not open late on a replay.
-			if (!redirected && goto && goto.page === PAYMENT_CALENDAR_PAGE)
-				ownRuns.delete(p.run_id);
-			if (!redirected) dropGotoMorph();
+			// No countdown for this run:end (refused for any reason, a tab nobody sees, a draft
+			// in the composer): see giveUpGotoAtRunEnd. A repeat does nothing here.
+			const nothingStarted = !countdown && !gotoRepeat;
+			if (nothingStarted) giveUpGotoAtRunEnd(p, goto);
 			break;
 		}
 		case "message:enriched": {
@@ -13155,7 +13348,7 @@ function onEvent(p) {
 			activeTools.value = [];
 			currentRunId.value = null;
 			store.streamingConvId = null;
-			dropGotoMorph(); // an errored turn never redirects — drop the latch and any pending hold-nav
+			dropGotoMorph(); // an errored turn never redirects — drop the latch and cancel any countdown
 			announceSR("That didn't go through. See the error in the chat.");
 			loadConversation(currentId.value);
 			break;
@@ -13218,7 +13411,7 @@ function stopRun() {
 	activeTools.value = [];
 	store.streamingConvId = null;
 	recovering.value = null;
-	dropGotoMorph(); // a stopped turn never redirects — drop the latch and any pending hold-nav
+	dropGotoMorph(); // a stopped turn never redirects — drop the latch and cancel any countdown
 	if (cid) api.stopRun(cid, rid).catch(() => {});
 	notify("Stopped.");
 }
@@ -14366,6 +14559,7 @@ function browseConnectors() {
 // ---- mentions (@ user, / doctype·tool) ----
 let _mentionSeq = 0;
 function onInput() {
+	gotoCd.cancel("typing"); // the user is writing: the hand-off must not take the page away
 	dismissFeedback(); // starting the next query clears any pending feedback line
 	histIdx.value = null; // typing exits prompt-history navigation
 	const el = composerRef.value?.el;
@@ -14485,6 +14679,9 @@ async function checkSilentRun() {
 	}
 }
 function onVisibility() {
+	// A hand-off countdown only runs while the tab can be seen.
+	if (document.visibilityState === "visible") gotoCd.resume(PAUSE.HIDDEN);
+	else gotoCd.pause(PAUSE.HIDDEN);
 	if (document.visibilityState === "visible") onResync();
 	// Going to the background stops requestAnimationFrame, so anything mid-reveal
 	// would sit frozen until the user came back. Snap it instead.
@@ -14849,6 +15046,22 @@ onBeforeUnmount(() => {
 // Chat-surface keyboard handling (Esc closes overlays). Ctrl+Shift+O and
 // Ctrl+B are owned by the shell now (AppShell → useShortcuts, §3.1).
 function onGlobalKey(e) {
+	// Esc cancels a running hand-off countdown, when nothing else consumed it (the machine is
+	// asked too: a stale mirror must never swallow Esc): a dialog's
+	// own Esc closes the dialog and the countdown keeps running. No preventDefault, and the
+	// return keeps the mic / artifact branches below untouched.
+	if (
+		e.key === "Escape" &&
+		gotoCdState.value &&
+		gotoCd.state() &&
+		!e.defaultPrevented &&
+		!e.isComposing &&
+		!store.settingsOpen &&
+		!modalIsOpen(document)
+	) {
+		stayInChat(gotoCardHasFocus(), "esc");
+		return;
+	}
 	if (e.defaultPrevented) return;
 	// The shell SettingsDialog is a foreground modal with its OWN Escape handler
 	// on the same window target; stopPropagation can't suppress a sibling
@@ -15733,7 +15946,8 @@ onUnmounted(() => {
 /* visible keyboard focus (UX #15) */
 .jv-iconbtn:focus-visible,
 .jv-retry:focus-visible,
-.jv-modelpill:focus-visible {
+.jv-modelpill:focus-visible,
+.jv-macrocard-btn:focus-visible {
 	outline: 2px solid var(--cta);
 	outline-offset: 2px;
 }
@@ -17724,7 +17938,7 @@ onUnmounted(() => {
 	font-weight: 600;
 	color: var(--text);
 }
-/* save-as-macro card (in a message) */
+/* save-as-macro card (in a message); the hand-off card is components/chat/GotoCard.vue */
 .jv-macrocard {
 	display: flex;
 	align-items: center;
@@ -17783,24 +17997,6 @@ onUnmounted(() => {
 }
 .jv-macrocard-btn:hover {
 	opacity: 0.9;
-}
-/* Narrow screens: the redirect card wraps instead of ellipsising the restated
-   request, and its button takes its own full-width row. Scoped to the goto card
-   so the save-as-macro card keeps its single-row layout. */
-@media (max-width: 400px) {
-	.jv-macrocard--goto {
-		flex-wrap: wrap;
-	}
-	.jv-macrocard--goto .jv-macrocard-title,
-	.jv-macrocard--goto .jv-macrocard-sub {
-		white-space: normal;
-		overflow: visible;
-		text-overflow: clip;
-		overflow-wrap: anywhere;
-	}
-	.jv-macrocard--goto .jv-macrocard-btn {
-		flex: 1 1 100%;
-	}
 }
 .jv-macro-merged-badge {
 	margin-left: 7px;

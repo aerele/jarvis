@@ -67,6 +67,29 @@ export function gotoChipPage(content) {
 	return parseGoto(content)?.page || null;
 }
 
+const GOTO_TITLES = { dashboards: "Dashboards", "payment-calendar": "Payment Calendar" };
+const GOTO_ICONS = { dashboards: "chart", "payment-calendar": "calendar" };
+
+/**
+ * The "Open in web chat" chips a reply earns: one for diagrams (counted), one for
+ * a valid page hand-off. Separate chips, because they are different things.
+ * Reads only the page key of a goto, never its prompt.
+ * @returns {Array<{kind: "diagram"|"goto", title: string, icon: "diagram"|"chart"|"calendar"}>}
+ */
+export function messageChips(content) {
+	const chips = [];
+	const diagrams = countDiagrams(content);
+	if (diagrams)
+		chips.push({
+			kind: "diagram",
+			title: diagrams > 1 ? diagrams + " diagrams" : "Diagram",
+			icon: "diagram",
+		});
+	const page = gotoChipPage(content);
+	if (page) chips.push({ kind: "goto", title: GOTO_TITLES[page], icon: GOTO_ICONS[page] });
+	return chips;
+}
+
 /** ```jarvis-cards``` → {title, cards:[{title, subtitle, doctype, name, fields}]}. */
 export function parseCards(content) {
 	if (!content || !content.includes("jarvis-cards")) return null;

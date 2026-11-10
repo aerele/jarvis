@@ -7,8 +7,8 @@
 //   - frontend/src/lib/chatGoto.js (parse allowlist, page map, decision), which
 //     the desktop SPA's ChatView and api.js use, and which the PWA reuses
 //     through pwa/src/lib/blocks.js (the chip);
-//   - the Desk widget only STRIPS the block from the prose; it does not read
-//     this table.
+//   - the Desk widget parses the goto with chatGoto.js parseGoto: a Dashboards
+//     goto becomes a "Continue in full chat" chip; other gotos are removed.
 // .mjs so it is unambiguously ESM regardless of the nearest package.json "type".
 //
 // Route names are those in frontend/src/router/index.js; goto_pages.test.mjs

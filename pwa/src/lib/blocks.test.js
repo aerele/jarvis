@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
 	countDiagrams,
 	gotoChipPage,
+	messageChips,
 	parseCards,
 	stripAgentBlocks,
 	toolStatus,
@@ -152,4 +153,44 @@ test("gotoChipPage: an invalid goto gets no chip", () => {
 	assert.equal(gotoChipPage("no block here"), null);
 	assert.equal(gotoChipPage(""), null);
 	assert.equal(gotoChipPage(null), null);
+});
+
+const diagram = () => fence("mermaid", "flowchart TD\nA-->B");
+
+// One chip per kind: the diagram and the page hand-off are different things and
+// used to share a single chip titled "Diagram" when both were present.
+test("messageChips: a diagram and a Dashboards goto give two chips", () => {
+	assert.deepEqual(messageChips(`${diagram()}\n${goto("dashboards")}`), [
+		{ kind: "diagram", title: "Diagram", icon: "diagram" },
+		{ kind: "goto", title: "Dashboards", icon: "chart" },
+	]);
+});
+
+test("messageChips: a Payment Calendar goto has its own title and icon", () => {
+	assert.deepEqual(messageChips(goto("payment-calendar")), [
+		{ kind: "goto", title: "Payment Calendar", icon: "calendar" },
+	]);
+});
+
+test("messageChips: a diagram alone is one chip; several diagrams are counted", () => {
+	assert.deepEqual(messageChips(diagram()), [
+		{ kind: "diagram", title: "Diagram", icon: "diagram" },
+	]);
+	assert.deepEqual(messageChips(`${diagram()}\n${diagram()}`), [
+		{ kind: "diagram", title: "2 diagrams", icon: "diagram" },
+	]);
+});
+
+test("messageChips: no chip for plain text, an invalid goto, or an unclosed goto", () => {
+	assert.deepEqual(messageChips("just prose"), []);
+	assert.deepEqual(messageChips(""), []);
+	assert.deepEqual(messageChips(null), []);
+	assert.deepEqual(messageChips(goto("settings")), []);
+	assert.deepEqual(messageChips(goto("dashboards", "  ")), []);
+	assert.deepEqual(messageChips('```jarvis-goto\n{"page":"dashboards","prompt":"x"}'), []);
+});
+
+test("messageChips: a chip carries no prompt or JSON from the goto block", () => {
+	const chips = messageChips(goto("dashboards", "SECRET-PROMPT"));
+	assert.ok(!JSON.stringify(chips).includes("SECRET-PROMPT"));
 });

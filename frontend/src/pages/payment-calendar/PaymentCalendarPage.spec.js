@@ -7,10 +7,15 @@ vi.mock("@/api/paymentCalendar", async () =>
 );
 vi.mock("@/utils/datetime", () => ({ siteTimezone: () => "Asia/Kolkata" }));
 vi.mock("@/stores/shell", () => ({ useShellStore: () => ({ mobile: false }) }));
-vi.mock("vue-router", () => ({ useRoute: () => ({ query: {} }) }));
+const router = vi.hoisted(() => ({
+	back: vi.fn(),
+	push: vi.fn(),
+	resolve: vi.fn(({ params }) => ({ fullPath: `/c/${params.id}` })),
+}));
+vi.mock("vue-router", () => ({ useRoute: () => ({ query: {} }), useRouter: () => router }));
 vi.mock("frappe-ui", () => ({
 	Breadcrumbs: { template: "<nav>Dashboards</nav>", props: ["items"] },
-	FeatherIcon: { template: "<span />", props: ["name"] },
+	FeatherIcon: { template: '<span class="fake-icon" :data-name="name" />', props: ["name"] },
 	Dialog: {
 		props: ["modelValue", "options"],
 		template:
@@ -61,7 +66,7 @@ describe("Native Payment Calendar page", () => {
 			expect(title.attributes("tabindex")).toBe("-1");
 			expect(document.activeElement).not.toBe(title.element);
 			wrapper.unmount();
-			window.history.replaceState({ fromChat: true }, "");
+			window.history.replaceState({ fromChat: true, chatConv: "c-1" }, "");
 			wrapper = mount(PaymentCalendarPage, { attachTo: host });
 			await flushPromises();
 			expect(document.activeElement).toBe(wrapper.get("#pcal-title").element);
@@ -77,13 +82,105 @@ describe("Native Payment Calendar page", () => {
 			host.remove();
 		}
 	});
-	it("hides the focus ring on the programmatically focused title, but keeps it for the keyboard", () => {
+	it("never draws a ring on the title: it is not interactive", () => {
 		const css = fs.readFileSync(path.resolve(__dirname, "payment-calendar.css"), "utf8");
-		expect(css).toMatch(
-			/#pcal-title:focus:not\(:focus-visible\)\s*\{\s*outline:\s*none;\s*\}/
-		);
-		// only the not-focus-visible case: a plain `:focus` rule would hide the keyboard ring too
-		expect(css).not.toMatch(/#pcal-title:focus\s*\{/);
+		expect(css).toMatch(/#pcal-title:focus\s*\{\s*outline:\s*none;\s*\}/);
+		expect(css).not.toMatch(/#pcal-title:focus:not\(:focus-visible\)/);
+	});
+	it("Back to chat uses the page's own focus ring, with no rule of its own", async () => {
+		window.history.replaceState({ fromChat: true, chatConv: "c-1", back: "/c/c-1" }, "");
+		wrapper = mount(PaymentCalendarPage);
+		await flushPromises();
+		window.history.replaceState({}, "");
+		const back = wrapper.find(".pcal-back");
+		// a plain button of the page, not a frappe-ui Button with a ring of its own
+		expect(back.element.tagName).toBe("BUTTON");
+		expect(back.attributes("type")).toBe("button");
+		expect(back.classes()).toContain("pcal-text-button");
+		expect(back.element.closest(".pcal-root")).not.toBeNull();
+		const css = fs.readFileSync(path.resolve(__dirname, "payment-calendar.css"), "utf8");
+		expect(css).toMatch(/\.pcal-root button:focus-visible/);
+		expect(css).not.toMatch(/\.pcal-back[^{,]*:focus-visible/);
+	});
+	describe("Back to chat", () => {
+		const backBtn = () => wrapper.find(".pcal-back");
+		async function arrive(state) {
+			window.history.replaceState(state, "");
+			wrapper = mount(PaymentCalendarPage);
+			await flushPromises();
+		}
+		afterEach(() => window.history.replaceState({}, ""));
+		it("is shown above the eyebrow when the hand-off carried a conversation", async () => {
+			await arrive({ fromChat: true, chatConv: "c-1", back: "/c/c-1" });
+			expect(backBtn().exists()).toBe(true);
+			expect(backBtn().text()).toBe("Back to chat");
+			const html = wrapper.html();
+			expect(html.indexOf("pcal-back")).toBeLessThan(html.indexOf("pcal-eyebrow"));
+		});
+		it("shows an arrow icon that assistive tech skips, in front of the label", async () => {
+			await arrive({ fromChat: true, chatConv: "c-1", back: "/c/c-1" });
+			const icon = backBtn().find(".fake-icon");
+			expect(icon.attributes("data-name")).toBe("arrow-left");
+			expect(icon.attributes("aria-hidden")).toBe("true");
+			expect(backBtn().text()).toBe("Back to chat");
+			expect(backBtn().html().indexOf("fake-icon")).toBeLessThan(
+				backBtn().html().indexOf("Back to chat")
+			);
+		});
+		it("sits above the title row, so the Refresh button does not move", async () => {
+			await arrive({ fromChat: true, chatConv: "c-1", back: "/c/c-1" });
+			const row = wrapper.get(".pcal-title-row");
+			expect(row.find(".pcal-back").exists()).toBe(false);
+			const html = wrapper.html();
+			expect(html.indexOf("pcal-back")).toBeLessThan(html.indexOf("pcal-title-row"));
+			expect(row.text()).toContain("Refresh");
+		});
+		it("is there on the FIRST paint, not one tick after mount", async () => {
+			window.history.replaceState({ fromChat: true, chatConv: "c-1", back: "/c/c-1" }, "");
+			wrapper = mount(PaymentCalendarPage);
+			// no await: the state is read in setup, so the first render already has the button
+			expect(wrapper.find(".pcal-back").exists()).toBe(true);
+			await flushPromises();
+		});
+		it("takes only a string conversation id from the history state", async () => {
+			for (const chatConv of [123, true, {}, ["c-1"], null, ""]) {
+				await arrive({ fromChat: true, chatConv, back: "/c/c-1" });
+				expect(backBtn().exists()).toBe(false);
+				wrapper.unmount();
+			}
+		});
+		it("goes back in history when the previous entry is that conversation", async () => {
+			await arrive({ fromChat: true, chatConv: "c-1", back: "/c/c-1" });
+			await backBtn().trigger("click");
+			expect(router.back).toHaveBeenCalledTimes(1);
+			expect(router.push).not.toHaveBeenCalled();
+		});
+		it("pushes the conversation route when the previous entry is something else", async () => {
+			await arrive({ fromChat: true, chatConv: "c-1", back: "/dashboards" });
+			await backBtn().trigger("click");
+			expect(router.back).not.toHaveBeenCalled();
+			expect(router.push).toHaveBeenCalledWith({
+				name: "Conversation",
+				params: { id: "c-1" },
+			});
+		});
+		it("keeps the key after the one-shot clear, with chatConv intact", async () => {
+			await arrive({ fromChat: true, chatConv: "c-1", back: "/c/c-1" });
+			expect("fromChat" in window.history.state).toBe(true);
+			expect(window.history.state.fromChat).toBeUndefined();
+			expect(window.history.state.chatConv).toBe("c-1");
+		});
+		it("still shows after a remount (reload) once fromChat was cleared", async () => {
+			await arrive({ fromChat: undefined, chatConv: "c-1", back: "/c/c-1" });
+			expect(backBtn().exists()).toBe(true);
+		});
+		it("is absent without state, or without a conversation", async () => {
+			await arrive({});
+			expect(backBtn().exists()).toBe(false);
+			wrapper.unmount();
+			await arrive({ fromChat: true, back: "/c/c-1" });
+			expect(backBtn().exists()).toBe(false);
+		});
 	});
 	it("removes financial panels at expiry and offers explicit recovery", async () => {
 		await render();

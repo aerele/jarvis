@@ -21,27 +21,32 @@ function chip() {
 	return chatViewSrc.slice(start, chatViewSrc.indexOf("</a>", at));
 }
 
-test("PWA ChatView: the message view carries the goto page from gotoChipPage", () => {
-	assert.match(chatViewSrc, /\bgotoChipPage,/, "ChatView must import gotoChipPage");
-	assert.match(chatViewSrc, /gotoPage: gotoChipPage\(content\)/);
+test("PWA ChatView: the message view carries its chips from messageChips", () => {
+	assert.match(chatViewSrc, /\bmessageChips,/, "ChatView must import messageChips");
+	assert.match(chatViewSrc, /chips: messageChips\(content\)/);
 });
 
-test("PWA ChatView: the chip shows for a diagram or a goto of either page, and opens the web chat", () => {
+test("PWA ChatView: one <a> per chip (diagram and goto apart), each opening the web chat", () => {
 	const el = chip();
-	assert.match(el, /v-if="it\.view\.diagrams \|\| it\.view\.gotoPage"/);
+	assert.match(el, /v-for="chip in it\.view\.chips"/);
+	assert.match(el, /:key="chip\.kind"/);
 	assert.match(el, /:href="webChatUrl"/);
+	assert.match(el, /Open in web chat/);
 });
 
 // A0 pinned "no chip for the calendar"; replaced on purpose (a lead-in needs a link).
-test("PWA ChatView: the chip is titled by the page the goto names", () => {
-	const at = chatViewSrc.indexOf("function chipTitle(v)");
-	assert.notEqual(at, -1);
-	const fn = chatViewSrc.slice(at, chatViewSrc.indexOf("\n}", at));
-	assert.match(
-		fn,
-		/return v\.gotoPage === "payment-calendar" \? "Payment Calendar" : "Dashboards";/
-	);
-	assert.match(fn, /return "Diagram";/);
+test("PWA ChatView: the chip is titled by the chip model, not by a local helper", () => {
+	assert.match(chip(), /\{\{ chip\.title \}\}/);
+	assert.equal(chatViewSrc.indexOf("function chipTitle("), -1, "chipTitle is replaced");
+});
+
+test("PWA ChatView: each chip draws its own icon (diagram, chart, calendar)", () => {
+	const el = chip();
+	assert.match(el, /chip\.icon === 'diagram'/);
+	assert.match(el, /chip\.icon === 'calendar'/);
+	assert.match(el, /M18 20V10M12 20V4M6 20v-6/, "chart icon");
+	assert.match(el, /M16 2v4M8 2v4M3 10h18/, "calendar icon");
+	assert.match(el, /aria-hidden="true"/);
 });
 
 test("PWA ChatView: no goto JSON is rendered anywhere: the chip reads only the page key, never the block's text", () => {
