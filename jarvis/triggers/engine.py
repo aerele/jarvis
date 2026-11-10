@@ -68,6 +68,30 @@ LLM_EVENTS = frozenset(
 	}
 )
 
+
+def split_events(value) -> list[str]:
+	"""The event names in a ``doc_events`` value, as written: one per line (the
+	stored form), or a list, or comma/space separated. Duplicates dropped, order
+	kept, nothing validated (the controller does that)."""
+	if isinstance(value, (list, tuple, set)):
+		tokens = [str(v) for v in value]
+	else:
+		tokens = re.split(r"[\s,]+", str(value or ""))
+	out: list[str] = []
+	for t in tokens:
+		t = t.strip()
+		if t and t not in out:
+			out.append(t)
+	return out
+
+
+def trigger_events(doc_events, doc_event: str | None = None) -> list[str]:
+	"""Every supported event a trigger runs on (#825), in UI order. A row saved
+	before ``doc_events`` existed has it blank, so it falls back to ``doc_event``."""
+	picked = set(split_events(doc_events)) or {doc_event}
+	return [e for e in SUPPORTED_EVENTS if e in picked]
+
+
 # Only these events are meant to BLOCK a save when a Script action throws. On
 # every other (post-)event a raised ``frappe.ValidationError`` — including the
 # incidental subclasses like DoesNotExistError/MandatoryError that a buggy
@@ -154,7 +178,8 @@ def eval_context(doc) -> dict:
 # Registry cache
 # --------------------------------------------------------------------------- #
 def _build_triggers_map() -> dict:
-	"""{doctype: {event: [row dicts]}} over all ENABLED Jarvis Trigger rows."""
+	"""{doctype: {event: [row dicts]}} over all ENABLED Jarvis Trigger rows. A
+	trigger with several events (#825) sits under each of them."""
 	rows = frappe.get_all(
 		TRIGGER,
 		filters={"enabled": 1},
@@ -164,6 +189,7 @@ def _build_triggers_map() -> dict:
 			"owner",
 			"target_doctype",
 			"doc_event",
+			"doc_events",
 			"condition",
 			"action_type",
 			"server_script",
@@ -173,7 +199,9 @@ def _build_triggers_map() -> dict:
 	)
 	out: dict = {}
 	for r in rows:
-		out.setdefault(r.target_doctype, {}).setdefault(r.doc_event, []).append(dict(r))
+		by_event = out.setdefault(r.target_doctype, {})
+		for event in trigger_events(r.doc_events, r.doc_event):
+			by_event.setdefault(event, []).append(dict(r))
 	return out
 
 

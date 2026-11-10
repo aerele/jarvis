@@ -1477,3 +1477,88 @@ describe("TriggerDetail: the form follows the newest init only (PM-8)", () => {
 		expect(nameInput(wrapper).element.value).toBe("Big invoice TRG-2");
 	});
 });
+
+/**
+ * jarvis-admin-v2#825: one trigger, several doc events. The Event select became a
+ * checkbox per event; the form sends `doc_events` one per line, in the server's order.
+ */
+describe("TriggerDetail events (#825)", () => {
+	const EVENTS = [
+		["validate", "Before Save (blockable)"],
+		["after_insert", "After Insert"],
+		["on_update", "After Save"],
+		["on_submit", "After Submit"],
+		["on_cancel", "After Cancel"],
+	].map(([value, label]) => ({ value, label }));
+	const LLM_EVENTS = ["after_insert", "on_update", "on_submit", "on_cancel"];
+
+	async function mountWith(data) {
+		apiTr.listActivityPage.mockResolvedValue(answer([]));
+		apiTr.getTrigger.mockResolvedValue({ ...trigger(), ...data });
+		apiTr.getTriggersCaps.mockResolvedValue({
+			can_manage: true,
+			events: EVENTS,
+			llm_events: LLM_EVENTS,
+		});
+		wrapper = mount(TriggerDetail, {
+			props: { id: "TRG-1", isNew: false },
+			attachTo: document.body,
+			global: { provide: { $socket: null } },
+		});
+		await flushPromises();
+		await flushPromises();
+		return wrapper;
+	}
+	const boxes = (w) =>
+		w
+			.findAllComponents({ name: "FormControl" })
+			.filter((c) => c.props("type") === "checkbox" && c.attributes("data-event"));
+	const box = (w, label) => boxes(w).find((c) => c.props("label") === label);
+	const ticked = (w) => boxes(w).filter((c) => c.props("modelValue") === true);
+	const saveBtn = (w) => w.findAll("button").find((b) => b.attributes("data-label") === "Save");
+
+	it("ticks every event the trigger runs on", async () => {
+		await mountWith({ doc_event: "on_submit", doc_events: ["on_submit", "on_cancel"] });
+		// an LLM trigger only offers the post-events
+		expect(boxes(wrapper).map((c) => c.props("label"))).toEqual([
+			"After Insert",
+			"After Save",
+			"After Submit",
+			"After Cancel",
+		]);
+		expect(ticked(wrapper).map((c) => c.props("label"))).toEqual([
+			"After Submit",
+			"After Cancel",
+		]);
+	});
+
+	it("an older trigger with only doc_event ticks that one", async () => {
+		await mountWith({ doc_event: "on_update", doc_events: undefined });
+		expect(ticked(wrapper).map((c) => c.props("label"))).toEqual(["After Save"]);
+	});
+
+	it("saves the ticked events one per line, in the server's order", async () => {
+		await mountWith({ doc_event: "on_submit", doc_events: ["on_submit"] });
+		apiTr.updateTrigger.mockResolvedValue({
+			...trigger(),
+			doc_events: ["after_insert", "on_submit"],
+		});
+		box(wrapper, "After Insert").vm.$emit("update:modelValue", true);
+		await flushPromises();
+		await saveBtn(wrapper).trigger("click");
+		await flushPromises();
+		expect(apiTr.updateTrigger).toHaveBeenCalledTimes(1);
+		const [, payload] = apiTr.updateTrigger.mock.calls[0];
+		expect(payload).toEqual({ doc_events: "after_insert\non_submit" });
+	});
+
+	it("unticking the last event blocks the save with an inline error", async () => {
+		await mountWith({ doc_event: "on_submit", doc_events: ["on_submit"] });
+		box(wrapper, "After Submit").vm.$emit("update:modelValue", false);
+		await flushPromises();
+		await saveBtn(wrapper).trigger("click");
+		await flushPromises();
+		expect(apiTr.updateTrigger).not.toHaveBeenCalled();
+		expect(wrapper.find(".error-message").text()).toBe("Pick at least one event.");
+	});
+});

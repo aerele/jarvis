@@ -72,8 +72,8 @@
 		</template>
 
 		<template #cell-doc_event="{ row }">
-			<div class="truncate text-base text-ink-gray-7" :title="eventLabel(row.doc_event)">
-				{{ eventLabel(row.doc_event) }}
+			<div class="truncate text-base text-ink-gray-7" :title="eventsLabel(row)">
+				{{ eventsLabel(row) }}
 			</div>
 		</template>
 
@@ -252,6 +252,11 @@ const eventOptions = computed(() => [
 function eventLabel(value) {
 	const hit = (props.caps.events || []).find((e) => e.value === value);
 	return (hit && hit.label) || value || "-";
+}
+// every event the trigger runs on (#825); older rows only carry doc_event
+function eventsLabel(row) {
+	const events = row.doc_events && row.doc_events.length ? row.doc_events : [row.doc_event];
+	return events.map(eventLabel).join(", ");
 }
 
 // ── inline enabled toggle (optimistic; reverts on failure) ───────────────────

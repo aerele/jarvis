@@ -32,6 +32,8 @@ from jarvis.triggers.engine import (
 	SUPPORTED_EVENTS,
 	clear_cache,
 	eval_context,
+	split_events,
+	trigger_events,
 )
 
 MAX_NAME_LEN = 140
@@ -109,6 +111,7 @@ class JarvisTrigger(NotRenamable, Document):
 	def validate(self):
 		self._validate_name()
 		self._validate_target_doctype()
+		self._normalize_events()
 		self._validate_event_action()
 		self._validate_condition()
 		if self.action_type == "Script":
@@ -123,8 +126,9 @@ class JarvisTrigger(NotRenamable, Document):
 	def check_duplicates(self):
 		"""Triggers are site-wide: every enabled row enters the dispatch map, so
 		two identical rows fire twice (#816). Refuse a new/edited/re-enabled
-		trigger when another ENABLED one has the same target, event, normalized
-		condition, action type and action body. A match that differs only in
+		trigger when another ENABLED one has the same target, a shared event (#825:
+		triggers can have several), normalized condition, action type and action
+		body. A match that differs only in
 		action type is allowed with an orange warning: ``msgprint`` on the
 		Desk/API path and ``flags.duplicate_warning`` (surfaced as ``warning`` by
 		``triggers_api.create_trigger`` / ``update_trigger``)."""
@@ -139,14 +143,25 @@ class JarvisTrigger(NotRenamable, Document):
 				"name": ["!=", self.name or ""],
 				"enabled": 1,
 				"target_doctype": self.target_doctype,
-				"doc_event": self.doc_event,
 			},
-			fields=["name", "trigger_name", "condition", "action_type", "script_body", "llm_instruction"],
+			fields=[
+				"name",
+				"trigger_name",
+				"doc_event",
+				"doc_events",
+				"condition",
+				"action_type",
+				"script_body",
+				"llm_instruction",
+			],
 		)
+		events = set(self.events())
 		condition = _normalize(self.condition)
 		body = _body_hash(self)
 		cross_type = None
 		for row in rows:
+			if not events & set(trigger_events(row.doc_events, row.doc_event)):
+				continue
 			if _normalize(row.condition) != condition:
 				continue
 			if row.action_type != self.action_type:
@@ -203,7 +218,14 @@ class JarvisTrigger(NotRenamable, Document):
 		if frappe.session.user in (owner, "Administrator"):
 			return
 		if before and cint(before.llm_allow_lookups) and before.action_type == "LLM":
-			watched = ("llm_instruction", "target_doctype", "doc_event", "condition", "action_type")
+			watched = (
+				"llm_instruction",
+				"target_doctype",
+				"doc_event",
+				"doc_events",
+				"condition",
+				"action_type",
+			)
 			if not any(self.has_value_changed(f) for f in watched):
 				return
 		frappe.throw(
@@ -277,19 +299,48 @@ class JarvisTrigger(NotRenamable, Document):
 				).format(self.target_doctype)
 			)
 
+	def _normalize_events(self):
+		"""A trigger can run on several doc events (#825). ``doc_events`` holds all
+		of them, one per line in UI order; ``doc_event`` is kept as the first, so
+		the list filter, sort and older callers still read one event.
+
+		Callers that only know ``doc_event`` keep working: on insert a blank
+		``doc_events`` becomes ``doc_event``, and a later edit of ``doc_event`` alone
+		(the Desk select, an old API payload) swaps the event it replaces."""
+		before = None if self.is_new() else self.get_doc_before_save()
+		events = split_events(self.doc_events)
+		if before and self.doc_event != before.doc_event:
+			if events == split_events(before.doc_events):
+				events = [self.doc_event if e == before.doc_event else e for e in events]
+				if self.doc_event not in events:
+					events = [self.doc_event]
+		if not events and self.doc_event:
+			events = [self.doc_event]
+		if not events:
+			frappe.throw(_("Pick at least one doc event."))
+		unknown = [e for e in events if e not in SUPPORTED_EVENTS]
+		if unknown:
+			frappe.throw(_("Unsupported doc event: {0}").format(", ".join(unknown)))
+		events = trigger_events(events)
+		self.doc_events = "\n".join(events)
+		self.doc_event = events[0]
+
+	def events(self) -> list[str]:
+		"""Every event this trigger runs on, in UI order."""
+		return trigger_events(self.doc_events, self.doc_event)
+
 	def _validate_event_action(self):
-		if self.doc_event not in SUPPORTED_EVENTS:
-			frappe.throw(_("Unsupported doc event: {0}").format(self.doc_event))
 		if self.action_type not in ("Script", "LLM"):
 			frappe.throw(_("Action type must be Script or LLM."))
-		if self.action_type == "LLM" and self.doc_event not in LLM_EVENTS:
+		in_txn = [e for e in self.events() if e not in LLM_EVENTS]
+		if self.action_type == "LLM" and in_txn:
 			frappe.throw(
 				_(
 					"LLM actions run in the background after the save commits, so "
 					"they cannot attach to '{0}' (an in-transaction event). Use a "
 					"Script action to block a save, or pick a post-event like "
 					"After Save."
-				).format(self.doc_event)
+				).format("', '".join(in_txn))
 			)
 
 	def _validate_condition(self):
@@ -446,6 +497,9 @@ class JarvisTrigger(NotRenamable, Document):
 			{
 				"script_type": "DocType Event",
 				"reference_doctype": self.target_doctype,
+				# One script serves every event of the trigger (#825): the engine
+				# calls execute_doc itself on each, and core never runs it (disabled),
+				# so this records the first event only.
 				"doctype_event": SCRIPT_EVENT_MAP[self.doc_event],
 				"script": self.script_body,
 				# ALWAYS disabled: core's server_script_map skips disabled scripts,
