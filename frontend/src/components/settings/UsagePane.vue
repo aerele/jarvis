@@ -329,7 +329,7 @@ const canSeeMetering = isSM || isAdmin;
 
 const paneDescription = computed(() =>
 	canSeeMetering
-		? "Message and token counts for this device, plus pool status and cost for the workspace."
+		? "Usage on this device, plus workspace pool status and cost."
 		: "Message and token counts for this device."
 );
 
