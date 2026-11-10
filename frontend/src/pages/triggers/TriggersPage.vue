@@ -78,8 +78,8 @@ const caps = ref({
 });
 const accessDenied = ref(false);
 
-// "View all" from a trigger's Recent activity deep-links with ?trigger=<id>
-// so the Activity tab opens pre-filtered to that trigger.
+// A direct link with ?trigger=<id> opens the Activity tab pre-filtered to that
+// trigger (the trigger page's Recent activity pages its own runs and no longer links here).
 const initialActivityTrigger = computed(() =>
 	typeof route.query.trigger === "string" ? route.query.trigger : ""
 );
