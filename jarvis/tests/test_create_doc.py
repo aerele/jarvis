@@ -64,6 +64,12 @@ class TestCreateDocValidation(FrappeTestCase):
 
 		def fake_new_doc(dt):
 			class _Stub:
+<<<<<<< HEAD
+=======
+				doctype = dt
+				name = "generated"
+				docstatus = 0
+>>>>>>> c8f5991 (perf(tools): compact create_doc/update_doc results, optional fields)
 				# What cast_numbers and apply_tax_template read: no numeric fields, no tax template field.
 				meta = frappe._dict(fields=[], get_field=lambda name: None)
 
@@ -85,7 +91,7 @@ class TestCreateDocValidation(FrappeTestCase):
 				def apply_fieldlevel_read_permissions(self):
 					pass
 
-				def as_dict(self):
+				def as_dict(self, **_):
 					return {"doctype": dt, "name": "generated", **self._values}
 
 			return _Stub()
@@ -97,7 +103,7 @@ class TestCreateDocValidation(FrappeTestCase):
 					doctype=NOTE_DT,
 					values={"name": "custom-id", "title": "x"},
 				)
-				self.assertEqual(result["title"], "x")
+				self.assertEqual(result, {"doctype": NOTE_DT, "name": "generated", "docstatus": 0})
 
 
 class TestCreateDocPermissions(FrappeTestCase):
@@ -145,10 +151,11 @@ class TestCreateDocHappyPath(FrappeTestCase):
 	def tearDown(self):
 		_cleanup_created()
 
-	def test_inserts_row_and_returns_full_doc(self):
+	def test_inserts_row_and_returns_the_asked_fields(self):
 		result = create_doc(
 			doctype=NOTE_DT,
 			values={"title": "jarvis-create-test", "content": "hello", "public": 1},
+			fields=["title", "content"],
 		)
 		_created_in_test.append(result["name"])
 
@@ -175,3 +182,55 @@ class TestCreateDocHappyPath(FrappeTestCase):
 		)
 		_created_in_test.append(result["name"])
 		self.assertTrue(result["name"])
+<<<<<<< HEAD
+=======
+
+
+THREE_FORMAT_SCRIPT = 'a = "PO {}".format(doc.name)\nb = "{} x".format(1)\nc = "{a}".format_map({"a": 1})\n'
+
+
+class TestCreateDocSandboxCode(FrappeTestCase):
+	"""jarvis-admin-v2#818 (T4): the agent's write of sandbox code is checked."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.tag = frappe.generate_hash(length=8)
+		self.addCleanup(frappe.db.rollback)
+
+	def _server_script(self, script: str) -> dict:
+		return {
+			"script_type": "DocType Event",
+			"reference_doctype": "ToDo",
+			"doctype_event": "Before Save",
+			"script": script,
+		}
+
+	def _report(self, script: str) -> dict:
+		return {
+			"report_name": f"zz818 rep {self.tag}",
+			"ref_doctype": "ToDo",
+			"report_type": "Script Report",
+			"is_standard": "No",
+			"report_script": script,
+		}
+
+	def test_server_script_with_three_format_reads_lists_all_three(self):
+		with self.assertRaises(InvalidFieldValueError) as ctx:
+			create_doc(doctype="Server Script", values=self._server_script(THREE_FORMAT_SCRIPT))
+		text = str(ctx.exception)
+		self.assertTrue(text.startswith("Server Script script:\n"), text)
+		for line in ("line 1:", "line 2:", "line 3:"):
+			self.assertIn(line, text)
+		self.assertIn("validate_script", text)
+
+	def test_report_script_with_format_is_refused_and_nothing_is_created(self):
+		with self.assertRaises(InvalidFieldValueError) as ctx:
+			create_doc(doctype="Report", values=self._report(THREE_FORMAT_SCRIPT))
+		self.assertIn("Report report_script:", str(ctx.exception))
+		self.assertFalse(frappe.db.exists("Report", f"zz818 rep {self.tag}"))
+
+	def test_clean_report_script_is_created(self):
+		result = create_doc(doctype="Report", values=self._report('x = f"{1}"\n'), fields=["report_script"])
+		self.assertEqual(result["report_script"], 'x = f"{1}"\n')
+		self.assertTrue(frappe.db.exists("Report", f"zz818 rep {self.tag}"))
+>>>>>>> c8f5991 (perf(tools): compact create_doc/update_doc results, optional fields)
