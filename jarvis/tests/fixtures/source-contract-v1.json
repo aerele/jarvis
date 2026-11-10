@@ -1,0 +1,702 @@
+{
+  "$comment": "Canonical: jarvis-fleet-agent jarvis_fleet_agent/claude_redactor/contract/source-contract-v1.json. Twins: plugin and backend tests/fixtures/source-contract-v1.json (byte copies, byte sha pinned). Update: change canonical, merge, copy byte-for-byte, re-pin. The runtime value is the semantic digest of the 11 keys contract, version, marker, marker_placement, retention, requery_required, source_tools, bridged_prefix, reference_keys, reference_list_keys and allowed_non_reference_keys; a change of those keys releases plugin first (accept old + new), then fleet-agent, then a plugin release that drops the old. Case, vocabulary and $comment edits do not change it. Backend keeps reference values <= 2048 chars; plugin and redactor <= 256 (file_url 2048); cases stay <= 256 so all agree. All case values are synthetic.",
+  "contract": "jarvis-source-contract",
+  "version": 1,
+  "marker": "JRVS-SRC-v1-d552693b807a87cb6a701597ed8e3fbd",
+  "marker_placement": "content[0]",
+  "retention": "source-reference-v1",
+  "requery_required": true,
+  "source_tools": [
+    "get_file_pages",
+    "query_file",
+    "query_report",
+    "read_file"
+  ],
+  "bridged_prefix": "mcp__openclaw__jarvis__",
+  "reference_keys": [
+    "archive_version",
+    "cursor",
+    "file_id",
+    "file_name",
+    "file_url",
+    "filename",
+    "member",
+    "payload_format",
+    "prepared_report",
+    "read_contract",
+    "read_mode",
+    "sheet",
+    "version"
+  ],
+  "reference_list_keys": [
+    "members",
+    "selected_members",
+    "sheets",
+    "worksheet_scope"
+  ],
+  "allowed_non_reference_keys": [
+    "coverage",
+    "data",
+    "data_rows",
+    "error",
+    "has_more",
+    "note",
+    "ok",
+    "page_count",
+    "requery_required",
+    "result_truncated",
+    "retention",
+    "source_query_executed",
+    "source_rows",
+    "tool",
+    "total_rows"
+  ],
+  "result_key_vocabulary": [
+    "archive_complete",
+    "archive_version",
+    "args",
+    "as_of",
+    "code",
+    "column",
+    "columns",
+    "complete",
+    "count",
+    "coverage",
+    "cursor",
+    "data",
+    "data_b64",
+    "data_rows",
+    "declared_size",
+    "directory_count",
+    "encoding",
+    "end_of_file",
+    "error",
+    "file_id",
+    "file_name",
+    "file_url",
+    "filename",
+    "first",
+    "format",
+    "fragment",
+    "has_more",
+    "hidden",
+    "hidden_rows",
+    "id",
+    "issues",
+    "kind",
+    "last",
+    "limit",
+    "list_contract",
+    "manifest",
+    "member",
+    "members",
+    "message",
+    "mime",
+    "name",
+    "name_shortened",
+    "next_read",
+    "next_start",
+    "note",
+    "offset",
+    "ok",
+    "order_by",
+    "page",
+    "page_count",
+    "pages",
+    "payload_format",
+    "prepared_report",
+    "query",
+    "range",
+    "read_contract",
+    "read_mode",
+    "records",
+    "report_name",
+    "requery_required",
+    "request",
+    "response",
+    "result_truncated",
+    "retention",
+    "returned",
+    "row",
+    "row_count",
+    "rows",
+    "scope",
+    "scope_sheets",
+    "selected_members",
+    "sheet",
+    "sheet_hidden",
+    "sheets",
+    "sheets_total",
+    "source",
+    "source_columns",
+    "source_empty",
+    "source_query_executed",
+    "source_rows",
+    "sql",
+    "start",
+    "status",
+    "stop_reason",
+    "table",
+    "tables",
+    "text",
+    "tool",
+    "total_rows",
+    "unread_member_count",
+    "values",
+    "version",
+    "window",
+    "window_complete",
+    "worksheet_scope",
+    "worksheets"
+  ],
+  "read_locations": {
+    "backend": [
+      "data"
+    ],
+    "plugin": [
+      "$",
+      "data"
+    ],
+    "redactor": [
+      "$",
+      "data"
+    ],
+    "rule": "reference keys of a case occur only at the top level of backend_result.data; the plugin and the redactor see that object as the top level of the JSON block, so every location rule yields the same set"
+  },
+  "receipt_objects": {
+    "backend": {
+      "result": "stored result: top level and .data",
+      "input": "stored_args"
+    },
+    "plugin": {
+      "result": "message.details AND the stub parsed from content[0].text (wrapper lines stripped); both deep-equal",
+      "input": "stored toolCall arguments"
+    },
+    "redactor": {
+      "result": "parsed RECEIPT stub and toolUseResult",
+      "input": "tool_use.input"
+    },
+    "rule": "assertion 1 applies to every result object and to the plugin input object only; assertion 3 applies to the top-level keys of each named object; assertion 2 to the named objects; assertion 4 to the full serialised output"
+  },
+  "assertions": {
+    "1": "retention and requery_required hold on every result receipt object, and on the input object for the plugin only",
+    "2": "the reference keys and values of the input object equal expect.input_references, and those of each result object equal expect.result_references; a reference key is a key of reference_keys or reference_list_keys; lists compare under comparison_rules.empty_reference_list",
+    "3": "every other top-level key of a named object is a reference key or is in allowed_non_reference_keys; note texts and count fields are not locked",
+    "4": "no value of expect.forbidden is a substring of the full serialised stored output"
+  },
+  "comparison_rules": {
+    "empty_reference_list": "An EMPTY reference list is equivalent to the key being absent: it carries no data. The rule applies to the reference-list keys (sheets, members, selected_members, worksheet_scope) in all four assertions in every consumer, on the expected side and on the actual side. A NON-empty list must still match exactly (same items, same order). Expectations in this file never hold an empty list."
+  },
+  "cases": [
+    {
+      "name": "read_file_ok",
+      "tool": "read_file",
+      "args": {
+        "file_id": "FILE-SYN-0001",
+        "file_url": "/private/files/synthetic-ledger.csv"
+      },
+      "backend_result": {
+        "ok": true,
+        "data": {
+          "read_contract": "file-cursor-v1",
+          "status": "complete",
+          "cursor": "0:1:0",
+          "version": "c26e26906287b5dd7540ba14e526b48c8ce4a4c09c94627421c1548b084ddd27",
+          "source": "csv",
+          "range": {
+            "source": 0,
+            "first": 1,
+            "last": 3
+          },
+          "records": [
+            {
+              "row": 1,
+              "values": [
+                "Account",
+                "Memo"
+              ]
+            },
+            {
+              "row": 2,
+              "values": [
+                "A-1001",
+                "CNRY-ROW-ALPHA-5500-SYNTHETIC-LEDGER-ENTRY-ONE"
+              ]
+            },
+            {
+              "row": 3,
+              "values": [
+                "A-1002",
+                "CNRY-ROW-BETA-7700-SYNTHETIC-LEDGER-ENTRY-TWO"
+              ]
+            }
+          ],
+          "stop_reason": null,
+          "coverage": {
+            "complete": true,
+            "window_complete": true,
+            "issues": []
+          },
+          "end_of_file": true,
+          "next_read": null,
+          "file_id": "FILE-SYN-0001",
+          "file_url": "/private/files/synthetic-ledger.csv",
+          "filename": "synthetic-ledger.csv"
+        }
+      },
+      "expect": {
+        "input_references": {
+          "file_id": "FILE-SYN-0001",
+          "file_url": "/private/files/synthetic-ledger.csv"
+        },
+        "result_references": {
+          "cursor": "0:1:0",
+          "file_id": "FILE-SYN-0001",
+          "file_url": "/private/files/synthetic-ledger.csv",
+          "filename": "synthetic-ledger.csv",
+          "read_contract": "file-cursor-v1",
+          "version": "c26e26906287b5dd7540ba14e526b48c8ce4a4c09c94627421c1548b084ddd27"
+        },
+        "forbidden": [
+          "CNRY-ROW-ALPHA-5500-SYNTHETIC-LEDGER-ENTRY-ONE",
+          "CNRY-ROW-BETA-7700-SYNTHETIC-LEDGER-ENTRY-TWO"
+        ]
+      }
+    },
+    {
+      "name": "query_file_sql_literal",
+      "tool": "query_file",
+      "args": {
+        "file_id": "FILE-SYN-0002",
+        "file_url": "/private/files/synthetic-sales.xlsx",
+        "sheets": [
+          "Sheet1"
+        ],
+        "sql": "SELECT memo, amount FROM sheet1 WHERE memo = 'CNRY-SQL-LITERAL-9911-SYNTHETIC-FILTER-VALUE-ONE'"
+      },
+      "backend_result": {
+        "ok": true,
+        "data": {
+          "read_contract": "spreadsheet-query-v1",
+          "source_rows": 4,
+          "coverage": {
+            "complete": true,
+            "scope": "all source rows in scope"
+          },
+          "result_truncated": false,
+          "version": "7fbd596aa4a8611c6e4b7797b86cb954310d7ec0c7907a752168ec5132d0e70a",
+          "columns": [
+            "memo",
+            "amount"
+          ],
+          "rows": [
+            [
+              "CNRY-QROW-ALPHA-4410-SYNTHETIC-QUERY-RESULT-ONE",
+              4410
+            ],
+            [
+              "CNRY-QROW-BETA-6620-SYNTHETIC-QUERY-RESULT-TWO",
+              6620
+            ]
+          ],
+          "sheets": [
+            {
+              "name": "Sheet1",
+              "table": "sheet1",
+              "hidden": false,
+              "row_count": 4,
+              "columns": [
+                "memo",
+                "amount"
+              ]
+            }
+          ],
+          "worksheet_scope": [
+            "Sheet1"
+          ],
+          "source_query_executed": true,
+          "note": "Synthetic note text for the shared source contract fixture.",
+          "file_id": "FILE-SYN-0002",
+          "file_url": "/private/files/synthetic-sales.xlsx",
+          "filename": "synthetic-sales.xlsx",
+          "sheet": "Sheet1"
+        }
+      },
+      "expect": {
+        "input_references": {
+          "file_id": "FILE-SYN-0002",
+          "file_url": "/private/files/synthetic-sales.xlsx",
+          "sheets": [
+            "Sheet1"
+          ]
+        },
+        "result_references": {
+          "file_id": "FILE-SYN-0002",
+          "file_url": "/private/files/synthetic-sales.xlsx",
+          "filename": "synthetic-sales.xlsx",
+          "read_contract": "spreadsheet-query-v1",
+          "sheet": "Sheet1",
+          "version": "7fbd596aa4a8611c6e4b7797b86cb954310d7ec0c7907a752168ec5132d0e70a",
+          "worksheet_scope": [
+            "Sheet1"
+          ]
+        },
+        "forbidden": [
+          "CNRY-SQL-LITERAL-9911-SYNTHETIC-FILTER-VALUE-ONE",
+          "CNRY-QROW-ALPHA-4410-SYNTHETIC-QUERY-RESULT-ONE",
+          "CNRY-QROW-BETA-6620-SYNTHETIC-QUERY-RESULT-TWO"
+        ]
+      }
+    },
+    {
+      "name": "query_report_prepared",
+      "tool": "query_report",
+      "args": {
+        "prepared_report": "PREP-SYN-0001",
+        "sheet": "Summary",
+        "sql": "SELECT customer, balance FROM report"
+      },
+      "backend_result": {
+        "ok": true,
+        "data": {
+          "read_contract": "prepared-report-query-v1",
+          "source_rows": 3,
+          "coverage": {
+            "complete": true,
+            "scope": "all stored rows of the prepared run"
+          },
+          "result_truncated": false,
+          "version": "3797baf30bdcf0a7766bb13223e14383c908da86f188f09d38b4be3ab8128606",
+          "rows": [
+            [
+              "CNRY-REPORT-ROW-ALPHA-3300-SYNTHETIC-RECEIVABLE",
+              3300
+            ],
+            [
+              "CNRY-REPORT-ROW-BETA-8800-SYNTHETIC-RECEIVABLE",
+              8800
+            ]
+          ],
+          "prepared_report": "PREP-SYN-0001",
+          "report_name": "Synthetic Receivables",
+          "as_of": "2026-01-31",
+          "data_rows": 2,
+          "total_rows": 1,
+          "source_columns": [
+            "customer",
+            "balance"
+          ],
+          "tables": [
+            "report"
+          ],
+          "sheet": "Summary",
+          "note": "Synthetic note text for the shared source contract fixture."
+        }
+      },
+      "expect": {
+        "input_references": {
+          "prepared_report": "PREP-SYN-0001",
+          "sheet": "Summary"
+        },
+        "result_references": {
+          "prepared_report": "PREP-SYN-0001",
+          "read_contract": "prepared-report-query-v1",
+          "sheet": "Summary",
+          "version": "3797baf30bdcf0a7766bb13223e14383c908da86f188f09d38b4be3ab8128606"
+        },
+        "forbidden": [
+          "CNRY-REPORT-ROW-ALPHA-3300-SYNTHETIC-RECEIVABLE",
+          "CNRY-REPORT-ROW-BETA-8800-SYNTHETIC-RECEIVABLE"
+        ]
+      }
+    },
+    {
+      "name": "get_file_pages_base64",
+      "tool": "get_file_pages",
+      "args": {
+        "file_id": "FILE-SYN-0003",
+        "file_url": "/private/files/synthetic-scan.pdf"
+      },
+      "backend_result": {
+        "ok": true,
+        "data": {
+          "kind": "file_pages",
+          "page_count": 1,
+          "has_more": false,
+          "pages": [
+            {
+              "page": 1,
+              "mime": "image/png",
+              "data_b64": "Q05SWS1QQUdFLUlNQUdFLUJZVEVTLVNZTlRIRVRJQy1TQ0FOLTAwMDEtUEFZTE9BRA=="
+            }
+          ],
+          "file_id": "FILE-SYN-0003",
+          "file_url": "/private/files/synthetic-scan.pdf",
+          "filename": "synthetic-scan.pdf"
+        }
+      },
+      "expect": {
+        "input_references": {
+          "file_id": "FILE-SYN-0003",
+          "file_url": "/private/files/synthetic-scan.pdf"
+        },
+        "result_references": {
+          "file_id": "FILE-SYN-0003",
+          "file_url": "/private/files/synthetic-scan.pdf",
+          "filename": "synthetic-scan.pdf"
+        },
+        "forbidden": [
+          "Q05SWS1QQUdFLUlNQUdFLUJZVEVTLVNZTlRIRVRJQy1TQ0FOLTAwMDEtUEFZTE9BRA=="
+        ]
+      }
+    },
+    {
+      "name": "read_file_error_payload_in_message",
+      "tool": "read_file",
+      "args": {
+        "file_id": "FILE-SYN-0004",
+        "file_url": "/private/files/synthetic-broken.csv"
+      },
+      "backend_result": {
+        "ok": false,
+        "error": {
+          "code": "FileReadContractError",
+          "message": "[records] cannot parse row CNRY-ERR-ROW-3300-SYNTHETIC-PAYLOAD-IN-ERROR-MESSAGE near byte 12"
+        }
+      },
+      "expect": {
+        "input_references": {
+          "file_id": "FILE-SYN-0004",
+          "file_url": "/private/files/synthetic-broken.csv"
+        },
+        "result_references": {},
+        "forbidden": [
+          "CNRY-ERR-ROW-3300-SYNTHETIC-PAYLOAD-IN-ERROR-MESSAGE"
+        ]
+      }
+    },
+    {
+      "name": "archive_manifest",
+      "tool": "read_file",
+      "args": {
+        "file_id": "FILE-SYN-0005",
+        "file_url": "/private/files/synthetic-bank.zip"
+      },
+      "backend_result": {
+        "ok": true,
+        "data": {
+          "read_contract": "archive-manifest-v1",
+          "members": [
+            {
+              "id": "m1",
+              "name": "jan.csv",
+              "name_shortened": false,
+              "format": "csv",
+              "status": "supported",
+              "declared_size": 19
+            },
+            {
+              "id": "m2",
+              "name": "feb.csv",
+              "name_shortened": false,
+              "format": "csv",
+              "status": "supported",
+              "declared_size": 19
+            }
+          ],
+          "directory_count": 0,
+          "coverage": {
+            "complete": false,
+            "scope": "inventory only; no content read"
+          },
+          "source_rows": null,
+          "archive_complete": false,
+          "note": "Synthetic note text for the shared source contract fixture.",
+          "file_id": "FILE-SYN-0005",
+          "file_url": "/private/files/synthetic-bank.zip",
+          "filename": "synthetic-bank.zip",
+          "archive_version": "ac6af7177fdbac7061a0bb30d93e0c6bbdfe4791306949ca53fe62a9a7fbbfa3"
+        }
+      },
+      "expect": {
+        "input_references": {
+          "file_id": "FILE-SYN-0005",
+          "file_url": "/private/files/synthetic-bank.zip"
+        },
+        "result_references": {
+          "archive_version": "ac6af7177fdbac7061a0bb30d93e0c6bbdfe4791306949ca53fe62a9a7fbbfa3",
+          "file_id": "FILE-SYN-0005",
+          "file_url": "/private/files/synthetic-bank.zip",
+          "filename": "synthetic-bank.zip",
+          "read_contract": "archive-manifest-v1"
+        },
+        "forbidden": [
+          "jan.csv",
+          "feb.csv"
+        ]
+      }
+    },
+    {
+      "name": "archive_member_read",
+      "tool": "read_file",
+      "args": {
+        "file_id": "FILE-SYN-0005",
+        "file_url": "/private/files/synthetic-bank.zip",
+        "archive_version": "ac6af7177fdbac7061a0bb30d93e0c6bbdfe4791306949ca53fe62a9a7fbbfa3",
+        "member": "m1",
+        "members": [
+          "m1"
+        ]
+      },
+      "backend_result": {
+        "ok": true,
+        "data": {
+          "read_contract": "archive-cursor-v1",
+          "kind": "table",
+          "status": "complete",
+          "cursor": "0:1:0",
+          "version": "f810f4e7bac474001eec67d77baa993756c9574a4c5d81751163c2c6815c0971",
+          "source": "csv",
+          "range": {
+            "source": 0,
+            "first": 1,
+            "last": 3
+          },
+          "records": [
+            {
+              "row": 1,
+              "values": [
+                "Ref",
+                "Memo"
+              ]
+            },
+            {
+              "row": 2,
+              "values": [
+                "J1",
+                "CNRY-MEMBER-ROW-ALPHA-0101-SYNTHETIC-ARCHIVE-ENTRY"
+              ]
+            },
+            {
+              "row": 3,
+              "values": [
+                "J2",
+                "CNRY-MEMBER-ROW-BETA-0202-SYNTHETIC-ARCHIVE-ENTRY"
+              ]
+            }
+          ],
+          "stop_reason": null,
+          "coverage": {
+            "complete": true,
+            "window_complete": true,
+            "issues": []
+          },
+          "end_of_file": true,
+          "next_read": null,
+          "member": "m1",
+          "unread_member_count": 1,
+          "archive_complete": false,
+          "worksheet_scope": null,
+          "note": "Synthetic note text for the shared source contract fixture.",
+          "file_id": "FILE-SYN-0005",
+          "file_url": "/private/files/synthetic-bank.zip",
+          "filename": "synthetic-bank.zip",
+          "archive_version": "ac6af7177fdbac7061a0bb30d93e0c6bbdfe4791306949ca53fe62a9a7fbbfa3",
+          "selected_members": [
+            "m1"
+          ]
+        }
+      },
+      "expect": {
+        "input_references": {
+          "archive_version": "ac6af7177fdbac7061a0bb30d93e0c6bbdfe4791306949ca53fe62a9a7fbbfa3",
+          "file_id": "FILE-SYN-0005",
+          "file_url": "/private/files/synthetic-bank.zip",
+          "member": "m1",
+          "members": [
+            "m1"
+          ]
+        },
+        "result_references": {
+          "archive_version": "ac6af7177fdbac7061a0bb30d93e0c6bbdfe4791306949ca53fe62a9a7fbbfa3",
+          "cursor": "0:1:0",
+          "file_id": "FILE-SYN-0005",
+          "file_url": "/private/files/synthetic-bank.zip",
+          "filename": "synthetic-bank.zip",
+          "member": "m1",
+          "read_contract": "archive-cursor-v1",
+          "version": "f810f4e7bac474001eec67d77baa993756c9574a4c5d81751163c2c6815c0971",
+          "selected_members": [
+            "m1"
+          ]
+        },
+        "forbidden": [
+          "CNRY-MEMBER-ROW-ALPHA-0101-SYNTHETIC-ARCHIVE-ENTRY",
+          "CNRY-MEMBER-ROW-BETA-0202-SYNTHETIC-ARCHIVE-ENTRY"
+        ]
+      }
+    },
+    {
+      "name": "nested_tool_call_query_file",
+      "tool": "query_file",
+      "via_tool_call": true,
+      "args": {
+        "file_id": "FILE-SYN-0006",
+        "file_url": "/private/files/synthetic-nested.xlsx",
+        "version": "b7365e2f6b74f57e40d653647c1281153d293af226c58815ed2dc618825df64e",
+        "sql": "SELECT memo, amount FROM sheet1 WHERE memo = 'CNRY-SQL-LITERAL-7733-SYNTHETIC-NESTED-FILTER-VALUE'"
+      },
+      "backend_result": {
+        "ok": true,
+        "data": {
+          "read_contract": "spreadsheet-query-v1",
+          "source_rows": 2,
+          "coverage": {
+            "complete": true,
+            "scope": "all source rows in scope"
+          },
+          "result_truncated": false,
+          "version": "b7365e2f6b74f57e40d653647c1281153d293af226c58815ed2dc618825df64e",
+          "columns": [
+            "memo",
+            "amount"
+          ],
+          "rows": [
+            [
+              "CNRY-NROW-ALPHA-1190-SYNTHETIC-NESTED-RESULT-ONE",
+              1190
+            ],
+            [
+              "CNRY-NROW-BETA-2280-SYNTHETIC-NESTED-RESULT-TWO",
+              2280
+            ]
+          ],
+          "source_query_executed": true,
+          "note": "Synthetic note text for the shared source contract fixture.",
+          "file_id": "FILE-SYN-0006",
+          "file_url": "/private/files/synthetic-nested.xlsx",
+          "filename": "synthetic-nested.xlsx"
+        }
+      },
+      "expect": {
+        "input_references": {
+          "file_id": "FILE-SYN-0006",
+          "file_url": "/private/files/synthetic-nested.xlsx",
+          "version": "b7365e2f6b74f57e40d653647c1281153d293af226c58815ed2dc618825df64e"
+        },
+        "result_references": {
+          "file_id": "FILE-SYN-0006",
+          "file_url": "/private/files/synthetic-nested.xlsx",
+          "filename": "synthetic-nested.xlsx",
+          "read_contract": "spreadsheet-query-v1",
+          "version": "b7365e2f6b74f57e40d653647c1281153d293af226c58815ed2dc618825df64e"
+        },
+        "forbidden": [
+          "CNRY-SQL-LITERAL-7733-SYNTHETIC-NESTED-FILTER-VALUE",
+          "CNRY-NROW-ALPHA-1190-SYNTHETIC-NESTED-RESULT-ONE",
+          "CNRY-NROW-BETA-2280-SYNTHETIC-NESTED-RESULT-TWO"
+        ]
+      }
+    }
+  ]
+}
