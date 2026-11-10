@@ -849,6 +849,53 @@ describe("subscriptionExpiredBanner copy (spec section 3)", () => {
 	});
 });
 
+describe("subscriptionExpiredBanner switch for a pinned chat (jarvis-admin-v2#810)", () => {
+	const entry = {
+		upstream: "anthropic",
+		label: "Anthropic",
+		account_ref: "A",
+		fallback: "OpenAI",
+		fallback_model: "gpt-5.6",
+		models: ["claude-sonnet-4-5"],
+	};
+
+	it("a chat pinned to the dead model is told it will not switch and offered the switch", () => {
+		const b = subscriptionExpiredBanner([entry], true, "claude-sonnet-4-5");
+		expect(b.message).toBe(
+			"This chat is pinned to claude-sonnet-4-5, so it will not switch on its own."
+		);
+		expect(b.switchModel).toBe("gpt-5.6");
+		expect(b.canUseAuto).toBeUndefined();
+	});
+
+	it("an unpinned chat keeps the Auto line and gets no switch", () => {
+		const b = subscriptionExpiredBanner([entry], true, "");
+		expect(b.message).toBe("Auto uses OpenAI until you reconnect.");
+		expect(b.switchModel).toBeFalsy();
+	});
+
+	it("a chat pinned to a healthy model keeps the Auto line and gets no switch", () => {
+		const b = subscriptionExpiredBanner([entry], true, "gpt-5.6");
+		expect(b.message).toBe("Auto uses OpenAI until you reconnect.");
+		expect(b.switchModel).toBeFalsy();
+	});
+
+	it("no fallback means nothing to switch to", () => {
+		const b = subscriptionExpiredBanner(
+			[{ ...entry, fallback: "", fallback_model: "" }],
+			true,
+			"claude-sonnet-4-5"
+		);
+		expect(b.message).toBe("Chats that need it will fail until it is reconnected.");
+		expect(b.switchModel).toBeFalsy();
+	});
+
+	it("a member gets no switch", () => {
+		const b = subscriptionExpiredBanner([entry], false, "claude-sonnet-4-5");
+		expect(b.switchModel).toBeFalsy();
+	});
+});
+
 describe("ChatView subscription-expired wiring", () => {
 	const HERE = path.dirname(fileURLToPath(import.meta.url));
 	const chatSrc = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");

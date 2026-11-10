@@ -533,6 +533,15 @@ def _answering(row: _PoolRow, expired_refs: set) -> str:
 	return row.model_id
 
 
+def fallback_model(expired_refs: set, rows: list[_PoolRow] | None = None) -> str:
+	"""Model id of the row ``fallback_label`` names, or ``""`` when none can answer. The SPA pins a
+	conversation to it ("Switch to ...") because a pinned chat never fails over by itself."""
+	for row in _pool_rows(rows):
+		if _answering(row, expired_refs):
+			return row.model_id
+	return ""
+
+
 def fallback_label(expired_refs: set, rows: list[_PoolRow] | None = None) -> str:
 	"""Label of the first enabled row, in pool order, that can still answer while ``expired_refs`` are
 	dead, or ``""`` when none can (chats fail). A subscription row answers while it has at least one
@@ -573,11 +582,13 @@ def _fallback_for(entry: dict, fallback: str) -> str:
 def _with_fallbacks(entries: list[dict], rows: list[_PoolRow]) -> list[dict]:
 	refs = {e["account_ref"] for e in entries}
 	fallback = fallback_label(refs, rows)
+	model = fallback_model(refs, rows) if fallback else ""
 	skipped = _skipped_refs(refs, rows) if fallback else set()
 	return [
 		{
 			**entry,
 			"fallback": _fallback_for(entry, fallback),
+			"fallback_model": model,
 			"skipped": entry["account_ref"] in skipped and entry["account_ref"] != DIRECT_REF,
 		}
 		for entry in entries
