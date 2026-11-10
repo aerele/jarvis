@@ -147,7 +147,8 @@ def _llm_task_prompt(
 def _evaluate(
 	prompt: str, fenced: str, messages: list, timeout: int = 60, expect_object: bool = False
 ) -> tuple[str | dict | None, str | None]:
-	"""Typed fallback decision: try the tenant's agent gateway first, fall back
+	"""Typed fallback decision: try the tenant's agent gateway first (walking its model pool
+	when a sign-in is dead, jarvis-admin-v2#826), fall back
 	to OpenRouter only when the gateway doesn't expose llm-task (older/
 	unconfigured runtime) AND an OpenRouter/STT key is actually resolvable.
 	Returns ``(reply, None)`` on success or ``(None, error_message)`` on a
@@ -157,13 +158,17 @@ def _evaluate(
 	Imported lazily (background job only): ``llm_task_client``/``voice`` for
 	the two completion transports."""
 	from jarvis.chat import voice
-	from jarvis.triggers.llm_task_client import LLMTaskError, LLMTaskNotAvailableError, llm_task_complete
+	from jarvis.triggers.llm_task_client import (
+		LLMTaskError,
+		LLMTaskNotAvailableError,
+		llm_task_complete_with_failover,
+	)
 
 	try:
 		# expect_object is passed only by the lookup loop, so a trigger without
 		# lookups makes exactly the call it always did.
 		extra = {"expect_object": True} if expect_object else {}
-		return llm_task_complete(prompt, fenced, timeout=timeout, **extra), None
+		return llm_task_complete_with_failover(prompt, fenced, timeout=timeout, **extra), None
 	except LLMTaskNotAvailableError:
 		pass
 	except LLMTaskError as e:
