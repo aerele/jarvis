@@ -23,36 +23,117 @@ test("removes pure control fences outright, keeping the prose", () => {
   }
 });
 
-test("strips a jarvis-goto block of either page: no chip, no raw JSON", () => {
-  for (const page of ["dashboards", "payment-calendar"]) {
-    const block = `\`\`\`jarvis-goto\n{"page":"${page}","prompt":"Show the cash view"}\n\`\`\``;
-    const src = `Opening that for you.\n\n${block}\n\nAnything else?`;
-    const out = stripControlBlocks(src);
-    assert.equal(
-      out,
-      "Opening that for you.\n\nAnything else?",
-      `${page} goto leaked`
+const gotoBlock = (page, prompt = "Show the cash view") =>
+  `\`\`\`jarvis-goto\n${JSON.stringify({ page, prompt })}\n\`\`\``;
+
+test("a Dashboards goto becomes one generic chip: no JSON, no prompt text", () => {
+  const src = `Opening that for you.\n\n${gotoBlock(
+    "dashboards"
+  )}\n\nAnything else?`;
+  const html = renderReply(src);
+  assert.equal(html.split("data-open-full").length - 1, 1, "want one chip");
+  assert.ok(html.includes(">Continue in full chat</span>"), "title");
+  assert.ok(html.includes(">to open Dashboards</span>"), "subline");
+  assert.ok(!html.includes("Open in full chat"), "generic subline leaked");
+  assert.ok(!html.includes("jarvis-goto"), "fence leaked");
+  assert.ok(!html.includes("cash view"), "prompt leaked");
+  assert.ok(!html.includes("&quot;page&quot;"), "json leaked");
+  assert.ok(html.includes("Opening that for you."), "prose dropped");
+  assert.ok(html.includes("Anything else?"), "prose dropped");
+});
+
+test("two goto blocks give one chip, from the first valid one", () => {
+  const src = `A.\n\n${gotoBlock("dashboards")}\n\nB.\n\n${gotoBlock(
+    "dashboards",
+    "Second ask"
+  )}`;
+  const html = renderReply(src);
+  assert.equal(html.split("data-open-full").length - 1, 1);
+  assert.ok(!html.includes("Second ask"), "second block leaked");
+});
+
+test("a Payment Calendar goto gets no chip and no raw text", () => {
+  const src = `Opening that for you.\n\n${gotoBlock(
+    "payment-calendar"
+  )}\n\nAnything else?`;
+  assert.equal(
+    stripControlBlocks(src),
+    "Opening that for you.\n\nAnything else?"
+  );
+  const html = renderReply(src);
+  assert.ok(!html.includes("data-open-full"), "calendar must not chip");
+  assert.ok(!html.includes("jarvis-goto"), "fence leaked");
+  assert.ok(!html.includes("cash view"), "prompt leaked");
+});
+
+test("a malformed or incomplete goto block gets no chip and no raw text", () => {
+  for (const body of [
+    "{not json",
+    '{"page":"dashboards"}',
+    '{"page":"dashboards","prompt":"  "}',
+    '{"page":"nowhere","prompt":"x"}',
+    "[]",
+  ]) {
+    const html = renderReply(
+      `Hi.\n\n\`\`\`jarvis-goto\n${body}\n\`\`\`\n\nBye.`
     );
-    const html = renderReply(src);
-    assert.ok(
-      !html.includes("jarvis-goto"),
-      `${page} fence leaked into the html`
-    );
-    assert.ok(
-      !html.includes("cash view"),
-      `${page} prompt leaked into the html`
-    );
-    assert.ok(
-      !html.includes("data-open-full"),
-      `${page} goto must not become a chip`
-    );
+    assert.ok(!html.includes("data-open-full"), `${body} chipped`);
+    assert.ok(!html.includes("jarvis-goto"), `${body} fence leaked`);
+    assert.ok(!html.includes("nowhere") && !html.includes("not json"), body);
   }
 });
 
-test("an unclosed jarvis-goto fence stays as text, like every other fence (streaming parity)", () => {
-  // Same rule as every other control fence: only a closed block is stripped.
-  const src = 'Wait.\n\n```jarvis-goto\n{"page":"dashboards","prompt":"x"}';
-  assert.equal(stripControlBlocks(src), src);
+test("only the FIRST goto counts: a calendar goto before a Dashboards one gives no chip", () => {
+  const src = `${gotoBlock("payment-calendar")}\n\n${gotoBlock("dashboards")}`;
+  assert.ok(!renderReply(src).includes("data-open-full"));
+});
+
+test("an unclosed jarvis-goto fence is stripped while streaming: no <pre>, no JSON", () => {
+  for (const tail of [
+    '```jarvis-goto\n{"page":"dashboards","prompt":"x"}',
+    '```jarvis-goto\n{"page":"dashbo',
+    "```jarvis-goto\n",
+    "```jarvis-goto",
+  ]) {
+    const src = `Wait.\n\n${tail}`;
+    assert.equal(stripControlBlocks(src), "Wait.", JSON.stringify(tail));
+    const html = renderReply(src);
+    assert.ok(!html.includes("<pre"), `${tail} drew a code block`);
+    assert.ok(!html.includes("page"), `${tail} leaked json`);
+    assert.ok(!html.includes("data-open-full"), `${tail} chipped early`);
+    assert.ok(html.includes("Wait."));
+  }
+});
+
+test("an unclosed goto tail whose prompt holds backticks (or a half-typed closing fence) is stripped too", () => {
+  for (const tail of [
+    '```jarvis-goto\n{"page":"dashboards","prompt":"use `x` here"}',
+    '```jarvis-goto\n{"page":"dashboards","prompt":"use `x` he',
+    '```jarvis-goto\n{"page":"dashboards","prompt":"a ``b`` c"',
+    '```jarvis-goto\n{"page":"dashboards","prompt":"x"}\n``',
+    '```jarvis-goto\n{"page":"dashboards","prompt":"x"}\n`',
+  ]) {
+    const src = `Wait.\n\n${tail}`;
+    assert.equal(stripControlBlocks(src), "Wait.", JSON.stringify(tail));
+    const html = renderReply(src);
+    assert.ok(!html.includes("<pre"), `${tail} drew a code block`);
+    assert.ok(!html.includes("page"), `${tail} leaked json`);
+    assert.ok(!html.includes("`"), `${tail} leaked a backtick`);
+    assert.ok(!html.includes("data-open-full"), `${tail} chipped early`);
+  }
+});
+
+test("a closed goto followed by a streaming unclosed one: one chip, no raw tail", () => {
+  const src = `${gotoBlock("dashboards")}\n\nMore.\n\n\`\`\`jarvis-goto\n{"pa`;
+  const html = renderReply(src);
+  assert.equal(html.split("data-open-full").length - 1, 1);
+  assert.ok(!html.includes("<pre"));
+});
+
+test("other chips keep the generic subline", () => {
+  const html = renderReply("```mermaid\nflowchart TD\nA-->B\n```");
+  assert.ok(html.includes(">Open in full chat</span>"));
+  assert.ok(!html.includes("to open Dashboards"));
 });
 
 test("keeps ordinary code fences — those are content", () => {

@@ -963,7 +963,7 @@ function onResizeKey(e) {
 
 // Delegated click for the in-message "open in full chat" chips that
 // panel_markdown swaps in for content this panel can't draw (diagrams, charts,
-// record cards). The chip lives inside a v-html bubble, so it cannot bind a Vue
+// record cards) and for a Dashboards hand-off ("Continue in full chat"). The chip lives inside a v-html bubble, so it cannot bind a Vue
 // handler directly.
 function onTranscriptClick(e) {
 	if (e.target?.closest?.(".jvp-view-chip")) emit("open-full");

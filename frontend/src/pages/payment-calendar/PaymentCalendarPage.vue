@@ -4,6 +4,15 @@
 			><template #left-header><Breadcrumbs :items="breadcrumbs" /></template
 		></LayoutHeader>
 		<main class="pcal-main" aria-labelledby="pcal-title">
+			<!-- Above the title row, so the Refresh button beside the title does not move. A plain
+			     button: the page's own focus ring (.pcal-root button:focus-visible) is its only ring. -->
+			<div v-if="chatConv" class="pcal-back-row">
+				<button type="button" class="pcal-text-button pcal-back" @click="backToChat">
+					<FeatherIcon name="arrow-left" class="size-4" aria-hidden="true" />{{
+						backLabel
+					}}
+				</button>
+			</div>
 			<div class="pcal-title-row">
 				<div>
 					<p class="pcal-eyebrow">CASH PLANNING</p>
@@ -290,8 +299,9 @@
 </template>
 <script setup>
 import { computed, onMounted, reactive, ref, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { Breadcrumbs, Dialog, FeatherIcon } from "frappe-ui";
+import { __ } from "@/lib/i18n";
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import { usePaymentCalendar } from "@/composables/usePaymentCalendar";
 import { useShellStore } from "@/stores/shell";
@@ -306,7 +316,21 @@ import CalendarReconciliation from "./CalendarReconciliation.vue";
 import { explain } from "./messages";
 import "./payment-calendar.css";
 const route = useRoute(),
+	router = useRouter(),
 	shell = useShellStore();
+// The conversation the hand-off came from (history state { chatConv }); empty on a direct visit.
+// Read in setup, so the Back button is on the first paint; a string only (state is user-reachable).
+const handedConv = window.history.state?.chatConv;
+const chatConv = ref(typeof handedConv === "string" ? handedConv : "");
+const backLabel = __("Back to chat");
+const CONVERSATION_ROUTE = "Conversation";
+// Back in history when the previous entry is that conversation, so the chat keeps its scroll
+// position; a push otherwise (a deep link, or the user wandered since).
+function backToChat() {
+	const target = { name: CONVERSATION_ROUTE, params: { id: chatConv.value } };
+	if (window.history.state?.back === router.resolve(target).fullPath) router.back();
+	else router.push(target);
+}
 const model = reactive(
 	usePaymentCalendar({
 		initialDate: typeof route.query.date === "string" ? route.query.date : "",
@@ -412,7 +436,7 @@ watch(
 );
 onMounted(() => {
 	void model.initialize();
-	// Arriving from the chat hand-off (ChatView passes history state { fromChat: true }):
+	// Arriving from the chat hand-off (ChatView passes history state { fromChat: true, chatConv }):
 	// move focus to the title so a keyboard / screen-reader user lands on the page,
 	// not on the chat they just left. The flag is one-shot: clear it so a reload or
 	// a Forward onto this entry does not pull focus again.

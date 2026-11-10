@@ -42,6 +42,8 @@ function harness(pendingStore) {
 			) + "\nreturn canViewCalendar;"
 		)((s.win = {})),
 		ownRuns,
+		// send() cancels a running hand-off countdown first; the real countdown has its own tests
+		gotoCd: { cancel: () => {} },
 		PAYMENT_CALENDAR_PAGE: "payment-calendar", // the shared constant ChatView imports
 		// the real helper from the SFC, bound to this harness's set
 		rememberOwnRun: new Function(
@@ -1007,6 +1009,11 @@ function eventsHarness() {
 		snapCandidateInto: () => {},
 		flushReveal: () => {},
 		dropGotoMorph: () => {},
+		// run:end's goto branch: no goto in these events, so only the handled lookup and the
+		// card-state read are reached (the countdown itself is tested in gotoCountdownWiring.test.js)
+		gotoCd: { isHandled: () => false, cancel: () => {} },
+		gotoCdState: { value: null },
+		startGotoCountdown: () => null,
 		shownRunSeconds: () => 1,
 		notify: () => {},
 		api: {
