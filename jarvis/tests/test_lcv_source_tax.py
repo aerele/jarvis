@@ -641,6 +641,223 @@ class TestLCVSourceTax(LandedCostFixtures):
 		self.assertEqual(doc.reload().docstatus, 0)
 		self.assertEqual(before, self.snapshot())
 
+<<<<<<< HEAD
+=======
+	def test_pos_restriction_with_zero_item_flags_blocks_without_effects(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice(restricted=True)
+		self.assertEqual(self.invoice.items[0].is_ineligible_for_itc, 0)
+		before = self.snapshot()
+		result = self.prepare()
+		self.assertEqual(result["status"], "needs_input", result)
+		self.assertEqual(result["issues"][0]["code"], "nonrecoverable_gst_unsupported")
+		self.assertEqual(result["issues"][0]["ineligible_gst_amount"], 18)
+		self.assertNotIn("draft_values", result)
+		self.assertEqual(before, self.snapshot())
+
+	def test_partial_selection_is_not_claimed_as_attributable_tax(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice(restricted=True)
+		result = self.prepare(
+			charges=[
+				{
+					"purchase_invoice": self.invoice.name,
+					"basis": "Manual",
+					"items": [{"name": self.invoice.items[0].name, "amount": 20}],
+					"allocations": [
+						{
+							"receipt_document_type": "Purchase Receipt",
+							"receipt_document": self.receipt.name,
+							"receipt_item": self.receipt.items[0].name,
+							"amount": 20,
+						}
+					],
+				}
+			]
+		)
+		self.assertEqual(result["status"], "needs_input", result)
+		self.assertEqual(result["issues"][0]["amount_scope"], "invoice")
+		self.assertNotIn("draft_values", result)
+
+	def test_item_flag_alone_is_not_ignored(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice(item_flag=True)
+		self.assertEqual(self.prepare()["issues"][0]["code"], "nonrecoverable_gst_unsupported")
+
+	def test_recorded_input_gst_stays_outside_cost(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice()
+		result = self.prepare()
+		self.assertEqual(result["status"], "ready", result)
+		self.assertEqual(result["source_tax"]["invoices"][0]["treatment"], "excluded_per_recorded_treatment")
+		self.assertEqual(result["totals"]["charges"], self.invoice.base_net_total)
+		saved = create_doc(LCV, result["draft_values"], fields=["vendor_invoices"])
+		self.assertEqual(saved["vendor_invoices"][0]["amount"], self.invoice.base_net_total)
+
+	def test_offset_input_tax_debit_is_not_proof_of_credit(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice()
+		frappe.db.sql(
+			"update `tabGL Entry` set credit=debit where voucher_type='Purchase Invoice' and voucher_no=%s and account=%s",
+			(self.invoice.name, self.invoice.taxes[0].account_head),
+		)
+		self.assertEqual(self.prepare()["issues"][0]["code"], "posted_treatment_unverified")
+
+	def test_missing_item_split_cannot_be_treated_as_zero_tax(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice()
+		frappe.db.set_value("Purchase Invoice Item", self.invoice.items[0].name, "cgst_amount", 0)
+		self.assertEqual(self.prepare()["issues"][0]["code"], "tax_split_inconsistent")
+
+	def test_edited_pos_does_not_reuse_stale_reason(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice()
+		frappe.db.set_value("Purchase Invoice", self.invoice.name, "place_of_supply", "19-West Bengal")
+		self.assertEqual(self.prepare()["issues"][0]["code"], "tax_treatment_changed")
+
+	def test_fx_uses_company_currency_once(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice(restricted=True, currency="USD", fx=83.4, tax=0.18)
+		result = self.prepare()
+		self.assertEqual(result["issues"][0]["ineligible_gst_amount"], 15.01)
+		self.assertEqual(result["issues"][0]["currency"], "INR")
+
+	def test_generic_preview_and_create_cannot_bypass_tax(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice(restricted=True)
+		values = self.values(amounts=[self.invoice.base_total])
+		before = self.snapshot()
+		result = preview_doc(LCV, values)
+		self.assertFalse(result["valid"], result)
+		self.assertEqual(result["status"], "needs_input")
+		self.assertNotIn("resolved", result)
+		with self.assertRaises(LCVSourceTaxNeedsInput):
+			create_doc(LCV, values)
+		self.assertEqual(before, self.snapshot())
+
+	def test_saved_draft_update_and_submit_recheck_source(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice(restricted=True)
+		doc = self.legacy_draft()
+		before = self.snapshot()
+		result = self.prepare(existing_draft=doc.name, charges=[])
+		self.assertEqual(result["status"], "needs_input", result)
+		self.assertNotIn("suggested_action", result)
+		with self.assertRaises(LCVSourceTaxNeedsInput):
+			update_doc(LCV, doc.name, {"posting_date": doc.posting_date})
+		with self.assertRaises(LCVSourceTaxNeedsInput):
+			submit_doc(LCV, doc.name)
+		self.assertEqual(doc.reload().docstatus, 0)
+		self.assertEqual(before, self.snapshot())
+
+	def test_removing_links_cannot_erase_the_source_check(self):
+		doc = self.legacy_draft()
+		with self.assertRaises(LCVSourceTaxNeedsInput) as caught:
+			update_doc(LCV, doc.name, {"vendor_invoices": []})
+		self.assertEqual(caught.exception.assessment["issues"][0]["code"], "vendor_link_removed")
+		self.assertEqual(len(doc.reload().vendor_invoices), 1)
+
+	def test_taxed_invoice_without_classifier_is_unresolved(self):
+		self.invoice = self.taxed_invoice()
+		apps = [a for a in frappe.get_installed_apps() if a != "india_compliance"]
+		with patch("jarvis.tools._lcv_source_tax.frappe.get_installed_apps", return_value=apps):
+			result = self.prepare()
+		self.assertEqual(result["issues"][0]["code"], "tax_classifier_unavailable")
+
+	def test_untaxed_invoice_does_not_require_india_compliance(self):
+		apps = [a for a in frappe.get_installed_apps() if a != "india_compliance"]
+		with patch("jarvis.tools._lcv_source_tax.frappe.get_installed_apps", return_value=apps):
+			self.assertEqual(self.prepare()["status"], "ready")
+
+	def test_hidden_header_cannot_leak_tax_through_result(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice(restricted=True)
+		meta = frappe.get_meta("Purchase Invoice")
+		with patch.object(meta, "get_masked_fields", return_value=[meta.get_field("ineligibility_reason")]):
+			with self.assertRaises(PermissionDeniedError) as caught:
+				self.prepare()
+		self.assertNotIn(self.invoice.name, str(caught.exception))
+		self.assertNotIn("18", str(caught.exception))
+
+	def test_unreadable_ledger_cannot_prove_input_credit(self):
+		self.require_ic()
+		self.invoice = self.taxed_invoice()
+		original = frappe.has_permission
+
+		def allowed(doctype, *args, **kwargs):
+			return False if doctype == "GL Entry" else original(doctype, *args, **kwargs)
+
+		with patch.object(frappe, "has_permission", side_effect=allowed):
+			result = self.prepare()
+		self.assertEqual(result["issues"][0]["code"], "posted_treatment_unreadable")
+		self.assertNotIn("ineligible_gst_amount", result["issues"][0])
+
+	def test_cancelled_source_invalidates_prior_preview(self):
+		prepared = self.prepare()
+		self.assertEqual(prepared["status"], "ready")
+		frappe.db.set_value("Purchase Invoice", self.invoice.name, "docstatus", 2)
+		with self.assertRaises(LCVSourceTaxNeedsInput):
+			create_doc(LCV, prepared["draft_values"])
+
+	def test_batch_rolls_back_an_earlier_valid_create(self):
+		self.require_ic()
+		good = self.values(amounts=[self.invoice.base_total])
+		self.invoice = self.taxed_invoice(restricted=True)
+		bad = self.values(amounts=[self.invoice.base_total])
+		before = self.snapshot()
+		with self.assertRaises(Exception):
+			create_doc(docs=[{"doctype": LCV, "values": good}, {"doctype": LCV, "values": bad}])
+		self.assertEqual(before, self.snapshot())
+
+	def test_manual_unlinked_costs_keep_native_scope(self):
+		values = self.values()
+		values["vendor_invoices"] = []
+		result = preview_doc(LCV, values)
+		self.assertTrue(result["valid"], result)
+		self.assertEqual(result["source_tax"]["status"], "not_applicable")
+
+	def test_missing_tax_rows_do_not_erase_recorded_tax(self):
+		frappe.db.set_value("Purchase Invoice", self.invoice.name, "base_total_taxes_and_charges", 18)
+		self.assertEqual(self.prepare()["issues"][0]["code"], "tax_split_inconsistent")
+
+	def test_workflow_single_and_batch_stop_before_transition(self):
+		self.require_ic()
+		from jarvis.tools.apply_workflow_action import apply_workflow_action
+
+		self.invoice = self.taxed_invoice(restricted=True)
+		doc = self.legacy_draft()
+		with (
+			patch("jarvis.tools.apply_workflow_action.get_workflow_name", return_value="LCV approval"),
+			patch(
+				"jarvis.tools.apply_workflow_action.get_workflow",
+				return_value=frappe._dict(states=[frappe._dict(state="Submitted", doc_status=1)]),
+			),
+			patch(
+				"jarvis.tools.apply_workflow_action.get_transitions",
+				return_value=[frappe._dict(action="Approve", next_state="Submitted")],
+			),
+			patch("jarvis.tools.apply_workflow_action.apply_workflow") as apply,
+		):
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				apply_workflow_action(LCV, doc.name, "Approve")
+			with self.assertRaises(LCVSourceTaxNeedsInput):
+				apply_workflow_action(LCV, action="Approve", names=[doc.name])
+			apply.assert_not_called()
+		self.assertEqual(doc.reload().docstatus, 0)
+
+	def test_amend_does_not_create_another_unresolved_draft(self):
+		self.require_ic()
+		from jarvis.tools.amend_doc import amend_doc
+
+		self.invoice = self.taxed_invoice(restricted=True)
+		doc = self.legacy_draft()
+		frappe.db.set_value(LCV, doc.name, "docstatus", 2)
+		before = self.snapshot()
+		with self.assertRaises(LCVSourceTaxNeedsInput):
+			amend_doc(LCV, doc.name)
+		self.assertEqual(before, self.snapshot())
+
+>>>>>>> c8f5991 (perf(tools): compact create_doc/update_doc results, optional fields)
 	def test_controller_write_is_refused_before_tax_gate(self):
 		from jarvis.tools.run_method import _run_doc_method
 

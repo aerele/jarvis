@@ -153,6 +153,33 @@ class DocPart:
 		return out
 
 
+def write_result(doc, fields: list | None = None) -> dict:
+	"""What create_doc / update_doc return for one saved ``doc`` (already masked by
+	apply_fieldlevel_read_permissions): a compact identity, or ``fields`` cut the
+	way get_doc cuts them. The full document is get_doc's job."""
+	if fields:
+		return DocPart(fields).of(doc.as_dict(no_default_fields=False))
+	out = {"doctype": doc.doctype, "name": doc.name, "docstatus": doc.docstatus}
+	keys = [k for k in ("status", doc.meta.title_field) if k and doc.meta.get_field(k)]
+	return out | {k: doc.get(k) for k in keys if doc.get(k) is not None and k not in out}
+
+
+def check_write_fields(doctype: str, fields: list | None) -> None:
+	"""Refuse bad ``fields`` before the write, so a refusal never follows a save."""
+	if not fields:
+		return
+	meta = frappe.get_meta(doctype)
+	known = set(meta.get_valid_fields()) | {df.fieldname for df in meta.get_table_fields()}
+	part = DocPart(fields)
+	_refuse_unreadable(doctype, part.fields)
+	_refuse_unknown(doctype, part.fields, known)
+
+
+def refuse_fields_with_batch(fields: list | None) -> None:
+	if fields:
+		raise InvalidArgumentError("fields applies to a single create_doc/update_doc, not a batch")
+
+
 def _row_part(row: dict, fields: list | None, hidden: set) -> dict:
 	"""``row`` as asked: the named fields plus its name and idx, or all of it,
 	without the fields the user cannot read."""
