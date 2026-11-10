@@ -21,17 +21,29 @@ function chip() {
 	return chatViewSrc.slice(start, chatViewSrc.indexOf("</a>", at));
 }
 
-test("PWA ChatView: the message view carries the dashboards goto flag from hasDashboardsGoto", () => {
-	assert.match(chatViewSrc, /\bhasDashboardsGoto,/, "ChatView must import hasDashboardsGoto");
-	assert.match(chatViewSrc, /dashboardsGoto: hasDashboardsGoto\(content\)/);
+test("PWA ChatView: the message view carries the goto page from gotoChipPage", () => {
+	assert.match(chatViewSrc, /\bgotoChipPage,/, "ChatView must import gotoChipPage");
+	assert.match(chatViewSrc, /gotoPage: gotoChipPage\(content\)/);
 });
 
-test("PWA ChatView: the chip shows for a diagram or a dashboards goto, and opens the web chat", () => {
+test("PWA ChatView: the chip shows for a diagram or a goto of either page, and opens the web chat", () => {
 	const el = chip();
-	assert.match(el, /v-if="it\.view\.diagrams \|\| it\.view\.dashboardsGoto"/);
+	assert.match(el, /v-if="it\.view\.diagrams \|\| it\.view\.gotoPage"/);
 	assert.match(el, /:href="webChatUrl"/);
 });
 
-test("PWA ChatView: no goto JSON is rendered anywhere: the chip never reads the block's text", () => {
-	assert.doesNotMatch(chip(), /it\.view\.goto|\.prompt|jarvis-goto/);
+// A0 pinned "no chip for the calendar"; replaced on purpose (a lead-in needs a link).
+test("PWA ChatView: the chip is titled by the page the goto names", () => {
+	const at = chatViewSrc.indexOf("function chipTitle(v)");
+	assert.notEqual(at, -1);
+	const fn = chatViewSrc.slice(at, chatViewSrc.indexOf("\n}", at));
+	assert.match(
+		fn,
+		/return v\.gotoPage === "payment-calendar" \? "Payment Calendar" : "Dashboards";/
+	);
+	assert.match(fn, /return "Diagram";/);
+});
+
+test("PWA ChatView: no goto JSON is rendered anywhere: the chip reads only the page key, never the block's text", () => {
+	assert.doesNotMatch(chip(), /it\.view\.goto\b|\.prompt|jarvis-goto/);
 });

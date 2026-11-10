@@ -188,6 +188,52 @@ class TestHandleChatSendAcceptsPayloadDict(FrappeTestCase):
 			frappe.db.commit()
 
 
+class TestHandleChatSendForwardsRunIdToTheHandoffHint(FrappeTestCase):
+	"""The legacy transport: handle_chat_send must hand its run_id to the prompt
+	assembly, or the Payment Calendar hand-off hint lines carry run_id null."""
+
+	def setUp(self):
+		agent_session_pool._POOL.clear()
+		_ensure_test_user()
+		self._orig_user = frappe.session.user
+		frappe.set_user(TEST_USER)
+		_cleanup_user_conversations()
+		self.conv, self.user_msg = _make_conversation_with_user_message("hello")
+
+	def tearDown(self):
+		_cleanup_user_conversations()
+		frappe.set_user(self._orig_user)
+
+	def test_the_hint_telemetry_line_carries_the_turns_run_id(self):
+		from jarvis import telemetry
+
+		fake_sess = MagicMock()
+		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
+		fake_sess.relay_turn_events.return_value = _fake_event_stream(
+			[
+				{"kind": "lifecycle", "phase": "end"},
+				{"kind": "relay:final", "text": None},
+			]
+		)
+		with (
+			patch("jarvis.chat.agent_session_pool.AgentSession.connect", return_value=fake_sess),
+			patch("jarvis.chat.worker.publish_to_user"),
+			patch("jarvis.chat.turn_handler.payment_calendar_handoff_enabled", return_value=True),
+			patch("jarvis.chat.turn_handler._visible_as", return_value=True),
+			patch.object(telemetry, "_emit") as emit,
+		):
+			turn_handler.handle_chat_send(
+				{
+					"conversation_id": self.conv,
+					"message_id": self.user_msg,
+					"run_id": "r-pc-legacy",
+					"context": {"handoff_pages": ["payment-calendar"]},
+				}
+			)
+		lines = [c.args[0] for c in emit.call_args_list if c.args[0]["kind"] == "pc_handoff_hint"]
+		self.assertEqual([(ln["outcome"], ln["run_id"]) for ln in lines], [("on", "r-pc-legacy")])
+
+
 class TestRunAgentTurnShimForwardsToHandleChatSend(FrappeTestCase):
 	"""The RQ entry point ``worker.run_agent_turn`` is now a thin shim
 	that constructs the payload dict and calls ``handle_chat_send``.

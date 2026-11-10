@@ -29,8 +29,29 @@ function harness(pendingStore) {
 		errors = [];
 	const noop = () => {};
 	let nextId = 0;
+	const ownRuns = new Set();
 	Object.assign(s, {
 		_NEW_CHAT_SCOPE: "NEW",
+		// The Payment Calendar hand-off: the boot flag, and the runs this tab sent.
+		// the real function from the SFC, reading this harness's `window`
+		canViewCalendar: new Function(
+			"window",
+			source.slice(
+				source.indexOf("function canViewCalendar() {"),
+				source.indexOf("\n}", source.indexOf("function canViewCalendar() {")) + 2
+			) + "\nreturn canViewCalendar;"
+		)((s.win = {})),
+		ownRuns,
+		PAYMENT_CALENDAR_PAGE: "payment-calendar", // the shared constant ChatView imports
+		// the real helper from the SFC, bound to this harness's set
+		rememberOwnRun: new Function(
+			"ownRuns",
+			"OWN_RUNS_MAX",
+			source.slice(
+				source.indexOf("function rememberOwnRun("),
+				source.indexOf("\n}", source.indexOf("function rememberOwnRun(")) + 2
+			) + "\nreturn rememberOwnRun;"
+		)(ownRuns, 50),
 		injectPendingBubbles,
 		heldNewestSeq,
 		mergeNewestPage,
@@ -209,6 +230,80 @@ for (const [label, text, files] of [
 		assert.deepEqual(h.errors, []);
 	});
 }
+test("the Payment Calendar capability rides the send context only when the boot flag is true", async () => {
+	const withoutFlag = harness();
+	await withoutFlag.f.send();
+	const base = withoutFlag.calls[0][4];
+	assert.equal(base.handoff_pages, undefined);
+	for (const flag of [undefined, null, false, 0, "true", 1]) {
+		const h = harness();
+		h.s.win.can_view_payment_calendar = flag;
+		await h.f.send();
+		assert.deepEqual(h.calls[0][4], base, `flag ${String(flag)} must change nothing`);
+	}
+	const h = harness();
+	h.s.win.can_view_payment_calendar = true;
+	await h.f.send();
+	assert.deepEqual(h.calls[0][4], { ...base, handoff_pages: ["payment-calendar"] });
+	// a plain send (no other context key) carries the capability alone
+	const plain = harness();
+	plain.s.win.can_view_payment_calendar = true;
+	plain.s.connectorFocus.value = null;
+	plain.f.setPrefill(null);
+	await plain.f.send();
+	assert.deepEqual(plain.calls[0][4], { handoff_pages: ["payment-calendar"] });
+	// and today's plain send still sends no context at all
+	const none = harness();
+	none.s.connectorFocus.value = null;
+	none.f.setPrefill(null);
+	await none.f.send();
+	assert.ok(
+		none.calls[0][4] == null,
+		"no context at all (the harness copies undefined to null)"
+	);
+});
+
+test("an accepted send records its run id as this tab's own; a rejected one does not", async () => {
+	const accepted = harness();
+	accepted.s.api.sendMessage = async () => ({
+		ok: true,
+		conversation_id: "A",
+		message_id: "M",
+		run_id: "RUN-1",
+	});
+	await accepted.f.send();
+	assert.ok(accepted.s.ownRuns.has("RUN-1"));
+	const rejected = harness();
+	rejected.s.api.sendMessage = async () => ({ ok: false, reason: "busy", run_id: "RUN-2" });
+	await rejected.f.send();
+	assert.equal(rejected.s.ownRuns.size, 0);
+});
+
+test("a recovered send that the server accepted records its run id as this tab's own", async () => {
+	const h = harness();
+	h.s.api.sendMessage = async () => {
+		throw Error("offline");
+	};
+	await h.f.send();
+	const m = h.failed();
+	h.s.api.checkMessageDelivery = async () => ({
+		ok: true,
+		conversation_id: "A",
+		message_id: "M",
+		run_id: "RUN-REC",
+	});
+	await h.f.recoverSend(m);
+	assert.ok(h.s.ownRuns.has("RUN-REC"));
+	const rej = harness();
+	rej.s.api.sendMessage = async () => {
+		throw Error("offline");
+	};
+	await rej.f.send();
+	rej.s.api.checkMessageDelivery = async () => ({ ok: false, reason: "busy", run_id: "RUN-X" });
+	await rej.f.recoverSend(rej.failed());
+	assert.equal(rej.s.ownRuns.size, 0);
+});
+
 for (const guard of ["booting", "holdActive", "compacting", "noAiConnected", "waiting"]) {
 	test(`blocked by ${guard}: retry retains its bubble and files`, async () => {
 		const h = harness();

@@ -851,7 +851,7 @@ class JarvisSettings(Document):
 
 	def validate(self):
 		self._preserve_agent_catalog_state()
-		self._guard_agent_min_model_authority()
+		self._guard_admin_only_fields()
 		# #731: a genuine ON -> OFF flip of the wiki toggle enqueues a container
 		# scrub in on_update. Capture the change here, the same way
 		# llm_auth_mode_changed is captured below: has_value_changed compares the
@@ -1205,27 +1205,31 @@ class JarvisSettings(Document):
 			return
 		wiki_mirror.enqueue_scrub(after_commit=True)
 
-	def _guard_agent_min_model_authority(self):
-		"""Security review F4: enforce_agent_min_model may change ONLY as
+	# Fields that only the Administrator identity may change (field -> label for the refusal).
+	_ADMIN_ONLY_FIELDS = {
+		"enforce_agent_min_model": "Enforce Agent Minimum Model",
+		"payment_calendar_chat_handoff": "Payment Calendar chat hand-off",
+	}
+
+	def _guard_admin_only_fields(self):
+		"""Security review F4: the fields in ``_ADMIN_ONLY_FIELDS``
+		(enforce_agent_min_model, payment_calendar_chat_handoff) may change ONLY as
 		Administrator. Frappe's own permlevel gate (validate_higher_perm_levels,
-		runs before validate()) already reverts this permlevel-2 field for a user
+		runs before validate()) already reverts these permlevel-2 fields for a user
 		genuinely lacking write access there - but a tenant System Manager can
 		self-grant that write via the Role Permission Manager
 		(permission_manager.update("Jarvis Settings", "System Manager", 2,
 		"write", 1)) and then save the flag for real. This is the backstop that
 		still refuses it: identity, not a grantable permission, is what decides
-		this field. Exempted for install/migrate/patch, which run trusted code
+		these fields. Exempted for install/migrate/patch, which run trusted code
 		outside a session a customer controls."""
 		if frappe.flags.in_install or frappe.flags.in_migrate or frappe.flags.in_patch:
 			return
 		if frappe.session.user == "Administrator":
 			return
-		if not self.has_value_changed("enforce_agent_min_model"):
-			return
-		frappe.throw(
-			"Only an Administrator may change Enforce Agent Minimum Model.",
-			frappe.PermissionError,
-		)
+		for fieldname, label in self._ADMIN_ONLY_FIELDS.items():
+			if self.has_value_changed(fieldname):
+				frappe.throw(f"Only an Administrator may change {label}.", frappe.PermissionError)
 
 	def _agent_min_model_flip(self) -> str | None:
 		"""``"on"`` / ``"off"`` when this save flips enforce_agent_min_model, else None."""
