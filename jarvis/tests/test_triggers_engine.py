@@ -252,10 +252,11 @@ class TestTriggerValidation(_TriggerTestCase):
 			self._draft(llm_instruction="").insert(ignore_permissions=True)
 
 	def test_llm_daily_cap_clamps(self):
-		self.assertEqual(self._make_llm_trigger(cap=0).llm_daily_cap, 100)
-		self.assertEqual(self._make_llm_trigger(cap=9999).llm_daily_cap, 2000)
-		self.assertEqual(self._make_llm_trigger(cap=-5).llm_daily_cap, 1)
-		self.assertEqual(self._make_llm_trigger(cap=250).llm_daily_cap, 250)
+		# Distinct conditions: identical enabled triggers are refused (#816).
+		cases = [(0, "", 100), (9999, "doc.priority == 'Low'", 2000)]
+		cases += [(-5, "doc.priority == 'High'", 1), (250, "doc.priority == 'Medium'", 250)]
+		for cap, condition, expected in cases:
+			self.assertEqual(self._make_llm_trigger(cap=cap, condition=condition).llm_daily_cap, expected)
 
 
 # --------------------------------------------------------------------------- #
