@@ -16,6 +16,8 @@ Managed Server Script contract:
   * Deleted when the action switches Script -> LLM and on trigger trash.
 """
 
+import hashlib
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
@@ -92,6 +94,17 @@ def _denylisted_doctypes() -> frozenset:
 DENYLISTED_DOCTYPES = _denylisted_doctypes()
 
 
+def _normalize(text) -> str:
+	"""Strip and collapse whitespace so cosmetic condition edits still match."""
+	return " ".join((text or "").split())
+
+
+def _body_hash(trigger) -> str:
+	"""Hash of the action body: script text for Script, instruction for LLM."""
+	text = trigger.script_body if trigger.action_type == "Script" else trigger.llm_instruction
+	return hashlib.sha256((text or "").strip().encode()).hexdigest()
+
+
 class JarvisTrigger(NotRenamable, Document):
 	def validate(self):
 		self._validate_name()
@@ -105,6 +118,65 @@ class JarvisTrigger(NotRenamable, Document):
 		self._guard_server_script_link()
 		self._guard_owner_immutable()
 		self._guard_lookup_authority()
+		self.check_duplicates()
+
+	def check_duplicates(self):
+		"""Triggers are site-wide: every enabled row enters the dispatch map, so
+		two identical rows fire twice (#816). Refuse a new/edited/re-enabled
+		trigger when another ENABLED one has the same target, event, normalized
+		condition, action type and action body. A match that differs only in
+		action type is allowed with an orange warning: ``msgprint`` on the
+		Desk/API path and ``flags.duplicate_warning`` (surfaced as ``warning`` by
+		``triggers_api.create_trigger`` / ``update_trigger``)."""
+		self.flags.duplicate_warning = None
+		if not cint(self.enabled):
+			return
+		# System context on purpose: triggers are site-wide, so a
+		# permission-filtered read would miss another user's duplicate row.
+		rows = frappe.get_all(
+			"Jarvis Trigger",
+			filters={
+				"name": ["!=", self.name or ""],
+				"enabled": 1,
+				"target_doctype": self.target_doctype,
+				"doc_event": self.doc_event,
+			},
+			fields=["name", "trigger_name", "condition", "action_type", "script_body", "llm_instruction"],
+		)
+		condition = _normalize(self.condition)
+		body = _body_hash(self)
+		cross_type = None
+		for row in rows:
+			if _normalize(row.condition) != condition:
+				continue
+			if row.action_type != self.action_type:
+				cross_type = cross_type or row
+			elif _body_hash(row) == body:
+				self._throw_duplicate(row)
+		if cross_type:
+			self._warn_cross_type(cross_type)
+
+	def _throw_duplicate(self, row):
+		if frappe.has_permission("Jarvis Trigger", "read", doc=row.name):
+			msg = _(
+				"An enabled trigger with the same DocType, event, condition and action already exists: "
+				"'{0}'. Edit or disable it instead of creating a duplicate."
+			).format(row.trigger_name)
+		else:
+			msg = _("An enabled trigger with the same DocType, event, condition and action already exists.")
+		frappe.throw(msg, frappe.ValidationError)
+
+	def _warn_cross_type(self, row):
+		if frappe.has_permission("Jarvis Trigger", "read", doc=row.name):
+			who = _("'{0}' ({1} action)").format(row.trigger_name, row.action_type)
+		else:
+			who = _("another trigger ({0} action)").format(row.action_type)
+		msg = _(
+			"Heads up: {0} already runs on the same DocType, event and condition. "
+			"Both will fire on each matching save."
+		).format(who)
+		self.flags.duplicate_warning = msg
+		frappe.msgprint(msg, indicator="orange", alert=False)
 
 	def _guard_owner_immutable(self):
 		"""``owner`` decides whose permissions lookups read with. Frappe already
