@@ -67,6 +67,24 @@ test("boolean is normalised to yesno and an unknown type falls back to single", 
 	assert.equal(spec.questions[0].doctype, "");
 });
 
+test("object options show their label, else their value, never [object Object] (#837)", () => {
+	const spec = parseAsk(
+		fence(
+			'[{"q":"Where should the remaining 30 minutes go?","type":"single","options":[' +
+				'{"label":"14:00 to 14:30","value":"14:00-14:30"},' +
+				'{"value":"17:00-17:30"},' +
+				'{"title":"Another time you specify"},' +
+				'{"id":7},null,"",42]}]'
+		)
+	);
+	assert.deepEqual(spec.questions[0].options, [
+		"14:00 to 14:30",
+		"17:00-17:30",
+		"Another time you specify",
+		"42",
+	]);
+});
+
 test("choice questions with no options are dropped; field types survive without them", () => {
 	const spec = parseAsk(fence('[{"q":"No opts","type":"single"},{"q":"When?","type":"date"}]'));
 	assert.deepEqual(

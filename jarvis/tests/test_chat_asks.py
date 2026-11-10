@@ -229,6 +229,28 @@ class TestParseAsk(unittest.TestCase):
 		self.assertEqual(qs[0]["type"], "single")
 		self.assertEqual(qs[0]["options"], ["Acme", "Globex"])
 
+	def test_object_options_show_their_label_not_a_dict_repr(self):
+		# #837: the model wrote {label, value} objects; str() drew "{'label': ...}".
+		body = json.dumps(
+			[
+				{
+					"q": "Where should the remaining 30 minutes go?",
+					"type": "single",
+					"options": [
+						{"label": "14:00 to 14:30", "value": "14:00-14:30"},
+						{"value": "17:00-17:30"},
+						{"title": "Another time you specify"},
+						{"id": 7},
+						None,
+						"",
+						42,
+					],
+				}
+			]
+		)
+		qs = parse_ask("```jarvis-ask\n" + body + "\n```")
+		self.assertEqual(qs[0]["options"], ["14:00 to 14:30", "17:00-17:30", "Another time you specify", "42"])
+
 	def test_last_fence_wins(self):
 		content = (
 			_fence([_ask(q="old question?", options=("A", "B"))])
