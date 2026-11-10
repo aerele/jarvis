@@ -155,10 +155,15 @@ class DocPart:
 def write_result(doc, fields: list | None = None) -> dict:
 	"""What create_doc / update_doc return for one saved ``doc`` (already masked by
 	apply_fieldlevel_read_permissions): a compact identity, or ``fields`` cut the
-	way get_doc cuts them. The full document is get_doc's job."""
+	way get_doc cuts them. The full document is get_doc's job.
+
+	``fields`` were already checked by check_write_fields before the write, so this
+	only copies them: a refusal here would follow a save the model then retries."""
+	out = {"doctype": doc.doctype, "name": doc.name}
 	if fields:
-		return DocPart(fields).of(doc.as_dict(no_default_fields=False))
-	out = {"doctype": doc.doctype, "name": doc.name, "docstatus": doc.docstatus}
+		saved = doc.as_dict(no_default_fields=False)
+		return out | {f: saved.get(f) for f in fields}
+	out["docstatus"] = doc.docstatus
 	keys = [k for k in ("status", doc.meta.title_field) if k and doc.meta.get_field(k)]
 	return out | {k: doc.get(k) for k in keys if doc.get(k) is not None and k not in out}
 
