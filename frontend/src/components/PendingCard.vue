@@ -1037,11 +1037,14 @@ html[data-theme="dark"] .jv-pcard {
 .jv-pcard-caption--after {
 	margin-top: 8px;
 }
+/* The list scrolls past 320px, and its scrollbar takes the right edge: without the
+   padding the right-aligned values ran into it (#811). */
 .jv-pcard-recs {
 	display: flex;
 	flex-direction: column;
 	max-height: 320px;
 	overflow-y: auto;
+	padding-right: 10px;
 	overscroll-behavior: contain;
 	-webkit-overflow-scrolling: touch;
 }
