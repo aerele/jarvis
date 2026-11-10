@@ -15,6 +15,7 @@ from frappe.query_builder.functions import Coalesce, Count, IfNull
 from pypika.terms import ExistsCriterion
 
 from jarvis.chat import admission, txn, user_settings_api
+from jarvis.chat.directive_filter import DirectiveRefusal
 from jarvis.chat.usage import current_month_key as _usage_month_key
 from jarvis.chat.usage import period_select_fields
 from jarvis.permissions import (
@@ -3795,6 +3796,9 @@ def compact_conversation(conversation: str, hint: str | None = None) -> dict:
 		return {"ok": False, "reason": "conversation_busy"}
 	try:
 		clean = compaction.sanitize_hint(hint)
+	except DirectiveRefusal:
+		# F-Q8: a model/runtime change in the hint; its own reason so the UI can say so.
+		return {"ok": False, "reason": "directive_refused"}
 	except frappe.ValidationError:
 		return {"ok": False, "reason": "bad_hint"}
 	return compaction.start_compaction(conversation, frappe.session.user, clean)

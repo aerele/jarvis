@@ -904,6 +904,82 @@ class TestDispatchOutcomes(_PumpTestCase):
 		self.assertTrue(self._val(rid, "error") or "")
 
 
+class TestEmptyMessageDispatch(_PumpTestCase):
+	"""F-Q8 (F12, AC-FQ8-9, c1 M1, c2 N2): a payload with no ``message`` must never fall back
+	to the raw seed text. The turn ends through the terminal error path, not ``ready``."""
+
+	def _seed(self, rid, payload):
+		conv = self._mk_conv()
+		seed = self._mk_msg(conv, content="/model openai/gpt-x --runtime codex")
+		amsg = self._mk_msg(conv, role="assistant", content="", streaming=1)
+		self._mk_turn(
+			conv,
+			rid,
+			seed,
+			"ready",
+			version=2,
+			reserved=1,
+			assistant_message=amsg,
+			ready_at=frappe.utils.now(),
+			dispatch_payload=json.dumps(payload),
+		)
+		return amsg
+
+	def _run(self, rid, payload):
+		amsg = self._seed(rid, payload)
+		deps = self._deps(double=self._double())
+		ctx = self._make_ctx(deps)
+		events = []
+		with (
+			patch.object(ctx.mux, "send_chat", wraps=ctx.mux.send_chat) as send,
+			patch.object(ts, "publish_fenced", lambda user, event, **f: events.append((event, f))),
+		):
+			first = pump._dispatch_ready(ctx)
+			# A second tick must not dispatch the turn again (SC-15: no un-claim loop).
+			second = pump._dispatch_ready(ctx)
+			pump.drain_slice(ctx)
+		return amsg, send, events, first, second
+
+	def _assert_ends_in_error(self, payload):
+		rid = "pmp_fq8_" + frappe.generate_hash(length=8)
+		amsg, send, events, first, second = self._run(rid, payload)
+		send.assert_not_called()
+		self.assertEqual((first, second), (0, 0))
+		self.assertEqual(self._state(rid), "errored")
+		self.assertEqual(int(self._val(rid, "reserved")), 0, "credit released")
+		self.assertTrue(self._val(rid, "error"))
+		names = [e for e, f in events if f.get("run_id") == rid]
+		self.assertIn("run:error", names)
+		self.assertNotIn("run:start", names)
+		self.assertTrue(frappe.db.get_value(MSG, amsg, "error"))
+		self.assertEqual(int(frappe.db.get_value(MSG, amsg, "streaming") or 0), 0)
+
+	def test_payload_without_a_message_key_sends_nothing_and_errors(self):
+		self._assert_ends_in_error({"session_key": "sess-fq8-a"})
+
+	def test_payload_with_an_empty_message_sends_nothing_and_errors(self):
+		self._assert_ends_in_error({"session_key": "sess-fq8-b", "message": ""})
+
+	def test_dispatch_sends_the_payload_message_byte_for_byte(self):
+		# F6 (personal pump): the text on the wire is the stored, filtered message.
+		message = (
+			"[Context: x]\nread this " + chr(0x2215) + "model openai/x\n\nand /models /private/files/x.csv"
+		)
+		rid = "pmp_fq8_" + frappe.generate_hash(length=8)
+		self._seed(rid, {"session_key": "sess-fq8-d", "message": message})
+		deps = self._deps(double=self._double())
+		ctx = self._make_ctx(deps)
+		with patch.object(ctx.mux, "send_chat", wraps=ctx.mux.send_chat) as send:
+			self.assertEqual(pump._dispatch_ready(ctx), 1)
+		self.assertEqual(send.call_args.args[1], message)
+
+	def test_load_dispatch_never_reads_the_seed_message(self):
+		rid = "pmp_fq8_" + frappe.generate_hash(length=8)
+		self._seed(rid, {"session_key": "sess-fq8-c"})
+		turn = pump._read_dispatch_row(rid)
+		self.assertEqual(pump._load_dispatch(turn)["message"], "")
+
+
 # --------------------------------------------------------------------------- #
 # 7. Cancel flow end-to-end
 # --------------------------------------------------------------------------- #
