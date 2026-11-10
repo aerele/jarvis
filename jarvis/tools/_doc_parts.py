@@ -7,6 +7,8 @@ read as an empty value, a part says so instead: a top-level field or a child
 table is refused by name, and a child field is left out of the rows and listed.
 """
 
+from contextlib import contextmanager
+
 import frappe
 from frappe.model import table_fields
 
@@ -160,13 +162,26 @@ def write_result(doc, fields: list | None = None) -> dict:
 
 	``fields`` were already checked by check_write_fields before the write, so this
 	only copies them: a refusal here would follow a save the model then retries."""
-	out = {"doctype": doc.doctype, "name": doc.name}
+	if getattr(frappe.local, "jarvis_full_write_result", False):
+		return doc.as_dict()
+	out = {"doctype": doc.doctype, "name": doc.name, "docstatus": doc.docstatus}
 	if fields:
 		saved = doc.as_dict(no_default_fields=False)
 		return out | {f: saved.get(f) for f in fields}
-	out["docstatus"] = doc.docstatus
 	keys = [k for k in ("status", doc.meta.title_field) if k and doc.meta.get_field(k)]
 	return out | {k: doc.get(k) for k in keys if doc.get(k) is not None and k not in out}
+
+
+@contextmanager
+def full_write_results():
+	"""A trial run (the confirmation preview) returns the whole would-be document:
+	the card's sensitive rows, diffs and Details are built from it."""
+	previous = getattr(frappe.local, "jarvis_full_write_result", False)
+	frappe.local.jarvis_full_write_result = True
+	try:
+		yield
+	finally:
+		frappe.local.jarvis_full_write_result = previous
 
 
 def check_write_fields(doctype: str, fields: list | None) -> None:
