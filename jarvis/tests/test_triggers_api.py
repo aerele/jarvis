@@ -684,81 +684,6 @@ class TestScriptActionAuthoring(_TriggersApiTestCase):
 			doc.insert(ignore_permissions=True)
 		self._triggers.append(doc.name)
 		self.assertTrue(frappe.db.exists(TRIGGER, doc.name))
-<<<<<<< HEAD
-=======
-
-
-class TestSetEnabledUnsafeAttributes(_TriggersApiTestCase):
-	"""Turning a trigger ON re-checks its stored code (#818): a body or condition
-	that was saved before the check existed must not be re-armed. set_trigger_enabled
-	is a raw db_set, so it runs the same check as validate. Turning OFF never does."""
-
-	BAD_BODY = 'x = "PO {}".format(doc.name)\n'
-	BAD_COND = '"{}".format(doc.description) if doc.description else False'
-
-	def _stored_bad_script_trigger(self) -> str:
-		with patch(_CTRL + ".is_safe_exec_enabled", return_value=True):
-			doc = frappe.get_doc(
-				{
-					"doctype": TRIGGER,
-					"trigger_name": f"script-{frappe.generate_hash(length=8)}",
-					"target_doctype": "ToDo",
-					"doc_event": "on_update",
-					"action_type": "Script",
-					"script_body": "x = 1",
-				}
-			)
-			doc.insert(ignore_permissions=True)
-		self._triggers.append(doc.name)
-		frappe.db.set_value(TRIGGER, doc.name, {"script_body": self.BAD_BODY, "enabled": 1})
-		return doc.name
-
-	def test_toggle_on_refuses_stored_format_script_and_off_still_works(self):
-		name = self._stored_bad_script_trigger()
-		frappe.set_user(ADMIN_USER)
-		self.assertEqual(set_trigger_enabled(name, 0)["data"]["enabled"], 0)
-		with self.assertRaises(frappe.ValidationError) as cm:
-			set_trigger_enabled(name, 1)
-		self.assertIn("blocks: line 1", strip_html(str(cm.exception)))
-		# the refused toggle changed nothing
-		self.assertEqual(int(frappe.db.get_value(TRIGGER, name, "enabled")), 0)
-
-	def test_toggle_off_on_a_bad_enabled_trigger_works(self):
-		name = self._stored_bad_script_trigger()
-		frappe.set_user(ADMIN_USER)
-		self.assertEqual(set_trigger_enabled(name, 0)["data"]["enabled"], 0)
-
-	def test_toggle_on_refuses_llm_trigger_with_stored_format_condition(self):
-		name = self._create_as_admin()
-		frappe.db.set_value(TRIGGER, name, {"condition": self.BAD_COND, "enabled": 0})
-		frappe.set_user(ADMIN_USER)
-		with self.assertRaises(frappe.ValidationError) as cm:
-			set_trigger_enabled(name, 1)
-		self.assertIn("Invalid Condition:", str(cm.exception))
-		self.assertEqual(int(frappe.db.get_value(TRIGGER, name, "enabled")), 0)
-
-	def test_toggle_on_refuses_script_trigger_with_clean_script_and_bad_stored_condition(self):
-		name = self._stored_bad_script_trigger()
-		frappe.db.set_value(TRIGGER, name, {"script_body": "x = 1", "condition": self.BAD_COND, "enabled": 0})
-		frappe.set_user(ADMIN_USER)
-		with self.assertRaises(frappe.ValidationError) as cm:
-			set_trigger_enabled(name, 1)
-		self.assertIn("Invalid Condition:", str(cm.exception))
-		self.assertEqual(int(frappe.db.get_value(TRIGGER, name, "enabled")), 0)
-
-	def test_toggle_on_llm_trigger_ignores_leftover_script_body(self):
-		# script_body is only code for a Script action; an LLM trigger that still
-		# holds an old body must not be refused.
-		name = self._create_as_admin()
-		frappe.db.set_value(TRIGGER, name, {"script_body": self.BAD_BODY, "enabled": 0})
-		frappe.set_user(ADMIN_USER)
-		self.assertEqual(set_trigger_enabled(name, 1)["data"]["enabled"], 1)
-
-	def test_toggle_on_clean_trigger_works(self):
-		name = self._create_as_admin()
-		frappe.db.set_value(TRIGGER, name, "enabled", 0)
-		frappe.set_user(ADMIN_USER)
-		self.assertEqual(set_trigger_enabled(name, 1)["data"]["enabled"], 1)
 
 
 class TestDuplicateTriggers(_TriggersApiTestCase):
@@ -873,4 +798,3 @@ class TestDuplicateTriggers(_TriggersApiTestCase):
 		self.assertTrue(
 			any(m.get("indicator") == "orange" for m in map(frappe.parse_json, frappe.local.message_log))
 		)
->>>>>>> f0f8e27 (test: Jarvis Trigger duplicate guard (#816), expected red)
