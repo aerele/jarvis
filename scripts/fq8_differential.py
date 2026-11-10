@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Build and check the F-Q8 differential table (AC-FQ8-7).
 
-    <bench-env>/bin/python -I scripts/fq8_differential.py --dist <openclaw-dist-dir> [--out FIXTURE]
+    <bench-env>/bin/python -I scripts/fq8_differential.py --dist <runtime-dist-dir> [--out FIXTURE]
                                            [--n 14000] [--seed 8] [--check-only]
 
 For every input string the table stores what the jarvis filter does with it and what the
-REAL OpenClaw directive parser says about the filter output (``scripts/fq8_differential.mjs``
+REAL agent-runtime directive parser says about the filter output (``scripts/fq8_differential.mjs``
 cuts the parser out of the pinned dist by its ``//#region`` markers).
 
 Row keys:  i  the input
@@ -16,11 +16,11 @@ Row keys:  i  the input
            hr control: host sees /model in the input itself (canonical, no filter); null for "nul"
 
 The script exits 1 when the host finds ``/model`` in any filter output. Regenerate the
-committed fixture at every OpenClaw pin bump, on the production Python and Node pair, and
+committed fixture at every runtime pin bump, on the production Python and Node pair, and
 record both Unicode versions (the table does).
 
-The pinned dist is not in this repo: it is the ``openclaw`` npm package of the image that
-production runs (``<node_modules>/openclaw/dist``).
+The pinned dist is not in this repo: it is the agent runtime's npm package in the image that
+production runs (``<node_modules>/<package>/dist``).
 """
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ def hand_rows() -> list[str]:
 		"/model openai/gpt-x harness=codex",
 		"/MODEL: openai/gpt-x --runtime codex",
 		"please /model openai/gpt-x --runtime codex and read the file",
-		"/model --runtime openclaw",
+		"/model --runtime native",
 		"/model openai/other-id",
 		"/fastmodel --runtime codex",
 		"please /think high/model anthropic/claude-x",
@@ -190,8 +190,15 @@ def host_verdicts(dist: str, texts: list[str]) -> tuple[list, str, str]:
 	with tempfile.TemporaryDirectory() as tmp:
 		cases = Path(tmp) / "cases.json"
 		cases.write_text(json.dumps(texts), encoding="utf-8")
-		proc = subprocess.run(
-			["node", str(ORACLE), dist, str(cases)], capture_output=True, text=True, check=False
+		if not Path(dist).is_dir():
+			sys.exit(f"not a directory: {dist}")
+		# Dev tool, not app code: fixed argv, no shell; the only variable parts are the
+		# dist directory (checked above) and a temp file this script wrote.
+		proc = subprocess.run(  # nosemgrep: frappe-subprocess-exec
+			["node", str(ORACLE), str(Path(dist).resolve()), str(cases)],
+			capture_output=True,
+			text=True,
+			check=False,
 		)
 	if proc.returncode != 0:
 		sys.exit(f"the host oracle failed ({proc.returncode}): {proc.stderr.strip()}")
@@ -249,7 +256,7 @@ def failed_controls(rows: list[dict]) -> list[str]:
 
 def main() -> int:
 	ap = argparse.ArgumentParser()
-	ap.add_argument("--dist", required=True, help="the pinned openclaw dist directory")
+	ap.add_argument("--dist", required=True, help="the pinned runtime dist directory")
 	ap.add_argument("--out", default=str(DEFAULT_OUT))
 	ap.add_argument("--n", type=int, default=14000, help="random rows in the table")
 	ap.add_argument("--seed", type=int, default=8)

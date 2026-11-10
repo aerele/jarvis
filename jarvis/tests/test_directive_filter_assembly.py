@@ -65,7 +65,7 @@ class TestTypedTurn(_PersonalCase):
 			"/model openai/gpt-x --runtime codex",
 			"please /model openai/gpt-x --runtime codex and read the file",
 			"/MODEL: openai/gpt-x --runtime codex",
-			"/model --runtime openclaw",
+			"/model --runtime native",
 			"/fastmodel --runtime codex",
 			"please /think high/model anthropic/claude-x",
 			FEFF + "/model x",

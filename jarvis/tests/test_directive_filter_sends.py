@@ -77,7 +77,7 @@ ALLOWED = {
 	): "the agent RPC; its one caller is the prewarm",
 	("chat/agent_scheduler.py", "_launch_audit", "post_agent_run"): "the prompt goes through clean_added",
 	# The agent RPC does not run the host's directive parser: the agent-command chunk graph of
-	# OpenClaw 9.3 has no import of get-reply (parseInlineSessionDirectives lives only there).
+	# The agent runtime 9.3 has no import of get-reply (parseInlineSessionDirectives lives only there).
 	# Re-check at every pin bump (AC-FQ8-4). The text of these is jarvis-built one-shot prompts.
 	(
 		"chat/agent_client.py",
