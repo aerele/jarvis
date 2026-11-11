@@ -186,7 +186,8 @@ def _lines(root, notes_only=False):
 		node = stack.pop()
 		if node.tag == f"{A}tr":
 			cells = [
-				" ".join(filter(None, (_para(p) for p in tc.iter(f"{A}p")))) for tc in node.findall(f"{A}tc")
+				" ".join(text for text in (_para(p) for p in tc.iter(f"{A}p")) if text)
+				for tc in node.findall(f"{A}tc")
 			]
 			line = "\t".join(cells)
 			if line.strip():
