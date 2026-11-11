@@ -4521,7 +4521,7 @@ import {
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
-import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
+import { parseCompactCommand, compactFailureCopy, compactToastType } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
@@ -6009,7 +6009,7 @@ async function runCompact(hint) {
 		const res = await api.compactConversation(view.conversation, hint);
 		if (!chatViewIsCurrent(view)) return;
 		if (!res || !res.ok) {
-			notify(compactFailureCopy(res && res.reason), { type: "error" });
+			notify(compactFailureCopy(res && res.reason), { type: compactToastType(res && res.reason) });
 			return;
 		}
 		compacting.value = true;
@@ -12248,7 +12248,7 @@ function onEvent(p) {
 		case "context:compact_failed":
 			compacting.value = false;
 			compactHintSeed.value = "";
-			notify(compactFailureCopy(p.reason), { type: "error" });
+			notify(compactFailureCopy(p.reason), { type: compactToastType(p.reason) });
 			break;
 		case "run:start":
 			// CDX-3: a stale-epoch run:start (a pump that lost the lease, or one that
