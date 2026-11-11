@@ -13,7 +13,7 @@ from pathlib import Path
 from jarvis.ci.runtime_branding import load_policy
 from jarvis.tests._legacy_migration_fixtures import validate
 
-POLICY_SHA256 = "86e42605f8ed3e1f73a8b9bf6ba111ef03343505c16ceb1a6ec696e57d261fd2"
+POLICY_SHA256 = "49dfbffc6b4232419332866e44737d2226a941c5ae5c2d0761b55c622edc2e5b"
 _DATA = Path(__file__).with_name("data")
 _FILES = {"fixture": "migration-fixture.b64", "policy": "branding-policy.b64"}
 
