@@ -762,6 +762,101 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 		self.assertIs(users[USER_A]["tokens_out_estimated"], True)
 
 
+class TestRunCacheFromTranscript(FrappeTestCase):
+	"""The run's cache numbers come from the transcript's per-message ``usage`` (sessions.list
+	has none): summed over the run's assistant messages, bounded by the seq window."""
+
+	WIN = (10, 20)  # (watermark, next turn's watermark): this run owns seq 11..20
+	setUp = TestCacheAndClaudeOutputEstimate.setUp
+	tearDown = TestCacheAndClaudeOutputEstimate.tearDown
+	_gpt_row = TestCacheAndClaudeOutputEstimate._gpt_row
+	_cli_row = TestCacheAndClaudeOutputEstimate._cli_row
+	_turn_row = TestCacheAndClaudeOutputEstimate._turn_row
+
+	def _msg(self, seq, role="assistant", **usage):
+		from jarvis.chat.runtime_profile import get_profile
+
+		m = {"role": role, get_profile().message_metadata_key: {"seq": seq}}
+		if usage:
+			m["usage"] = usage
+		return m
+
+	def _fetch(self, messages=None, window=WIN, error=None):
+		class Sess:
+			def get_session_messages(self, key, **kw):
+				if error:
+					raise error
+				return messages
+
+		with patch.object(usage, "_run_seq_window", return_value=window):
+			return usage.fetch_run_cache(Sess(), "agent:tu-x", "run-1")
+
+	def test_single_call(self):
+		cache = self._fetch([self._msg(12, cacheRead=7, cacheWrite=3)])
+		self.assertEqual(cache, {"cacheRead": 7, "cacheWrite": 3})
+
+	def test_multi_call_turn_sums_and_skips_messages_without_usage_and_non_assistant(self):
+		msgs = [
+			self._msg(11, role="user"),
+			self._msg(12, cacheRead=100, cacheWrite=10),
+			self._msg(13),  # no usage: ignored
+			self._msg(14, cacheRead=200, cacheWrite=0),
+		]
+		self.assertEqual(self._fetch(msgs), {"cacheRead": 300, "cacheWrite": 10})
+
+	def test_messages_outside_the_run_window_are_excluded(self):
+		msgs = [
+			self._msg(9, cacheRead=1000, cacheWrite=1000),  # earlier run
+			self._msg(10, cacheRead=1000, cacheWrite=1000),  # the watermark itself is earlier
+			self._msg(15, cacheRead=5, cacheWrite=1),
+			self._msg(21, cacheRead=1000, cacheWrite=1000),  # later run
+		]
+		self.assertEqual(self._fetch(msgs), {"cacheRead": 5, "cacheWrite": 1})
+
+	def test_open_ended_window_when_no_later_turn(self):
+		cache = self._fetch([self._msg(99, cacheRead=4, cacheWrite=2)], window=(10, None))
+		self.assertEqual(cache, {"cacheRead": 4, "cacheWrite": 2})
+
+	def test_nothing_reported_is_none(self):
+		self.assertIsNone(self._fetch([self._msg(12), self._msg(13, input=5, output=5)]))
+
+	def test_rpc_error_is_none_and_never_raises(self):
+		self.assertIsNone(self._fetch(error=RuntimeError("gateway down")))
+
+	def test_unbounded_run_is_none_without_an_rpc(self):
+		self.assertIsNone(self._fetch([self._msg(12, cacheRead=1)], window=None))
+
+	def test_truncated_tail_is_none(self):
+		tail = [self._msg(1000 + i, cacheRead=1) for i in range(usage._RUN_CACHE_TAIL_LIMIT)]
+		self.assertIsNone(self._fetch(tail, window=(10, None)))
+
+	def test_claude_cli_shape_overlaid_on_row_fills_the_columns(self):
+		_make_session("agent:tu-cli-run", USER_A)
+		cache = self._fetch([self._msg(12, input=2, output=8, cacheRead=90190, cacheWrite=36198)])
+		outcome = usage.record_turn_usage(
+			"agent:tu-cli-run", usage.with_run_cache(self._cli_row(), cache), run_id=None
+		)
+		self.assertEqual(outcome, usage.USAGE_RECORDED)
+		r = self._turn_row("agent:tu-cli-run")
+		self.assertEqual((r.cache_read, r.cache_write, r.cache_reported), (90190, 36198, 1))
+		self.assertEqual(r.tokens_in, 2)  # tokens_in semantics unchanged
+
+	def test_gpt_shape_zero_cache_is_reported(self):
+		_make_session("agent:tu-gpt-run", USER_A)
+		cache = self._fetch([self._msg(12, input=30352, output=33, cacheRead=0, cacheWrite=0)])
+		usage.record_turn_usage("agent:tu-gpt-run", usage.with_run_cache(self._gpt_row(), cache))
+		r = self._turn_row("agent:tu-gpt-run")
+		self.assertEqual((r.cache_read, r.cache_write, r.cache_reported), (0, 0, 1))
+
+	def test_no_run_cache_keeps_the_sessions_list_values(self):
+		_make_session("agent:tu-fallback", USER_A)
+		row = self._gpt_row(cacheRead=11, cacheWrite=2)
+		self.assertIs(usage.with_run_cache(row, None), row)
+		usage.record_turn_usage("agent:tu-fallback", usage.with_run_cache(row, self._fetch(error=OSError())))
+		r = self._turn_row("agent:tu-fallback")
+		self.assertEqual((r.cache_read, r.cache_write, r.cache_reported), (11, 2, 1))
+
+
 class TestUsageRollup(FrappeTestCase):
 	"""Task U2: the MTD rollup builder's profile/cache/tool-call extension.
 	Hermetic like TestTurnUsage - fixtures are disposable and committed rows

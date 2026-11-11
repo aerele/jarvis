@@ -461,6 +461,8 @@ def _effect_usage(ctx: _Ctx) -> None:
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	with agent_session_pool.checkout(gateway_url) as sess:
 		row = _usage.fetch_fresh_session_row(sess, session_key)
+		# sessions.list carries no cache numbers; the transcript's per-message usage does.
+		cache = _usage.fetch_run_cache(sess, session_key, ctx.run_id)
 	# Reply length for the claude-cli output estimate: read once, BEFORE the fresh snapshot (a
 	# read after it would open a new snapshot right before the guard CAS on the same Turn row),
 	# outside the replayed unit, and only for a row that can use it. None on any lookup failure.
@@ -477,7 +479,9 @@ def _effect_usage(ctx: _Ctx) -> None:
 		# the model whether or not its token counters have gone fresh yet, and an audit
 		# ("which model proposed this journal entry") must not be lost to a slow counter.
 		_stamp_reply_model(ctx, row)
-		return _usage.record_turn_usage(session_key, row, run_id=ctx.run_id, reply_chars=reply_chars)
+		return _usage.record_turn_usage(
+			session_key, _usage.with_run_cache(row, cache), run_id=ctx.run_id, reply_chars=reply_chars
+		)
 
 	# CDX-6: honour record_turn_usage's EXPLICIT outcome. A `retry` (stale/missing/
 	# no-fresh row) must NOT permanently mark usage recorded — RAISE so the runner
