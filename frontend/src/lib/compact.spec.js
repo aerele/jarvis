@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCompactCommand, compactFailureCopy, compactToastType } from "./compact.js";
+import { parseCompactCommand, compactFailureCopy, compactOutcome } from "./compact.js";
 
 describe("parseCompactCommand", () => {
 	it("returns null for normal text", () => {
@@ -33,11 +33,11 @@ describe("compactFailureCopy", () => {
 	});
 });
 
-describe("compactToastType", () => {
+describe("compactOutcome", () => {
 	it("shows no-op outcomes as info and everything else as error", () => {
-		expect(compactToastType("runtime_declined")).toBe("info");
-		expect(compactToastType("nothing_to_compact")).toBe("info");
-		expect(compactToastType("runtime_failed")).toBe("error");
-		expect(compactToastType(undefined)).toBe("error");
+		expect(compactOutcome("runtime_declined")).toEqual({ text: "Nothing to compact yet", type: "info" });
+		expect(compactOutcome("nothing_to_compact").type).toBe("info");
+		expect(compactOutcome("runtime_failed").type).toBe("error");
+		expect(compactOutcome(undefined)).toEqual({ text: "Could not compact this chat", type: "error" });
 	});
 });

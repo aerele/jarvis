@@ -31,6 +31,7 @@ from jarvis.chat.events import publish_to_user
 
 CONV = "Jarvis Conversation"
 CHAT_SESSION = "Jarvis Chat Session"
+MSG = "Jarvis Chat Message"
 TURN_USAGE = "Jarvis Turn Usage"
 
 COMPACT_LOCK_SECONDS = 300
@@ -98,13 +99,32 @@ _CLAUDE_CLI_NOTHING_TO_COMPACT = (
 )
 
 
-def is_claude_cli_nothing_to_compact(row: dict | None, text: str | None) -> bool:
-	"""True only for a claude-cli session row AND the runtime's "nothing to compact"
-	text. Any other runtime, or any other claude-cli error, keeps its own outcome."""
+def _last_reply_is_claude_plan(conversation: str) -> bool:
+	"""Fallback when the gateway row is empty (a freshly resumed session): the
+	provider stamped on the conversation's newest assistant reply."""
+	rows = frappe.get_list(
+		MSG,
+		filters={"conversation": conversation, "role": "assistant", "provider": ["is", "set"]},
+		fields=["provider"],
+		order_by="creation desc",
+		limit=1,
+	)
+	return bool(rows) and rows[0].provider in ("anthropic", "claude-cli")
+
+
+def is_claude_cli_nothing_to_compact(conversation: str, row: dict | None, res: dict) -> bool:
+	"""True only for a FINAL compact result on a claude-cli conversation whose text
+	says there was nothing to compact. In no-log mode every manual compaction runs
+	in a fresh CLI process holding two placeholder messages, so that final text means
+	nothing to compact; real failures arrive as error/aborted and stay failed."""
 	from jarvis.chat import usage
 
-	t = (text or "").lower()
-	return usage.is_claude_cli_row(row) and any(m in t for m in _CLAUDE_CLI_NOTHING_TO_COMPACT)
+	if res.get("state") != "final":
+		return False
+	t = (res.get("text") or "").lower()
+	if not any(m in t for m in _CLAUDE_CLI_NOTHING_TO_COMPACT):
+		return False
+	return usage.is_claude_cli_row(row) or _last_reply_is_claude_plan(conversation)
 
 
 def _session_row(session_key: str) -> dict:
@@ -299,7 +319,7 @@ def run_compact(conversation: str, user: str, hint: str = "") -> None:
 			# not make the write below fail with 1020.
 			txn.fresh_snapshot()
 			outcome = classify_notice(res.get("text") or "") if res.get("state") == "final" else "failed"
-			if outcome == "failed" and is_claude_cli_nothing_to_compact(row, res.get("text")):
+			if outcome == "failed" and is_claude_cli_nothing_to_compact(conversation, row, res):
 				outcome = "skipped"
 			if outcome != "compacted":
 				reason = "runtime_declined" if outcome == "skipped" else "runtime_failed"
