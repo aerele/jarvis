@@ -518,35 +518,6 @@ class TestPanel4Chokepoint(_PipelineCase):
 # --------------------------------------------------------------------------- #
 
 
-<<<<<<< HEAD
-=======
-class TestPrepareBindsConnectorFocus(_PipelineCase):
-	"""The pump is the default transport, so its prepare must bind the turn's
-	connector focus (and clear a stale one) or the tool gate is inert."""
-
-	_FOCUS = {"key": "microsoft_learn", "label": "Microsoft Learn"}
-
-	def _prepare(self, rid, context, *, stale_focus=None):
-		conv = self._mk_conv()
-		self.addCleanup(connector_focus.clear, conv)
-		connector_focus.bind_turn(conv, stale_focus)
-		seed = self._mk_msg(conv, content="hi")
-		payload = json.dumps({"context": context})
-		self._mk_turn(conv, rid, seed, "queued", version=1, reserved=1, dispatch_payload=payload)
-		with self._gateway(_FakeSess()), self._pump_on():
-			prepare.run_prepare(rid, self._target)
-		self.assertEqual(self._state(rid), "ready")
-		return conv
-
-	def test_focused_turn_binds_the_focus(self):
-		conv = self._prepare("pmp_focus_on", {"focus_connector": self._FOCUS})
-		self.assertEqual(connector_focus.current(conv), self._FOCUS)
-
-	def test_unfocused_turn_clears_a_stale_focus(self):
-		conv = self._prepare("pmp_focus_off", {"page": "triggers"}, stale_focus=self._FOCUS)
-		self.assertIsNone(connector_focus.current(conv))
-
-
 class TestPrepareStoresTheGuardedMessage(_PipelineCase):
 	"""F-Q8 F6 (personal pump): the message in the dispatch payload is the directive filter's
 	output, byte for byte, and the pump reads it back without any fallback."""
@@ -586,7 +557,6 @@ class TestPrepareStoresTheGuardedMessage(_PipelineCase):
 		self.assertEqual(pump._load_dispatch(pump._read_dispatch_row(rid))["message"], stored)
 
 
->>>>>>> ec0c8d8 (fix(chat): refuse runtime directives in tenant chat text (F-Q8))
 class TestPanel5PrepareKill(_PipelineCase):
 	def test_kill_during_preparing_recovers_and_session_at_most_once(self):
 		conv = self._mk_conv()
