@@ -1,4 +1,4 @@
-# source-contract-v1.json provenance
+# source-contract-v1.json provenance (stored here as source-contract-v1.json.b64, base64 of the exact bytes)
 
 - Canonical repo: jarvis-fleet-agent
 - Canonical path: `jarvis_fleet_agent/claude_redactor/contract/source-contract-v1.json`
