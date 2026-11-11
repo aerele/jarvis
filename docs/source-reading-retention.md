@@ -22,13 +22,15 @@ call again.
 
 These changes apply to new writes. They do not delete earlier transcripts,
 backups, original uploads, report artifacts, or user-requested exported files.
-Gateway hooks do not establish retention guarantees for native Claude CLI or
-other provider-owned transcripts. Those paths need separate lifecycle checks.
+Gateway hooks do not establish retention guarantees for provider-owned
+transcripts. The Claude CLI is covered only by the no-save setup in "Claude plan
+(subscription) tenants" below; other CLI runners need separate lifecycle checks.
 Protected reads require gateway runtime 2026.9.3 or later, the Jarvis plugin's
 explicit conversation-access hook permission, and runtime trajectory capture
 switched off before gateway startup. Native trajectory snapshots
 bypass the transcript hooks. The plugin refuses reads while capture is enabled
-or its setting is absent. It also refuses reads on CLI or unknown runners.
+or its setting is absent. It also refuses reads on CLI or unknown runners, except the Claude CLI
+(`claude-cli`) from the plugin release that pairs with fleet 0.3.79 (see below).
 An older runtime without the persistence hook API logs an explicit compatibility
 warning. The paired plugin refuses source reads before network dispatch until
 the runtime is upgraded. Other tools retain their existing behavior.
@@ -44,39 +46,47 @@ address-space guarantee; byte, row, SQL-work, and parent wall limits still apply
 
 ## Claude plan (subscription) tenants
 
-Status: on Claude plan tenants (the `claude-cli` runtime), the source readers work as on every
-other model. The Claude CLI does not save chat sessions, so Jarvis keeps the same retention
-behaviour as above.
+Status: from fleet agent 0.3.79 and its paired plugin release, the source readers work on Claude
+plan tenants (the `claude-cli` runtime) as on every other model. Before that pair is live on a
+host, Claude plan source reads stay refused there.
 
 ### How it works
 
 - The fleet agent starts every Claude CLI run with `--no-session-persistence`. The CLI keeps the
-  chat in the memory of its live process and does not write it to disk.
+  chat in the memory of its live process and does not write the session to disk.
 - A Claude Code `SessionStart` hook restores the chat when a new CLI process starts (after an
   idle exit or a container restart). It reads the user and assistant text of that chat from the
   gateway's own transcript, which already holds source receipts in place of source data.
 - The hook leaves a content-free placeholder log per session (text `[history held by Jarvis]`),
   so the gateway keeps resuming the session. The placeholder carries the Claude account id; a
   restore happens only for the same account.
+- If the hook fails, the CLI still does not save the session: the only effect is that Claude
+  starts that chat without its earlier messages. Source reads do not depend on the hook.
 - Large tool results that the CLI writes to a side file go to a memory-only folder.
-- The CLI's own file, shell and agent tools are denied. Claude reads data only through the
-  Jarvis tools.
-- On the first boot with this release, existing CLI session logs are replaced by placeholders.
+- The CLI's own file, shell, web and agent tools are denied in its settings. Claude reads data
+  only through the Jarvis tools.
+- On the first boot with fleet 0.3.79, existing CLI session logs are replaced by placeholders.
 
 ### What you may claim
 
-"On the Claude plan, the Claude CLI does not store chat sessions or file and report contents on
-disk. File and report contents returned by Jarvis's source readers are stored only as source
-references, as on every other model."
+"On the Claude plan, with fleet 0.3.79 and the paired plugin release, the Claude CLI does not
+store its chat sessions on disk. File and report contents returned by Jarvis's source readers are
+stored in the gateway transcript only as source references, as on every other model."
 
 ### Do not claim
 
+- Zero retention.
+- Coverage of assistant replies or thinking. A reply that quotes or summarises file data is stored
+  like any reply, and the restore hook gives it back to Claude as chat text.
+- Coverage of output the model makes by transforming file data, or of data it writes or sends
+  through other tools.
 - That inline attachments (small JSON, Markdown and TXT files) are minimized. They are user input
   and remain in the gateway's prompt history, as on every other model.
-- Protection from operators or host root.
+- Protection from operators, host root, or a prompt-injected model acting through the Jarvis tools.
+- Coverage of data written before fleet 0.3.79: earlier CLI session logs until the first boot
+  conversion, and any backups or snapshots taken before it.
 - That a restored chat holds earlier tool results. After a CLI process restarts, Claude gets the
-  earlier messages as text; it must query the source again for data.
-- Coverage of files the model writes or sends anywhere.
+  earlier messages as text and must query the source again for data.
 
 ### Known limits
 
@@ -85,13 +95,18 @@ references, as on every other model."
   (at most six parts of 9,000 characters, newest first).
 - The placeholder format follows the pinned Claude CLI version. A CLI version change must re-run
   the restore checks.
+- Chat text lives in the live CLI process memory for the process lifetime (the gateway's idle
+  timeout), as before.
 
-### Release order
+### Release order and rollback
 
-The fleet release with `--no-session-persistence` and the restore hook must be live on every
-host with a Claude plan tenant before the plugin release that admits source reads on
-`claude-cli`. A plugin of that release on an older fleet would let the CLI save source data to
-disk.
+1. Deploy fleet agent 0.3.79 to every host that has a Claude plan tenant. Check
+   `GET /v1/version` reports `agent_version` 0.3.79 or later on each host, and that a recreated
+   Claude tenant's `claude` wrapper passes `--no-session-persistence`.
+2. Only then release the paired plugin. A plugin of that release on an older fleet would let the
+   CLI save source data to disk.
+3. Rollback: roll the plugin back first (Claude reads refused again), then the fleet agent. Rolling
+   the fleet back alone while the new plugin is live is not a supported state.
 
 ## Paired rollout
 
