@@ -5,6 +5,7 @@ bounded: member count, uncompressed bytes per part and in total, slide count and
 output characters. XML with a DTD or entities is refused (entity-expansion bombs).
 """
 
+import json
 import posixpath
 import zipfile
 from io import BytesIO
@@ -21,6 +22,7 @@ MAX_PART_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 MAX_SLIDES = 500
 MAX_CHARS = 1_000_000
+WINDOW_CHARS = 12_000  # same serialized window budget as the docx/pdf cursor scanner
 
 
 class PptxError(ValueError):
@@ -59,17 +61,17 @@ def _extract(content: bytes, max_chars: int) -> dict:
 		for index, path in enumerate(paths[:MAX_SLIDES], start=1):
 			slide = _read_slide(zf, budget, index, path)
 			slides.append(slide)
-			chars += len(_render(slide)) + 2
+			chars += len(render_slide(slide)) + 2
 			if chars > max_chars:
 				truncated = True
 				break
-	text = "\n\n".join(_render(s) for s in slides)
+	text = "\n\n".join(render_slide(s) for s in slides)
 	if len(text) > max_chars:
 		text, truncated = text[:max_chars], True
 	return {"text": text, "slides": slides, "slide_count": total, "truncated": truncated}
 
 
-def _render(slide: dict) -> str:
+def render_slide(slide: dict) -> str:
 	lines = [f"Slide {slide['index']}"]
 	if slide["text"]:
 		lines.append(slide["text"])
@@ -203,3 +205,48 @@ def _lines(root, notes_only=False):
 		else:
 			stack.extend(reversed(list(node)))
 	return out
+
+
+def window(slides: list, start: int, offset: int) -> dict:
+	"""One file-cursor-v1 window over rendered slides; units are 1-based slide numbers.
+
+	Returns {"records", "last", "next_unit", "next_offset"} (next_unit None at the end).
+	A slide too large for one window is split into fragments resumed through `offset`.
+	"""
+	records, used = [], 2
+	last = start - 1
+	for unit in range(start, len(slides) + 1):
+		text = render_slide(slides[unit - 1])
+		char = offset if unit == start else 0
+		record = {"slide": unit, "text": text}
+		size = len(json.dumps(record, ensure_ascii=False)) + 1
+		if char == 0 and used + size <= WINDOW_CHARS:
+			records.append(record)
+			used += size
+			last = unit
+			continue
+		if records:
+			return {"records": records, "last": last, "next_unit": unit, "next_offset": char}
+		if char >= len(text):
+			raise PptxError("File cursor offset is outside its source. Restart this file read.")
+		low, high = 0, min(len(text) - char, WINDOW_CHARS)
+		while low < high:
+			mid = (low + high + 1) // 2
+			candidate = {
+				"slide": unit,
+				"offset": char,
+				"fragment": text[char : char + mid],
+				"encoding": "text",
+			}
+			if len(json.dumps(candidate, ensure_ascii=False)) + 3 <= WINDOW_CHARS:
+				low = mid
+			else:
+				high = mid - 1
+		records.append(
+			{"slide": unit, "offset": char, "fragment": text[char : char + low], "encoding": "text"}
+		)
+		last = unit
+		if char + low < len(text):
+			return {"records": records, "last": last, "next_unit": unit, "next_offset": char + low}
+		used = WINDOW_CHARS
+	return {"records": records, "last": last, "next_unit": None, "next_offset": 0}
