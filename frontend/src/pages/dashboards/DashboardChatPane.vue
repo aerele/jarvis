@@ -788,6 +788,8 @@ const retryText = computed(() => retryLabel(retryRows.value));
 // stripped from the PROSE here too, but unlike the others it is not discarded:
 // <AskCard> renders it below the bubble (see activeAsk), so the clarifying
 // questions the agent asks before building are answerable in this pane.
+// `jarvis-goto` (a hand-off to a page of the app) is dropped for any page: this
+// pane is already on Dashboards, and nothing here follows it.
 function stripBlocks(text) {
 	return (text || "")
 		.replace(/```jarvis-action[ \t]*\n[\s\S]*?```/g, "")
@@ -796,6 +798,7 @@ function stripBlocks(text) {
 		.replace(/```jarvis-cards[ \t]*\n[\s\S]*?```/g, "")
 		.replace(/```jarvis-skill[ \t]*\n[\s\S]*?```/g, "")
 		.replace(/```jarvis-macro[ \t]*\n[\s\S]*?```/g, "")
+		.replace(/```jarvis-goto[ \t]*\n[\s\S]*?```/g, "")
 		.replace(/```jarvis-chart[ \t]*\n[\s\S]*?```/g, "")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();

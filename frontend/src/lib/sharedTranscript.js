@@ -63,6 +63,8 @@ export function sharedTranscript(content, streaming = false) {
 		at = match.index + match[0].length;
 		const tag = match[1],
 			body = match[2].trim();
+		// A hand-off to a page means nothing to a reader of a shared chat.
+		if (tag === "jarvis-goto") continue;
 		let spec = null;
 		if (tag === "jarvis-chart") {
 			try {
