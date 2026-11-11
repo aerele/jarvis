@@ -46,6 +46,19 @@
 	letter-spacing: -0.7px;
 	line-height: 1.25;
 }
+/* The title takes programmatic focus on arrival from the chat hand-off (a screen
+   reader lands on it). It is not interactive, so it never draws a ring. */
+#pcal-title:focus {
+	outline: none;
+}
+.pcal-back-row {
+	margin-bottom: 10px;
+}
+.pcal-back {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
 .pcal-subtitle {
 	font-size: 13px;
 	color: var(--ink-gray-6, #697380);

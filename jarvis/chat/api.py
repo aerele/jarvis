@@ -2919,7 +2919,10 @@ def send_message(
 	# Floating-widget auto-context: {doctype, name, label} of the doc the user
 	# is viewing, OR {report_name, filters} when the user is on a
 	# query-report route, OR {page: "triggers"|"dashboards"} when the user is
-	# on the Triggers / Dashboards page. Only forwarded when present, for the
+	# on the Triggers / Dashboards page, OR {handoff_pages: ["payment-calendar"]}
+	# when the web chat can open the Payment Calendar page (a capability, not a
+	# viewing context; see the allow-list below and
+	# turn_handler._payment_calendar_clause). Only forwarded when present, for the
 	# same not-yet-reloaded worker safety as attachments above. The narrowing
 	# here is deliberate (allow-list, not passthrough) so a compromised /
 	# stale frontend can't smuggle arbitrary keys into the worker payload;
@@ -2932,11 +2935,23 @@ def send_message(
 			# context payload when EITHER a doc/report ref OR ground_wiki OR a
 			# page marker is set.
 			ground_wiki = 1 if (isinstance(ctx, dict) and frappe.utils.cint(ctx.get("ground_wiki"))) else 0
+			# Payment Calendar hand-off capability: the web chat names the pages it
+			# can open. A literal allow-list of ONE value (never a passthrough): the
+			# server hint (turn_handler._payment_calendar_clause) only checks that
+			# this one literal is present, and still gates on the switch and on the
+			# user's own visibility. Anything else the client sends is dropped.
+			_pages_raw = ctx.get("handoff_pages") if isinstance(ctx, dict) else None
+			handoff_pages = (
+				["payment-calendar"]
+				if isinstance(_pages_raw, list) and "payment-calendar" in _pages_raw
+				else []
+			)
 			if isinstance(ctx, dict) and (
 				ctx.get("doctype")
 				or ctx.get("report_name")
 				or ground_wiki
 				or ctx.get("page") in ("triggers", "dashboards")
+				or handoff_pages
 			):
 				enqueue_kwargs["context"] = {
 					"doctype": ctx.get("doctype") or "",
@@ -2950,6 +2965,11 @@ def send_message(
 					# One-shot wiki grounding (allow-listed, boolean only).
 					"ground_wiki": ground_wiki,
 				}
+				# Only set when present — an absent key, not a null/empty one,
+				# so a plain send's context dict looks exactly as it did before
+				# (mirrors how `page` below is handled).
+				if handoff_pages:
+					enqueue_kwargs["context"]["handoff_pages"] = handoff_pages
 				# `page` is a literal allow-list of two values (not a
 				# passthrough) — the prompt-side only consumes "triggers"
 				# and "dashboards".

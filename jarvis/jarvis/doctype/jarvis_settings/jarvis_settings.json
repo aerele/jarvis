@@ -108,6 +108,7 @@
   "enable_customizations_clause",
   "enable_role_profiles",
   "file_box_sheets",
+  "payment_calendar_chat_handoff",
   "sync_tab",
   "last_sync_section",
   "last_sync_at",
@@ -861,6 +862,15 @@
    "description": "On: a File Box run lists every missing master and question for a document on ONE approval sheet, applied at once with one resume. Off: each master waits on its own held row. Turning it off stops new sheets; open ones still collect and drain."
   },
   {
+   "fieldname": "payment_calendar_chat_handoff",
+   "fieldtype": "Check",
+   "label": "Payment Calendar: chat hand-off",
+   "default": "0",
+   "hidden": 1,
+   "permlevel": 2,
+   "description": "On: a chat turn from a user who can open the Payment Calendar tells the agent the page exists, so a per-day cash request can be handed to it. Off (default): no hint is sent and the agent behaves as before. Turned on per site by Jarvis support after a check; only an Administrator can change it."
+  },
+  {
    "fieldname": "sync_tab",
    "fieldtype": "Tab Break",
    "label": "Sync & Status"
@@ -1429,5 +1439,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-03 23:30:00.000000"
+ "modified": "2026-11-09 12:00:00.000000"
 }
