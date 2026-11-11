@@ -8089,13 +8089,28 @@ const draftParkedRegion = ref(null);
 const DRAFT_DEFAULT_WIDTH = 720;
 const DRAFT_MIN_WIDTH = 440;
 const DRAFT_WIDTH_KEY = "jarvis-draftpanel-width";
-const draftMaxWidth = () => Math.min(1100, Math.round(window.innerWidth * 0.92));
+const draftPanelEl = ref(null);
+// The overlay fills the chat column, not the window: beside the in-flow sidebar
+// the column is narrower than the viewport, and a width clamped to the viewport
+// let the panel's left edge run under the sidebar (jarvis-admin-v2#776). While
+// the panel is closed the column is unknown, so the number falls back to the
+// window; .jv-draft-panel's percentage max-width caps the paint, and the watcher
+// below re-clamps once the panel is in the DOM.
+const draftHostWidth = () => draftPanelEl.value?.parentElement?.clientWidth || window.innerWidth;
+const draftMaxWidth = () => Math.min(1100, Math.round(draftHostWidth() * 0.92));
 const clampDraftWidth = (w) => Math.min(draftMaxWidth(), Math.max(DRAFT_MIN_WIDTH, w));
 const _storedDraftW = Number(localStorage.getItem(DRAFT_WIDTH_KEY));
 const draftPanelWidth = ref(clampDraftWidth(_storedDraftW || DRAFT_DEFAULT_WIDTH));
-const draftPanelEl = ref(null);
 const draftResizing = ref(false);
 let _draftPanelRight = 0;
+watch(
+	() => !!draftPanel.value,
+	async (open) => {
+		if (!open) return;
+		await nextTick();
+		draftPanelWidth.value = clampDraftWidth(draftPanelWidth.value);
+	}
+);
 
 function onDraftResizeMove(e) {
 	draftResizing.value = true;
@@ -18616,7 +18631,10 @@ onUnmounted(() => {
 /* --- record draft panel --- */
 .jv-draft-panel {
 	position: relative;
-	max-width: 92vw;
+	/* Of the overlay (the chat column), never the viewport: a definite max-width
+	   also caps the flex item's automatic minimum, so a nowrap grid cannot hold
+	   the panel wider than the column and push it under the sidebar (#776). */
+	max-width: 92%;
 	display: flex;
 	flex-direction: column;
 }
