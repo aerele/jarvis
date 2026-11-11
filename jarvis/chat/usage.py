@@ -492,15 +492,16 @@ def sum_run_cache(messages: list, min_seq: int, max_seq: int | None = None) -> d
 	for m in messages or []:
 		if (m.get("role") or "").lower() != "assistant":
 			continue
-		seq = int(((m.get(meta_key) or {}).get("seq")) or 0)
-		if seq <= min_seq or (max_seq is not None and seq > max_seq):
+		seq = _msg_seq(m, meta_key)
+		if seq is None or seq <= min_seq or (max_seq is not None and seq > max_seq):
 			continue
 		u = m.get("usage")
 		if not isinstance(u, dict):
 			continue
 		for key in totals:
-			if u.get(key) is not None:
-				totals[key] += int(u[key] or 0)
+			count = _token_count(u.get(key))
+			if count is not None:
+				totals[key] += count
 				reported = True
 	return totals if reported else None
 
@@ -522,16 +523,36 @@ def fetch_run_cache(sess, session_key: str, run_id: str | None) -> dict | None:
 	except Exception as e:
 		if txn.is_write_conflict(e):
 			raise
-		frappe.log_error(title="jarvis usage: run cache read failed", message=frappe.get_traceback())
+		# Best-effort and per turn: a log line, not an Error Log row on every finalize.
+		frappe.logger("jarvis.usage").warning("run cache read failed for %s", session_key, exc_info=True)
 		return None
 
 
 def _tail_starts_after(messages: list, min_seq: int) -> bool:
+	"""The tail begins after the run's first message, so a sum would be partial. Messages
+	without a seq cannot place the tail; with none at all, assume it is cut."""
 	from jarvis.chat.runtime_profile import get_profile
 
 	meta_key = get_profile().message_metadata_key
-	seqs = [int(((m or {}).get(meta_key) or {}).get("seq") or 0) for m in messages]
-	return min(seqs) > min_seq + 1
+	seqs = [s for s in (_msg_seq(m, meta_key) for m in messages) if s is not None]
+	return not seqs or min(seqs) > min_seq + 1
+
+
+def _msg_seq(message: dict | None, meta_key: str) -> int | None:
+	"""The gateway transcript seq of one message, or None when absent or not a number."""
+	seq = ((message or {}).get(meta_key) or {}).get("seq")
+	return _token_count(seq) or None
+
+
+def _token_count(value) -> int | None:
+	"""A non-negative integer count, or None for a missing or malformed value."""
+	if value is None or isinstance(value, bool):
+		return None
+	try:
+		count = int(value)
+	except (TypeError, ValueError):
+		return None
+	return count if count >= 0 else None
 
 
 def with_run_cache(row: dict | None, cache: dict | None) -> dict | None:
