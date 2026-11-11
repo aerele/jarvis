@@ -885,6 +885,8 @@ def _reconcile_gateway_active(ctx: "PumpContext", snap: dict | None = None) -> N
 	ga = snap.get("gateway_active")
 	if ok is None:
 		ok = ga is not None
+	keys = snap.get("active_session_keys")
+	ctx.active_session_keys = set(keys) if ok and keys is not None else None
 	if ok and ga is not None:
 		ctx.gateway_active = int(ga)
 		ctx.gateway_active_known = True
@@ -1742,6 +1744,8 @@ class _PendingRecovery:
 	# True when the turn never showed a frame (``last_event_seq == 0``): an empty window
 	# then proves nothing (the run may still be starting), so it re-attaches, not errors.
 	quiet: bool = False
+	# Quiet turns only: how many idle-session tail checks already found no proof (item 3).
+	rechecks: int = 0
 
 
 @dataclass
@@ -1780,6 +1784,10 @@ class PumpContext:
 	# OARF-5: in-flight RPCs the reactor polls (never blocks on) each slice.
 	pending_acks: dict[str, _PendingAck] = field(default_factory=dict)
 	pending_recoveries: dict[str, _PendingRecovery] = field(default_factory=dict)
+	# #2583: quiet turns waiting for a bounded re-check: run_id -> (due monotonic, rechecks).
+	quiet_waits: dict[str, tuple[float, int]] = field(default_factory=dict)
+	# Session keys with an active run in the newest good snapshot (None until one lands).
+	active_session_keys: set | None = None
 	# Lane keys whose tool-event request waits for IO time (_observe_tool_events).
 	pending_observes: set[str] = field(default_factory=set)
 	# CDX-17: the in-flight mid-hop capacity-refresh RPC (issue-and-poll, never blocked on).
@@ -2700,6 +2708,7 @@ def _poll_pending(ctx: PumpContext) -> None:
 	the shared hop exit."""
 	_poll_acks(ctx)
 	_poll_recoveries(ctx)
+	_recheck_quiet(ctx)
 	# NB: the capacity-refresh snapshot is polled in drain_slice BEFORE promote (CDX-11 —
 	# issue -> poll -> promote), not here, so a resolved refresh folds ahead of admission.
 
@@ -3657,10 +3666,13 @@ def _reattach_or_recover(ctx: PumpContext, r: dict, active_keys) -> None:
 	from the durable tail (D2 row 23, snapshot recovery, Amendment D). Otherwise
 	re-attach the lane so the future-only broadcast resumes.
 
-	OARF-2: ONLY a `streaming` turn that ACTUALLY streamed frames
-	(``last_event_seq > 0``) is missed-terminal eligible — a bare dispatching turn
-	adopted to streaming (acked, no observed output) is re-attached, never settled
-	from a session-wide tail (which could hold a PRIOR turn's answer). OARF-5: the
+	OARF-2: a `streaming` turn that ACTUALLY streamed frames (``last_event_seq > 0``)
+	is missed-terminal eligible. A QUIET turn (acked, no frame seen) is eligible only
+	once dispatched ``QUIET_RECOVERY_MIN_AGE_S`` ago (#2583), and it keeps its lane
+	attached while the tail is read. It is settled only on positive proof in the tail
+	that the run ended (``tail_proves_run_ended``); otherwise it keeps waiting and is
+	re-checked (``_recheck_quiet``). It is never settled from a session-wide tail that
+	could hold a PRIOR turn's answer or mid-run narration. OARF-5: the
 	recovery tail RPC is ISSUED non-blocking and resolved by ``_poll_recoveries``,
 	so a crash-reconcile of N gone turns does not serialize N×15s of blocking waits
 	off the delta-draining critical path.
@@ -3699,8 +3711,8 @@ def _missed_terminal_eligible(r: dict) -> bool:
 	``QUIET_RECOVERY_MIN_AGE_S`` ago. That is the turn dispatched in the last seconds of a
 	hop whose terminal landed in the gap before the successor connected (#2583): without
 	this it was re-attached to a run that had already finished and waited for the
-	watchdog (about 30 min). The OARF-2 window still bounds the tail, and an empty
-	window leaves a quiet turn waiting (``_resolve_recovery_tail``)."""
+	watchdog (about 30 min). The OARF-2 window still bounds the tail and a quiet turn
+	needs positive proof of run end (``_resolve_recovery_tail``)."""
 	if int(r.get("last_event_seq") or 0) > 0:
 		return True
 	started = r.get("dispatching_at")
@@ -3710,7 +3722,7 @@ def _missed_terminal_eligible(r: dict) -> bool:
 	return age >= QUIET_RECOVERY_MIN_AGE_S
 
 
-def _issue_recovery_tail(ctx: PumpContext, r: dict, session_key: str) -> None:
+def _issue_recovery_tail(ctx: PumpContext, r: dict, session_key: str, *, rechecks: int = 0) -> None:
 	"""OARF-5: issue the missed-terminal ``sessions.get`` recovery-tail RPC WITHOUT
 	blocking and park it (with the OARF-2 watermark window) for ``_poll_recoveries``.
 	Falls back to re-attach when the mux is unavailable."""
@@ -3722,13 +3734,18 @@ def _issue_recovery_tail(ctx: PumpContext, r: dict, session_key: str) -> None:
 	if ctx.mux is None or not _io_admit(ctx):
 		# No transport, or (#773) no lease time for the write: re-attach; the next hop's
 		# reconcile issues the tail.
-		_reattach_lane(ctx, r)
+		_resume_after_recovery(ctx, r)
 		return
 	min_seq, max_seq = _recovery_window(r)
+	quiet = int(r.get("last_event_seq") or 0) == 0
+	if quiet and r["run_id"] not in ctx.runs:
+		# Attach BEFORE the RPC: a run that is just starting must not lose its frames
+		# while the tail is in flight (#2583). Settling later detaches it.
+		_reattach_lane(ctx, r)
 	try:
 		fut = ctx.mux.issue_rpc("sessions.get", {"key": session_key}, timeout_s=ACK_TIMEOUT_S)
 	except Exception:
-		_reattach_lane(ctx, r)
+		_resume_after_recovery(ctx, r)
 		return
 	ctx.pending_recoveries[r["run_id"]] = _PendingRecovery(
 		fut=fut,
@@ -3737,8 +3754,55 @@ def _issue_recovery_tail(ctx: PumpContext, r: dict, session_key: str) -> None:
 		session_key=session_key,
 		min_seq=min_seq,
 		max_seq=max_seq,
-		quiet=int(r.get("last_event_seq") or 0) == 0,
+		quiet=quiet,
+		rechecks=rechecks,
 	)
+
+
+def _resume_after_recovery(ctx: PumpContext, r: dict) -> None:
+	"""Back to waiting on the lane. A quiet turn's lane was attached before the RPC and
+	still is; re-attaching it would replace the lane and its handler state."""
+	if r["run_id"] in ctx.runs:
+		return
+	_reattach_lane(ctx, r)
+
+
+# A quiet turn with no proof of run end is re-checked this often, while the snapshot shows
+# its session idle. After QUIET_EMPTY_ERROR_RECHECKS idle checks with nothing in its window
+# the run is proven to have ended with no output and it errors honestly.
+QUIET_RECHECK_S = 60
+QUIET_EMPTY_ERROR_RECHECKS = 2
+
+
+def _recheck_quiet(ctx: PumpContext) -> None:
+	"""Re-issue the tail for quiet turns that had no proof of run end, once due and only
+	while the newest snapshot shows the session idle. A turn that streamed, moved on or
+	whose lane is gone is dropped from the wait list."""
+	if not ctx.quiet_waits:
+		return
+	now = _monotonic()
+	for run_id, (due, rechecks) in list(ctx.quiet_waits.items()):
+		if now < due or run_id in ctx.pending_recoveries:
+			continue
+		row = frappe.db.get_value(
+			TURN,
+			run_id,
+			[
+				"run_id", "state", "version", "conversation", "assistant_message",
+				"last_event_seq", "gateway_run_id", "dispatching_at", "recovery_started_at",
+			],
+			as_dict=True,
+		)
+		if not row or row.state != "streaming" or int(row.last_event_seq or 0) > 0:
+			ctx.quiet_waits.pop(run_id, None)
+			continue
+		session_key = _load_dispatch(_read_dispatch_row(run_id) or {}).get("session_key")
+		keys = ctx.active_session_keys
+		if not session_key or keys is None or session_key in keys:
+			ctx.quiet_waits[run_id] = (now + QUIET_RECHECK_S, rechecks)
+			continue
+		ctx.quiet_waits.pop(run_id, None)
+		_issue_recovery_tail(ctx, row, session_key, rechecks=rechecks)
 
 
 def _poll_recoveries(ctx: PumpContext) -> None:
@@ -3755,7 +3819,8 @@ def _poll_recoveries(ctx: PumpContext) -> None:
 			frame = pr.fut.result(0)
 		except Exception:
 			# tail RPC timed out / unavailable — re-attach and keep waiting.
-			_reattach_lane(ctx, pr.r)
+			_resume_after_recovery(ctx, pr.r)
+			_schedule_quiet_recheck(ctx, pr, pr.rechecks)
 			continue
 		try:
 			_resolve_recovery_tail(ctx, pr, frame)
@@ -3769,7 +3834,8 @@ def _poll_recoveries(ctx: PumpContext) -> None:
 			# re-drives it from its durable state.
 			frappe.db.rollback()
 			frappe.log_error(title="pump.recovery_tail", message=frappe.get_traceback())
-			_reattach_lane(ctx, pr.r)
+			_resume_after_recovery(ctx, pr.r)
+			_schedule_quiet_recheck(ctx, pr, pr.rechecks)
 
 
 def _recovery_window(r: dict) -> tuple[int, int | None]:
@@ -3806,11 +3872,18 @@ def _resolve_recovery_tail(ctx: PumpContext, pr: _PendingRecovery, frame: dict) 
 	newest assistant text WITHIN [min_seq, max_seq] wins; if the window is empty
 	the run genuinely ended with NO output beyond the watermark, so settle
 	``errored`` honestly — NEVER adopt content from before the watermark (a prior
-	turn's answer), Amendment D 'never fabricate'."""
+	turn's answer), Amendment D 'never fabricate'.
+
+	A QUIET turn (never showed a frame, #2583) is stricter: its lane is attached while
+	the tail is read, and it settles only on positive proof the run ENDED
+	(``tail_proves_run_ended``: newest windowed message is an assistant message with a
+	non-tool ``stopReason``). Narration before a tool call, or any unproven tail, keeps
+	it waiting and schedules a bounded re-check (``_recheck_quiet``). An empty window
+	errors honestly only after ``QUIET_EMPTY_ERROR_RECHECKS`` idle-session checks."""
 	payload = frame.get("payload") or frame.get("result") or {}
 	messages = payload.get("messages") or []
 	from jarvis.chat import egress_rules
-	from jarvis.chat.turn_recovery import _latest_assistant_raw
+	from jarvis.chat.turn_recovery import _latest_assistant_raw, tail_proves_run_ended
 
 	raw = _latest_assistant_raw(messages, min_seq=pr.min_seq, max_seq=pr.max_seq)
 	# The relay never saw this turn's terminal, so its step strip never ran, and the
@@ -3820,6 +3893,21 @@ def _resolve_recovery_tail(ctx: PumpContext, pr: _PendingRecovery, frame: dict) 
 	# redaction so both sides of the match are the same raw text.
 	raw = _strip_cached_steps(pr.r["run_id"], raw)
 	text, rels, marker_stripped = egress_rules.redact_final_with_media(raw)
+	if pr.quiet and not _quiet_still_unsettled(pr):
+		return  # frames arrived or the row moved while the tail was in flight: the lane owns it
+	if pr.quiet:
+		ended = tail_proves_run_ended(messages, min_seq=pr.min_seq, max_seq=pr.max_seq)
+		has_output = bool(text or marker_stripped)
+		empty_proven = not raw and pr.rechecks + 1 >= QUIET_EMPTY_ERROR_RECHECKS
+		if not ended and not empty_proven:
+			_schedule_quiet_recheck(ctx, pr, pr.rechecks + 1)
+			return
+		_detach_lane(ctx, pr.r)
+		if has_output:
+			_settle_recovered_final(ctx, pr.r, text, media_rels=rels, marker_stripped=marker_stripped)
+		else:
+			_settle_recovered_errored(ctx, pr.r)
+		return
 	# A media/marker-only reply strips to "" but IS real in-window output — settle
 	# final with the clean (empty) text so the raw marker never lingers in stored
 	# content, rather than erroring and leaving the streamed tail. Parity with cron
@@ -3828,12 +3916,32 @@ def _resolve_recovery_tail(ctx: PumpContext, pr: _PendingRecovery, frame: dict) 
 	# its image, not just the text (previously dropped here).
 	if text or marker_stripped:
 		_settle_recovered_final(ctx, pr.r, text, media_rels=rels, marker_stripped=marker_stripped)
-	elif pr.quiet:
-		# Nothing in the window and the turn never showed a frame: the run may not have
-		# started yet. Keep waiting; the watchdog deadline settles a run that never speaks.
-		_reattach_lane(ctx, pr.r)
 	else:
 		_settle_recovered_errored(ctx, pr.r)
+
+
+def _quiet_still_unsettled(pr: _PendingRecovery) -> bool:
+	"""Still the same quiet streaming row the tail was issued for?"""
+	row = frappe.db.get_value(TURN, pr.r["run_id"], ["state", "version", "last_event_seq"], as_dict=True)
+	return bool(
+		row
+		and row.state == "streaming"
+		and int(row.version) == int(pr.r["version"])
+		and int(row.last_event_seq or 0) == 0
+	)
+
+
+def _schedule_quiet_recheck(ctx: PumpContext, pr: _PendingRecovery, rechecks: int) -> None:
+	if pr.quiet:
+		ctx.quiet_waits[pr.r["run_id"]] = (_monotonic() + QUIET_RECHECK_S, rechecks)
+
+
+def _detach_lane(ctx: PumpContext, r: dict) -> None:
+	"""Drop the lane ``_reattach_lane`` registered, before settling the turn from the tail,
+	so a late frame cannot reach a handler of a settled turn."""
+	rs = ctx.runs.pop(r["run_id"], None)
+	if ctx.mux is not None and rs is not None:
+		ctx.mux.unregister_run(r.get("gateway_run_id") or rs.key)
 
 
 def _strip_cached_steps(run_id: str, raw: str) -> str:
