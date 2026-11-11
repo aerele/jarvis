@@ -64,7 +64,7 @@ copy, the file and report contents returned by `read_file`, `query_file`,
 `query_report` and `get_file_pages` are replaced by the same source-reference
 receipts that other models get (see the first section). The shared receipt shape
 is defined by one contract file that the fleet agent, the plugin and this
-backend all test against (`jarvis/tests/fixtures/source-contract-v1.json`).
+backend all test against (`jarvis/tests/fixtures/source-contract-v1.json.b64`, base64 of the exact fixture bytes).
 A later turn must query the source again under current permissions.
 
 ### What you may claim
@@ -72,7 +72,7 @@ A later turn must query the source again under current permissions.
 "On the Claude plan with the guard active, file and report contents returned by
 Jarvis's file tools are not written to persistent storage by the Claude CLI.
 They are held in the container's memory while a chat's process is alive (the
-process ends on OpenClaw's own idle timeout, as today) and for a short time
+process ends on the agent runtime's own idle timeout, as today) and for a short time
 after it stops, normally about ten seconds, after which the saved transcript
 holds only references. Transcripts written before this change are not rewritten
 unless an operator runs the purge procedure."
@@ -110,7 +110,7 @@ these cases, always in memory only and never on disk:
   any other tool input. They are below the detection bound.
 - That the last one to two seconds of a chat survive an ungraceful kill. That
   gap is lost history, not a leak.
-- That the process ends sooner than OpenClaw's idle timeout, or that an
+- That the process ends sooner than the agent runtime's idle timeout, or that an
   operator or agent outage keeps reads on. If the fleet agent is down for 10
   minutes, or its lease lapses after 30 minutes, source reads turn off (fail
   closed, the same as today).
@@ -125,7 +125,7 @@ these cases, always in memory only and never on disk:
 - Auto-memory files are in memory only on these tenants. A container restart
   empties them. While any chat of the tenant is in receipt-only mode, memory
   writes get the fallback receipt text.
-- A chat that OpenClaw recovers in a forked session after an ungraceful kill, or
+- A chat that the agent runtime recovers in a forked session after an ungraceful kill, or
   a chat after `/clear` (any session rotation), keeps receipts only for its
   saved history from that point. Rotations count as fork-suspect events and can
   raise the rollout stop rule. Operators lift a false stop by hand.
@@ -135,7 +135,7 @@ these cases, always in memory only and never on disk:
   delay on resume). Near-full store refuses `get_file_pages`, then all source
   tools, until it drains. No process is stopped.
 - Tenants below the memory floor (1536m, provisional) cannot use these reads.
-- The host directory for OpenClaw state has mode 0777 (existing, `main.py`). Any
+- The host directory for agent runtime state has mode 0777 (existing, `main.py`). Any
   host process running as uid 1000 can write a tenant's store. Fix is tracked
   separately.
 - The static no-follow checker does not cover 42 older functions in `main.py`.
