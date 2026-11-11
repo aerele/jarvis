@@ -4661,7 +4661,7 @@ import {
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
-import { parseCompactCommand, compactFailureCopy, compactToastType } from "@/lib/compact";
+import { parseCompactCommand, compactOutcome } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
@@ -6168,7 +6168,10 @@ async function runCompact(hint) {
 		const res = await api.compactConversation(view.conversation, hint);
 		if (!chatViewIsCurrent(view)) return;
 		if (!res || !res.ok) {
-			notify(compactFailureCopy(res && res.reason), { type: compactToastType(res && res.reason) });
+			{
+				const o = compactOutcome(res && res.reason);
+				notify(o.text, { type: o.type });
+			}
 			return;
 		}
 		compacting.value = true;
@@ -6177,7 +6180,7 @@ async function runCompact(hint) {
 		compactDialogOpen.value = false;
 	} catch (e) {
 		if (chatViewIsCurrent(view))
-			notify(errMessage(e) || compactFailureCopy(), { type: "error" });
+			notify(errMessage(e) || compactOutcome().text, { type: "error" });
 	} finally {
 		if (chatViewIsCurrent(view)) compactSubmitting.value = false;
 	}
@@ -12862,7 +12865,10 @@ function onEvent(p) {
 		case "context:compact_failed":
 			compacting.value = false;
 			compactHintSeed.value = "";
-			notify(compactFailureCopy(p.reason), { type: compactToastType(p.reason) });
+			{
+				const o = compactOutcome(p.reason);
+				notify(o.text, { type: o.type });
+			}
 			break;
 		case "run:start":
 			// CDX-3: a stale-epoch run:start (a pump that lost the lease, or one that
