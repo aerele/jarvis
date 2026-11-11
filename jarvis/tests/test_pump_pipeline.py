@@ -762,7 +762,7 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 	PRIOR turn's answer — it settles ``errored`` honestly (Amendment D: never
 	fabricate)."""
 
-	def _seed_streaming_gone(self, conv, rid, *, watermark, last_event_seq=3):
+	def _seed_streaming_gone(self, conv, rid, *, watermark, last_event_seq=3, dispatched_ago_s=0):
 		seed = self._mk_msg(conv, content="second question")
 		amsg = self._mk_msg(
 			conv, role="assistant", content="partial", streaming=1, agent_seq_watermark=watermark
@@ -779,7 +779,7 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 			assistant_message=amsg,
 			last_event_seq=last_event_seq,
 			gateway_run_id=rid,
-			dispatching_at=frappe.utils.now(),
+			dispatching_at=frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-dispatched_ago_s),
 			dispatch_payload=json.dumps({"session_key": "sess-rec"}),
 		)
 		return amsg, epoch
@@ -868,6 +868,69 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		self.assertIn("run:end", self._pub_kinds())
 		end = next(p for p in self._pubs if p.get("kind") == "run:end")
 		self.assertTrue(end.get("was_recovered"), "run:end carries was_recovered for a real recovery")
+
+	def test_quiet_turn_whose_terminal_fell_in_the_handoff_gap_recovers(self):
+		"""#2583: acked, no frame seen (last_event_seq 0), the run finished while no hop
+		was connected. The snapshot shows the session idle, so the in-window answer is
+		recovered instead of the turn waiting for the watchdog."""
+		conv = self._mk_conv()
+		rid = "pmp_rec_quiet"
+		amsg, epoch = self._seed_streaming_gone(
+			conv, rid, watermark=5, last_event_seq=0, dispatched_ago_s=120
+		)
+		double = self._double()
+		double.arm_sessions_get(
+			"sess-rec",
+			[
+				transcript_message("assistant", "PRIOR ANSWER", seq=5),
+				transcript_message("user", "second question", seq=6),
+				transcript_message("assistant", "GAP ANSWER", seq=7),
+			],
+		)
+		ctx = self._ctx_for(double, epoch)
+
+		pump._reconcile_on_start(ctx)
+		self._pump_until(ctx, lambda: self._state(rid) in ("errored", "finalizing", "done"))
+
+		self.assertEqual(self._state(rid), "finalizing")
+		self.assertEqual(frappe.db.get_value(MSG, amsg, "content"), "GAP ANSWER")
+
+	def test_quiet_turn_with_empty_window_keeps_waiting(self):
+		"""A quiet turn with nothing in its window may simply not have started: it
+		stays streaming (the watchdog deadline owns it), never an honest-error."""
+		conv = self._mk_conv()
+		rid = "pmp_rec_quiet_empty"
+		amsg, epoch = self._seed_streaming_gone(
+			conv, rid, watermark=5, last_event_seq=0, dispatched_ago_s=120
+		)
+		double = self._double()
+		double.arm_sessions_get(
+			"sess-rec",
+			[
+				transcript_message("assistant", "PRIOR ANSWER", seq=5),
+				transcript_message("user", "second question", seq=6),
+			],
+		)
+		ctx = self._ctx_for(double, epoch)
+
+		pump._reconcile_on_start(ctx)
+		self._pump_until(ctx, lambda: rid in ctx.runs)
+
+		self.assertEqual(self._state(rid), "streaming")
+		self.assertIn(rid, ctx.runs, "the lane is re-attached")
+
+	def test_freshly_dispatched_quiet_turn_is_not_treated_as_missed(self):
+		"""Acked seconds ago and not in the snapshot yet: re-attach, issue no tail."""
+		conv = self._mk_conv()
+		rid = "pmp_rec_quiet_fresh"
+		amsg, epoch = self._seed_streaming_gone(conv, rid, watermark=5, last_event_seq=0)
+		ctx = self._ctx_for(self._double(), epoch)
+
+		pump._reconcile_on_start(ctx)
+
+		self.assertEqual(ctx.pending_recoveries, {})
+		self.assertEqual(self._state(rid), "streaming")
+		self.assertIn(rid, ctx.runs)
 
 	def test_in_window_media_marker_only_recovers_final_with_clean_content(self):
 		"""Q3 leak-safety: a marker-ONLY in-window reply (seq 7 > watermark 5) must

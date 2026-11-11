@@ -1739,6 +1739,9 @@ class _PendingRecovery:
 	session_key: str
 	min_seq: int
 	max_seq: int | None
+	# True when the turn never showed a frame (``last_event_seq == 0``): an empty window
+	# then proves nothing (the run may still be starting), so it re-attaches, not errors.
+	quiet: bool = False
 
 
 @dataclass
@@ -3675,12 +3678,36 @@ def _reattach_or_recover(ctx: PumpContext, r: dict, active_keys) -> None:
 	if _yield_pending(r["run_id"]):
 		_park_recovering(ctx, r["run_id"], reason="agent-yield")
 		return
-	if r.get("state") == "streaming" and active_keys is not None and int(r.get("last_event_seq") or 0) > 0:
+	if r.get("state") == "streaming" and active_keys is not None and _missed_terminal_eligible(r):
 		session_key = _load_dispatch(_read_dispatch_row(r["run_id"]) or {}).get("session_key")
 		if session_key and session_key not in active_keys:
 			_issue_recovery_tail(ctx, r, session_key)
 			return
 	_reattach_lane(ctx, r)
+
+
+# A turn the gateway acked that showed no frame to any hop is "quiet". It is only missed-
+# terminal eligible once it is older than this, so a run the snapshot has not listed yet
+# (just acked) is never mistaken for a finished one.
+QUIET_RECOVERY_MIN_AGE_S = 30
+
+
+def _missed_terminal_eligible(r: dict) -> bool:
+	"""May this adopted ``streaming`` turn be settled from the durable tail when the
+	snapshot shows its session idle? Yes when it streamed frames (OARF-2). Also yes when
+	it is quiet: acked (``gateway_run_id``) but no frame seen, and dispatched at least
+	``QUIET_RECOVERY_MIN_AGE_S`` ago. That is the turn dispatched in the last seconds of a
+	hop whose terminal landed in the gap before the successor connected (#2583): without
+	this it was re-attached to a run that had already finished and waited for the
+	watchdog (about 30 min). The OARF-2 window still bounds the tail, and an empty
+	window leaves a quiet turn waiting (``_resolve_recovery_tail``)."""
+	if int(r.get("last_event_seq") or 0) > 0:
+		return True
+	started = r.get("dispatching_at")
+	if not (r.get("gateway_run_id") and started):
+		return False
+	age = frappe.utils.time_diff_in_seconds(frappe.utils.now_datetime(), started)
+	return age >= QUIET_RECOVERY_MIN_AGE_S
 
 
 def _issue_recovery_tail(ctx: PumpContext, r: dict, session_key: str) -> None:
@@ -3710,6 +3737,7 @@ def _issue_recovery_tail(ctx: PumpContext, r: dict, session_key: str) -> None:
 		session_key=session_key,
 		min_seq=min_seq,
 		max_seq=max_seq,
+		quiet=int(r.get("last_event_seq") or 0) == 0,
 	)
 
 
@@ -3800,6 +3828,10 @@ def _resolve_recovery_tail(ctx: PumpContext, pr: _PendingRecovery, frame: dict) 
 	# its image, not just the text (previously dropped here).
 	if text or marker_stripped:
 		_settle_recovered_final(ctx, pr.r, text, media_rels=rels, marker_stripped=marker_stripped)
+	elif pr.quiet:
+		# Nothing in the window and the turn never showed a frame: the run may not have
+		# started yet. Keep waiting; the watchdog deadline settles a run that never speaks.
+		_reattach_lane(ctx, pr.r)
 	else:
 		_settle_recovered_errored(ctx, pr.r)
 
