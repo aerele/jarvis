@@ -14,6 +14,7 @@ const COPY = {
 	already_compacting: "Already compacting this chat",
 	macro_armed: "This chat is running a macro",
 	bad_hint: "The hint cannot start with a slash",
+	directive_refused: "Model and runtime changes are not available in chat.",
 	timeout: "Compacting took too long, try again",
 	gateway_unreachable: "Could not reach your assistant, try again",
 };

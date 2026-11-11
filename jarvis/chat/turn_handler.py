@@ -39,7 +39,15 @@ from dataclasses import dataclass, field
 import frappe
 
 from jarvis import compat
-from jarvis.chat import agent_session_pool, device, empty_reply_recovery, seq_watermark, txn, vision
+from jarvis.chat import (
+	agent_session_pool,
+	device,
+	directive_filter,
+	empty_reply_recovery,
+	seq_watermark,
+	txn,
+	vision,
+)
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.chat.filebox_source import SourceLost
@@ -1238,6 +1246,10 @@ def _assemble_prompt(
 
 		chat_user = binding.actor
 		user_message = scrub_for_share(user_message or "")
+	# F-Q8: the user's own words. A runtime directive (``/model ...``) typed here is refused
+	# before any attachment work; the same words are checked again on the finished prompt.
+	typed = user_message or ""
+	directive_filter.refuse_typed(typed)
 	# Prepend today's date AND the chat user's Frappe id as a context line so
 	# the agent (AGENTS.md tells it to treat the leading ``[Context: ...]``
 	# as system, not user) can (a) resolve relative time expressions
@@ -1471,8 +1483,13 @@ def _assemble_prompt(
 		prefix, marker, suffix = user_message.partition(history_marker)
 		if not marker or history_marker in suffix:
 			frappe.throw("The shared request could not be assembled safely.")
+		# F-Q8 order rule: split at the marker FIRST (its U+0000 would refuse every shared
+		# turn), then clean each part. ``collaboration_workers`` fits ``shared_parts`` again
+		# and only verifies the result, so the parts must already be clean.
+		prefix, prior, suffix = (directive_filter.clean_added(part) for part in (prefix, prior, suffix))
 		shared_parts = (prefix, prior, suffix)
 		user_message = prefix + _fence_untrusted(prior, "shared transcript") + suffix
+	user_message = directive_filter.guard_turn_message(typed, user_message)
 	inlined_prompt_chars = max(0, len(user_message) - _prompt_chars_before_attachments)
 	return _PreparedPrompt(
 		settings=settings,
@@ -2155,6 +2172,13 @@ def handle_chat_send(payload: dict) -> None:
 
 	except SourceLost as e:
 		_publish_run_error(str(e), changed_data=False, code="source_unavailable")
+		_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
+		_admission_settle(run_id, "errored", str(e))
+		return
+	except directive_filter.DirectiveRefusal as e:
+		# F-Q8: a runtime directive in the typed text. The assembly refuses before anything
+		# is sent, so nothing changed: show the fixed text and end the turn.
+		_publish_run_error(str(e), changed_data=False, code="directive_refused")
 		_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
 		_admission_settle(run_id, "errored", str(e))
 		return
