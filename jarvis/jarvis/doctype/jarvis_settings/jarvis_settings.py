@@ -807,6 +807,13 @@ def _direct_subscription_blob(doc) -> tuple[str, dict]:
 
 
 class JarvisSettings(Document):
+	def onload(self):
+		"""Flags the form's buttons read. Only a yes/no about the callback key, never the key."""
+		from jarvis import _plugin_auth
+
+		# A site holding the key may not rotate the owner token, so the form hides that button.
+		self.set_onload("has_callback_key", bool(_plugin_auth._callback_key()))
+
 	def before_validate(self):
 		"""Mirror models[0] into legacy fields BEFORE validate() runs.
 
