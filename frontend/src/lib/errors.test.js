@@ -407,6 +407,7 @@ test("retryable is pinned per code", () => {
 		"empty-reply",
 		"empty-reply-tools",
 		"gateway",
+		"gate-unconfirmed",
 	]);
 	for (const { code } of rules) {
 		assert.equal(turnErrorInfo("x", code).retryable, retryable.has(code), code);
