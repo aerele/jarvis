@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCompactCommand, compactFailureCopy } from "./compact.js";
+import { parseCompactCommand, compactFailureCopy, compactToastType } from "./compact.js";
 
 describe("parseCompactCommand", () => {
 	it("returns null for normal text", () => {
@@ -30,5 +30,14 @@ describe("compactFailureCopy", () => {
 			"Model and runtime changes are not available in chat."
 		);
 		expect(compactFailureCopy("whatever")).toBe("Could not compact this chat");
+	});
+});
+
+describe("compactToastType", () => {
+	it("shows no-op outcomes as info and everything else as error", () => {
+		expect(compactToastType("runtime_declined")).toBe("info");
+		expect(compactToastType("nothing_to_compact")).toBe("info");
+		expect(compactToastType("runtime_failed")).toBe("error");
+		expect(compactToastType(undefined)).toBe("error");
 	});
 });

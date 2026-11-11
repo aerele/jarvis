@@ -21,3 +21,9 @@ const COPY = {
 export function compactFailureCopy(reason) {
 	return COPY[reason] || "Could not compact this chat";
 }
+
+// "Nothing to compact" outcomes are a calm note, not an error.
+const NOOP_REASONS = ["runtime_declined", "nothing_to_compact"];
+export function compactToastType(reason) {
+	return NOOP_REASONS.includes(reason) ? "info" : "error";
+}
