@@ -151,57 +151,74 @@ def read_file(
 
 
 def _read_pptx(fdoc, content: bytes, max_chars: int, read_mode: str, cursor, version) -> dict:
-	"""Slide text and notes. Windows over the extracted text; cursor is `0:1:<char offset>`."""
+	"""Preview text, or a file-cursor-v1 window (cursor `0:<slide>:<char offset>`, same shape as docx)."""
 	import hashlib
-	import re
 
-	from jarvis.tools._pptx_text import PptxError, extract_pptx
+	from jarvis.tools import _pptx_text
+	from jarvis.tools._file_scan import MAX_BYTES, parse_cursor
 
-	offset = 0
-	digest = hashlib.sha256(b"pptx-v1\0" + content).hexdigest()
-	if cursor is not None:
-		match = re.fullmatch(r"0:1:(\d{1,9})", cursor)
-		if not match or version != digest:
-			raise InvalidArgumentError("File changed or cursor invalid. Restart without cursor/version.")
-		offset = int(match.group(1))
+	if len(content) > MAX_BYTES:
+		raise InvalidArgumentError("File exceeds the 10 MiB input limit. Split it into smaller files.")
+	digest = hashlib.sha256(b"pptx-v2\0" + content).hexdigest()
+	if cursor is not None and version != digest:
+		raise InvalidArgumentError("File changed or cursor invalid. Restart without cursor/version.")
+	source, start, offset = parse_cursor(cursor)
 	try:
-		data = extract_pptx(content)
-	except PptxError as e:
+		data = _pptx_text.extract_pptx(content)
+	except _pptx_text.PptxError as e:
 		raise InvalidArgumentError(str(e)) from None
-	text = data["text"]
-	window = text[offset : offset + max_chars]
-	end = offset + len(window)
-	more = end < len(text)
-	cut = data["truncated"] and not more  # the source itself was capped; nothing further is readable
-	out = {
+	note = "PowerPoint slide text, tables and speaker notes only; images, charts, SmartArt and comments are not read."
+	if read_mode != "file-cursor-v1":
+		return {
+			"kind": "document",
+			"format": "pptx",
+			"text": data["text"][:max_chars],
+			"slide_count": data["slide_count"],
+			"truncated": data["truncated"] or len(data["text"]) > max_chars,
+			"coverage": {"complete": not data["truncated"] and len(data["text"]) <= max_chars},
+			"note": note + " This is a bounded preview.",
+		}
+	slides = data["slides"]
+	if source != 0 or (cursor is not None and not 1 <= start <= max(len(slides), 1)):
+		raise InvalidArgumentError("File cursor is outside the file. Restart this file read.")
+	try:
+		win = _pptx_text.window(slides, start, offset)
+	except _pptx_text.PptxError as e:
+		raise InvalidArgumentError(str(e)) from None
+	next_read = None
+	if win["next_unit"] is not None:
+		next_read = {
+			"file_url": fdoc.file_url,
+			"cursor": f"0:{win['next_unit']}:{win['next_offset']}",
+			"version": digest,
+		}
+	stop = None
+	if next_read is None and data["truncated"]:
+		stop = {"code": "slide_limit", "slides_read": len(slides), "slide_count": data["slide_count"]}
+	window_complete = stop is None
+	complete = cursor is None and next_read is None and window_complete
+	return {
 		"kind": "document",
 		"format": "pptx",
-		"text": window,
-		"slide_count": data["slide_count"],
-		"truncated": more or data["truncated"],
-		"coverage": {"complete": not more and not data["truncated"]},
-		"note": "PowerPoint slide text, tables and speaker notes only; images, charts, SmartArt and comments are not read.",
+		"records": win["records"],
+		"stop_reason": stop,
+		"source": {"filename": fdoc.file_name, "slide_count": data["slide_count"]},
+		"range": {"source": 0, "first": start, "last": win["last"]},
+		"read_contract": "file-cursor-v1",
+		"status": "partial" if not window_complete else "complete" if complete else "window",
+		"version": digest,
+		"cursor": cursor or "0:1:0",
+		"end_of_file": next_read is None,
+		"coverage": {
+			"complete": complete,
+			"window_complete": window_complete,
+			"issues": [] if window_complete else [dict(stop)],
+		},
+		"next_read": next_read,
+		"note": note + " This is one exact extraction window. Follow next_read only within the task budget; "
+		"stop after at most 20 windows or 100,000 returned characters and disclose unread ranges. "
+		"Retain coverage issues and stop_reason; a final window does not prove prior windows were read.",
 	}
-	if read_mode == "file-cursor-v1":
-		next_cursor = f"0:1:{end}" if more else None
-		out.update(
-			{
-				"read_contract": "file-cursor-v1",
-				"version": digest,
-				"cursor": cursor or "0:1:0",
-				"end_of_file": not more,
-				"status": "partial" if cut else "window" if (more or offset) else "complete",
-				"coverage": {
-					"complete": not more and not offset and not cut,
-					"window_complete": not cut,
-					"issues": [{"code": "source_limit"}] if cut else [],
-				},
-				"next_read": (
-					{"file_url": fdoc.file_url, "cursor": next_cursor, "version": digest} if more else None
-				),
-			}
-		)
-	return out
 
 
 def _resolve_file(file_url: str | None, filename: str | None):
