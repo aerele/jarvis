@@ -16,6 +16,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import usage, usage_push
+from jarvis.tests._gateway_fixtures import synthetic_runtime_profile
 
 USETT = "Jarvis User Settings"
 SESSION = "Jarvis Chat Session"
@@ -767,6 +768,19 @@ class TestRunCacheFromTranscript(FrappeTestCase):
 	has none): summed over the run's assistant messages, bounded by the seq window."""
 
 	WIN = (10, 20)  # (watermark, next turn's watermark): this run owns seq 11..20
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		# The transcript's metadata key comes from the synced runtime profile; CI has none.
+		cls._profile = synthetic_runtime_profile()
+		cls._profile.__enter__()
+
+	@classmethod
+	def tearDownClass(cls):
+		cls._profile.__exit__(None, None, None)
+		super().tearDownClass()
+
 	setUp = TestCacheAndClaudeOutputEstimate.setUp
 	tearDown = TestCacheAndClaudeOutputEstimate.tearDown
 	_gpt_row = TestCacheAndClaudeOutputEstimate._gpt_row
