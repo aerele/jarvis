@@ -2831,7 +2831,8 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 		elif ext == "pptx":
 			blocks.append(
 				f"[Attached PowerPoint `{name}`: use jarvis__read_file with its attachment URL to read the slide text, tables and speaker notes. "
-				"Follow next_read sequentially when supplied. Images, charts and SmartArt are not read; do not claim they were.]"
+				"Follow next_read sequentially when supplied; check the returned contract and coverage before claiming a whole-file read. "
+				"Images, charts and SmartArt are not read; do not claim they were.]"
 			)
 		elif ext == "xls":
 			blocks.append(

@@ -113,20 +113,22 @@ def read_file(
 		"size_bytes": len(content),
 		"read_capability": "file-cursor-v1",
 	}
-	if ext == "pptx":
-		return {**base, **_read_pptx(fdoc, content, max_chars, read_mode, cursor, version)}
 	if (
 		not preview
 		and read_mode == "file-cursor-v1"
 		and (
-			ext in _PDF_EXT | _TABLE_EXT | _TEXT_EXT | {"docx"}
+			ext in _PDF_EXT | _TABLE_EXT | _TEXT_EXT | {"docx", "pptx"}
 			or (ext not in _IMAGE_EXT | {"xls"} and _looks_text(content))
 		)
 	):
+		if ext == "pptx":
+			return {**base, **_read_pptx(fdoc, content, max_chars, "file-cursor-v1", cursor, version)}
 		from jarvis.tools._file_sections import read_sections
 
 		return {**base, **read_sections(fdoc, content, sheet=sheet, cursor=cursor, version=version)}
 
+	if ext == "pptx":
+		return {**base, **_read_pptx(fdoc, content, max_chars, "preview", None, None)}
 	if ext == "docx":
 		from jarvis.tools._docx_preview import preview_docx
 
@@ -170,12 +172,14 @@ def _read_pptx(fdoc, content: bytes, max_chars: int, read_mode: str, cursor, ver
 	window = text[offset : offset + max_chars]
 	end = offset + len(window)
 	more = end < len(text)
+	cut = data["truncated"] and not more  # the source itself was capped; nothing further is readable
 	out = {
 		"kind": "document",
 		"format": "pptx",
 		"text": window,
 		"slide_count": data["slide_count"],
 		"truncated": more or data["truncated"],
+		"coverage": {"complete": not more and not data["truncated"]},
 		"note": "PowerPoint slide text, tables and speaker notes only; images, charts, SmartArt and comments are not read.",
 	}
 	if read_mode == "file-cursor-v1":
@@ -186,8 +190,12 @@ def _read_pptx(fdoc, content: bytes, max_chars: int, read_mode: str, cursor, ver
 				"version": digest,
 				"cursor": cursor or "0:1:0",
 				"end_of_file": not more,
-				"status": "window" if (more or offset) else "complete",
-				"coverage": {"complete": not more and not offset and not data["truncated"]},
+				"status": "partial" if cut else "window" if (more or offset) else "complete",
+				"coverage": {
+					"complete": not more and not offset and not cut,
+					"window_complete": not cut,
+					"issues": [{"code": "source_limit"}] if cut else [],
+				},
 				"next_read": (
 					{"file_url": fdoc.file_url, "cursor": next_cursor, "version": digest} if more else None
 				),
