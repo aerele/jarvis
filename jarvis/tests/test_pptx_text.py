@@ -177,6 +177,22 @@ class TestPptxText(unittest.TestCase):
 		out = pptx_text.extract_pptx(build({"slide1.xml": (data, None)}))
 		self.assertIn("Привет", out["text"])
 
+	def test_deep_nesting_is_a_clean_error_or_text(self):
+		depth = 5000
+		body = "<p:grpSp>" * depth + _shape("deep") + "</p:grpSp>" * depth
+		try:
+			out = pptx_text.extract_pptx(build({"slide1.xml": (_slide(body), None)}))
+		except pptx_text.PptxError:
+			return
+		self.assertIn("deep", out["text"])
+
+	def test_slide_cap_marks_truncated(self):
+		slides = {f"s{i}.xml": (_slide(_shape(f"t{i}")), None) for i in range(pptx_text.MAX_SLIDES + 1)}
+		out = pptx_text.extract_pptx(build(slides))
+		self.assertTrue(out["truncated"])
+		self.assertEqual(out["slide_count"], pptx_text.MAX_SLIDES + 1)
+		self.assertEqual(len(out["slides"]), pptx_text.MAX_SLIDES)
+
 
 if __name__ == "__main__":
 	unittest.main()

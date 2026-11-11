@@ -35,6 +35,15 @@ class _Budget:
 def extract_pptx(content: bytes, max_chars: int = MAX_CHARS) -> dict:
 	"""Return {"text", "slides": [{"index", "text", "notes"}], "slide_count", "truncated"}."""
 	try:
+		return _extract(content, max_chars)
+	except PptxError:
+		raise
+	except Exception:
+		raise PptxError("This .pptx could not be read (it is damaged or too complex).") from None
+
+
+def _extract(content: bytes, max_chars: int) -> dict:
+	try:
 		zf = zipfile.ZipFile(BytesIO(content))
 	except (zipfile.BadZipFile, OSError, EOFError):
 		raise PptxError(
@@ -167,22 +176,29 @@ def _para(p):
 	return "".join(out).strip()
 
 
-def _lines(node, notes_only=False):
-	"""Paragraph lines in document order; a table row becomes one tab-joined line."""
-	if node.tag == f"{A}tr":
-		cells = [
-			" ".join(filter(None, (_para(p) for p in tc.iter(f"{A}p")))) for tc in node.findall(f"{A}tc")
-		]
-		line = "\t".join(cells)
-		return [line] if line.strip() else []
-	if node.tag == f"{A}p":
-		text = _para(node)
-		return [text] if text else []
-	if notes_only and node.tag == f"{P}sp":
-		ph = node.find(f"{P}nvSpPr/{P}nvPr/{P}ph")
-		if ph is None or ph.get("type") != "body":
-			return []
-	out = []
-	for child in node:
-		out.extend(_lines(child, notes_only))
+def _lines(root, notes_only=False):
+	"""Paragraph lines in document order; a table row becomes one tab-joined line.
+
+	Iterative (explicit stack) so deeply nested XML cannot hit the recursion limit.
+	"""
+	out, stack = [], [root]
+	while stack:
+		node = stack.pop()
+		if node.tag == f"{A}tr":
+			cells = [
+				" ".join(filter(None, (_para(p) for p in tc.iter(f"{A}p")))) for tc in node.findall(f"{A}tc")
+			]
+			line = "\t".join(cells)
+			if line.strip():
+				out.append(line)
+		elif node.tag == f"{A}p":
+			text = _para(node)
+			if text:
+				out.append(text)
+		elif notes_only and node.tag == f"{P}sp":
+			ph = node.find(f"{P}nvSpPr/{P}nvPr/{P}ph")
+			if ph is not None and ph.get("type") == "body":
+				stack.extend(reversed(list(node)))
+		else:
+			stack.extend(reversed(list(node)))
 	return out
