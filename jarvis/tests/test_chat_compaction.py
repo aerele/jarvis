@@ -289,7 +289,9 @@ class TestRunCompact(FrappeTestCase):
 				}
 			).insert(ignore_permissions=True)
 		sess = MagicMock()
-		sess.list_sessions.return_value = [] if empty_row else [{"key": key, "totalTokens": 1000, **row_extra}]
+		sess.list_sessions.return_value = (
+			[] if empty_row else [{"key": key, "totalTokens": 1000, **row_extra}]
+		)
 		sess.compact_session.return_value = {"state": state, "text": text, "run_id": "r"}
 		pub = self._run(conv, sess)
 		return [c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "context:compact_failed"]
@@ -338,7 +340,7 @@ class TestRunCompact(FrappeTestCase):
 	def test_other_runtime_same_text_stays_failed(self):
 		got = self._nothing_to_compact_run(
 			"agent:main:c-cli4",
-			{"agentRuntime": {"id": "openclaw"}},
+			{"agentRuntime": {"id": "default"}},
 			"Claude CLI did not confirm that native compaction ran.",
 		)
 		self.assertEqual(got[0]["reason"], "runtime_failed")
