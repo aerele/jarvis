@@ -830,6 +830,17 @@ class TestRunCacheFromTranscript(FrappeTestCase):
 		tail = [self._msg(1000 + i, cacheRead=1) for i in range(usage._RUN_CACHE_TAIL_LIMIT)]
 		self.assertIsNone(self._fetch(tail, window=(10, None)))
 
+	def test_seq_less_messages_do_not_hide_a_cut_tail(self):
+		# Rows without a seq used to read as seq 0 and disarm the truncation guard.
+		half = usage._RUN_CACHE_TAIL_LIMIT // 2
+		tail = [{"role": "toolResult"} for _ in range(half)]
+		tail += [self._msg(1000 + i, cacheRead=1) for i in range(usage._RUN_CACHE_TAIL_LIMIT - half)]
+		self.assertIsNone(self._fetch(tail, window=(10, None)))
+
+	def test_a_malformed_count_is_skipped_not_fatal(self):
+		msgs = [self._msg(12, cacheRead="1.5k", cacheWrite=3), self._msg(13, cacheRead=5)]
+		self.assertEqual(self._fetch(msgs), {"cacheRead": 5, "cacheWrite": 3})
+
 	def test_claude_cli_shape_overlaid_on_row_fills_the_columns(self):
 		_make_session("agent:tu-cli-run", USER_A)
 		cache = self._fetch([self._msg(12, input=2, output=8, cacheRead=90190, cacheWrite=36198)])
