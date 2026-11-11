@@ -120,6 +120,13 @@ Both rules sit right after `internal`, so a role-profile key containing
 `billing`, `quota`, `rate-limit-timeout` or `forbidden` cannot send the text to a
 rule that shows the wrong copy or hides Retry.
 
+### Site gate blocks
+
+When the plugin's site gate blocks a turn, the runtime appends `(blocked by <plugin>)` to the
+gate's own sentence. The six `gate-*` rules match that sentence, never the suffix, and show it as
+the bubble message with no hint. Only "Jarvis cannot confirm this site right now" keeps Retry; the
+others need a person (support, a System Manager's Re-verify, or a plugin update).
+
 What heals an archived chat, per client:
 
 - Desktop and dashboard chat: Retry runs the turn again through the repair.
