@@ -196,7 +196,7 @@
 
 			<!-- ============ Saved tab ============ -->
 			<router-link
-				v-if="activeTab === 'saved'"
+				v-if="activeTab === 'saved' && canViewCalendar"
 				to="/dashboards/payment-calendar"
 				class="mx-5 mt-4 flex shrink-0 items-center justify-between gap-4 rounded-lg border bg-surface-white px-4 py-4 hover:bg-surface-gray-1"
 			>
@@ -295,6 +295,9 @@ const router = useRouter();
 // never overwritten, see stores/shell.setSpaciousView). `isMobile` drops the
 // side-by-side split for a single-pane swap below the phone breakpoint.
 const shell = useShellStore();
+// Boot-time global (jarvis/www/jarvis.py), frozen for the page's life. UX-only: the backend
+// still gates the data. Strict `=== true`, like the router guard.
+const canViewCalendar = window.can_view_payment_calendar === true;
 const MIN_CHAT_WIDTH = 320;
 const MIN_CANVAS_WIDTH = 360;
 const DIVIDER_WIDTH = 10;

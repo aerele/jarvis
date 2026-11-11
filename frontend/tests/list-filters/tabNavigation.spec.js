@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { createRouter, createMemoryHistory } from "vue-router";
 import { frappeUiStubs } from "./stubs.js";
@@ -43,7 +43,9 @@ vi.mock("@/pages/triggers/TriggersListPane.vue", () => ({ default: INERT }));
 vi.mock("@/pages/triggers/ActivityTab.vue", () => ({ default: INERT }));
 vi.mock("@/pages/dashboards/DashboardCanvas.vue", () => ({ default: INERT }));
 vi.mock("@/pages/dashboards/DashboardChatPane.vue", () => ({ default: INERT }));
-vi.mock("@/pages/dashboards/SavedDashboardsTab.vue", () => ({ default: INERT }));
+vi.mock("@/pages/dashboards/SavedDashboardsTab.vue", () => ({
+	default: { name: "SavedDashboardsTab", template: '<div data-testid="saved-tab"/>' },
+}));
 vi.mock("@/pages/dashboards/SaveDashboardDialog.vue", () => ({ default: INERT }));
 
 vi.mock("@/api/triggers", () => ({
@@ -170,4 +172,44 @@ describe("DashboardsPage: Builder ⇄ Saved keeps the filter set", () => {
 		await flushPromises();
 		expect(router.currentRoute.value.query.fv2).toBe(DASH_FV2);
 	});
+});
+
+describe("DashboardsPage: Payment Calendar card on the Saved tab", () => {
+	const CARD = 'a[href$="/dashboards/payment-calendar"]';
+
+	// The flag is a boot-time global read once in setup, so it is set BEFORE mount.
+	async function mountSaved(flag) {
+		if (flag === undefined) delete window.can_view_payment_calendar;
+		else window.can_view_payment_calendar = flag;
+		const router = await makeRouter({ path: "/dashboards", hash: "#saved" });
+		const w = mount(DashboardsPage, { global: { plugins: [router] } });
+		await flushPromises();
+		return w;
+	}
+
+	afterEach(() => {
+		delete window.can_view_payment_calendar;
+	});
+
+	it("shows the card when the flag is true", async () => {
+		const w = await mountSaved(true);
+		const card = w.find(CARD);
+		expect(card.exists()).toBe(true);
+		expect(card.text()).toContain("Payment Calendar");
+		w.unmount();
+	});
+
+	it.each([
+		["false", false],
+		["undefined", undefined],
+		['the string "true"', "true"],
+	])(
+		"hides the card when the flag is %s, and the Saved list still renders",
+		async (_n, flag) => {
+			const w = await mountSaved(flag);
+			expect(w.find(CARD).exists()).toBe(false);
+			expect(w.find('[data-testid="saved-tab"]').exists()).toBe(true);
+			w.unmount();
+		}
+	);
 });
