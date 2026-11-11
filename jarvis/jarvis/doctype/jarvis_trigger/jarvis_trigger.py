@@ -16,6 +16,8 @@ Managed Server Script contract:
   * Deleted when the action switches Script -> LLM and on trigger trash.
 """
 
+import hashlib
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
@@ -23,6 +25,7 @@ from frappe.utils import cint
 from frappe.utils.safe_exec import is_safe_exec_enabled
 
 from jarvis.permissions import NotRenamable
+from jarvis.tools._sandbox_attrs import capped, unsafe_attribute_errors
 from jarvis.triggers.engine import (
 	LLM_EVENTS,
 	SCRIPT_EVENT_MAP,
@@ -91,6 +94,17 @@ def _denylisted_doctypes() -> frozenset:
 DENYLISTED_DOCTYPES = _denylisted_doctypes()
 
 
+def _normalize(text) -> str:
+	"""Strip and collapse whitespace so cosmetic condition edits still match."""
+	return " ".join((text or "").split())
+
+
+def _body_hash(trigger) -> str:
+	"""Hash of the action body: script text for Script, instruction for LLM."""
+	text = trigger.script_body if trigger.action_type == "Script" else trigger.llm_instruction
+	return hashlib.sha256((text or "").strip().encode()).hexdigest()
+
+
 class JarvisTrigger(NotRenamable, Document):
 	def validate(self):
 		self._validate_name()
@@ -104,6 +118,65 @@ class JarvisTrigger(NotRenamable, Document):
 		self._guard_server_script_link()
 		self._guard_owner_immutable()
 		self._guard_lookup_authority()
+		self.check_duplicates()
+
+	def check_duplicates(self):
+		"""Triggers are site-wide: every enabled row enters the dispatch map, so
+		two identical rows fire twice (#816). Refuse a new/edited/re-enabled
+		trigger when another ENABLED one has the same target, event, normalized
+		condition, action type and action body. A match that differs only in
+		action type is allowed with an orange warning: ``msgprint`` on the
+		Desk/API path and ``flags.duplicate_warning`` (surfaced as ``warning`` by
+		``triggers_api.create_trigger`` / ``update_trigger``)."""
+		self.flags.duplicate_warning = None
+		if not cint(self.enabled):
+			return
+		# System context on purpose: triggers are site-wide, so a
+		# permission-filtered read would miss another user's duplicate row.
+		rows = frappe.get_all(
+			"Jarvis Trigger",
+			filters={
+				"name": ["!=", self.name or ""],
+				"enabled": 1,
+				"target_doctype": self.target_doctype,
+				"doc_event": self.doc_event,
+			},
+			fields=["name", "trigger_name", "condition", "action_type", "script_body", "llm_instruction"],
+		)
+		condition = _normalize(self.condition)
+		body = _body_hash(self)
+		cross_type = None
+		for row in rows:
+			if _normalize(row.condition) != condition:
+				continue
+			if row.action_type != self.action_type:
+				cross_type = cross_type or row
+			elif _body_hash(row) == body:
+				self._throw_duplicate(row)
+		if cross_type:
+			self._warn_cross_type(cross_type)
+
+	def _throw_duplicate(self, row):
+		if frappe.has_permission("Jarvis Trigger", "read", doc=row.name):
+			msg = _(
+				"An enabled trigger with the same DocType, event, condition and action already exists: "
+				"'{0}'. Edit or disable it instead of creating a duplicate."
+			).format(row.trigger_name)
+		else:
+			msg = _("An enabled trigger with the same DocType, event, condition and action already exists.")
+		frappe.throw(msg, frappe.ValidationError)
+
+	def _warn_cross_type(self, row):
+		if frappe.has_permission("Jarvis Trigger", "read", doc=row.name):
+			who = _("'{0}' ({1} action)").format(row.trigger_name, row.action_type)
+		else:
+			who = _("another trigger ({0} action)").format(row.action_type)
+		msg = _(
+			"Heads up: {0} already runs on the same DocType, event and condition. "
+			"Both will fire on each matching save."
+		).format(who)
+		self.flags.duplicate_warning = msg
+		frappe.msgprint(msg, indicator="orange", alert=False)
 
 	def _guard_owner_immutable(self):
 		"""``owner`` decides whose permissions lookups read with. Frappe already
@@ -223,6 +296,10 @@ class JarvisTrigger(NotRenamable, Document):
 		self.condition = (self.condition or "").strip()
 		if not self.condition:
 			return
+		# Before the evaluation below: a short-circuiting condition never reaches
+		# the blocked attribute on a blank doc, yet fails on every real fire.
+		if self._unsafe_check_due("condition"):
+			self.check_unsafe_attributes(("condition",))
 		# Same check as frappe Webhook.validate_condition: compile + evaluate
 		# against an empty doc of the target doctype with the webhook context.
 		temp_doc = frappe.new_doc(self.target_doctype)
@@ -240,6 +317,51 @@ class JarvisTrigger(NotRenamable, Document):
 			pass
 		except Exception as e:
 			frappe.throw(_("Invalid Condition: {0}").format(str(e)))
+
+	def _unsafe_check_due(self, field: str) -> bool:
+		"""Whether the sandbox-attribute check must run on ``field`` for this save.
+
+		It runs for a new trigger, when the code or the action type changed, and
+		when the trigger is being turned on. A stored body or condition that was
+		saved before the check existed therefore stays editable and can be turned
+		off, but it cannot be turned back on while it would fail at run time."""
+		return bool(
+			self.is_new()
+			or self.has_value_changed(field)
+			or self.has_value_changed("action_type")
+			or (self.has_value_changed("enabled") and cint(self.enabled))
+		)
+
+	def check_unsafe_attributes(self, fields=("condition", "script_body")):
+		"""Refuse code that reads an attribute the server-script sandbox blocks
+		(for example ``"..".format(..)``), which would fail on every fire.
+
+		One method for save (``validate``) and for the enable toggle
+		(``triggers_api.set_trigger_enabled``). ``condition`` is checked for every
+		action type (as an expression); ``script_body`` only for a Script action
+		(as a script). A UX pre-check: the sandbox still enforces at run time."""
+		for field in fields:
+			if field == "condition":
+				code, mode = (self.condition or "").strip(), "eval"
+				lead_in, title = _("Invalid Condition:"), _("Condition cannot run")
+			elif field == "script_body":
+				if self.action_type != "Script":
+					continue  # leftover body of a non-Script trigger is not code
+				code, mode = self.script_body or "", "exec"
+				lead_in = _("The script uses an attribute that the sandbox blocks:")
+				title = _("Script cannot run")
+			else:
+				raise ValueError(f"check_unsafe_attributes: unknown field {field!r}")
+			errors = unsafe_attribute_errors(code, mode=mode) if code else []
+			if not errors:
+				continue
+			# Never the code itself, only where the refusal came from. A debug/dev-level
+			# trace: dropped at production log levels, so not an operator signal.
+			try:
+				frappe.logger("jarvis").info("unsafe-attr refusal doctype=%s path=%s", self.doctype, field)
+			except Exception:
+				pass
+			frappe.throw(lead_in + " <br>" + "; <br>".join(capped(errors)), title=title)
 
 	def _require_script_authoring_rights(self):
 		"""A Script action materializes a managed Server Script that runs with full
@@ -292,6 +414,8 @@ class JarvisTrigger(NotRenamable, Document):
 			# Frappe core only msgprint-warns on Server Script compile errors;
 			# a trigger script that cannot compile can never run, so throw.
 			frappe.throw(_("Script does not compile: {0}").format(str(e)))
+		if self._unsafe_check_due("script_body"):
+			self.check_unsafe_attributes(("script_body",))
 
 	def _validate_llm(self):
 		instruction = (self.llm_instruction or "").strip()

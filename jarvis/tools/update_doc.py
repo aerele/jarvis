@@ -7,7 +7,7 @@ DocType + record, not just ``read``.
 
 Two shapes:
 
-- **Single:** ``update_doc(doctype, name, changes)`` -> the saved doc as a dict.
+- **Single:** ``update_doc(doctype, name, changes)`` -> a compact ``{doctype,name,docstatus,...}``.
 - **Batch:** ``update_doc(doctype, updates=[{"name","changes"}, ...])`` -> a
   lean ``{"doctype","updated":[name,...],"count":N}``, every save in ONE atomic
   savepoint (a single confirmation card). One doctype, per-doc name + changes.
@@ -33,7 +33,9 @@ from jarvis.tools import require_doctype_and_name
 from jarvis.tools._bulk import run_atomic_batch
 from jarvis.tools._child_rows import merge_child_rows, row_values
 from jarvis.tools._delegate_write_caps import enforce_update
+from jarvis.tools._doc_parts import check_write_fields, refuse_fields_with_batch, write_result
 from jarvis.tools._field_values import cast_numbers, check_values
+from jarvis.tools._sandbox_attrs import check_sandbox_code
 from jarvis.tools.create_doc import refused_field_names
 
 # Fields Frappe maintains itself or that govern DocType identity. An LLM
@@ -107,6 +109,7 @@ def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.documen
 
 		previous_links.update(source_names(doc))
 	changes = check_values(doctype, changes)
+	check_sandbox_code(doc.doctype, changes, before=doc)
 
 	# Child tables are merged by row name, never wholesale-replaced: a payload
 	# that omits a field (custom fields, so_detail links) must not erase it.
@@ -136,10 +139,14 @@ def update_doc(
 	name: str | None = None,
 	changes: dict | None = None,
 	updates: list | None = None,
+	fields: list | None = None,
 ) -> dict:
 	"""Apply changes to one document - or a whole batch when ``updates`` is given.
 
-	Single: returns the saved document as a dict (matching ``get_doc``'s shape).
+	Single: returns ``{"doctype","name","docstatus"}`` plus ``status`` and the
+	title field when the DocType has them. ``fields`` names more fields to return
+	(as ``get_doc``'s ``fields`` does; unknown or unreadable ones are refused);
+	read anything else with ``get_doc``.
 	Batch: returns ``{"doctype","updated":[name,...],"count":N}``.
 
 	Raises:
@@ -150,12 +157,14 @@ def update_doc(
 	  - frappe.ValidationError when a DocType's own validate() rejects
 	"""
 	if updates is not None:
+		refuse_fields_with_batch(fields)
 		return _update_batch(doctype, updates)
 
 	require_doctype_and_name(doctype, name)
+	check_write_fields(doctype, fields)
 	doc = _update_one(doctype, name, changes)
 	doc.apply_fieldlevel_read_permissions()
-	return doc.as_dict()
+	return write_result(doc, fields)
 
 
 def _update_batch(doctype: str, updates: list) -> dict:

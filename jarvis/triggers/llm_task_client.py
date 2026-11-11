@@ -128,32 +128,10 @@ def _extract_object_reply(payload: dict) -> dict | str:
 	return _extract_text(payload)
 
 
-def llm_task_complete(
-	prompt: str, input_payload: str, timeout: int = 60, expect_object: bool = False
-) -> str | dict:
-	"""Run one llm-task completion on the tenant's own agent gateway + model.
+def _call_route(path: str, body: dict, read_timeout_s: float) -> tuple[int, bytes]:
+	"""POST ``body`` to a plugin route on the tenant's agent and return ``(status, raw body)``.
 
-	``input_payload`` is sent as-is as the tool's ``input`` arg (the caller has
-	already fenced/serialized it - never re-parsed here). ``timeoutMs`` and
-	``maxTokens`` are passed through to the tool for parity with the old
-	openrouter_complete path (60s / 1000 tokens by default); a ``schema`` of
-	``{"type": "string"}`` makes the runtime validate the parsed JSON is a
-	plain string, backing up the JSON-string-literal instruction in the
-	prompt. ``provider``/``model`` are deliberately never sent - the tenant's
-	own configured model is the whole point, and there is no path for a
-	caller to override it. Returns the reply text. Raises
-	``LLMTaskNotAvailableError`` when the gateway doesn't expose the tool;
-	``LLMTaskError`` on any other failure (unreachable gateway, no
-	agent_url/token configured, timeout, oversize or malformed response).
-	Never logs the bearer token.
-
-	``expect_object`` (LLM trigger lookups) asks for a JSON object instead of a
-	string literal: the schema becomes ``{"type": ["object", "string"]}`` (an
-	object-only schema makes the runtime fail a prose answer with HTTP 500, so
-	a string answer must stay valid and become the finding) and the return is
-	the parsed object (``details.json`` first, then the content text), or the
-	plain text when the model did not answer with one.
-	"""
+	Every transport failure is an ``LLMTaskError`` (never carrying the signing key)."""
 	import requests
 
 	# Third door to the tenant's agent besides AgentSession.connect: a restored copy
@@ -170,13 +148,6 @@ def llm_task_complete(
 	if not agent_url:
 		raise LLMTaskError("agent gateway is not configured on this site")
 
-	args = {
-		"prompt": prompt,
-		"input": input_payload,
-		"schema": {"type": ["object", "string"] if expect_object else "string"},
-		"maxTokens": _MAX_TOKENS,
-		"timeoutMs": timeout * 1000,
-	}
 	# The plugin vouches this key with the site before it runs the task, so claim it
 	# first: a trigger key has no row until the activity is written.
 	session_key = f"agent:main:trigger-{uuid.uuid4().hex}"
@@ -188,14 +159,13 @@ def llm_task_complete(
 		with plugin_routes.route_request(
 			agent_url,
 			"POST",
-			plugin_routes.LLM_TASK_PATH,
+			path,
 			session_key,
-			{"args": args},
-			read_timeout_s=timeout + _TIMEOUT_BUFFER_S,
+			body,
+			read_timeout_s=read_timeout_s,
 			stream=True,
 		) as response:
-			status = response.status_code
-			raw = _read_bounded(response)
+			return response.status_code, _read_bounded(response)
 	except LLMTaskError:
 		raise
 	except plugin_routes.PluginRouteError as e:
@@ -204,6 +174,51 @@ def llm_task_complete(
 		raise LLMTaskError("llm-task request timed out") from e
 	except Exception as e:
 		raise LLMTaskError("llm-task request failed") from e
+
+
+def llm_task_complete(
+	prompt: str,
+	input_payload: str,
+	timeout: int = 60,
+	expect_object: bool = False,
+	model_ref: dict | None = None,
+) -> str | dict:
+	"""Run one llm-task completion on the tenant's own agent gateway + model.
+
+	``input_payload`` is sent as-is as the tool's ``input`` arg (the caller has
+	already fenced/serialized it - never re-parsed here). ``timeoutMs`` and
+	``maxTokens`` are passed through to the tool for parity with the old
+	openrouter_complete path (60s / 1000 tokens by default); a ``schema`` of
+	``{"type": "string"}`` makes the runtime validate the parsed JSON is a
+	plain string, backing up the JSON-string-literal instruction in the
+	prompt. ``provider``/``model`` are sent only for a pool failover attempt
+	(``model_ref``, see ``llm_task_complete_with_failover``); otherwise the
+	tenant's own configured model answers. Returns the reply text. Raises
+	``LLMTaskNotAvailableError`` when the gateway doesn't expose the tool;
+	``LLMTaskError`` on any other failure (unreachable gateway, no
+	agent_url/token configured, timeout, oversize or malformed response).
+	Never logs the bearer token.
+
+	``expect_object`` (LLM trigger lookups) asks for a JSON object instead of a
+	string literal: the schema becomes ``{"type": ["object", "string"]}`` (an
+	object-only schema makes the runtime fail a prose answer with HTTP 500, so
+	a string answer must stay valid and become the finding) and the return is
+	the parsed object (``details.json`` first, then the content text), or the
+	plain text when the model did not answer with one.
+	"""
+	args = {
+		"prompt": prompt,
+		"input": input_payload,
+		"schema": {"type": ["object", "string"] if expect_object else "string"},
+		"maxTokens": _MAX_TOKENS,
+		"timeoutMs": timeout * 1000,
+	}
+	if model_ref:
+		# jarvis-admin-v2#826: a pool failover attempt names the exact provider-qualified
+		# model; the gateway honours it only where the host allowlists that model.
+		args["provider"] = model_ref["provider"]
+		args["model"] = model_ref["model"]
+	status, raw = _call_route(plugin_routes.LLM_TASK_PATH, {"args": args}, timeout + _TIMEOUT_BUFFER_S)
 
 	# 401/403 are the plugin refusing this site (bad key, or a session it will not
 	# vouch for): a fixed error, never a fallback to another completion path.
@@ -227,3 +242,140 @@ def llm_task_complete(
 	if not payload.get("ok"):
 		_raise_for_gateway_error(status, payload)
 	return _extract_object_reply(payload) if expect_object else _extract_text(payload)
+
+
+# ---- pool failover (jarvis-admin-v2#826) ---------------------------------------------------
+
+# Error classes (jarvis.chat.error_taxonomy codes) that mean "this model's credential cannot
+# serve right now", so the next pool model may. Anything else (timeout, bad reply, ...) is not
+# cured by another model and is raised as-is.
+_FAILOVER_CODES = frozenset({"subscription-expired", "authentication", "billing", "quota"})
+# Total completions one trigger evaluation may spend walking the pool.
+_MAX_ATTEMPTS = 3
+
+
+def pool_model_refs() -> list[dict]:
+	"""The tenant gateway's chat models as ``[{"provider", "model"}, ...]``, primary first and
+	then the fallbacks: the order its own chat failover uses, with the provider-qualified ids
+	only the gateway can mint. Raises ``LLMTaskNotAvailableError`` when the plugin predates the
+	route, ``LLMTaskError`` on any other failure."""
+	status, raw = _call_route(plugin_routes.LLM_TASK_MODELS_PATH, {}, _CONNECT_TIMEOUT_S + _TIMEOUT_BUFFER_S)
+	if status == 404:
+		raise LLMTaskNotAvailableError(_gateway_error_message(status, raw))
+	if status in (401, 403):
+		raise LLMTaskError("llm-task request was refused by the agent plugin")
+	try:
+		payload = frappe.parse_json(raw.decode("utf-8")) if raw else {}
+	except Exception as e:
+		raise LLMTaskError("llm-task returned a non-JSON response") from e
+	if status != 200 or not isinstance(payload, dict) or not payload.get("ok"):
+		raise LLMTaskError(f"llm-task model list failed (HTTP {status})")
+	models = payload.get("models")
+	return [
+		{"provider": m["provider"], "model": m["model"]}
+		for m in (models if isinstance(models, list) else [])
+		if isinstance(m, dict)
+		and isinstance(m.get("provider"), str)
+		and isinstance(m.get("model"), str)
+		and m["provider"]
+		and m["model"]
+	]
+
+
+def _failover_code(error: Exception) -> str:
+	"""The failover-worthy error class of ``error``, or ``""``."""
+	from jarvis.chat.error_taxonomy import classify_error_text
+
+	code = classify_error_text(str(error))
+	return code if code in _FAILOVER_CODES else ""
+
+
+def _flagged_upstreams() -> set[str]:
+	"""Subscription upstreams the site already knows are signed out. Never raises."""
+	try:
+		from jarvis import subscription_health
+
+		return {e.get("upstream") for e in subscription_health.expired_entries() if e.get("upstream")}
+	except Exception:
+		return set()
+
+
+def _blocked(ref: dict, skipped: set[str]) -> bool:
+	"""Whether ``ref`` is served by an upstream in ``skipped``. Never raises."""
+	if not skipped:
+		return False
+	try:
+		from jarvis import subscription_health
+
+		return subscription_health.upstream_for_serving(ref["model"], ref["provider"]) in skipped
+	except Exception:
+		return False
+
+
+def _pool_refs_or_empty() -> list[dict]:
+	"""``pool_model_refs()``, or ``[]`` where the plugin cannot list them (older plugin, refused)."""
+	try:
+		return pool_model_refs()
+	except LLMTaskError:
+		return []
+
+
+def llm_task_complete_with_failover(
+	prompt: str, input_payload: str, timeout: int = 60, expect_object: bool = False
+) -> str | dict:
+	"""``llm_task_complete`` that walks the tenant's model pool when a model's credential is dead.
+
+	The first attempt uses the gateway's own default (the pool primary), unless the site already
+	flags the primary's subscription as expired, in which case it starts at the first model whose
+	upstream is not flagged. A failure of the credential kind (``_FAILOVER_CODES``) is fed to
+	``subscription_health`` (so expiry detection does not depend on chat) and the next model in
+	pool order is tried, at most ``_MAX_ATTEMPTS`` completions in all. Any other failure is
+	raised as-is.
+
+	Where the walk cannot start (the plugin has no model list, or the host's render does not
+	allow a per-call model) the FIRST error is raised: exactly what a trigger did before.
+	"""
+	from jarvis import subscription_health
+
+	extra = {"expect_object": True} if expect_object else {}
+	skipped = _flagged_upstreams()
+	ordered: list[dict] | None = None  # pool order after the primary, learned lazily
+	use_default = True
+	if skipped:
+		refs = _pool_refs_or_empty()
+		if refs and _blocked(refs[0], skipped):
+			ordered = [r for r in refs[1:] if not _blocked(r, skipped)]
+			use_default = not ordered
+	first_error: LLMTaskError | None = None
+	for _ in range(_MAX_ATTEMPTS):
+		ref = None
+		if use_default:
+			use_default = False
+		else:
+			if ordered is None:
+				ordered = _pool_refs_or_empty()[1:]
+			ref = next((r for r in ordered if not _blocked(r, skipped)), None)
+			if ref is None:
+				break
+			ordered.remove(ref)
+		try:
+			return llm_task_complete(
+				prompt, input_payload, timeout=timeout, **extra, **({"model_ref": ref} if ref else {})
+			)
+		except LLMTaskNotAvailableError:
+			raise
+		except LLMTaskError as e:
+			first_error = first_error or e
+			code = _failover_code(e)
+			if not code:
+				raise first_error from None
+			subscription_health.note_turn_error(str(e), code)
+			from jarvis.chat.error_taxonomy import subscription_upstream_from_error
+
+			upstream = subscription_upstream_from_error(str(e))
+			if upstream:
+				skipped.add(upstream)
+	if first_error is None:
+		# Nothing usable left to try (every other model is flagged): let the default speak.
+		return llm_task_complete(prompt, input_payload, timeout=timeout, **extra)
+	raise first_error

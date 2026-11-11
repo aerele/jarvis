@@ -37,7 +37,7 @@ import time
 import frappe
 
 from jarvis._session import impersonate
-from jarvis.chat import seq_watermark, txn
+from jarvis.chat import directive_filter, seq_watermark, txn
 from jarvis.chat import turn_state as ts
 from jarvis.chat.filebox_source import SourceLost
 from jarvis.chat.runtime_profile import get_profile
@@ -214,6 +214,13 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 			run_id, version, assistant_msg, conversation, owner, str(exc), code="source_unavailable"
 		)
 		return {"ok": False, "reason": "source_unavailable"}
+	except directive_filter.DirectiveRefusal as exc:
+		# F-Q8: a runtime directive in the typed text. Nothing was sent; end the turn with
+		# the fixed text (not the generic "could not prepare" below).
+		_prepare_error(
+			run_id, version, assistant_msg, conversation, owner, str(exc), code="directive_refused"
+		)
+		return {"ok": False, "reason": "directive_refused"}
 	except Exception:
 		# Assembly is all best-effort reads; a hard failure here is unexpected. Error
 		# the turn (release credit) rather than dispatch a broken prompt.

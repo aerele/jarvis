@@ -45,6 +45,13 @@ _CAP_TTL_SECONDS = 2 * 86400
 # about speech-to-text; it is about the agent container being out of date).
 _NO_AGENT_UPDATE_MESSAGE = "LLM triggers need the latest agent update on this site."
 
+# The Activity summary is readable and LIKE-searchable by non-managers, and the
+# raw error text can carry record values or model output. Only these fixed
+# constant messages may land in the summary; any other error text goes to
+# ``detail`` (managers only) and the summary holds ``_LLM_FAILED_SUMMARY``.
+_SAFE_SUMMARIES = frozenset({_NO_AGENT_UPDATE_MESSAGE, lookups.TIMEOUT_MESSAGE})
+_LLM_FAILED_SUMMARY = "LLM evaluation failed. Trigger managers can see the details in this activity."
+
 # llm-task forces the model to answer with JSON only (see the runtime's
 # JSON.parse of the reply text), so the completion asks for a bare JSON
 # string literal holding the finding - that keeps the reply plain prose
@@ -140,7 +147,8 @@ def _llm_task_prompt(
 def _evaluate(
 	prompt: str, fenced: str, messages: list, timeout: int = 60, expect_object: bool = False
 ) -> tuple[str | dict | None, str | None]:
-	"""Typed fallback decision: try the tenant's agent gateway first, fall back
+	"""Typed fallback decision: try the tenant's agent gateway first (walking its model pool
+	when a sign-in is dead, jarvis-admin-v2#826), fall back
 	to OpenRouter only when the gateway doesn't expose llm-task (older/
 	unconfigured runtime) AND an OpenRouter/STT key is actually resolvable.
 	Returns ``(reply, None)`` on success or ``(None, error_message)`` on a
@@ -150,13 +158,17 @@ def _evaluate(
 	Imported lazily (background job only): ``llm_task_client``/``voice`` for
 	the two completion transports."""
 	from jarvis.chat import voice
-	from jarvis.triggers.llm_task_client import LLMTaskError, LLMTaskNotAvailableError, llm_task_complete
+	from jarvis.triggers.llm_task_client import (
+		LLMTaskError,
+		LLMTaskNotAvailableError,
+		llm_task_complete_with_failover,
+	)
 
 	try:
 		# expect_object is passed only by the lookup loop, so a trigger without
 		# lookups makes exactly the call it always did.
 		extra = {"expect_object": True} if expect_object else {}
-		return llm_task_complete(prompt, fenced, timeout=timeout, **extra), None
+		return llm_task_complete_with_failover(prompt, fenced, timeout=timeout, **extra), None
 	except LLMTaskNotAvailableError:
 		pass
 	except LLMTaskError as e:
@@ -308,8 +320,9 @@ def run_llm_action(
 		else ""
 	)
 	if error is not None:
+		summary = error if error in _SAFE_SUMMARIES else _LLM_FAILED_SUMMARY
 		_insert_activity(
-			**base, status="Failed", summary=error, detail=lookup_note + error, duration_ms=duration_ms
+			**base, status="Failed", summary=summary, detail=lookup_note + error, duration_ms=duration_ms
 		)
 	else:
 		reply = (reply or "").strip()

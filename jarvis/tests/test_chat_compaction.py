@@ -383,6 +383,61 @@ class TestCompactEndpoints(FrappeTestCase):
 		conv = _mk_conversation("agent:main:c-ep4")
 		self.assertEqual(chat_api.compact_conversation(conv, "/new"), {"ok": False, "reason": "bad_hint"})
 
+	# F-Q8 (F11, AC-FQ8-8, c2 N1): a /compact hint is typed text; the host reads every inline
+	# directive in "/compact <hint>" before it runs the command.
+	DIRECTIVE_HINTS = [
+		"keep notes /model openai/x --runtime codex",
+		"keep /think:/model openai/x",
+		"keep x/think:/model openai/x",
+		chr(0xFEFF) + "/model openai/x --runtime codex",
+		"keep " + chr(0xFEFF) + "/model x",
+		"keep /MODEL: openai/x",
+		"keep a/model x",
+		# N1: the 500-character cut leaves "/model" at the end of the FINAL hint.
+		"a" * 493 + " /models",
+	]
+
+	def test_sanitize_hint_refuses_a_directive_with_the_fixed_text(self):
+		from jarvis.chat import directive_filter
+
+		for hint in self.DIRECTIVE_HINTS:
+			with self.subTest(hint=hint[:60]):
+				with self.assertRaises(directive_filter.DirectiveRefusal) as ctx:
+					compaction.sanitize_hint(hint)
+				self.assertEqual(str(ctx.exception), directive_filter.REFUSAL_TEXT)
+
+	def test_the_final_hint_never_holds_a_model_token(self):
+		from jarvis.chat import directive_filter
+
+		for pad in range(480, 500):
+			hint = "a" * pad + " /models and /model"
+			with self.subTest(pad=pad):
+				try:
+					out = compaction.sanitize_hint(hint)
+				except frappe.ValidationError:
+					continue
+				self.assertIsNone(directive_filter.MODEL_TOKEN.search(out))
+
+	def test_sanitize_hint_passes_a_normal_hint_unchanged(self):
+		for hint in ["keep the invoice inputs", "keep /models notes", "keep /private/files/x.csv", "x" * 900]:
+			with self.subTest(hint=hint[:30]):
+				self.assertEqual(
+					compaction.sanitize_hint(hint), " ".join(hint.split())[: compaction.HINT_MAX_CHARS]
+				)
+
+	def test_compact_with_a_directive_hint_is_refused_and_nothing_is_sent(self):
+		conv = _mk_conversation("agent:main:c-fq8")
+		for hint in self.DIRECTIVE_HINTS:
+			with self.subTest(hint=hint[:60]):
+				with (
+					patch("jarvis.chat.compaction.frappe.enqueue") as enq,
+					patch("jarvis.chat.agent_client.AgentSession.compact_session") as send,
+				):
+					out = chat_api.compact_conversation(conv, hint)
+				self.assertEqual(out, {"ok": False, "reason": "directive_refused"})
+				enq.assert_not_called()
+				send.assert_not_called()
+
 	def test_compact_enqueues(self):
 		conv = _mk_conversation("agent:main:c-ep5")
 		with patch("jarvis.chat.compaction.frappe.enqueue") as enq:
