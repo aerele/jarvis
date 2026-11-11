@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 
 vi.mock("frappe-ui", () => ({
-	FormControl: { template: "<input />" },
 	LoadingIndicator: { template: "<span>Loading</span>" },
 	Select: { template: "<select />" },
 }));
@@ -68,6 +67,35 @@ describe("contextual field-ask contract", () => {
 			expect(parseAsk(fence({ ...question, ...context })).questions[0].type).toBe("text");
 		}
 	);
+});
+
+describe("AskCard number field", () => {
+	// jarvis-admin-v2#806: the number control is the card's own .jv-ask-field
+	// (like date/text/link), not a frappe-ui FormControl, whose utility-class
+	// styling the chat surface's forms-plugin compensation reverts to a bare input.
+	it("draws a numeric field as a decimal .jv-ask-field and submits the typed number", async () => {
+		getDoctypeFields.mockResolvedValue({
+			ok: true,
+			fields: [{ fieldname: "rate", label: "Rate per Phone (INR)", fieldtype: "Currency" }],
+		});
+		const w = card({ ...question, q: "", fieldname: "rate" });
+		await flushPromises();
+		const field = w.get("input[placeholder='Type a number']");
+		expect(field.classes()).toContain("jv-ask-field");
+		expect(field.attributes("inputmode")).toBe("decimal");
+		expect(field.attributes("type")).toBe("text");
+		expect(w.get(".jv-ask-qt").text()).toContain("Rate per Phone (INR)");
+		expect(submit(w).element.disabled).toBe(true);
+		await field.setValue("abc");
+		expect(submit(w).element.disabled).toBe(true);
+		await field.setValue("1,250.50");
+		expect(submit(w).element.disabled).toBe(false);
+		await submit(w).trigger("click");
+		expect(w.emitted("submit")).toEqual([
+			["Here are my answers:\n1. Rate per Phone (INR) → 1,250.50"],
+		]);
+		w.unmount();
+	});
 });
 
 describe("AskCard field-backed Link search", () => {
