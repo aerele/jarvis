@@ -882,6 +882,63 @@ class TestRunCacheFromTranscript(FrappeTestCase):
 		self.assertEqual((r.cache_read, r.cache_write, r.cache_reported), (11, 2, 1))
 
 
+class TestRunSeqWindow(FrappeTestCase):
+	"""The run's transcript window from the reply's watermark. A 0 watermark is the empty
+	transcript on a chat's first turn, but "not stamped" on any later turn."""
+
+	def setUp(self):
+		self.conv = frappe.get_doc(
+			{"doctype": "Jarvis Conversation", "title": "tu-window", "session_key": "agent:tu-window"}
+		).insert(ignore_permissions=True)
+
+	def tearDown(self):
+		frappe.db.delete("Jarvis Chat Message", {"conversation": self.conv.name})
+		frappe.db.delete("Jarvis Conversation", {"name": self.conv.name})
+
+	def _msg(self, seq, role="assistant", watermark=0):
+		doc = frappe.get_doc(
+			{
+				"doctype": "Jarvis Chat Message",
+				"conversation": self.conv.name,
+				"seq": seq,
+				"role": role,
+				"content": "x",
+			}
+		).insert(ignore_permissions=True)
+		if watermark:
+			frappe.db.set_value("Jarvis Chat Message", doc.name, "agent_seq_watermark", watermark)
+		return doc.name
+
+	def _window(self, reply):
+		real = frappe.db.get_value
+
+		def get_value(doctype, *args, **kwargs):
+			if doctype == usage.CHAT_TURN:
+				return frappe._dict(conversation=self.conv.name, assistant_message=reply)
+			return real(doctype, *args, **kwargs)
+
+		with patch.object(frappe.db, "get_value", side_effect=get_value):
+			return usage._run_seq_window("run-x")
+
+	def test_first_turn_zero_watermark_is_the_transcript_start(self):
+		self._msg(1, role="user")
+		self.assertEqual(self._window(self._msg(2)), (0, None))
+
+	def test_later_turn_zero_watermark_is_not_guessed(self):
+		self._msg(1, role="user")
+		self._msg(2)
+		self._msg(3, role="user")
+		self.assertIsNone(self._window(self._msg(4)))
+
+	def test_stamped_watermarks_bound_both_ends(self):
+		self._msg(1, role="user")
+		first = self._msg(2)
+		self._msg(3, role="user")
+		second = self._msg(4, watermark=5)
+		self.assertEqual(self._window(second), (5, None))
+		self.assertEqual(self._window(first), (0, 5))
+
+
 class TestUsageRollup(FrappeTestCase):
 	"""Task U2: the MTD rollup builder's profile/cache/tool-call extension.
 	Hermetic like TestTurnUsage - fixtures are disposable and committed rows
