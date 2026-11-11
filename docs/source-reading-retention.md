@@ -44,136 +44,54 @@ address-space guarantee; byte, row, SQL-work, and parent wall limits still apply
 
 ## Claude plan (subscription) tenants
 
-Status: the Claude plan source reads are off until an operator enables them for
-a tenant (the per-tenant guard setting) and the fleet default is switched. The
-plugin's Claude gate stays closed (D1 off) until it is enabled. Until then every
-source read on a Claude plan tenant is refused, as it has been since 16.7.0.
-Other models are not affected by any of this.
+Status: on Claude plan tenants (the `claude-cli` runtime), the source readers work as on every
+other model. The Claude CLI does not save chat sessions, so Jarvis keeps the same retention
+behaviour as above.
 
-### Why they were refused
+### How it works
 
-The Claude CLI writes its own transcript, tool results included, to the
-container's persisted disk. Jarvis cannot redact that file. The plugin therefore
-refused the four source tools on the Claude plan.
-
-### What changes when the guard is active
-
-The container keeps the CLI's live transcripts in memory (tmpfs). A guard in the
-container makes a redacted copy and stores only that copy on disk. In the saved
-copy, the file and report contents returned by `read_file`, `query_file`,
-`query_report` and `get_file_pages` are replaced by the same source-reference
-receipts that other models get (see the first section). The shared receipt shape
-is defined by one contract file that the fleet agent, the plugin and this
-backend all test against (`jarvis/tests/fixtures/source-contract-v1.json`).
-A later turn must query the source again under current permissions.
+- The fleet agent starts every Claude CLI run with `--no-session-persistence`. The CLI keeps the
+  chat in the memory of its live process and does not write it to disk.
+- A Claude Code `SessionStart` hook restores the chat when a new CLI process starts (after an
+  idle exit or a container restart). It reads the user and assistant text of that chat from the
+  gateway's own transcript, which already holds source receipts in place of source data.
+- The hook leaves a content-free placeholder log per session (text `[history held by Jarvis]`),
+  so the gateway keeps resuming the session. The placeholder carries the Claude account id; a
+  restore happens only for the same account.
+- Large tool results that the CLI writes to a side file go to a memory-only folder.
+- The CLI's own file, shell and agent tools are denied. Claude reads data only through the
+  Jarvis tools.
+- On the first boot with this release, existing CLI session logs are replaced by placeholders.
 
 ### What you may claim
 
-"On the Claude plan with the guard active, file and report contents returned by
-Jarvis's file tools are not written to persistent storage by the Claude CLI.
-They are held in the container's memory while a chat's process is alive (the
-process ends on the agent runtime's own idle timeout, as today) and for a short time
-after it stops, normally about ten seconds, after which the saved transcript
-holds only references. Transcripts written before this change are not rewritten
-unless an operator runs the purge procedure."
-
-Qualify the time. "About ten seconds" is the normal case. It can be longer in
-these cases, always in memory only and never on disk:
-
-- A background process started by the model's Bash inside a chat keeps a lock
-  open. The raw copy for that chat stays in memory until that process ends or
-  the container restarts. The guard counts this (`replace_blocked`) and alerts
-  after 10 minutes. It never forces the replacement.
-- A host without working file watching falls back to a timer, which can add up
-  to about ten seconds before a copy is made.
-- If the guard stops (crash loop, parked guard), the gate refuses source reads
-  (within 60 seconds, or at the next call for a memory failure). A stale guard
-  can stay trusted for at most 10 minutes. Memory-only data is lost with the
-  container, never written.
+"On the Claude plan, the Claude CLI does not store chat sessions or file and report contents on
+disk. File and report contents returned by Jarvis's source readers are stored only as source
+references, as on every other model."
 
 ### Do not claim
 
-- Zero retention.
-- Protection from operators, host root, or any code running as the container
-  user. This includes the model's own Bash tool. It can read other users' live
-  chats on the same tenant, as it can today.
-- Coverage of assistant replies, thinking, compaction summaries, inline
-  attachments, ordinary ERP reads, transcripts written before this change, or
-  off-host backups.
-- Files the model writes or sends anywhere.
-- Output the model makes by transforming file data (jq, cut, awk, totals,
-  re-encodings).
-- Protection against a prompt-injected or adversarial model that uses Bash to
-  copy data.
-- Text the model reads off a scanned page image and types again.
-- Short fields (under 39 normalised characters) copied into ERP write tools or
-  any other tool input. They are below the detection bound.
-- That the last one to two seconds of a chat survive an ungraceful kill. That
-  gap is lost history, not a leak.
-- That the process ends sooner than the agent runtime's idle timeout, or that an
-  operator or agent outage keeps reads on. If the fleet agent is down for 10
-  minutes, or its lease lapses after 30 minutes, source reads turn off (fail
-  closed, the same as today).
+- That inline attachments (small JSON, Markdown and TXT files) are minimized. They are user input
+  and remain in the gateway's prompt history, as on every other model.
+- Protection from operators or host root.
+- That a restored chat holds earlier tool results. After a CLI process restarts, Claude gets the
+  earlier messages as text; it must query the source again for data.
+- Coverage of files the model writes or sends anywhere.
 
-### Known limits (accepted by the owner unless noted)
+### Known limits
 
-- About 12.0% of list-shaped results measured on the test corpus (54 of 451)
-  become receipts in saved history. Field-subset list pages below the 39
-  character bound stay as they are. The owner decision on this share is open.
-- A text value with a very large number of delimiters (rare) sends that session
-  to receipt-only saved history. The `leaf_values` counter tracks it.
-- Auto-memory files are in memory only on these tenants. A container restart
-  empties them. While any chat of the tenant is in receipt-only mode, memory
-  writes get the fallback receipt text.
-- A chat that the agent runtime recovers in a forked session after an ungraceful kill, or
-  a chat after `/clear` (any session rotation), keeps receipts only for its
-  saved history from that point. Rotations count as fork-suspect events and can
-  raise the rollout stop rule. Operators lift a false stop by hand.
-- A long indivisible job for one chat can delay saving for other chats of the
-  same tenant. After 60 seconds the gate refuses reads for that tenant.
-- Under memory pressure in the store, older copies become placeholders (small
-  delay on resume). Near-full store refuses `get_file_pages`, then all source
-  tools, until it drains. No process is stopped.
-- Tenants below the memory floor (1536m, provisional) cannot use these reads.
-- The host directory for agent runtime state has mode 0777 (existing, `main.py`). Any
-  host process running as uid 1000 can write a tenant's store. Fix is tracked
-  separately.
-- The static no-follow checker does not cover 42 older functions in `main.py`.
-- Alerts use the `cp-health` channel. After a channel dies, up to 90 minutes of
-  enforcement can run with no working alert path.
-- After a rare loss of worker state, clean notice results can be withheld once.
-- Scanned-PDF page reads (`get_file_pages`) use the same profile as other
-  models (no profile change).
+- Manual compaction (`/compact`) on a Claude plan chat fails fast ("Claude CLI did not confirm
+  that native compaction ran"). The chat continues; the restored history is bounded instead
+  (at most six parts of 9,000 characters, newest first).
+- The placeholder format follows the pinned Claude CLI version. A CLI version change must re-run
+  the restore checks.
 
-### Older transcripts
+### Release order
 
-Transcripts written before the guard is active are not rewritten. The release
-renames the old projects directory (bytes untouched) and the chat still resumes
-with its full history. New content after the flip is redacted. Chats older than
-16.7.0 may hold file contents from before the refusal. An operator can run the
-optional purge runbook per tenant. Transcripts written since 16.7.0 hold no
-source data, because reads were refused.
-
-### Operator requirements
-
-- The fleet agent needs the `CAP_SYS_CHROOT` capability and unrestricted
-  `unshare`. The current systemd root agent has both. A hardened unit that
-  removes either breaks the guard setup. A fleet agent that does not run as root
-  is not supported for this feature.
-- Provision the `cp-health` alert secret (the control-plane consumer that
-  acknowledges each hourly test delivery) before you enable the guard for any
-  tenant. While the channel is unset or degraded, the guard is forced off
-  everywhere and enforcement cannot be turned on.
-- The guard stays off until the operator sets it for a tenant and the fleet
-  default is switched. Turning it off is immediate for the gate (within about 40
-  seconds) and needs no restart.
-- Roll out in cohorts, with deploys to scratch tenants first and a soak of at
-  least 3 days on them before cohort 0 starts.
-- Rollback: guard off, then per-tenant return to the legacy layout (one
-  recreate, no chat reset), then fleet-agent downgrade only after every Claude
-  tenant is back on legacy.
-- Disconnecting the Claude login wipes the memory store with the container. On
-  these tenants the last step is a recreate instead of a restart.
+The fleet release with `--no-session-persistence` and the restore hook must be live on every
+host with a Claude plan tenant before the plugin release that admits source reads on
+`claude-cli`. A plugin of that release on an older fleet would let the CLI save source data to
+disk.
 
 ## Paired rollout
 
