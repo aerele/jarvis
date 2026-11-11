@@ -35,15 +35,31 @@ test("a role-profile key naming billing does not turn the archive error into a b
 // The plugin's gate blocks a turn with a plain sentence that tells the customer what to do. The
 // bubble must show that sentence, not the generic "cause is not clear" copy (#2484).
 const GATE_TEXTS = [
-  ["gate-wrong-site", "This site is not the one registered for this Jarvis account. Contact support if this is wrong.", false],
-  ["gate-unconfirmed", "Jarvis cannot confirm this site right now. Please try again in a minute.", true],
-  ["gate-update-needed", "This site needs a Jarvis update before it can use this assistant. Contact support.", false],
+  [
+    "gate-wrong-site",
+    "This site is not the one registered for this Jarvis account. Contact support if this is wrong.",
+    false,
+  ],
+  [
+    "gate-unconfirmed",
+    "Jarvis cannot confirm this site right now. Please try again in a minute.",
+    true,
+  ],
+  [
+    "gate-update-needed",
+    "This site needs a Jarvis update before it can use this assistant. Contact support.",
+    false,
+  ],
   [
     "gate-site-changed",
     'This site changed since Jarvis last checked it, for example after a restore or a move. A System Manager can open Jarvis and press "Re-verify this site" to reconnect. Contact support if this is wrong.',
     false,
   ],
-  ["gate-background-run", "ERP tools are not available in scheduled background runs.", false],
+  [
+    "gate-background-run",
+    "ERP tools are not available in scheduled background runs.",
+    false,
+  ],
   [
     "gate-subagent",
     "ERP tools are only available in the main conversation. Return your findings to the parent agent instead.",
@@ -63,7 +79,10 @@ test("each gate block text is the bubble message, with Retry only where a retry 
 
 test("the runtime's trailing (blocked by <plugin>) is dropped, whichever plugin names it", () => {
   for (const [code, text] of GATE_TEXTS) {
-    for (const suffix of [" (blocked by jarvis-erp)", " (blocked by some-other-plugin)"]) {
+    for (const suffix of [
+      " (blocked by jarvis-erp)",
+      " (blocked by some-other-plugin)",
+    ]) {
       const info = turnErrorInfo(`${text}${suffix}`);
       assert.equal(info.code, code, suffix);
       assert.equal(info.headline, text);
