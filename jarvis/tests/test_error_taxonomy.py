@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
+from jarvis.chat.directive_filter import NUL_TEXT, REFUSAL_TEXT
 from jarvis.chat.error_taxonomy import (
 	_RULES,
 	SUBSCRIPTION_LABELS,
@@ -35,6 +36,14 @@ class TestErrorTaxonomy(unittest.TestCase):
 		for earlier in ("session-archived", "session-ended"):
 			for later in ("billing", "quota", "rate-limit", "timeout", "permission", "invalid-request"):
 				self.assertLess(codes.index(earlier), codes.index(later), f"{earlier} before {later}")
+
+	def test_directive_refused_has_its_own_rule_after_the_session_rules(self):
+		# F-Q8: the fixed refusal texts get a headline of their own, not the generic internal one.
+		codes = [code for code, _, _ in _RULES]
+		self.assertIn("directive_refused", codes)
+		self.assertGreater(codes.index("directive_refused"), codes.index("session-ended"))
+		for text in (REFUSAL_TEXT, NUL_TEXT):
+			self.assertEqual(headline_for(text), "This message was not sent")
 
 	def test_structured_error(self):
 		self.assertEqual(classify_error_text({"error": {"type": "overloaded_error"}}), "service-unavailable")

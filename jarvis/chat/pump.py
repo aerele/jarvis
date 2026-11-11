@@ -2448,6 +2448,12 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 		send_key=_gateway_key(run_id, dispatch),
 		accept_ms=_dt_to_ms(turn.get("enqueued_at")),
 	)
+	# F-Q8: a payload with no message is never completed from the seed text (that is the
+	# raw typed text, before the directive filter). The turn is already ``dispatching``,
+	# so it ends through the terminal error path, before ``run:start`` and ``send_chat``.
+	if not dispatch["message"]:
+		_end_without_message(ctx, rs)
+		return False
 	ctx.runs[run_id] = rs
 	ctx.peak_occupancy = max(ctx.peak_occupancy, len(ctx.runs))
 
@@ -2499,6 +2505,19 @@ def _dispatch_one(ctx: PumpContext, run_id: str) -> bool:
 		drained_note_ids=dispatch.get("drained_note_ids"),
 	)
 	return True
+
+
+_EMPTY_MESSAGE_ERROR = "The message could not be prepared for sending. Send it again."
+
+
+def _end_without_message(ctx: PumpContext, rs: _RunState) -> None:
+	"""A claimed (``dispatching``) turn whose payload holds no message: ``dispatching ->
+	errored`` with the credit released and ``run:error`` published, by the same path as a
+	definite pre-ack rejection (``_handle_ack_failure``).
+
+	It must NOT go through ``_return_unsent``: that undoes the claim, the turn returns to
+	``ready`` and the next slice dispatches it again, in a loop."""
+	_handle_ack_failure(ctx, rs, AgentUnreachableError(_EMPTY_MESSAGE_ERROR, code="empty-message"))
 
 
 def _return_unsent(
@@ -4876,7 +4895,7 @@ def _load_dispatch(turn: dict) -> dict:
 	"""The prepare->pump handoff contract: prepare (WP-1d) writes the assembled
 	prompt + created session into ``dispatch_payload`` JSON for the pump to
 	``chat.send``. Keys the pump reads: ``session_key`` (required), ``message``
-	(assembled prompt; falls back to the seed message content), ``thinking``,
+	(the assembled, filtered prompt; "" when absent, never the seed text), ``thinking``,
 	``attachments``, ``ack_timeout_s`` (#773; absent on older payloads). Robust to a
 	missing/partial payload."""
 	payload: dict = {}
@@ -4888,11 +4907,9 @@ def _load_dispatch(turn: dict) -> dict:
 				payload = parsed
 		except Exception:
 			payload = {}
+	# F-Q8: no fallback to the seed message. Its content is the raw typed text, from before
+	# the directive filter; ``_dispatch_one`` ends a turn that has no message.
 	message = payload.get("message")
-	if not message and turn.get("run_id"):
-		seed = frappe.db.get_value(TURN, turn["run_id"], "seed_message")
-		if seed:
-			message = frappe.db.get_value(MSG, seed, "content") or ""
 	return {
 		"session_key": payload.get("session_key") or "",
 		"message": message or "",
