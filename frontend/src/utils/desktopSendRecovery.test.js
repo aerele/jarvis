@@ -785,6 +785,9 @@ test("same-ID acceptance refreshes the current transcript and restores live Stop
 	});
 	await h.f.recoverSend(m, true);
 	assert.equal(m.deliveryState, "delivered");
+	// #805: the receipt belongs to the chat on screen, so the note says so
+	// instead of pointing at a link to the same chat.
+	assert.equal(m.deliveryNote, "Delivery confirmed. The result is in this chat.");
 	assert.equal(h.s.currentRunId.value, "R");
 	assert.equal(h.s.currentMsgId.value, "reply");
 	assert.equal(h.s.sending.value, true);
@@ -940,6 +943,16 @@ for (const newerDraft of [false, true])
 		assert.equal(h.s.currentId.value, newerDraft ? "" : "created");
 		assert.equal(h.s.input.value, newerDraft ? "a different task" : "");
 		assert.equal(original.deliveryConversation, "created");
+		// #805: with the link gone, a receipt that stays on the home surface says
+		// where its chat is; an adopted one is on screen.
+		assert.ok(
+			original.deliveryNote.startsWith(
+				newerDraft
+					? "Delivery confirmed. The result is in another chat; open it from Recent chats."
+					: "Delivery confirmed. The result is in this chat."
+			),
+			original.deliveryNote
+		);
 		if (!newerDraft) assert.equal(h.s.convAutoMode.value, 1);
 	});
 for (const ok of [true, false])
