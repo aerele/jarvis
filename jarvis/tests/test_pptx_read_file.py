@@ -18,7 +18,7 @@ CURSOR = r"[0-9]{1,2}:[0-9]{1,6}:[0-9]{1,8}"
 
 
 def plugin_failures(data, args):
-	"""Port of normalizeFileReading checks in jarvis-openclaw-plugin/src/file-reading.ts.
+	"""Port of normalizeFileReading checks in the plugin's src/file-reading.ts.
 
 	Returns the names of failed checks (empty list means the plugin accepts the reply).
 	"""
