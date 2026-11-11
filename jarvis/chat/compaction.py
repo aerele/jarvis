@@ -87,6 +87,26 @@ def classify_notice(text: str) -> str:
 	return "failed"
 
 
+# Claude Code compacts only the messages inside its own session. A resumed no-log
+# claude-cli session holds just placeholder messages (history arrives as hook
+# context), so it answers "Not enough messages to compact." and openclaw reports
+# that it "did not confirm that native compaction ran". Not a failure: the restore
+# hook already bounds the restored history, so there is nothing to compact.
+_CLAUDE_CLI_NOTHING_TO_COMPACT = (
+	"not enough messages to compact",
+	"did not confirm that native compaction ran",
+)
+
+
+def is_claude_cli_nothing_to_compact(row: dict | None, text: str | None) -> bool:
+	"""True only for a claude-cli session row AND the runtime's "nothing to compact"
+	text. Any other runtime, or any other claude-cli error, keeps its own outcome."""
+	from jarvis.chat import usage
+
+	t = (text or "").lower()
+	return usage.is_claude_cli_row(row) and any(m in t for m in _CLAUDE_CLI_NOTHING_TO_COMPACT)
+
+
 def _session_row(session_key: str) -> dict:
 	if not session_key:
 		return {}
@@ -279,6 +299,8 @@ def run_compact(conversation: str, user: str, hint: str = "") -> None:
 			# not make the write below fail with 1020.
 			txn.fresh_snapshot()
 			outcome = classify_notice(res.get("text") or "") if res.get("state") == "final" else "failed"
+			if outcome == "failed" and is_claude_cli_nothing_to_compact(row, res.get("text")):
+				outcome = "skipped"
 			if outcome != "compacted":
 				reason = "runtime_declined" if outcome == "skipped" else "runtime_failed"
 				frappe.logger("jarvis.chat").warning(

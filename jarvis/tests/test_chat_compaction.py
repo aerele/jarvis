@@ -275,6 +275,42 @@ class TestRunCompact(FrappeTestCase):
 		payload = [c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "context:compact_failed"][0]
 		self.assertEqual(payload["reason"], "runtime_failed")
 
+	def _nothing_to_compact_run(self, key, row_extra, text):
+		conv = _mk_conversation(key)
+		sess = MagicMock()
+		sess.list_sessions.return_value = [{"key": key, "totalTokens": 1000, **row_extra}]
+		sess.compact_session.return_value = {"state": "final", "text": text, "run_id": "r"}
+		pub = self._run(conv, sess)
+		return [c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "context:compact_failed"]
+
+	def test_claude_cli_not_enough_messages_is_a_noop(self):
+		got = self._nothing_to_compact_run(
+			"agent:main:c-cli1",
+			{"agentRuntime": {"id": "claude-cli"}},
+			"Claude CLI did not confirm that native compaction ran.",
+		)
+		self.assertEqual(got[0]["reason"], "runtime_declined")
+		got = self._nothing_to_compact_run(
+			"agent:main:c-cli2",
+			{"agentRuntime": {"id": "claude-cli"}},
+			"Not enough messages to compact.",
+		)
+		self.assertEqual(got[0]["reason"], "runtime_declined")
+
+	def test_claude_cli_other_error_stays_failed(self):
+		got = self._nothing_to_compact_run(
+			"agent:main:c-cli3", {"agentRuntime": {"id": "claude-cli"}}, "Compaction failed: rate limited"
+		)
+		self.assertEqual(got[0]["reason"], "runtime_failed")
+
+	def test_other_runtime_same_text_stays_failed(self):
+		got = self._nothing_to_compact_run(
+			"agent:main:c-cli4",
+			{"agentRuntime": {"id": "openclaw"}},
+			"Claude CLI did not confirm that native compaction ran.",
+		)
+		self.assertEqual(got[0]["reason"], "runtime_failed")
+
 	def test_timeout_reason(self):
 		from jarvis.chat.agent_client import AgentUnreachableError
 
