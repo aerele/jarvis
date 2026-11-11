@@ -275,11 +275,22 @@ class TestRunCompact(FrappeTestCase):
 		payload = [c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "context:compact_failed"][0]
 		self.assertEqual(payload["reason"], "runtime_failed")
 
-	def _nothing_to_compact_run(self, key, row_extra, text):
+	def _nothing_to_compact_run(self, key, row_extra, text, state="final", provider=None, empty_row=False):
 		conv = _mk_conversation(key)
+		if provider:
+			frappe.get_doc(
+				{
+					"doctype": MSG,
+					"conversation": conv,
+					"role": "assistant",
+					"seq": 1,
+					"content": "hi",
+					"provider": provider,
+				}
+			).insert(ignore_permissions=True)
 		sess = MagicMock()
-		sess.list_sessions.return_value = [{"key": key, "totalTokens": 1000, **row_extra}]
-		sess.compact_session.return_value = {"state": "final", "text": text, "run_id": "r"}
+		sess.list_sessions.return_value = [] if empty_row else [{"key": key, "totalTokens": 1000, **row_extra}]
+		sess.compact_session.return_value = {"state": state, "text": text, "run_id": "r"}
 		pub = self._run(conv, sess)
 		return [c.args[1] for c in pub.call_args_list if c.args[1]["kind"] == "context:compact_failed"]
 
@@ -296,6 +307,27 @@ class TestRunCompact(FrappeTestCase):
 			"Not enough messages to compact.",
 		)
 		self.assertEqual(got[0]["reason"], "runtime_declined")
+
+	def test_claude_cli_error_state_stays_failed(self):
+		got = self._nothing_to_compact_run(
+			"agent:main:c-cli5",
+			{"agentRuntime": {"id": "claude-cli"}},
+			"Claude CLI did not confirm that native compaction ran.",
+			state="error",
+		)
+		self.assertEqual(got[0]["reason"], "runtime_failed")
+
+	def test_empty_row_claude_conversation_is_detected(self):
+		got = self._nothing_to_compact_run(
+			"agent:main:c-cli6", {}, "Not enough messages to compact.", provider="anthropic", empty_row=True
+		)
+		self.assertEqual(got[0]["reason"], "runtime_declined")
+
+	def test_empty_row_gpt_conversation_is_not_detected(self):
+		got = self._nothing_to_compact_run(
+			"agent:main:c-cli7", {}, "Not enough messages to compact.", provider="openai", empty_row=True
+		)
+		self.assertEqual(got[0]["reason"], "runtime_failed")
 
 	def test_claude_cli_other_error_stays_failed(self):
 		got = self._nothing_to_compact_run(
