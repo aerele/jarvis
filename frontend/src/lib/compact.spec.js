@@ -25,6 +25,10 @@ describe("compactFailureCopy", () => {
 		expect(compactFailureCopy("conversation_busy")).toBe(
 			"A reply is in progress, try again in a moment"
 		);
+		expect(compactFailureCopy("bad_hint")).toBe("The hint cannot start with a slash");
+		expect(compactFailureCopy("directive_refused")).toBe(
+			"Model and runtime changes are not available in chat."
+		);
 		expect(compactFailureCopy("whatever")).toBe("Could not compact this chat");
 	});
 });
