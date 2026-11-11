@@ -458,7 +458,8 @@ def _run_seq_window(run_id: str | None) -> tuple[int, int | None] | None:
 	"""(min_seq, max_seq) of the run's slice of the gateway transcript, or None when it
 	cannot be bounded. Same fence turn recovery uses: ``agent_seq_watermark`` is the
 	transcript seq captured before the turn's chat.send, and the next turn's watermark
-	closes the window. A zero watermark means no fence, so no guess."""
+	closes the window. A zero watermark is the empty transcript on a chat's first turn;
+	on any later turn it means "not stamped", so no guess."""
 	if not run_id:
 		return None
 	from jarvis.chat.seq_watermark import wm_term
@@ -474,9 +475,18 @@ def _run_seq_window(run_id: str | None) -> tuple[int, int | None] | None:
 		.where(m.name == turn.assistant_message)
 		.run(as_dict=True)
 	)
-	if not rows or not rows[0]["wm"]:
+	if not rows:
 		return None
-	return int(rows[0]["wm"]), _next_turn_watermark(turn.conversation, rows[0]["seq"])
+	wm, seq = int(rows[0]["wm"] or 0), rows[0]["seq"]
+	if not wm and _has_earlier_reply(turn.conversation, seq):
+		return None
+	return wm, _next_turn_watermark(turn.conversation, seq)
+
+
+def _has_earlier_reply(conversation: str, seq: int) -> bool:
+	return bool(
+		frappe.db.exists(CHAT_MESSAGE, {"conversation": conversation, "role": "assistant", "seq": ["<", seq]})
+	)
 
 
 def sum_run_cache(messages: list, min_seq: int, max_seq: int | None = None) -> dict | None:
