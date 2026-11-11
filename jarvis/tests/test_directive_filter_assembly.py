@@ -163,10 +163,13 @@ class TestAddedContent(_PersonalCase):
 		self.assertIsNone(df.MODEL_TOKEN.search(out))
 
 	def test_a_directive_in_the_bracket_clauses_is_neutralized(self):
+		from jarvis.chat import customizations_clause
+
 		with patch.object(
-			turn_handler, "_prepend_connected_apps", lambda m, c, u: "apps: /think:" + HOSTILE + "\n" + m
+			customizations_clause, "customizations_clause", lambda: "; site: /think:" + HOSTILE
 		):
 			out = self.assemble("hello").user_message
+		self.assertIn(SLASH + "model", out)
 		self.assertIsNone(df.MODEL_TOKEN.search(out))
 
 	def test_typed_text_and_added_content_that_join_into_a_token(self):
