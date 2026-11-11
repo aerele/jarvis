@@ -1,13 +1,13 @@
 <template>
-<<<<<<< HEAD
+	<<<<<<< HEAD
 	<!-- The welcome screen's starter cards and the capability catalog, as two siblings
 	     (no wrapper), so the normal layout and the holiday stage layout put them in the
 	     same place. -->
-=======
+	=======
 	<!-- The welcome screen's starter cards, the Payment Calendar link (only when the boot flag
 	     allows it) and the capability catalog, as three siblings (no wrapper), so the normal
 	     layout and the holiday stage layout put them in the same place. -->
->>>>>>> 5d98189 (fix(payment-calendar): hide the calendar where it cannot work)
+	>>>>>>> 5d98189 (fix(payment-calendar): hide the calendar where it cannot work)
 	<div
 		class="jv-welcome-grid"
 		style="
@@ -66,8 +66,7 @@
 			</div>
 		</button>
 	</div>
-<<<<<<< HEAD
-=======
+	<<<<<<< HEAD =======
 	<router-link
 		v-if="canViewCalendar"
 		to="/dashboards/payment-calendar"
@@ -76,7 +75,7 @@
 		<span>Payment Calendar · plan supplier dues and cash</span>
 		<span aria-hidden="true">→</span>
 	</router-link>
->>>>>>> 5d98189 (fix(payment-calendar): hide the calendar where it cannot work)
+	>>>>>>> 5d98189 (fix(payment-calendar): hide the calendar where it cannot work)
 	<CapabilityCatalog @select="emit('select', $event)" />
 </template>
 
