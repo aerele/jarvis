@@ -90,7 +90,7 @@ def classify_notice(text: str) -> str:
 
 # Claude Code compacts only the messages inside its own session. A resumed no-log
 # claude-cli session holds just placeholder messages (history arrives as hook
-# context), so it answers "Not enough messages to compact." and openclaw reports
+# context), so it answers "Not enough messages to compact." and the gateway reports
 # that it "did not confirm that native compaction ran". Not a failure: the restore
 # hook already bounds the restored history, so there is nothing to compact.
 _CLAUDE_CLI_NOTHING_TO_COMPACT = (
