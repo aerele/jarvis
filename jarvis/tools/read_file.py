@@ -113,6 +113,8 @@ def read_file(
 		"size_bytes": len(content),
 		"read_capability": "file-cursor-v1",
 	}
+	if ext == "pptx":
+		return {**base, **_read_pptx(fdoc, content, max_chars, read_mode, cursor, version)}
 	if (
 		not preview
 		and read_mode == "file-cursor-v1"
@@ -140,8 +142,58 @@ def read_file(
 	if ext in _TEXT_EXT or _looks_text(content):
 		return {**base, **_read_text(content, max_chars)}
 	if ext == "xls":
-		raise InvalidArgumentError("legacy .xls isn't supported; re-save as .xlsx and retry")
+		raise InvalidArgumentError(
+			"Legacy .xls files can't be read. Save the file as .xlsx and attach it again."
+		)
 	return {**base, "kind": "binary", "note": f"unsupported file type {ext!r}; cannot extract text"}
+
+
+def _read_pptx(fdoc, content: bytes, max_chars: int, read_mode: str, cursor, version) -> dict:
+	"""Slide text and notes. Windows over the extracted text; cursor is `0:1:<char offset>`."""
+	import hashlib
+	import re
+
+	from jarvis.tools._pptx_text import PptxError, extract_pptx
+
+	offset = 0
+	digest = hashlib.sha256(b"pptx-v1\0" + content).hexdigest()
+	if cursor is not None:
+		match = re.fullmatch(r"0:1:(\d{1,9})", cursor)
+		if not match or version != digest:
+			raise InvalidArgumentError("File changed or cursor invalid. Restart without cursor/version.")
+		offset = int(match.group(1))
+	try:
+		data = extract_pptx(content)
+	except PptxError as e:
+		raise InvalidArgumentError(str(e)) from None
+	text = data["text"]
+	window = text[offset : offset + max_chars]
+	end = offset + len(window)
+	more = end < len(text)
+	out = {
+		"kind": "document",
+		"format": "pptx",
+		"text": window,
+		"slide_count": data["slide_count"],
+		"truncated": more or data["truncated"],
+		"note": "PowerPoint slide text, tables and speaker notes only; images, charts, SmartArt and comments are not read.",
+	}
+	if read_mode == "file-cursor-v1":
+		next_cursor = f"0:1:{end}" if more else None
+		out.update(
+			{
+				"read_contract": "file-cursor-v1",
+				"version": digest,
+				"cursor": cursor or "0:1:0",
+				"end_of_file": not more,
+				"status": "window" if (more or offset) else "complete",
+				"coverage": {"complete": not more and not offset and not data["truncated"]},
+				"next_read": (
+					{"file_url": fdoc.file_url, "cursor": next_cursor, "version": digest} if more else None
+				),
+			}
+		)
+	return out
 
 
 def _resolve_file(file_url: str | None, filename: str | None):
