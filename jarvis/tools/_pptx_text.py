@@ -6,10 +6,10 @@ output characters. XML with a DTD or entities is refused (entity-expansion bombs
 """
 
 import posixpath
-import re
 import zipfile
 from io import BytesIO
 from xml.etree import ElementTree as ET
+from xml.parsers import expat
 
 A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 P = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
@@ -84,12 +84,33 @@ def _part(zf, budget, path):
 	return data
 
 
+def _refuse(*_args):
+	raise PptxError("This .pptx contains unsafe XML and was not read.")
+
+
+def _qname(name):
+	return "{" + name if "}" in name else name
+
+
 def _xml(data, what):
-	if re.search(rb"<!(DOCTYPE|ENTITY)", data, re.I):
-		raise PptxError("This .pptx contains unsafe XML and was not read.")
+	"""Parse with expat directly so DTDs and entities are refused whatever the encoding."""
+	builder = ET.TreeBuilder()
+	parser = expat.ParserCreate(namespace_separator="}")
+	parser.buffer_text = True
+	parser.StartDoctypeDeclHandler = _refuse
+	parser.EntityDeclHandler = _refuse
+	parser.UnparsedEntityDeclHandler = _refuse
+	parser.ExternalEntityRefHandler = _refuse
+	parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+	parser.StartElementHandler = lambda n, attrs: builder.start(
+		_qname(n), {_qname(k): v for k, v in attrs.items()}
+	)
+	parser.EndElementHandler = lambda n: builder.end(_qname(n))
+	parser.CharacterDataHandler = builder.data
 	try:
-		return ET.fromstring(data)
-	except ET.ParseError:
+		parser.Parse(data, True)
+		return builder.close()
+	except expat.ExpatError:
 		raise PptxError(f"This .pptx is damaged ({what} could not be parsed).") from None
 
 
