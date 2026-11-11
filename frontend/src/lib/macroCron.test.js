@@ -12,6 +12,8 @@ import {
 	schedulePreview,
 	scheduleSentence,
 	shortestGapMinutes,
+	withCronLine,
+	MAX_CRON_LINES,
 } from "./macroCron.js";
 
 // Thursday 22 Oct 2026, 10:00 on the site's clock.
@@ -320,4 +322,19 @@ test("list labels", () => {
 	);
 	assert.equal(cronListLabel({ schedule_frequency: "daily", schedule_cron: "" }), "");
 	assert.equal(cronListLabel({ schedule_frequency: "once", schedule_cron: "0 9 * * *" }), "");
+});
+
+// #801: an example chip adds its schedule to the cron box, it does not replace it.
+test("withCronLine adds a line after the ones already written", () => {
+	assert.equal(withCronLine("", "0 9 * * 1-5"), "0 9 * * 1-5");
+	assert.equal(withCronLine("0 9 * * 1-5", "30 17 * * 5"), "0 9 * * 1-5\n30 17 * * 5");
+	// the box is normalised the way the save stores it
+	assert.equal(withCronLine("  0  9 * * 1-5 \n\n", "30 17 * * 5"), "0 9 * * 1-5\n30 17 * * 5");
+});
+
+test("withCronLine leaves the box alone for a line already there or a full box", () => {
+	assert.equal(withCronLine("0 9 * * 1-5", "0  9 * * 1-5"), "0 9 * * 1-5");
+	const full = Array.from({ length: MAX_CRON_LINES }, (_, i) => `${i} 9 * * *`).join("\n");
+	assert.equal(withCronLine(full, "30 17 * * 5"), full);
+	assert.equal(withCronLine("0 9 * * *", ""), "0 9 * * *");
 });
