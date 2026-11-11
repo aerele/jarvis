@@ -145,10 +145,37 @@ class TestPptxText(unittest.TestCase):
 		finally:
 			pptx_text.MAX_PART_BYTES = old
 
+	def _refused(self, payload):
+		with self.assertRaises(pptx_text.PptxError) as ctx:
+			pptx_text.extract_pptx(build({"slide1.xml": (payload, None)}))
+		self.assertIn("unsafe XML", str(ctx.exception))
+
 	def test_entities_refused(self):
-		bomb = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]>' + _slide(_shape("&a;"))
-		with self.assertRaises(pptx_text.PptxError):
-			pptx_text.extract_pptx(build({"slide1.xml": (bomb, None)}))
+		bomb = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa"><!ENTITY b "&a;&a;&a;&a;">]>' + _slide(
+			_shape("&b;")
+		)
+		self._refused(bomb)
+
+	def test_utf16_entities_refused(self):
+		bomb = '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE x [<!ENTITY a "aaaa">]>' + _slide(
+			_shape("&a;")
+		)
+		self._refused(b"\xff\xfe" + bomb.encode("utf-16-le"))
+
+	def test_external_entity_refused(self):
+		xml = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a SYSTEM "file:///etc/passwd">]>' + _slide(
+			_shape("&a;")
+		)
+		self._refused(xml)
+
+	def test_plain_doctype_refused(self):
+		self._refused('<?xml version="1.0"?><!DOCTYPE x>' + _slide(_shape("a")))
+
+	def test_normal_utf16_part_parses(self):
+		xml = _slide(_shape("Привет"))
+		data = b"\xff\xfe" + xml.encode("utf-16-le")
+		out = pptx_text.extract_pptx(build({"slide1.xml": (data, None)}))
+		self.assertIn("Привет", out["text"])
 
 
 if __name__ == "__main__":
