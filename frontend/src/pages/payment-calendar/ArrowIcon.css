@@ -1,0 +1,17 @@
+/* The template's arrow: a stroked icon, not a text glyph. 16 px in buttons, 14 px in the
+   "view all" rows of the aside panels. */
+.pcal-arrow {
+	width: 16px;
+	height: 16px;
+	flex-shrink: 0;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.6;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+.aside-more .pcal-arrow,
+.ledger-more .pcal-arrow {
+	width: 14px;
+	height: 14px;
+}
