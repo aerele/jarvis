@@ -11,6 +11,7 @@ from frappe.utils import add_days
 
 from jarvis.payment_calendar import access, api, banks, read_log, store
 from jarvis.payment_calendar.compatibility import has_native_field_masks
+from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.projection import project_snapshot
 from jarvis.payment_calendar.scope import normalize_scope
 from jarvis.payment_calendar.settings import get_settings, update_safety_floor
@@ -967,12 +968,13 @@ class TestV15Backport(ReadPathCase):
 		self.assertTrue(sent)
 		self.assertIn(permissions.row_filter_columns(columns), sent)
 
-	def test_a_sales_person_permission_at_build_makes_every_read_restricted(self):
-		# The permission exists when the fingerprint is taken, so only the v15 obligation gate can refuse.
+	def sales_person_permission(self):
+		"""Give the test user a Sales Person user permission; the next policy read and fingerprint see it."""
 		frappe.set_user("Administrator")
 		person = self.fx.insert(
 			"Sales Person", "SalesPerson", sales_person_name="Scoped sales person", is_group=0, lft=1, rgt=2
 		)
+		# Saving the row clears the cached `user_permissions` of the user (UserPermission.on_update).
 		frappe.get_doc(
 			{
 				"doctype": "User Permission",
@@ -983,10 +985,22 @@ class TestV15Backport(ReadPathCase):
 			}
 		).insert(ignore_permissions=True)
 		frappe.set_user(self.user)
-		sid = self.publish()
+
+	def test_a_sales_person_permission_makes_every_read_restricted(self):
+		# The snapshot is built while no permission exists: the v15 build gate cannot refuse it.
+		result = self.build()
+		self.sales_person_permission()
+		# The fingerprint is taken with the permission, so only the v15 obligation gate on the read can refuse.
+		sid = self.publish(result)
 		for name, read in self.all_reads().items():
 			with self.subTest(read=name):
 				response = read(sid)
 				self.assertFalse(response["ok"], response)
 				self.assertEqual(response["code"], "restricted_obligations")
 				self.assertNotIn("data", response)
+
+	def test_a_sales_person_permission_refuses_the_receivable_source_at_build(self):
+		self.sales_person_permission()
+		with self.assertRaises(CalendarSourceUnavailable) as error:
+			self.build()
+		self.assertEqual(error.exception.code, "restricted_obligations")
