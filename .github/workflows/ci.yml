@@ -540,6 +540,11 @@ jobs:
           bench get-app --branch version-15 --skip-assets https://github.com/resilient-tech/india-compliance.git
           git -C apps/india_compliance fetch upstream eb7860a9250f76f7aeeb2e4a35b8135875bfd2e9
           git -C apps/india_compliance checkout --detach eb7860a9250f76f7aeeb2e4a35b8135875bfd2e9
+          # ERPNext v15.125.0 refuses a Supplier in a group Supplier Group, and the pin's
+          # before_tests defaults to "All Supplier Groups". Add the upstream fix (test setup
+          # only, india-compliance #5053) until a version-15 release includes it.
+          git -C apps/india_compliance fetch --depth 2 upstream afcd220ac14aeb5f3db781b916402cbc9e66237c
+          git -C apps/india_compliance cherry-pick --no-commit afcd220ac14aeb5f3db781b916402cbc9e66237c
           ./env/bin/pip install -e apps/india_compliance
           bench new-site jarvis-lcv-ci.test \
             --db-host 127.0.0.1 \
