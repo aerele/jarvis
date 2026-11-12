@@ -1,0 +1,468 @@
+/* Filter bar: company menu, account chips and picker, minimum cash balance (template L131-355,
+   L111-114). Final cascade of the template, with container queries on .pcal-layout in place of
+   its @media widths. Everything is scoped to .pcal-root so the template's short class names
+   (.menu, .option, .btn) cannot leak into the app. */
+.pcal-root .filters {
+	position: relative;
+	display: grid;
+	grid-template-columns: minmax(230px, 1.05fr) minmax(300px, 1.35fr) minmax(205px, 0.7fr);
+	margin-bottom: 16px;
+	border: 1px solid var(--pc-border);
+	border-radius: var(--pc-radius-card);
+	background: var(--pc-card);
+}
+.pcal-root .filter {
+	position: relative;
+	min-width: 0;
+	padding: 12px 16px;
+}
+.pcal-root .filter + .filter {
+	border-left: 1px solid var(--pc-border-soft);
+}
+.pcal-root .field-label {
+	display: block;
+	margin-bottom: 4px;
+	font-size: 12px;
+	font-weight: 550;
+	color: var(--pc-muted);
+}
+.pcal-root .filter-button {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	width: 100%;
+	min-height: 23px;
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--pc-text);
+	font-size: 14px;
+	font-weight: 550;
+	text-align: left;
+	cursor: pointer;
+}
+.pcal-root .filter-button:disabled {
+	cursor: default;
+	opacity: 0.6;
+}
+.pcal-root .filter-button .value {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.pcal-root .filter-button svg {
+	flex-shrink: 0;
+	width: 15px;
+	height: 15px;
+	fill: none;
+	stroke: var(--pc-muted);
+	stroke-width: 1.8;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+/* Menus: the company list and the account picker hang under their filter cell. */
+.pcal-root .menu {
+	position: absolute;
+	top: calc(100% - 2px);
+	left: 9px;
+	right: 9px;
+	z-index: 15;
+	padding: 6px;
+	border: 1px solid var(--pc-border);
+	border-radius: var(--pc-radius-card);
+	background: var(--pc-card);
+	color: var(--pc-text);
+	box-shadow: var(--pc-shadow-menu);
+}
+.pcal-root .menu input[type="search"] {
+	width: 100%;
+	margin-bottom: 5px;
+	padding: 9px 10px;
+	border: 1px solid var(--pc-border-strong);
+	border-radius: var(--pc-radius-chip);
+	background: var(--pc-card);
+	color: var(--pc-text);
+	font-size: 13px;
+}
+/* The template's dark inputs sit one step above the panel. */
+[data-theme="dark"] .pcal-root .menu input[type="search"] {
+	background: var(--pc-surface-2);
+}
+.pcal-root .option {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	width: 100%;
+	padding: 10px 9px;
+	border: 0;
+	border-radius: 5px;
+	background: none;
+	color: var(--pc-text);
+	font-size: 13px;
+	text-align: left;
+	cursor: pointer;
+}
+.pcal-root .option:hover,
+.pcal-root .option.active {
+	background: var(--pc-hover);
+}
+.pcal-root .option .check {
+	margin-left: auto;
+	color: var(--pc-positive);
+}
+.pcal-root .menu .schedule-empty {
+	margin: 0;
+	padding: 12px 0;
+	font-size: 12px;
+	line-height: 1.7;
+	color: var(--pc-muted);
+}
+.pcal-root .menu-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 5px;
+	padding: 8px 2px 2px;
+	border-top: 1px solid var(--pc-border-soft);
+}
+.pcal-root .menu-actions .btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 36px;
+	padding: 7px 12px;
+	border: 1px solid var(--pc-border-strong);
+	border-radius: var(--pc-radius-button);
+	background: var(--pc-card);
+	color: var(--pc-text);
+	font-size: 13px;
+	font-weight: 550;
+	cursor: pointer;
+}
+.pcal-root .menu-actions .btn:hover {
+	background: var(--pc-surface-2);
+}
+.pcal-root .menu-actions .btn.primary {
+	border-color: var(--pc-primary);
+	background: var(--pc-primary);
+	color: var(--pc-primary-fg);
+}
+.pcal-root .menu-actions .btn.primary:hover {
+	background: var(--pc-primary-hover);
+}
+.pcal-root .text-btn {
+	padding: 2px;
+	border: 0;
+	background: none;
+	color: var(--pc-link);
+	font-size: 12px;
+	font-weight: 550;
+	cursor: pointer;
+}
+.pcal-root .text-btn:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+
+/* Accounts */
+.pcal-root .account-summary {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 7px;
+}
+.pcal-root .account-chips {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 5px;
+}
+.pcal-root .account-chip {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-height: 29px;
+	padding: 5px 7px;
+	border: 1px solid var(--pc-border-strong);
+	border-radius: var(--pc-radius-chip);
+	background: var(--pc-head);
+	color: var(--pc-text-2);
+	font-size: 11px;
+	white-space: nowrap;
+	cursor: pointer;
+}
+.pcal-root .account-chip.active {
+	border-color: var(--pc-positive-bd);
+	background: var(--pc-positive-bg);
+	color: var(--pc-positive);
+}
+.pcal-root .account-chip > span {
+	font-size: 13px;
+	color: var(--pc-muted);
+}
+.pcal-root .account-overflow {
+	background: var(--pc-surface-2);
+	color: var(--pc-text-2);
+}
+.pcal-root .no-accounts {
+	font-size: 12px;
+	color: var(--pc-muted);
+}
+.pcal-root .account-manage {
+	padding: 6px 8px;
+	border: 1px solid var(--pc-border-strong);
+	border-radius: var(--pc-radius-chip);
+	background: var(--pc-card);
+	color: var(--pc-link);
+	font-size: 11px;
+	white-space: nowrap;
+	cursor: pointer;
+}
+.pcal-root .account-manage:disabled {
+	cursor: default;
+	opacity: 0.5;
+}
+.pcal-root .account-picker {
+	max-height: 580px;
+	padding: 10px;
+	overflow: auto;
+}
+.pcal-root .account-picker-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin: 2px 2px 10px;
+	font-size: 12px;
+}
+.pcal-root .account-picker-head > span {
+	font-size: var(--pc-fs-micro);
+	color: var(--pc-muted);
+}
+.pcal-root .account-picker input[type="search"] {
+	margin-bottom: 8px;
+}
+.pcal-root .account-picker-tools {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 0 2px 7px;
+}
+.pcal-root .account-picker-tools > span {
+	font-size: var(--pc-fs-micro);
+	color: var(--pc-muted);
+}
+.pcal-root .account-picker-tools > div {
+	display: flex;
+	gap: 12px;
+}
+.pcal-root .account-picker-tools .text-btn {
+	font-size: var(--pc-fs-micro);
+}
+.pcal-root .account-limit-note {
+	margin: 0;
+	padding: 0 2px 7px;
+	font-size: var(--pc-fs-micro);
+	color: var(--pc-caution);
+}
+.pcal-root .account-options {
+	max-height: 270px;
+	overflow: auto;
+	border-top: 1px solid var(--pc-border-soft);
+}
+.pcal-root .account-option {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	min-height: 54px;
+	padding: 10px 8px;
+	border-bottom: 1px solid var(--pc-border-soft);
+	font-size: 13px;
+	cursor: pointer;
+}
+/* @tailwindcss/forms turns every checkbox into a white box (appearance none, white fill, a
+   background-image tick). Hand the native control back, so dark mode draws a dark one. */
+.pcal-root .account-option input[type="checkbox"] {
+	width: 16px;
+	height: 16px;
+	appearance: auto;
+	padding: revert;
+	border: revert;
+	border-radius: revert;
+	background-color: revert;
+	background-image: none;
+	box-shadow: none;
+	accent-color: var(--pc-primary);
+}
+[data-theme="dark"] .pcal-root .account-option input[type="checkbox"] {
+	color-scheme: dark;
+	accent-color: var(--pc-link);
+}
+.pcal-root .account-option strong {
+	display: block;
+	font-size: 12px;
+	font-weight: 550;
+}
+.pcal-root .account-option small {
+	display: block;
+	font-size: var(--pc-fs-micro);
+	color: var(--pc-muted);
+}
+.pcal-root .account-option:has(input:disabled) {
+	opacity: 0.5;
+}
+
+/* Minimum cash balance */
+.pcal-root .currency-field {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	max-width: 230px;
+	font-size: 14px;
+	color: var(--pc-text-2);
+}
+.pcal-root .currency-field input {
+	width: 100%;
+	min-width: 70px;
+	max-width: 135px;
+	padding: 5px 8px;
+	border: 1px solid var(--pc-border-strong);
+	border-radius: var(--pc-radius-input);
+	background: var(--pc-card);
+	color: var(--pc-text);
+	font-size: 14px;
+	font-weight: 600;
+}
+.pcal-root .currency-field input:disabled {
+	opacity: 0.6;
+}
+.pcal-root .floor-save {
+	padding: 6px 9px;
+	border: 0;
+	border-radius: var(--pc-radius-input);
+	background: var(--pc-positive-bg);
+	color: var(--pc-positive);
+	font-size: 12px;
+	cursor: pointer;
+}
+.pcal-root .floor-save[hidden] {
+	display: none;
+}
+.pcal-root .floor-filter small {
+	display: block;
+	margin-top: 3px;
+	font-size: var(--pc-fs-micro);
+	color: var(--pc-muted);
+}
+.pcal-root #floor-error {
+	display: block;
+	margin-top: 3px;
+	font-size: 11px;
+	color: var(--pc-negative);
+}
+.pcal-root #floor-error:empty {
+	display: none;
+}
+
+@container (min-width: 851px) {
+	.pcal-root .filters {
+		margin-bottom: 13px;
+	}
+}
+@container (max-width: 1200px) {
+	.pcal-root .filters {
+		grid-template-columns: minmax(210px, 1fr) minmax(290px, 1.3fr) 190px;
+	}
+	.pcal-root .filter {
+		padding: 10px 12px;
+	}
+}
+@container (max-width: 850px) {
+	.pcal-root .filters {
+		grid-template-columns: 1fr 1fr;
+	}
+	.pcal-root .floor-filter {
+		grid-column: 1 / -1;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 15px;
+		padding: 10px 16px;
+		border-left: 0;
+		border-top: 1px solid var(--pc-border-soft);
+	}
+	.pcal-root .floor-filter .field-label {
+		margin: 0;
+	}
+	.pcal-root .floor-filter #floor-help {
+		margin-right: auto;
+	}
+	.pcal-root .floor-filter #floor-error {
+		max-width: 200px;
+	}
+	.pcal-root .account-options {
+		max-height: 250px;
+	}
+}
+@container (max-width: 540px) {
+	.pcal-root .filters {
+		grid-template-columns: minmax(0, 1fr);
+		margin-bottom: 12px;
+	}
+	.pcal-root .filter {
+		padding: 12px 14px;
+	}
+	.pcal-root .filter + .filter {
+		border-left: 0;
+		border-top: 1px solid var(--pc-border-soft);
+	}
+	.pcal-root .filter-button {
+		font-size: 13px;
+	}
+	.pcal-root .accounts-filter .field-label {
+		margin-bottom: 7px;
+	}
+	.pcal-root .floor-filter {
+		display: block;
+		grid-column: auto;
+		padding: 11px 14px;
+	}
+	.pcal-root .floor-filter .field-label {
+		margin-bottom: 5px;
+	}
+	.pcal-root .floor-filter #floor-help {
+		margin-top: 5px;
+	}
+	.pcal-root .floor-filter #floor-error {
+		max-width: none;
+	}
+	.pcal-root .currency-field {
+		max-width: none;
+	}
+	.pcal-root .currency-field input {
+		max-width: 145px;
+	}
+	.pcal-root .account-chip {
+		min-height: 31px;
+		padding: 5px 6px;
+	}
+	.pcal-root .account-summary {
+		gap: 6px;
+	}
+	/* The picker spans the full width of the accounts filter on a phone (AC3). */
+	.pcal-root .account-picker {
+		left: 0;
+		right: 0;
+		max-height: 530px;
+	}
+	.pcal-root .account-picker-tools {
+		flex-wrap: wrap;
+		align-items: flex-start;
+	}
+	.pcal-root .account-options {
+		max-height: 240px;
+	}
+}
