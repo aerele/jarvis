@@ -67,7 +67,7 @@ class TestLCVLegacy(LandedCostFixtures):
 	def test_update_cannot_erase_legacy_source_while_costs_remain(self):
 		values = self.values()
 		values["vendor_invoices"] = []
-		saved = create_doc("Landed Cost Voucher", values)
+		saved = create_doc("Landed Cost Voucher", values, fields=["posting_date"])
 		with patch.object(_lcv_legacy, "source_names", side_effect=[{self.invoice.name}, set()]):
 			with self.assertRaises(LCVSourceTaxNeedsInput):
 				update_doc("Landed Cost Voucher", saved["name"], {"posting_date": saved["posting_date"]})
