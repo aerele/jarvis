@@ -4,6 +4,7 @@
 			><template #left-header><Breadcrumbs :items="breadcrumbs" /></template
 		></LayoutHeader>
 		<main class="pcal-main" aria-labelledby="pcal-title">
+<<<<<<< HEAD
 			<div class="pcal-title-row">
 				<div>
 					<p class="pcal-eyebrow">CASH PLANNING</p>
@@ -52,289 +53,399 @@
 								: "Select accounts"
 						}}</span
 						><FeatherIcon name="chevron-down" class="size-4" />
+=======
+			<!-- The page padding is on .pcal-main; .pcal-layout is unpadded, so its container
+			     width equals the template's content width. -->
+			<div class="pcal-layout">
+				<!-- Above the heading row, so the Refresh button beside the title does not move. A plain
+				     button: the page's own focus ring (.pcal-root button:focus-visible) is its only ring. -->
+				<div v-if="chatConv" class="pcal-back-row">
+					<button type="button" class="pcal-text-button pcal-back" @click="backToChat">
+						<FeatherIcon name="arrow-left" class="size-4" aria-hidden="true" />{{
+							backLabel
+						}}
+>>>>>>> 28663c0 (fix(payment-calendar): rebuild the page to match the design template (#821))
 					</button>
 				</div>
-				<div class="pcal-field minimum-field">
-					<span>Minimum cash balance</span>
-					<div class="minimum-value">
-						<strong>{{ configuredFloor }}</strong
-						><button
-							v-if="model.caps?.can_configure"
-							class="pcal-text-button"
-							@click="openFloor"
+				<div class="pcal-page-heading">
+					<h1 id="pcal-title" tabindex="-1">Payment Calendar</h1>
+					<div class="pcal-heading-tools">
+						<button
+							id="theme-toggle"
+							type="button"
+							class="pcal-btn pcal-theme-toggle"
+							:aria-label="themeLabel"
+							:title="themeLabel"
+							:aria-pressed="String(dark)"
+							@click="toggleTheme()"
 						>
-							{{ model.caps.settings?.configured ? "Edit" : "Set minimum" }}
+							<svg
+								viewBox="0 0 24 24"
+								:data-icon="dark ? 'sun' : 'moon'"
+								aria-hidden="true"
+							>
+								<template v-if="dark">
+									<circle cx="12" cy="12" r="4" />
+									<path
+										d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"
+									/>
+								</template>
+								<path
+									v-else
+									d="M20.6 13A8.5 8.5 0 0 1 11 3.4 8.5 8.5 0 1 0 20.6 13Z"
+								/>
+							</svg>
+						</button>
+						<span class="pcal-updated"
+							><i></i
+							><span v-if="model.snapshot" class="pcal-as-of"
+								>As of
+								{{ snapshotStamp(model.snapshot.generated_at, timezone()) }}</span
+							><span v-if="updateNote" role="status">{{ updateNote }}</span
+							><span v-if="!model.snapshot">{{
+								model.refreshIssue
+									? "Waiting for fresh balances…"
+									: "Loading current balances…"
+							}}</span></span
+						>
+						<button
+							id="refresh-button"
+							type="button"
+							class="pcal-btn"
+							:disabled="!model.company || busy || model.refreshing"
+							@click="model.refresh({ background: true })"
+						>
+							<svg viewBox="0 0 24 24" aria-hidden="true">
+								<path d="M20 7v5h-5M4 17v-5h5" />
+								<path d="M6.1 6.5A8 8 0 0 1 20 12M4 12a8 8 0 0 0 13.9 5.5" /></svg
+							><span>{{ model.refreshing ? "Refreshing…" : "Refresh" }}</span>
 						</button>
 					</div>
 				</div>
-			</section>
-			<p v-if="model.preferenceError" class="pcal-inline-error" role="status">
-				Your selection could not be saved.
-				<button class="pcal-text-button" @click="model.saveSelection()">
-					Retry saving
-				</button>
-			</p>
-			<p v-if="model.notice" class="pcal-notice" role="status">{{ model.notice }}</p>
-			<template v-if="viewSnapshot">
-				<div class="pcal-asof">
-					<span v-if="model.snapshot"
-						><i class="snapshot-dot"></i>As of
-						{{ snapshotTime(model.snapshot.generated_at, timezone()) }} ({{
-							timezone() || "UTC"
-						}})</span
-					><span v-else>{{
-						model.refreshIssue
-							? "Waiting for fresh balances…"
-							: "Loading current balances…"
-					}}</span
-					><span role="status"
-						>{{ viewSnapshot.currency }} ·
-						{{
-							model.refreshIssue
-								? "Update paused"
-								: model.refreshing
-								? "Refreshing data…"
-								: "Updates automatically while this page is visible"
-						}}</span
-					>
-				</div>
-				<div
-					v-if="model.snapshot && !model.snapshot.projection.forecast_available"
-					class="pcal-warning"
-					role="status"
-				>
-					<strong>Cash forecast unavailable</strong>
-					<p v-for="reason in model.snapshot.projection.scope_reasons" :key="reason">
-						{{ explain(reason) }}
-					</p>
-					<p v-if="model.snapshot.bank_code">{{ explain(model.snapshot.bank_code) }}</p>
-				</div>
-				<p v-if="!model.accounts.length" class="pcal-notice">
-					Choose bank and cash accounts to include book cash in the forecast.
-				</p>
-				<CalendarKpis
+				<CalendarHeadlines
+					v-if="viewSnapshot"
 					:snapshot="viewSnapshot"
-					:loading="model.refreshing || !!model.refreshIssue"
-					:day="model.day"
-					:selected="model.selectedDate"
+					:month="model.month"
+					@jump="jumpToTrough"
+					@view-totals="viewTotals"
+					@obligation="showObligation"
 				/>
-				<p class="pcal-assumptions">
-					Customer collections assume on-time payment. Overdue and undated supplier dues
-					are charged once today, in addition to today's scheduled dues.
+				<CalendarFilterBar
+					:companies="model.companies"
+					:company="model.company"
+					:caps="model.caps"
+					:accounts="model.accounts"
+					:company-disabled="model.phase === 'loading'"
+					:floor-saving="model.floorSaving"
+					:floor-error="model.floorError"
+					:save-floor="saveFloor"
+					@choose-company="chooseCompany"
+					@set-accounts="model.setAccounts"
+				/>
+				<p v-if="model.preferenceError" class="pcal-inline-error" role="status">
+					Your selection could not be saved.
+					<button class="pcal-text-button" @click="model.saveSelection()">
+						Retry saving
+					</button>
 				</p>
-				<div class="pcal-section-bar">
-					<div>
-						<h2>Your payment schedule</h2>
-						<p>Click any date to update the figures and details below.</p>
-					</div>
-					<div class="pcal-segment" role="group" aria-label="Calendar display">
-						<button :aria-pressed="mode === 'month'" @click="mode = 'month'">
-							Month</button
-						><button :aria-pressed="mode === 'list'" @click="mode = 'list'">
-							List
-						</button>
-					</div>
-				</div>
-				<div class="pcal-calendar-layout">
-					<CalendarGrid
+				<p v-if="model.notice" class="pcal-notice" role="status">{{ model.notice }}</p>
+				<template v-if="viewSnapshot">
+					<BookCashRow
+						:snapshot="viewSnapshot"
+						:timezone="timezone()"
+						@open="balancesOpen = true"
+					/>
+					<CashDetails
+						v-model:scope="cashScope"
+						v-model:open="detailsOpen"
 						:snapshot="viewSnapshot"
 						:selected="model.selectedDate"
 						:month="model.month"
-						:mode="mode"
-						:loading="model.refreshing"
-						:waiting="model.waitingForWorker"
-						:load-error="!!model.refreshIssue"
-						@retry="model.refresh({ background: true })"
-						@select="model.selectDate"
-						@browse="model.browseMonth"
-						@today="model.goToday"
-					/><UpcomingPayments
-						:snapshot="viewSnapshot"
-						:selected="model.selectedDate"
-						:rows="model.upcoming"
-						:load-error="!!model.refreshIssue"
-						:loading="model.upcomingLoading || (!model.snapshot && model.refreshing)"
-						@select="model.selectDate"
+						:timezone="timezone()"
+						@balances="balancesOpen = true"
+						@balance-details="method?.openBalanceDetails()"
+						@obligation="showObligation"
+						@invoices="showInvoices"
+						@jump="jumpToRisk"
 					/>
-				</div>
-				<CalendarDetails
-					:snapshot="viewSnapshot"
-					:selected="model.selectedDate"
-					:data="model.detail"
-					:loading="model.detailLoading || (!model.snapshot && model.refreshing)"
-					:view="model.activeView"
-					@view="model.setDetailView"
-					@page="model.changeDetailPage"
-				/>
-				<CalendarReconciliation :snapshot="viewSnapshot" @bucket="model.openBucket" />
-			</template>
-			<section v-else class="pcal-state pcal-panel" aria-live="polite" :aria-busy="busy">
-				<FeatherIcon
-					:name="busy ? 'clock' : model.phase === 'forbidden' ? 'lock' : 'calendar'"
-					class="size-8"
-				/>
-				<h2>{{ stateTitle }}</h2>
-				<p>{{ stateMessage }}</p>
-				<button
-					v-if="!busy && model.company && model.phase !== 'forbidden'"
-					class="pcal-button pcal-primary"
-					@click="model.refresh()"
-				>
-					Refresh calendar
-				</button>
-			</section>
-		</main>
-		<Dialog v-model="accountsOpen" :options="{ title: 'Bank & cash accounts', size: 'md' }"
-			><template #body-content
-				><div class="pcal-dialog">
-					<p>
-						Choose up to 50 accounts in {{ model.company }}. Balances use the company
-						currency.
-					</p>
-					<p v-if="!model.caps?.accounts.length">
-						No permitted enabled bank or cash accounts are available.
-					</p>
-					<div class="account-choices">
-						<label v-for="item in model.caps?.accounts || []" :key="item.name"
-							><input
-								v-model="accountDraft"
-								type="checkbox"
-								:value="item.name"
-								:disabled="
-									!accountDraft.includes(item.name) && accountDraft.length >= 50
-								"
-							/><span
-								>{{ item.account_name || item.name
-								}}<small
-									>{{ item.name }} · {{ item.account_currency }}</small
-								></span
-							></label
-						>
+					<div
+						v-if="model.snapshot && !model.snapshot.projection.forecast_available"
+						class="pcal-warning"
+						role="status"
+					>
+						<strong>Cash forecast unavailable</strong>
+						<p v-for="reason in model.snapshot.projection.scope_reasons" :key="reason">
+							{{ explain(reason) }}
+						</p>
+						<p v-if="model.snapshot.bank_code">
+							{{ explain(model.snapshot.bank_code) }}
+						</p>
 					</div>
-					<p>{{ accountDraft.length }} of 50 selected</p>
-				</div></template
-			><template #actions
-				><div class="pcal-dialog-actions">
-					<button class="pcal-button" @click="accountsOpen = false">Cancel</button
-					><button class="pcal-button pcal-primary" @click="applyAccounts">
-						Apply accounts
-					</button>
-				</div></template
-			></Dialog
-		>
-		<Dialog
-			v-model="floorOpen"
-			:options="{ title: 'Company minimum cash balance', size: 'md' }"
-			><template #body-content
-				><div class="pcal-dialog">
-					<p>
-						This minimum is shared by everyone viewing {{ model.company }}. It changes
-						the warning threshold, not accounting balances.
+					<p v-if="!model.accounts.length" class="pcal-notice">
+						Choose bank and cash accounts to include book cash in the forecast.
 					</p>
-					<label class="pcal-field"
-						>Minimum ({{ model.caps?.settings?.currency }})<input
-							v-model="floorDraft"
-							type="text"
-							inputmode="decimal"
-							autocomplete="off"
-							:disabled="model.floorSaving"
-					/></label>
-					<p>Current minimum: {{ configuredFloor }}</p>
-					<p v-if="floorValidation" class="pcal-inline-error" role="alert">
-						{{ floorValidation }}
+					<div class="pcal-calendar-layout">
+						<div class="pcal-calendar-column">
+							<CalendarGrid
+								ref="calendarGrid"
+								v-model:mode="gridMode"
+								:snapshot="viewSnapshot"
+								:selected="model.selectedDate"
+								:month="model.month"
+								:loading="model.refreshing"
+								:waiting="model.waitingForWorker"
+								:load-error="!!model.refreshIssue"
+								:issue="model.refreshIssue"
+								@retry="model.refresh({ background: true })"
+								@select="selectDate"
+								@browse="model.browseMonth"
+								@today="goToday"
+							/>
+							<NextPayments
+								:snapshot="viewSnapshot"
+								:selected="model.selectedDate"
+								:month="model.month"
+								:rows="model.upcoming"
+								:load-error="!!model.refreshIssue"
+								:loading="
+									model.upcomingLoading || (!model.snapshot && model.refreshing)
+								"
+								@select="(date) => selectDate(date, 'Payable')"
+								@view-all="viewAllPayments"
+							/>
+						</div>
+						<aside class="pcal-aside">
+							<DayLedger
+								ref="dayLedger"
+								:snapshot="viewSnapshot"
+								:scope="ledger.panelScope"
+								:side="ledger.panelSide"
+								:date="model.selectedDate"
+								:panel="ledger.panel"
+								@side="ledger.setSide"
+								@back="ledger.backToDate"
+								@view-all="ledger.openModal()"
+								@retry="ledger.retry"
+							/>
+							<CalendarMethod
+								ref="method"
+								:snapshot="viewSnapshot"
+								:selected="model.selectedDate"
+								:scope="cashScope"
+								:month="model.month"
+								:timezone="timezone()"
+							/>
+						</aside>
+					</div>
+					<p class="bottom-note">
+						<span>Amounts are remaining balances as of the snapshot.</span>
+						<button
+							id="snapshot-note"
+							type="button"
+							@click="method?.openCalculation()"
+						>
+							View calculation example
+						</button>
 					</p>
-					<p v-if="model.floorError" class="pcal-inline-error" role="alert">
-						{{ explain(model.floorError.code) }}
-					</p>
-				</div></template
-			><template #actions
-				><div class="pcal-dialog-actions">
+				</template>
+				<section v-else class="pcal-state pcal-panel" aria-live="polite" :aria-busy="busy">
+					<FeatherIcon
+						:name="busy ? 'clock' : model.phase === 'forbidden' ? 'lock' : 'calendar'"
+						class="size-8"
+					/>
+					<h2>{{ stateTitle }}</h2>
+					<p>{{ stateMessage }}</p>
 					<button
-						class="pcal-button"
-						:disabled="model.floorSaving"
-						@click="floorOpen = false"
+						v-if="!busy && model.company && model.phase !== 'forbidden'"
+						class="pcal-primary-btn"
+						@click="model.refresh()"
 					>
-						Cancel</button
-					><button
-						class="pcal-button pcal-primary"
-						:disabled="model.floorSaving"
-						@click="saveFloor"
-					>
-						{{ model.floorSaving ? "Saving…" : "Save minimum" }}
+						Refresh calendar
 					</button>
-				</div></template
-			></Dialog
-		>
-		<Dialog
-			:model-value="!!model.bucket && !!model.snapshot"
-			:options="{ title: bucketTitle, size: '4xl' }"
-			@update:model-value="
-				(value) => {
-					if (!value) model.closeBucket();
-				}
-			"
-			><template #body-content
-				><div class="pcal-dialog pcal-root">
-					<CalendarDetails
-						v-if="model.bucket && model.snapshot"
-						:snapshot="viewSnapshot"
-						:data="model.bucketData"
-						:loading="model.bucketLoading"
-						view="terms"
-						:title="bucketTitle"
-						:bucket-side="model.bucket.side"
-						@page="model.changeBucketPage"
-					/></div></template
-		></Dialog>
+				</section>
+			</div>
+		</main>
+		<CalendarToast :message="toastMessage" @hidden="toastMessage = ''" />
+		<AccountBalancesDialog
+			v-if="viewSnapshot"
+			v-model="balancesOpen"
+			:snapshot="viewSnapshot"
+			:company="model.company"
+			:timezone="timezone()"
+		/>
+		<InvoiceDetailsDialog
+			v-if="viewSnapshot"
+			:snapshot="viewSnapshot"
+			:modal="ledger.modal"
+			:sort-key="ledger.sortKey"
+			:sort-direction="ledger.sortDirection"
+			@close="ledger.closeModal"
+			@side="ledger.setModalSide"
+			@sort="ledger.setSort"
+			@page="ledger.changeModalPage"
+			@retry="ledger.retry"
+		/>
 	</div>
 </template>
 <script setup>
+<<<<<<< HEAD
 import { computed, onMounted, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import { Breadcrumbs, Dialog, FeatherIcon } from "frappe-ui";
+=======
+import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import { Breadcrumbs, FeatherIcon } from "frappe-ui";
+import { __ } from "@/lib/i18n";
+import { useJarvisTheme } from "@/theme";
+>>>>>>> 28663c0 (fix(payment-calendar): rebuild the page to match the design template (#821))
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import { usePaymentCalendar } from "@/composables/usePaymentCalendar";
-import { useShellStore } from "@/stores/shell";
+import { usePaymentLedger } from "@/composables/usePaymentLedger";
 import { siteTimezone as timezone } from "@/utils/datetime";
-import { snapshotTime } from "@/lib/paymentCalendar/dates";
-import { exactMoney } from "@/lib/paymentCalendar/format";
+import { isSelectable, snapshotStamp } from "@/lib/paymentCalendar/dates";
 import CalendarGrid from "./CalendarGrid.vue";
-import CalendarKpis from "./CalendarKpis.vue";
-import UpcomingPayments from "./UpcomingPayments.vue";
-import CalendarDetails from "./CalendarDetails.vue";
-import CalendarReconciliation from "./CalendarReconciliation.vue";
+import CalendarHeadlines from "./CalendarHeadlines.vue";
+import CalendarFilterBar from "./CalendarFilterBar.vue";
+import BookCashRow from "./BookCashRow.vue";
+import AccountBalancesDialog from "./AccountBalancesDialog.vue";
+import NextPayments from "./NextPayments.vue";
+import CashDetails from "./CashDetails.vue";
+import CalendarMethod from "./CalendarMethod.vue";
+import CalendarToast from "./CalendarToast.vue";
+import DayLedger from "./DayLedger.vue";
+import InvoiceDetailsDialog from "./InvoiceDetailsDialog.vue";
 import { explain } from "./messages";
-import "./payment-calendar.css";
+import { provideOverlayStack } from "./overlayStack";
+import "./tokens.css";
+import "./PaymentCalendarPage.css";
 const route = useRoute(),
+<<<<<<< HEAD
 	shell = useShellStore();
 const model = reactive(
 	usePaymentCalendar({
 		initialDate: typeof route.query.date === "string" ? route.query.date : "",
 	})
 );
+=======
+	router = useRouter();
+// The conversation the hand-off came from (history state { chatConv }); empty on a direct visit.
+// Read in setup, so the Back button is on the first paint; a string only (state is user-reachable).
+const handedConv = window.history.state?.chatConv;
+const chatConv = ref(typeof handedConv === "string" ? handedConv : "");
+const backLabel = __("Back to chat");
+const CONVERSATION_ROUTE = "Conversation";
+// Back in history when the previous entry is that conversation, so the chat keeps its scroll
+// position; a push otherwise (a deep link, or the user wandered since).
+function backToChat() {
+	const target = { name: CONVERSATION_ROUTE, params: { id: chatConv.value } };
+	if (window.history.state?.back === router.resolve(target).fullPath) router.back();
+	else router.push(target);
+}
+// The ledger needs the raw core (refs, not unwrapped); only the template reads reactive views.
+const core = usePaymentCalendar({
+	initialDate: typeof route.query.date === "string" ? route.query.date : "",
+});
+const model = reactive(core);
+const ledger = reactive(usePaymentLedger(core));
+// One Escape listener for every overlay of the page (components register through useOverlay).
+provideOverlayStack();
+const { effectiveDark: dark, toggleTheme } = useJarvisTheme();
+// A fixed name: aria-pressed says whether it is on, so the label must not flip as well.
+const themeLabel = "Dark mode";
+>>>>>>> 28663c0 (fix(payment-calendar): rebuild the page to match the design template (#821))
 const viewSnapshot = computed(() => model.snapshot || model.loadingSnapshot);
-const mode = ref(shell.mobile ? "list" : "month");
-const accountsOpen = ref(false),
-	accountDraft = ref([]),
-	floorOpen = ref(false),
-	floorDraft = ref(""),
-	floorValidation = ref("");
+const balancesOpen = ref(false);
+const dayLedger = ref(null);
+// Cash details: "day" or "month" scope, shared with the calculation example.
+const cashScope = ref("day");
+// Kept here, not in the details: a floor save unmounts the panel while the snapshot reloads.
+const detailsOpen = ref(false);
+const method = ref(null);
+// The calendar view the page asks for (Next payments → List); null leaves the grid's default.
+const gridMode = ref(null);
+const toastMessage = ref("");
+// Keep in sync with SIDES in usePaymentLedger.js.
+const SIDES = ["Payable", "Receivable"];
+// An amount line carries its side; set it before the date change so the click reads once.
+// A date the core refuses (outside the range) changes nothing, not even the side.
+function selectDate(date, side) {
+	if (SIDES.includes(side) && isSelectable(date, viewSnapshot.value?.scope))
+		ledger.panelSide = side;
+	return model.selectDate(date);
+}
+// "View {date}" from the Lowest Cushion card: select the date on the Payable side, then land on it.
+const calendarGrid = ref(null);
+function jumpToTrough(date) {
+	cashScope.value = "day";
+	selectDate(date, "Payable");
+	return calendarGrid.value?.revealTrough(date);
+}
+// Today shows the snapshot day in the day view, like the template.
+function goToday() {
+	cashScope.value = "day";
+	return model.goToday();
+}
+const viewTotals = () => ledger.openModal({ scope: "month" });
+// Show a scope in the side panel, bring the panel into view and focus its heading. The
+// obligation cards scroll it to the top; "nearest" (the date's invoices) moves it the least.
+async function showObligation(scope, block = "start") {
+	const reading = ledger.setScope(scope);
+	await nextTick();
+	const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+	const panel = dayLedger.value?.$el;
+	panel?.scrollIntoView?.({ block, behavior: reduced ? "auto" : "smooth" });
+	panel?.querySelector("#ledger-heading")?.focus({ preventScroll: true });
+	await reading;
+}
+// "View invoices" and the two amounts of the cash details: the month scope opens the full
+// dialog, the day scope shows the date in the side panel.
+function showInvoices(side) {
+	if (cashScope.value === "month") return ledger.openModal({ scope: "month", side });
+	if (SIDES.includes(side)) ledger.panelSide = side;
+	return showObligation("date", "nearest");
+}
+// The risk alert's "View {date}": select it in day scope and focus its cell.
+async function jumpToRisk(date) {
+	await selectDate(date);
+	await nextTick();
+	calendarGrid.value?.$el?.querySelector(`[data-date="${date}"]`)?.focus();
+}
+// Reset first: the grid may already hold "list" in its own state after a trough jump.
+async function viewAllPayments() {
+	gridMode.value = null;
+	await nextTick();
+	gridMode.value = "list";
+}
+async function saveFloor(value) {
+	const result = await model.saveFloor(value);
+	if (result?.ok) toastMessage.value = "Minimum cash balance saved.";
+	return result;
+}
+// Confirm at once: loading the company's snapshot can take minutes.
+function chooseCompany(name) {
+	const changed = !!name && name !== model.company;
+	const pending = model.chooseCompany(name);
+	if (changed) toastMessage.value = "Company changed.";
+	return pending;
+}
 const breadcrumbs = [
 	{ label: "Dashboards", route: { name: "DashboardsPage", hash: "#saved" } },
 	{ label: "Payment Calendar" },
 ];
+// The status next to "As of": only while a snapshot is shown and its update is running or stuck.
+const updateNote = computed(() => {
+	if (!model.snapshot) return "";
+	return model.refreshIssue ? "Update paused" : model.refreshing ? "Refreshing data…" : "";
+});
 const busy = computed(() =>
 	["loading", "loading_company", "requesting", "queued", "running"].includes(model.phase)
 );
-const configuredFloor = computed(() =>
-	exactMoney(
-		model.caps?.settings?.configured ? model.caps.settings.safety_floor : null,
-		model.caps?.settings?.currency
-	)
-);
+// After the automatic recovery cap both "expired" and "failed" ask for a manual Refresh.
 const stateTitle = computed(
 	() =>
-		({
+		(model.error?.code === "recovery_limit" && "Calendar keeps changing") ||
+		{
 			loading: "Loading your companies…",
 			loading_company: "Checking company access…",
 			requesting: "Starting your calendar…",
@@ -342,74 +453,22 @@ const stateTitle = computed(
 			running: "Preparing your calendar",
 			choose_company: "Choose a company to begin",
 			forbidden: "Finance access required",
-			expired: "Snapshot expired",
+			expired: "Calendar data expired",
 			failed: "Calendar unavailable",
-		}[model.phase] || "Calendar unavailable")
+		}[model.phase] ||
+		"Calendar unavailable"
 );
 const stateMessage = computed(() =>
 	model.waitingForWorker
 		? "Waiting for calendar data. This page will update automatically."
 		: busy.value
-		? "Reading complete ERPNext balances. Large companies can take a few minutes. You can change company while this runs."
+		? "Reading your balances. Large companies can take a few minutes. You can change company while this runs."
 		: model.phase === "choose_company"
 		? "Select a permitted company, then choose the bank and cash accounts to include."
 		: explain(model.error?.code || (model.phase === "forbidden" ? "forbidden" : "expired"))
 );
-const bucketTitle = computed(
-	() =>
-		`${model.bucket?.side === "Receivable" ? "Customer" : "Supplier"} ${
-			{
-				overdue: "overdue balances",
-				undated: "balances without a due date",
-				adjustments: "signed adjustments",
-				outside_horizon: model.snapshot?.scope.month
-					? "balances after the selected month"
-					: "balances outside the forecast",
-			}[model.bucket?.name] || "balances"
-		}`
-);
-function openAccounts() {
-	accountDraft.value = [...model.accounts];
-	accountsOpen.value = true;
-}
-function applyAccounts() {
-	accountsOpen.value = false;
-	void model.setAccounts(accountDraft.value);
-}
-function openFloor() {
-	floorDraft.value = model.caps?.settings?.configured ? model.caps.settings.safety_floor : "";
-	floorValidation.value = "";
-	model.floorError = null;
-	floorOpen.value = true;
-}
-async function saveFloor() {
-	if (!/^\d+(?:\.\d+)?$/.test(floorDraft.value.trim())) {
-		floorValidation.value = "Enter a non-negative number without separators.";
-		return;
-	}
-	floorValidation.value = "";
-	const chosenCompany = model.company;
-	const result = await model.saveFloor(floorDraft.value.trim());
-	if (result?.ok && model.company === chosenCompany) floorOpen.value = false;
-}
-watch(
-	() => model.company,
-	() => {
-		accountsOpen.value = false;
-		floorOpen.value = false;
-		floorValidation.value = "";
-	}
-);
-watch(
-	() => model.caps,
-	(value) => {
-		if (!value) {
-			accountsOpen.value = false;
-			floorOpen.value = false;
-			floorDraft.value = "";
-		}
-	}
-);
+// The balance rows belong to one company: close the dialog when it changes or access is lost.
+watch([() => model.company, () => !!model.caps], () => (balancesOpen.value = false));
 onMounted(() => {
 	void model.initialize();
 });
