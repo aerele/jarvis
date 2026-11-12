@@ -1,0 +1,46 @@
+/* "Invoice side" tabs (template .tabs, L136-139). The modal variant sets its own padding. */
+.ledger-tabs {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 0 15px;
+	border-top: 1px solid var(--pc-border-soft);
+	border-bottom: 1px solid var(--pc-border-soft);
+}
+.ledger-tabs button {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	padding: 10px 0;
+	border: 0;
+	border-bottom: 2px solid transparent;
+	background: none;
+	color: var(--pc-muted);
+	font-size: 13px;
+	font-weight: 500;
+	text-align: left;
+	cursor: pointer;
+}
+.ledger-tabs button strong {
+	margin-top: 2px;
+	font-size: 12px;
+	font-weight: 550;
+}
+.ledger-tabs button.active {
+	border-bottom-color: var(--pc-link);
+	color: var(--pc-link);
+	font-weight: 600;
+}
+.ledger-tabs .count {
+	margin-left: 3px;
+	padding: 2px 5px;
+	border-radius: var(--pc-radius-tag);
+	background: var(--pc-surface-2);
+	color: var(--pc-muted);
+	font-size: var(--pc-fs-micro);
+}
+[data-theme="dark"] .ledger-tabs .count {
+	background: var(--pc-surface-3);
+	color: var(--pc-text-2);
+}
