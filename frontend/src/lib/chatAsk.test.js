@@ -442,3 +442,71 @@ test("the real blocks that parsed before still parse the same", () => {
 		{ q: "Supplier invoice number for this bill", type: "text", options: [], doctype: "" },
 	]);
 });
+
+// ---- optional questions (Aerele-RnD/jarvis-admin-v2#789) -----------------
+
+// The issue's mini-form: email, first name, and a last name the model marked
+// optional in its label. Submit stayed disabled until the last name was typed.
+const userForm = parseAsk(
+	fence(
+		'[{"q":"Email address","type":"text"},{"q":"First name","type":"text"},{"q":"Last name (optional)","type":"text"}]'
+	)
+);
+
+test("a label ending in (optional), optional:true or required:false marks the question optional", () => {
+	assert.deepEqual(
+		userForm.questions.map((q) => !!q.optional),
+		[false, false, true]
+	);
+	// the label is kept as written (the board and the answer text quote it)
+	assert.equal(userForm.questions[2].q, "Last name (optional)");
+	const flagged = parseAsk(
+		fence(
+			'[{"q":"Notes","type":"text","optional":true},{"q":"Ref","type":"text","required":false},' +
+				'{"q":"Why?","type":"single","options":["a"],"optional":"yes"},{"q":"Due","type":"date","required":true},' +
+				'{"q":"HSN","type":"field","doctype":"Item","fieldname":"gst_hsn_code","optional":true},' +
+				'{"q":"Bad ( Optional )","type":"field","doctype":"Item","fieldname":"a b"}]'
+		)
+	);
+	assert.deepEqual(
+		flagged.questions.map((q) => !!q.optional),
+		[true, true, false, false, true, true]
+	);
+	// a required question's shape is unchanged (no `optional` key at all)
+	assert.equal("optional" in flagged.questions[3], false);
+});
+
+test("a blank optional question does not hold Submit back; a blank required one still does", () => {
+	assert.equal(isAskReady(userForm, {}, {}), false);
+	assert.equal(isAskReady(userForm, { 0: "a@b.c" }, {}), false);
+	assert.equal(isAskReady(userForm, { 0: "a@b.c", 1: "Jarvis" }, {}), true);
+	assert.equal(isAskReady(userForm, { 0: "a@b.c", 1: "Jarvis", 2: "   " }, {}), true);
+	assert.equal(isAskReady(userForm, { 0: "a@b.c", 1: "Jarvis", 2: "User" }, {}), true);
+	// every kind of blank counts: multi with no picks, a loading field control
+	const kinds = {
+		questions: [
+			{ q: "Which?", type: "multi", options: ["a"], optional: true },
+			{ q: "Item", type: "loading", optional: true },
+			{ q: "Go?", type: "yesno", options: [], optional: true },
+		],
+	};
+	assert.equal(isAskReady(kinds, { 0: [] }, {}), true);
+});
+
+test("an optional question that IS answered must still be a valid answer", () => {
+	const spec = { questions: [{ q: "Qty", type: "number", optional: true }] };
+	assert.equal(isAskReady(spec, {}, {}), true);
+	assert.equal(isAskReady(spec, { 0: "abc" }, {}), false);
+	assert.equal(isAskReady(spec, { 0: "12" }, {}), true);
+	// an "Other…" text on an optional choice question is an answer, not a blank
+	const choice = { questions: [{ q: "Why?", type: "single", options: ["a"], optional: true }] };
+	assert.equal(isAskReady(choice, {}, { 0: "because" }), true);
+});
+
+test("a skipped optional question is reported as skipped, a missing required one as no answer", () => {
+	assert.equal(
+		askAnswerText(userForm, { 0: "a@b.c", 1: "Jarvis" }, {}),
+		"Here are my answers:\n1. Email address → a@b.c\n2. First name → Jarvis\n3. Last name (optional) → (skipped)"
+	);
+	assert.match(askAnswerText(userForm, { 0: "a@b.c" }, {}), /2\. First name → \(no answer\)/);
+});

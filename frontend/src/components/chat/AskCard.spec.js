@@ -534,3 +534,49 @@ describe("AskCard Link suggestions: keyboard and focus", () => {
 		});
 	});
 });
+
+describe("optional questions (Aerele-RnD/jarvis-admin-v2#789)", () => {
+	const form = () =>
+		mount(AskCard, {
+			props: {
+				spec: parseAsk(
+					"```jarvis-ask\n" +
+						JSON.stringify([
+							{ q: "Email address", type: "text" },
+							{ q: "First name", type: "text" },
+							{ q: "Last name (optional)", type: "text" },
+							{ q: "Nickname", type: "text", optional: true },
+						]) +
+						"\n```"
+				),
+			},
+		});
+	const fields = (w) => w.findAll("input.jv-ask-field");
+
+	it("enables Submit once the required questions are answered, with the optional ones blank", async () => {
+		const w = form();
+		expect(submit(w).element.disabled).toBe(true);
+		expect(w.text()).toContain("Answer each required question to continue");
+		await fields(w)[0].setValue("user1@gmail.com");
+		expect(submit(w).element.disabled).toBe(true);
+		await fields(w)[1].setValue("Jarvis User");
+		expect(submit(w).element.disabled).toBe(false);
+		await submit(w).trigger("click");
+		expect(w.emitted("submit")).toEqual([
+			[
+				"Here are my answers:\n1. Email address → user1@gmail.com\n2. First name → Jarvis User\n3. Last name (optional) → (skipped)\n4. Nickname → (skipped)",
+			],
+		]);
+	});
+
+	it("labels a flag-marked optional question once, without touching a label that already says so", () => {
+		const w = form();
+		const labels = w.findAll(".jv-ask-qt").map((n) => n.text().replace(/\s+/g, " "));
+		expect(labels).toEqual([
+			"1Email address",
+			"2First name",
+			"3Last name (optional)",
+			"4Nickname (optional)",
+		]);
+	});
+});
