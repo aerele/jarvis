@@ -75,9 +75,12 @@
    JvCombo model/provider pickers and the API-key/Base-URL fields — painting the
    forms-plugin's BLUE focus ring, which contradicts the monochrome accent. Note
    the plugin rings via box-shadow + border-color, not outline, so a component's
-   `outline: none` does not suppress it. */
+   `outline: none` does not suppress it. .pcal-root / .pcal-overlay (Payment Calendar and
+   its teleported modals) opt out the same way and draw only the template's own ring. */
 .jv-root :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus,
-.jv-ob-root :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus {
+.jv-ob-root :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus,
+.pcal-root :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus,
+.pcal-overlay :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):focus {
 	outline: none;
 	box-shadow: none;
 	border-color: revert;
@@ -126,7 +129,9 @@
 :root:root
 	:where(input:not([type="checkbox"]):not([type="radio"]), textarea, select):not(
 		.jv-root *,
-		.jv-ob-root *
+		.jv-ob-root *,
+		.pcal-root *,
+		.pcal-overlay *
 	):focus-visible {
 	box-shadow: none;
 	border-color: var(--focus-ring);

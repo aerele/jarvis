@@ -1,0 +1,82 @@
+{
+ "data": {
+  "generated_at": "2026-11-11T05:12:00+00:00",
+  "has_more": false,
+  "page": 1,
+  "page_size": 100,
+  "parties": [
+   {
+    "invoices": 1,
+    "party": "Evergreen Retail",
+    "party_name": "Evergreen Retail",
+    "party_type": "Customer",
+    "remaining": "54000.00",
+    "terms": 1
+   },
+   {
+    "invoices": 1,
+    "party": "Summit Engineering",
+    "party_name": "Summit Engineering",
+    "party_type": "Customer",
+    "remaining": "32250.00",
+    "terms": 1
+   }
+  ],
+  "party_page": 1,
+  "party_total": 2,
+  "rows": [
+   {
+    "account": "Debtors - NM",
+    "credit": "0.00",
+    "discount": "0.00",
+    "due_date": "2026-11-11",
+    "id": "receivable-2026-11-11-0",
+    "kind": "obligation",
+    "original": "54000.00",
+    "paid": "0.00",
+    "party": "Evergreen Retail",
+    "party_name": "Evergreen Retail",
+    "party_type": "Customer",
+    "posting_date": "2026-10-15",
+    "remaining": "54000.00",
+    "settled": "0.00",
+    "settlement": "Unpaid",
+    "term": "",
+    "voucher_no": "SINV-2026-0284",
+    "voucher_type": "Sales Invoice"
+   },
+   {
+    "account": "Debtors - NM",
+    "credit": "0.00",
+    "discount": "0.00",
+    "due_date": "2026-11-11",
+    "id": "receivable-2026-11-11-1",
+    "kind": "obligation",
+    "original": "45000.00",
+    "paid": "12750.00",
+    "party": "Summit Engineering",
+    "party_name": "Summit Engineering",
+    "party_type": "Customer",
+    "posting_date": "2026-10-15",
+    "remaining": "32250.00",
+    "settled": "12750.00",
+    "settlement": "Partially paid",
+    "term": "",
+    "voucher_no": "SINV-2026-0291",
+    "voucher_type": "Sales Invoice"
+   }
+  ],
+  "total": 2,
+  "total_remaining": "86250.00"
+ },
+ "request": {
+  "date": "2026-11-11",
+  "kind": "day",
+  "order": null,
+  "page": 1,
+  "page_size": 100,
+  "side": "Receivable",
+  "sort": null
+ },
+ "scenario": "default_day_receivable"
+}
