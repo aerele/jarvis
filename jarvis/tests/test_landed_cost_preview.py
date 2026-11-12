@@ -121,7 +121,7 @@ class TestLandedCostPreview(LandedCostFixtures):
 		saved = create_doc(
 			"Landed Cost Voucher",
 			result["draft_values"],
-			fields=["total_taxes_and_charges", "vendor_invoices"],
+			fields=["total_taxes_and_charges", "taxes"],
 		)
 		self.assertEqual(saved["total_taxes_and_charges"], 30)
 		self.assertEqual(saved["taxes"][0]["base_amount"], 30)
