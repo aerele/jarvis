@@ -13,7 +13,7 @@ import secrets
 import time
 from urllib.parse import quote
 
-from jarvis._plugin_auth import _agent_token, _callback_key
+from jarvis._plugin_auth import _agent_token, _callback_key, _canonical_request
 from jarvis.exceptions import JarvisError
 
 
@@ -46,15 +46,17 @@ def signed_route_headers(session_key: str, body: bytes) -> dict:
 	if not key:
 		raise PluginRouteKeyMissingError("No plugin signing key is stored on this site.")
 	nonce = secrets.token_hex(16)
-	timestamp = str(int(time.time()))
-	canonical = "|".join([session_key, hashlib.sha256(body or b"").hexdigest(), nonce, timestamp])
-	signature = hmac.new(key.encode("utf-8"), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
+	timestamp = int(time.time())
+	canonical = _canonical_request(
+		session_key=session_key, body_bytes=body, nonce=nonce, timestamp_s=timestamp
+	)
+	signature = hmac.new(key.encode("utf-8"), canonical, hashlib.sha256).hexdigest()
 	return {
 		"X-Jarvis-Token": key,
 		"X-Jarvis-Session": session_key,
 		"X-Jarvis-Signature": signature,
 		"X-Jarvis-Nonce": nonce,
-		"X-Jarvis-Timestamp": timestamp,
+		"X-Jarvis-Timestamp": str(timestamp),
 	}
 
 

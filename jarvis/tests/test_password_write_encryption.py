@@ -26,6 +26,8 @@ from unittest.mock import patch
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
+
 SETTINGS = "Jarvis Settings"
 
 _ALL_PASSWORD_FIELDS = (
@@ -36,15 +38,6 @@ _ALL_PASSWORD_FIELDS = (
 	"agent_token",
 	"chat_device_private_key",
 	"chat_device_token",
-)
-
-# Plain (non-Password) fields the exercised flows also write.
-_PLAIN_FIELDS = (
-	"jarvis_admin_customer_email",
-	"agent_url",
-	"agent_token_issued_at",
-	"chat_device_id",
-	"chat_device_public_key",
 )
 
 
@@ -70,43 +63,10 @@ def _is_masked(value: str | None) -> bool:
 	return bool(value) and set(value) == {"*"}
 
 
-class _SecretsSnapshotTestCase(FrappeTestCase):
-	"""Snapshot/restore the raw tabSingles column AND the raw __Auth row for
-	every Password field (plus the plain fields these flows touch), so the
-	suite leaves the singleton exactly as found - byte-for-byte, whichever
-	representation (plaintext-legacy or encrypted) the site had."""
-
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		cls._raw_snapshot = {f: _raw_singles_value(f) for f in _ALL_PASSWORD_FIELDS}
-		cls._auth_snapshot = {f: _auth_row(f) for f in _ALL_PASSWORD_FIELDS}
-		s = frappe.get_single(SETTINGS)
-		cls._plain_snapshot = {f: s.get(f) for f in _PLAIN_FIELDS}
-
-	@classmethod
-	def tearDownClass(cls):
-		try:
-			for field, raw in cls._raw_snapshot.items():
-				frappe.db.set_single_value(SETTINGS, field, raw or "", update_modified=False)
-			for field, row in cls._auth_snapshot.items():
-				frappe.db.sql(
-					"delete from `__Auth` where doctype=%s and name=%s and fieldname=%s",
-					(SETTINGS, SETTINGS, field),
-				)
-				if row:
-					frappe.db.sql(
-						"insert into `__Auth` (doctype, name, fieldname, `password`, encrypted) "
-						"values (%s, %s, %s, %s, %s)",
-						(SETTINGS, SETTINGS, field, row[0], row[1]),
-					)
-			for field, value in cls._plain_snapshot.items():
-				frappe.db.set_single_value(
-					SETTINGS, field, value if value is not None else "", update_modified=False
-				)
-			frappe.db.commit()
-		finally:
-			super().tearDownClass()
+class _SecretsSnapshotTestCase(JarvisSettingsSnapshot, FrappeTestCase):
+	"""Every raw Jarvis Settings row (Singles, __Auth, child tables) is snapshotted before
+	each test and restored after it by ``JarvisSettingsSnapshot``, so the suite leaves the
+	singleton exactly as found, including keys these flows do not name (``callback_key``)."""
 
 	def setUp(self):
 		super().setUp()
