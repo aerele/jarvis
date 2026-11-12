@@ -356,46 +356,19 @@ def _check_proofs(report, permission_columns, rows, actor) -> None:
 	"""The report's own row filter must still keep every stored proof."""
 	from frappe.desk.query_report import get_filtered_data
 
-<<<<<<< HEAD
-	for side, source in result.get("sources", {}).items():
-		if source is None:
-			continue
-		require_obligation_scope(side)
-		report = require_report(scope["company"], side)
-		rows = source["rows"] + source.get("excluded_rows", [])
-		try:
-			proofs = [frappe._dict(deepcopy(row["_permission"])) for row in rows]
-			filtered = get_filtered_data(
-				report.ref_doctype, row_filter_columns(source["permission_columns"]), proofs, scope["actor"]
-			)
-		except (KeyError, TypeError, AttributeError) as exc:
-			raise ScopeChanged("Refresh the Payment Calendar snapshot.") from exc
-		if len(filtered) != len(rows):
-			raise ScopeChanged("Refresh the Payment Calendar snapshot.")
-		for doctype in {row["voucher_type"] for row in rows}:
-			names = {row["voucher_no"] for row in rows if row["voucher_type"] == doctype}
-			filters = {"docstatus": 1}
-			if frappe.get_meta(doctype).has_field("company"):
-				filters["company"] = scope["company"]
-			if visible_names(doctype, names, filters) != names:
-				raise ScopeChanged("Refresh the Payment Calendar snapshot.")
-		for doctype in {row["party_type"] for row in rows}:
-			names = {row["party"] for row in rows if row["party_type"] == doctype}
-			if visible_names(doctype, names) != names:
-				raise ScopeChanged("Refresh the Payment Calendar snapshot.")
-=======
 	# Only a damaged proof or a changed row shape is a scope change. A hook or lookup
 	# error must stay an error, so nothing else is caught here.
 	try:
 		proofs = [frappe._dict(deepcopy(row["_permission"])) for row in rows]
-		# v15 backport: pass row_filter_columns(permission_columns) (permissions.py in
-		# pr-2258). Without it get_filtered_data reads DocType for non-System-Managers.
-		filtered = get_filtered_data(report.ref_doctype, permission_columns, proofs, actor)
+		# Link-to-DocType columns would make get_filtered_data read DocType and refuse
+		# users who are not System Managers (see row_filter_columns).
+		filtered = get_filtered_data(
+			report.ref_doctype, row_filter_columns(permission_columns), proofs, actor
+		)
 	except (KeyError, TypeError, AttributeError, ValueError) as exc:
 		raise ScopeChanged(REFRESH, "proof") from exc
 	if len(filtered) != len(rows):
 		raise ScopeChanged(REFRESH, "proof")
->>>>>>> 4605b35 (feat(payment-calendar): template API, balances job and check-once reads (#821))
 
 
 def _check_vouchers(company: str, rows) -> None:
