@@ -50,15 +50,10 @@ class TestLandedCostPreview(LandedCostFixtures):
 		self.assertEqual(
 			result["draft_values"]["items"][0]["purchase_receipt_item"], self.receipt.items[0].name
 		)
-<<<<<<< HEAD
 		self.assertFalse(self.claimed_cost())
-		saved = create_doc("Landed Cost Voucher", result["draft_values"])
-=======
-		self.assertFalse(self.invoice.reload().claimed_landed_cost_amount)
 		saved = create_doc(
-			"Landed Cost Voucher", result["draft_values"], fields=["total_vendor_invoices_cost", "items"]
+			"Landed Cost Voucher", result["draft_values"], fields=["total_taxes_and_charges", "items"]
 		)
->>>>>>> c8f5991 (perf(tools): compact create_doc/update_doc results, optional fields)
 		self.assertEqual(saved["docstatus"], 0)
 		self.assertEqual(saved["total_taxes_and_charges"], 120)
 		self.assertEqual(saved["items"][0]["applicable_charges"], 120)

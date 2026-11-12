@@ -189,7 +189,8 @@ def check_write_fields(doctype: str, fields: list | None) -> None:
 	if not fields:
 		return
 	meta = frappe.get_meta(doctype)
-	known = set(meta.get_valid_fields()) | {df.fieldname for df in meta.get_table_fields()}
+	# get_valid_columns: Frappe v15 has no get_valid_fields (same list on v16).
+	known = set(meta.get_valid_columns()) | {df.fieldname for df in meta.get_table_fields()}
 	part = DocPart(fields)
 	_refuse_unreadable(doctype, part.fields)
 	_refuse_unknown(doctype, part.fields, known)

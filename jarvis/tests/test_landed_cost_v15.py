@@ -35,7 +35,7 @@ class TestLandedCostV15(LandedCostFixtures):
 		result = self.prepare()
 		self.assertEqual(result["status"], "ready", result)
 		self.assertNotIn("vendor_invoices", result["draft_values"])
-		saved = create_doc(LCV, result["draft_values"])
+		saved = create_doc(LCV, result["draft_values"], fields=["taxes"])
 		self.assertEqual(saved["taxes"][0][SOURCE_INVOICE], self.invoice.name)
 		review = self.prepare(existing_draft=saved["name"], charges=[])
 		self.assertEqual(review["status"], "ready", review)
@@ -141,7 +141,7 @@ class TestLandedCostV15(LandedCostFixtures):
 		self.assertEqual(self.prepare()["status"], "ready")
 
 	def test_current_claim_does_not_trust_stale_base_amount(self):
-		doc = create_doc(LCV, self.values(amounts=[120]))
+		doc = create_doc(LCV, self.values(amounts=[120]), fields=["taxes"])
 		frappe.db.set_value(TAX_DOCTYPE, doc["taxes"][0]["name"], {"amount": 121, "base_amount": 0})
 		with self.assertRaises(LCVSourceTaxNeedsInput) as caught:
 			submit_doc(LCV, doc["name"])
@@ -218,7 +218,7 @@ class TestLandedCostV15(LandedCostFixtures):
 		values = self.values()
 		values["taxes"][0]["amount"] = 40
 		values["taxes"].append({**values["taxes"][0], "amount": 80})
-		saved = create_doc(LCV, values)
+		saved = create_doc(LCV, values, fields=["taxes"])
 		rows = [{"name": row["name"]} for row in saved["taxes"]]
 		rows[0][SOURCE_INVOICE] = ""
 		with self.assertRaises(LCVSourceTaxNeedsInput) as caught:
@@ -227,9 +227,12 @@ class TestLandedCostV15(LandedCostFixtures):
 		self.assertTrue(all(row.get(SOURCE_INVOICE) for row in frappe.get_doc(LCV, saved["name"]).taxes))
 
 	def test_confirm_card_amount_change_preserves_unmentioned_source_link(self):
-		saved = create_doc(LCV, self.values())
+		saved = create_doc(LCV, self.values(), fields=["taxes"])
 		updated = update_doc(
-			LCV, saved["name"], {"taxes": [{"name": saved["taxes"][0]["name"], "amount": 100}]}
+			LCV,
+			saved["name"],
+			{"taxes": [{"name": saved["taxes"][0]["name"], "amount": 100}]},
+			fields=["taxes", "total_taxes_and_charges"],
 		)
 		self.assertEqual(updated["taxes"][0][SOURCE_INVOICE], self.invoice.name)
 		self.assertEqual(updated["total_taxes_and_charges"], 100)

@@ -365,7 +365,7 @@ class TestLandedCostDefaults(LandedCostFixtures):
 			return False if doctype == "Purchase Invoice" else original(doctype, *args, **kwargs)
 
 		with patch("jarvis.tools._client_defaults.frappe.has_permission", side_effect=permission):
-			saved = create_doc("Landed Cost Voucher", values)
+			saved = create_doc("Landed Cost Voucher", values, fields=["total_vendor_invoices_cost"])
 		self.assertEqual(saved["total_vendor_invoices_cost"], 25)
 
 	def test_save_refreshes_an_omitted_default_after_preview(self):
