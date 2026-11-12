@@ -227,14 +227,6 @@ jobs:
           path: frontend/test-results/approval-layout
           retention-days: 7
 
-<<<<<<< HEAD
-  # Builds BOTH deploy artifacts (the /jarvis SPA and the /jarvis-mobile PWA) on Node
-  # 18.16.0 the way the Frappe Cloud v15 deploy does, so a Vite/workbox break surfaces here
-  # instead of as a 404 (or a failed deploy) in production. The PWA reads the bench site
-  # config via a bench-relative path a bare runner lacks; the SPA step stubs that file and
-  # the PWA build reuses it. Node 18 is deliberate: FC v15 benches build on 18.16.0, so a
-  # break that only shows up there must fail here, not at deploy time.
-=======
   # Real-browser Payment Calendar gate (#821). A stateful mock serves the golden JSON of the
   # backend tests, so the SPA renders in system Chrome with no site. Needs no bench shard.
   payment-calendar-browser:
@@ -267,13 +259,12 @@ jobs:
           path: frontend/test-results/payment-calendar
           retention-days: 7
 
-  # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
-  # would slip through green and only surface at Frappe Cloud deploy time as a 404 on /jarvis. This gate
-  # builds the SPA (the /jarvis artifact) and the PWA (the /jarvis-mobile artifact) the way the deploy does.
-  # The PWA imports modules from frontend/src (@shared, e.g. voice.js -> frappe-ui), so it builds AFTER the
-  # SPA's dependencies are installed. Its socket.js reads the bench site config by the same fixed relative
-  # path as the SPA's, which the stub step below satisfies (pwa/vite.config.js aliases it like the SPA's).
->>>>>>> 28663c0 (fix(payment-calendar): rebuild the page to match the design template (#821))
+  # Builds BOTH deploy artifacts (the /jarvis SPA and the /jarvis-mobile PWA) on Node
+  # 18.16.0 the way the Frappe Cloud v15 deploy does, so a Vite/workbox break surfaces here
+  # instead of as a 404 (or a failed deploy) in production. The PWA reads the bench site
+  # config via a bench-relative path a bare runner lacks; the SPA step stubs that file and
+  # the PWA build reuses it. Node 18 is deliberate: FC v15 benches build on 18.16.0, so a
+  # break that only shows up there must fail here, not at deploy time.
   frontend-build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
