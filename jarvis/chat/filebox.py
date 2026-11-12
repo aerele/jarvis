@@ -1065,7 +1065,8 @@ def open_waits(conversation: str) -> dict:
 	"""What a File Box file is waiting on, for its own chat (the Approval Board shows
 	the same items): each Pending question with its text and options, answered with
 	``approvals_api.decide`` like the board, and a held record or approval sheet as a
-	title with its board link. Owner-only; an ordinary chat has none."""
+	title with its board link. Each item carries its ``creation`` so the chat can show
+	it under the reply whose turn filed it. Owner-only; an ordinary chat has none."""
 	from urllib.parse import quote
 
 	me = frappe.session.user
@@ -1074,14 +1075,14 @@ def open_waits(conversation: str) -> dict:
 		frappe.throw("Not permitted", frappe.PermissionError)
 	# _pending_waits_sql covers File Box conversations only: an ordinary chat has none.
 	waits = frappe.db.sql(
-		f"SELECT w.src, w.item, w.title FROM ({_pending_waits_sql()}) w "
+		f"SELECT w.src, w.item, w.title, w.creation FROM ({_pending_waits_sql()}) w "
 		"WHERE w.conversation = %(one)s ORDER BY w.creation",
 		{**_ladder_params(me), "one": conversation},
 		as_dict=True,
 	)
 	items = []
 	for w in waits:
-		item = {"src": w.src, "name": w.item, "title": w.title or ""}
+		item = {"src": w.src, "name": w.item, "title": w.title or "", "creation": w.creation}
 		if w.src == "ar":
 			ar = frappe.db.get_value(APPROVAL, w.item, ["question", "options", "source"], as_dict=True) or {}
 			item["source"] = ar.get("source") or "File Box"

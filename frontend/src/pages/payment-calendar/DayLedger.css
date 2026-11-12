@@ -1,0 +1,126 @@
+/* Selected-date side panel (template .ledger-panel, L136-150 and the ledger rules). In-page, so
+   it follows the container, not the viewport. */
+.ledger-panel {
+	min-width: 0;
+	overflow: hidden;
+	border: 1px solid var(--pc-border);
+	border-radius: var(--pc-radius-card);
+	background: var(--pc-card);
+	scroll-margin-block-start: 16px;
+}
+.ledger-heading {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 15px;
+}
+.panel-eyebrow {
+	font-size: 9px;
+	font-weight: 550;
+	letter-spacing: 1px;
+	color: var(--pc-muted);
+}
+.ledger-heading h2 {
+	margin: 4px 0 0;
+	font-size: var(--pc-fs-ledger-title);
+	font-weight: 650;
+	letter-spacing: -0.2px;
+}
+#ledger-heading:focus {
+	outline: 2px solid var(--pc-focus);
+	outline-offset: 3px;
+	border-radius: 2px;
+}
+.ledger-heading p {
+	margin: 4px 0 0;
+	font-size: 11px;
+	color: var(--pc-muted);
+}
+.ledger-back,
+.ledger-retry {
+	padding: 2px;
+	border: 0;
+	background: none;
+	color: var(--pc-link);
+	font-size: var(--pc-fs-small);
+	font-weight: 550;
+	cursor: pointer;
+}
+.ledger-list {
+	padding: 0 15px;
+}
+.ledger-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 9px;
+	padding: 14px 0;
+	border-bottom: 1px solid var(--pc-border-soft);
+}
+.ledger-row:last-child {
+	border-bottom: 0;
+}
+.ledger-party {
+	min-width: 0;
+	flex: 1;
+}
+.invoice-party {
+	font-size: 13px;
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+.invoice-reference {
+	display: block;
+	margin-top: 3px;
+	color: var(--pc-text-2);
+	font-size: var(--pc-fs-small);
+	overflow-wrap: anywhere;
+}
+.ledger-party > small {
+	display: block;
+	margin-top: 2px;
+	font-size: var(--pc-fs-micro);
+	color: var(--pc-muted);
+}
+.invoice-balance {
+	flex-shrink: 0;
+	text-align: right;
+	white-space: nowrap;
+}
+.invoice-balance strong {
+	font-size: 14px;
+	font-weight: 600;
+}
+.invoice-balance small {
+	display: block;
+	margin-top: 3px;
+	font-size: var(--pc-fs-micro);
+	color: var(--pc-caution);
+}
+.ledger-note {
+	margin: 0;
+	padding: 24px 4px;
+	text-align: center;
+	color: var(--pc-text-2);
+	font-size: var(--pc-fs-small);
+}
+.ledger-more {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+	width: 100%;
+	padding: 12px 17px;
+	border: 0;
+	border-top: 1px solid var(--pc-border-soft);
+	background: none;
+	color: var(--pc-link);
+	font-size: var(--pc-fs-small);
+	font-weight: 550;
+	cursor: pointer;
+}
+.ledger-more:disabled {
+	opacity: 0.5;
+	cursor: default;
+}

@@ -294,7 +294,9 @@ def _create_card(args: dict, would, full: bool = False) -> dict:
 			continue
 		if isinstance(would, dict) and key not in would:
 			continue  # perm-dropped from the resolved doc: the save will not write it
-		t = table_rows(meta, key, _resulting_rows(meta, key, value, []) if full else value, full)
+		t = table_rows(
+			meta, key, _resulting_rows(meta, key, value, []) if full else _trial_rows(key, value, would), full
+		)
 		if t:
 			tables.append(t)
 			table_keys.add(key)
@@ -426,6 +428,33 @@ def _stored_args(tool: str, args: dict) -> dict:
 				{**u, "changes": stored(out.get("doctype"), u.get("changes"))} if isinstance(u, dict) else u
 				for u in out["updates"]
 			]
+	return out
+
+
+def _trial_rows(key: str, rows: list, would) -> list:
+	"""The rows of child table ``key`` as the trial run left them, for an ordinary
+	create card (the full card builds its rows with ``_resulting_rows``).
+
+	A DocType's ``validate()`` may rewrite a cell the call sent: ERPNext's Timesheet
+	recomputes ``hours`` from ``from_time`` / ``to_time`` whenever both are given. The
+	card's scalar rows already read the perm-filtered trial doc (``would``); its
+	tables read the call, so a row sent as ``hours: 3`` over a 13:00-14:30 slot drew
+	as 3 hours while Confirm stored 1.5 (jarvis-admin-v2#823). Each sent cell is read
+	from the resolved row at the same position instead, which keeps the columns the
+	caller chose (a resolved row also carries its bookkeeping and every unset field).
+	A cell the resolved row does not carry stays as sent: ``table_rows`` still counts
+	a key that is not a child field as unknown. The call's rows are kept whole when
+	the trial holds no list of the same length for the table (no dry run, as on a
+	held create; a validate that added or removed rows, which position cannot pair)."""
+	resolved = would.get(key) if isinstance(would, dict) else None
+	if not isinstance(resolved, list) or len(resolved) != len(rows):
+		return rows
+	out = []
+	for sent, got in zip(rows, resolved, strict=True):
+		if not isinstance(sent, dict) or not isinstance(got, dict):
+			out.append(sent)
+			continue
+		out.append({k: got[k] if k in got else v for k, v in sent.items()})
 	return out
 
 

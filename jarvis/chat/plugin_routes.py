@@ -27,6 +27,7 @@ class PluginRouteError(JarvisError):
 
 # Plugin routes, relative to the agent's HTTP base (the plugin's ROUTE_PATHS).
 LLM_TASK_PATH = "/jarvis/llm-task"
+LLM_TASK_MODELS_PATH = "/jarvis/llm-task/models"
 CANVAS_PATH = "/jarvis/canvas/"
 SESSIONS_DELETE_PATH = "/jarvis/sessions/delete"
 SESSIONS_PATCH_PATH = "/jarvis/sessions/patch"

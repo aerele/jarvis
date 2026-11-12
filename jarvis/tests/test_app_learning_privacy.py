@@ -166,6 +166,21 @@ class TestAppLearningPrivacyBoundary(FrappeTestCase):
 		for call in record_step.call_args_list:
 			self._assert_private_material_absent(call.args, call.kwargs)
 
+	def test_successful_private_write_audit_gets_projected_payload(self):
+		"""The success branch of a dispatched write audits the projected pair (#2466)."""
+		with (
+			mock.patch.object(api, "dispatch", return_value=self._private_data()),
+			mock.patch.object(api.audit, "record") as audit_record,
+			mock.patch("jarvis.agent_audit.record_write") as record_write,
+		):
+			result = api._dispatch_and_wrap("record_app_wiki", self._private_args(), is_write=True)
+
+		self.assertTrue(result["ok"])
+		audit_record.assert_called_once()
+		self._assert_private_material_absent(audit_record.call_args.kwargs)
+		self.assertTrue(audit_record.call_args.kwargs["args"]["private_app_learning"])
+		self._assert_private_material_absent(record_write.call_args.kwargs)
+
 	def test_capability_denial_persists_and_audits_only_safe_metadata(self):
 		"""The pre-dispatch denial branch cannot bypass the private projection."""
 		denial = {

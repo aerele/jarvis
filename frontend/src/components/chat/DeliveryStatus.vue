@@ -19,6 +19,11 @@
 
   Two structural rules tests rely on: the head is the first role="status" and
   holds only the title, and the first button is the retry/check action.
+
+  A confirmed delivery offers no retry (that would send the message twice) and
+  no "View conversation" link (Aerele-RnD/jarvis-admin-v2#805): the bubble sits
+  in the chat the receipt belongs to, so the link opened the very same
+  conversation in a new tab. Outcome and Dismiss are the whole notice.
 -->
 <template>
 	<div class="jv-delivery" :class="'jv-delivery--' + view.tone">
@@ -59,14 +64,6 @@
 			>
 				Retry same request
 			</button>
-			<a
-				v-if="conversation"
-				class="jv-delivery-btn"
-				:href="'/jarvis/c/' + encodeURIComponent(conversation)"
-				target="_blank"
-				rel="noopener noreferrer"
-				>View conversation</a
-			>
 			<button
 				v-if="recoverable || state === 'delivered'"
 				class="jv-delivery-btn jv-delivery-btn--quiet"
@@ -87,7 +84,6 @@ const props = defineProps({
 	// "" and "rejected" both mean a send that did not go through.
 	state: { type: String, default: "" },
 	note: { type: String, default: "" },
-	conversation: { type: String, default: "" },
 });
 const emit = defineEmits(["retry", "dismiss", "retry-same"]);
 

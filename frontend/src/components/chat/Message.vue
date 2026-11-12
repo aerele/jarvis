@@ -64,7 +64,6 @@
 				v-if="failed || ['checking', 'delivered'].includes(deliveryState)"
 				:state="deliveryState"
 				:note="deliveryNote"
-				:conversation="deliveryConversation"
 				@retry="emit('retry')"
 				@dismiss="emit('dismiss')"
 				@retry-same="emit('retry-same')"
@@ -316,7 +315,6 @@ defineProps({
 	failed: { type: Boolean, default: false },
 	deliveryState: { type: String, default: "" },
 	deliveryNote: { type: String, default: "" },
-	deliveryConversation: { type: String, default: "" },
 	// Render an image attachment as the same filename chip as every other file
 	// (click through to view it) instead of an inline cropped thumbnail. Chat's
 	// generated-canvas images (charts/diagrams) rely on the thumbnail staying
