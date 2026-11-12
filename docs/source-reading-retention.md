@@ -64,7 +64,7 @@ copy, the file and report contents returned by `read_file`, `query_file`,
 `query_report` and `get_file_pages` are replaced by the same source-reference
 receipts that other models get (see the first section). The shared receipt shape
 is defined by one contract file that the fleet agent, the plugin and this
-backend all test against (`jarvis/tests/fixtures/source-contract-v1.json.b64`, base64 of the exact fixture bytes).
+backend all test against (`jarvis/tests/fixtures/source-contract-v1.json`).
 A later turn must query the source again under current permissions.
 
 ### What you may claim
