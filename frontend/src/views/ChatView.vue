@@ -2038,11 +2038,22 @@
 								/>
 							</template>
 						</Message>
+						<!-- a File Box file's open questions, right after the reply whose turn
+						     filed them (also on the Approval Board) -->
+						<FileBoxWaits
+							v-if="fileboxWaitGroups.byMessage[m.name]"
+							:items="fileboxWaitGroups.byMessage[m.name]"
+							:busy="fileboxWaitBusy"
+							@decide="decideFileboxWait"
+							@review="reviewFileboxSheet"
+						/>
 					</template>
-					<!-- a File Box file's open questions, also on the Approval Board -->
+					<!-- a File Box file's open questions that no loaded reply produced (filed
+					     before any reply, or under a reply that is not loaded); the rest sit
+					     under their own reply above -->
 					<FileBoxWaits
-						v-if="visibleFileboxWaits.length"
-						:items="visibleFileboxWaits"
+						v-if="fileboxWaitGroups.rest.length"
+						:items="fileboxWaitGroups.rest"
 						:busy="fileboxWaitBusy"
 						@decide="decideFileboxWait"
 						@review="reviewFileboxSheet"
@@ -4686,6 +4697,7 @@ import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
 import { preConnectStatusLabel } from "@/lib/statusPhrase";
 import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
+import { anchorFileboxWaits } from "@/lib/fileboxWaitAnchors";
 import { reconcilePending } from "@/lib/pendingResync";
 import {
 	discardedTokens,
@@ -10358,6 +10370,11 @@ const {
 	load: api.fileboxOpenWaits,
 	onChanged: () => store.refreshApprovalsCount?.(),
 });
+// Each wait sits under the reply whose turn filed it (a wait is created between
+// that reply row and the next message); the rest keep the bottom of the thread.
+const fileboxWaitGroups = computed(() =>
+	anchorFileboxWaits(visibleFileboxWaits.value, visibleMessages.value)
+);
 const fileboxWaitBusy = ref("");
 const fileboxWaitInFlight = new Set();
 function fileboxWaitIsCurrent(view) {
