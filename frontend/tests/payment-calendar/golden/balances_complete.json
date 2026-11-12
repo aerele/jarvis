@@ -1,0 +1,503 @@
+{
+ "data": {
+  "accounts": [
+   {
+    "account": "HDFC Current",
+    "account_name": "HDFC Current",
+    "account_type": "Bank",
+    "balance": "221850.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 3281"
+   },
+   {
+    "account": "Petty Cash",
+    "account_name": "Petty Cash",
+    "account_type": "Cash",
+    "balance": "25000.00",
+    "bank": null,
+    "reference": null
+   },
+   {
+    "account": "ICICI Savings",
+    "account_name": "ICICI Savings",
+    "account_type": "Bank",
+    "balance": "80000.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 9016"
+   },
+   {
+    "account": "Operating account 04",
+    "account_name": "Operating account 04",
+    "account_type": "Bank",
+    "balance": "12000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4100"
+   },
+   {
+    "account": "Operating account 05",
+    "account_name": "Operating account 05",
+    "account_type": "Bank",
+    "balance": "12500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4101"
+   },
+   {
+    "account": "Operating account 06",
+    "account_name": "Operating account 06",
+    "account_type": "Bank",
+    "balance": "13000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4102"
+   },
+   {
+    "account": "Operating account 07",
+    "account_name": "Operating account 07",
+    "account_type": "Bank",
+    "balance": "13500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4103"
+   },
+   {
+    "account": "Operating account 08",
+    "account_name": "Operating account 08",
+    "account_type": "Bank",
+    "balance": "14000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4104"
+   },
+   {
+    "account": "Operating account 09",
+    "account_name": "Operating account 09",
+    "account_type": "Bank",
+    "balance": "14500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4105"
+   },
+   {
+    "account": "Operating account 10",
+    "account_name": "Operating account 10",
+    "account_type": "Bank",
+    "balance": "15000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4106"
+   },
+   {
+    "account": "Operating account 11",
+    "account_name": "Operating account 11",
+    "account_type": "Bank",
+    "balance": "15500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4107"
+   },
+   {
+    "account": "Operating account 12",
+    "account_name": "Operating account 12",
+    "account_type": "Bank",
+    "balance": "16000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4108"
+   },
+   {
+    "account": "Operating account 13",
+    "account_name": "Operating account 13",
+    "account_type": "Bank",
+    "balance": "16500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4109"
+   },
+   {
+    "account": "Operating account 14",
+    "account_name": "Operating account 14",
+    "account_type": "Bank",
+    "balance": "17000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4110"
+   },
+   {
+    "account": "Operating account 15",
+    "account_name": "Operating account 15",
+    "account_type": "Bank",
+    "balance": "17500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4111"
+   },
+   {
+    "account": "Operating account 16",
+    "account_name": "Operating account 16",
+    "account_type": "Bank",
+    "balance": "18000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4112"
+   },
+   {
+    "account": "Operating account 17",
+    "account_name": "Operating account 17",
+    "account_type": "Bank",
+    "balance": "18500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4113"
+   },
+   {
+    "account": "Operating account 18",
+    "account_name": "Operating account 18",
+    "account_type": "Bank",
+    "balance": "19000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4114"
+   },
+   {
+    "account": "Operating account 19",
+    "account_name": "Operating account 19",
+    "account_type": "Bank",
+    "balance": "19500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4115"
+   },
+   {
+    "account": "Operating account 20",
+    "account_name": "Operating account 20",
+    "account_type": "Bank",
+    "balance": "20000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4116"
+   },
+   {
+    "account": "Operating account 21",
+    "account_name": "Operating account 21",
+    "account_type": "Bank",
+    "balance": "20500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4117"
+   },
+   {
+    "account": "Operating account 22",
+    "account_name": "Operating account 22",
+    "account_type": "Bank",
+    "balance": "21000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4118"
+   },
+   {
+    "account": "Operating account 23",
+    "account_name": "Operating account 23",
+    "account_type": "Bank",
+    "balance": "21500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4119"
+   },
+   {
+    "account": "Operating account 24",
+    "account_name": "Operating account 24",
+    "account_type": "Bank",
+    "balance": "22000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4120"
+   },
+   {
+    "account": "Operating account 25",
+    "account_name": "Operating account 25",
+    "account_type": "Bank",
+    "balance": "22500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4121"
+   },
+   {
+    "account": "Operating account 26",
+    "account_name": "Operating account 26",
+    "account_type": "Bank",
+    "balance": "23000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4122"
+   },
+   {
+    "account": "Operating account 27",
+    "account_name": "Operating account 27",
+    "account_type": "Bank",
+    "balance": "23500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4123"
+   },
+   {
+    "account": "Operating account 28",
+    "account_name": "Operating account 28",
+    "account_type": "Bank",
+    "balance": "24000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4124"
+   },
+   {
+    "account": "Operating account 29",
+    "account_name": "Operating account 29",
+    "account_type": "Bank",
+    "balance": "24500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4125"
+   },
+   {
+    "account": "Operating account 30",
+    "account_name": "Operating account 30",
+    "account_type": "Bank",
+    "balance": "25000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4126"
+   },
+   {
+    "account": "Operating account 31",
+    "account_name": "Operating account 31",
+    "account_type": "Bank",
+    "balance": "25500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4127"
+   },
+   {
+    "account": "Operating account 32",
+    "account_name": "Operating account 32",
+    "account_type": "Bank",
+    "balance": "26000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4128"
+   },
+   {
+    "account": "Operating account 33",
+    "account_name": "Operating account 33",
+    "account_type": "Bank",
+    "balance": "26500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4129"
+   },
+   {
+    "account": "Operating account 34",
+    "account_name": "Operating account 34",
+    "account_type": "Bank",
+    "balance": "27000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4130"
+   },
+   {
+    "account": "Operating account 35",
+    "account_name": "Operating account 35",
+    "account_type": "Bank",
+    "balance": "27500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4131"
+   },
+   {
+    "account": "Operating account 36",
+    "account_name": "Operating account 36",
+    "account_type": "Bank",
+    "balance": "28000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4132"
+   },
+   {
+    "account": "Operating account 37",
+    "account_name": "Operating account 37",
+    "account_type": "Bank",
+    "balance": "28500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4133"
+   },
+   {
+    "account": "Operating account 38",
+    "account_name": "Operating account 38",
+    "account_type": "Bank",
+    "balance": "29000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4134"
+   },
+   {
+    "account": "Operating account 39",
+    "account_name": "Operating account 39",
+    "account_type": "Bank",
+    "balance": "29500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4135"
+   },
+   {
+    "account": "Operating account 40",
+    "account_name": "Operating account 40",
+    "account_type": "Bank",
+    "balance": "30000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4136"
+   },
+   {
+    "account": "Operating account 41",
+    "account_name": "Operating account 41",
+    "account_type": "Bank",
+    "balance": "30500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4137"
+   },
+   {
+    "account": "Operating account 42",
+    "account_name": "Operating account 42",
+    "account_type": "Bank",
+    "balance": "31000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4138"
+   },
+   {
+    "account": "Operating account 43",
+    "account_name": "Operating account 43",
+    "account_type": "Bank",
+    "balance": "31500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4139"
+   },
+   {
+    "account": "Operating account 44",
+    "account_name": "Operating account 44",
+    "account_type": "Bank",
+    "balance": "32000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4140"
+   },
+   {
+    "account": "Operating account 45",
+    "account_name": "Operating account 45",
+    "account_type": "Bank",
+    "balance": "32500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4141"
+   },
+   {
+    "account": "Operating account 46",
+    "account_name": "Operating account 46",
+    "account_type": "Bank",
+    "balance": "33000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4142"
+   },
+   {
+    "account": "Operating account 47",
+    "account_name": "Operating account 47",
+    "account_type": "Bank",
+    "balance": "33500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4143"
+   },
+   {
+    "account": "Operating account 48",
+    "account_name": "Operating account 48",
+    "account_type": "Bank",
+    "balance": "34000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4144"
+   },
+   {
+    "account": "Operating account 49",
+    "account_name": "Operating account 49",
+    "account_type": "Bank",
+    "balance": "34500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4145"
+   },
+   {
+    "account": "Operating account 50",
+    "account_name": "Operating account 50",
+    "account_type": "Bank",
+    "balance": "35000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4146"
+   },
+   {
+    "account": "Operating account 51",
+    "account_name": "Operating account 51",
+    "account_type": "Bank",
+    "balance": "35500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4147"
+   },
+   {
+    "account": "Operating account 52",
+    "account_name": "Operating account 52",
+    "account_type": "Bank",
+    "balance": "36000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4148"
+   },
+   {
+    "account": "Operating account 53",
+    "account_name": "Operating account 53",
+    "account_type": "Bank",
+    "balance": "36500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4149"
+   },
+   {
+    "account": "Operating account 54",
+    "account_name": "Operating account 54",
+    "account_type": "Bank",
+    "balance": "37000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4150"
+   },
+   {
+    "account": "Operating account 55",
+    "account_name": "Operating account 55",
+    "account_type": "Bank",
+    "balance": "37500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4151"
+   },
+   {
+    "account": "Operating account 56",
+    "account_name": "Operating account 56",
+    "account_type": "Bank",
+    "balance": "38000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4152"
+   },
+   {
+    "account": "Operating account 57",
+    "account_name": "Operating account 57",
+    "account_type": "Bank",
+    "balance": "38500.00",
+    "bank": "ICICI Bank",
+    "reference": "•••• 4153"
+   },
+   {
+    "account": "Operating account 58",
+    "account_name": "Operating account 58",
+    "account_type": "Bank",
+    "balance": "39000.00",
+    "bank": "State Bank of India",
+    "reference": "•••• 4154"
+   },
+   {
+    "account": "Operating account 59",
+    "account_name": "Operating account 59",
+    "account_type": "Bank",
+    "balance": "39500.00",
+    "bank": "Axis Bank",
+    "reference": "•••• 4155"
+   },
+   {
+    "account": "Operating account 60",
+    "account_name": "Operating account 60",
+    "account_type": "Bank",
+    "balance": "40000.00",
+    "bank": "HDFC Bank",
+    "reference": "•••• 4156"
+   }
+  ],
+  "code": null,
+  "completed_at": "2026-11-11T05:12:00+00:00",
+  "currency": "INR",
+  "expires_at": "2026-11-11T05:12:00+00:00",
+  "generated_at": "2026-11-11T05:12:00+00:00",
+  "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "precision": 2,
+  "queued_at": "2026-11-11T05:12:00+00:00",
+  "started_at": "2026-11-11T05:12:00+00:00",
+  "state": "complete",
+  "total": "1808850.00"
+ },
+ "request": {
+  "company": "Northstar Manufacturing Pvt Ltd",
+  "job_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "kind": "balances"
+ },
+ "scenario": "balances_complete"
+}
