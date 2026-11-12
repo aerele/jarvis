@@ -3788,8 +3788,15 @@ def _recheck_quiet(ctx: PumpContext) -> None:
 			TURN,
 			run_id,
 			[
-				"run_id", "state", "version", "conversation", "assistant_message",
-				"last_event_seq", "gateway_run_id", "dispatching_at", "recovery_started_at",
+				"run_id",
+				"state",
+				"version",
+				"conversation",
+				"assistant_message",
+				"last_event_seq",
+				"gateway_run_id",
+				"dispatching_at",
+				"recovery_started_at",
 			],
 			as_dict=True,
 		)
