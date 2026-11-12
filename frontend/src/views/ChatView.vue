@@ -840,7 +840,6 @@
 							:failed="hasCurrentMessageSnapshot && m.failed"
 							:delivery-state="hasCurrentMessageSnapshot ? m.deliveryState : ''"
 							:delivery-note="hasCurrentMessageSnapshot ? m.deliveryNote : ''"
-							:delivery-conversation="m.deliveryConversation"
 							@edit="editCommand(m)"
 							@copy="copyMsg(m.name, m.content)"
 							@retry="resendFailed(m)"
@@ -11356,7 +11355,7 @@ async function refreshRecoveredSend(m, r, view) {
 	} catch {
 		// Delivery stays authoritative even when refreshing the transcript fails.
 		m.deliveryNote +=
-			" The conversation could not be refreshed. Open it to see the latest result.";
+			" The conversation could not be refreshed. Reload it to see the latest result.";
 	}
 }
 
@@ -11379,11 +11378,6 @@ async function settleRecoveredSend(m, r, view) {
 	m.deliveryConversation = r.conversation_id;
 	m.deliveryMessageId = r.message_id;
 	m.deliveryConfirmed = !!r.confirmed;
-	m.deliveryNote =
-		r.confirmed && r.ok === false
-			? r.error?.message ||
-			  "One or more actions could not be completed. Check the action receipts."
-			: "Delivery confirmed. View the conversation for the current result.";
 	// Only adopt this home send while the same empty surface still owns it.
 	// A newer draft/request or another mounted route must never be moved.
 	let refreshView = view;
@@ -11407,6 +11401,20 @@ async function settleRecoveredSend(m, r, view) {
 		originOf.value = "";
 		router.replace("/c/" + r.conversation_id);
 	}
+	// The note names where the result is. The bubble sits in its own chat, so
+	// that is "this chat" unless the receipt landed elsewhere: a home send whose
+	// surface was not adopted above (newer draft) or a request promoted to
+	// another scope. No link (jarvis-admin-v2#805): it opened the same chat in a
+	// new tab. Receipt resolution never navigates; the sidebar list is reloaded
+	// below, so the other chat is one click away in Recent chats.
+	const elsewhere = !!r.conversation_id && _pendingSends.scopeOf(m) !== r.conversation_id;
+	m.deliveryNote =
+		r.confirmed && r.ok === false
+			? r.error?.message ||
+			  "One or more actions could not be completed. Check the action receipts."
+			: elsewhere
+			? "Delivery confirmed. The result is in another chat; open it from Recent chats."
+			: "Delivery confirmed. The result is in this chat.";
 	if (
 		_recoveryViewActive &&
 		viewIsCurrent() &&
