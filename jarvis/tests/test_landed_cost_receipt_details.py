@@ -45,7 +45,7 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 		values = self.receipt_values()
 		values["purchase_receipts"][0].update(supplier="", posting_date=None, grand_total=0)
 		original = copy.deepcopy(values)
-		saved = create_doc("Landed Cost Voucher", values)
+		saved = create_doc("Landed Cost Voucher", values, fields=["purchase_receipts"])
 		self.assert_receipt_summary(saved["purchase_receipts"][0])
 		stored = frappe.get_doc("Landed Cost Voucher", saved["name"])
 		self.assert_receipt_summary(stored.purchase_receipts[0])
@@ -68,7 +68,7 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 		self.assertEqual(result["status"], "ready", result)
 		self.assert_receipt_summary(result["draft_values"]["purchase_receipts"][0])
 		self.assertEqual(frappe.db.count("Landed Cost Voucher"), before)
-		saved = create_doc("Landed Cost Voucher", result["draft_values"])
+		saved = create_doc("Landed Cost Voucher", result["draft_values"], fields=["purchase_receipts"])
 		self.assert_receipt_summary(saved["purchase_receipts"][0])
 
 	def test_receipt_table_edit_repairs_legacy_summary_and_preserves_row(self):
@@ -76,7 +76,12 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 		row_name = legacy.purchase_receipts[0].name
 		self.assertFalse(legacy.purchase_receipts[0].grand_total)
 		items = [(r.name, r.applicable_charges) for r in legacy.items]
-		saved = update_doc("Landed Cost Voucher", legacy.name, {"purchase_receipts": [{"name": row_name}]})
+		saved = update_doc(
+			"Landed Cost Voucher",
+			legacy.name,
+			{"purchase_receipts": [{"name": row_name}]},
+			fields=["purchase_receipts", "items"],
+		)
 		self.assert_receipt_summary(saved["purchase_receipts"][0])
 		self.assertEqual(saved["purchase_receipts"][0]["name"], row_name)
 		self.assertEqual([(r["name"], r["applicable_charges"]) for r in saved["items"]], items)
@@ -126,7 +131,7 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 		values = self.receipt_values()
 		values["purchase_receipts"][0]["receipt_document"] = receipt.name
 		values["items"] = []
-		saved = create_doc("Landed Cost Voucher", values)
+		saved = create_doc("Landed Cost Voucher", values, fields=["purchase_receipts"])
 		self.assert_receipt_summary(saved["purchase_receipts"][0], receipt)
 		self.assertNotEqual(receipt.base_grand_total, receipt.grand_total)
 		self.assertNotEqual(receipt.base_grand_total, receipt.base_net_total)
@@ -148,7 +153,7 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 			{"receipt_document_type": "Purchase Receipt", "receipt_document": other.name}
 		)
 		values["items"] = []
-		saved = create_doc("Landed Cost Voucher", values)
+		saved = create_doc("Landed Cost Voucher", values, fields=["purchase_receipts", "items"])
 		self.assert_receipt_summary(saved["purchase_receipts"][0])
 		self.assert_receipt_summary(saved["purchase_receipts"][1], other)
 		self.assertEqual([r["applicable_charges"] for r in saved["items"]], [40, 80])
@@ -324,7 +329,9 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 		self.assertFalse(legacy.reload().purchase_receipts[0].grand_total)
 
 	def test_changing_a_receipt_link_refreshes_the_summary(self):
-		saved = create_doc("Landed Cost Voucher", self.receipt_values())
+		saved = create_doc(
+			"Landed Cost Voucher", self.receipt_values(), fields=["purchase_receipts", "items"]
+		)
 		other = self.make_receipt(rate=150)
 		row = saved["purchase_receipts"][0]
 		updated = update_doc(
@@ -345,6 +352,7 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 					for r in saved["items"]
 				],
 			},
+			fields=["purchase_receipts"],
 		)
 		self.assert_receipt_summary(updated["purchase_receipts"][0], other)
 		self.assertEqual(updated["purchase_receipts"][0]["name"], row["name"])
@@ -379,7 +387,7 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 			{"receipt_document_type": "Purchase Invoice", "receipt_document": invoice.name}
 		]
 		values["items"] = []
-		saved = create_doc("Landed Cost Voucher", values)
+		saved = create_doc("Landed Cost Voucher", values, fields=["purchase_receipts"])
 		self.assert_receipt_summary(saved["purchase_receipts"][0], invoice)
 
 	def test_native_extended_receipt_types_use_their_own_amount_fields(self):

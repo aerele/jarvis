@@ -2801,10 +2801,11 @@ def _run_preview(tool: str, args: dict) -> dict:
 	Raises ``PreviewSandboxLost`` when the dry run could not be undone cleanly;
 	every caller turns that into a refusal (see the class)."""
 	from jarvis.tools import _write_risk
+	from jarvis.tools._doc_parts import full_write_results
 	from jarvis.tools._preview_sandbox import preview_sandbox, will_queue_summary
 
 	_write_risk.take_refusal()
-	with preview_sandbox() as dropped:
+	with preview_sandbox() as dropped, full_write_results():
 		would = dispatch(tool, args)
 	hidden = _write_risk.take_refusal()
 	if hidden is not None:
@@ -3416,7 +3417,10 @@ def _dispatch_and_wrap(
 		except Exception:
 			pass
 	if is_write:
-		audit.record(tool=tool, args=args, ok=True, result=data)
+		# Both audit sinks get the projected pair: a private App Learning write
+		# must never reach either one with its raw args or result.
+		audit_args, audit_data = _app_learning_audit_payload(tool, args, data)
+		audit.record(tool=tool, args=audit_args, ok=True, result=audit_data)
 		# Manager audit: a dispatched write (one metadata-only row; bulk collapses
 		# to one row + bulk_count). Own savepoint, never commits. This branch
 		# (version-15-hotfix) has no envelope_ok / _ENVELOPE_TOOLS machinery, so a
@@ -3425,7 +3429,6 @@ def _dispatch_and_wrap(
 		# connector-envelope feature that is not on this branch.
 		from jarvis import agent_audit
 
-		audit_args, audit_data = _app_learning_audit_payload(tool, args, data)
 		agent_audit.record_write(
 			actor=frappe.session.user,
 			tool=tool,

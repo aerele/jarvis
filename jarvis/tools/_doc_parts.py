@@ -7,6 +7,8 @@ read as an empty value, a part says so instead: a top-level field or a child
 table is refused by name, and a child field is left out of the rows and listed.
 """
 
+from contextlib import contextmanager
+
 import frappe
 from frappe.model import table_fields
 
@@ -151,6 +153,52 @@ class DocPart:
 			out["omitted_fields"] = omitted
 			out["note"] += " Row fields you cannot read are left out of every row; omitted_fields names them."
 		return out
+
+
+def write_result(doc, fields: list | None = None) -> dict:
+	"""What create_doc / update_doc return for one saved ``doc`` (already masked by
+	apply_fieldlevel_read_permissions): a compact identity, or ``fields`` cut the
+	way get_doc cuts them. The full document is get_doc's job.
+
+	``fields`` were already checked by check_write_fields before the write, so this
+	only copies them: a refusal here would follow a save the model then retries."""
+	if getattr(frappe.local, "jarvis_full_write_result", False):
+		return doc.as_dict()
+	out = {"doctype": doc.doctype, "name": doc.name, "docstatus": doc.docstatus}
+	if fields:
+		saved = doc.as_dict(no_default_fields=False)
+		return out | {f: saved.get(f) for f in fields}
+	keys = [k for k in ("status", doc.meta.title_field) if k and doc.meta.get_field(k)]
+	return out | {k: doc.get(k) for k in keys if doc.get(k) is not None and k not in out}
+
+
+@contextmanager
+def full_write_results():
+	"""A trial run (the confirmation preview) returns the whole would-be document:
+	the card's sensitive rows, diffs and Details are built from it."""
+	previous = getattr(frappe.local, "jarvis_full_write_result", False)
+	frappe.local.jarvis_full_write_result = True
+	try:
+		yield
+	finally:
+		frappe.local.jarvis_full_write_result = previous
+
+
+def check_write_fields(doctype: str, fields: list | None) -> None:
+	"""Refuse bad ``fields`` before the write, so a refusal never follows a save."""
+	if not fields:
+		return
+	meta = frappe.get_meta(doctype)
+	# get_valid_columns: Frappe v15 has no get_valid_fields (same list on v16).
+	known = set(meta.get_valid_columns()) | {df.fieldname for df in meta.get_table_fields()}
+	part = DocPart(fields)
+	_refuse_unreadable(doctype, part.fields)
+	_refuse_unknown(doctype, part.fields, known)
+
+
+def refuse_fields_with_batch(fields: list | None) -> None:
+	if fields:
+		raise InvalidArgumentError("fields applies to a single create_doc/update_doc, not a batch")
 
 
 def _row_part(row: dict, fields: list | None, hidden: set) -> dict:

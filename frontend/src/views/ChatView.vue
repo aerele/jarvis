@@ -840,7 +840,6 @@
 							:failed="hasCurrentMessageSnapshot && m.failed"
 							:delivery-state="hasCurrentMessageSnapshot ? m.deliveryState : ''"
 							:delivery-note="hasCurrentMessageSnapshot ? m.deliveryNote : ''"
-							:delivery-conversation="m.deliveryConversation"
 							@edit="editCommand(m)"
 							@copy="copyMsg(m.name, m.content)"
 							@retry="resendFailed(m)"
@@ -2038,11 +2037,22 @@
 								/>
 							</template>
 						</Message>
+						<!-- a File Box file's open questions, right after the reply whose turn
+						     filed them (also on the Approval Board) -->
+						<FileBoxWaits
+							v-if="fileboxWaitGroups.byMessage[m.name]"
+							:items="fileboxWaitGroups.byMessage[m.name]"
+							:busy="fileboxWaitBusy"
+							@decide="decideFileboxWait"
+							@review="reviewFileboxSheet"
+						/>
 					</template>
-					<!-- a File Box file's open questions, also on the Approval Board -->
+					<!-- a File Box file's open questions that no loaded reply produced (filed
+					     before any reply, or under a reply that is not loaded); the rest sit
+					     under their own reply above -->
 					<FileBoxWaits
-						v-if="visibleFileboxWaits.length"
-						:items="visibleFileboxWaits"
+						v-if="fileboxWaitGroups.rest.length"
+						:items="fileboxWaitGroups.rest"
 						:busy="fileboxWaitBusy"
 						@decide="decideFileboxWait"
 						@review="reviewFileboxSheet"
@@ -2475,6 +2485,14 @@
 					style="margin-bottom: 10px"
 				>
 					<template v-if="subscriptionExpired.showReconnect" #action>
+						<button
+							v-if="subscriptionExpired.switchModel"
+							class="jv-btn jv-btn--sm"
+							style="margin-right: 6px"
+							@click="selectModel(subscriptionExpired.switchModel)"
+						>
+							Switch to {{ subscriptionExpired.switchModel }}
+						</button>
 						<button
 							class="jv-btn jv-btn--sm"
 							@click="goReconnectSubscription(subscriptionExpired.upstream)"
@@ -4513,7 +4531,7 @@ import {
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
-import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
+import { parseCompactCommand, compactOutcome } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
@@ -4678,6 +4696,7 @@ import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
 import { preConnectStatusLabel } from "@/lib/statusPhrase";
 import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
+import { anchorFileboxWaits } from "@/lib/fileboxWaitAnchors";
 import { reconcilePending } from "@/lib/pendingResync";
 import {
 	discardedTokens,
@@ -5155,7 +5174,7 @@ function goConnectModel() {
 // refetched on the jarvis:subscription_health realtime event (see onMounted / onBeforeUnmount).
 let unwatchSubscriptionNotice = () => {};
 const subscriptionExpired = computed(() =>
-	subscriptionExpiredBanner(subscriptionNotice.expired, canConnectModel)
+	subscriptionExpiredBanner(subscriptionNotice.expired, canConnectModel, modelOverride.value)
 );
 // The card and the banner know the upstream, the pool knows account_refs: take the first expired
 // account of that upstream. No match opens the pane without the link.
@@ -6001,7 +6020,10 @@ async function runCompact(hint) {
 		const res = await api.compactConversation(view.conversation, hint);
 		if (!chatViewIsCurrent(view)) return;
 		if (!res || !res.ok) {
-			notify(compactFailureCopy(res && res.reason), { type: "error" });
+			{
+				const o = compactOutcome(res && res.reason);
+				notify(o.text, { type: o.type });
+			}
 			return;
 		}
 		compacting.value = true;
@@ -6010,7 +6032,7 @@ async function runCompact(hint) {
 		compactDialogOpen.value = false;
 	} catch (e) {
 		if (chatViewIsCurrent(view))
-			notify(errMessage(e) || compactFailureCopy(), { type: "error" });
+			notify(errMessage(e) || compactOutcome().text, { type: "error" });
 	} finally {
 		if (chatViewIsCurrent(view)) compactSubmitting.value = false;
 	}
@@ -7771,13 +7793,28 @@ const draftParkedRegion = ref(null);
 const DRAFT_DEFAULT_WIDTH = 720;
 const DRAFT_MIN_WIDTH = 440;
 const DRAFT_WIDTH_KEY = "jarvis-draftpanel-width";
-const draftMaxWidth = () => Math.min(1100, Math.round(window.innerWidth * 0.92));
+const draftPanelEl = ref(null);
+// The overlay fills the chat column, not the window: beside the in-flow sidebar
+// the column is narrower than the viewport, and a width clamped to the viewport
+// let the panel's left edge run under the sidebar (jarvis-admin-v2#776). While
+// the panel is closed the column is unknown, so the number falls back to the
+// window; .jv-draft-panel's percentage max-width caps the paint, and the watcher
+// below re-clamps once the panel is in the DOM.
+const draftHostWidth = () => draftPanelEl.value?.parentElement?.clientWidth || window.innerWidth;
+const draftMaxWidth = () => Math.min(1100, Math.round(draftHostWidth() * 0.92));
 const clampDraftWidth = (w) => Math.min(draftMaxWidth(), Math.max(DRAFT_MIN_WIDTH, w));
 const _storedDraftW = Number(localStorage.getItem(DRAFT_WIDTH_KEY));
 const draftPanelWidth = ref(clampDraftWidth(_storedDraftW || DRAFT_DEFAULT_WIDTH));
-const draftPanelEl = ref(null);
 const draftResizing = ref(false);
 let _draftPanelRight = 0;
+watch(
+	() => !!draftPanel.value,
+	async (open) => {
+		if (!open) return;
+		await nextTick();
+		draftPanelWidth.value = clampDraftWidth(draftPanelWidth.value);
+	}
+);
 
 function onDraftResizeMove(e) {
 	draftResizing.value = true;
@@ -10347,6 +10384,11 @@ const {
 	load: api.fileboxOpenWaits,
 	onChanged: () => store.refreshApprovalsCount?.(),
 });
+// Each wait sits under the reply whose turn filed it (a wait is created between
+// that reply row and the next message); the rest keep the bottom of the thread.
+const fileboxWaitGroups = computed(() =>
+	anchorFileboxWaits(visibleFileboxWaits.value, visibleMessages.value)
+);
 const fileboxWaitBusy = ref("");
 const fileboxWaitInFlight = new Set();
 function fileboxWaitIsCurrent(view) {
@@ -11345,7 +11387,7 @@ async function refreshRecoveredSend(m, r, view) {
 	} catch {
 		// Delivery stays authoritative even when refreshing the transcript fails.
 		m.deliveryNote +=
-			" The conversation could not be refreshed. Open it to see the latest result.";
+			" The conversation could not be refreshed. Reload it to see the latest result.";
 	}
 }
 
@@ -11368,11 +11410,6 @@ async function settleRecoveredSend(m, r, view) {
 	m.deliveryConversation = r.conversation_id;
 	m.deliveryMessageId = r.message_id;
 	m.deliveryConfirmed = !!r.confirmed;
-	m.deliveryNote =
-		r.confirmed && r.ok === false
-			? r.error?.message ||
-			  "One or more actions could not be completed. Check the action receipts."
-			: "Delivery confirmed. View the conversation for the current result.";
 	// Only adopt this home send while the same empty surface still owns it.
 	// A newer draft/request or another mounted route must never be moved.
 	let refreshView = view;
@@ -11396,6 +11433,20 @@ async function settleRecoveredSend(m, r, view) {
 		originOf.value = "";
 		router.replace("/c/" + r.conversation_id);
 	}
+	// The note names where the result is. The bubble sits in its own chat, so
+	// that is "this chat" unless the receipt landed elsewhere: a home send whose
+	// surface was not adopted above (newer draft) or a request promoted to
+	// another scope. No link (jarvis-admin-v2#805): it opened the same chat in a
+	// new tab. Receipt resolution never navigates; the sidebar list is reloaded
+	// below, so the other chat is one click away in Recent chats.
+	const elsewhere = !!r.conversation_id && _pendingSends.scopeOf(m) !== r.conversation_id;
+	m.deliveryNote =
+		r.confirmed && r.ok === false
+			? r.error?.message ||
+			  "One or more actions could not be completed. Check the action receipts."
+			: elsewhere
+			? "Delivery confirmed. The result is in another chat; open it from Recent chats."
+			: "Delivery confirmed. The result is in this chat.";
 	if (
 		_recoveryViewActive &&
 		viewIsCurrent() &&
@@ -12240,7 +12291,10 @@ function onEvent(p) {
 		case "context:compact_failed":
 			compacting.value = false;
 			compactHintSeed.value = "";
-			notify(compactFailureCopy(p.reason), { type: "error" });
+			{
+				const o = compactOutcome(p.reason);
+				notify(o.text, { type: o.type });
+			}
 			break;
 		case "run:start":
 			// CDX-3: a stale-epoch run:start (a pump that lost the lease, or one that
@@ -17832,7 +17886,10 @@ onUnmounted(() => {
 /* --- record draft panel --- */
 .jv-draft-panel {
 	position: relative;
-	max-width: 92vw;
+	/* Of the overlay (the chat column), never the viewport: a definite max-width
+	   also caps the flex item's automatic minimum, so a nowrap grid cannot hold
+	   the panel wider than the column and push it under the sidebar (#776). */
+	max-width: 92%;
 	display: flex;
 	flex-direction: column;
 }

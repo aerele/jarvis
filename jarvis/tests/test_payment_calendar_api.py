@@ -7,7 +7,7 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import add_days
 
-from jarvis.payment_calendar import access, api, store
+from jarvis.payment_calendar import access, api, detail, store
 from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.projection import project_snapshot
 from jarvis.payment_calendar.scope import normalize_scope
@@ -37,6 +37,7 @@ class TestPaymentCalendarAPI(TestCase):
 			for side in ("Payable", "Receivable")
 		}
 		self.result = {
+			"schema": 2,
 			"sources": sources,
 			"projection": project_snapshot(
 				sources["Payable"],
@@ -47,6 +48,7 @@ class TestPaymentCalendarAPI(TestCase):
 				self.scope["window_start"],
 				self.scope["window_end"],
 			),
+			"horizon": None,
 			"bank": None,
 			"bank_code": None,
 			"floor": get_settings(self.fx.company),
@@ -56,7 +58,7 @@ class TestPaymentCalendarAPI(TestCase):
 		}
 		self.sid, _ = store.admit(self.user, "b" * 64, self.scope, proof["fingerprint"])
 		store.mark_running(self.user, self.sid)
-		store.publish(self.user, self.sid, self.result)
+		store.publish_snapshot(self.user, self.sid, store.split_result(self.result, self.scope))
 
 	def tearDown(self):
 		store.purge_actor(self.user)
@@ -100,6 +102,19 @@ class TestPaymentCalendarAPI(TestCase):
 		self.assertIs(result["data"]["projection"]["payable_settlement_complete"], True)
 		self.assertNotIn("_permission", json.dumps(result))
 		self.assertNotIn("permission_columns", json.dumps(result))
+		# The top invoice of a day is the one deliberate invoice number in status (B2).
+		quoted = json.dumps(self.invoice)
+		tops = [
+			day[key]
+			for day in result["data"]["projection"]["days"].values()
+			for key in ("payable_top_invoice", "receivable_top_invoice")
+			if day[key]
+		]
+		named = [top for top in tops if top["voucher_no"] == self.invoice]
+		self.assertTrue(named)
+		self.assertEqual(json.dumps(result).count(quoted), len(named))
+		for top in named:
+			top["voucher_no"] = None
 		self.assertNotIn(self.invoice, json.dumps(result))
 
 	def test_detail_and_upcoming_use_the_same_snapshot_without_running_sources(self):
@@ -163,7 +178,7 @@ class TestPaymentCalendarAPI(TestCase):
 			proof = access.authorize_scope(self.scope)
 			sid, _ = store.admit(self.user, "d" * 64, self.scope, proof["fingerprint"])
 			store.mark_running(self.user, sid)
-			store.publish(self.user, sid, self.result)
+			store.publish_snapshot(self.user, sid, store.split_result(self.result, self.scope))
 			for response in (
 				api.get_snapshot_status(sid),
 				api.get_day_detail(sid, self.fx.today, "Receivable"),
@@ -214,7 +229,7 @@ class TestPaymentCalendarAPI(TestCase):
 			proof = access.authorize_scope(self.scope)
 			sid, _ = store.admit(self.user, "c" * 64, self.scope, proof["fingerprint"])
 			store.mark_running(self.user, sid)
-			store.publish(self.user, sid, self.result)
+			store.publish_snapshot(self.user, sid, store.split_result(self.result, self.scope))
 			party_tests._selected_supplier = "NO_SUCH_SUPPLIER"
 			result = api.get_snapshot_status(sid)
 			self.assertFalse(result["ok"], result)
@@ -232,6 +247,58 @@ class TestPaymentCalendarAPI(TestCase):
 				result = api.get_day_detail(self.sid, date, side, page, size)
 				self.assertFalse(result["ok"])
 				self.assertNotIn("data", result)
+
+	def test_the_party_page_is_validated_even_when_the_party_summary_is_off(self):
+		for parties in (True, False):
+			for party_page in (0, -1, "x", 100001, True):
+				with self.subTest(parties=parties, party_page=party_page):
+					for result in (
+						api.get_day_detail(
+							self.sid, self.fx.today, "Payable", 1, 25, party_page, None, None, parties
+						),
+						api.get_bucket_detail(
+							self.sid, "overdue", "Payable", 1, 25, party_page, None, None, parties
+						),
+					):
+						self.assertEqual((result["ok"], result["code"]), (False, "invalid_request"))
+
+	def test_invalid_sort_or_order_returns_the_invalid_envelope(self):
+		for sort, order in (("bogus", "asc"), ("remaining", "up"), ("", "desc"), ("party", "")):
+			with self.subTest(sort=sort, order=order):
+				for result in (
+					api.get_day_detail(self.sid, self.fx.today, "Payable", 1, 25, 1, sort, order),
+					api.get_bucket_detail(self.sid, "overdue", "Payable", 1, 25, 1, sort, order),
+				):
+					self.assertEqual(
+						(result["ok"], result["state"], result["code"]), (False, "invalid", "invalid_request")
+					)
+					self.assertNotIn("data", result)
+
+	def test_detail_rows_are_sorted_carry_settled_and_no_source_link(self):
+		selected = add_days(self.fx.today, 10)
+		# The window bucket spans both terms (40 and 60), so the order is visible.
+		for order, expected in (("asc", ["40.00", "60.00"]), ("desc", ["60.00", "40.00"])):
+			window = api.get_bucket_detail(self.sid, "window", "Payable", 1, 25, 1, "remaining", order)
+			self.assertEqual([r["remaining"] for r in window["data"]["rows"]], expected)
+		row = api.get_day_detail(self.sid, selected, "Payable")["data"]["rows"][0]
+		self.assertNotIn("source_link", row)
+		self.assertEqual(row["settled"], "0.00")
+		self.assertEqual(api.get_day_detail(self.sid, selected)["data"]["total_remaining"], "40.00")
+
+	def test_payable_only_buckets_answer_payables_and_refuse_receivables(self):
+		for bucket in ("today", "immediate", "now"):
+			ok = api.get_bucket_detail(self.sid, bucket)
+			self.assertTrue(ok["ok"], ok)
+			self.assertIn("total_remaining", ok["data"])
+			refused = api.get_bucket_detail(self.sid, bucket, "Receivable")
+			self.assertEqual((refused["ok"], refused["state"]), (False, "invalid"))
+
+	def test_window_bucket_total_is_the_month_total_and_its_rows_are_the_tab_count(self):
+		window = api.get_bucket_detail(self.sid, "window", "Payable")
+		self.assertTrue(window["ok"], window)
+		totals = self.result["projection"]["month_totals"]
+		self.assertIsNone(totals)  # this fixture scope has no month: the window total is unknown
+		self.assertIsNone(window["data"]["total_remaining"])
 
 	def test_error_envelopes_never_echo_exception_text_or_server_messages(self):
 		with (
@@ -262,7 +329,7 @@ class TestPaymentCalendarAPI(TestCase):
 		)
 		sid, _ = store.admit(self.user, "f" * 64, self.scope, proof["fingerprint"])
 		store.mark_running(self.user, sid)
-		store.publish(self.user, sid, result)
+		store.publish_snapshot(self.user, sid, store.split_result(result, self.scope))
 		response = api.get_upcoming(sid, self.fx.today)
 		self.assertFalse(response["ok"], response)
 		self.assertEqual(response["state"], "unavailable")
@@ -287,3 +354,70 @@ class TestPaymentCalendarAPI(TestCase):
 		self.assertFalse(response["ok"])
 		self.assertEqual(response["state"], "forbidden")
 		self.assertFalse(response["retryable"])
+
+	def publish(self, result, digest):
+		proof = access.authorize_scope(self.scope)
+		sid, _ = store.admit(self.user, digest * 64, self.scope, proof["fingerprint"])
+		store.mark_running(self.user, sid)
+		store.publish_snapshot(self.user, sid, store.split_result(result, self.scope))
+		return sid
+
+	def test_status_response_comes_from_the_module_level_snapshot_status_body(self):
+		with patch.object(
+			api, "snapshot_status_body", return_value={"state": "complete", "marker": 1}
+		) as build:
+			result = api.get_snapshot_status(self.sid)
+		self.assertEqual(result, {"ok": True, "data": {"state": "complete", "marker": 1}})
+		self.assertEqual(build.call_args.args[1]["currency"], "INR")
+
+	def test_a_bucket_read_takes_its_rows_from_the_stored_index_not_from_a_filter(self):
+		with patch.object(detail, "bucket_filter", side_effect=AssertionError("filtered")):
+			result = api.get_bucket_detail(self.sid, "window")
+		self.assertTrue(result["ok"], result)
+		self.assertTrue(result["data"]["rows"])
+
+	def test_schema_two_result_is_delivered_with_month_totals(self):
+		sid = self.publish({**self.result, "schema": 2, "horizon": None}, "2")
+		result = api.get_snapshot_status(sid)
+		self.assertTrue(result["ok"], result)
+		self.assertIn("month_totals", result["data"]["projection"])
+		self.assertIsNone(result["data"]["horizon"])
+
+	def test_schema_two_horizon_is_delivered_unchanged(self):
+		horizon = {"start": "2026-10-24", "forecast_available": False, "lowest": None}
+		sid = self.publish({**self.result, "schema": 2, "horizon": horizon}, "4")
+		result = api.get_snapshot_status(sid)
+		self.assertTrue(result["ok"], result)
+		self.assertEqual(result["data"]["horizon"], horizon)
+
+	def internal_errors(self, *errors):
+		"""How many Error Log rows these failures of `get_snapshot_status` write."""
+		with patch.object(frappe, "log_error") as log:
+			for error in errors:
+				with patch.object(api, "_load", side_effect=error):
+					self.assertEqual(api.get_snapshot_status(self.sid)["code"], "internal_error")
+		return log.call_count
+
+	def test_a_repeated_internal_error_writes_one_error_log_row_per_operation_and_class(self):
+		self.assertEqual(self.internal_errors(*[ValueError("a")] * 5), 1)
+
+	def test_another_exception_class_or_operation_gets_its_own_row(self):
+		self.assertEqual(self.internal_errors(ValueError("a"), RuntimeError("b"), ValueError("c")), 2)
+		with (
+			patch.object(frappe, "log_error") as log,
+			patch.object(api.detail, "check_side", side_effect=ValueError("d")),
+		):
+			api.get_day_detail(self.sid, self.fx.today, "Payable")
+		self.assertEqual(log.call_count, 1)
+
+	def test_the_throttle_never_stops_the_first_row_when_the_cache_is_down(self):
+		with patch.object(frappe.cache, "execute_command", side_effect=ConnectionError("redis down")):
+			self.assertEqual(self.internal_errors(ValueError("a"), ValueError("b")), 2)
+
+	def test_other_internal_errors_log_no_exception_text(self):
+		with (
+			patch.object(api, "_load", side_effect=ValueError("PRIVATE_SUPPLIER_AMOUNT")),
+			patch.object(frappe, "log_error") as log,
+		):
+			api.get_snapshot_status(self.sid)
+		self.assertNotIn("detail", json.loads(log.call_args.kwargs["message"]))

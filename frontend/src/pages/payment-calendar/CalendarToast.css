@@ -1,0 +1,27 @@
+/* Toast (template L84, L108-114): bottom-centre; teleported to <body>, so it follows the
+   viewport. Dark: the CTA colours through --pc-toast tokens. */
+.pcal-toast {
+	position: fixed;
+	bottom: 20px;
+	left: 50%;
+	z-index: 200;
+	transform: translateX(-50%);
+	padding: 10px 16px;
+	border-radius: var(--pc-radius-button);
+	background: var(--pc-toast);
+	box-shadow: var(--pc-shadow-toast);
+	font-size: 13px;
+	color: var(--pc-toast-fg);
+}
+.pcal-toast[hidden] {
+	display: none;
+}
+@media (max-width: 540px) {
+	.pcal-toast {
+		bottom: 80px;
+		width: max-content;
+		max-width: calc(100vw - 26px);
+		font-size: 11px;
+		text-align: center;
+	}
+}

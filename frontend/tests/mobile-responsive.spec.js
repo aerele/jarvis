@@ -21,6 +21,9 @@ const ALLOWLIST = new Set([
 	// to 50% inside a max-w-[280px], overflow-hidden container, so the 560px is
 	// clipped and never reaches the viewport. See PdfTemplatesPane.vue fit-mode.
 	"src/components/settings/PdfTemplatesPane.vue :: fixed-width-over-480px :: w-[560px]",
+	// The table sits in .table-wrap (overflow: auto in the scoped CSS), which the
+	// .vue-only scan cannot see.
+	"src/pages/payment-calendar/InvoiceDetailsDialog.vue :: table-without-overflow-scroller :: <table>",
 ]);
 
 // Each rule returns the offending substrings for a file's source (empty = ok).
@@ -41,6 +44,13 @@ const RULES = {
 		matchAll(src, /(?:^|["'\s])((?:min-)?w-\[(\d+)px\])/g).filter(
 			(m) => Number(m.match(/(\d+)px/)[1]) > 480
 		),
+	// A width in vw sizes an element against the viewport, but the chat's
+	// side-over panels (and anything else in the routed column) live BESIDE the
+	// in-flow sidebar, so the viewport is wider than their container. The panel
+	// then overflowed the column and was cut off under the sidebar on a resized
+	// window (jarvis-admin-v2#776). Size against the container (%) instead.
+	"vw-width-in-style": (src) =>
+		matchAll(src, /(?:^|[\s;{])((?:max-|min-)?width:\s*[\d.]+vw)\b/g),
 	// A bare table overflows narrow screens; it must sit inside an overflow-x
 	// (or overflow-auto) scroller. Coarse per-file check: table present, no
 	// horizontal scroller anywhere in the file.
