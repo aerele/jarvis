@@ -762,7 +762,7 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 	PRIOR turn's answer — it settles ``errored`` honestly (Amendment D: never
 	fabricate)."""
 
-	def _seed_streaming_gone(self, conv, rid, *, watermark, last_event_seq=3):
+	def _seed_streaming_gone(self, conv, rid, *, watermark, last_event_seq=3, dispatched_ago_s=0):
 		seed = self._mk_msg(conv, content="second question")
 		amsg = self._mk_msg(
 			conv, role="assistant", content="partial", streaming=1, agent_seq_watermark=watermark
@@ -779,7 +779,7 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 			assistant_message=amsg,
 			last_event_seq=last_event_seq,
 			gateway_run_id=rid,
-			dispatching_at=frappe.utils.now(),
+			dispatching_at=frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-dispatched_ago_s),
 			dispatch_payload=json.dumps({"session_key": "sess-rec"}),
 		)
 		return amsg, epoch
@@ -868,6 +868,170 @@ class TestSnapshotRecoveryWindow(_PipelineCase):
 		self.assertIn("run:end", self._pub_kinds())
 		end = next(p for p in self._pubs if p.get("kind") == "run:end")
 		self.assertTrue(end.get("was_recovered"), "run:end carries was_recovered for a real recovery")
+
+	def test_quiet_turn_whose_terminal_fell_in_the_handoff_gap_recovers(self):
+		"""#2583: acked, no frame seen (last_event_seq 0), the run finished while no hop
+		was connected. The snapshot shows the session idle, so the in-window answer is
+		recovered instead of the turn waiting for the watchdog."""
+		conv = self._mk_conv()
+		rid = "pmp_rec_quiet"
+		amsg, epoch = self._seed_streaming_gone(
+			conv, rid, watermark=5, last_event_seq=0, dispatched_ago_s=120
+		)
+		double = self._double()
+		double.arm_sessions_get(
+			"sess-rec",
+			[
+				transcript_message("assistant", "PRIOR ANSWER", seq=5),
+				transcript_message("user", "second question", seq=6),
+				{**transcript_message("assistant", "GAP ANSWER", seq=7), "stopReason": "stop"},
+			],
+		)
+		ctx = self._ctx_for(double, epoch)
+
+		pump._reconcile_on_start(ctx)
+		self.assertIn(rid, ctx.runs, "lane attached BEFORE the tail RPC resolves (frames not lost)")
+		self._pump_until(ctx, lambda: self._state(rid) in ("errored", "finalizing", "done"))
+
+		self.assertEqual(self._state(rid), "finalizing")
+		self.assertEqual(frappe.db.get_value(MSG, amsg, "content"), "GAP ANSWER")
+		self.assertNotIn(rid, ctx.runs, "lane detached once settled")
+
+	def test_quiet_turn_with_midrun_narration_is_not_settled(self):
+		"""Narration before a tool call (stopReason toolUse) is not proof the run ended."""
+		conv = self._mk_conv()
+		rid = "pmp_rec_quiet_narr"
+		amsg, epoch = self._seed_streaming_gone(
+			conv, rid, watermark=5, last_event_seq=0, dispatched_ago_s=120
+		)
+		double = self._double()
+		narration = {
+			**transcript_message("assistant", "Let me check that.", seq=7),
+			"stopReason": "toolUse",
+		}
+		double.arm_sessions_get(
+			"sess-rec",
+			[transcript_message("user", "second question", seq=6), narration],
+		)
+		ctx = self._ctx_for(double, epoch)
+
+		pump._reconcile_on_start(ctx)
+		self._pump_until(ctx, lambda: rid in ctx.quiet_waits)
+
+		self.assertEqual(self._state(rid), "streaming")
+		self.assertIn(rid, ctx.runs)
+		self.assertIn(rid, ctx.quiet_waits, "re-checked later, not settled")
+		self.assertNotEqual(frappe.db.get_value(MSG, amsg, "content"), "Let me check that.")
+
+	def test_quiet_turn_without_stop_reason_is_not_settled(self):
+		conv = self._mk_conv()
+		rid = "pmp_rec_quiet_nostop"
+		amsg, epoch = self._seed_streaming_gone(
+			conv, rid, watermark=5, last_event_seq=0, dispatched_ago_s=120
+		)
+		double = self._double()
+		double.arm_sessions_get(
+			"sess-rec",
+			[
+				transcript_message("user", "second question", seq=6),
+				transcript_message("assistant", "maybe partial", seq=7),
+			],
+		)
+		ctx = self._ctx_for(double, epoch)
+
+		pump._reconcile_on_start(ctx)
+		self._pump_until(ctx, lambda: rid in ctx.quiet_waits)
+
+		self.assertEqual(self._state(rid), "streaming")
+		self.assertIn(rid, ctx.quiet_waits)
+
+	def test_quiet_turn_settles_on_a_later_recheck_once_the_run_ended(self):
+		conv = self._mk_conv()
+		rid = "pmp_rec_quiet_later"
+		amsg, epoch = self._seed_streaming_gone(
+			conv, rid, watermark=5, last_event_seq=0, dispatched_ago_s=120
+		)
+		double = self._double()
+		user = transcript_message("user", "second question", seq=6)
+		double.arm_sessions_get(
+			"sess-rec", [user, {**transcript_message("assistant", "working", seq=7), "stopReason": "toolUse"}]
+		)
+		ctx = self._ctx_for(double, epoch)
+		pump._reconcile_on_start(ctx)
+		self._pump_until(ctx, lambda: rid in ctx.quiet_waits)
+		self.assertEqual(self._state(rid), "streaming")
+
+		double.arm_sessions_get(
+			"sess-rec", [user, {**transcript_message("assistant", "DONE", seq=8), "stopReason": "stop"}]
+		)
+		ctx.active_session_keys = set()
+		ctx.quiet_waits[rid] = (0.0, 1)
+		pump._recheck_quiet(ctx)
+		self._pump_until(ctx, lambda: self._state(rid) in ("errored", "finalizing", "done"))
+
+		self.assertEqual(self._state(rid), "finalizing")
+		self.assertEqual(frappe.db.get_value(MSG, amsg, "content"), "DONE")
+
+	def test_quiet_recheck_waits_while_the_session_is_still_active(self):
+		conv = self._mk_conv()
+		rid = "pmp_rec_quiet_active"
+		amsg, epoch = self._seed_streaming_gone(
+			conv, rid, watermark=5, last_event_seq=0, dispatched_ago_s=120
+		)
+		ctx = self._ctx_for(self._double(), epoch)
+		ctx.runs[rid] = object()
+		ctx.active_session_keys = {"sess-rec"}
+		ctx.quiet_waits[rid] = (0.0, 0)
+
+		pump._recheck_quiet(ctx)
+
+		self.assertEqual(ctx.pending_recoveries, {}, "no tail while the run is still active")
+		self.assertGreater(ctx.quiet_waits[rid][0], pump._monotonic())
+
+	def test_quiet_turn_with_empty_window_errors_after_bounded_rechecks(self):
+		"""Nothing in the window: wait first, then error honestly once the session has
+		stayed idle across QUIET_EMPTY_ERROR_RECHECKS checks (no watchdog wait)."""
+		conv = self._mk_conv()
+		rid = "pmp_rec_quiet_empty"
+		amsg, epoch = self._seed_streaming_gone(
+			conv, rid, watermark=5, last_event_seq=0, dispatched_ago_s=120
+		)
+		double = self._double()
+		double.arm_sessions_get(
+			"sess-rec",
+			[
+				transcript_message("assistant", "PRIOR ANSWER", seq=5),
+				transcript_message("user", "second question", seq=6),
+			],
+		)
+		ctx = self._ctx_for(double, epoch)
+
+		pump._reconcile_on_start(ctx)
+		self._pump_until(ctx, lambda: rid in ctx.quiet_waits)
+		self.assertEqual(self._state(rid), "streaming", "first empty check only waits")
+		self.assertIn(rid, ctx.runs)
+
+		ctx.active_session_keys = set()
+		ctx.quiet_waits[rid] = (0.0, ctx.quiet_waits[rid][1])
+		pump._recheck_quiet(ctx)
+		self._pump_until(ctx, lambda: self._state(rid) in ("errored", "finalizing", "done"))
+
+		self.assertEqual(self._state(rid), "errored")
+		self.assertNotEqual(frappe.db.get_value(MSG, amsg, "content"), "PRIOR ANSWER")
+		self.assertNotIn(rid, ctx.runs)
+
+	def test_freshly_dispatched_quiet_turn_is_not_treated_as_missed(self):
+		"""Acked seconds ago and not in the snapshot yet: re-attach, issue no tail."""
+		conv = self._mk_conv()
+		rid = "pmp_rec_quiet_fresh"
+		amsg, epoch = self._seed_streaming_gone(conv, rid, watermark=5, last_event_seq=0)
+		ctx = self._ctx_for(self._double(), epoch)
+
+		pump._reconcile_on_start(ctx)
+
+		self.assertEqual(ctx.pending_recoveries, {})
+		self.assertEqual(self._state(rid), "streaming")
+		self.assertIn(rid, ctx.runs)
 
 	def test_in_window_media_marker_only_recovers_final_with_clean_content(self):
 		"""Q3 leak-safety: a marker-ONLY in-window reply (seq 7 > watermark 5) must
