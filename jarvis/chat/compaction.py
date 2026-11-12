@@ -31,6 +31,7 @@ from jarvis.chat.events import publish_to_user
 
 CONV = "Jarvis Conversation"
 CHAT_SESSION = "Jarvis Chat Session"
+MSG = "Jarvis Chat Message"
 TURN_USAGE = "Jarvis Turn Usage"
 
 COMPACT_LOCK_SECONDS = 300
@@ -85,6 +86,45 @@ def classify_notice(text: str) -> str:
 	if t.startswith("compaction skipped"):
 		return "skipped"
 	return "failed"
+
+
+# Claude Code compacts only the messages inside its own session. A resumed no-log
+# claude-cli session holds just placeholder messages (history arrives as hook
+# context), so it answers "Not enough messages to compact." and the gateway reports
+# that it "did not confirm that native compaction ran". Not a failure: the restore
+# hook already bounds the restored history, so there is nothing to compact.
+_CLAUDE_CLI_NOTHING_TO_COMPACT = (
+	"not enough messages to compact",
+	"did not confirm that native compaction ran",
+)
+
+
+def _last_reply_is_claude_plan(conversation: str) -> bool:
+	"""Fallback when the gateway row is empty (a freshly resumed session): the
+	provider stamped on the conversation's newest assistant reply."""
+	rows = frappe.get_list(
+		MSG,
+		filters={"conversation": conversation, "role": "assistant", "provider": ["is", "set"]},
+		fields=["provider"],
+		order_by="creation desc",
+		limit=1,
+	)
+	return bool(rows) and rows[0].provider in ("anthropic", "claude-cli")
+
+
+def is_claude_cli_nothing_to_compact(conversation: str, row: dict | None, res: dict) -> bool:
+	"""True only for a FINAL compact result on a claude-cli conversation whose text
+	says there was nothing to compact. In no-log mode every manual compaction runs
+	in a fresh CLI process holding two placeholder messages, so that final text means
+	nothing to compact; real failures arrive as error/aborted and stay failed."""
+	from jarvis.chat import usage
+
+	if res.get("state") != "final":
+		return False
+	t = (res.get("text") or "").lower()
+	if not any(m in t for m in _CLAUDE_CLI_NOTHING_TO_COMPACT):
+		return False
+	return usage.is_claude_cli_row(row) or _last_reply_is_claude_plan(conversation)
 
 
 def _session_row(session_key: str) -> dict:
@@ -279,6 +319,8 @@ def run_compact(conversation: str, user: str, hint: str = "") -> None:
 			# not make the write below fail with 1020.
 			txn.fresh_snapshot()
 			outcome = classify_notice(res.get("text") or "") if res.get("state") == "final" else "failed"
+			if outcome == "failed" and is_claude_cli_nothing_to_compact(conversation, row, res):
+				outcome = "skipped"
 			if outcome != "compacted":
 				reason = "runtime_declined" if outcome == "skipped" else "runtime_failed"
 				frappe.logger("jarvis.chat").warning(

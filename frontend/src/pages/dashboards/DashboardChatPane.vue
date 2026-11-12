@@ -436,7 +436,7 @@ import { errHtml, escapeHtml, turnErrorInfo } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { sortPendingCards } from "@/lib/sortPendingCards";
 import { discardedTokens } from "@/lib/typedCardReply";
-import { compactFailureCopy } from "@/lib/compact";
+import { compactOutcome } from "@/lib/compact";
 import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
 
@@ -637,7 +637,10 @@ async function runCompact(hint) {
 		const res = await compactConversation(view.conversation, hint);
 		if (!dashboardViewIsCurrent(view)) return;
 		if (!res || !res.ok) {
-			toast.error(compactFailureCopy(res && res.reason));
+			{
+				const o = compactOutcome(res && res.reason);
+				toast[o.type](o.text);
+			}
 			return;
 		}
 		compacting.value = true;
@@ -1602,7 +1605,10 @@ function onEvent(p) {
 		case "context:compact_failed":
 			compacting.value = false;
 			compactHintSeed.value = "";
-			toast.error(compactFailureCopy(p.reason));
+			{
+				const o = compactOutcome(p.reason);
+				toast[o.type](o.text);
+			}
 			break;
 	}
 }
