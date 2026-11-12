@@ -152,6 +152,16 @@ describe("index.css focus-ring opt-in", () => {
 
 	it("keeps the app's input ring and border off the page and its overlays", () => {
 		const rule = ruleWith(".jv-ob-root *");
+		// Hotfix lines have no app-wide input rule, so there is nothing to opt out of.
+		if (!rule) {
+			const appWide = css
+				.split("}")
+				.filter(
+					(block) => block.includes(":root:root") && block.includes(":focus-visible")
+				);
+			expect(appWide.filter((block) => !block.includes(".pcal-root *"))).toEqual([]);
+			return;
+		}
 		expect(rule).toContain(".pcal-root *");
 		expect(rule).toContain(".pcal-overlay *");
 	});

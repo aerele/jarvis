@@ -4,56 +4,6 @@
 			><template #left-header><Breadcrumbs :items="breadcrumbs" /></template
 		></LayoutHeader>
 		<main class="pcal-main" aria-labelledby="pcal-title">
-<<<<<<< HEAD
-			<div class="pcal-title-row">
-				<div>
-					<p class="pcal-eyebrow">CASH PLANNING</p>
-					<h1 id="pcal-title">Payment Calendar</h1>
-					<p class="pcal-subtitle">
-						Know what is due. See the days that need attention.
-					</p>
-				</div>
-				<button
-					class="pcal-button pcal-primary"
-					:disabled="!model.company || busy || model.refreshing"
-					@click="model.refresh({ background: true })"
-				>
-					<FeatherIcon name="refresh-cw" class="size-4" />{{
-						model.refreshing ? "Refreshing…" : "Refresh"
-					}}
-				</button>
-			</div>
-			<section class="pcal-toolbar" aria-label="Calendar filters">
-				<label class="pcal-field"
-					>Company<select
-						:value="model.company"
-						:disabled="model.phase === 'loading'"
-						@change="model.chooseCompany($event.target.value)"
-					>
-						<option value="">Select a company</option>
-						<option
-							v-for="item in model.companies"
-							:key="item.name"
-							:value="item.name"
-						>
-							{{ item.name }}
-						</option>
-					</select></label
-				>
-				<div class="pcal-field">
-					<span>Bank & cash accounts</span
-					><button
-						class="pcal-select-button"
-						:disabled="!model.caps"
-						@click="openAccounts"
-					>
-						<span>{{
-							model.accounts.length
-								? `${model.accounts.length} selected`
-								: "Select accounts"
-						}}</span
-						><FeatherIcon name="chevron-down" class="size-4" />
-=======
 			<!-- The page padding is on .pcal-main; .pcal-layout is unpadded, so its container
 			     width equals the template's content width. -->
 			<div class="pcal-layout">
@@ -64,7 +14,6 @@
 						<FeatherIcon name="arrow-left" class="size-4" aria-hidden="true" />{{
 							backLabel
 						}}
->>>>>>> 28663c0 (fix(payment-calendar): rebuild the page to match the design template (#821))
 					</button>
 				</div>
 				<div class="pcal-page-heading">
@@ -288,17 +237,11 @@
 	</div>
 </template>
 <script setup>
-<<<<<<< HEAD
-import { computed, onMounted, reactive, ref, watch } from "vue";
-import { useRoute } from "vue-router";
-import { Breadcrumbs, Dialog, FeatherIcon } from "frappe-ui";
-=======
 import { computed, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { Breadcrumbs, FeatherIcon } from "frappe-ui";
 import { __ } from "@/lib/i18n";
 import { useJarvisTheme } from "@/theme";
->>>>>>> 28663c0 (fix(payment-calendar): rebuild the page to match the design template (#821))
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import { usePaymentCalendar } from "@/composables/usePaymentCalendar";
 import { usePaymentLedger } from "@/composables/usePaymentLedger";
@@ -320,14 +263,6 @@ import { provideOverlayStack } from "./overlayStack";
 import "./tokens.css";
 import "./PaymentCalendarPage.css";
 const route = useRoute(),
-<<<<<<< HEAD
-	shell = useShellStore();
-const model = reactive(
-	usePaymentCalendar({
-		initialDate: typeof route.query.date === "string" ? route.query.date : "",
-	})
-);
-=======
 	router = useRouter();
 // The conversation the hand-off came from (history state { chatConv }); empty on a direct visit.
 // Read in setup, so the Back button is on the first paint; a string only (state is user-reachable).
@@ -353,7 +288,6 @@ provideOverlayStack();
 const { effectiveDark: dark, toggleTheme } = useJarvisTheme();
 // A fixed name: aria-pressed says whether it is on, so the label must not flip as well.
 const themeLabel = "Dark mode";
->>>>>>> 28663c0 (fix(payment-calendar): rebuild the page to match the design template (#821))
 const viewSnapshot = computed(() => model.snapshot || model.loadingSnapshot);
 const balancesOpen = ref(false);
 const dayLedger = ref(null);
@@ -471,5 +405,13 @@ const stateMessage = computed(() =>
 watch([() => model.company, () => !!model.caps], () => (balancesOpen.value = false));
 onMounted(() => {
 	void model.initialize();
+	// Arriving from the chat hand-off (ChatView passes history state { fromChat: true, chatConv }):
+	// move focus to the title so a keyboard / screen-reader user lands on the page,
+	// not on the chat they just left. The flag is one-shot: clear it so a reload or
+	// a Forward onto this entry does not pull focus again.
+	if (window.history.state?.fromChat === true) {
+		document.getElementById("pcal-title")?.focus();
+		window.history.replaceState({ ...window.history.state, fromChat: undefined }, "");
+	}
 });
 </script>

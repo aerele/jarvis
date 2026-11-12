@@ -1,13 +1,12 @@
 import { vi, afterEach } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import { mount, flushPromises } from "@vue/test-utils";
 vi.mock("@/api/paymentCalendar", async () =>
 	(await import("../../../tests/payment-calendar/fixtures")).fakeApi()
 );
 vi.mock("@/utils/datetime", () => ({ siteTimezone: () => "Asia/Kolkata" }));
 vi.mock("@/stores/shell", () => ({ useShellStore: () => ({ mobile: false }) }));
-<<<<<<< HEAD
-vi.mock("vue-router", () => ({ useRoute: () => ({ query: {} }) }));
-=======
 const theme = vi.hoisted(() => ({ dark: null, toggleTheme: vi.fn() }));
 vi.mock("@/theme", async () => {
 	const { ref } = await import("vue");
@@ -22,10 +21,9 @@ const router = vi.hoisted(() => ({
 	resolve: vi.fn(({ params }) => ({ fullPath: `/c/${params.id}` })),
 }));
 vi.mock("vue-router", () => ({ useRoute: () => ({ query: {} }), useRouter: () => router }));
->>>>>>> 28663c0 (fix(payment-calendar): rebuild the page to match the design template (#821))
 vi.mock("frappe-ui", () => ({
 	Breadcrumbs: { template: "<nav>Dashboards</nav>", props: ["items"] },
-	FeatherIcon: { template: "<span />", props: ["name"] },
+	FeatherIcon: { template: '<span class="fake-icon" :data-name="name" />', props: ["name"] },
 	Dialog: {
 		props: ["modelValue", "options"],
 		template:
@@ -77,8 +75,6 @@ describe("Native Payment Calendar page", () => {
 		expect(api.getDayDetail).toHaveBeenCalledTimes(reads + 2);
 		expect(api.getDayDetail.mock.calls.at(-1)[2]).toBe("Receivable");
 	});
-<<<<<<< HEAD
-=======
 	it("moves focus to the title on arrival from the chat hand-off, and only then", async () => {
 		const host = document.createElement("div");
 		document.body.appendChild(host);
@@ -321,7 +317,6 @@ describe("Native Payment Calendar page", () => {
 			remove.mockRestore();
 		});
 	});
->>>>>>> 28663c0 (fix(payment-calendar): rebuild the page to match the design template (#821))
 	it("removes financial panels at expiry and offers explicit recovery", async () => {
 		await render();
 		expect(wrapper.find("#lowest-card").exists()).toBe(true);
