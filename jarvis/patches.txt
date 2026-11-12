@@ -1,6 +1,7 @@
 [pre_model_sync]
 # Patches added in this section will be executed before doctypes are migrated
 # Read docs to understand patches: https://docs.frappe.io/framework/user/en/database-migrations
+# Release v15.8.1 (2026-11-12): this line changes on each patch release so Frappe Cloud sees patches.txt and runs bench migrate.
 
 jarvis.patches.v1_0_migrate_legacy_agent_settings
 
