@@ -347,7 +347,9 @@ def _check_rows(scope: dict, side: str, permission_columns: list, rows: list, pa
 	if rows:
 		_check_proofs(report, permission_columns, rows, scope["actor"])
 		_check_vouchers(scope["company"], rows)
-	_check_parties({*map(tuple, parties), *((row["party_type"], row["party"]) for row in rows)})
+	_check_parties(
+		{*(tuple(party) for party in parties), *((row["party_type"], row["party"]) for row in rows)}
+	)
 
 
 def _check_proofs(report, permission_columns, rows, actor) -> None:
