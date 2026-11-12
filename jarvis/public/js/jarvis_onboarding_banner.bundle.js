@@ -40,6 +40,9 @@
 	// (require_jarvis_admin, which accepts System Manager - the same role this
 	// nudge is already gated to), probe-first and throttled 180s.
 	var RESYNC_METHOD = "jarvis.onboarding.resync_llm";
+	// The way back from a false copy block: asks admin to prove this is the registered
+	// site. System Manager only, like this banner (jarvis.chat.site_pin.reverify).
+	var REVERIFY_METHOD = "jarvis.chat.site_pin.reverify";
 	// Deep link to the AI models settings tab, used by the reconnect variant's
 	// CTA. Must match config.mjs's AI_MODELS_SETTINGS_URL: this standalone desk
 	// bundle is loaded via app_include_js and cannot import from the widget
@@ -273,10 +276,11 @@
 	// reconnected, so they get different copy and a different destination.
 	function nudgeVariant() {
 		if (isCopy()) {
-			// Same sentence as jarvis.chat.site_pin.copy_message. No CTA: only support
-			// can move the pairing.
+			// Same sentence as jarvis.chat.site_pin.copy_message. A System Manager can
+			// ask for a re-check (a false block after a restore or a move); only support
+			// can move the pairing for real.
 			var site = (frappe.boot && frappe.boot.jarvis_paired_site) || "another site";
-			return {
+			var copyVariant = {
 				name: "Jarvis",
 				aria: "This site is a copy",
 				text:
@@ -284,6 +288,11 @@
 					site +
 					". Jarvis is turned off here. Contact support to use Jarvis on this site.",
 			};
+			if (isSystemManager()) {
+				copyVariant.action = "reverify";
+				copyVariant.ctaLabel = "Re-verify this site";
+			}
+			return copyVariant;
 		}
 		var reason = (window.frappe && frappe.boot && frappe.boot.jarvis_ready_reason) || "";
 		// White-label: the reconnect copy names the agent, so its whole bubble -
@@ -474,13 +483,14 @@
 				if (!variant.href && !variant.action) {
 					return b;
 				}
-				if (variant.action === "resync") {
+				if (variant.action === "resync" || variant.action === "reverify") {
 					cta = document.createElement("button");
 					cta.type = "button";
 					cta.className = "jvn-btn";
 					cta.textContent = variant.ctaLabel;
 					cta.addEventListener("click", function () {
-						retryApply(cta, variant.ctaLabel);
+						if (variant.action === "reverify") reverifySite(cta, variant.ctaLabel);
+						else retryApply(cta, variant.ctaLabel);
 					});
 				} else {
 					cta = document.createElement("a");
@@ -558,6 +568,90 @@
 		}
 	}
 
+	// What a Re-verify answer means to the person who pressed it. Same outcomes (and the same
+	// words) as the chat page's banner; `cleared` means the block is gone.
+	function reverifyOutcome(res) {
+		if (res && res.proved && !res.blocked) {
+			return {
+				cleared: true,
+				indicator: "green",
+				message: "This site is verified. Jarvis is on again here.",
+			};
+		}
+		if (res && res.proved) {
+			return {
+				cleared: false,
+				indicator: "orange",
+				message:
+					"This site is verified, but Jarvis could not reconnect it yet. Try again in a minute, or contact support if this keeps happening.",
+			};
+		}
+		if (res && res.error === "unreachable") {
+			return {
+				cleared: false,
+				indicator: "orange",
+				message: "Could not reach Jarvis to verify this site. Try again in a minute.",
+			};
+		}
+		return {
+			cleared: false,
+			indicator: "red",
+			message: "Re-verify did not confirm this site.",
+		};
+	}
+
+	// Re-verify button on the copy banner: ask for the proof, say the outcome with the Desk's own
+	// alert, and on a pass drop the banner and re-read readiness (the cached boot flags still
+	// describe the blocked state).
+	function reverifySite(btn, label) {
+		if (btn.disabled) return;
+		btn.disabled = true;
+		btn.textContent = "Verifying…";
+		var finish = function (res) {
+			var outcome = reverifyOutcome(res);
+			frappe.show_alert({ message: outcome.message, indicator: outcome.indicator }, 8);
+			if (outcome.cleared) {
+				frappe.boot.jarvis_pairing_blocked = false;
+				frappe.boot.jarvis_onboarded = true;
+				remove();
+				try {
+					frappe.call({
+						method: READY_METHOD,
+						callback: function (r) {
+							var m = (r && r.message) || null;
+							if (m) {
+								frappe.boot.jarvis_onboarded =
+									!!m.ready || m.reason === "site_instance_changed";
+								frappe.boot.jarvis_ready_reason = frappe.boot.jarvis_onboarded
+									? ""
+									: m.reason || "";
+							}
+							sync();
+						},
+					});
+				} catch (e) {
+					/* the cleared flags already hide the banner */
+				}
+				return;
+			}
+			btn.disabled = false;
+			btn.textContent = label;
+		};
+		try {
+			frappe.call({
+				method: REVERIFY_METHOD,
+				callback: function (r) {
+					finish((r && r.message) || null);
+				},
+				error: function () {
+					finish({ proved: false, error: "unreachable" });
+				},
+			});
+		} catch (e) {
+			finish({ proved: false, error: "unreachable" });
+		}
+	}
+
 	function sync() {
 		if (shouldShow()) inject();
 		else remove();
@@ -599,7 +693,12 @@
 	// createRequire) - a real browser has no `module` global, so this is inert
 	// in production and does not change what ships to the Desk.
 	if (typeof module !== "undefined" && module.exports) {
-		module.exports = { nudgeVariant: nudgeVariant, isSuppressedReason: isSuppressedReason };
+		module.exports = {
+			nudgeVariant: nudgeVariant,
+			isSuppressedReason: isSuppressedReason,
+			reverifyOutcome: reverifyOutcome,
+			reverifySite: reverifySite,
+		};
 	}
 
 	if (window.frappe && window.frappe.router) {
