@@ -46,6 +46,18 @@ class TestVisionTaskComplete(unittest.TestCase):
 		self.assertNotIsInstance(cm.exception, LLMTaskNotAvailableError)
 		self.assertIn("too slow", str(cm.exception))
 
+	def test_gateway_failure_says_vision_task_not_llm_task(self):
+		with patch(_CALL, return_value=(500, b"{}")):
+			with self.assertRaises(LLMTaskError) as cm:
+				client.vision_task_complete("p", {}, [])
+		self.assertEqual(str(cm.exception), "vision task invocation failed (HTTP 500)")
+
+	def test_404_message_says_vision_task(self):
+		with patch(_CALL, return_value=(404, b"<html>nope</html>")):
+			with self.assertRaises(LLMTaskNotAvailableError) as cm:
+				client.vision_task_complete("p", {}, [])
+		self.assertEqual(str(cm.exception), "vision task invocation failed (HTTP 404)")
+
 	def test_refused_raises_llm_task_error(self):
 		with patch(_CALL, return_value=(401, b"{}")):
 			with self.assertRaises(LLMTaskError):

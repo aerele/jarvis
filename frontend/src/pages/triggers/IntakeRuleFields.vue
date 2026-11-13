@@ -33,7 +33,7 @@
 				:options="recordDoctypeOptions"
 				:modelValue="pickValue(form.intake_record_doctype)"
 				placeholder="Files attached to records of…"
-				@update:query="(q) => queryDoctypes(q, recordDoctypeOptions)"
+				@update:query="(q) => queryDoctypes(q, 'record')"
 				@update:modelValue="setRecordDoctype"
 			/>
 			<FormControl
@@ -51,7 +51,7 @@
 				:options="targetDoctypeOptions"
 				:modelValue="pickValue(form.intake_target_doctype)"
 				placeholder="Pick a DocType…"
-				@update:query="(q) => queryDoctypes(q, targetDoctypeOptions)"
+				@update:query="(q) => queryDoctypes(q, 'target')"
 				@update:modelValue="onTargetPick"
 			/>
 			<FormControl
@@ -325,10 +325,13 @@ watch(() => props.readOnly, loadFolders, { immediate: true });
 // ── DocType pickers (search_link, like the page's own DocType picker) ────────
 const recordDoctypeOptions = ref([]);
 const targetDoctypeOptions = ref([]);
-let dtTimer = null;
-function queryDoctypes(q, target) {
-	clearTimeout(dtTimer);
-	dtTimer = setTimeout(async () => {
+// The template unwraps refs, so the handler gets a key and writes the ref here in script scope.
+const doctypeOptionRefs = { record: recordDoctypeOptions, target: targetDoctypeOptions };
+const dtTimers = {};
+function queryDoctypes(q, which) {
+	const target = doctypeOptionRefs[which];
+	clearTimeout(dtTimers[which]);
+	dtTimers[which] = setTimeout(async () => {
 		try {
 			const r = await searchLink("DocType", q || "");
 			target.value = (r || []).map((x) => ({ label: x.value, value: x.value }));
@@ -337,9 +340,9 @@ function queryDoctypes(q, target) {
 		}
 	}, 300);
 }
-queryDoctypes("", recordDoctypeOptions);
-queryDoctypes("", targetDoctypeOptions);
-onBeforeUnmount(() => clearTimeout(dtTimer));
+queryDoctypes("", "record");
+queryDoctypes("", "target");
+onBeforeUnmount(() => Object.values(dtTimers).forEach(clearTimeout));
 
 // ── field options of the target and of the record DocType ────────────────────
 const options = ref(null);

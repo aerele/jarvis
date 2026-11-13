@@ -17,6 +17,11 @@ LLMTaskError = lt.LLMTaskError
 LLMTaskNotAvailableError = lt.LLMTaskNotAvailableError
 
 
+def _vision_wording(message: str) -> str:
+	"""The shared helpers speak of ``llm-task``; this route is the vision task."""
+	return message.replace("llm-task", "vision task")
+
+
 def vision_task_complete(
 	prompt: str,
 	schema: dict,
@@ -43,12 +48,21 @@ def vision_task_complete(
 	if model_ref:
 		args["provider"] = model_ref["provider"]
 		args["model"] = model_ref["model"]
+	try:
+		return _run_vision_task(args, timeout)
+	except LLMTaskNotAvailableError as e:
+		raise LLMTaskNotAvailableError(_vision_wording(str(e))) from e
+	except LLMTaskError as e:
+		raise LLMTaskError(_vision_wording(str(e))) from e
+
+
+def _run_vision_task(args: dict, timeout: int) -> dict:
 	status, raw = lt._call_route(
 		plugin_routes.VISION_TASK_PATH, {"args": args}, timeout + lt._TIMEOUT_BUFFER_S
 	)
 
 	if status in (401, 403):
-		raise LLMTaskError("vision-task request was refused by the agent plugin")
+		raise LLMTaskError("vision task request was refused by the agent plugin")
 	# Before parsing: an older plugin answers an unknown route with a non-JSON 404.
 	if status == 404:
 		raise LLMTaskNotAvailableError(lt._gateway_error_message(status, raw))
@@ -56,13 +70,13 @@ def vision_task_complete(
 	try:
 		payload = frappe.parse_json(raw.decode("utf-8")) if raw else {}
 	except Exception as e:
-		raise LLMTaskError("vision-task returned a non-JSON response") from e
+		raise LLMTaskError("vision task returned a non-JSON response") from e
 	if not isinstance(payload, dict):
-		raise LLMTaskError("vision-task returned an unexpected response shape")
+		raise LLMTaskError("vision task returned an unexpected response shape")
 	if not payload.get("ok"):
 		lt._raise_for_gateway_error(status, payload)
 
 	reply = lt._extract_object_reply(payload)
 	if not isinstance(reply, dict):
-		raise LLMTaskError("vision-task did not return a JSON object")
+		raise LLMTaskError("vision task did not return a JSON object")
 	return reply

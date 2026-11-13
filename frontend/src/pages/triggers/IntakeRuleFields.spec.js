@@ -34,6 +34,7 @@ vi.mock("frappe-ui", () => ({
 	},
 }));
 
+import { searchLink } from "@/api";
 import IntakeRuleFields from "./IntakeRuleFields.vue";
 
 const TODO = {
@@ -247,5 +248,26 @@ describe("IntakeRuleFields", () => {
 		expect(apiTr.listIntakeFolders).not.toHaveBeenCalled();
 		expect(w.find(".error-message").exists()).toBe(false);
 		expect(w.text()).not.toContain("Needs a value or a default");
+	});
+
+	it("typing in the DocType pickers replaces their options with the search result", async () => {
+		vi.useFakeTimers();
+		try {
+			for (const source of ["Folder", "Record"]) {
+				const w = mount(IntakeRuleFields, {
+					props: { form: formOf({ intake_source: source }) },
+				});
+				await vi.advanceTimersByTimeAsync(400);
+				searchLink.mockResolvedValue([{ value: "ToDo" }]);
+				const picker = w
+					.findAllComponents({ name: "Autocomplete" })
+					.find((p) => p.attributes("data-placeholder") === "Pick a DocType…");
+				picker.vm.$emit("update:query", "ToD");
+				await vi.advanceTimersByTimeAsync(400);
+				expect(picker.props("options")).toEqual([{ label: "ToDo", value: "ToDo" }]);
+			}
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
