@@ -1,6 +1,5 @@
 """The backend receipt parser must honour the shared source contract (fleet-agent PR-0 twin)."""
 
-import base64
 import hashlib
 import json
 import unittest
@@ -8,9 +7,7 @@ from pathlib import Path
 
 from jarvis.chat.source_receipts import REFERENCE_FIELDS, SOURCE_TOOLS, source_receipt
 
-# Stored base64 so the vendored bytes (which name the bridge prefix) stay exact and the
-# runtime-branding scan sees no vendor term. The pins below are over the decoded bytes.
-FIXTURE = Path(__file__).parent / "fixtures" / "source-contract-v1.json.b64"
+FIXTURE = Path(__file__).parent / "fixtures" / "source-contract-v1.json"
 BYTE_SHA256 = "bd12b22aaa684e8fc65e64543498f1d080989841e996d80ce7924cb8f8e30de8"
 SEMANTIC_DIGEST = "0e76718f09b9e549712ac7c0b814e73bb0631d7816c3d24be5e378b67fe3268c"
 SEMANTIC_KEYS = (
@@ -44,7 +41,7 @@ def _references(obj, contract):
 class TestSourceReceiptContract(unittest.TestCase):
 	@classmethod
 	def setUpClass(cls):
-		cls.raw = base64.b64decode(FIXTURE.read_text().strip(), validate=True)
+		cls.raw = FIXTURE.read_bytes()
 		cls.contract = json.loads(cls.raw)
 
 	def test_vendored_fixture_is_pinned(self):

@@ -1,0 +1,270 @@
+/* Calendar card, toolbar, month grid frame, legend (template L55-L119). Container queries on
+   .pcal-layout use the template's @media widths. Colours come from the --pc-* tokens; the few
+   template literals without a token are local variables with a dark twin. */
+.pcal-cal {
+	--cal-dot-unpaid: #c5a08e;
+	--cal-dot-partial: #c5a45b;
+	--cal-dot-settled: #86ab91;
+	--cal-dot-none: #92a0a8;
+	--cal-star: #b89a55;
+	--cal-accent: #4e765c;
+	background: var(--pc-card);
+	border: 1px solid var(--pc-border);
+	border-radius: var(--pc-radius-card);
+	min-width: 0;
+}
+[data-theme="dark"] .pcal-cal {
+	--cal-dot-unpaid: var(--pc-negative);
+	--cal-dot-partial: var(--pc-caution);
+	--cal-dot-settled: var(--pc-positive);
+	--cal-dot-none: var(--pc-muted);
+	--cal-star: var(--pc-caution);
+	--cal-accent: var(--pc-link);
+}
+
+.pcal-cal .calendar-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 12px 15px 8px;
+}
+.pcal-cal .month-nav {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.pcal-cal .month-nav h2 {
+	margin: 0 5px;
+	font-size: var(--pc-fs-month-title);
+	font-weight: 650;
+	letter-spacing: -0.2px;
+}
+.pcal-cal .icon-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 32px;
+	min-height: 32px;
+	padding: 6px;
+	border: 0;
+	border-radius: 6px;
+	background: transparent;
+	color: var(--pc-text);
+	font-size: 20px;
+	line-height: 1;
+	cursor: pointer;
+}
+.pcal-cal .icon-btn:hover:not(:disabled) {
+	background: var(--pc-surface-2);
+}
+.pcal-cal .icon-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+.pcal-cal .btn {
+	min-height: 31px;
+	margin-left: 8px;
+	padding: 5px 10px;
+	border: 1px solid var(--pc-border-strong);
+	border-radius: var(--pc-radius-button);
+	background: var(--pc-card);
+	color: var(--pc-text);
+	font-size: 12px;
+	font-weight: 550;
+	cursor: pointer;
+}
+.pcal-cal .btn:hover {
+	background: var(--pc-surface-2);
+}
+.pcal-cal .view-controls {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+.pcal-cal .currency {
+	font-size: 11px;
+	color: var(--pc-muted);
+}
+.pcal-cal .segmented {
+	display: flex;
+	gap: 2px;
+	padding: 3px;
+	border-radius: 7px;
+	background: var(--pc-surface-2);
+}
+.pcal-cal .segmented button {
+	padding: 5px 9px;
+	border: 0;
+	border-radius: 5px;
+	background: transparent;
+	color: var(--pc-text-2);
+	font-size: 11px;
+	white-space: nowrap;
+	cursor: pointer;
+}
+.pcal-cal .segmented button.active {
+	background: var(--pc-surface-3);
+	color: var(--pc-text);
+	font-weight: 600;
+	box-shadow: 0 1px 3px #1d343015;
+}
+[data-theme="dark"] .pcal-cal .segmented button.active {
+	box-shadow: 0 1px 3px #0003;
+}
+
+.pcal-cal-state {
+	margin: 0;
+	padding: 0 15px 6px;
+	font-size: 11px;
+	color: var(--pc-muted);
+}
+.pcal-cal-state button {
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--pc-link);
+	font: inherit;
+	text-decoration: underline;
+	cursor: pointer;
+}
+
+.pcal-cal .grid {
+	padding: 0 14px 8px;
+	overflow: auto;
+}
+.pcal-cal .weekdays,
+.pcal-cal .week {
+	display: grid;
+	grid-template-columns: repeat(7, minmax(0, 1fr));
+	gap: 4px;
+}
+.pcal-cal .week {
+	margin-bottom: 4px;
+}
+.pcal-cal .weekdays span {
+	padding: 8px 0 10px;
+	text-align: center;
+	font-size: 11px;
+	font-weight: 550;
+	color: var(--pc-muted);
+}
+.pcal-cal .calendar-unavailable,
+.pcal-cal .week-help {
+	margin: 0;
+	padding: 8px 16px 14px;
+	font-size: 12px;
+	color: var(--pc-muted);
+}
+
+.pcal-cal .calendar-footer {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 12px 18px;
+	border-top: 1px solid var(--pc-border-soft);
+	font-size: 10px;
+	color: var(--pc-muted);
+}
+.pcal-cal .legend {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 12px;
+}
+.pcal-cal .legend span {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+}
+.pcal-cal .legend i {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--cal-dot-none);
+}
+.pcal-cal .legend .green {
+	background: var(--cal-dot-settled);
+}
+.pcal-cal .legend .amber {
+	background: var(--cal-dot-partial);
+}
+.pcal-cal .legend .red {
+	background: var(--cal-dot-unpaid);
+}
+.pcal-cal .hotspot-legend b {
+	font-size: 11px;
+	font-weight: 400;
+	color: var(--cal-star);
+}
+@container (min-width: 1101px) {
+	.pcal-cal .weekdays span {
+		font-size: 12px;
+	}
+}
+@container (max-width: 1100px) {
+	.pcal-cal .currency {
+		display: none;
+	}
+	.pcal-cal .month-nav h2 {
+		font-size: 16px;
+	}
+	.pcal-cal .hotspot-legend b {
+		font-size: 10px;
+	}
+}
+@container (max-width: 850px) {
+	.pcal-cal .segmented button {
+		padding: 5px 7px;
+		font-size: 10px;
+	}
+}
+@container (max-width: 540px) {
+	.pcal-cal .calendar-toolbar {
+		gap: 8px;
+		padding: 13px 14px 8px;
+	}
+	.pcal-cal .month-nav {
+		gap: 0;
+	}
+	.pcal-cal .month-nav h2 {
+		margin: 0 3px;
+		font-size: 15px;
+	}
+	.pcal-cal .month-nav .icon-btn {
+		min-width: 24px;
+		width: 24px;
+		padding: 3px;
+	}
+	.pcal-cal .month-nav .btn {
+		min-height: 28px;
+		margin-left: 5px;
+		padding: 4px 7px;
+		font-size: 10px;
+	}
+	.pcal-cal .view-controls {
+		gap: 0;
+		margin-left: auto;
+	}
+	.pcal-cal .grid {
+		padding: 0 12px 8px;
+	}
+	.pcal-cal .weekdays,
+	.pcal-cal .week {
+		min-width: 600px;
+	}
+	.pcal-cal .week-help {
+		padding: 10px 13px 13px;
+		font-size: 10px;
+	}
+	.pcal-cal .calendar-footer {
+		padding: 11px 13px;
+		font-size: 9px;
+	}
+	.pcal-cal .hotspot-legend {
+		font-size: 9px;
+	}
+}

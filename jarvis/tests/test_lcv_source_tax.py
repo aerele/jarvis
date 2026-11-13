@@ -164,7 +164,7 @@ class TestLCVSourceTax(LandedCostFixtures):
 		self.assertEqual(result["status"], "ready", result)
 		self.assertEqual(result["source_tax"]["invoices"][0]["treatment"], "excluded_per_recorded_treatment")
 		self.assertEqual(result["totals"]["charges"], self.invoice.base_net_total)
-		saved = create_doc(LCV, result["draft_values"])
+		saved = create_doc(LCV, result["draft_values"], fields=["taxes"])
 		self.assertEqual(saved["taxes"][0]["base_amount"], self.invoice.base_net_total)
 
 	def test_offset_input_tax_debit_is_not_proof_of_credit(self):

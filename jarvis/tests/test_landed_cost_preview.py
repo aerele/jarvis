@@ -51,7 +51,9 @@ class TestLandedCostPreview(LandedCostFixtures):
 			result["draft_values"]["items"][0]["purchase_receipt_item"], self.receipt.items[0].name
 		)
 		self.assertFalse(self.claimed_cost())
-		saved = create_doc("Landed Cost Voucher", result["draft_values"])
+		saved = create_doc(
+			"Landed Cost Voucher", result["draft_values"], fields=["total_taxes_and_charges", "items"]
+		)
 		self.assertEqual(saved["docstatus"], 0)
 		self.assertEqual(saved["total_taxes_and_charges"], 120)
 		self.assertEqual(saved["items"][0]["applicable_charges"], 120)
@@ -87,7 +89,7 @@ class TestLandedCostPreview(LandedCostFixtures):
 
 	def test_saved_draft_is_reconciled_after_an_edit(self):
 		prepared = self.prepare()
-		saved = create_doc("Landed Cost Voucher", prepared["draft_values"])
+		saved = create_doc("Landed Cost Voucher", prepared["draft_values"], fields=["items"])
 		frappe.db.set_value("Landed Cost Item", saved["items"][0]["name"], "applicable_charges", 121)
 		before = self.snapshot()
 		result = self.prepare(existing_draft=saved["name"], charges=[])
@@ -116,7 +118,11 @@ class TestLandedCostPreview(LandedCostFixtures):
 			]
 		)
 		self.assertEqual(result["status"], "ready", result)
-		saved = create_doc("Landed Cost Voucher", result["draft_values"])
+		saved = create_doc(
+			"Landed Cost Voucher",
+			result["draft_values"],
+			fields=["total_taxes_and_charges", "taxes"],
+		)
 		self.assertEqual(saved["total_taxes_and_charges"], 30)
 		self.assertEqual(saved["taxes"][0]["base_amount"], 30)
 

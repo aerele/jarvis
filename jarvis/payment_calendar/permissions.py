@@ -112,7 +112,7 @@ def visible_names(doctype: str, names, filters: dict | None = None) -> set[str]:
 					limit_page_length=0,
 				)
 			)
-	except frappe.PermissionError:
+	except (frappe.PermissionError, frappe.DoesNotExistError):
 		return set()
 	hooks = frappe.get_hooks("has_permission")
 	if hooks.get(doctype) or hooks.get("*"):
