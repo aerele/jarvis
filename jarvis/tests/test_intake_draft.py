@@ -641,6 +641,14 @@ class TestIntakeDraft(FrappeTestCase):
 		self.assertEqual(self._num("120,000.50", "#,##,###.##"), bad)
 		self.assertEqual(self._num("1 200,5", "# ###,##"), (1200.5, None))
 
+	def test_whole_number_formats_take_integers_only(self):
+		bad = (None, "not a number")
+		self.assertEqual(self._num("1.2345", "#.###"), bad)
+		self.assertEqual(self._num("1,2345", "#,###"), bad)
+		self.assertEqual(self._num("1.234", "#.###"), (1234, None))
+		self.assertEqual(self._num("1,234", "#,###"), (1234, None))
+		self.assertEqual(self._num("1234", "#,###"), (1234, None))
+
 	def test_dates_follow_iso_or_the_site_format(self):
 		date = frappe._dict(fieldtype="Date")
 		with self._site(date_format="dd-mm-yyyy"):

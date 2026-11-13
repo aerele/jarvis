@@ -171,7 +171,10 @@ def _number_pattern(number_format: str) -> re.Pattern:
 		whole = rf"\d{{1,2}}(?:{group}\d{{2}})*{group}\d{{3}}|\d+"
 	else:
 		whole = rf"\d{{1,3}}(?:{group}\d{{3}})+|\d+"
-	return re.compile(rf"([+-]?)({whole})(?:{decimal}(\d+))?")
+	# "#.###" and "#,###" have no decimal separator (it is ""): integers only, or an
+	# over-long group such as "1.2345" would read as 1234.5.
+	fraction = rf"(?:{decimal}(\d+))?" if info.decimal_separator else "()"
+	return re.compile(rf"([+-]?)({whole}){fraction}")
 
 
 def _number(value, fieldtype: str, number_format: str):
