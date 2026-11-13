@@ -47,6 +47,15 @@ _ALLOWED_PAYLOAD_FIELDS = {
 	"llm_allow_lookups",
 	"description",
 	"source_conversation",
+	"intake_source",
+	"intake_folder",
+	"intake_record_doctype",
+	"intake_target_doctype",
+	"intake_spec",
+	"intake_instructions",
+	"allow_incomplete_drafts",
+	"intake_status_field",
+	"intake_link_field",
 }
 
 _ACTION_TYPES = {"Script", "LLM", "Intake"}

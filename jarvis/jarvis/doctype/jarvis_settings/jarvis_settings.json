@@ -16,6 +16,7 @@
   "budgets_section",
   "agent_run_budget_monthly",
   "macro_step_budget_monthly",
+  "intake_daily_cap",
   "activation_module_ceiling",
   "enforce_agent_min_model",
   "branding_section",
@@ -252,6 +253,13 @@
    "fieldname": "macro_step_budget_monthly",
    "fieldtype": "Int",
    "label": "Scheduled Macro Step Budget (monthly, per owner)"
+  },
+  {
+   "default": "300",
+   "description": "Most documents Document Intake reads per day, across the whole site.",
+   "fieldname": "intake_daily_cap",
+   "fieldtype": "Int",
+   "label": "Intake daily limit (site)"
   },
   {
    "default": "1",

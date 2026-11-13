@@ -157,7 +157,8 @@ def _build_triggers_map() -> dict:
 	"""{doctype: {event: [row dicts]}} over all ENABLED Jarvis Trigger rows."""
 	rows = frappe.get_all(
 		TRIGGER,
-		filters={"enabled": 1},
+		# Intake rows run from uploads, never from doc events.
+		filters={"enabled": 1, "action_type": ["!=", "Intake"]},
 		fields=[
 			"name",
 			"trigger_name",

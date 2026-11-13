@@ -24,6 +24,8 @@ from frappe.model.document import Document
 from frappe.utils import cint
 from frappe.utils.safe_exec import is_safe_exec_enabled
 
+from jarvis.intake import spec as intake_spec
+from jarvis.intake.capture import clear_intake_cache
 from jarvis.permissions import NotRenamable
 from jarvis.tools._sandbox_attrs import capped, unsafe_attribute_errors
 from jarvis.triggers.engine import (
@@ -108,6 +110,13 @@ def _body_hash(trigger) -> str:
 class JarvisTrigger(NotRenamable, Document):
 	def validate(self):
 		self._validate_name()
+		if self.action_type == "Intake":
+			# Intake never fires through doc events, so none of the event, condition,
+			# script or duplicate checks apply to it.
+			self._validate_intake()
+			self._guard_server_script_link()
+			self._guard_owner_immutable()
+			return
 		self._validate_target_doctype()
 		self._validate_event_action()
 		self._validate_condition()
@@ -291,6 +300,35 @@ class JarvisTrigger(NotRenamable, Document):
 					"After Save."
 				).format(self.doc_event)
 			)
+
+	def _validate_intake(self):
+		if self.intake_source not in ("Folder", "Record"):
+			frappe.throw(_("Pick where the documents come from: a folder or a record."))
+		if self.intake_source == "Folder":
+			self._validate_intake_folder()
+		else:
+			self._validate_intake_record()
+		intake_spec.validate(intake_spec.load(self))
+
+	def _validate_intake_folder(self):
+		path = (self.intake_folder or "").strip().strip("/")
+		if not path or not frappe.db.exists("File", {"name": path, "is_folder": 1}):
+			frappe.throw(_("Folder '{0}' does not exist in Files.").format(path))
+		self.intake_folder = path
+
+	def _validate_intake_record(self):
+		doctype = self.intake_record_doctype
+		if not doctype:
+			frappe.throw(_("Record DocType is required."))
+		row = frappe.db.get_value("DocType", doctype, ["issingle", "istable"], as_dict=True)
+		if not row:
+			frappe.throw(_("DocType '{0}' does not exist.").format(doctype))
+		if cint(row.issingle) or cint(row.istable) or doctype in DENYLISTED_DOCTYPES:
+			frappe.throw(_("Intake from '{0}' is not allowed.").format(doctype))
+		meta = frappe.get_meta(doctype)
+		for fieldname in (self.intake_status_field, self.intake_link_field):
+			if fieldname and not meta.has_field(fieldname):
+				frappe.throw(_("Field '{0}' does not exist on {1}.").format(fieldname, doctype))
 
 	def _validate_condition(self):
 		self.condition = (self.condition or "").strip()
@@ -487,6 +525,7 @@ class JarvisTrigger(NotRenamable, Document):
 	# ------------------------------------------------------------------ #
 	def _notify_changed(self):
 		clear_cache()
+		clear_intake_cache()
 		# Best-effort nudge to the actor's own open tabs; other users pick the
 		# change up on list refetch (a broadcast to every jarvis user would be
 		# disproportionate for a settings-style doctype).
