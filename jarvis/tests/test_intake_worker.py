@@ -297,6 +297,35 @@ class TestIntakeWorker(FrappeTestCase):
 		got = self._get(row)
 		self.assertEqual((got.status, got.summary), ("Failed", llm_action._NO_AGENT_UPDATE_MESSAGE))
 
+	def test_failure_stores_short_reason_and_logs_traceback(self):
+		rule = self._rule()
+		row = self._row(rule)
+		fin = mock.Mock(side_effect=RuntimeError("/home/secret/path.py: SELECT * FROM tabUser " + "x" * 500))
+		with mock.patch("frappe.log_error") as log:
+			self._run(row, finish=fin)
+		got = self._get(row)
+		self.assertEqual(got.status, "Failed")
+		self.assertNotIn("Traceback", got.detail)
+		self.assertTrue(got.detail.startswith("RuntimeError"))
+		self.assertLessEqual(len(got.detail), 260)
+		self.assertTrue(log.called)
+		self.assertIn("Traceback", log.call_args.kwargs["message"])
+		self.assertEqual(log.call_args.kwargs["title"], "jarvis.intake.worker")
+
+	def test_crash_stores_no_traceback(self):
+		rule = self._rule()
+		row = self._row(rule)
+		with (
+			mock.patch("jarvis.intake.worker._run_stages", side_effect=KeyError("boom")),
+			mock.patch("frappe.log_error") as log,
+			mock.patch("frappe.enqueue"),
+		):
+			worker.run_job(row.name)
+		got = self._get(row)
+		self.assertNotIn("Traceback", got.detail)
+		self.assertIn("KeyError", got.detail)
+		self.assertIn("Traceback", log.call_args.kwargs["message"])
+
 	def test_other_agent_error_fails_with_safe_summary(self):
 		rule = self._rule()
 		row = self._row(rule)

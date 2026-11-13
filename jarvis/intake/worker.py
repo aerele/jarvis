@@ -8,6 +8,7 @@ finished job (plus the 5-minute ``pump``) starts the next waiting row.
 """
 
 import json
+import re
 import traceback
 
 import frappe
@@ -30,6 +31,20 @@ _MAX_ATTEMPTS = 3
 _NO_IMAGE_SUMMARY = "This site's AI model can't read images for intake yet."
 _READ_FAILED_SUMMARY = "Reading the file failed. Managers can see the details in this activity."
 _DRAFT_FAILED_SUMMARY = "Creating the draft failed. Managers can see the details in this activity."
+
+
+def _reason(e: Exception) -> str:
+	"""Short, safe text for ``detail``: class name plus a trimmed message with file paths
+	cut out. The uploader can open their own row, so no traceback or long raw text goes on it;
+	the full traceback is in the Error Log."""
+	text = re.sub(r"(?:/[\w.\-]+)+", "", str(e)).strip()
+	return f"{type(e).__name__}: {text}"[:200]
+
+
+def _log(e: Exception) -> str:
+	"""Send the traceback to the Error Log and return the short reason for the row."""
+	frappe.log_error(title="jarvis.intake.worker", message=traceback.format_exc())
+	return _reason(e)
 
 
 def slot_keys() -> list[str]:
@@ -116,10 +131,9 @@ def run_job(activity: str) -> None:
 	slot = None
 	try:
 		slot = _run_guarded(row)
-	except Exception:
+	except Exception as e:
 		frappe.db.rollback()
-		_set(row, status="Failed", summary=_READ_FAILED_SUMMARY, detail=traceback.format_exc()[-2000:])
-		frappe.log_error(title="Jarvis Intake: job crashed")
+		_set(row, status="Failed", summary=_READ_FAILED_SUMMARY, detail=_log(e))
 	finally:
 		if slot is not False:
 			_enqueue_next(activity)
@@ -202,10 +216,11 @@ def _run_stages(row, trigger, needs_ai: bool) -> None:
 		try:
 			reading, note = reader.read_file(row.source_file, s, before_call=lambda: _count_call(row.trigger))
 		except lt.LLMTaskNotAvailableError as e:
-			_set(row, status="Failed", summary=llm_action._NO_AGENT_UPDATE_MESSAGE, detail=str(e)[:2000])
+			_set(row, status="Failed", summary=llm_action._NO_AGENT_UPDATE_MESSAGE, detail=_reason(e))
 			return
 		except lt.LLMTaskError as e:
-			_set(row, status="Failed", summary=_READ_FAILED_SUMMARY, detail=str(e)[:2000])
+			# Expected (agent refusal, timeout): a short reason, no Error Log noise.
+			_set(row, status="Failed", summary=_READ_FAILED_SUMMARY, detail=_reason(e))
 			return
 		except reader.UnreadableFile as e:
 			_set(row, status="Failed", summary=str(e), detail=str(e))
@@ -225,7 +240,7 @@ def _run_stages(row, trigger, needs_ai: bool) -> None:
 		draft.finish(row, reading)
 	except Exception as e:
 		frappe.db.rollback()
-		_set(row, status="Failed", summary=_DRAFT_FAILED_SUMMARY, detail=f"{e}"[:2000])
+		_set(row, status="Failed", summary=_DRAFT_FAILED_SUMMARY, detail=_log(e))
 
 
 def _recover_stuck() -> None:

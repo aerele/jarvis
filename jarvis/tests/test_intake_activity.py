@@ -83,6 +83,20 @@ class TestIntakeActivity(FrappeTestCase):
 		visible = frappe.get_list(ACTIVITY, filters={"name": ("in", [mine, mine_llm, theirs])}, pluck="name")
 		self.assertCountEqual(visible, [mine, mine_llm, theirs])
 
+	def test_detail_is_manager_only_at_field_level(self):
+		mine = self._row(owner=UPLOADER, detail="ValueError: internal text", summary="safe copy")
+		frappe.set_user(UPLOADER)
+		doc = frappe.get_doc(ACTIVITY, mine)
+		doc.apply_fieldlevel_read_permissions()
+		got = doc.as_dict()
+		self.assertFalse(got.get("detail"))
+		self.assertEqual(got.get("summary"), "safe copy")
+		frappe.set_user("Administrator")
+		manager = frappe.get_doc(ACTIVITY, mine)
+		manager.apply_fieldlevel_read_permissions()
+		self.assertEqual(manager.as_dict().get("detail"), "ValueError: internal text")
+		self.assertEqual(frappe.get_meta(ACTIVITY).get_field("detail").permlevel, 1)
+
 	def test_clear_old_logs_keeps_open_rows(self):
 		old = add_days(now_datetime(), -200)
 		names = {s: self._row(status=s) for s in ("Queued", "Running", "Needs Review", "Success", "Failed")}
