@@ -107,6 +107,9 @@ def _body_hash(trigger) -> str:
 	return hashlib.sha256((text or "").strip().encode()).hexdigest()
 
 
+_STATUS_FIELD_TYPES = ("Data", "Small Text")
+
+
 class JarvisTrigger(NotRenamable, Document):
 	def validate(self):
 		self._validate_name()
@@ -372,6 +375,26 @@ class JarvisTrigger(NotRenamable, Document):
 		for fieldname in (self.intake_status_field, self.intake_link_field):
 			if fieldname and not meta.has_field(fieldname):
 				frappe.throw(_("Field '{0}' does not exist on {1}.").format(fieldname, doctype))
+		# The write-back is a plain DB write, but the value must still fit what the field
+		# is: a Select would refuse "Needs Review", a Link to another doctype a draft name.
+		# A standard column (owner, name) has no field row, so it is refused here too.
+		status = self.intake_status_field
+		if status and getattr(meta.get_field(status), "fieldtype", None) not in _STATUS_FIELD_TYPES:
+			frappe.throw(_("Status field '{0}' must be a Data or Small Text field.").format(status))
+		link = self.intake_link_field
+		df = meta.get_field(link) if link else None
+		if link and not (
+			df
+			and (
+				df.fieldtype in ("Data", "Dynamic Link")
+				or (df.fieldtype == "Link" and df.options == self.intake_target_doctype)
+			)
+		):
+			frappe.throw(
+				_("Link field '{0}' must be a Data field, a Dynamic Link, or a Link to {1}.").format(
+					self.intake_link_field, self.intake_target_doctype
+				)
+			)
 
 	def _validate_condition(self):
 		self.condition = (self.condition or "").strip()

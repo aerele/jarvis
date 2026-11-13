@@ -105,7 +105,18 @@ class TestIntakeSpec(FrappeTestCase):
 		}
 		self.assertRaises(frappe.ValidationError, self._insert, **base, intake_status_field="no_such_field")
 		self.assertRaises(frappe.ValidationError, self._insert, **{**base, "intake_record_doctype": "User"})
-		self._insert(**base, intake_status_field="status", intake_link_field="reference_name")
+		self._insert(**base, intake_status_field="sender", intake_link_field="reference_name")
+
+	def test_writeback_fields_must_be_able_to_hold_the_value(self):
+		base = {"intake_source": "Record", "intake_folder": None, "intake_record_doctype": "ToDo"}
+		# A Select would refuse "Needs Review"; a Link to another doctype would refuse a draft name.
+		with self.assertRaises(frappe.ValidationError):
+			self._insert(**base, intake_status_field="status")
+		with self.assertRaises(frappe.ValidationError):
+			self._insert(**base, intake_link_field="reference_type")
+		with self.assertRaises(frappe.ValidationError):
+			self._insert(**base, intake_link_field="date")
+		self._insert(**base, intake_status_field="sender", intake_link_field="reference_name")
 
 	def test_target_doctype_gated(self):
 		# User is denylisted, Website Settings is Single, Note Seen By is a child table.
