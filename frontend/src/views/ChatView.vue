@@ -864,6 +864,7 @@
 							:timestampFull="msgTimeFull(m)"
 							:copied="copiedId === m.name"
 							@copy="copyReplyMsg(m.name, m.content)"
+							@code-copy="announceCodeCopy"
 							@open-attachment="openArtifact(m, $event)"
 						>
 							<template #avatar>
@@ -7868,7 +7869,11 @@ function render(text, streaming = false) {
 	const key = (streaming ? "S:" : "F:") + text;
 	const hit = _renderCache.get(key);
 	if (hit !== undefined) return hit;
-	const out = linkifyDocs(renderMarkdown(stripBlocks(text, streaming)));
+	// copyCode: each settled code block gets a copy button, handled by Message.vue
+	// (#2170). Not while streaming: the block may still be growing.
+	const out = linkifyDocs(
+		renderMarkdown(stripBlocks(text, streaming), { copyCode: !streaming })
+	);
 	if (_renderCache.size >= 800) _renderCache.clear();
 	_renderCache.set(key, out);
 	return out;
@@ -9739,6 +9744,11 @@ function copyReplyMsg(id, content) {
 				conversation: currentId.value,
 			}),
 	});
+}
+// A code block's copy button (Message.vue) has no text of its own to change, so
+// its result is read out through the same live region as the reply Copy.
+function announceCodeCopy(ok) {
+	announceSR(ok ? "Code copied." : "Couldn't copy the code. Select it and copy it instead.");
 }
 function replyCopyLabel(id) {
 	if (copiedId.value === id) return "Copied";
