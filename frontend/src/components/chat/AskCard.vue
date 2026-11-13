@@ -39,21 +39,14 @@
 				</button>
 			</div>
 			<!-- date / datetime / free text fields -->
-			<input
-				v-else-if="q.type === 'date'"
-				type="date"
-				class="jv-ask-field"
-				:value="sel[qi] || ''"
+			<DateControl
+				v-else-if="q.type === 'date' || q.type === 'datetime'"
+				:kind="q.type"
+				:ariaLabel="q.q"
+				look="ask"
+				:modelValue="sel[qi] || ''"
 				:disabled="answered"
-				@input="pickSingle(qi, $event.target.value)"
-			/>
-			<input
-				v-else-if="q.type === 'datetime'"
-				type="datetime-local"
-				class="jv-ask-field"
-				:value="sel[qi] || ''"
-				:disabled="answered"
-				@input="pickSingle(qi, $event.target.value)"
+				@update:modelValue="(v) => pickSingle(qi, v)"
 			/>
 			<input
 				v-else-if="q.type === 'text'"
@@ -177,6 +170,7 @@ import { ref, computed, watch } from "vue";
 import { LoadingIndicator, Select } from "frappe-ui";
 import { getDoctypeFields, searchLink } from "@/api";
 import { controlFor } from "@/lib/docFields";
+import DateControl from "@/components/forms/DateControl.vue";
 import { DraftLinkFilterError, resolveLinkFilters } from "@/lib/draftLinkFilters";
 import { vScrollFade } from "@/composables/useScrollFade";
 import { ASK_FIELD_TYPES, isAskReady, askAnswerText, humanizeFieldname } from "@/lib/chatAsk";
