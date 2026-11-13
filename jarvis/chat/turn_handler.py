@@ -1149,7 +1149,9 @@ def _visible_as(chat_user: str) -> bool:
 	longer than the TTL."""
 	key = _pc_visible_key(chat_user)
 	try:
-		hit = frappe.cache().get_value(key, expires=True, use_local_cache=False)
+		# compat.cache_get_fresh: Frappe 15 has no use_local_cache= (a TypeError here
+		# would turn every read into a miss).
+		hit = compat.cache_get_fresh(key)
 	except Exception:
 		hit = None
 	if hit is not None:
