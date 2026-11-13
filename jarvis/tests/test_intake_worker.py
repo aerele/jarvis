@@ -302,6 +302,29 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertEqual((got.status, got.summary), ("Failed", "The file was removed"))
 		self.assertEqual(capture.FILE_REMOVED_SUMMARY, "The file was removed")
 
+	def _bell(self, row, like):
+		# Rows from other runs are committed, so only this test's own (named by file) count.
+		file_name = frappe.db.get_value("File", row.source_file, "file_name")
+		return frappe.get_all(
+			"Notification Log",
+			filters={"for_user": row.event_user, "subject": ["like", f"{file_name}: %{like}%"]},
+			pluck="name",
+		)
+
+	def test_failed_and_skipped_rows_tell_the_uploader(self):
+		rule = self._rule()
+		failed = self._row(rule, self._file(f"{frappe.generate_hash(length=8)}.png"))
+		err = mock.Mock(side_effect=lt.LLMTaskError("model said no"))
+		with mock.patch("jarvis.intake.client.vision_task_complete", err), mock.patch("frappe.enqueue"):
+			worker.run_job(failed.name)
+		self.assertEqual(len(self._bell(failed, "Reading the file failed")), 1)
+		# the bell carries the safe summary only, never the manager-only detail
+		self.assertFalse(self._bell(failed, "model said no"))
+		skipped = self._row(rule, self._file(f"{frappe.generate_hash(length=8)}.png"))
+		frappe.db.set_value(TRIGGER, rule.name, "enabled", 0)
+		self._run(skipped)
+		self.assertEqual(len(self._bell(skipped, "rule turned off")), 1)
+
 	def test_old_plugin_maps_to_update_copy(self):
 		rule = self._rule()
 		row = self._row(rule)

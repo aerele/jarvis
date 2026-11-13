@@ -21,6 +21,7 @@ from frappe.utils import escape_html, get_datetime, getdate
 
 from jarvis._session import impersonate
 from jarvis.chat.filebox import attach_file_to_doc
+from jarvis.intake import notify
 from jarvis.intake import spec as intake_spec
 
 ACTIVITY = "Jarvis Trigger Activity"
@@ -389,11 +390,14 @@ def _issue_text(label: str, row, hit: dict | None) -> str:
 # --------------------------------------------------------------------------- #
 # finish and create
 # --------------------------------------------------------------------------- #
-def _fail(row, trigger, summary: str, detail: str = ""):
+def _fail(row, trigger, summary: str, detail: str = "", tell_uploader: bool = True):
 	"""End the row Failed (``detail`` is a short reason, never raw exception text), mark the
-	source record's status field Failed too, and stop the caller."""
+	source record's status field Failed too, tell the uploader (a reviewer's reject sends
+	its own notice) and stop the caller."""
 	row.db_set({"status": "Failed", "summary": summary, "detail": detail[:140]})
 	_guarded(_write_back, row, trigger, "Failed", None)
+	if tell_uploader:
+		notify.row_ended(row, summary)
 	raise DraftFailed(summary)
 
 
@@ -449,7 +453,7 @@ def _review(row, trigger, s, values: dict, missing: list[dict], note: str) -> No
 	summary = _with_note(f"Waiting for a reviewer: {count} field(s) need a value", note)
 	row.db_set({"status": "Needs Review", "approval_request": approval, "summary": summary})
 	_guarded(_write_back, row, trigger, "Needs Review", None)
-	_notify(row.event_user, f"Waiting for a reviewer: {count} field(s) need a value")
+	notify.notify(row.event_user, f"Waiting for a reviewer: {count} field(s) need a value")
 
 
 def _ignored_blanks(s, values: dict, missing: list[dict], unresolved: list[dict]) -> list[str]:
@@ -520,7 +524,7 @@ def create(
 		}
 	)
 	_guarded(_write_back, row, trigger, status, doc.name)
-	_notify(uploader, f"Draft ready: {doc.doctype} {doc.name}", doc)
+	notify.notify(uploader, f"Draft ready: {doc.doctype} {doc.name}", doc)
 	return doc.doctype, doc.name
 
 
@@ -625,24 +629,3 @@ def _write_back(row, trigger, status: str, draft_name: str | None) -> None:
 		updates[link_field] = draft_name
 	if updates:
 		frappe.db.set_value(record_doctype, row.target_docname, updates, update_modified=False)
-
-
-def _notify(user: str, subject: str, doc=None) -> None:
-	"""Bell notification to the uploader, in its own savepoint so a failure never undoes
-	the draft. The desk bell renders the subject as HTML, so it is escaped."""
-	savepoint = "jarvis_intake_notice"
-	try:
-		frappe.db.savepoint(savepoint)
-		log = {
-			"doctype": "Notification Log",
-			"for_user": user,
-			"type": "Alert",
-			"subject": escape_html(subject[:140]),
-		}
-		if doc:
-			log.update({"document_type": doc.doctype, "document_name": doc.name})
-		frappe.get_doc(log).insert(ignore_permissions=True)
-		frappe.db.release_savepoint(savepoint)
-	except Exception:
-		frappe.db.rollback(save_point=savepoint)
-		frappe.log_error(title="jarvis.intake.draft.notify_failed", message=frappe.get_traceback())

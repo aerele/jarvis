@@ -15,7 +15,7 @@ import frappe
 from frappe.utils import add_to_date, cint, now_datetime, nowdate
 
 from jarvis import _redis_lock, compat
-from jarvis.intake import capture, draft, reader
+from jarvis.intake import capture, draft, notify, reader
 from jarvis.triggers import llm_action
 from jarvis.triggers import llm_task_client as lt
 
@@ -66,6 +66,9 @@ def _site_cap() -> int:
 def _set(row, **values) -> None:
 	"""Save a status change and publish it: the SPA polls this row while the job runs."""
 	row.db_set(values)
+	if values.get("status") in ("Failed", "Skipped"):
+		# The uploader may have no Jarvis access: the bell is how they learn of it.
+		notify.row_ended(row, values.get("summary") or row.summary or "")
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- the polling UI must see each stage
 
 
@@ -275,6 +278,8 @@ def _recover_stuck() -> None:
 			frappe.db.set_value(
 				ACTIVITY, r.name, {"status": "Failed", "summary": "Stopped unexpectedly. Retry it."}
 			)
+			who = frappe.db.get_value(ACTIVITY, r.name, ["event_user", "source_file"], as_dict=True)
+			notify.row_ended(who, "Stopped unexpectedly. Retry it.")
 			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- scheduler job must publish the state
 
 

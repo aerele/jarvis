@@ -12,6 +12,7 @@ import frappe
 from frappe.utils import cint
 
 from jarvis import compat
+from jarvis.intake import notify
 
 INTAKE_MAP_CACHE_KEY = "jarvis:intake_map"
 # Short TTL backstops a bust that races a concurrent rebuild.
@@ -174,6 +175,10 @@ def _queue_one(doc, rule: dict, event: str, user: str) -> None:
 			"duplicate_of": duplicate_of,
 		}
 	).insert(ignore_permissions=True)
+	if status == "Skipped" and not duplicate_of:
+		# An unreadable type will never be drafted; the uploader may have no Jarvis access,
+		# so the bell is how they learn of it. A duplicate stays quiet.
+		notify.row_ended(row, summary)
 	if status != "Queued":
 		return
 	frappe.enqueue(

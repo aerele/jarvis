@@ -171,6 +171,18 @@ class TestIntakeCapture(FrappeTestCase):
 		self.assertEqual((third.status, third.duplicate_of), ("Queued", None))
 		enq.assert_called_once()
 
+	def test_unreadable_type_tells_the_uploader_but_a_duplicate_stays_quiet(self):
+		rule = self._rule()
+		subject = "%read for intake%"  # the bell escapes the apostrophe in "can't"
+		before = frappe.db.count("Notification Log", {"subject": ["like", subject]})
+		self._upload("notes.txt")
+		self.assertEqual(frappe.db.count("Notification Log", {"subject": ["like", subject]}), before + 1)
+		self._upload("a.png", content="same-bytes-3")
+		quiet = frappe.db.count("Notification Log", {"for_user": frappe.session.user})
+		self._upload("b.png", content="same-bytes-3")
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": frappe.session.user}), quiet)
+		self.assertEqual(self._rows(rule)[-1].status, "Skipped")
+
 	def test_record_attach_waits_for_saved_parent(self):
 		rule = self._rule(
 			intake_source="Record",

@@ -19,7 +19,7 @@ from frappe import _
 from frappe.utils import now_datetime
 
 from jarvis._session import impersonate
-from jarvis.intake import draft
+from jarvis.intake import draft, notify
 from jarvis.intake import spec as intake_spec
 
 AR = "Jarvis Approval Request"
@@ -258,10 +258,10 @@ def _reject(request, activity) -> dict:
 	if activity is not None and activity.status == "Needs Review":
 		trigger = frappe.db.get_value(TRIGGER, activity.trigger, draft._TRIGGER_FIELDS, as_dict=True)
 		try:
-			draft._fail(activity, trigger or frappe._dict(), _("Rejected by reviewer"))
+			draft._fail(activity, trigger or frappe._dict(), _("Rejected by reviewer"), tell_uploader=False)
 		except draft.DraftFailed:
 			pass  # the row is Failed and written back; nothing more to do
-		draft._notify(activity.event_user, f"Rejected by reviewer: {request.title}"[:140])
+		notify.notify(activity.event_user, f"Rejected by reviewer: {request.title}"[:140])
 	return _settle(request, "Rejected", "Rejected by reviewer")
 
 
