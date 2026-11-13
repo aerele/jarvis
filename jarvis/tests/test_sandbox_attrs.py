@@ -12,11 +12,11 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import frappe
-from frappe.tests.classes.context_managers import enable_safe_exec
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils.safe_exec import safe_exec
 
 from jarvis.exceptions import InvalidFieldValueError, SandboxCodeError
+from jarvis.tests._safe_exec import enable_safe_exec
 from jarvis.tools import _sandbox_attrs
 from jarvis.tools._sandbox_attrs import (
 	FORMAT_NAMES,

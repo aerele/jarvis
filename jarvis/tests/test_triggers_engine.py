@@ -595,8 +595,9 @@ class TestDispatch(_TriggerTestCase):
 
 	def test_real_sandbox_error_gets_the_hint(self):
 		# Locks _UNSAFE_ATTR_RE to Frappe's real message, not a copy of it.
-		from frappe.tests.classes.context_managers import enable_safe_exec
 		from frappe.utils.safe_exec import safe_exec
+
+		from jarvis.tests._safe_exec import enable_safe_exec
 
 		with enable_safe_exec():
 			with self.assertRaises(SyntaxError) as cm:
