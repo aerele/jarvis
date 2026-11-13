@@ -183,18 +183,42 @@ export function cardBannerOf(card) {
 const ROLLED_BACK_LINE =
 	"During the check, the record's own code stopped part-way, so the result may differ.";
 
-// The ONE warning line for a create / update card whose trial found something
-// (``card.warning = {jobs, rolled_back}``), else "". ``jobs`` is the real count
-// of background jobs Confirm will start, not the number of kinds.
+const count = (n) => (Number.isInteger(n) && n > 0 ? n : 0);
+
+// What a bench-resolved email merge (send_email recipients_from) left out:
+// ``warning.merge = {rows, no_email, duplicate, limited}``. The recipients came
+// from the query, so these are the only rows the card does not show as emails.
+function mergeLine(m) {
+	if (!m || typeof m !== "object") return "";
+	const parts = [];
+	const none = count(m.no_email);
+	const dup = count(m.duplicate);
+	if (none)
+		parts.push(
+			`${none} row${none === 1 ? " has" : "s have"} no valid email and ${
+				none === 1 ? "is" : "are"
+			} left out.`
+		);
+	if (dup) parts.push(`${dup} repeated address${dup === 1 ? " gets" : "es get"} one email.`);
+	if (m.limited === true) parts.push("The query's own limit left more rows out.");
+	return parts.join(" ");
+}
+
+// The ONE warning line for a card whose check found something, else "": a
+// create / update trial (``card.warning = {jobs, rolled_back}``; ``jobs`` is the
+// real count of background jobs Confirm will start, not the number of kinds) or
+// an email merge (``card.warning.merge``).
 export function cardWarningOf(card) {
 	const w = card && card.warning;
 	if (!w || typeof w !== "object") return "";
-	const jobs = Number.isInteger(w.jobs) && w.jobs > 0 ? w.jobs : 0;
+	const jobs = count(w.jobs);
 	const parts = [];
 	if (w.rolled_back === true) parts.push(ROLLED_BACK_LINE);
 	if (jobs) {
 		parts.push(`This will also start ${jobs} background job${jobs === 1 ? "" : "s"}.`);
 	}
+	const merge = mergeLine(w.merge);
+	if (merge) parts.push(merge);
 	return parts.join(" ");
 }
 
