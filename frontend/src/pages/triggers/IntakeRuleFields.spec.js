@@ -209,6 +209,31 @@ describe("IntakeRuleFields", () => {
 		expect(patches(toRecord).at(-1)).toEqual({ intake_source: "Record", intake_folder: "" });
 	});
 
+	it("changing the record doctype clears the write-back picks", async () => {
+		const w = await mountIt(
+			formOf({
+				intake_source: "Record",
+				intake_record_doctype: "ToDo",
+				intake_status_field: "status",
+				intake_link_field: "ref",
+			})
+		);
+		const picker = w
+			.findAllComponents({ name: "Autocomplete" })
+			.find((c) => c.props("placeholder") === "Files attached to records of…");
+		await picker.vm.$emit("update:modelValue", { label: "Note", value: "Note" });
+		expect(patches(w).at(-1)).toEqual({
+			intake_record_doctype: "Note",
+			intake_status_field: "",
+			intake_link_field: "",
+		});
+		// Re-picking the same doctype keeps them.
+		const before = patches(w).length;
+		await picker.vm.$emit("update:modelValue", { label: "ToDo", value: "ToDo" });
+		expect(patches(w).at(-1)).toEqual({ intake_record_doctype: "ToDo" });
+		expect(patches(w).length).toBe(before + 1);
+	});
+
 	it("read-only with a redacted spec renders without loading or crashing", async () => {
 		const w = mount(IntakeRuleFields, {
 			props: {

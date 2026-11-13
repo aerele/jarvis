@@ -34,7 +34,7 @@
 				:modelValue="pickValue(form.intake_record_doctype)"
 				placeholder="Files attached to records of…"
 				@update:query="(q) => queryDoctypes(q, recordDoctypeOptions)"
-				@update:modelValue="(o) => emit('update', { intake_record_doctype: optValue(o) })"
+				@update:modelValue="setRecordDoctype"
 			/>
 			<FormControl
 				v-else
@@ -296,6 +296,18 @@ function setSource(value) {
 			  }
 			: { intake_source: value, intake_folder: "" }
 	);
+}
+
+// The status and link picks name fields of the old doctype, so a new doctype drops them.
+function setRecordDoctype(o) {
+	const value = optValue(o);
+	if (value === (props.form.intake_record_doctype || ""))
+		return emit("update", { intake_record_doctype: value });
+	emit("update", {
+		intake_record_doctype: value,
+		intake_status_field: "",
+		intake_link_field: "",
+	});
 }
 
 // ── folders ──────────────────────────────────────────────────────────────────
