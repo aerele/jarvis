@@ -640,7 +640,14 @@
 						<!-- 4. decision -->
 						<DocSection label="Decision" :collapsible="false">
 							<template v-if="selected.status === 'Pending'">
-								<div v-if="selected.can_act">
+								<!-- a Document Intake review: its own form, answers as JSON -->
+								<IntakeReviewDetail
+									v-if="selected.source === 'Intake' && selected.can_act"
+									:key="selected.name"
+									:approval="selected"
+									:on-decided="onIntakeDecided"
+								/>
+								<div v-else-if="selected.can_act">
 									<!-- the LLM's options are varied per chat - selectable chips;
 									     hidden when they merely restate Approve/Reject -->
 									<div v-if="showOptionChips" class="flex flex-wrap gap-2">
@@ -899,6 +906,7 @@ import PendingActionDetail from "@/pages/approvals/PendingActionDetail.vue";
 import PendingChatDetail from "@/pages/approvals/PendingChatDetail.vue";
 import SheetDetail from "@/pages/approvals/SheetDetail.vue";
 import WikiProposalDetail from "@/pages/approvals/WikiProposalDetail.vue";
+import IntakeReviewDetail from "@/pages/approvals/IntakeReviewDetail.vue";
 import DocSection from "@/components/doc/DocSection.vue";
 import DocMetaPanel from "@/components/doc/DocMetaPanel.vue";
 import CommentsSection from "@/components/doc/CommentsSection.vue";
@@ -1620,6 +1628,16 @@ async function sendDecisionToChat() {
 		refreshKeep();
 		await loadRecord(id, { keep: true });
 	}
+}
+
+// A Document Intake review settled (approved, rejected or refused by the draft): the
+// row leaves the Pending rail like any decided row.
+// ``id`` is the row that was decided, not whatever is selected by now.
+function onIntakeDecided(_res, id) {
+	if (!id) return;
+	store.refreshApprovalsCount();
+	if ((filters.status || "Pending") === "Pending") advanceAfterDecide(id);
+	else loadRecord(id, { keep: true });
 }
 
 // Ignore = dismiss off the board with no verdict and no chat resume. Same

@@ -126,6 +126,13 @@ function detailStub(kind, cls) {
 vi.mock("./PendingActionDetail.vue", detailStub("held", "held-detail"));
 vi.mock("./PendingChatDetail.vue", detailStub("chat", "chat-detail"));
 vi.mock("./SheetDetail.vue", detailStub("sheet", "sheet-detail"));
+vi.mock("./IntakeReviewDetail.vue", () => ({
+	default: {
+		props: ["approval", "onDecided"],
+		template:
+			'<div class="intake-detail"><span class="who">{{ approval.name }}</span><button class="intake-done" @click="onDecided({ ok: true }, approval.name)">done</button></div>',
+	},
+}));
 
 import { useRoute, useRouter } from "vue-router";
 import * as api from "@/api";
@@ -332,6 +339,29 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(w.get('[data-testid="approval-tag-picker"]').classes()).toContain(
 			"max-w-[calc(100vw-2rem)]"
 		);
+	});
+
+	it("opens a Document Intake review in its own form, not the generic decision controls", async () => {
+		state.ar = [ar("AR-1", { source: "Intake" }), ar("AR-2")];
+		approvals.getApproval.mockImplementation(async (name) => ({
+			...ar(name, name === "AR-1" ? { source: "Intake" } : {}),
+			question: "Needed",
+			can_act: 1,
+			intake: { missing: [], read: [], table: null, file: null },
+		}));
+		const w = await board({}, { id: "AR-1" });
+		expect(w.find(".intake-detail .who").text()).toBe("AR-1");
+		const decision = pane(w);
+		expect(button(decision, "Approve")).toBeUndefined();
+		expect(button(decision, "Ignore")).toBeUndefined();
+		expect(
+			decision.find("textarea, input[placeholder='Add a note - optional']").exists()
+		).toBe(false);
+		// Settling it drops that row from the Pending rail and refreshes the badge.
+		await w.find(".intake-done").trigger("click");
+		await flushPromises();
+		expect(shell.refresh).toHaveBeenCalled();
+		expect(arRow(w, "AR-1")).toBeUndefined();
 	});
 
 	it("re-reads both lists when the sidebar badge moves (#616)", async () => {
