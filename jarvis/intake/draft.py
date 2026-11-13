@@ -13,6 +13,7 @@ and the worker turns them into a Failed row.
 import difflib
 import math
 import re
+from datetime import datetime
 
 import frappe
 from frappe import _
@@ -143,23 +144,90 @@ def _lookup(doctype: str, text: str, fuzzy: bool) -> tuple[str | None, list[str]
 
 
 _NUMBER_TYPES = {"Int", "Float", "Currency", "Percent"}
-_CURRENCY_NOISE = re.compile(r"(?i)[\u20b9$\u20ac\u00a3\u00a5,\s]|\b(?:inr|usd|eur|gbp|rs)\b\.?")
+_CURRENCY_END = re.compile(
+	r"(?i)^[\s\u20b9$\u20ac\u00a3\u00a5]*(?:(?:inr|usd|eur|gbp|rs)\b\.?\s*)?|"
+	r"\s*(?:\b(?:inr|usd|eur|gbp|rs)\.?|[\u20b9$\u20ac\u00a3\u00a5])?\s*$"
+)
+_DATE_TOKENS = {"yyyy": "%Y", "dd": "%d", "mm": "%m"}
 
 
-def _number(value, fieldtype: str):
-	"""A float/int, or None when ``value`` is not a plain number. Frappe would turn
-	"N/A" into 0, and 0 passes a mandatory check, so unparseable text must stay blank."""
+def _site_formats() -> tuple[str, str]:
+	"""(number format, date format) from System Settings, with Frappe's defaults."""
+	return (
+		frappe.get_system_settings("number_format") or "#,###.##",
+		frappe.get_system_settings("date_format") or "yyyy-mm-dd",
+	)
+
+
+def _number_pattern(number_format: str) -> re.Pattern:
+	"""Regex for a number written in the site's format: optional sign, digits grouped the
+	way the format groups them (3-3-3, or 2-2-3 for the Indian format), at most one
+	decimal separator that is the format's own. Anything else is not a number."""
+	from frappe.utils.number_format import NumberFormat
+
+	info = NumberFormat.from_string(number_format)
+	group, decimal = re.escape(info.thousands_separator), re.escape(info.decimal_separator)
+	if number_format == "#,##,###.##":
+		whole = rf"\d{{1,2}}(?:{group}\d{{2}})*{group}\d{{3}}|\d+"
+	else:
+		whole = rf"\d{{1,3}}(?:{group}\d{{3}})+|\d+"
+	return re.compile(rf"([+-]?)({whole})(?:{decimal}(\d+))?")
+
+
+def _number(value, fieldtype: str, number_format: str):
+	"""A float/int, or None when ``value`` is not a plain number in the site's format.
+	Frappe would turn "N/A" into 0 (and a wrong separator into a wrong value), so anything
+	unparseable must stay blank."""
 	if isinstance(value, bool) or not isinstance(value, str | int | float):
 		return None
-	try:
-		number = float(_CURRENCY_NOISE.sub("", value)) if isinstance(value, str) else float(value)
-	except ValueError:
-		return None
+	if isinstance(value, str):
+		text = value.replace("\u00a0", " ").replace("\u202f", " ")
+		text = text.strip()
+		sign = text[0] if text[:1] in ("+", "-") else ""
+		match = _number_pattern(number_format).fullmatch(sign + _CURRENCY_END.sub("", text[len(sign) :]))
+		if not match:
+			return None
+		from frappe.utils.number_format import NumberFormat
+
+		info = NumberFormat.from_string(number_format)
+		digits = match.group(2).replace(info.thousands_separator, "")
+		number = float(f"{match.group(1)}{digits}.{match.group(3) or 0}")
+	else:
+		number = float(value)
 	if not math.isfinite(number):
 		return None
-	if fieldtype == "Int":
-		return int(number) if number == int(number) else None
+	if fieldtype == "Int" and number != int(number):
+		return None
 	return int(number) if number == int(number) else number
+
+
+def _date_format_string(date_format: str) -> str:
+	out = date_format.lower()
+	for token, code in _DATE_TOKENS.items():
+		out = out.replace(token, code)
+	return out
+
+
+def _date(value, fieldtype: str, date_format: str) -> str | None:
+	"""ISO text as is; any other text only in the site's own date format. A guess
+	between day-first and month-first would silently store the wrong date."""
+	if not isinstance(value, str):
+		return None
+	text = value.strip()
+	if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?", text):
+		try:
+			return str(getdate(text) if fieldtype == "Date" else get_datetime(text))
+		except Exception:
+			return None
+	fmt = _date_format_string(date_format)
+	candidates = [fmt] if fieldtype == "Date" else [f"{fmt} %H:%M:%S", f"{fmt} %H:%M", fmt]
+	for candidate in candidates:
+		try:
+			parsed = datetime.strptime(text, candidate)
+		except ValueError:
+			continue
+		return str(parsed.date() if fieldtype == "Date" else parsed)
+	return None
 
 
 def _clean(df, value):
@@ -169,16 +237,11 @@ def _clean(df, value):
 	if isinstance(value, list | dict):
 		return None, "unreadable"
 	if df.fieldtype in _NUMBER_TYPES:
-		number = _number(value, df.fieldtype)
+		number = _number(value, df.fieldtype, _site_formats()[0])
 		return (number, None) if number is not None else (None, "not a number")
 	if df.fieldtype in ("Date", "Datetime"):
-		try:
-			if not isinstance(value, str):
-				raise ValueError
-			parsed = getdate(value) if df.fieldtype == "Date" else get_datetime(value)
-			return str(parsed), None
-		except Exception:
-			return None, "not a date"
+		parsed = _date(value, df.fieldtype, _site_formats()[1])
+		return (parsed, None) if parsed else (None, "not a date")
 	return value, None
 
 
@@ -327,7 +390,7 @@ def _fail(row, trigger, summary: str, detail: str = ""):
 	"""End the row Failed (``detail`` is a short reason, never raw exception text), mark the
 	source record's status field Failed too, and stop the caller."""
 	row.db_set({"status": "Failed", "summary": summary, "detail": detail[:140]})
-	_write_back(row, trigger, "Failed", None)
+	_guarded(_write_back, row, trigger, "Failed", None)
 	raise DraftFailed(summary)
 
 
@@ -480,11 +543,21 @@ def _guarded(fn, *args) -> None:
 		)
 
 
-def _attach_and_comment(row, doc, lines: list[str], resumed: bool) -> list[str]:
+def _already_attached(row, doc) -> bool:
+	url = frappe.db.get_value("File", row.source_file, "file_url")
+	return bool(
+		url
+		and frappe.db.exists(
+			"File", {"file_url": url, "attached_to_doctype": doc.doctype, "attached_to_name": doc.name}
+		)
+	)
+
+
+def _attach_and_comment(row, doc, lines: list[str], resumed: bool) -> None:
 	"""Attach the source file and leave one Comment on the blanks; both are best effort.
 	On a resume the Comment is only added when the first run never got to it."""
 	attached = {}
-	if row.source_file:
+	if row.source_file and not (resumed and _already_attached(row, doc)):
 		try:
 			attached = attach_file_to_doc(row.source_file, doc.doctype, doc.name)
 		except Exception:
@@ -496,7 +569,6 @@ def _attach_and_comment(row, doc, lines: list[str], resumed: bool) -> list[str]:
 	)
 	if (lines or extra) and not has_comment:
 		_guarded(doc.add_comment, "Comment", "<br>".join(escape_html(line) for line in lines + extra))
-	return extra
 
 
 def _insert(row, trigger, s, values: dict, allow_missing: bool):

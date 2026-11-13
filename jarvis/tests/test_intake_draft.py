@@ -611,3 +611,67 @@ class TestIntakeDraft(FrappeTestCase):
 		self.assertEqual(draft._clean(date, "not a date"), (None, "not a date"))
 		self.assertEqual(draft._clean(frappe._dict(fieldtype="Datetime"), "31/31/2026"), (None, "not a date"))
 		self.assertEqual(draft._clean(frappe._dict(fieldtype="Int"), "2.5"), (None, "not a number"))
+
+	def _site(self, number_format="#,###.##", date_format="yyyy-mm-dd"):
+		"""Pretend the site has these System Settings (no global state is written)."""
+		settings = {"number_format": number_format, "date_format": date_format}
+		return mock.patch("frappe.get_system_settings", side_effect=settings.get)
+
+	def _num(self, text, number_format="#,###.##", fieldtype="Float"):
+		with self._site(number_format):
+			return draft._clean(frappe._dict(fieldtype=fieldtype), text)
+
+	def test_numbers_follow_the_site_format(self):
+		bad = (None, "not a number")
+		self.assertEqual(self._num("1,200.50"), (1200.5, None))
+		self.assertEqual(self._num("1.200,50"), bad)
+		self.assertEqual(self._num("1,5"), bad)
+		self.assertEqual(self._num("1,20"), bad)
+		self.assertEqual(self._num("1.200"), (1.2, None))  # a valid dot-decimal number
+		self.assertEqual(self._num("1200.5"), (1200.5, None))
+		self.assertEqual(self._num("-\u20b91,200"), (-1200, None))
+		self.assertEqual(self._num("Rs. 15"), (15, None))
+		self.assertEqual(self._num("1,2000"), bad)
+		self.assertEqual(self._num("12abc"), bad)
+		self.assertEqual(self._num(1200.5), (1200.5, None))
+		self.assertEqual(self._num("1.200,50", "#.###,##"), (1200.5, None))
+		self.assertEqual(self._num("1,5", "#.###,##"), (1.5, None))
+		self.assertEqual(self._num("1,200.50", "#.###,##"), bad)
+		self.assertEqual(self._num("1,20,000.50", "#,##,###.##"), (120000.5, None))
+		self.assertEqual(self._num("120,000.50", "#,##,###.##"), bad)
+		self.assertEqual(self._num("1 200,5", "# ###,##"), (1200.5, None))
+
+	def test_dates_follow_iso_or_the_site_format(self):
+		date = frappe._dict(fieldtype="Date")
+		with self._site(date_format="dd-mm-yyyy"):
+			self.assertEqual(draft._clean(date, "2026-11-03"), ("2026-11-03", None))
+			self.assertEqual(draft._clean(date, "03-11-2026"), ("2026-11-03", None))
+			self.assertEqual(draft._clean(date, "03/11/2026"), (None, "not a date"))
+			self.assertEqual(draft._clean(date, "11-03-26"), (None, "not a date"))
+			dt = frappe._dict(fieldtype="Datetime")
+			self.assertEqual(draft._clean(dt, "2026-11-03 10:30:00"), ("2026-11-03 10:30:00", None))
+			self.assertEqual(draft._clean(dt, "03-11-2026 10:30"), ("2026-11-03 10:30:00", None))
+		with self._site(date_format="mm/dd/yyyy"):
+			self.assertEqual(draft._clean(date, "03/11/2026"), ("2026-03-11", None))
+
+	def test_prompt_asks_for_plain_numbers_and_iso_dates(self):
+		from jarvis.intake import reader
+
+		with self._site(date_format="dd-mm-yyyy"):
+			prompt = reader.build_prompt(self._spec())
+		self.assertIn("plain JSON numbers", prompt)
+		self.assertIn("YYYY-MM-DD", prompt)
+		self.assertIn("dd-mm-yyyy", prompt)
+
+	def test_resumed_draft_does_not_attach_twice(self):
+		row = self._row(self._rule())
+		draft.finish(row, self._simple_reading())
+		with mock.patch("jarvis.intake.draft.attach_file_to_doc") as attach:
+			draft.finish(row, self._simple_reading())
+		attach.assert_not_called()
+
+	def test_failed_write_back_does_not_hide_the_failure(self):
+		row = self._row(self._rule(), uploader=READER_ONLY)
+		with mock.patch("jarvis.intake.draft._write_back", side_effect=RuntimeError("w")):
+			draft.finish(row, self._simple_reading())
+		self.assertEqual(self._state(row).status, "Failed")
