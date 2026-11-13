@@ -22,6 +22,20 @@ OPEN_STATUSES = ("Queued", "Running", "Needs Review")
 
 
 class JarvisTriggerActivity(NotRenamable, Document):
+	def onload(self):
+		"""Tell the desk form whether to show Retry: the same rule File Box uses, so the two
+		never disagree (duplicates, permanent skips and rows with a live draft hide it)."""
+		if self.action_type != "Intake":
+			return
+		from jarvis.chat import filebox
+		from jarvis.chat.triggers_api import _can_manage
+
+		row = self.as_dict()
+		me = frappe.session.user
+		self.set_onload(
+			"can_retry_intake", filebox.can_retry_row(row, me, _can_manage(me), filebox.live_drafts([row]))
+		)
+
 	@staticmethod
 	def clear_old_logs(days=90):
 		from frappe.query_builder import Interval

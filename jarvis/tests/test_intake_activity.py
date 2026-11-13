@@ -145,3 +145,26 @@ class TestIntakeActivity(FrappeTestCase):
 		self.assertFalse(frappe.db.exists("ToDo", todo.name))
 		self.assertFalse(frappe.db.exists("File", fdoc.name))
 		self.assertFalse(frappe.db.exists("Jarvis Approval Request", request.name))
+
+	def _can_retry_onload(self, name: str) -> bool:
+		doc = frappe.get_doc(ACTIVITY, name)
+		doc.run_method("onload")
+		return bool((doc.get("__onload") or {}).get("can_retry_intake"))
+
+	def test_desk_form_offers_retry_only_when_it_can_work(self):
+		from jarvis.intake.capture import FILE_REMOVED_SUMMARY, UNREADABLE_TYPE_SUMMARY
+
+		failed = self._row(owner=UPLOADER, status="Failed", summary="Reading the file failed.")
+		dup = self._row(owner=UPLOADER, status="Skipped", duplicate_of=failed)
+		perm = self._row(owner=UPLOADER, status="Skipped", summary=UNREADABLE_TYPE_SUMMARY)
+		removed = self._row(owner=UPLOADER, status="Failed", summary=FILE_REMOVED_SUMMARY)
+		success = self._row(owner=UPLOADER, status="Success")
+		drafted = self._row(owner=UPLOADER, status="Failed", draft_doctype="User", draft_name=UPLOADER)
+		llm = self._row(owner=UPLOADER, status="Failed", action_type="LLM")
+		theirs = self._row(owner=OTHER, status="Failed")
+		frappe.set_user(UPLOADER)
+		self.assertTrue(self._can_retry_onload(failed))
+		for hidden in (dup, perm, removed, success, drafted, llm):
+			self.assertFalse(self._can_retry_onload(hidden), hidden)
+		frappe.set_user("Administrator")
+		self.assertTrue(self._can_retry_onload(theirs))  # a manager may retry anyone's

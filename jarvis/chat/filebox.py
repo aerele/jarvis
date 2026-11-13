@@ -1266,7 +1266,7 @@ def _intake_source_label(row: dict) -> str:
 	return f"Folder: {folder[5:] if folder.startswith('Home/') else folder}"
 
 
-def _live_drafts(rows: list[dict]) -> set[tuple[str, str]]:
+def live_drafts(rows: list[dict]) -> set[tuple[str, str]]:
 	"""The ``(doctype, name)`` drafts that still exist: one query per doctype, not per row."""
 	wanted: dict[str, set[str]] = {}
 	for r in rows:
@@ -1282,7 +1282,7 @@ def _live_drafts(rows: list[dict]) -> set[tuple[str, str]]:
 	return live
 
 
-def _can_retry_row(row: dict, me: str, manager: bool, live: set[tuple[str, str]]) -> bool:
+def can_retry_row(row: dict, me: str, manager: bool, live: set[tuple[str, str]]) -> bool:
 	"""Failed or Skipped, no draft yet, not a duplicate, and the caller's to retry."""
 	if row.get("status") not in _INTAKE_RETRYABLE or row.get("duplicate_of"):
 		return False
@@ -1391,7 +1391,7 @@ def list_intake_page(
 		.offset(start)
 		.run(as_dict=True)
 	)
-	live = _live_drafts(rows)
+	live = live_drafts(rows)
 	out = [
 		{
 			"name": r["name"],
@@ -1404,7 +1404,7 @@ def list_intake_page(
 			"draft_doctype": r["draft_doctype"] or "",
 			"draft_name": r["draft_name"] or "",
 			"approval_request": r["approval_request"] or "",
-			"can_retry": _can_retry_row(r, me, manager, live),
+			"can_retry": can_retry_row(r, me, manager, live),
 		}
 		for r in rows
 	]
@@ -1448,7 +1448,7 @@ def retry_intake(activity: str) -> dict:
 		frappe.throw("The file was removed, so running it again would not help.")
 	if row.status not in _INTAKE_RETRYABLE:
 		frappe.throw("Only a failed or skipped file can be run again.")
-	if (row.draft_doctype, row.draft_name) in _live_drafts([row]):
+	if (row.draft_doctype, row.draft_name) in live_drafts([row]):
 		frappe.throw("A draft already exists for this file.")
 
 	a = frappe.qb.DocType(ACTIVITY)
