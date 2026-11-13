@@ -73,7 +73,12 @@ def _set(row, **values) -> None:
 	if values.get("status") in ("Failed", "Skipped"):
 		# The uploader may have no Jarvis access: the bell is how they learn of it.
 		notify.row_ended(row, values.get("summary") or row.summary or "")
-	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- the polling UI must see each stage
+	try:
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- the polling UI must see each stage
+	except Exception:
+		# A failed publish must not leave a half-open transaction for the next stage.
+		frappe.db.rollback()
+		frappe.log_error(title="Jarvis Intake: could not publish a status change")
 
 
 def _claim_slot() -> str | None:
@@ -158,9 +163,12 @@ def run_job(activity: str) -> None:
 
 
 def _run_job(activity: str) -> None:
-	row = frappe.get_doc(ACTIVITY, activity) if frappe.db.exists(ACTIVITY, activity) else None
-	if not row or row.status != "Queued":
-		return  # already handled (a duplicate job, or the row was cancelled)
+	try:
+		row = frappe.get_doc(ACTIVITY, activity)
+	except frappe.DoesNotExistError:
+		return  # the row was cancelled
+	if row.status != "Queued":
+		return  # already handled (a duplicate job)
 	slot = None
 	try:
 		slot = _run_guarded(row)
@@ -296,19 +304,28 @@ def _recover_stuck() -> None:
 		fields=["name", "attempts"],
 	)
 	for r in stuck:
-		if cint(r.attempts) < _MAX_ATTEMPTS:
-			frappe.db.set_value(
-				ACTIVITY, r.name, {"status": "Queued", "summary": "Retrying after an interruption"}
-			)
-			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- scheduler job must publish the state
-			_enqueue(r.name)
-		else:
-			frappe.db.set_value(
-				ACTIVITY, r.name, {"status": "Failed", "summary": "Stopped unexpectedly. Retry it."}
-			)
-			who = frappe.db.get_value(ACTIVITY, r.name, ["event_user", "source_file"], as_dict=True)
-			notify.row_ended(who, "Stopped unexpectedly. Retry it.")
-			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- scheduler job must publish the state
+		# One bad row (a failed write, a lost queue) must not strand the rest.
+		try:
+			_recover_one(r)
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(title="Jarvis Intake: could not recover a stuck row", message=r.name)
+
+
+def _recover_one(r) -> None:
+	if cint(r.attempts) < _MAX_ATTEMPTS:
+		frappe.db.set_value(
+			ACTIVITY, r.name, {"status": "Queued", "summary": "Retrying after an interruption"}
+		)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- scheduler job must publish the state; the caller rolls back on failure
+		_enqueue(r.name)
+	else:
+		frappe.db.set_value(
+			ACTIVITY, r.name, {"status": "Failed", "summary": "Stopped unexpectedly. Retry it."}
+		)
+		who = frappe.db.get_value(ACTIVITY, r.name, ["event_user", "source_file"], as_dict=True)
+		notify.row_ended(who, "Stopped unexpectedly. Retry it.")
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- scheduler job must publish the state; the caller rolls back on failure
 
 
 def pump() -> None:

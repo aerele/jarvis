@@ -301,6 +301,24 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertEqual((got.status, got.summary), ("Queued", "Retrying after an interruption"))
 		self.assertIn(row.name, [c.kwargs["activity"] for c in enq.call_args_list])
 
+	def test_one_bad_stuck_row_does_not_stop_the_rest(self):
+		rule = self._rule()
+		rows = [self._stuck(rule, 1), self._stuck(rule, 1)]
+		calls = []
+
+		def enqueue(name):
+			calls.append(name)
+			if len(calls) == 1:
+				raise RuntimeError("queue down")
+
+		with (
+			mock.patch.object(worker, "_enqueue", side_effect=enqueue),
+			mock.patch("frappe.log_error") as log,
+		):
+			worker._recover_stuck()
+		self.assertEqual(sorted(calls), sorted(r.name for r in rows))
+		log.assert_called_once()
+
 	def test_pump_fails_stuck_running_row_after_three_attempts(self):
 		rule = self._rule()
 		row = self._stuck(rule, 3)
