@@ -70,8 +70,11 @@ def _file_of(activity) -> dict:
 
 
 def raise_request(activity, values: dict, missing: list[dict]) -> str:
-	"""Create the review request for ``activity`` and return its name. Runs as the
-	system (outside the uploader's session); the caller sets the row to Needs Review."""
+	"""Create the review request for ``activity`` and return its name. Runs as
+	Administrator (``worker.run_job`` pins that; the draft stage restores it after the
+	uploader's part), inserting with ``ignore_permissions``. The request is OWNED by the
+	rule's owner whoever enqueued the job, so the owner is the same on every run. The
+	caller sets the row to Needs Review."""
 	_trigger, s = draft._load_spec(activity)
 	file_name = _file_of(activity)["file_name"]
 	lines = [item["reason"] for item in missing]
@@ -94,6 +97,9 @@ def raise_request(activity, values: dict, missing: list[dict]) -> str:
 	# Server-managed source and fields: only this module may write them.
 	request.flags.jarvis_server_write = True
 	request.insert(ignore_permissions=True)
+	owner = _trigger_owner(activity.name)
+	if owner and owner not in _NO_REVIEWER:
+		frappe.db.set_value(AR, request.name, "owner", owner, update_modified=False)
 	_share_with_owner(request, activity)
 	return request.name
 
@@ -181,7 +187,7 @@ def view(request) -> dict:
 	if not activity:
 		return out
 	values = payload.get("values") or {}
-	trigger = frappe.db.get_value(TRIGGER, activity.trigger, draft._TRIGGER_FIELDS, as_dict=True)
+	trigger = frappe.db.get_value(TRIGGER, activity.trigger, intake_spec.TRIGGER_FIELDS, as_dict=True)
 	if trigger:
 		s = intake_spec.load(trigger)
 		meta = frappe.get_meta(s.target)
@@ -256,7 +262,7 @@ def _settle(request, status: str, text: str) -> dict:
 
 def _reject(request, activity) -> dict:
 	if activity is not None and activity.status == "Needs Review":
-		trigger = frappe.db.get_value(TRIGGER, activity.trigger, draft._TRIGGER_FIELDS, as_dict=True)
+		trigger = frappe.db.get_value(TRIGGER, activity.trigger, intake_spec.TRIGGER_FIELDS, as_dict=True)
 		try:
 			draft._fail(activity, trigger or frappe._dict(), _("Rejected by reviewer"), tell_uploader=False)
 		except draft.DraftFailed:
@@ -265,20 +271,10 @@ def _reject(request, activity) -> dict:
 	return _settle(request, "Rejected", "Rejected by reviewer")
 
 
-def _existing_draft(activity) -> tuple[str, str] | None:
-	if (
-		activity.get("draft_doctype")
-		and activity.get("draft_name")
-		and frappe.db.exists(activity.draft_doctype, activity.draft_name)
-	):
-		return activity.draft_doctype, activity.draft_name
-	return None
-
-
 def _approve(request, activity, answers: dict) -> dict:
 	if activity is None:
 		frappe.throw(_("The intake record for this request no longer exists. Reject it instead."))
-	made = _existing_draft(activity)
+	made = draft.existing_draft(activity)
 	if made:
 		# Never a second draft: close the request over the one that exists, and finish
 		# the upload the earlier run left in review.

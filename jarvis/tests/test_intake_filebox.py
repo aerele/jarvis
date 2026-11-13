@@ -192,7 +192,7 @@ class TestIntakeFilebox(FrappeTestCase):
 		enq.assert_called_once()
 
 	def test_retry_clears_reading_after_no_image(self):
-		name = self._row(UPLOADER, status="Failed", summary=worker._NO_IMAGE_SUMMARY, reading_json='{"a": 1}')
+		name = self._row(UPLOADER, status="Failed", summary=worker.NO_IMAGE_SUMMARY, reading_json='{"a": 1}')
 		frappe.set_user(UPLOADER)
 		with mock.patch("frappe.enqueue"):
 			filebox.retry_intake(name)

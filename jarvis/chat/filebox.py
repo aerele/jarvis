@@ -1428,6 +1428,7 @@ def retry_intake(activity: str) -> dict:
 	(a draft-only retry costs no AI call) unless the model could not read the image."""
 	from jarvis.chat.triggers_api import _can_manage
 	from jarvis.intake import worker
+	from jarvis.intake._db import update_rowcount
 
 	me = frappe.session.user
 	row = frappe.db.get_value(
@@ -1458,10 +1459,9 @@ def retry_intake(activity: str) -> dict:
 		.set(a.summary, "Queued again")
 		.where((a.name == activity) & a.status.isin(list(_INTAKE_RETRYABLE)))
 	)
-	if row.summary == worker._NO_IMAGE_SUMMARY:
+	if row.summary == worker.NO_IMAGE_SUMMARY:
 		update = update.set(a.reading_json, "")  # the model must look at the file again
-	update.run()
-	if frappe.db._cursor.rowcount != 1:
+	if update_rowcount(update) != 1:
 		frappe.throw("This file was already run again.")
 	frappe.enqueue(
 		"jarvis.intake.worker.run_job",

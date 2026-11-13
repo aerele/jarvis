@@ -21,6 +21,7 @@ from frappe.utils import escape_html, get_datetime, getdate
 
 from jarvis._session import impersonate
 from jarvis.chat.filebox import attach_file_to_doc
+from jarvis.chat.list_filters import escape_like
 from jarvis.intake import notify
 from jarvis.intake import spec as intake_spec
 
@@ -29,16 +30,6 @@ TRIGGER = "Jarvis Trigger"
 _CANDIDATES = 3
 # Close names are looked up among the newest records only: bounded work per unresolved value.
 _CANDIDATE_POOL = 200
-_TRIGGER_FIELDS = [
-	"intake_source",
-	"intake_record_doctype",
-	"intake_target_doctype",
-	"intake_spec",
-	"intake_instructions",
-	"intake_status_field",
-	"intake_link_field",
-	"allow_incomplete_drafts",
-]
 
 
 class DraftFailed(Exception):
@@ -47,10 +38,6 @@ class DraftFailed(Exception):
 
 def _blank(value) -> bool:
 	return value is None or (isinstance(value, str) and not value.strip())
-
-
-def _escape_like(value: str) -> str:
-	return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 # --------------------------------------------------------------------------- #
@@ -102,7 +89,7 @@ def _find_close_match(doctype: str, value: str) -> str | None:
 	are none or several (a guess between two is worse than a blank)."""
 	title_field = frappe.get_meta(doctype).title_field
 	fields = ["name"] + ([title_field] if title_field and title_field != "name" else [])
-	pattern = _escape_like(value)
+	pattern = escape_like(value)
 	or_filters = [[doctype, f, "like", pattern] for f in fields]
 	wanted = value.casefold()
 	# The LIKE only narrows; the exact comparison below is the real test.
@@ -424,7 +411,9 @@ def _fail(row, trigger, summary: str, detail: str = "", tell_uploader: bool = Tr
 
 
 def _load_spec(row):
-	trigger = frappe.db.get_value(TRIGGER, row.trigger, _TRIGGER_FIELDS, as_dict=True) or frappe._dict()
+	trigger = (
+		frappe.db.get_value(TRIGGER, row.trigger, intake_spec.TRIGGER_FIELDS, as_dict=True) or frappe._dict()
+	)
 	return trigger, intake_spec.load(trigger)
 
 
@@ -458,7 +447,7 @@ def _finish(row, reading: dict, note: str) -> None:
 		values, unresolved = resolve_links(s, merge_values(s, reading))
 		missing = missing_fields(s, values, unresolved)
 	if missing and not s.allow_incomplete:
-		_review(row, trigger, s, values, missing, note)
+		_review(row, trigger, values, missing, note)
 		return
 	create(row, values, allow_missing=bool(missing), unresolved=unresolved, note=note)
 
@@ -467,8 +456,9 @@ def _with_note(summary: str, note: str) -> str:
 	return f"{summary}. {note}" if note else summary
 
 
-def _review(row, trigger, s, values: dict, missing: list[dict], note: str) -> None:
-	from jarvis.intake import review  # Task 8; imported late so tests can patch it
+def _review(row, trigger, values: dict, missing: list[dict], note: str) -> None:
+	# Imported late: review imports this module at the top (import cycle).
+	from jarvis.intake import review
 
 	approval = review.raise_request(row, values, missing)
 	count = len(missing)
@@ -550,15 +540,21 @@ def create(
 	return doc.doctype, doc.name
 
 
-def _existing_draft(row):
-	"""The draft an earlier run of this row already made, if it still exists."""
+def existing_draft(row) -> tuple[str, str] | None:
+	"""``(doctype, name)`` of the draft an earlier run of this row already made, if it
+	still exists (a deleted draft leaves a dangling link on the row)."""
 	if (
 		row.get("draft_doctype")
 		and row.get("draft_name")
 		and frappe.db.exists(row.draft_doctype, row.draft_name)
 	):
-		return frappe.get_doc(row.draft_doctype, row.draft_name)  # to call add_comment
+		return row.draft_doctype, row.draft_name
 	return None
+
+
+def _existing_draft(row):
+	made = existing_draft(row)
+	return frappe.get_doc(*made) if made else None  # a Document, to call add_comment
 
 
 def _guarded(fn, *args) -> None:

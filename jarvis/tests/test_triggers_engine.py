@@ -710,7 +710,7 @@ class TestDispatch(_TriggerTestCase):
 		self._make_llm_trigger(cap=1)
 		self._burst(3)
 		with (
-			patch.object(llm_action, "_bump", side_effect=ConnectionError("cache down")),
+			patch.object(llm_action, "bump", side_effect=ConnectionError("cache down")),
 			patch("frappe.enqueue") as enq,
 		):
 			engine._flush_llm_queue()
@@ -860,7 +860,7 @@ class TestRunLLMAction(_TriggerTestCase):
 		rows = self._activities(trig.name)
 		self.assertEqual(len(rows), 1)
 		self.assertEqual(rows[0].status, "Failed")
-		self.assertEqual(rows[0].summary, llm_action._NO_AGENT_UPDATE_MESSAGE)
+		self.assertEqual(rows[0].summary, llm_action.NO_AGENT_UPDATE_MESSAGE)
 		self.assertNotIn("Speech-to-text", rows[0].summary)
 
 	def test_other_gateway_error_writes_failed_activity_without_raising(self):
@@ -894,7 +894,7 @@ class TestRunLLMAction(_TriggerTestCase):
 	def test_safe_constant_errors_keep_their_own_summary(self):
 		self.assertEqual(
 			llm_action._SAFE_SUMMARIES,
-			frozenset({llm_action._NO_AGENT_UPDATE_MESSAGE, llm_action.lookups.TIMEOUT_MESSAGE}),
+			frozenset({llm_action.NO_AGENT_UPDATE_MESSAGE, llm_action.lookups.TIMEOUT_MESSAGE}),
 		)
 		trig = self._make_llm_trigger()
 		with patch.object(llm_action, "_complete", return_value=(None, llm_action.lookups.TIMEOUT_MESSAGE)):

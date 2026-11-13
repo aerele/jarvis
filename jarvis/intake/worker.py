@@ -15,7 +15,8 @@ import frappe
 from frappe.utils import add_to_date, cint, now_datetime, nowdate
 
 from jarvis import _redis_lock, compat
-from jarvis.intake import capture, draft, notify, reader
+from jarvis._session import impersonate
+from jarvis.intake import _db, capture, draft, notify, reader, spec
 from jarvis.triggers import llm_action
 from jarvis.triggers import llm_task_client as lt
 
@@ -28,7 +29,7 @@ _PUMP_AGE_MINUTES = 2
 _STUCK_MINUTES = 10
 _MAX_ATTEMPTS = 3
 
-_NO_IMAGE_SUMMARY = "This site's AI model can't read images for intake yet."
+NO_IMAGE_SUMMARY = "This site's AI model can't read images for intake yet."
 _READ_FAILED_SUMMARY = "Reading the file failed. Managers can see the details in this activity."
 _DRAFT_FAILED_SUMMARY = "Creating the draft failed. Managers can see the details in this activity."
 
@@ -122,12 +123,22 @@ def _over_cap(trigger: str, trigger_cap: int) -> bool:
 
 
 def _count_call(trigger: str) -> None:
-	llm_action._bump(llm_action._cap_key(trigger))
-	llm_action._bump(site_cap_key())
+	llm_action.bump(llm_action.cap_key(trigger))
+	llm_action.bump(site_cap_key())
 
 
 def run_job(activity: str) -> None:
-	"""Run one Queued Intake row. Expected failures end on the row, never in RQ."""
+	"""Run one Queued Intake row. Expected failures end on the row, never in RQ.
+
+	A queued job runs as whoever enqueued it (the uploader, an owner retrying, the
+	scheduler). The system bookkeeping here (status writes, notices, the review request)
+	must not depend on that, so it runs as Administrator. The ERP reads and the draft
+	write still switch to the uploader inside ``draft`` (never as Administrator)."""
+	with impersonate("Administrator"):
+		_run_job(activity)
+
+
+def _run_job(activity: str) -> None:
 	row = frappe.get_doc(ACTIVITY, activity) if frappe.db.exists(ACTIVITY, activity) else None
 	if not row or row.status != "Queued":
 		return  # already handled (a duplicate job, or the row was cancelled)
@@ -148,15 +159,7 @@ def _run_guarded(row):
 		frappe.db.get_value(
 			"Jarvis Trigger",
 			row.trigger,
-			[
-				"enabled",
-				"action_type",
-				"llm_daily_cap",
-				"intake_spec",
-				"intake_target_doctype",
-				"intake_instructions",
-				"allow_incomplete_drafts",
-			],
+			["enabled", "action_type", "llm_daily_cap", *spec.TRIGGER_FIELDS],
 			as_dict=True,
 		)
 		if row.trigger
@@ -173,7 +176,7 @@ def _run_guarded(row):
 		)
 		return True
 	needs_ai = not row.reading_json
-	trigger_cap = cint(trigger.llm_daily_cap) or llm_action._DEFAULT_DAILY_CAP
+	trigger_cap = cint(trigger.llm_daily_cap) or llm_action.DEFAULT_DAILY_CAP
 	if needs_ai and _over_cap(row.trigger, trigger_cap):
 		_set(row, status="Skipped", summary="daily limit reached")
 		return True
@@ -195,10 +198,18 @@ def _claim_row(row) -> bool:
 	Two jobs for a row (a duplicate enqueue, a pump racing a chain) can both have read
 	it as Queued; only one UPDATE matches, so only one job makes the AI call."""
 	activity = frappe.qb.DocType(ACTIVITY)
-	frappe.qb.update(activity).set(activity.status, "Running").set(
-		activity.attempts, cint(row.attempts) + 1
-	).where((activity.name == row.name) & (activity.status == "Queued")).run()
-	won = frappe.db._cursor.rowcount == 1
+	won = (
+		_db.update_rowcount(
+			frappe.qb.update(activity)
+			.set(activity.status, "Running")
+			.set(activity.attempts, cint(row.attempts) + 1)
+			# A raw UPDATE skips the ORM's modified stamp: without it the pump's "stuck"
+			# test would see the row as old for a moment after the claim.
+			.set(activity.modified, now_datetime())
+			.where((activity.name == row.name) & (activity.status == "Queued"))
+		)
+		== 1
+	)
 	if won:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- the polling UI must see Running
 	return won
@@ -211,15 +222,13 @@ def _valid_owner(user: str) -> bool:
 
 
 def _run_stages(row, trigger, needs_ai: bool) -> None:
-	from jarvis.intake import spec
-
 	_set(row, summary="Reading the file")
 	if needs_ai:
 		s = spec.load(trigger)
 		try:
 			reading, note = reader.read_file(row.source_file, s, before_call=lambda: _count_call(row.trigger))
 		except lt.LLMTaskNotAvailableError as e:
-			_set(row, status="Failed", summary=llm_action._NO_AGENT_UPDATE_MESSAGE, detail=_reason(e))
+			_set(row, status="Failed", summary=llm_action.NO_AGENT_UPDATE_MESSAGE, detail=_reason(e))
 			return
 		except lt.LLMTaskError as e:
 			# Expected (agent refusal, timeout): a short reason, no Error Log noise.
@@ -237,7 +246,7 @@ def _run_stages(row, trigger, needs_ai: bool) -> None:
 			_set(row, status="Failed", summary=str(e), detail=str(e))
 			return
 		if reading.get("error") == "NO_IMAGE":
-			_set(row, status="Failed", summary=_NO_IMAGE_SUMMARY, detail="The model reported NO_IMAGE.")
+			_set(row, status="Failed", summary=NO_IMAGE_SUMMARY, detail="The model reported NO_IMAGE.")
 			return
 		if note:
 			# Inside the reading so it survives a draft-only retry; draft.finish pops it.
@@ -286,6 +295,11 @@ def _recover_stuck() -> None:
 def pump() -> None:
 	"""Cron backstop: a row whose job was lost (restart, crash) or that found no slot
 	still moves. Starts up to two rows older than two minutes when a slot looks free."""
+	with impersonate("Administrator"):
+		_pump()
+
+
+def _pump() -> None:
 	_recover_stuck()
 	cache = frappe.cache()
 	free = sum(1 for key in slot_keys() if not cache.exists(key))

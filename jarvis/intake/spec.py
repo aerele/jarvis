@@ -20,6 +20,17 @@ from frappe.model import (
 from frappe.utils import cint
 
 MAX_INSTRUCTIONS_LEN = 4000
+# The Jarvis Trigger columns every intake stage reads (draft, review, worker).
+TRIGGER_FIELDS = [
+	"intake_source",
+	"intake_record_doctype",
+	"intake_target_doctype",
+	"intake_spec",
+	"intake_instructions",
+	"intake_status_field",
+	"intake_link_field",
+	"allow_incomplete_drafts",
+]
 
 _INTEGER_TYPES = {"Int", "Check"}
 _NUMBER_TYPES = {"Float", "Currency", "Percent"}

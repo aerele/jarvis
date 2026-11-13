@@ -188,6 +188,15 @@ class TestIntakeReview(FrappeTestCase):
 			frappe.db.exists("DocShare", {"share_doctype": AR, "share_name": name, "user": OWNER})
 		)
 
+	def test_request_owner_is_the_rule_owner_whoever_runs_the_job(self):
+		rule = self._rule()
+		row = self._row(rule)
+		frappe.set_user(STRANGER)  # a background job inherits whoever enqueued it
+		draft.finish(row, {"title": "Sheet 1", "customer": "ACME", "items": [{"item_name": "bolt"}]})
+		frappe.set_user("Administrator")
+		row.reload()
+		self.assertEqual(frappe.db.get_value(AR, row.approval_request, "owner"), OWNER)
+
 	def test_intake_fields_are_server_managed(self):
 		_rule, row, _name = self._pending()
 		frappe.set_user(STRANGER)

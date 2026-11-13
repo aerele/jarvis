@@ -86,7 +86,7 @@ class TestIntakeWorker(FrappeTestCase):
 		doc.update(over)
 		rule = frappe.get_doc(doc).insert(ignore_permissions=True)
 		self._triggers.append(rule.name)
-		llm_action_key = llm_action._cap_key(rule.name)
+		llm_action_key = llm_action.cap_key(rule.name)
 		cache = frappe.cache()
 		cache.delete(cache.make_key(llm_action_key))
 		cache.delete(cache.make_key(f"{llm_action_key}:count"))
@@ -153,8 +153,8 @@ class TestIntakeWorker(FrappeTestCase):
 
 	def test_daily_cap_skips(self):
 		rule = self._rule(llm_daily_cap=2)
-		llm_action._bump(llm_action._cap_key(rule.name))
-		llm_action._bump(llm_action._cap_key(rule.name))
+		llm_action.bump(llm_action.cap_key(rule.name))
+		llm_action.bump(llm_action.cap_key(rule.name))
 		row = self._row(rule)
 		client, _ = self._run(row)
 		client.assert_not_called()
@@ -164,7 +164,7 @@ class TestIntakeWorker(FrappeTestCase):
 	def test_site_cap_skips(self):
 		rule = self._rule()
 		row = self._row(rule)
-		llm_action._bump(worker.site_cap_key())
+		llm_action.bump(worker.site_cap_key())
 		with mock.patch.object(worker, "_site_cap", return_value=1):
 			client, _ = self._run(row)
 		client.assert_not_called()
@@ -261,6 +261,30 @@ class TestIntakeWorker(FrappeTestCase):
 		cache = frappe.cache()
 		self.assertFalse(any(cache.exists(k) for k in worker.slot_keys()))
 
+	def test_claim_stamps_modified_so_the_pump_does_not_see_a_stale_row(self):
+		rule = self._rule()
+		row = self._row(rule)
+		old = add_to_date(now_datetime(), minutes=-30)
+		frappe.db.set_value(ACTIVITY, row.name, "modified", old, update_modified=False)
+		self.assertTrue(worker._claim_row(frappe.get_doc(ACTIVITY, row.name)))
+		modified = frappe.db.get_value(ACTIVITY, row.name, "modified")
+		self.assertGreater(modified, add_to_date(now_datetime(), minutes=-1))
+
+	def test_job_runs_as_administrator_whoever_enqueued_it(self):
+		"""A job inherits the enqueuer (an uploader, a retrying owner). The bookkeeping must
+		not depend on who that was, and the caller's session comes back afterwards."""
+		rule = self._rule()
+		row = self._row(rule)
+		seen = []
+		fin = mock.Mock(side_effect=lambda *a: seen.append(frappe.session.user))
+		frappe.set_user("Guest")
+		try:
+			self._run(row, finish=fin)
+			self.assertEqual(frappe.session.user, "Guest")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(seen, ["Administrator"])
+
 	def _stuck(self, rule, attempts):
 		row = self._row(rule, status="Running", attempts=attempts)
 		frappe.db.set_value(
@@ -332,7 +356,7 @@ class TestIntakeWorker(FrappeTestCase):
 		with mock.patch("jarvis.intake.client.vision_task_complete", client), mock.patch("frappe.enqueue"):
 			worker.run_job(row.name)
 		got = self._get(row)
-		self.assertEqual((got.status, got.summary), ("Failed", llm_action._NO_AGENT_UPDATE_MESSAGE))
+		self.assertEqual((got.status, got.summary), ("Failed", llm_action.NO_AGENT_UPDATE_MESSAGE))
 
 	def test_failure_stores_short_reason_and_logs_traceback(self):
 		rule = self._rule()
