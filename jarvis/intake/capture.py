@@ -79,14 +79,17 @@ def intake_map() -> dict:
 # Hooks
 # --------------------------------------------------------------------------- #
 def on_file_insert(doc, method=None) -> None:
-	_capture(doc, "after_insert", check_attach_change=False)
+	_capture(doc, "after_insert", check_changes=False)
 
 
 def on_file_update(doc, method=None) -> None:
-	_capture(doc, "on_update", check_attach_change=True)
+	# Insert fires on_update right after after_insert; the insert hook owns that capture.
+	if doc.flags.in_insert:
+		return
+	_capture(doc, "on_update", check_changes=True)
 
 
-def _capture(doc, event: str, check_attach_change: bool) -> None:
+def _capture(doc, event: str, check_changes: bool) -> None:
 	try:
 		flags = frappe.local.flags
 		if flags.in_install or flags.in_patch or flags.in_migrate or flags.in_import:
@@ -99,7 +102,7 @@ def _capture(doc, event: str, check_attach_change: bool) -> None:
 		rules = intake_map()
 		if not rules["folder"] and not rules["record"]:
 			return
-		matched = _matching_rules(doc, rules, check_attach_change)
+		matched = _matching_rules(doc, rules, check_changes)
 		if not matched:
 			return
 		if not doc.get("content_hash"):
@@ -117,26 +120,23 @@ def _capture(doc, event: str, check_attach_change: bool) -> None:
 			pass
 
 
-def _matching_rules(doc, rules: dict, check_attach_change: bool) -> list[dict]:
+def _matching_rules(doc, rules: dict, check_changes: bool) -> list[dict]:
+	"""Rules this save triggers. On insert everything present counts. On update
+	only a CHANGE counts: a file newly attached to a saved record, or moved into
+	a watched folder. Any other edit must not re-capture the file."""
 	matched: list[dict] = []
+	before = doc.get_doc_before_save() if check_changes else None
+	if check_changes and not before:
+		return matched
+	if doc.get("folder") and (not check_changes or before.get("folder") != doc.folder):
+		matched.extend(rules["folder"].get(doc.folder, []))
 	attached_to = doc.get("attached_to_name") or ""
 	# A "new-..." name is a form that is not saved yet; the real name arrives later.
-	attached = bool(attached_to) and not attached_to.startswith("new-")
-	if doc.get("folder"):
-		matched.extend(rules["folder"].get(doc.folder, []))
-	if attached and doc.get("attached_to_doctype"):
-		record_rules = rules["record"].get(doc.attached_to_doctype, [])
-		if record_rules and (not check_attach_change or _attached_name_was_empty(doc)):
-			matched.extend(record_rules)
-	if check_attach_change:
-		# on_update fires for every File edit; folder rules act on insert only.
-		matched = [r for r in matched if r["intake_source"] == "Record"]
+	if attached_to and not attached_to.startswith("new-") and doc.get("attached_to_doctype"):
+		was_empty = check_changes and not before.get("attached_to_name")
+		if not check_changes or was_empty:
+			matched.extend(rules["record"].get(doc.attached_to_doctype, []))
 	return matched
-
-
-def _attached_name_was_empty(doc) -> bool:
-	before = doc.get_doc_before_save()
-	return not (before.get("attached_to_name") if before else "")
 
 
 def _queue_one(doc, rule: dict, event: str, user: str) -> None:

@@ -177,6 +177,56 @@ class TestIntakeCapture(FrappeTestCase):
 		self.assertEqual((rows[0].target_docname, rows[0].doc_event), (note.name, "on_update"))
 		self.assertEqual(enq.call_count, 1)
 
+	def test_insert_already_attached_queues_once(self):
+		rule = self._rule(
+			intake_source="Record",
+			intake_folder=None,
+			intake_record_doctype="Note",
+			intake_target_doctype="ToDo",
+		)
+		note = frappe.get_doc({"doctype": "Note", "title": "n-" + frappe.generate_hash(length=6)}).insert()
+		self.addCleanup(frappe.delete_doc, "Note", note.name, force=True)
+		self._upload("a.pdf", attached_to_doctype="Note", attached_to_name=note.name)
+		rows = self._rows(rule)
+		self.assertEqual([r.status for r in rows], ["Queued"])
+
+	def _move(self, doc, folder):
+		doc.reload()
+		doc.folder = folder
+		with mock.patch("frappe.enqueue") as enq:
+			doc.save(ignore_permissions=True)
+		return enq
+
+	def test_move_into_watched_folder_captured(self):
+		rule = self._rule()
+		doc, _ = self._upload("m.png", folder="Home")
+		self.assertEqual(self._rows(rule), [])
+		enq = self._move(doc, FOLDER)
+		rows = self._rows(rule)
+		self.assertEqual(
+			[(r.status, r.doc_event, r.source_file) for r in rows], [("Queued", "on_update", doc.name)]
+		)
+		self.assertEqual(enq.call_count, 1)
+		# Saving again with no folder change adds nothing.
+		self._move(doc, FOLDER)
+		self.assertEqual(len(self._rows(rule)), 1)
+
+	def test_move_between_unwatched_folders_ignored(self):
+		rule = self._rule()
+		doc, _ = self._upload("n.png", folder="Home")
+		other = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": "Other-" + frappe.generate_hash(length=5),
+				"is_folder": 1,
+				"folder": "Home",
+			}
+		)
+		other.insert(ignore_permissions=True)
+		self._files.append(other.name)
+		self._move(doc, other.name)
+		self.assertEqual(self._rows(rule), [])
+
 	def test_listener_swallows_errors(self):
 		self._rule()
 		with mock.patch.object(capture, "_queue_one", side_effect=RuntimeError("boom")):
