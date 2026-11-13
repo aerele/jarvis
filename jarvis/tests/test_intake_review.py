@@ -374,3 +374,67 @@ class TestIntakeReview(FrappeTestCase):
 		self.assertEqual(res["status"], "Approved")
 		row.reload()
 		self.assertEqual(row.status, "Success")
+
+	# ---- fix round 1 ----------------------------------------------------------
+	def _shared(self, row, name):
+		return {
+			"request": bool(
+				frappe.db.exists("DocShare", {"share_doctype": AR, "share_name": name, "user": OWNER})
+			),
+			"file": bool(
+				frappe.db.exists(
+					"DocShare", {"share_doctype": "File", "share_name": row.source_file, "user": OWNER}
+				)
+			),
+		}
+
+	def test_shares_live_only_while_pending(self):
+		_rule, row, name = self._pending()
+		self.assertEqual(self._shared(row, name), {"request": True, "file": True})
+		self._decide(OWNER, name, {"items.2.qty": 3})
+		frappe.set_user("Administrator")
+		self.assertEqual(self._shared(row, name), {"request": False, "file": False})
+
+	def test_shares_removed_on_reject(self):
+		_rule, row, name = self._pending()
+		self.assertEqual(self._shared(row, name), {"request": True, "file": True})
+		self._decide(OWNER, name, {}, 0)
+		frappe.set_user("Administrator")
+		self.assertEqual(self._shared(row, name), {"request": False, "file": False})
+
+	def test_shares_removed_when_the_draft_is_refused(self):
+		_rule, row, name = self._pending()
+		with mock.patch("jarvis.intake.draft.create", side_effect=draft.DraftFailed("no")):
+			self._decide(OWNER, name, {"items.2.qty": 3})
+		frappe.set_user("Administrator")
+		self.assertEqual(self._shared(row, name), {"request": False, "file": False})
+
+	def test_a_share_that_was_already_there_is_kept(self):
+		rule = self._rule()
+		row = self._row(rule)
+		frappe.share.add("File", row.source_file, OWNER, read=1, flags={"ignore_share_permission": True})
+		draft.finish(row, {"title": "S", "customer": "ACME", "items": [{"item_name": "a", "qty": None}]})
+		row.reload()
+		self._decide(OWNER, row.approval_request, {}, 0)
+		frappe.set_user("Administrator")
+		self.assertEqual(self._shared(row, row.approval_request), {"request": False, "file": True})
+
+	def test_odd_answers_are_refused_not_a_500(self):
+		_rule, row, name = self._pending()
+		for answers in ({"items.2.qty": {"a": 1}}, {"items.2.qty": [1]}, {"items.x.qty": 3}, {1: 2}):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				self._decide(OWNER, name, answers)
+			self.assertIn("Still needed: Qty, row 2", str(ctx.exception))
+		frappe.set_user("Administrator")
+		self.assertEqual(self._request(name).status, "Pending")
+
+	def test_existing_draft_also_finishes_the_activity(self):
+		_rule, row, name = self._pending()
+		frappe.set_user("Administrator")
+		made = frappe.get_doc({"doctype": PARENT, "title": "Earlier", "customer": "ACME"}).insert()
+		row.db_set({"draft_doctype": PARENT, "draft_name": made.name})
+		self._decide(OWNER, name, {"items.2.qty": 3})
+		frappe.set_user("Administrator")
+		row.reload()
+		self.assertEqual(row.status, "Success")
+		self.assertEqual(row.summary, f"Draft ready: {PARENT} {made.name}")

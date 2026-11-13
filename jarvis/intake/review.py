@@ -105,16 +105,44 @@ def _trigger_owner(activity_name: str) -> str | None:
 
 def _share_with_owner(request, activity) -> None:
 	"""Read access for the rule owner, so the request shows on their board and badge
-	and the private source file opens for them. Best effort: the request exists either way."""
+	and the private source file opens for them. Only shares this adds are recorded on
+	the request, and ``_unshare`` takes exactly those back when it is settled. Best
+	effort: the request exists either way."""
 	owner = _trigger_owner(activity.name)
 	if not owner or owner in _NO_REVIEWER:
 		return
+	added = []
 	targets = [(AR, request.name)] + ([("File", activity.source_file)] if activity.source_file else [])
 	for doctype, name in targets:
 		try:
+			if frappe.db.exists("DocShare", {"share_doctype": doctype, "share_name": name, "user": owner}):
+				continue  # access it already had is not ours to remove
+			if doctype == "File" and frappe.db.get_value("File", name, "owner") == owner:
+				continue
 			frappe.share.add(doctype, name, owner, read=1, flags={"ignore_share_permission": True})
+			added.append([doctype, name, owner])
 		except Exception:
 			frappe.log_error(title="jarvis.intake.review.share_failed", message=frappe.get_traceback())
+	if added:
+		payload = _payload(request) | {"shares": added}
+		frappe.db.set_value(AR, request.name, "intake_missing", frappe.as_json(payload, indent=None))
+
+
+def _unshare(request) -> None:
+	"""Take back the shares ``raise_request`` added. A failure is logged and never undoes
+	the decision."""
+	for doctype, name, user in _payload(request).get("shares") or []:
+		try:
+			share = frappe.db.get_value(
+				"DocShare", {"share_doctype": doctype, "share_name": name, "user": user}
+			)
+			if share:
+				# A system clean-up as Administrator: the deciding user holds no share right
+				# on the file, and DocShare's own delete hook checks the session user.
+				with impersonate("Administrator"):
+					frappe.delete_doc("DocShare", share, ignore_permissions=True, force=True)
+		except Exception:
+			frappe.log_error(title="jarvis.intake.review.unshare_failed", message=frappe.get_traceback())
 
 
 # --------------------------------------------------------------------------- #
@@ -208,6 +236,7 @@ def apply_decision(request, approve: bool, answers: dict) -> dict:
 def _settle(request, status: str, text: str) -> dict:
 	"""Record the outcome with a plain DB write (status and decision are permlevel-1
 	fields; the generic decide writes them the same way)."""
+	_unshare(request)
 	frappe.db.set_value(
 		AR,
 		request.name,
@@ -247,7 +276,10 @@ def _approve(request, activity, answers: dict) -> dict:
 		frappe.throw(_("The intake record for this request no longer exists. Reject it instead."))
 	made = _existing_draft(activity)
 	if made:
-		# Never a second draft: close the request over the one that exists.
+		# Never a second draft: close the request over the one that exists, and finish
+		# the upload the earlier run left in review.
+		if activity.status == "Needs Review":
+			activity.db_set({"status": "Success", "summary": f"Draft ready: {made[0]} {made[1]}"})
 		return _settle(request, "Approved", f"Draft already exists: {made[0]} {made[1]}") | {"draft": made[1]}
 	if activity.status != "Needs Review":
 		frappe.throw(_("This upload is no longer waiting for a review."))
@@ -293,17 +325,21 @@ def _merge(s, payload: dict, answers: dict, uploader: str) -> dict:
 	child = intake_spec._child_doctype(s)
 	child_meta = frappe.get_meta(child) if child else None
 	values = copy.deepcopy(payload.get("values") or {})
+	bad: dict = {}
 	wanted = []  # (item, df) for each listed field that has an answer
 	for item in payload.get("missing") or []:
 		answer = answers.get(item["key"])
 		if not item.get("answerable") or draft._blank(answer):
+			continue
+		if not isinstance(answer, str | int | float):  # bool is an int; dicts and lists are not values
+			bad[(item["field"], item["row"])] = "unreadable"
 			continue
 		df = (meta if item["row"] is None else child_meta).get_field(item["field"])
 		target = values if item["row"] is None else values[table][item["row"] - 1]
 		target[item["field"]] = answer
 		wanted.append((item, df, target))
 	cleaned, problems = draft.normalise(s, values)
-	why = {(p["field"], p["row"]): p["reason"] for p in problems}
+	why = {(p["field"], p["row"]): p["reason"] for p in problems} | bad
 	with impersonate(uploader):
 		memo: dict = {}
 		for item, df, _target in wanted:
