@@ -22,6 +22,7 @@ import frappe
 from frappe.rate_limiter import rate_limit
 
 from jarvis.chat import filebox_skills
+from jarvis.intake.capture import UNREADABLE_TYPE_SUMMARY
 from jarvis.permissions import message_origin, refuse_in_tool_dispatch, require_jarvis_user
 
 # The persona fallback skill (SHARED_CORE_SKILLS, role_profiles.py) - always
@@ -1285,6 +1286,8 @@ def _can_retry_row(row: dict, me: str, manager: bool, live: set[tuple[str, str]]
 	"""Failed or Skipped, no draft yet, not a duplicate, and the caller's to retry."""
 	if row.get("status") not in _INTAKE_RETRYABLE or row.get("duplicate_of"):
 		return False
+	if row.get("summary") == UNREADABLE_TYPE_SUMMARY:
+		return False
 	if row.get("draft_name") and (row.get("draft_doctype"), row["draft_name"]) in live:
 		return False
 	return manager or row.get("owner") == me
@@ -1436,6 +1439,8 @@ def retry_intake(activity: str) -> dict:
 		frappe.throw(
 			"This file is a duplicate of an earlier upload, so running it again would only repeat it."
 		)
+	if row.summary == UNREADABLE_TYPE_SUMMARY:
+		frappe.throw("This file type can't be read for intake, so running it again would not help.")
 	if row.status not in _INTAKE_RETRYABLE:
 		frappe.throw("Only a failed or skipped file can be run again.")
 	if (row.draft_doctype, row.draft_name) in _live_drafts([row]):

@@ -18,6 +18,8 @@ INTAKE_MAP_CACHE_KEY = "jarvis:intake_map"
 _CACHE_TTL_S = 300
 _READABLE_EXTENSIONS = ("jpg", "jpeg", "png", "webp", "pdf")
 ACTIVITY = "Jarvis Trigger Activity"
+# A permanent skip: the row can never be read, so File Box offers no retry.
+UNREADABLE_TYPE_SUMMARY = "This file type can't be read for intake"
 _RULE_FIELDS = (
 	"name",
 	"trigger_name",
@@ -147,7 +149,7 @@ def _queue_one(doc, rule: dict, event: str, user: str) -> None:
 		attached_name = ""
 	status, summary, duplicate_of = "Queued", f"Queued {doc.get('file_name') or doc.name}"[:140], None
 	if ext not in _READABLE_EXTENSIONS:
-		status, summary = "Skipped", "This file type can't be read for intake"
+		status, summary = "Skipped", UNREADABLE_TYPE_SUMMARY
 	else:
 		duplicate_of = _earlier_row(rule["name"], doc.content_hash)
 		if duplicate_of:

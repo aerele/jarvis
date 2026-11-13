@@ -7,7 +7,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import filebox
-from jarvis.intake import worker
+from jarvis.intake import capture, worker
 
 TRIGGER = "Jarvis Trigger"
 ACTIVITY = "Jarvis Trigger Activity"
@@ -207,4 +207,17 @@ class TestIntakeFilebox(FrappeTestCase):
 					filebox.retry_intake(bad)
 			frappe.set_user(MANAGER)
 			filebox.retry_intake(mine)  # a manager may retry another person's row
+		self.assertEqual(enq.call_count, 1)
+
+	def test_unreadable_type_skip_is_permanent_but_limit_skips_retry(self):
+		perm = self._row(UPLOADER, status="Skipped", summary=capture.UNREADABLE_TYPE_SUMMARY)
+		limit = self._row(UPLOADER, status="Skipped", summary="daily limit reached")
+		off = self._row(UPLOADER, status="Skipped", summary="rule turned off")
+		rows = {r["name"]: r["can_retry"] for r in self._list(UPLOADER)["rows"]}
+		self.assertEqual(rows, {perm: False, limit: True, off: True})
+		frappe.set_user(UPLOADER)
+		with mock.patch("frappe.enqueue") as enq:
+			with self.assertRaises(frappe.ValidationError):
+				filebox.retry_intake(perm)
+			filebox.retry_intake(limit)
 		self.assertEqual(enq.call_count, 1)

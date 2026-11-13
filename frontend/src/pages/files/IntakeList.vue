@@ -197,12 +197,19 @@ function stopPolling() {
 	if (pollTimer) clearInterval(pollTimer);
 	pollTimer = null;
 }
+// A hidden tab does not poll; coming back refreshes once and resumes.
+function tick() {
+	if (!document.hidden) refreshKeep();
+}
+function onVisibility() {
+	if (!document.hidden && pollTimer) refreshKeep();
+}
 // Poll only while a visible row is still moving; stop when none is.
 watch(
 	rows,
 	(list) => {
 		if ((list || []).some(intakeIsLive)) {
-			if (!pollTimer) pollTimer = setInterval(refreshKeep, 10000);
+			if (!pollTimer) pollTimer = setInterval(tick, 10000);
 		} else {
 			stopPolling();
 		}
@@ -210,11 +217,15 @@ watch(
 	{ immediate: true }
 );
 onMounted(async () => {
+	document.addEventListener("visibilitychange", onVisibility);
 	try {
 		canManage.value = !!(await getTriggersCaps())?.can_manage;
 	} catch (e) {
 		canManage.value = false;
 	}
 });
-onBeforeUnmount(stopPolling);
+onBeforeUnmount(() => {
+	stopPolling();
+	document.removeEventListener("visibilitychange", onVisibility);
+});
 </script>

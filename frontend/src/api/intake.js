@@ -1,5 +1,5 @@
-// Document Intake wrappers (File Box "Intake" view). src/api.js is frozen, so the
-// two endpoints live here; the page imports them from "@/api/intake".
+// Document Intake wrappers (File Box "Intake" view). These endpoints live in their own
+// module, like approvals.js and paymentCalendar.js; the page imports "@/api/intake".
 import { call } from "frappe-ui";
 
 // {rows, total, has_more, start, page_length}. `scope` is "mine" or "all" (managers).
