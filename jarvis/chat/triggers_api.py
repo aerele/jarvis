@@ -49,8 +49,8 @@ _ALLOWED_PAYLOAD_FIELDS = {
 	"source_conversation",
 }
 
-_ACTION_TYPES = {"Script", "LLM"}
-_ACTIVITY_STATUSES = {"Success", "Failed", "Blocked", "Skipped"}
+_ACTION_TYPES = {"Script", "LLM", "Intake"}
+_ACTIVITY_STATUSES = {"Success", "Failed", "Blocked", "Skipped", "Queued", "Running", "Needs Review"}
 
 _TRIGGER_FILTERS = {"enabled", "action_type", "target_doctype", "doc_event"}
 _TRIGGER_SORTABLE = {
@@ -70,6 +70,7 @@ _ACTIVITY_FILTERS = {
 	"doc_event",
 	"from_date",
 	"to_date",
+	"file_hash",
 }
 _ACTIVITY_SORTABLE = {
 	"creation": "creation",
@@ -100,6 +101,13 @@ _ACTIVITY_FIELDS = (
 	"summary",
 	"duration_ms",
 	"event_user",
+	"source_file",
+	"file_hash",
+	"draft_doctype",
+	"draft_name",
+	"attempts",
+	"approval_request",
+	"duplicate_of",
 	"creation",
 )
 
@@ -655,6 +663,8 @@ def _activity_query(search: str, f: dict):
 		query = query.where(a.action_type == f["action_type"])
 	if "target_doctype" in f:
 		query = query.where(a.target_doctype == str(f["target_doctype"]))
+	if "file_hash" in f:
+		query = query.where(a.file_hash == str(f["file_hash"]))
 	if "doc_event" in f:
 		if f["doc_event"] not in SUPPORTED_EVENTS:
 			frappe.throw(_("Invalid doc_event filter."))

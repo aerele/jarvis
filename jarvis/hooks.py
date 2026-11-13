@@ -904,12 +904,15 @@ has_permission.update(
 permission_query_conditions.update(
 	{
 		"Jarvis Custom Skill": "jarvis.chat.skill_permissions.skill_query_conditions",
+		# Uploaders read their own Intake rows only; Script/LLM rows stay managers-only.
+		"Jarvis Trigger Activity": "jarvis.triggers.activity_permissions.activity_query_conditions",
 		"Jarvis Personalise Question": "jarvis.chat.personalise_permissions.personalise_question_query_conditions",
 	}
 )
 has_permission.update(
 	{
 		"Jarvis Custom Skill": "jarvis.chat.skill_permissions.has_skill_permission",
+		"Jarvis Trigger Activity": "jarvis.triggers.activity_permissions.has_activity_permission",
 		"Jarvis Personalise Question": "jarvis.chat.personalise_permissions.has_personalise_question_permission",
 	}
 )

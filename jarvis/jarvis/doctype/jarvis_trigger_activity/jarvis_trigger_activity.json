@@ -16,7 +16,15 @@
   "summary",
   "detail",
   "duration_ms",
-  "event_user"
+  "event_user",
+  "source_file",
+  "file_hash",
+  "draft_doctype",
+  "draft_name",
+  "reading_json",
+  "attempts",
+  "approval_request",
+  "duplicate_of"
  ],
  "fields": [
   {
@@ -57,7 +65,7 @@
    "fieldname": "status",
    "fieldtype": "Select",
    "label": "Status",
-   "options": "Success\nFailed\nBlocked\nSkipped",
+   "options": "Success\nFailed\nBlocked\nSkipped\nQueued\nRunning\nNeeds Review",
    "in_list_view": 1,
    "in_standard_filter": 1
   },
@@ -83,6 +91,55 @@
    "fieldtype": "Data",
    "label": "Event User",
    "description": "frappe.session.user at fire time."
+  },
+  {
+   "fieldname": "source_file",
+   "fieldtype": "Link",
+   "label": "Source File",
+   "options": "File",
+   "description": "Intake: the uploaded file this row tracks."
+  },
+  {
+   "fieldname": "file_hash",
+   "fieldtype": "Data",
+   "label": "File Hash",
+   "search_index": 1,
+   "description": "Intake: content hash, used to spot duplicate uploads."
+  },
+  {
+   "fieldname": "draft_doctype",
+   "fieldtype": "Link",
+   "label": "Draft DocType",
+   "options": "DocType"
+  },
+  {
+   "fieldname": "draft_name",
+   "fieldtype": "Dynamic Link",
+   "label": "Draft Document",
+   "options": "draft_doctype"
+  },
+  {
+   "fieldname": "reading_json",
+   "fieldtype": "Long Text",
+   "label": "Reading (JSON)",
+   "description": "Intake: what the model read from the file."
+  },
+  {
+   "fieldname": "attempts",
+   "fieldtype": "Int",
+   "label": "Attempts"
+  },
+  {
+   "fieldname": "approval_request",
+   "fieldtype": "Link",
+   "label": "Approval Request",
+   "options": "Jarvis Approval Request"
+  },
+  {
+   "fieldname": "duplicate_of",
+   "fieldtype": "Link",
+   "label": "Duplicate Of",
+   "options": "Jarvis Trigger Activity"
   }
  ],
  "in_create": 1,
@@ -99,6 +156,11 @@
    "delete": 1,
    "read": 1,
    "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "role": "All",
+   "if_owner": 1
   }
  ],
  "sort_field": "creation",
