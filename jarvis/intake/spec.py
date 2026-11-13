@@ -138,15 +138,21 @@ def _is_blank(value) -> bool:
 def _validate_default(df, value) -> None:
 	"""A default is written to every draft as is, so it must be a legal value for
 	the field. Blank values are skipped here (they just do not cover anything)."""
+	name = df.fieldname
+	# Scalars only: a dict/list reaching frappe.db.exists would be read as filters.
+	if not isinstance(value, str | int | float | bool):
+		frappe.throw(_("Default for '{0}' must be a single text or number value.").format(name))
 	if _is_blank(value):
 		return
-	name = df.fieldname
 	if df.fieldtype == "Select":
 		options = [o.strip() for o in (df.options or "").split("\n") if o.strip()]
 		if str(value) not in options:
 			frappe.throw(_("Default for '{0}' must be one of: {1}.").format(name, ", ".join(options)))
 	elif df.fieldtype == "Link":
-		if not frappe.db.exists(df.options, value):
+		# Name lookup only, and only for records the editor can read, so a default
+		# cannot be used to probe records the editor may not see.
+		exists = isinstance(value, str) and frappe.db.exists(df.options, {"name": value})
+		if not exists or not frappe.has_permission(df.options, "read", doc=value):
 			frappe.throw(_("Default for '{0}': {1} '{2}' does not exist.").format(name, df.options, value))
 	elif df.fieldtype in _INTEGER_TYPES | _NUMBER_TYPES:
 		# float() accepts "nan" and "inf", which no field can store.

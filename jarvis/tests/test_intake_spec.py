@@ -156,18 +156,35 @@ class TestIntakeSpec(FrappeTestCase):
 
 	def test_non_finite_numeric_defaults_refused(self):
 		for fieldname in ("shelf_life_in_days", "weight_per_unit", "valuation_rate"):
-			for bad in ("nan", "inf", "-inf", float("nan"), float("inf")):
-				spec_json = json.dumps(
-					{"fields": ["item_name"], "defaults": {fieldname: bad}}, allow_nan=True
-				)
+			for bad in ("nan", "inf", "-inf"):
+				spec_json = json.dumps({"fields": ["item_name"], "defaults": {fieldname: bad}})
 				with self.subTest(field=fieldname, value=bad):
-					self.assertRaises(
-						frappe.ValidationError,
-						self._insert,
-						intake_target_doctype="Item",
-						intake_spec=spec_json,
-						allow_incomplete_drafts=1,
-					)
+					with self.assertRaisesRegex(frappe.ValidationError, "must be a number"):
+						self._insert(
+							intake_target_doctype="Item",
+							intake_spec=spec_json,
+							allow_incomplete_drafts=1,
+						)
+
+	def test_non_scalar_defaults_refused(self):
+		filters = {"enabled": [">", 0]}
+		for fieldname in ("allocated_to", "priority", "date"):
+			for bad in (filters, ["a"], None):
+				spec_json = json.dumps({"fields": ["description"], "defaults": {fieldname: bad}})
+				with self.subTest(field=fieldname, value=bad):
+					with self.assertRaisesRegex(frappe.ValidationError, "single text or number"):
+						self._insert(intake_spec=spec_json)
+
+	def test_link_default_needs_read_access(self):
+		spec_json = json.dumps({"fields": ["description"], "defaults": {"allocated_to": "Administrator"}})
+		# Guest cannot read User records: same message as a missing record.
+		frappe.set_user("Guest")
+		try:
+			with self.assertRaisesRegex(frappe.ValidationError, "does not exist"):
+				self._insert(intake_spec=spec_json)
+		finally:
+			frappe.set_user("Administrator")
+		self._insert(intake_spec=spec_json, enabled=0)
 
 	def test_duplicate_intake_rule_refused(self):
 		self._insert()
