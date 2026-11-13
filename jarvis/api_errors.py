@@ -19,6 +19,12 @@ Every way a jarvis error can reach a user is captured (all feed
     writes no Error Log row for these (only 5xx), so nothing else sees them.
   - ``record_tool_failure`` - a tool that failed and returned ``{ok: false}``
     to the agent (a 200, so no other lane sees it).
+  - ``call_tool`` escapes - an exception that left ``call_tool`` (the agent
+    saw HTTP 4xx/5xx, no ``{ok: false}``). ``call_tool`` stashes its facts and
+    ``capture_failed_request`` records them under the ``call_tool_raised``
+    surface once Frappe has rolled the request back. A 5xx escape (or any escape
+    under developer_mode) also writes a ``server`` Error Log row, so it shows up
+    in the feed twice; a 4xx escape has no stack.
   - ``collect_failed_turns`` - every turn that ended ``errored``, read from the
     durable turn row whether or not a browser was open to see it fail.
 
@@ -64,8 +70,15 @@ ERROR_LOG_SCAN_LIMIT = 300
 
 #: Surfaces the server writes into the buffer (never a browser), with the
 #: severity each is sent at. A tool or API failure the user can act on is a
-#: warning; a turn that failed outright is an error.
-SERVER_SURFACES = {"turn": "error", "tool": "warning", "api": "warning", "call_tool": "error"}
+#: warning; a turn that failed outright is an error. ``call_tool_raised`` is an
+#: exception that escaped ``call_tool``: the agent got a transport error.
+SERVER_SURFACES = {
+	"turn": "error",
+	"tool": "warning",
+	"api": "warning",
+	"call_tool": "error",
+	"call_tool_raised": "error",
+}
 
 #: Ceiling on server-side buffer writes per user per minute. Past it the
 #: occurrence is dropped: one runaway loop must not flood the buffer.
@@ -886,14 +899,18 @@ def record_server_error(
 
 _METHOD_PATH_RE = re.compile(r"^/api/(?:v\d+/)?method/(jarvis\.[\w.]+)")
 
+#: The agent's one tool endpoint.
+CALL_TOOL_METHOD = "jarvis.api.call_tool"
+
 #: Endpoints whose failures are not captured here: the reporter's own (a
 #: loop), and call_tool, which records its own (record_call_tool_failure) with
-#: the chat user and tool this hook can't see.
-_UNCAPTURED_METHODS = ("jarvis.api_errors.", "jarvis.api.call_tool")
+#: the chat user and tool this hook can't see. Its escapes take the branch above.
+_UNCAPTURED_METHODS = ("jarvis.api_errors.", CALL_TOOL_METHOD)
 
 
 def capture_failed_request(response=None, request=None) -> None:
-	"""``after_request``: buffer a jarvis API call that answered 4xx.
+	"""``after_request``: buffer a jarvis API call that answered 4xx, or a
+	``call_tool`` exception that escaped (any status, see ``_handle_call_tool_escape``).
 
 	A ``frappe.throw``, permission or validation error is shown to the user but
 	never written to Error Log (Frappe logs only 5xx, which the Error Log lane
@@ -904,6 +921,9 @@ def capture_failed_request(response=None, request=None) -> None:
 	Never raises: an after_request hook that throws is only logged by Frappe."""
 	try:
 		if capture_off():
+			return
+		# First: a call_tool escape is any status (500, 429 ...), above the 4xx gate below.
+		if _handle_call_tool_escape(response, request):
 			return
 		status = int(getattr(response, "status_code", 0) or 0)
 		if not 400 <= status < 500 or status in (401, 429) or request is None:
@@ -927,6 +947,64 @@ def capture_failed_request(response=None, request=None) -> None:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- after_request runs past the request commit
 	except Exception:
 		_capture_warning("failed request not buffered")
+
+
+def _handle_call_tool_escape(response, request) -> bool:
+	"""Buffer the exception ``call_tool`` stashed when it escaped. True when this
+	request is handled (a row or a deliberate skip), False when the normal 4xx lane
+	must run: no stash, or a stash read on another endpoint (cleared, never used).
+
+	It runs above the guards of ``capture_failed_request``. The stash is cleared
+	first: nothing may read it twice. The response status wins; the stash status is
+	only a fallback when the response has none. The ``rollback`` is defensive, as
+	Frappe already rolled the request back. The escape path does one small
+	synchronous DB and Redis write before the response is sent (accepted latency).
+	A failure here logs a warning and writes no row; it never raises."""
+	stash = getattr(frappe.local, "jarvis_call_tool_raised", None)
+	if not stash:
+		return False
+	frappe.local.jarvis_call_tool_raised = None
+	try:
+		m = _METHOD_PATH_RE.match(getattr(request, "path", "") or "")
+		if not m or m.group(1) != CALL_TOOL_METHOD:
+			return False
+		status = int(getattr(response, "status_code", 0) or 0) or int(stash.get("status") or 0)
+		if status < 400:
+			return True
+		caller = _call_tool_caller(stash.get("tool"), status)
+		if caller is None:
+			return True
+		user, route = caller
+		frappe.db.rollback()
+		record_server_error(
+			"call_tool_raised",
+			error_code=str(status),
+			error_class=str(stash.get("error_class") or f"HTTP {status}"),
+			message=str(stash.get("message") or ""),
+			route=route,
+			user=user,
+		)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- after_request runs past the request commit
+	except Exception:
+		_capture_warning("call_tool escape not buffered")
+	return True
+
+
+def _call_tool_user():
+	"""The chat user ``call_tool`` resolved, else the session user."""
+	return getattr(frappe.local, "jarvis_call_tool_user", None) or frappe.session.user
+
+
+def _call_tool_caller(tool, status: int) -> tuple[str | None, str] | None:
+	"""(user, route) a failed ``call_tool`` is recorded under, or None to record
+	nothing. Before the caller is known this is anyone on the internet: one constant
+	route, never the tool name they typed. A 401 from such a caller is not an error
+	of the tenant: a probe of the guest endpoint, or a plugin-auth rejection that
+	``_plugin_auth`` already wrote to the Error Log (which is forwarded)."""
+	user = _call_tool_user()
+	if not user or user == "Guest":
+		return None if status == 401 else (user, UNAUTHENTICATED_ROUTE)
+	return user, _known_tool(tool)
 
 
 def _known_method(path: str) -> str:
@@ -986,26 +1064,22 @@ def record_call_tool_failure(tool: str, result) -> None:
 				"code": str(error.get("code") or "CapabilityDeniedError"),
 				"message": "Private payroll delegate call failed.",
 			}
-		user = getattr(frappe.local, "jarvis_call_tool_user", None) or frappe.session.user
 		status = int((getattr(frappe.local, "response", None) or {}).get("http_status_code") or 200)
-		if status >= 400:
-			# Before the caller is known this is anyone on the internet: one constant
-			# route, never the tool name they typed.
-			unknown_caller = not user or user == "Guest"
-			if status == 401 and unknown_caller:
-				# Not an error of the tenant: a probe of the guest endpoint, or a plugin-auth
-				# rejection that _plugin_auth already wrote to the Error Log (which is forwarded).
-				return
-			record_server_error(
-				"call_tool",
-				error_code=str(status),
-				error_class=str(error.get("code") or f"HTTP {status}"),
-				message=str(error.get("message") or ""),
-				route=UNAUTHENTICATED_ROUTE if unknown_caller else _known_tool(tool),
-				user=user,
-			)
+		if status < 400:
+			record_tool_failure(tool, error, user=_call_tool_user())
 			return
-		record_tool_failure(tool, error, user=user)
+		caller = _call_tool_caller(tool, status)
+		if caller is None:
+			return
+		user, route = caller
+		record_server_error(
+			"call_tool",
+			error_code=str(status),
+			error_class=str(error.get("code") or f"HTTP {status}"),
+			message=str(error.get("message") or ""),
+			route=route,
+			user=user,
+		)
 	except Exception:
 		_capture_warning("call_tool failure not buffered")
 

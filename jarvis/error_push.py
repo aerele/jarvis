@@ -7,14 +7,19 @@ without ever touching the chat hot path.
 
 Error capture lanes (what reaches admin, from where, and how it is read)::
 
-    lane                      source                           surface    severity  cursor
-    ------------------------  -------------------------------  ---------  --------  ----------------------------
-    browser (SPA/PWA/Desk)    Jarvis Client Error, claimed     <client>   error     pushed 0 -> 1
-    failed jarvis API call    Jarvis Client Error (after_req)  api        warning   pushed 0 -> 1
-    failed tool ({ok:false})  Jarvis Client Error              tool       warning   pushed 0 -> 1
-    rejected call_tool        Jarvis Client Error              call_tool  error     pushed 0 -> 1
-    code-level exception      Error Log, jarvis-origin only    server     error     jarvis_error_log_watermark
-    failed turn               Jarvis Chat Turn, errored        turn       error     jarvis_failed_turn_watermark
+    lane                      source                           surface           severity  cursor
+    ------------------------  -------------------------------  ----------------  --------  ----------------------------
+    browser (SPA/PWA/Desk)    Jarvis Client Error, claimed     <client>          error     pushed 0 -> 1
+    failed jarvis API call    Jarvis Client Error (after_req)  api               warning   pushed 0 -> 1
+    failed tool ({ok:false})  Jarvis Client Error              tool              warning   pushed 0 -> 1
+    rejected call_tool        Jarvis Client Error              call_tool         error     pushed 0 -> 1
+    call_tool escape          Jarvis Client Error (after_req)  call_tool_raised  error     pushed 0 -> 1
+    code-level exception      Error Log, jarvis-origin only    server            error     jarvis_error_log_watermark
+    failed turn               Jarvis Chat Turn, errored        turn              error     jarvis_failed_turn_watermark
+
+A ``call_tool`` escape that answers 5xx (or any escape under developer_mode) also
+gets a ``server`` row from the Error Log lane: two rows for one failure, by design.
+A 4xx escape carries no stack.
 
 A cursor is ``"<timestamp>|<name>"`` and only ever moves forward. Each scan reads
 up to ``SCAN_LAG_S`` behind now, so a row whose transaction commits a moment late

@@ -52,11 +52,13 @@ class CaptureBase(FrappeTestCase):
 
 	def setUp(self):
 		super().setUp()
+		self._clear_call_tool_markers()
 		frappe.db.delete(DT)
 		frappe.db.commit()
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
+		self._clear_call_tool_markers()
 		frappe.db.delete(DT)
 		frappe.db.delete(TURN, {"name": ("like", "errcap-%")})
 		frappe.db.commit()
@@ -64,6 +66,12 @@ class CaptureBase(FrappeTestCase):
 
 	def buffered(self) -> list:
 		return frappe.get_all(DT, fields=["surface", "error_code", "error_class", "message", "route", "user"])
+
+	@staticmethod
+	def _clear_call_tool_markers():
+		# Request-scoped markers of the call_tool endpoint: they outlive a test on frappe.local.
+		frappe.local.jarvis_call_tool_user = None
+		frappe.local.jarvis_call_tool_raised = None
 
 
 def _ago(**kw):
@@ -319,7 +327,7 @@ class TestCallToolFailures(CaptureBase):
 		super().setUp()
 		frappe.local.response = frappe._dict()
 
-	def _plugin_call(self, **patches):
+	def _plugin_call(self, *, tool="get_list", result_mode=None, **patches):
 		"""Drive the real call_tool down the container's (X-Jarvis-Token) path."""
 		from jarvis import api
 
@@ -330,7 +338,7 @@ class TestCallToolFailures(CaptureBase):
 			stack.enter_context(patch.object(api, "_request_body_bytes", return_value=b"{}"))
 			for name, kw in patches.items():
 				stack.enter_context(patch.object(api, name, **kw))
-			return api.call_tool("get_list", {"doctype": "Customer"})
+			return api.call_tool(tool, {"doctype": "Customer"}, result_mode=result_mode)
 
 	def test_a_rejected_container_call_is_an_error(self):
 		from jarvis._plugin_auth import PluginAuthError
@@ -420,6 +428,331 @@ class TestCallToolFailures(CaptureBase):
 		with patch.object(api, "_call_tool", return_value={"ok": True, "data": []}):
 			api.call_tool("get_list", {})
 		self.assertEqual(self.buffered(), [])
+
+
+# --------------------------------------------------------------------------- #
+# call_tool: an exception that escapes the tool wrapper
+# --------------------------------------------------------------------------- #
+CALL_TOOL_PATH = "/api/method/jarvis.api.call_tool"
+# Lower case, no digits: the scrubber would leave it whole, so only the redaction hides it.
+RAW_SECRET = "payroll of priya sharma exceeds the limit"
+
+
+class TestCallToolRaised(CaptureBase):
+	"""The agent sees HTTP 417/500 and the chat shows "ERP access error". Frappe
+	writes no 4xx Error Log row and call_tool skips the generic hook, so the
+	escape stashes its facts and ``capture_failed_request`` records them."""
+
+	def setUp(self):
+		super().setUp()
+		frappe.local.response = frappe._dict()
+		self.key = f"errcap-raised-{frappe.generate_hash(length=8)}"
+		frappe.get_doc({"doctype": "Jarvis Chat Session", "session_key": self.key, "user": USER}).insert(
+			ignore_permissions=True
+		)
+		frappe.db.commit()
+		self.addCleanup(frappe.db.delete, "Jarvis Chat Session", {"session_key": self.key})
+
+	def _escape(self, exc, *, tool="get_list", result_mode=None, **patches):
+		"""Run a container call that raises ``exc`` out of the dispatcher; return what the
+		client would see (the very same exception object)."""
+		frappe.set_user("Guest")
+		patches.setdefault("validate_plugin_request", {"return_value": self.key})
+		patches.setdefault("_dispatch_from_session", {"side_effect": exc})
+		with self.assertRaises(type(exc)) as seen:
+			TestCallToolFailures._plugin_call(self, tool=tool, result_mode=result_mode, **patches)
+		self.assertIs(seen.exception, exc)
+		return seen.exception
+
+	def _hook(self, status, *, path=CALL_TOOL_PATH, request="default"):
+		response = (
+			Response("{}", status=status, mimetype="application/json")
+			if status
+			else types.SimpleNamespace(status_code=status)
+		)
+		request = types.SimpleNamespace(path=path) if request == "default" else request
+		api_errors.capture_failed_request(response=response, request=request)
+
+	def test_a_validation_error_that_escapes_is_buffered_once(self):
+		self._escape(frappe.ValidationError("Customer is disabled"))
+		self._hook(417)
+		(row,) = self.buffered()
+		self.assertEqual(row.surface, "call_tool_raised")
+		self.assertEqual((row.error_code, row.error_class), ("417", "ValidationError"))
+		self.assertEqual((row.user, row.route), (USER, "get_list"))
+
+	def test_a_plain_exception_is_a_500(self):
+		self._escape(RuntimeError("boom"))
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertEqual(
+			(row.surface, row.error_code, row.error_class), ("call_tool_raised", "500", "RuntimeError")
+		)
+
+	def test_a_returned_failure_is_not_a_raised_one(self):
+		frappe.set_user("Guest")
+		TestCallToolFailures._plugin_call(
+			self, validate_plugin_request={"return_value": "errcap-no-such-session"}
+		)
+		self._hook(400)
+		self.assertEqual([r.surface for r in self.buffered()], ["call_tool"])
+
+	def test_a_private_delegate_failure_never_carries_its_text(self):
+		from jarvis import api
+
+		exc = RuntimeError(RAW_SECRET)
+
+		def deposit_failure(*args, **kwargs):
+			frappe.local.jarvis_private_delegate_metadata = True
+			raise exc
+
+		self._escape(exc, _dispatch_from_session={"side_effect": deposit_failure})
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertEqual(row.message, api._PRIVATE_ESCAPE_MESSAGE)
+
+	def test_a_private_app_learning_tool_never_carries_its_text(self):
+		from jarvis import api
+
+		self._escape(RuntimeError("the file secret_source is unreadable"), tool="list_app_modules")
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertEqual(row.message, api._PRIVATE_ESCAPE_MESSAGE)
+
+	def test_an_escape_with_a_result_mode_never_carries_its_text(self):
+		from jarvis import api
+		from jarvis.tools import _private_output
+
+		self._escape(RuntimeError(RAW_SECRET), tool="query", result_mode=_private_output.MODE)
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertEqual(row.message, api._PRIVATE_ESCAPE_MESSAGE)
+
+	def test_an_ordinary_message_is_kept_for_triage(self):
+		self._escape(RuntimeError("<b>pool</b> exhausted"))
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertIn("pool exhausted", row.message)
+		self.assertNotIn("<b>", row.message)
+
+	def test_a_made_up_tool_name_is_recorded_as_one_constant_route(self):
+		self._escape(RuntimeError("boom"), tool="errcap_not_a_tool")
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertEqual(row.route, api_errors.UNKNOWN_TOOL)
+
+	def test_a_401_from_nobody_is_not_recorded(self):
+		bad = frappe.AuthenticationError("bad")
+		self._escape(bad, validate_plugin_request={"side_effect": bad})
+		self._hook(401)
+		self.assertEqual(self.buffered(), [])
+
+	def test_an_escape_before_the_caller_is_known_is_the_constant_route(self):
+		boom = RuntimeError("boom")
+		self._escape(boom, validate_plugin_request={"side_effect": boom})
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertEqual((row.route, row.user), (api_errors.UNAUTHENTICATED_ROUTE, "Guest"))
+
+	def test_the_kill_switch_records_nothing(self):
+		self._escape(RuntimeError("boom"))
+		with patch.dict(frappe.conf, {"jarvis_error_capture_off": 1}):
+			self._hook(500)
+		self.assertEqual(self.buffered(), [])
+
+	def test_a_call_that_does_not_escape_forgets_an_earlier_escape(self):
+		from jarvis import api
+
+		self._escape(RuntimeError("boom"))  # the hook never ran for it
+		with patch.object(api, "_call_tool", return_value={"ok": True, "data": []}):
+			api.call_tool("get_list", {})
+		self._hook(417)
+		self.assertEqual(self.buffered(), [])
+
+	def test_a_failing_recorder_does_not_mask_the_original_error(self):
+		self._escape(frappe.ValidationError("Customer is disabled"))
+		with (
+			patch.object(api_errors, "record_server_error", side_effect=RuntimeError("recorder down")),
+			patch.object(api_errors, "_capture_warning") as warned,
+			patch.object(frappe, "log_error") as logged,
+		):
+			self._hook(417)  # must not raise
+		warned.assert_called_once_with("call_tool escape not buffered")
+		logged.assert_not_called()
+		self.assertIsNone(frappe.local.jarvis_call_tool_raised)
+
+	def test_a_failing_stash_degrades_to_a_minimal_row_and_keeps_the_original_error(self):
+		from jarvis import api
+		from jarvis.tools import _private_output
+
+		with (
+			patch.object(_private_output, "metadata_redacted", side_effect=RuntimeError("stash down")),
+			patch.object(api_errors, "_capture_warning") as warned,
+		):
+			self._escape(frappe.ValidationError("Customer is disabled"))
+		warned.assert_called_once_with("call_tool escape stash degraded")
+		self._hook(417)
+		(row,) = self.buffered()
+		self.assertEqual(
+			(row.surface, row.error_code, row.error_class), ("call_tool_raised", "417", "ValidationError")
+		)
+		self.assertEqual(row.message, api._PRIVATE_ESCAPE_MESSAGE)
+
+	def test_an_exception_whose_text_cannot_be_read_is_recorded_by_its_class(self):
+		class UnprintableError(Exception):
+			def __str__(self):
+				raise RuntimeError("no text")
+
+		self._escape(UnprintableError())
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertEqual((row.error_class, row.message), ("UnprintableError", "UnprintableError"))
+
+	def test_an_exception_with_no_text_is_recorded_by_its_class(self):
+		self._escape(RuntimeError())
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertEqual(row.message, "RuntimeError")
+
+	def test_a_huge_message_is_clipped(self):
+		self._escape(RuntimeError("pool exhausted " * 200))
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertTrue(row.message.startswith("pool exhausted"))
+		self.assertLessEqual(len(row.message), api_errors.MAX_MESSAGE)
+
+	def test_a_private_source_tool_never_carries_its_text(self):
+		from jarvis import api
+
+		boom = RuntimeError(RAW_SECRET)
+		self._escape(boom, tool="get_cycle_count_inputs", validate_plugin_request={"side_effect": boom})
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertEqual(row.message, api._PRIVATE_ESCAPE_MESSAGE)
+
+	def test_a_401_from_a_known_user_is_recorded(self):
+		self._escape(frappe.AuthenticationError("bad"))
+		self._hook(401)
+		(row,) = self.buffered()
+		self.assertEqual((row.surface, row.error_code, row.user), ("call_tool_raised", "401", USER))
+
+	def test_a_stash_with_a_success_status_records_nothing(self):
+		self._escape(RuntimeError("boom"))
+		self._hook(200)
+		self.assertEqual(self.buffered(), [])
+
+	def test_a_response_without_a_status_falls_back_to_the_stash_status(self):
+		self._escape(frappe.PermissionError("no access"))
+		self._hook(None)
+		(row,) = self.buffered()
+		self.assertEqual((row.surface, row.error_code), ("call_tool_raised", "403"))
+
+	def test_a_stash_without_a_class_is_recorded_as_its_status(self):
+		frappe.set_user(USER)
+		frappe.local.jarvis_call_tool_raised = {
+			"tool": "get_list",
+			"error_class": "",
+			"message": "",
+			"status": 500,
+		}
+		self._hook(500)
+		(row,) = self.buffered()
+		self.assertEqual(row.error_class, "HTTP 500")
+
+	def test_5xx_and_429_escapes_are_recorded_too(self):
+		for status in (500, 502, 429):
+			with self.subTest(status=status):
+				frappe.db.delete(DT)
+				frappe.db.commit()
+				self._escape(RuntimeError("boom"))
+				self._hook(status)
+				(row,) = self.buffered()
+				self.assertEqual((row.surface, row.error_code), ("call_tool_raised", str(status)))
+
+	def test_a_standard_auth_escape_is_the_session_users(self):
+		from jarvis import api
+
+		frappe.set_user(USER)
+		exc = frappe.ValidationError("Customer is disabled")
+		with (
+			patch.object(api, "_get_header", return_value=""),
+			patch.object(api, "has_jarvis_access", return_value=True),
+			patch.object(api, "_dispatch_current_user", side_effect=exc),
+			self.assertRaises(frappe.ValidationError),
+		):
+			api.call_tool("get_list", {"doctype": "Customer"})
+		self._hook(417)
+		(row,) = self.buffered()
+		self.assertEqual((row.surface, row.user, row.route), ("call_tool_raised", USER, "get_list"))
+
+	def test_a_stash_is_not_read_by_a_look_alike_path(self):
+		frappe.set_user(USER)
+		frappe.local.jarvis_call_tool_raised = {
+			"tool": "get_list",
+			"error_class": "RuntimeError",
+			"message": "boom",
+			"status": 500,
+		}
+		self._hook(417, path="/api/method/jarvis.api.call_tool_other")
+		self.assertEqual(self.buffered(), [])
+		self.assertIsNone(frappe.local.jarvis_call_tool_raised)
+
+	def test_a_stash_on_another_endpoint_leaves_that_requests_normal_row(self):
+		frappe.set_user(USER)
+		frappe.local.jarvis_call_tool_raised = {
+			"tool": "get_list",
+			"error_class": "RuntimeError",
+			"message": "boom",
+			"status": 500,
+		}
+		self._hook(417, path="/api/method/jarvis.chat.api.send_message")
+		(row,) = self.buffered()
+		self.assertEqual((row.surface, row.error_code), ("api", "417"))
+		self.assertIsNone(frappe.local.jarvis_call_tool_raised)
+
+	def test_a_missing_request_or_session_records_nothing_and_clears_the_stash(self):
+		stash = {"tool": "get_list", "error_class": "RuntimeError", "message": "boom", "status": 500}
+		frappe.set_user(USER)
+		frappe.local.jarvis_call_tool_raised = dict(stash)
+		self._hook(500, request=None)
+		self.assertIsNone(frappe.local.jarvis_call_tool_raised)
+
+		frappe.local.jarvis_call_tool_raised = dict(stash)
+		with patch.object(frappe.local, "session", None):
+			self._hook(500)
+		self.assertIsNone(frappe.local.jarvis_call_tool_raised)
+		self.assertEqual(self.buffered(), [])
+
+	def test_a_receipt_failure_after_a_tool_failure_is_two_rows(self):
+		from jarvis import api
+
+		exc = frappe.ValidationError("receipt insert failed")
+
+		def fail_then_escape(*args, **kwargs):
+			frappe.set_user(USER)
+			with patch.object(api, "dispatch", side_effect=frappe.ValidationError("Customer is disabled")):
+				api._dispatch_and_wrap("get_list", {"doctype": "Customer"}, False)
+			frappe.db.commit()  # persist_tool_receipt commits mid-request
+			raise exc
+
+		self._escape(exc, _dispatch_from_session={"side_effect": fail_then_escape})
+		self._hook(417)
+		self.assertEqual(sorted(r.surface for r in self.buffered()), ["call_tool_raised", "tool"])
+
+	def test_what_the_escaped_request_left_behind_is_discarded(self):
+		self._escape(RuntimeError("boom"))
+		frappe.db.set_default("errcap_pending", "1")
+		self.addCleanup(frappe.db.set_default, "errcap_pending", "")
+		self._hook(500)
+		self.assertFalse(frappe.db.get_default("errcap_pending"))
+		self.assertEqual(len(self.buffered()), 1)
+
+	def test_a_browser_cannot_report_the_surface(self):
+		frappe.set_user(USER)
+		api_errors.report_client_errors([{"surface": "call_tool_raised", "message": "ui boom"}])
+		frappe.set_user("Administrator")
+		(row,) = self.buffered()
+		self.assertEqual(row.surface, "ui")
 
 
 # --------------------------------------------------------------------------- #
