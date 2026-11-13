@@ -9,8 +9,9 @@ native document block on the chat entrypoint, so we rasterize their pages to
 images here.
 
 Caps (all enforced before anything leaves the bench):
-- per-image bytes: kept under agent's 2MB inline threshold (hard cap 6MB) so
-  images stay inline rather than disk-offloaded;
+- per-image bytes: <= 240 KB. The Claude Code CLI silently drops any @-mentioned
+  file over 256 KiB and openclaw passes images to it unchanged, so a bigger part
+  reaches the model as just a file name. JPEG quality steps down before pixels do;
 - pixels: <= ~3.75MP (Anthropic's limit) - also the decompression-bomb guard,
   set once process-wide at import;
 - PDF pages: capped so a huge doc can't explode token cost.
@@ -21,13 +22,15 @@ from __future__ import annotations
 import base64
 import io
 
-_MAX_IMAGE_BYTES = 2 * 1024 * 1024
+# Claude Code CLI drops @-mentioned files over 256 KiB (262,144 bytes) with no error;
+# openclaw hands it our image unchanged. 240 KB leaves margin. Same rule for every runtime.
+_MAX_IMAGE_BYTES = 240_000
 _MAX_IMAGE_PIXELS = 3_750_000  # render/resize TARGET for the model (Anthropic ~3.75MP)
-_MAX_DIM = 1568  # longest side after resize (Anthropic's optimal); 1568^2 = 2.46MP
+_SIDE_STEPS = (1568, 1400, 1200, 1000, 800)  # longest side; 1568 is Anthropic's optimal
 _BOMB_MAX_PIXELS = 64_000_000  # decompression-bomb ceiling: reject absurd decodes, allow real photos
 _MAX_PDF_PAGES = 20
 _RASTER_SCALE = 200 / 72  # ~200 DPI
-_JPEG_QUALITIES = (85, 70, 55, 40)
+_JPEG_QUALITIES = (85, 75, 65, 55, 45, 40)  # q65 at 1568 px still read handwriting fully
 
 # Lowercase, matched case-insensitively: a site connected through the admin's provider
 # presets stores the catalog slug ("anthropic", "openai", "gemini"), a hand-set one the
@@ -126,19 +129,18 @@ def pdf_parts(
 
 
 def _encode_under_caps(im, file_name: str) -> dict | None:
-	"""Convert to RGB, thumbnail under the pixel cap, JPEG-recompress stepping
-	quality down until under the byte cap (one extra halving as a last resort)."""
+	"""Convert to RGB and return the first JPEG within the byte budget. Quality drops
+	before pixels do (legibility holds longer at lower quality than at fewer pixels);
+	each size step starts from the full image so resampling never compounds."""
 	try:
 		im = im.convert("RGB")
-		im.thumbnail((_MAX_DIM, _MAX_DIM))
-		for quality in _JPEG_QUALITIES:
-			data = _jpeg(im, quality)
-			if len(data) <= _MAX_IMAGE_BYTES:
-				return _part(data, file_name)
-		im.thumbnail((max(1, im.width // 2), max(1, im.height // 2)))
-		data = _jpeg(im, _JPEG_QUALITIES[-1])
-		if len(data) <= _MAX_IMAGE_BYTES:
-			return _part(data, file_name)
+		for side in _SIDE_STEPS:
+			scaled = im.copy()
+			scaled.thumbnail((side, side))  # never upscales
+			for quality in _JPEG_QUALITIES:
+				data = _jpeg(scaled, quality)
+				if len(data) <= _MAX_IMAGE_BYTES:
+					return _part(data, file_name)
 	except Exception:
 		return None
 	return None
