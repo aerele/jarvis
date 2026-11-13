@@ -6,7 +6,9 @@
 		@dragleave="onDragLeave"
 		@drop.prevent="onDrop"
 	>
+		<IntakeList v-if="view === 'intake'" @switch="view = $event" />
 		<ListPage
+			v-else
 			:breadcrumbs="[{ label: 'File Box', route: { name: 'FilesList' } }]"
 			:columns="columns"
 			:rows="rows"
@@ -36,6 +38,7 @@
 			@refresh="resetLoad"
 		>
 			<template #right-header>
+				<FileBoxSwitch v-model="view" />
 				<Button label="Clear Processed" @click="clearProcessed" />
 				<Button
 					variant="solid"
@@ -262,6 +265,8 @@ import {
 } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import FilePreview from "@/components/FilePreview.vue";
+import FileBoxSwitch from "./FileBoxSwitch.vue";
+import IntakeList from "./IntakeList.vue";
 import { useListPage } from "@/composables/useListPage";
 import { useShellStore } from "@/stores/shell";
 import { timeAgo, exactDate } from "@/utils/datetime";
@@ -282,6 +287,8 @@ import {
 const route = useRoute();
 const router = useRouter();
 const store = useShellStore();
+// "dropped" (files added by hand, the default) or "intake" (Document Intake files)
+const view = ref("dropped");
 
 // ── list config ──────────────────────────────────────────────────────────────
 // statuses, badges and result links live in @/lib/fileboxStatus (tested).
@@ -485,13 +492,14 @@ function hasFiles(ev) {
 	return Array.from(types).includes("Files");
 }
 function onDragEnter(ev) {
-	if (hasFiles(ev)) dragDepth.value++;
+	if (view.value === "dropped" && hasFiles(ev)) dragDepth.value++;
 }
 function onDragLeave() {
 	dragDepth.value = Math.max(0, dragDepth.value - 1);
 }
 function onDrop(ev) {
 	dragDepth.value = 0;
+	if (view.value !== "dropped") return;
 	uploadBatch(ev.dataTransfer && ev.dataTransfer.files);
 }
 

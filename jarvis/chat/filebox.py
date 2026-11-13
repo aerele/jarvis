@@ -1249,6 +1249,222 @@ def list_inbound_page(
 
 
 # --------------------------------------------------------------------------- #
+# Document Intake rows (Jarvis Trigger Activity, action_type Intake)
+# --------------------------------------------------------------------------- #
+ACTIVITY = "Jarvis Trigger Activity"
+_INTAKE_STATUSES = ("Queued", "Running", "Needs Review", "Success", "Failed", "Skipped")
+_INTAKE_RETRYABLE = ("Failed", "Skipped")
+_INTAKE_FILTERS = {"status", "trigger", "from_date", "to_date"}
+
+
+def _intake_source_label(row: dict) -> str:
+	"""``Folder: <path without Home/>`` or ``Record: <doctype> <name>`` from the rule."""
+	if row.get("intake_source") == "Record":
+		return f"Record: {row.get('intake_record_doctype') or ''} {row.get('target_docname') or ''}".strip()
+	folder = row.get("intake_folder") or ""
+	return f"Folder: {folder[5:] if folder.startswith('Home/') else folder}"
+
+
+def _live_drafts(rows: list[dict]) -> set[tuple[str, str]]:
+	"""The ``(doctype, name)`` drafts that still exist: one query per doctype, not per row."""
+	wanted: dict[str, set[str]] = {}
+	for r in rows:
+		if r.get("draft_doctype") and r.get("draft_name"):
+			wanted.setdefault(r["draft_doctype"], set()).add(r["draft_name"])
+	live: set[tuple[str, str]] = set()
+	for doctype, names in wanted.items():
+		if not frappe.db.exists("DocType", doctype):
+			continue
+		table = frappe.qb.DocType(doctype)
+		found = frappe.qb.from_(table).select(table.name).where(table.name.isin(list(names))).run(pluck=True)
+		live.update((doctype, n) for n in found)
+	return live
+
+
+def _can_retry_row(row: dict, me: str, manager: bool, live: set[tuple[str, str]]) -> bool:
+	"""Failed or Skipped, no draft yet, not a duplicate, and the caller's to retry."""
+	if row.get("status") not in _INTAKE_RETRYABLE or row.get("duplicate_of"):
+		return False
+	if row.get("draft_name") and (row.get("draft_doctype"), row["draft_name"]) in live:
+		return False
+	return manager or row.get("owner") == me
+
+
+def _intake_filters(filters) -> dict:
+	from frappe.utils import getdate
+
+	f = _load_filters(filters, _INTAKE_FILTERS)
+	if "status" in f and f["status"] not in _INTAKE_STATUSES:
+		frappe.throw("Invalid status filter")
+	for key in ("from_date", "to_date"):
+		if key in f:
+			try:
+				f[key] = getdate(f[key])
+			except Exception:
+				frappe.throw(f"Invalid {key} (expected YYYY-MM-DD)")
+	return f
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def list_intake_page(
+	search: str = "",
+	filters: str | dict | None = None,
+	scope: str = "mine",
+	start: int = 0,
+	page_length: int = 20,
+) -> dict:
+	"""Document Intake files, newest first, as ``{rows, total, has_more, start, page_length}``.
+	``scope="mine"`` is the caller's own uploads; ``"all"`` needs the trigger-manager role.
+	Never returns ``detail`` (managers only). Filters: status, trigger, from_date, to_date."""
+	from frappe.utils import add_days
+	from pypika.functions import Count
+
+	from jarvis.chat.triggers_api import _can_manage
+
+	me = frappe.session.user
+	manager = _can_manage(me)
+	if scope not in ("mine", "all"):
+		frappe.throw("Invalid scope")
+	if scope == "all" and not manager:
+		frappe.throw(
+			"You need the Jarvis Admin or System Manager role to see everyone's files.",
+			frappe.PermissionError,
+		)
+	start, pl = _clamp_page(start, page_length)
+	f = _intake_filters(filters)
+
+	a, fl, t = frappe.qb.DocType(ACTIVITY), frappe.qb.DocType("File"), frappe.qb.DocType("Jarvis Trigger")
+	conds = [a.action_type == "Intake"]
+	if scope == "mine":
+		conds.append(a.owner == me)
+	if "status" in f:
+		conds.append(a.status == f["status"])
+	if "trigger" in f:
+		conds.append(a.trigger == f["trigger"])
+	if "from_date" in f:
+		conds.append(a.creation >= f["from_date"])
+	if "to_date" in f:
+		conds.append(a.creation < add_days(f["to_date"], 1))
+	if search:
+		like = f"%{_lk(search)}%"
+		conds.append(fl.file_name.like(like) | a.summary.like(like))
+
+	def base(*cols):
+		q = (
+			frappe.qb.from_(a)
+			.left_join(fl)
+			.on(fl.name == a.source_file)
+			.left_join(t)
+			.on(t.name == a.trigger)
+			.select(*cols)
+		)
+		for c in conds:
+			q = q.where(c)
+		return q
+
+	total = base(Count("*")).run()[0][0]
+	rows = (
+		base(
+			a.name,
+			a.creation,
+			a.owner,
+			fl.file_name,
+			fl.file_url,
+			a.status,
+			a.summary,
+			a.draft_doctype,
+			a.draft_name,
+			a.approval_request,
+			a.duplicate_of,
+			a.target_docname,
+			t.intake_source,
+			t.intake_folder,
+			t.intake_record_doctype,
+		)
+		.orderby(a.creation, order=frappe.qb.desc)
+		.orderby(a.name, order=frappe.qb.desc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
+	)
+	live = _live_drafts(rows)
+	out = [
+		{
+			"name": r["name"],
+			"creation": r["creation"],
+			"file_name": r["file_name"] or "",
+			"file_url": r["file_url"] or "",
+			"source_label": _intake_source_label(r),
+			"status": r["status"],
+			"summary": r["summary"] or "",
+			"draft_doctype": r["draft_doctype"] or "",
+			"draft_name": r["draft_name"] or "",
+			"approval_request": r["approval_request"] or "",
+			"can_retry": _can_retry_row(r, me, manager, live),
+		}
+		for r in rows
+	]
+	return {
+		"rows": out,
+		"total": total,
+		"has_more": start + len(out) < total,
+		"start": start,
+		"page_length": pl,
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def retry_intake(activity: str) -> dict:
+	"""Run a Failed or Skipped intake file again. Claim-first: one conditional UPDATE
+	moves the row to Queued, so a double click retries once. A saved reading is kept
+	(a draft-only retry costs no AI call) unless the model could not read the image."""
+	from jarvis.chat.triggers_api import _can_manage
+	from jarvis.intake import worker
+
+	me = frappe.session.user
+	row = frappe.db.get_value(
+		ACTIVITY,
+		{"name": activity, "action_type": "Intake"},
+		["name", "owner", "status", "summary", "draft_doctype", "draft_name", "duplicate_of"],
+		as_dict=True,
+	)
+	if not row or not (row.owner == me or _can_manage(me)):
+		frappe.throw("Not permitted", frappe.PermissionError)
+	if row.duplicate_of:
+		frappe.throw(
+			"This file is a duplicate of an earlier upload, so running it again would only repeat it."
+		)
+	if row.status not in _INTAKE_RETRYABLE:
+		frappe.throw("Only a failed or skipped file can be run again.")
+	if (row.draft_doctype, row.draft_name) in _live_drafts([row]):
+		frappe.throw("A draft already exists for this file.")
+
+	a = frappe.qb.DocType(ACTIVITY)
+	update = (
+		frappe.qb.update(a)
+		.set(a.status, "Queued")
+		.set(a.summary, "Queued again")
+		.where((a.name == activity) & a.status.isin(list(_INTAKE_RETRYABLE)))
+	)
+	if row.summary == worker._NO_IMAGE_SUMMARY:
+		update = update.set(a.reading_json, "")  # the model must look at the file again
+	update.run()
+	if frappe.db._cursor.rowcount != 1:
+		frappe.throw("This file was already run again.")
+	frappe.enqueue(
+		"jarvis.intake.worker.run_job",
+		queue="default",
+		enqueue_after_commit=True,
+		job_id=f"intake:{activity}",
+		deduplicate=True,
+		activity=activity,
+	)
+	return {"ok": True, "status": "Queued"}
+
+
+# --------------------------------------------------------------------------- #
 # FB-1 cascade delete (owner-gated; refuses while the run is live or a wiki
 # note is still with a reviewer — orchestrator Q6, M8).
 # --------------------------------------------------------------------------- #
