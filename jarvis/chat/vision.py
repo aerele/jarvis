@@ -10,7 +10,7 @@ images here.
 
 Caps (all enforced before anything leaves the bench):
 - per-image bytes: <= 240 KB. The Claude Code CLI silently drops any @-mentioned
-  file over 256 KiB and openclaw passes images to it unchanged, so a bigger part
+  file over 256 KiB and the agent runtime passes images to it unchanged, so a bigger part
   reaches the model as just a file name. JPEG quality steps down before pixels do;
 - pixels: <= ~3.75MP (Anthropic's limit) - also the decompression-bomb guard,
   set once process-wide at import;
@@ -23,7 +23,7 @@ import base64
 import io
 
 # Claude Code CLI drops @-mentioned files over 256 KiB (262,144 bytes) with no error;
-# openclaw hands it our image unchanged. 240 KB leaves margin. Same rule for every runtime.
+# the agent runtime hands it our image unchanged. 240 KB leaves margin. Same rule for every runtime.
 _MAX_IMAGE_BYTES = 240_000
 _MAX_IMAGE_PIXELS = 3_750_000  # render/resize TARGET for the model (Anthropic ~3.75MP)
 _SIDE_STEPS = (1568, 1400, 1200, 1000, 800)  # longest side; 1568 is Anthropic's optimal
