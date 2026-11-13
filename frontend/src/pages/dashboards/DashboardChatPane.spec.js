@@ -222,6 +222,46 @@ describe("DashboardChatPane surfaces a run that failed before its first token", 
 	});
 });
 
+describe("DashboardChatPane hides a jarvis-goto block from the prose", () => {
+	// The block is a hand-off for the main chat. Here it is dropped, not rendered:
+	// the pane's renderMarkdown double is the identity, so any text left in the
+	// bubble is text the user would read.
+	const seed = async (content) => {
+		localStorage.setItem("jarvis-dash-conv-u@x.com", "conv1");
+		api.getDashboardConversation.mockResolvedValueOnce({
+			conversation: { name: "conv1" },
+			messages: [
+				{ name: "m1", role: "user", content: "Show the cash view" },
+				{ name: "m2", role: "assistant", content },
+			],
+		});
+		const { wrapper } = mountPane();
+		await flushPromises();
+		localStorage.removeItem("jarvis-dash-conv-u@x.com");
+		return wrapper;
+	};
+	const gotoBlock = (page) =>
+		"```jarvis-goto\n" + JSON.stringify({ page, prompt: "Cash by month" }) + "\n```";
+
+	for (const page of ["dashboards", "payment-calendar"]) {
+		it(`strips a ${page} goto and keeps the prose around it`, async () => {
+			const wrapper = await seed(`Opening that.\n\n${gotoBlock(page)}\n\nAnything else?`);
+			const text = wrapper.text();
+			expect(text).toContain("Opening that.");
+			expect(text).toContain("Anything else?");
+			expect(text).not.toContain("jarvis-goto");
+			expect(text).not.toContain("Cash by month");
+		});
+	}
+
+	it("strips a goto that is not valid JSON, so no raw fence shows", async () => {
+		const wrapper = await seed("Hold on.\n\n```jarvis-goto\n{not json\n```");
+		expect(wrapper.text()).toContain("Hold on.");
+		expect(wrapper.text()).not.toContain("jarvis-goto");
+		expect(wrapper.text()).not.toContain("not json");
+	});
+});
+
 describe("DashboardChatPane history menu", () => {
 	it("labels a never-titled thread as untitled, not with the 'New chat' placeholder", async () => {
 		api.listDashboardConversations.mockResolvedValueOnce({
