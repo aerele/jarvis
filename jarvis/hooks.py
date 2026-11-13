@@ -773,6 +773,21 @@ for _trigger_event in (
 	else:
 		_existing_handlers.append(_TRIGGER_DISPATCH)
 
+# Document Intake: watch File uploads (folder rules on insert, record rules when a
+# file gets attached to a saved record). No-op unless an Intake rule exists.
+_intake_file_events = doc_events.setdefault("File", {})
+for _intake_event, _intake_handler in (
+	("after_insert", "jarvis.intake.capture.on_file_insert"),
+	("on_update", "jarvis.intake.capture.on_file_update"),
+):
+	_existing_handlers = _intake_file_events.get(_intake_event)
+	if _existing_handlers is None:
+		_intake_file_events[_intake_event] = _intake_handler
+	elif isinstance(_existing_handlers, str):
+		_intake_file_events[_intake_event] = [_existing_handlers, _intake_handler]
+	else:
+		_existing_handlers.append(_intake_handler)
+
 # Write-risk guard (round 2, jarvis.tools._write_risk): while a Jarvis tool call
 # runs, a ROOT write of a structure / sensitive document is refused unless the card
 # the user confirmed named it; saves a document's own controller makes pass, as from
