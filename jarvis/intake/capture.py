@@ -184,10 +184,19 @@ def _queue_one(doc, rule: dict, event: str, user: str) -> None:
 
 
 def _earlier_row(trigger: str, file_hash: str) -> str | None:
-	# Failed and Skipped rows never produced a draft, so a re-upload may retry.
-	return frappe.db.get_value(
+	"""The first row of this rule that already stands for the same bytes, or None.
+
+	Failed and Skipped rows never produced a draft, so a re-upload may retry. A row that
+	did (Success, or Needs Review with a draft) only counts while its draft still exists:
+	a deleted draft would otherwise leave the file a duplicate for good, with nothing
+	retryable. In-flight and waiting-for-review rows (no draft yet) always count."""
+	rows = frappe.get_all(  # system context: the capture hook runs for any uploader
 		ACTIVITY,
-		{"trigger": trigger, "file_hash": file_hash, "status": ["not in", ["Failed", "Skipped"]]},
-		"name",
+		filters={"trigger": trigger, "file_hash": file_hash, "status": ["not in", ["Failed", "Skipped"]]},
+		fields=["name", "draft_doctype", "draft_name"],
 		order_by="creation asc",
 	)
+	for r in rows:
+		if not r.draft_name or frappe.db.exists(r.draft_doctype, r.draft_name):
+			return r.name
+	return None

@@ -152,6 +152,25 @@ class TestIntakeCapture(FrappeTestCase):
 		self.assertEqual(second.summary, "Same file as an earlier upload")
 		enq.assert_not_called()
 
+	def test_reupload_after_the_draft_was_deleted_is_captured_again(self):
+		rule = self._rule()
+		self._upload("a.png", content="same-bytes-2")
+		(first,) = self._rows(rule)
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "d"}).insert(ignore_permissions=True)
+		frappe.db.set_value(
+			ACTIVITY,
+			first.name,
+			{"status": "Success", "draft_doctype": "ToDo", "draft_name": todo.name},
+		)
+		# While the draft exists the second upload is still a duplicate.
+		self._upload("b.png", content="same-bytes-2")
+		self.assertEqual(self._rows(rule)[1].status, "Skipped")
+		frappe.delete_doc("ToDo", todo.name, ignore_permissions=True)
+		_doc, enq = self._upload("c.png", content="same-bytes-2")
+		third = self._rows(rule)[2]
+		self.assertEqual((third.status, third.duplicate_of), ("Queued", None))
+		enq.assert_called_once()
+
 	def test_record_attach_waits_for_saved_parent(self):
 		rule = self._rule(
 			intake_source="Record",
