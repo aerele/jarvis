@@ -24,6 +24,8 @@ SLOTS = 2
 _SLOT_TTL_S = 360
 _DEFAULT_SITE_CAP = 300
 _PUMP_AGE_MINUTES = 2
+_STUCK_MINUTES = 10
+_MAX_ATTEMPTS = 3
 
 _NO_IMAGE_SUMMARY = "This site's AI model can't read images for intake yet."
 _READ_FAILED_SUMMARY = "Reading the file failed. Managers can see the details in this activity."
@@ -162,10 +164,27 @@ def _run_guarded(row):
 	if not slot:
 		return False
 	try:
+		if not _claim_row(row):
+			return False  # another job owns this row; this one did no work
+		row.status, row.attempts = "Running", cint(row.attempts) + 1
 		_run_stages(row, trigger, needs_ai)
 	finally:
 		_release_slot(slot)
 	return True
+
+
+def _claim_row(row) -> bool:
+	"""Move Queued -> Running in ONE conditional UPDATE and report whether this job won.
+	Two jobs for a row (a duplicate enqueue, a pump racing a chain) can both have read
+	it as Queued; only one UPDATE matches, so only one job makes the AI call."""
+	activity = frappe.qb.DocType(ACTIVITY)
+	frappe.qb.update(activity).set(activity.status, "Running").set(
+		activity.attempts, cint(row.attempts) + 1
+	).where((activity.name == row.name) & (activity.status == "Queued")).run()
+	won = frappe.db._cursor.rowcount == 1
+	if won:
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- the polling UI must see Running
+	return won
 
 
 def _valid_owner(user: str) -> bool:
@@ -177,7 +196,7 @@ def _valid_owner(user: str) -> bool:
 def _run_stages(row, trigger, needs_ai: bool) -> None:
 	from jarvis.intake import spec
 
-	_set(row, status="Running", summary="Reading the file", attempts=cint(row.attempts) + 1)
+	_set(row, summary="Reading the file")
 	if needs_ai:
 		s = spec.load(trigger)
 		try:
@@ -194,9 +213,14 @@ def _run_stages(row, trigger, needs_ai: bool) -> None:
 		if reading.get("error") == "NO_IMAGE":
 			_set(row, status="Failed", summary=_NO_IMAGE_SUMMARY, detail="The model reported NO_IMAGE.")
 			return
+		if note:
+			# Inside the reading so it survives a draft-only retry; draft.finish pops it.
+			reading["_note"] = note
 		# Saved before the draft stage: a retry reuses it instead of paying for another read.
-		_set(row, reading_json=json.dumps(reading), detail=note)
+		_set(row, reading_json=json.dumps(reading))
 	reading = json.loads(row.reading_json)
+	note = reading.get("_note")
+	_set(row, summary=f"Creating the draft. {note}" if note else "Creating the draft")
 	try:
 		draft.finish(row, reading)
 	except Exception as e:
@@ -204,9 +228,37 @@ def _run_stages(row, trigger, needs_ai: bool) -> None:
 		_set(row, status="Failed", summary=_DRAFT_FAILED_SUMMARY, detail=f"{e}"[:2000])
 
 
+def _recover_stuck() -> None:
+	"""A job killed mid-run (OOM, restart) leaves its row Running for good. Past the
+	slot TTL plus margin, retry it (it keeps any saved reading) or give up after 3 runs."""
+	# System context: scheduler job, not a user request.
+	stuck = frappe.get_all(
+		ACTIVITY,
+		filters={
+			"action_type": "Intake",
+			"status": "Running",
+			"modified": ["<", add_to_date(now_datetime(), minutes=-_STUCK_MINUTES)],
+		},
+		fields=["name", "attempts"],
+	)
+	for r in stuck:
+		if cint(r.attempts) < _MAX_ATTEMPTS:
+			frappe.db.set_value(
+				ACTIVITY, r.name, {"status": "Queued", "summary": "Retrying after an interruption"}
+			)
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- scheduler job must publish the state
+			_enqueue(r.name)
+		else:
+			frappe.db.set_value(
+				ACTIVITY, r.name, {"status": "Failed", "summary": "Stopped unexpectedly. Retry it."}
+			)
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- scheduler job must publish the state
+
+
 def pump() -> None:
 	"""Cron backstop: a row whose job was lost (restart, crash) or that found no slot
 	still moves. Starts up to two rows older than two minutes when a slot looks free."""
+	_recover_stuck()
 	cache = frappe.cache()
 	free = sum(1 for key in slot_keys() if not cache.exists(key))
 	if not free:

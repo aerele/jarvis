@@ -64,7 +64,7 @@ def _parts(fdoc, content: bytes) -> tuple[list[dict], str]:
 	name = fdoc.file_name or fdoc.name
 	if name.lower().endswith(".pdf") or content[:5] == b"%PDF-":
 		parts, total = vision.pdf_parts(content, name, max_pages=MAX_PAGES, max_bytes=IMAGE_BYTES)
-		note = f"read first {len(parts)} of {total} pages" if total > len(parts) else ""
+		note = f"Read {len(parts)} of {total} pages" if total > len(parts) else ""
 		return parts, note
 	part = vision.image_part(content, name, max_bytes=IMAGE_BYTES)
 	return ([part] if part else []), ""

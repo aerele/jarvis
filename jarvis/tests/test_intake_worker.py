@@ -212,11 +212,81 @@ class TestIntakeWorker(FrappeTestCase):
 			s = spec.load({"intake_target_doctype": "ToDo", "intake_spec": {"fields": ["description"]}})
 			data, note = reader.read_file(fdoc.name, s)
 		self.assertEqual(data, READING)
-		self.assertEqual(note, "read first 10 of 14 pages")
+		self.assertEqual(note, "Read 10 of 14 pages")
 		self.assertEqual(len(client.call_args.kwargs["images"]), 10)
 		row = self._row(rule, fdoc)
-		self._run(row)
-		self.assertIn("read first 10 of 14 pages", self._get(row).detail)
+		_client, fin = self._run(row)
+		# The uploader sees the note: it is in the Running summary and in the saved reading
+		# (so a draft-only retry keeps it); draft.finish pops it into the final summary.
+		got = self._get(row)
+		self.assertIn("Read 10 of 14 pages", got.summary)
+		self.assertEqual(json.loads(got.reading_json)["_note"], "Read 10 of 14 pages")
+		self.assertEqual(fin.call_args.args[1]["_note"], "Read 10 of 14 pages")
+
+	def test_note_counts_pages_actually_read(self):
+		fdoc = self._file("nine.pdf", _pdf(14))
+		s = spec.load({"intake_target_doctype": "ToDo", "intake_spec": {"fields": ["description"]}})
+		real = reader.vision.pdf_parts
+
+		def nine(*a, **kw):
+			parts, total = real(*a, **kw)
+			return parts[:9], total
+
+		with (
+			mock.patch("jarvis.intake.reader.vision.pdf_parts", nine),
+			mock.patch("jarvis.intake.client.vision_task_complete", mock.Mock(return_value=READING)),
+		):
+			_data, note = reader.read_file(fdoc.name, s)
+		self.assertEqual(note, "Read 9 of 14 pages")
+
+	def test_second_job_for_a_claimed_row_makes_no_ai_call(self):
+		rule = self._rule()
+		row = self._row(rule)
+		stale = frappe.get_doc(ACTIVITY, row.name)  # what a racing job loaded: still Queued
+		client, _ = self._run(row)
+		self.assertEqual(client.call_count, 1)
+		client2 = mock.Mock(return_value=READING)
+		real_get_doc = frappe.get_doc
+		racing = mock.Mock(
+			side_effect=lambda *a, **kw: stale if a and a[0] == ACTIVITY else real_get_doc(*a, **kw)
+		)
+		with (
+			mock.patch("jarvis.intake.client.vision_task_complete", client2),
+			mock.patch("jarvis.intake.draft.finish"),
+			mock.patch("frappe.enqueue"),
+			mock.patch("frappe.get_doc", racing),
+		):
+			worker.run_job(row.name)
+		client2.assert_not_called()
+		cache = frappe.cache()
+		self.assertFalse(any(cache.exists(k) for k in worker.slot_keys()))
+
+	def _stuck(self, rule, attempts):
+		row = self._row(rule, status="Running", attempts=attempts)
+		frappe.db.set_value(
+			ACTIVITY, row.name, "modified", add_to_date(now_datetime(), minutes=-11), update_modified=False
+		)
+		return row
+
+	def test_pump_requeues_stuck_running_row_under_three_attempts(self):
+		rule = self._rule()
+		row = self._stuck(rule, 1)
+		with mock.patch("frappe.enqueue") as enq:
+			worker.pump()
+		got = self._get(row)
+		self.assertEqual((got.status, got.summary), ("Queued", "Retrying after an interruption"))
+		self.assertIn(row.name, [c.kwargs["activity"] for c in enq.call_args_list])
+
+	def test_pump_fails_stuck_running_row_after_three_attempts(self):
+		rule = self._rule()
+		row = self._stuck(rule, 3)
+		fresh = self._row(rule, self._file("f.png"), status="Running", attempts=1)
+		with mock.patch("frappe.enqueue") as enq:
+			worker.pump()
+		got = self._get(row)
+		self.assertEqual((got.status, got.summary), ("Failed", "Stopped unexpectedly. Retry it."))
+		self.assertNotIn(row.name, [c.kwargs["activity"] for c in enq.call_args_list])
+		self.assertEqual(self._get(fresh).status, "Running")  # recent: left alone
 
 	def test_old_plugin_maps_to_update_copy(self):
 		rule = self._rule()
