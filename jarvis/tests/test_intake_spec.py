@@ -107,6 +107,70 @@ class TestIntakeSpec(FrappeTestCase):
 		self.assertRaises(frappe.ValidationError, self._insert, **{**base, "intake_record_doctype": "User"})
 		self._insert(**base, intake_status_field="status", intake_link_field="reference_name")
 
+	def test_target_doctype_gated(self):
+		# User is denylisted, Website Settings is Single, Note Seen By is a child table.
+		for dt in ("User", "Website Settings", "Note Seen By", "No Such DocType"):
+			spec_json = json.dumps({"fields": ["description"]})
+			with self.subTest(target=dt):
+				self.assertRaises(
+					frappe.ValidationError, self._insert, intake_target_doctype=dt, intake_spec=spec_json
+				)
+
+	def test_record_doctype_gated(self):
+		for dt in ("User", "Website Settings", "Note Seen By"):
+			with self.subTest(record=dt):
+				self.assertRaises(
+					frappe.ValidationError,
+					self._insert,
+					intake_source="Record",
+					intake_folder=None,
+					intake_record_doctype=dt,
+				)
+
+	def test_defaults_are_validated(self):
+		def spec_with(**defaults):
+			return json.dumps({"fields": ["description"], "defaults": defaults})
+
+		# Blank defaults are refused as coverage of a mandatory field.
+		for blank in (None, "", "   "):
+			bad = json.dumps({"fields": ["priority"], "defaults": {"description": blank}})
+			with self.subTest(blank=blank):
+				self.assertRaises(frappe.ValidationError, self._insert, intake_spec=bad)
+		# Select must be one of its options.
+		self.assertRaises(frappe.ValidationError, self._insert, intake_spec=spec_with(priority="Urgent"))
+		self._insert(intake_spec=spec_with(priority="High"), enabled=0)
+		# Link must exist.
+		self.assertRaises(
+			frappe.ValidationError, self._insert, intake_spec=spec_with(allocated_to="nobody@nowhere.invalid")
+		)
+		self._insert(intake_spec=spec_with(allocated_to="Administrator"), enabled=0)
+		# Numbers must parse.
+		item = {"intake_target_doctype": "Item"}
+		fields = ["item_name", "item_group"]
+		bad_num = json.dumps({"fields": fields, "defaults": {"shelf_life_in_days": "soon"}})
+		self.assertRaises(
+			frappe.ValidationError, self._insert, **item, intake_spec=bad_num, allow_incomplete_drafts=1
+		)
+		ok_num = json.dumps({"fields": fields, "defaults": {"shelf_life_in_days": "30"}})
+		self._insert(**item, intake_spec=ok_num, allow_incomplete_drafts=1)
+
+	def test_duplicate_intake_rule_refused(self):
+		self._insert()
+		self.assertRaises(frappe.ValidationError, self._insert)
+		# Different target, same folder: allowed.
+		self._insert(
+			intake_target_doctype="Note",
+			intake_spec=json.dumps({"fields": ["title"]}),
+		)
+		# Disabled duplicate: allowed; but re-enabling it is refused.
+		dup = self._insert(enabled=0)
+		dup.enabled = 1
+		self.assertRaises(frappe.ValidationError, dup.save, ignore_permissions=True)
+		# Same record doctype + target is a duplicate too.
+		rec = {"intake_source": "Record", "intake_folder": None, "intake_record_doctype": "ToDo"}
+		self._insert(**rec)
+		self.assertRaises(frappe.ValidationError, self._insert, **rec)
+
 	def test_load_reads_row_and_accepts_dict_or_json(self):
 		row = self._insert(allow_incomplete_drafts=1, intake_instructions="Read the totals.")
 		s = intake_spec.load(row)

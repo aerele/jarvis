@@ -264,26 +264,40 @@ class JarvisTrigger(NotRenamable, Document):
 	def _validate_target_doctype(self):
 		if not self.target_doctype:
 			frappe.throw(_("Target DocType is required."))
-		row = frappe.db.get_value("DocType", self.target_doctype, ["issingle", "istable"], as_dict=True)
+		self._check_doctype_usable(self.target_doctype)
+
+	def _check_doctype_usable(self, doctype, intake=False):
+		"""One gate for every doctype a trigger touches (event target, intake
+		target, intake record): exists, not Single, not a child table, not on the
+		denylist. ``intake`` only changes the wording."""
+		row = frappe.db.get_value("DocType", doctype, ["issingle", "istable"], as_dict=True)
 		if not row:
-			frappe.throw(_("DocType '{0}' does not exist.").format(self.target_doctype))
+			frappe.throw(_("DocType '{0}' does not exist.").format(doctype))
 		if cint(row.issingle):
 			frappe.throw(
-				_("Triggers cannot target single DocTypes ('{0}' is a Single).").format(self.target_doctype)
+				_("Triggers cannot target single DocTypes ('{0}' is a Single).").format(doctype)
+				if not intake
+				else _("Intake cannot use single DocTypes ('{0}' is a Single).").format(doctype)
 			)
 		if cint(row.istable):
 			frappe.throw(
 				_(
 					"Triggers cannot target child tables ('{0}'). Target the parent "
 					"DocType instead. Child rows ride its events."
-				).format(self.target_doctype)
+				).format(doctype)
+				if not intake
+				else _("Intake cannot use child tables ('{0}'). Use the parent DocType instead.").format(
+					doctype
+				)
 			)
-		if self.target_doctype in DENYLISTED_DOCTYPES:
+		if doctype in DENYLISTED_DOCTYPES:
 			frappe.throw(
 				_(
 					"Triggers on '{0}' are not allowed. They could loop on their own "
 					"logs or fire on internal plumbing."
-				).format(self.target_doctype)
+				).format(doctype)
+				if not intake
+				else _("Intake on '{0}' is not allowed. It is an internal DocType.").format(doctype)
 			)
 
 	def _validate_event_action(self):
@@ -308,7 +322,40 @@ class JarvisTrigger(NotRenamable, Document):
 			self._validate_intake_folder()
 		else:
 			self._validate_intake_record()
+		if not self.intake_target_doctype:
+			frappe.throw(_("Pick the DocType the drafts are created in."))
+		self._check_doctype_usable(self.intake_target_doctype, intake=True)
 		intake_spec.validate(intake_spec.load(self))
+		self._check_intake_duplicates()
+
+	def _check_intake_duplicates(self):
+		"""Two enabled rules reading the same source into the same DocType would
+		create two drafts per upload."""
+		if not cint(self.enabled):
+			return
+		by_source = {"Folder": "intake_folder", "Record": "intake_record_doctype"}[self.intake_source]
+		# System context on purpose: rules are site-wide, so a permission-filtered
+		# read would miss another user's duplicate.
+		duplicate = frappe.get_all(
+			"Jarvis Trigger",
+			filters={
+				"name": ["!=", self.name or ""],
+				"enabled": 1,
+				"action_type": "Intake",
+				"intake_source": self.intake_source,
+				by_source: self.get(by_source),
+				"intake_target_doctype": self.intake_target_doctype,
+			},
+			limit=1,
+			pluck="name",
+		)
+		if duplicate:
+			frappe.throw(
+				_("Another enabled intake rule already creates {0} from {1}.").format(
+					self.intake_target_doctype, self.get(by_source)
+				),
+				frappe.ValidationError,
+			)
 
 	def _validate_intake_folder(self):
 		path = (self.intake_folder or "").strip().strip("/")
@@ -320,11 +367,7 @@ class JarvisTrigger(NotRenamable, Document):
 		doctype = self.intake_record_doctype
 		if not doctype:
 			frappe.throw(_("Record DocType is required."))
-		row = frappe.db.get_value("DocType", doctype, ["issingle", "istable"], as_dict=True)
-		if not row:
-			frappe.throw(_("DocType '{0}' does not exist.").format(doctype))
-		if cint(row.issingle) or cint(row.istable) or doctype in DENYLISTED_DOCTYPES:
-			frappe.throw(_("Intake from '{0}' is not allowed.").format(doctype))
+		self._check_doctype_usable(doctype, intake=True)
 		meta = frappe.get_meta(doctype)
 		for fieldname in (self.intake_status_field, self.intake_link_field):
 			if fieldname and not meta.has_field(fieldname):

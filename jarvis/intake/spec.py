@@ -123,11 +123,35 @@ def validate(s: IntakeSpec) -> None:
 				)
 			)
 
-	for fieldname in s.defaults:
-		_value_field(meta, fieldname, _("Defaults"))
+	for fieldname, value in s.defaults.items():
+		_validate_default(_value_field(meta, fieldname, _("Defaults")), value)
 
 	if not s.allow_incomplete:
 		_validate_coverage(s, meta)
+
+
+def _is_blank(value) -> bool:
+	return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _validate_default(df, value) -> None:
+	"""A default is written to every draft as is, so it must be a legal value for
+	the field. Blank values are skipped here (they just do not cover anything)."""
+	if _is_blank(value):
+		return
+	name = df.fieldname
+	if df.fieldtype == "Select":
+		options = [o.strip() for o in (df.options or "").split("\n") if o.strip()]
+		if str(value) not in options:
+			frappe.throw(_("Default for '{0}' must be one of: {1}.").format(name, ", ".join(options)))
+	elif df.fieldtype == "Link":
+		if not frappe.db.exists(df.options, value):
+			frappe.throw(_("Default for '{0}': {1} '{2}' does not exist.").format(name, df.options, value))
+	elif df.fieldtype in _INTEGER_TYPES | _NUMBER_TYPES:
+		try:
+			float(value)
+		except (TypeError, ValueError):
+			frappe.throw(_("Default for '{0}' must be a number.").format(name))
 
 
 def _validate_table(s: IntakeSpec, meta) -> None:
@@ -147,7 +171,8 @@ def _validate_coverage(s: IntakeSpec, meta) -> None:
 	"""Strict mode: a draft is only saved when every mandatory field is read or
 	defaulted, so refuse a spec that could never produce one."""
 	header, columns = mandatory_fields(s)
-	covered = set(s.fields) | set(s.defaults)
+	# A blank default fills nothing, so it never counts as coverage.
+	covered = set(s.fields) | {k for k, v in s.defaults.items() if not _is_blank(v)}
 	missing = [f for f in header if f not in covered]
 	missing_columns = [c for c in columns if c not in ((s.table or {}).get("columns") or [])]
 	# A mandatory table that the spec does not fill can never be satisfied.
