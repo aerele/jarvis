@@ -21,12 +21,6 @@ vi.mock("frappe-ui", () => ({
 		emits: ["update:modelValue"],
 		template: "<div class='fui-select' />",
 	},
-	FormControl: {
-		name: "FormControl",
-		props: ["type", "modelValue", "disabled", "placeholder"],
-		emits: ["update:modelValue"],
-		template: "<input class='fui-control' />",
-	},
 	LoadingIndicator: { name: "LoadingIndicator", template: "<span class='fui-loading' />" },
 }));
 
@@ -314,13 +308,15 @@ test("field: a Check field renders the Yes/No buttons, with no Other box", async
 	expect(findCard(w).emitted("submit")[0][0]).toBe("Here are my answers:\n1. HSN Code → Yes");
 });
 
-test("field: Int / Float / Currency / Percent render a numeric frappe-ui input", async () => {
+// The card's own field (jarvis-admin-v2#806): a frappe-ui FormControl painted as
+// a bare browser input on the chat surface, unlike the date/text/link siblings.
+test("field: Int / Float / Currency / Percent render a decimal .jv-ask-field input", async () => {
 	for (const fieldtype of ["Int", "Float", "Currency", "Percent"]) {
 		const w = await fieldCard({ fieldtype });
-		const c = w.findComponent({ name: "FormControl" });
+		const c = w.find('input[inputmode="decimal"]');
 		expect(c.exists(), fieldtype).toBe(true);
-		c.vm.$emit("update:modelValue", "42");
-		await w.vm.$nextTick();
+		expect(c.classes(), fieldtype).toContain("jv-ask-field");
+		await c.setValue("42");
 		expect(submit(w).attributes("disabled")).toBeUndefined();
 	}
 });
@@ -351,12 +347,10 @@ test("field: a field the meta does not list falls back to the text input", async
 
 test("field: a numeric control rejects non-numbers and accepts numbers", async () => {
 	const w = await fieldCard({ fieldtype: "Int" });
-	const c = w.findComponent({ name: "FormControl" });
-	c.vm.$emit("update:modelValue", "abc");
-	await w.vm.$nextTick();
+	const c = w.find('input[inputmode="decimal"]');
+	await c.setValue("abc");
 	expect(submit(w).attributes("disabled")).toBeDefined();
-	c.vm.$emit("update:modelValue", "1,200");
-	await w.vm.$nextTick();
+	await c.setValue("1,200");
 	expect(submit(w).attributes("disabled")).toBeUndefined();
 });
 

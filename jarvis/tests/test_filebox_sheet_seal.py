@@ -21,6 +21,7 @@ from jarvis.chat import (
 	held_sheet_seal,
 	held_sheets,
 	held_writes,
+	macros,  # imported before any clock patch: see TestBackstopClockDoesNotLeak
 	settlement,
 )
 from jarvis.chat import pending_actions as pa
@@ -569,6 +570,20 @@ class TestBackstop(_SealBase):
 			{(q.status, q.decision) for q in self.questions(sheet.name)},
 			{("Dismissed", held_sheet_seal.CLOSED_NOTE)},
 		)
+
+
+class TestBackstopClockDoesNotLeak(_SealBase):
+	"""``TestBackstop.ahead`` patches ``frappe.utils.now_datetime``. A module that is first
+	imported while that patch is active binds the mock for good (``from frappe.utils import
+	now_datetime``), freezing its clock for every later test in the process. The seal's
+	notification path imports ``jarvis.chat.macros`` lazily, so with this file first in a CI
+	shard the macro sweep ran on a frozen clock and ``test_macro_reconcile`` failed."""
+
+	def test_a_lazily_imported_module_never_binds_the_patched_clock(self):
+		from unittest.mock import Mock
+
+		self.assertNotIsInstance(macros.now_datetime, Mock)
+		self.assertIs(macros.now_datetime, frappe.utils.now_datetime)
 
 
 # --------------------------------------------------------------------------- #

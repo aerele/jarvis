@@ -336,10 +336,21 @@ def _run_whitelisted(method: str, args: dict | None) -> dict:
 	# with the arg missing and return a wrong/empty result the user then trusts.
 	_reject_unknown_args(fn, method, args)
 
+	# Desk's /api/method handler runs a method with a form_dict holding exactly that
+	# call's arguments, and some whitelisted methods read it instead of (or as well
+	# as) their parameters: frappe.client.get_count writes doctype / filters into it
+	# and frappe.desk.reportview.get_count passes ALL of it to the query. Here the
+	# tool runs inside another request (the Confirm click, the agent's call_tool),
+	# whose form_dict (token, conversation ...) would leak in as query arguments
+	# ("unexpected keyword argument 'token'", Aerele-RnD/jarvis-admin-v2#750).
+	outer = getattr(frappe.local, "form_dict", None)
+	frappe.local.form_dict = frappe._dict(args or {})
 	try:
 		return frappe.call(fn, **(args or {}))
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"no permission to call {method}") from e
+	finally:
+		frappe.local.form_dict = outer if outer is not None else frappe._dict()
 
 
 def _is_denied(fn) -> bool:

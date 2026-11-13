@@ -31,6 +31,14 @@ AGENT_WRITE = "Jarvis Agent Write"
 PREFIX = "jarvis-wg-"
 
 
+def _gender() -> str:
+	# a site that never ran the setup wizard has no Gender records
+	name = frappe.db.get_value("Gender", {}, "name")
+	if name:
+		return name
+	return frappe.get_doc({"doctype": "Gender", "gender": "Other"}).insert(ignore_permissions=True).name
+
+
 # --------------------------------------------------------------------------- #
 # Whitelisted stand-ins for "a custom app's method" (run_method targets). None of
 # their arguments names a doctype, so only the ORM guard can catch them.
@@ -453,7 +461,7 @@ class TestNestedWritesFromChat(FrappeTestCase):
 			{
 				"doctype": "Employee",
 				"first_name": "Jarvis Wg",
-				"gender": frappe.db.get_value("Gender", {}, "name"),
+				"gender": _gender(),
 				"date_of_birth": "1990-01-01",
 				"date_of_joining": "2020-01-01",
 				"company": company,
@@ -1019,7 +1027,7 @@ class TestConfirmedRunMethod(_RouteBase):
 				"doctype": "Employee",
 				"first_name": "Jarvis Wg Run",
 				"status": "Active",
-				"gender": frappe.db.get_value("Gender", {}, "name"),
+				"gender": _gender(),
 				"date_of_birth": "1990-01-01",
 				"date_of_joining": "2020-01-01",
 				"company": company,
@@ -1424,7 +1432,7 @@ class TestSavedRoutesCycle3(_RouteBase):
 		values = {
 			"first_name": "Jarvis Wg Auto",
 			"status": "Active",
-			"gender": frappe.db.get_value("Gender", {}, "name"),
+			"gender": _gender(),
 			"date_of_birth": "1990-01-01",
 			"date_of_joining": "2020-01-01",
 			"company": company,
@@ -1470,6 +1478,68 @@ class TestSavedRoutesCycle3(_RouteBase):
 			frappe.db.exists("User Permission", {"user": email, "allow": "Employee", "for_value": emp.name})
 		)
 
+	def test_default_user_permission_flag_alone_is_not_access(self):
+		"""Aerele-RnD/jarvis-admin-v2#749: ``create_user_permission`` defaults to 1, and
+		with no user (no ``user_id``, no ``create_user_automatically``) it grants
+		nothing, so the save is not sensitive; with a user to act on, it still is."""
+		company = frappe.db.get_value("Company", {}, "name")
+		if not company:
+			self.skipTest("no Company on this site")
+		doc = frappe.new_doc("Employee")
+		doc.update({"first_name": "Jarvis Wg Plain", "company": company})
+		self.assertEqual(doc.create_user_permission, 1, "the Employee default this guards against")
+		self.assertIsNone(wr.doc_risk(doc, "before_validate"))
+		doc.user_id = "Administrator"
+		self.assertEqual(wr.doc_risk(doc, "before_validate"), "sensitive", "a linked user still counts")
+		doc.user_id = None
+		if frappe.get_meta("Employee").has_field("create_user_automatically"):
+			doc.create_user_automatically = 1
+			self.assertEqual(wr.doc_risk(doc, "before_validate"), "sensitive", "an auto-created user counts")
+
+	def test_plain_employee_create_runs_after_its_card(self):
+		"""Aerele-RnD/jarvis-admin-v2#749: an Employee with no user, emails or login
+		gets an ordinary card, and confirming it creates exactly one Employee instead
+		of a ``sensitive_refused`` loop. Replaying the confirmation creates no second."""
+		company = frappe.db.get_value("Company", {}, "name")
+		if not company:
+			self.skipTest("no Company on this site")
+		values = {
+			"first_name": "Jarvis Wg Plain",
+			"status": "Active",
+			"gender": _gender(),
+			"date_of_birth": "1990-01-01",
+			"date_of_joining": "2020-01-01",
+			"company": company,
+		}
+
+		def _drop():
+			frappe.db.rollback()
+			for emp in frappe.get_all("Employee", {"first_name": "Jarvis Wg Plain"}, pluck="name"):
+				frappe.db.delete("User Permission", {"for_value": emp})
+				frappe.delete_doc("Employee", emp, force=True, ignore_permissions=True)
+			frappe.db.commit()
+
+		self.addCleanup(_drop)
+		self.assertIsNone(wr.risk_of("create_doc", {"doctype": "Employee", "values": values}))
+		conv = _make_conv("Administrator")  # the card's owner confirms it
+		self.addCleanup(lambda: (_cleanup_convs("Administrator"), frappe.db.commit()))
+		r = self._run("create_doc", {"doctype": "Employee", "values": values}, conv)
+		self.assertEqual(r["data"]["status"], "pending_confirmation", r)
+		self.assertFalse(frappe.db.exists("Employee", {"first_name": "Jarvis Wg Plain"}))
+		from jarvis.chat.actions_api import confirm_tool
+
+		token = self._token()
+		with patch("jarvis.chat.api._dispatch_turn"):
+			res = confirm_tool(token, conversation=conv)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual(frappe.db.count("Employee", {"first_name": "Jarvis Wg Plain"}), 1, res)
+		with patch("jarvis.chat.api._dispatch_turn"):
+			try:
+				confirm_tool(token, conversation=conv)
+			except Exception:
+				pass  # a spent token may raise or answer not-ok; either way nothing runs
+		self.assertEqual(frappe.db.count("Employee", {"first_name": "Jarvis Wg Plain"}), 1)
+
 	def _employee(self, **values):
 		company = frappe.db.get_value("Company", {}, "name")
 		if not company:
@@ -1479,7 +1549,7 @@ class TestSavedRoutesCycle3(_RouteBase):
 				"doctype": "Employee",
 				"first_name": "Jarvis Wg Field",
 				"status": "Active",
-				"gender": frappe.db.get_value("Gender", {}, "name"),
+				"gender": _gender(),
 				"date_of_birth": "1990-01-01",
 				"date_of_joining": "2020-01-01",
 				"company": company,

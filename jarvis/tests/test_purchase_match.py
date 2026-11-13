@@ -96,6 +96,7 @@ def output(captured):
 AP_E2E_CO, AP_E2E_ABBR = "zz-apm Test Co", "ZAPM"
 AP_E2E_SUPPLIER, AP_E2E_ITEM = "zz-apm Acme Traders", "ZZ-APM-WIDGET"
 AP_E2E_ITEM_GROUP = "zz-apm Products"
+AP_E2E_SUPPLIER_GROUP = "zz-apm Vendors"  # a supplier needs a leaf group
 AP_E2E_FISCAL_YEAR = "zz-apm"
 
 
@@ -118,6 +119,7 @@ def _purge_ap_e2e(roots=()):
 	for doctype, name in (
 		("Item", AP_E2E_ITEM),
 		("Supplier", AP_E2E_SUPPLIER),
+		("Supplier Group", AP_E2E_SUPPLIER_GROUP),
 		("Item Group", AP_E2E_ITEM_GROUP),
 	):
 		if frappe.db.exists(doctype, name):
@@ -221,7 +223,11 @@ def _ap_e2e_fixtures():
 	_ap_e2e_insert(
 		"Item Group", {"item_group_name": AP_E2E_ITEM_GROUP, "parent_item_group": "All Item Groups"}
 	)
-	_ap_e2e_insert("Supplier", {"supplier_name": AP_E2E_SUPPLIER, "supplier_group": "All Supplier Groups"})
+	_ap_e2e_insert(
+		"Supplier Group",
+		{"supplier_group_name": AP_E2E_SUPPLIER_GROUP, "parent_supplier_group": "All Supplier Groups"},
+	)
+	_ap_e2e_insert("Supplier", {"supplier_name": AP_E2E_SUPPLIER, "supplier_group": AP_E2E_SUPPLIER_GROUP})
 	item = {
 		"item_code": AP_E2E_ITEM,
 		"item_group": AP_E2E_ITEM_GROUP,

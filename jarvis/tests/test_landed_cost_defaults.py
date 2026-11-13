@@ -227,7 +227,9 @@ class TestLandedCostDefaults(LandedCostFixtures):
 		self.assertAlmostEqual(preview["resolved"]["total_vendor_invoices_cost"], expected)
 		self.assertEqual(frappe.db.count("Landed Cost Voucher"), before)
 		self.assertFalse(self.invoice.reload().claimed_landed_cost_amount)
-		saved = create_doc("Landed Cost Voucher", values)
+		saved = create_doc(
+			"Landed Cost Voucher", values, fields=["total_vendor_invoices_cost", "vendor_invoices"]
+		)
 		self.assertEqual(saved["docstatus"], 0)
 		self.assertAlmostEqual(saved["total_vendor_invoices_cost"], expected)
 		self.assertEqual(
@@ -238,14 +240,20 @@ class TestLandedCostDefaults(LandedCostFixtures):
 		first = create_doc("Landed Cost Voucher", self.values(amounts=[30], charge=30))
 		frappe.get_doc("Landed Cost Voucher", first["name"]).submit()
 		self.assertEqual(self.invoice.reload().claimed_landed_cost_amount, 30)
-		saved = create_doc("Landed Cost Voucher", self.values(charge=90))
+		saved = create_doc(
+			"Landed Cost Voucher", self.values(charge=90), fields=["total_vendor_invoices_cost"]
+		)
 		self.assertEqual(saved["total_vendor_invoices_cost"], 90)
 
 	def test_explicit_zero_null_blank_and_partial_are_not_fetched(self):
 		controller = type(frappe.new_doc("Landed Cost Voucher"))
 		for amount in (0, None, "", 25):
 			with self.subTest(amount=amount), patch.object(controller, "get_vendor_invoice_amount") as fetch:
-				saved = create_doc("Landed Cost Voucher", self.values(amounts=[amount]))
+				saved = create_doc(
+					"Landed Cost Voucher",
+					self.values(amounts=[amount]),
+					fields=["total_vendor_invoices_cost"],
+				)
 				fetch.assert_not_called()
 				self.assertEqual(saved["total_vendor_invoices_cost"], amount or 0)
 
@@ -334,7 +342,7 @@ class TestLandedCostDefaults(LandedCostFixtures):
 			preview = preview_doc("Landed Cost Voucher", values)
 			self.assertTrue(preview["valid"], preview)
 			self.assertEqual(preview["resolved"]["total_vendor_invoices_cost"], 120)
-			saved = create_doc("Landed Cost Voucher", values)
+			saved = create_doc("Landed Cost Voucher", values, fields=["total_vendor_invoices_cost"])
 			self.assertEqual(saved["docstatus"], 0)
 			self.assertEqual(saved["total_vendor_invoices_cost"], 120)
 		finally:
@@ -357,7 +365,7 @@ class TestLandedCostDefaults(LandedCostFixtures):
 			return False if doctype == "Purchase Invoice" else original(doctype, *args, **kwargs)
 
 		with patch("jarvis.tools._client_defaults.frappe.has_permission", side_effect=permission):
-			saved = create_doc("Landed Cost Voucher", values)
+			saved = create_doc("Landed Cost Voucher", values, fields=["total_vendor_invoices_cost"])
 		self.assertEqual(saved["total_vendor_invoices_cost"], 25)
 
 	def test_save_refreshes_an_omitted_default_after_preview(self):
@@ -367,7 +375,7 @@ class TestLandedCostDefaults(LandedCostFixtures):
 		self.assertNotIn("amount", values["vendor_invoices"][0])
 		first = create_doc("Landed Cost Voucher", self.values(amounts=[30], charge=30))
 		frappe.get_doc("Landed Cost Voucher", first["name"]).submit()
-		saved = create_doc("Landed Cost Voucher", values)
+		saved = create_doc("Landed Cost Voucher", values, fields=["total_vendor_invoices_cost"])
 		self.assertEqual(saved["total_vendor_invoices_cost"], 90)
 
 	def test_a_draft_invoice_is_not_a_derivable_cost(self):

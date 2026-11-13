@@ -227,6 +227,38 @@ jobs:
           path: frontend/test-results/approval-layout
           retention-days: 7
 
+  # Real-browser Payment Calendar gate (#821). A stateful mock serves the golden JSON of the
+  # backend tests, so the SPA renders in system Chrome with no site. Needs no bench shard.
+  payment-calendar-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend deps and Chrome
+        working-directory: frontend
+        run: |
+          npm ci --prefix ../wiki-graph-core
+          npm ci
+          npx playwright install --with-deps chrome
+      - name: Stub the bench site config (API calls are mocked)
+        run: |
+          mkdir -p "$HOME/sites"
+          printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$HOME/sites/common_site_config.json"
+      - name: Check the Payment Calendar in Chrome
+        working-directory: frontend
+        run: npx playwright test --config playwright.payment-calendar.config.cjs
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: payment-calendar-browser-failure
+          path: frontend/test-results/payment-calendar
+          retention-days: 7
+
   # Builds BOTH deploy artifacts (the /jarvis SPA and the /jarvis-mobile PWA) on Node
   # 18.16.0 the way the Frappe Cloud v15 deploy does, so a Vite/workbox break surfaces here
   # instead of as a 404 (or a failed deploy) in production. The PWA reads the bench site
@@ -508,6 +540,11 @@ jobs:
           bench get-app --branch version-15 --skip-assets https://github.com/resilient-tech/india-compliance.git
           git -C apps/india_compliance fetch upstream eb7860a9250f76f7aeeb2e4a35b8135875bfd2e9
           git -C apps/india_compliance checkout --detach eb7860a9250f76f7aeeb2e4a35b8135875bfd2e9
+          # ERPNext v15.125.0 refuses a Supplier in a group Supplier Group, and the pin's
+          # before_tests defaults to "All Supplier Groups". Add the upstream fix (test setup
+          # only, india-compliance #5053) until a version-15 release includes it.
+          git -C apps/india_compliance fetch --depth 2 upstream afcd220ac14aeb5f3db781b916402cbc9e66237c
+          git -C apps/india_compliance cherry-pick --no-commit afcd220ac14aeb5f3db781b916402cbc9e66237c
           ./env/bin/pip install -e apps/india_compliance
           bench new-site jarvis-lcv-ci.test \
             --db-host 127.0.0.1 \
