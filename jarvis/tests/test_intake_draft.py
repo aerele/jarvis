@@ -321,7 +321,7 @@ class TestIntakeDraft(FrappeTestCase):
 		self.assertIsNone(state.approval_request)
 		self.assertEqual(state.draft_doctype, PARENT)
 		self.assertIn(f"Draft ready: {PARENT} {state.draft_name}", state.summary)
-		self.assertIn("fields to check)", state.summary)
+		self.assertIn("field(s) to check)", state.summary)
 		comment = frappe.db.get_value(
 			"Comment",
 			{"reference_doctype": PARENT, "reference_name": state.draft_name, "comment_type": "Comment"},
@@ -483,3 +483,131 @@ class TestIntakeDraft(FrappeTestCase):
 		state = self._state(row)
 		doc = frappe.get_doc(PARENT, state.draft_name)
 		self.assertEqual((doc.title, doc.priority, state.status), ("Fallback", "High", "Success"))
+
+	# ---- fix round 1 ----------------------------------------------------------
+	def _simple_reading(self, **over):
+		reading = {
+			"title": "T",
+			"customer": None,
+			"notes": None,
+			"items": [{"item_name": "x", "qty": 1, "rate": 1}],
+		}
+		reading.update(over)
+		return reading
+
+	def test_retry_after_post_insert_failure_makes_no_second_draft(self):
+		row = self._row(self._rule())
+		with mock.patch("jarvis.intake.draft._ignored_blanks", side_effect=RuntimeError("boom")):
+			with self.assertRaises(RuntimeError):
+				draft.finish(row, self._simple_reading())
+		self.assertEqual(frappe.db.count(PARENT), 1)
+		self.assertTrue(frappe.db.get_value(ACTIVITY, row.name, "draft_name"))
+		draft.finish(row, self._simple_reading())
+		self.assertEqual(frappe.db.count(PARENT), 1)
+		state = self._state(row)
+		self.assertEqual(state.status, "Success")
+		self.assertIn(state.draft_name, state.summary)
+
+	def test_failing_comment_or_attach_still_links_the_draft(self):
+		row = self._row(self._rule(allow_incomplete_drafts=1))
+		with (
+			mock.patch("frappe.model.document.Document.add_comment", side_effect=RuntimeError("c")),
+			mock.patch("jarvis.intake.draft.attach_file_to_doc", side_effect=RuntimeError("a")),
+			mock.patch("jarvis.intake.draft._write_back", side_effect=RuntimeError("w")),
+		):
+			draft.finish(row, self._simple_reading(title=None))
+		state = self._state(row)
+		self.assertEqual(state.status, "Needs Review")
+		self.assertTrue(state.draft_name)
+
+	def test_unparseable_number_is_missing_not_zero(self):
+		reading = self._simple_reading(items=[{"item_name": "x", "qty": "abc", "rate": 1}])
+		rule = self._rule()
+		row = self._row(rule)
+		with mock.patch("jarvis.intake.review.raise_request", return_value=self._approval()) as rr:
+			draft.finish(row, reading)
+		missing = rr.call_args.args[2]
+		self.assertEqual(
+			[(m["field"], m["row"], m["reason"]) for m in missing],
+			[("qty", 1, "Qty, row 1: not a number")],
+		)
+		self.assertFalse(frappe.db.count(PARENT))
+		frappe.db.set_value(TRIGGER, rule.name, "allow_incomplete_drafts", 1)
+		row2 = self._row(rule)
+		draft.finish(row2, reading)
+		state = self._state(row2)
+		self.assertEqual(state.status, "Needs Review")
+		item = frappe.get_doc(PARENT, state.draft_name).items[0]
+		self.assertFalse(item.qty)
+		comment = frappe.db.get_value(
+			"Comment", {"reference_name": state.draft_name, "comment_type": "Comment"}, "content"
+		)
+		self.assertIn("Qty, row 1: not a number", comment)
+
+	def test_number_and_date_normalising(self):
+		values, unresolved = self._resolve(
+			MAKER, {"items": [{"item_name": "a", "qty": "1,200.50", "rate": "\u20b91,000"}]}, fields=["title"]
+		)
+		self.assertEqual((values["items"][0]["qty"], values["items"][0]["rate"]), (1200.5, 1000))
+		self.assertEqual(unresolved, [])
+
+	def test_non_scalar_value_is_blank(self):
+		values, unresolved = self._resolve(MAKER, {"title": ["a", "b"], "notes": {"x": 1}})
+		self.assertEqual((values["title"], values["notes"]), (None, None))
+		self.assertEqual({u["field"] for u in unresolved}, {"title", "notes"})
+
+	def test_duplicate_entry_ends_failed_cleanly(self):
+		row = self._row(self._rule())
+		real_insert = frappe.model.document.Document.insert
+
+		def insert(doc, *args, **kwargs):
+			if doc.doctype == PARENT:
+				raise frappe.DuplicateEntryError(PARENT, "x", None)
+			return real_insert(doc, *args, **kwargs)
+
+		with mock.patch("frappe.model.document.Document.insert", insert):
+			draft.finish(row, self._simple_reading())
+		state = self._state(row)
+		self.assertEqual(state.status, "Failed")
+		self.assertTrue(state.summary.startswith("The draft could not be saved: "))
+		self.assertFalse(frappe.db.count(PARENT))
+		self.assertEqual(frappe.session.user, "Administrator")
+
+	def test_repeated_unresolved_value_is_looked_up_once(self):
+		rows = [{"item_name": str(i), "qty": 1, "supplier": "NOPE-1"} for i in range(30)]
+		with mock.patch("jarvis.intake.draft._readable_names", wraps=draft._readable_names) as spy:
+			values, unresolved = self._resolve(MAKER, {"items": rows})
+		self.assertEqual(len(unresolved), 30)
+		self.assertEqual(spy.call_count, 2)  # exact name, then close names
+
+	def test_failed_row_writes_status_back_but_not_the_link(self):
+		sheet = frappe.get_doc({"doctype": RECORD, "progress": "new", "draft_link": "keep"}).insert()
+		rule = self._rule(
+			intake_source="Record",
+			intake_folder=None,
+			intake_record_doctype=RECORD,
+			intake_status_field="progress",
+			intake_link_field="draft_link",
+		)
+		row = self._row(rule, uploader=READER_ONLY, target_docname=sheet.name)
+		draft.finish(row, self._simple_reading())
+		self.assertEqual(self._state(row).status, "Failed")
+		self.assertEqual(
+			frappe.db.get_value(RECORD, sheet.name, ["progress", "draft_link"], as_dict=True),
+			{"progress": "Failed", "draft_link": "keep"},
+		)
+		self.assertEqual(frappe.session.user, "Administrator", "session restored after DraftFailed")
+
+	def test_detail_is_the_short_reason(self):
+		row = self._row(self._rule(spec_data={"fields": ["title", "priority"], "table": None, "match": []}))
+		draft.finish(row, {"title": "T", "priority": "Urgent"})
+		detail = self._state(row).detail
+		self.assertLessEqual(len(detail), 140)
+		self.assertNotIn("Traceback", detail)
+
+	def test_clean_dates(self):
+		date = frappe._dict(fieldtype="Date")
+		self.assertEqual(draft._clean(date, "2026-11-03"), ("2026-11-03", None))
+		self.assertEqual(draft._clean(date, "not a date"), (None, "not a date"))
+		self.assertEqual(draft._clean(frappe._dict(fieldtype="Datetime"), "31/31/2026"), (None, "not a date"))
+		self.assertEqual(draft._clean(frappe._dict(fieldtype="Int"), "2.5"), (None, "not a number"))

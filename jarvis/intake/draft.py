@@ -11,10 +11,12 @@ and the worker turns them into a Failed row.
 """
 
 import difflib
+import math
+import re
 
 import frappe
 from frappe import _
-from frappe.utils import escape_html
+from frappe.utils import escape_html, get_datetime, getdate
 
 from jarvis._session import impersonate
 from jarvis.chat.filebox import attach_file_to_doc
@@ -117,11 +119,19 @@ def _candidates(doctype: str, value: str) -> list[str]:
 	return [by_fold[c] for c in close]
 
 
-def _resolve_one(doctype: str, value, *, fuzzy: bool) -> tuple[str | None, list[str]]:
-	"""(resolved name or None, candidates). Always as the current session user."""
+def _resolve_one(doctype: str, value, *, fuzzy: bool, memo: dict) -> tuple[str | None, list[str]]:
+	"""(resolved name or None, candidates). Always as the current session user. ``memo``
+	lives for one ``resolve_links`` call: a sheet repeating the same value queries once."""
 	if _blank(value):
 		return None, []
 	text = str(value).strip()
+	key = (doctype, text, fuzzy)
+	if key not in memo:
+		memo[key] = _lookup(doctype, text, fuzzy)
+	return memo[key]
+
+
+def _lookup(doctype: str, text: str, fuzzy: bool) -> tuple[str | None, list[str]]:
 	name = _find_exact(doctype, text)
 	# The database compares names case-insensitively; a field that is not a match field
 	# keeps only a value that is the record's name exactly, never a re-cased guess.
@@ -132,20 +142,96 @@ def _resolve_one(doctype: str, value, *, fuzzy: bool) -> tuple[str | None, list[
 	return (name, []) if name else (None, _candidates(doctype, text))
 
 
+_NUMBER_TYPES = {"Int", "Float", "Currency", "Percent"}
+_CURRENCY_NOISE = re.compile(r"(?i)[\u20b9$\u20ac\u00a3\u00a5,\s]|\b(?:inr|usd|eur|gbp|rs)\b\.?")
+
+
+def _number(value, fieldtype: str):
+	"""A float/int, or None when ``value`` is not a plain number. Frappe would turn
+	"N/A" into 0, and 0 passes a mandatory check, so unparseable text must stay blank."""
+	if isinstance(value, bool) or not isinstance(value, str | int | float):
+		return None
+	try:
+		number = float(_CURRENCY_NOISE.sub("", value)) if isinstance(value, str) else float(value)
+	except ValueError:
+		return None
+	if not math.isfinite(number):
+		return None
+	if fieldtype == "Int":
+		return int(number) if number == int(number) else None
+	return int(number) if number == int(number) else number
+
+
+def _clean(df, value):
+	"""(cleaned value, reason or None). A reason means the value must stay blank."""
+	if _blank(value):
+		return None, None
+	if isinstance(value, list | dict):
+		return None, "unreadable"
+	if df.fieldtype in _NUMBER_TYPES:
+		number = _number(value, df.fieldtype)
+		return (number, None) if number is not None else (None, "not a number")
+	if df.fieldtype in ("Date", "Datetime"):
+		try:
+			if not isinstance(value, str):
+				raise ValueError
+			parsed = getdate(value) if df.fieldtype == "Date" else get_datetime(value)
+			return str(parsed), None
+		except Exception:
+			return None, "not a date"
+	return value, None
+
+
+def normalise(s, values: dict) -> tuple[dict, list[dict]]:
+	"""Header values and child cells made safe to insert: numbers parsed (thousands
+	separators and currency signs dropped), dates parsed, lists/dicts refused. Anything
+	unusable becomes blank and is listed as ``{field, row, value, candidates, reason}``."""
+	meta = frappe.get_meta(s.target)
+	table = (s.table or {}).get("fieldname")
+	out, problems = dict(values), []
+
+	def clean(df, value, row):
+		cleaned, reason = _clean(df, value)
+		if reason:
+			problems.append(
+				{"field": df.fieldname, "row": row, "value": value, "candidates": [], "reason": reason}
+			)
+		return cleaned
+
+	for fieldname, value in values.items():
+		df = meta.get_field(fieldname)
+		if fieldname != table and df:
+			out[fieldname] = clean(df, value, None)
+	child = intake_spec._child_doctype(s)
+	if table and child:
+		child_meta = frappe.get_meta(child)
+		out[table] = [
+			{
+				k: clean(child_meta.get_field(k), v, i) if child_meta.get_field(k) else v
+				for k, v in row.items()
+			}
+			for i, row in enumerate(values.get(table) or [], start=1)
+		]
+	return out, problems
+
+
 def resolve_links(s, values: dict) -> tuple[dict, list[dict]]:
 	"""Resolve Link values as the current session user (call inside ``impersonate``).
 
 	Fields in ``s.match``: exact name, else ONE case-insensitive match on the name or
 	the title field. Other Link fields (header or child column): only an exact name.
-	Anything not resolved is blanked and listed as
-	``{field, row, value, candidates}``; ``row`` is None for a header field and the
+	Values that are not plain numbers, dates or scalars are blanked first (see
+	``normalise``). Anything not resolved is blanked and listed as
+	``{field, row, value, candidates}`` (``reason`` too for a normalise entry); ``row`` is None for a header field and the
 	1-based row number for a child column. Returns ``(new values, unresolved)``."""
 	meta = frappe.get_meta(s.target)
-	out = dict(values)
-	unresolved = []
+	out, unresolved = normalise(s, values)
+	memo: dict = {}
 
 	def resolve(df, value, row):
-		name, candidates = _resolve_one(df.options, value, fuzzy=df.fieldname in s.match and row is None)
+		name, candidates = _resolve_one(
+			df.options, value, fuzzy=df.fieldname in s.match and row is None, memo=memo
+		)
 		if name is None and not _blank(value):
 			unresolved.append({"field": df.fieldname, "row": row, "value": value, "candidates": candidates})
 		return name
@@ -225,6 +311,8 @@ def missing_fields(s, values: dict, unresolved: list[dict]) -> list[dict]:
 def _issue_text(label: str, row, hit: dict | None) -> str:
 	"""One line for a reviewer or the comment: 'Qty, row 3: unreadable',
 	'Item BRK-2299: not found, closest BRK-2290'."""
+	if hit and hit.get("reason"):
+		return f"{label}, row {row}: {hit['reason']}" if row else f"{label}: {hit['reason']}"
 	if hit:
 		close = ", ".join(hit["candidates"])
 		where = f", row {row}" if row else ""
@@ -235,8 +323,11 @@ def _issue_text(label: str, row, hit: dict | None) -> str:
 # --------------------------------------------------------------------------- #
 # finish and create
 # --------------------------------------------------------------------------- #
-def _fail(row, summary: str, detail: str = ""):
-	row.db_set({"status": "Failed", "summary": summary, "detail": detail[:200]})
+def _fail(row, trigger, summary: str, detail: str = ""):
+	"""End the row Failed (``detail`` is a short reason, never raw exception text), mark the
+	source record's status field Failed too, and stop the caller."""
+	row.db_set({"status": "Failed", "summary": summary, "detail": detail[:140]})
+	_write_back(row, trigger, "Failed", None)
 	raise DraftFailed(summary)
 
 
@@ -245,13 +336,13 @@ def _load_spec(row):
 	return trigger, intake_spec.load(trigger)
 
 
-def _uploader(row) -> str:
+def _uploader(row, trigger) -> str:
 	from jarvis.permissions import is_valid_unattended_owner
 
 	user = row.event_user
 	# Checked again here: a review approval can run days after the worker's own check.
 	if not is_valid_unattended_owner(user):
-		_fail(row, _("The uploader can't be used for unattended work."))
+		_fail(row, trigger, _("The uploader can't be used for unattended work."))
 	return user
 
 
@@ -270,7 +361,7 @@ def finish(activity, reading: dict) -> None:
 
 def _finish(row, reading: dict, note: str) -> None:
 	trigger, s = _load_spec(row)
-	uploader = _uploader(row)
+	uploader = _uploader(row, trigger)
 	with impersonate(uploader):
 		values, unresolved = resolve_links(s, merge_values(s, reading))
 		missing = missing_fields(s, values, unresolved)
@@ -291,7 +382,7 @@ def _review(row, trigger, s, values: dict, missing: list[dict], note: str) -> No
 	count = len(missing)
 	summary = _with_note(f"Waiting for a reviewer: {count} field(s) need a value", note)
 	row.db_set({"status": "Needs Review", "approval_request": approval, "summary": summary})
-	_write_back(row, trigger, "Needs Review", None)
+	_guarded(_write_back, row, trigger, "Needs Review", None)
 	_notify(row.event_user, f"Waiting for a reviewer: {count} field(s) need a value")
 
 
@@ -335,25 +426,25 @@ def create(
 	``note`` defaults to the one saved with the reading."""
 	row = activity
 	trigger, s = _load_spec(row)
-	uploader = _uploader(row)
+	uploader = _uploader(row, trigger)
 	unresolved = unresolved or []
 	if note is None:
 		note = frappe.parse_json(row.get("reading_json") or "{}").get("_note", "") or ""
 	with impersonate(uploader):
 		missing = missing_fields(s, values, unresolved)
-		doc = _insert(row, s, values, allow_missing)
-		attached = attach_file_to_doc(row.source_file, doc.doctype, doc.name) if row.source_file else {}
+		doc = _existing_draft(row)
+		resumed = doc is not None
+		if not resumed:
+			doc = _insert(row, trigger, s, values, allow_missing)
+			# Linked at once: if anything below raises, a retry finds this draft
+			# instead of inserting a second one.
+			row.db_set({"draft_doctype": doc.doctype, "draft_name": doc.name})
 		lines = _ignored_blanks(s, values, missing, unresolved)
-		extra = [attached["attach_error"]] if attached.get("attach_error") else []
-		if lines or extra:
-			doc.add_comment(
-				"Comment",
-				"<br>".join(escape_html(line) for line in lines + extra),
-			)
+		_attach_and_comment(row, doc, lines, resumed)
 	status = "Needs Review" if missing else "Success"
 	summary = f"Draft ready: {doc.doctype} {doc.name}"
 	if lines:
-		summary += f" ({len(lines)} fields to check)"
+		summary += f" ({len(lines)} field(s) to check)"
 	row.db_set(
 		{
 			"status": status,
@@ -362,12 +453,53 @@ def create(
 			"draft_name": doc.name,
 		}
 	)
-	_write_back(row, trigger, status, doc.name)
+	_guarded(_write_back, row, trigger, status, doc.name)
 	_notify(uploader, f"Draft ready: {doc.doctype} {doc.name}", doc)
 	return doc.doctype, doc.name
 
 
-def _insert(row, s, values: dict, allow_missing: bool):
+def _existing_draft(row):
+	"""The draft an earlier run of this row already made, if it still exists."""
+	if (
+		row.get("draft_doctype")
+		and row.get("draft_name")
+		and frappe.db.exists(row.draft_doctype, row.draft_name)
+	):
+		return frappe.get_doc(row.draft_doctype, row.draft_name)  # to call add_comment
+	return None
+
+
+def _guarded(fn, *args) -> None:
+	"""A side step (comment, attach, write-back) must never undo or hide the draft."""
+	try:
+		fn(*args)
+	except Exception:
+		frappe.log_error(
+			title=f"jarvis.intake.draft.{getattr(fn, '__name__', 'step')}_failed",
+			message=frappe.get_traceback(),
+		)
+
+
+def _attach_and_comment(row, doc, lines: list[str], resumed: bool) -> list[str]:
+	"""Attach the source file and leave one Comment on the blanks; both are best effort.
+	On a resume the Comment is only added when the first run never got to it."""
+	attached = {}
+	if row.source_file:
+		try:
+			attached = attach_file_to_doc(row.source_file, doc.doctype, doc.name)
+		except Exception:
+			frappe.log_error(title="jarvis.intake.draft.attach_failed", message=frappe.get_traceback())
+	extra = [attached["attach_error"]] if attached.get("attach_error") else []
+	has_comment = resumed and frappe.db.exists(
+		"Comment",
+		{"reference_doctype": doc.doctype, "reference_name": doc.name, "comment_type": "Comment"},
+	)
+	if (lines or extra) and not has_comment:
+		_guarded(doc.add_comment, "Comment", "<br>".join(escape_html(line) for line in lines + extra))
+	return extra
+
+
+def _insert(row, trigger, s, values: dict, allow_missing: bool):
 	payload = {"doctype": s.target}
 	table = (s.table or {}).get("fieldname")
 	for fieldname, value in values.items():
@@ -383,10 +515,15 @@ def _insert(row, s, values: dict, allow_missing: bool):
 		doc = frappe.get_doc(payload).insert(ignore_mandatory=allow_missing)
 	except frappe.PermissionError:
 		frappe.db.rollback(save_point=savepoint)
-		_fail(row, _("You can't create {0}").format(s.target))
+		_fail(row, trigger, _("You can't create {0}").format(s.target))
 	except frappe.ValidationError as e:
 		frappe.db.rollback(save_point=savepoint)
-		_fail(row, _("The draft could not be saved: {0}").format(_short(e)), str(e))
+		_fail(row, trigger, _("The draft could not be saved: {0}").format(_short(e)), _short(e))
+	except Exception as e:
+		# A duplicate name or a type error from a hook: nothing half-written stays.
+		frappe.db.rollback(save_point=savepoint)
+		frappe.log_error(title="jarvis.intake.draft.insert_failed", message=frappe.get_traceback())
+		_fail(row, trigger, _("The draft could not be saved: {0}").format(_short(e)), _short(e))
 	return doc
 
 
@@ -425,7 +562,7 @@ def _notify(user: str, subject: str, doc=None) -> None:
 			"doctype": "Notification Log",
 			"for_user": user,
 			"type": "Alert",
-			"subject": escape_html(subject)[:140],
+			"subject": escape_html(subject[:140]),
 		}
 		if doc:
 			log.update({"document_type": doc.doctype, "document_name": doc.name})
