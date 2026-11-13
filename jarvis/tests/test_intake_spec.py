@@ -277,6 +277,23 @@ class TestIntakeSpec(FrappeTestCase):
 		for p in props.values():
 			self.assertIn("null", p["type"])
 
+	def test_build_schema_select_lists_its_options(self):
+		s = intake_spec.IntakeSpec(
+			target="ToDo",
+			fields=["status", "description"],
+			table=None,
+			match=[],
+			defaults={},
+			instructions="",
+			allow_incomplete=True,
+		)
+		props = next(b for b in intake_spec.build_schema(s)["anyOf"] if "status" in b["properties"])[
+			"properties"
+		]
+		options = [o for o in frappe.get_meta("ToDo").get_field("status").options.split("\n") if o.strip()]
+		self.assertEqual(props["status"]["enum"], [*options, None])
+		self.assertNotIn("enum", props["description"])
+
 	def test_build_schema_table_rows(self):
 		s = intake_spec.IntakeSpec(
 			target="Event",

@@ -354,13 +354,6 @@ def _merge(s, payload: dict, answers: dict, uploader: str) -> dict:
 				holder[item["field"]] = name
 				if name is None:
 					why[(item["field"], item["row"])] = "not found"
-			elif (
-				df.fieldtype == "Select"
-				and not draft._blank(value)
-				and value not in (df.options or "").split("\n")
-			):
-				holder[item["field"]] = None
-				why[(item["field"], item["row"])] = "not an option"
 	still = draft.missing_fields(s, cleaned, [])
 	if still:
 		frappe.throw(

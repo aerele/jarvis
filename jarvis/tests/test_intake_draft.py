@@ -449,16 +449,34 @@ class TestIntakeDraft(FrappeTestCase):
 		self.assertEqual(state.summary, f"You can't create {PARENT}")
 		self.assertFalse(frappe.db.count(PARENT))
 
+	def _insert_raises(self, error):
+		real_insert = frappe.model.document.Document.insert
+
+		def insert(doc, *args, **kwargs):
+			if doc.doctype == PARENT:
+				raise error
+			return real_insert(doc, *args, **kwargs)
+
+		return mock.patch("frappe.model.document.Document.insert", insert)
+
 	def test_validation_error_is_failed_and_retryable(self):
-		rule = self._rule(
-			spec_data={"fields": ["title", "priority"], "table": None, "match": []},
-		)
-		row = self._row(rule)
-		draft.finish(row, {"title": "T", "priority": "Urgent"})
+		row = self._row(self._rule())
+		with self._insert_raises(frappe.ValidationError("<b>Total</b> must be <i>positive</i>")):
+			draft.finish(row, self._simple_reading())
 		state = self._state(row)
 		self.assertEqual(state.status, "Failed")
-		self.assertTrue(state.summary.startswith("The draft could not be saved: "))
+		# The target's own validation text is user-facing by design; its HTML is stripped.
+		self.assertEqual(state.summary, "The draft could not be saved: Total must be positive")
 		self.assertFalse(frappe.db.count(PARENT))
+
+	def test_unexpected_error_text_stays_off_the_uploader_summary(self):
+		row = self._row(self._rule())
+		boom = RuntimeError("/home/secret/app.py: SELECT password FROM tabUser")
+		with self._insert_raises(boom):
+			draft.finish(row, self._simple_reading())
+		state = self._state(row)
+		self.assertEqual((state.status, state.summary), ("Failed", "The draft could not be saved."))
+		self.assertIn("SELECT password", state.detail)  # managers only
 
 	def test_invalid_uploader_fails(self):
 		rule = self._rule()
@@ -569,7 +587,7 @@ class TestIntakeDraft(FrappeTestCase):
 			draft.finish(row, self._simple_reading())
 		state = self._state(row)
 		self.assertEqual(state.status, "Failed")
-		self.assertTrue(state.summary.startswith("The draft could not be saved: "))
+		self.assertEqual(state.summary, "The draft could not be saved.")
 		self.assertFalse(frappe.db.count(PARENT))
 		self.assertEqual(frappe.session.user, "Administrator")
 
@@ -599,8 +617,9 @@ class TestIntakeDraft(FrappeTestCase):
 		self.assertEqual(frappe.session.user, "Administrator", "session restored after DraftFailed")
 
 	def test_detail_is_the_short_reason(self):
-		row = self._row(self._rule(spec_data={"fields": ["title", "priority"], "table": None, "match": []}))
-		draft.finish(row, {"title": "T", "priority": "Urgent"})
+		row = self._row(self._rule())
+		with self._insert_raises(frappe.ValidationError("x" * 300)):
+			draft.finish(row, self._simple_reading())
 		detail = self._state(row).detail
 		self.assertLessEqual(len(detail), 140)
 		self.assertNotIn("Traceback", detail)
@@ -611,6 +630,25 @@ class TestIntakeDraft(FrappeTestCase):
 		self.assertEqual(draft._clean(date, "not a date"), (None, "not a date"))
 		self.assertEqual(draft._clean(frappe._dict(fieldtype="Datetime"), "31/31/2026"), (None, "not a date"))
 		self.assertEqual(draft._clean(frappe._dict(fieldtype="Int"), "2.5"), (None, "not a number"))
+
+	def test_clean_select_and_check(self):
+		select = frappe._dict(fieldtype="Select", options="\nOpen\nClosed")
+		self.assertEqual(draft._clean(select, "Open"), ("Open", None))
+		self.assertEqual(draft._clean(select, "Pending"), (None, "not an option"))
+		self.assertEqual(draft._clean(select, ""), (None, None))
+		check = frappe._dict(fieldtype="Check")
+		for given, want in ((1, 1), (0, 0), (True, 1), (False, 0), ("1", 1), ("true", 1), ("False", 0)):
+			self.assertEqual(draft._clean(check, given), (want, None), given)
+		for bad in ("maybe", 2, "yes", 0.5):
+			self.assertEqual(draft._clean(check, bad), (None, "not a yes/no value"), bad)
+
+	def test_off_list_select_value_no_longer_fails_the_insert(self):
+		row = self._row(self._rule(spec_data={"fields": ["title", "priority"], "table": None, "match": []}))
+		draft.finish(row, {"title": "T", "priority": "Whenever"})
+		got = self._state(row)
+		self.assertEqual(got.status, "Success")
+		self.assertIn("field(s) to check", got.summary)
+		self.assertNotEqual(frappe.db.get_value(got.draft_doctype, got.draft_name, "priority"), "Whenever")
 
 	def _site(self, number_format="#,###.##", date_format="yyyy-mm-dd"):
 		"""Pretend the site has these System Settings (no global state is written)."""

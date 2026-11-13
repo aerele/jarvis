@@ -145,7 +145,7 @@ def _validate_default(df, value) -> None:
 	if _is_blank(value):
 		return
 	if df.fieldtype == "Select":
-		options = [o.strip() for o in (df.options or "").split("\n") if o.strip()]
+		options = select_options(df)
 		if str(value) not in options:
 			frappe.throw(_("Default for '{0}' must be one of: {1}.").format(name, ", ".join(options)))
 	elif df.fieldtype == "Link":
@@ -201,6 +201,11 @@ def _validate_coverage(s: IntakeSpec, meta) -> None:
 		)
 
 
+def select_options(df) -> list[str]:
+	"""The values a Select field accepts (blank lines dropped)."""
+	return [o.strip() for o in (df.options or "").split("\n") if o.strip()]
+
+
 def _property(df) -> dict:
 	"""One schema property. ``null`` is always allowed: an unreadable value comes
 	back null instead of a guess."""
@@ -215,6 +220,10 @@ def _property(df) -> dict:
 		prop["format"] = "date"
 	elif df.fieldtype == "Datetime":
 		prop["format"] = "date-time"
+	elif df.fieldtype == "Select" and select_options(df):
+		# The model may only answer with a listed option (or null): an off-list value
+		# would otherwise fail the whole insert.
+		prop["enum"] = [*select_options(df), None]
 	return prop
 
 

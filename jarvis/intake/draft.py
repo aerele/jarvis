@@ -246,7 +246,29 @@ def _clean(df, value):
 	if df.fieldtype in ("Date", "Datetime"):
 		parsed = _date(value, df.fieldtype, _site_formats()[1])
 		return (parsed, None) if parsed else (None, "not a date")
+	if df.fieldtype == "Select":
+		options = intake_spec.select_options(df)
+		# A Select with no options listed accepts anything, as Frappe does.
+		return (value, None) if not options or str(value) in options else (None, "not an option")
+	if df.fieldtype == "Check":
+		flag = _yes_no(value)
+		return (flag, None) if flag is not None else (None, "not a yes/no value")
 	return value, None
+
+
+_YES_NO = {"1": 1, "true": 1, "0": 0, "false": 0}
+
+
+def _yes_no(value) -> int | None:
+	"""1 or 0 for 1/0/true/false (any case, bool or text), else None. Frappe would store
+	any non-zero text as 1, so "maybe" must stay blank instead of ticking the box."""
+	if isinstance(value, bool):
+		return int(value)
+	if isinstance(value, int | float) and value in (0, 1):
+		return int(value)
+	if isinstance(value, str):
+		return _YES_NO.get(value.strip().casefold())
+	return None
 
 
 def normalise(s, values: dict) -> tuple[dict, list[dict]]:
@@ -602,7 +624,9 @@ def _insert(row, trigger, s, values: dict, allow_missing: bool):
 		# A duplicate name or a type error from a hook: nothing half-written stays.
 		frappe.db.rollback(save_point=savepoint)
 		frappe.log_error(title="jarvis.intake.draft.insert_failed", message=frappe.get_traceback())
-		_fail(row, trigger, _("The draft could not be saved: {0}").format(_short(e)), _short(e))
+		# The uploader sees the summary; raw exception text (paths, SQL, record values)
+		# goes to the manager-only detail and the Error Log, never the summary.
+		_fail(row, trigger, _("The draft could not be saved."), _short(e))
 	return doc
 
 
