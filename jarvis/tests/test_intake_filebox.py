@@ -209,6 +209,15 @@ class TestIntakeFilebox(FrappeTestCase):
 			filebox.retry_intake(mine)  # a manager may retry another person's row
 		self.assertEqual(enq.call_count, 1)
 
+	def test_removed_file_failure_is_permanent(self):
+		gone = self._row(UPLOADER, status="Failed", summary=capture.FILE_REMOVED_SUMMARY)
+		rows = {r["name"]: r["can_retry"] for r in self._list(UPLOADER)["rows"]}
+		self.assertEqual(rows, {gone: False})
+		frappe.set_user(UPLOADER)
+		with mock.patch("frappe.enqueue") as enq, self.assertRaises(frappe.ValidationError):
+			filebox.retry_intake(gone)
+		enq.assert_not_called()
+
 	def test_unreadable_type_skip_is_permanent_but_limit_skips_retry(self):
 		perm = self._row(UPLOADER, status="Skipped", summary=capture.UNREADABLE_TYPE_SUMMARY)
 		limit = self._row(UPLOADER, status="Skipped", summary="daily limit reached")

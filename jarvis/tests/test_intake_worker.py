@@ -288,6 +288,20 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertNotIn(row.name, [c.kwargs["activity"] for c in enq.call_args_list])
 		self.assertEqual(self._get(fresh).status, "Running")  # recent: left alone
 
+	def test_removed_source_file_fails_cleanly_and_is_not_retryable(self):
+		rule = self._rule()
+		fdoc = self._file()
+		row = self._row(rule, fdoc)
+		frappe.delete_doc("File", fdoc.name, ignore_permissions=True, force=True)
+		with mock.patch("frappe.log_error") as log:
+			client, fin = self._run(row)
+		client.assert_not_called()
+		fin.assert_not_called()
+		log.assert_not_called()  # an expected outcome, not an Error Log entry
+		got = self._get(row)
+		self.assertEqual((got.status, got.summary), ("Failed", "The file was removed"))
+		self.assertEqual(capture.FILE_REMOVED_SUMMARY, "The file was removed")
+
 	def test_old_plugin_maps_to_update_copy(self):
 		rule = self._rule()
 		row = self._row(rule)

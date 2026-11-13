@@ -15,7 +15,7 @@ import frappe
 from frappe.utils import add_to_date, cint, now_datetime, nowdate
 
 from jarvis import _redis_lock, compat
-from jarvis.intake import draft, reader
+from jarvis.intake import capture, draft, reader
 from jarvis.triggers import llm_action
 from jarvis.triggers import llm_task_client as lt
 
@@ -221,6 +221,14 @@ def _run_stages(row, trigger, needs_ai: bool) -> None:
 		except lt.LLMTaskError as e:
 			# Expected (agent refusal, timeout): a short reason, no Error Log noise.
 			_set(row, status="Failed", summary=_READ_FAILED_SUMMARY, detail=_reason(e))
+			return
+		except frappe.DoesNotExistError:
+			_set(
+				row,
+				status="Failed",
+				summary=capture.FILE_REMOVED_SUMMARY,
+				detail="The source File no longer exists.",
+			)
 			return
 		except reader.UnreadableFile as e:
 			_set(row, status="Failed", summary=str(e), detail=str(e))

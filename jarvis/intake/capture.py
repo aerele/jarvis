@@ -20,6 +20,9 @@ _READABLE_EXTENSIONS = ("jpg", "jpeg", "png", "webp", "pdf")
 ACTIVITY = "Jarvis Trigger Activity"
 # A permanent skip: the row can never be read, so File Box offers no retry.
 UNREADABLE_TYPE_SUMMARY = "This file type can't be read for intake"
+# Also permanent: the source File was deleted before (or while) the job read it.
+FILE_REMOVED_SUMMARY = "The file was removed"
+PERMANENT_SUMMARIES = (UNREADABLE_TYPE_SUMMARY, FILE_REMOVED_SUMMARY)
 _RULE_FIELDS = (
 	"name",
 	"trigger_name",
