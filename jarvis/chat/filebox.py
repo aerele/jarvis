@@ -1417,8 +1417,11 @@ def list_intake_page(
 	}
 
 
+# Deliberately NOT behind ``require_jarvis_user``: the uploader of an intake file may have
+# no Jarvis access at all (they only upload), yet they must be able to run their own
+# failed file again. The ownership check in the body (row owner or trigger manager) is
+# the gate; see ``_OWNER_GATED_ALLOWLIST`` in test_chat_endpoint_gating.
 @frappe.whitelist(methods=["POST"])
-@require_jarvis_user
 def retry_intake(activity: str) -> dict:
 	"""Run a Failed or Skipped intake file again. Claim-first: one conditional UPDATE
 	moves the row to Queued, so a double click retries once. A saved reading is kept

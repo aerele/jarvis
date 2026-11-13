@@ -44,6 +44,7 @@ class TestIntakeFilebox(FrappeTestCase):
 		p = mock.patch("jarvis.permissions.require_jarvis_access")
 		p.start()
 		self.addCleanup(p.stop)
+		self._gate = p
 		frappe.db.delete(ACTIVITY, {"action_type": "Intake"})
 
 	def tearDown(self):
@@ -177,6 +178,18 @@ class TestIntakeFilebox(FrappeTestCase):
 		with mock.patch("frappe.enqueue") as enq2, self.assertRaises(frappe.ValidationError):
 			filebox.retry_intake(name)
 		enq2.assert_not_called()
+
+	def test_uploader_without_jarvis_access_can_retry_their_own_row(self):
+		"""The uploader persona has no Jarvis role, so the Jarvis gate must not apply."""
+		self._gate.stop()
+		own = self._row(UPLOADER, status="Failed")
+		theirs = self._row(OTHER, status="Failed")
+		frappe.set_user(UPLOADER)
+		with mock.patch("frappe.enqueue") as enq:
+			self.assertEqual(filebox.retry_intake(own)["status"], "Queued")
+			with self.assertRaises(frappe.PermissionError):
+				filebox.retry_intake(theirs)
+		enq.assert_called_once()
 
 	def test_retry_clears_reading_after_no_image(self):
 		name = self._row(UPLOADER, status="Failed", summary=worker._NO_IMAGE_SUMMARY, reading_json='{"a": 1}')
