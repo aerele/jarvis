@@ -298,14 +298,21 @@ def call_tool(tool: str, args: dict | str | None = None, result_mode: str | None
 	``_dispatch_and_wrap``, which records the tools that failed (the flag below
 	keeps those from being counted twice). A 401 from a caller nobody knows is
 	not recorded: it is an internet probe, or a plugin-auth rejection that is
-	already in the Error Log."""
+	already in the Error Log. An exception that escapes is re-raised unchanged;
+	its facts are stashed for ``api_errors.capture_failed_request``."""
 	frappe.local.jarvis_tool_failure_recorded = False
 	frappe.local.jarvis_call_tool_user = None
 	# A stale-device refusal can happen before normal delegate dispatch.  Reset
 	# this request marker here so an outer failure reporter can still use the
 	# Deposit-safe metadata decision made below.
 	frappe.local.jarvis_private_delegate_metadata = False
-	result = _call_tool(tool, args, result_mode=result_mode)
+	frappe.local.jarvis_call_tool_raised = None
+	try:
+		result = _call_tool(tool, args, result_mode=result_mode)
+	except Exception as e:
+		# Frappe answers 4xx/5xx and rolls back; the after_request hook records the stash.
+		_stash_call_tool_escape(tool, e, result_mode)
+		raise
 	from jarvis import api_errors
 
 	# A private app-learning failure may contain an OS path or source fragment.
@@ -1323,6 +1330,64 @@ def _app_learning_safe_error(tool: str, error=None) -> dict:
 			"message": "The private app-learning tool call was refused or failed.",
 		}
 	return error if isinstance(error, dict) else {}
+
+
+#: Recorded instead of the text of an escape from a private tool call.
+_PRIVATE_ESCAPE_MESSAGE = "A private tool call failed."
+_ESCAPE_MESSAGE_MAX = 2000
+
+
+def _stash_call_tool_escape(tool: str, exc: Exception, result_mode: str | None) -> None:
+	"""Keep the facts of an exception leaving ``call_tool`` for the after_request hook
+	(``api_errors.capture_failed_request``). Never raises: it must not replace ``exc``.
+	If the facts cannot be built, a minimal stash with the fixed message is kept
+	instead, so the escape is never lost silently."""
+	try:
+		frappe.local.jarvis_call_tool_raised = _escape_facts(tool, exc, result_mode)
+	except Exception:
+		from jarvis import api_errors
+
+		frappe.local.jarvis_call_tool_raised = {
+			"tool": tool,
+			"error_class": type(exc).__name__,
+			"message": _PRIVATE_ESCAPE_MESSAGE,
+			"status": _escape_status(exc),
+		}
+		api_errors._capture_warning("call_tool escape stash degraded")
+
+
+def _escape_facts(tool: str, exc: Exception, result_mode: str | None) -> dict:
+	from jarvis.tools import _private_output
+
+	private = (
+		_private_output.metadata_redacted()
+		or result_mode is not None
+		or tool in _private_output.PRIVATE_SOURCE_TOOLS
+		or _is_private_app_learning_tool(tool)
+	)
+	return {
+		"tool": tool,
+		"error_class": type(exc).__name__,
+		"message": _PRIVATE_ESCAPE_MESSAGE if private else _escape_message(exc),
+		"status": _escape_status(exc),
+	}
+
+
+def _escape_message(exc: Exception) -> str:
+	"""The exception's text for triage: clipped before the HTML strip so a huge text
+	costs little, then clipped again. Empty or unreadable text is the class name."""
+	try:
+		text = frappe.utils.strip_html(str(exc)[: 4 * _ESCAPE_MESSAGE_MAX])[:_ESCAPE_MESSAGE_MAX]
+	except Exception:
+		text = ""
+	return text or type(exc).__name__
+
+
+def _escape_status(exc: Exception) -> int:
+	try:
+		return int(getattr(exc, "http_status_code", 500))
+	except Exception:
+		return 500
 
 
 def _app_learning_safe_failure_result(tool: str, result):
