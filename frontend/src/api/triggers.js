@@ -35,8 +35,10 @@ export const listTriggersPage = (p) => call(TR + "list_triggers_page", _page(p))
 export const getTrigger = (name) => call(TR + "get_trigger", { name }).then(unwrap);
 
 // payload fields: trigger_name, enabled, target_doctype, doc_event, condition,
-// action_type ('Script'|'LLM'), script_body, llm_instruction, llm_daily_cap,
-// llm_allow_lookups, description, source_conversation - JSON-encoded (dict arg). -> full detail
+// action_type ('Script'|'LLM'|'Intake'), script_body, llm_instruction, llm_daily_cap,
+// llm_allow_lookups, description, source_conversation, and for Intake: intake_source,
+// intake_folder, intake_record_doctype, intake_target_doctype, intake_spec (JSON string),
+// intake_instructions, allow_incomplete_drafts, intake_status_field, intake_link_field - JSON-encoded (dict arg). -> full detail
 export const createTrigger = (payload = {}) =>
 	call(TR + "create_trigger", { payload: JSON.stringify(payload) }).then(unwrap);
 export const updateTrigger = (name, payload = {}) =>
@@ -55,6 +57,14 @@ export const deleteTriggersBulk = (names) =>
 // -> {valid: bool, error?: string, would_fire?: bool}
 export const testTriggerCondition = (target_doctype, condition, docname = "") =>
 	call(TR + "test_trigger_condition", { target_doctype, condition, docname }).then(unwrap);
+
+// ── intake form (managers only) ───────────────────────────────────────────────
+// -> ["Home/Production Sheets", ...] File folders, sorted, without Home and Attachments
+export const listIntakeFolders = () => call(TR + "list_intake_folders");
+// -> {fields: [{fieldname, label, fieldtype, options, mandatory}],
+//     tables: [{fieldname, label, child_doctype, mandatory, columns: [same shape as fields]}]}
+export const getIntakeFieldOptions = (doctype) =>
+	call(TR + "get_intake_field_options", { doctype });
 
 // ── activity ──────────────────────────────────────────────────────────────────
 // rows: {name, trigger, trigger_label, target_doctype, target_docname,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import frappe
 from frappe import _
+from frappe.model import default_fields
 from frappe.query_builder import CustomFunction, Order
 from frappe.query_builder.functions import Count, IfNull
 from frappe.utils import add_to_date, cint, getdate, now_datetime
@@ -19,6 +20,7 @@ from frappe.utils.safe_exec import is_safe_exec_enabled
 
 from jarvis.chat import list_filters
 from jarvis.chat.macros_api import _bool01, _clamp_page, _lk, _load_filters
+from jarvis.intake import spec as intake_spec
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 from jarvis.triggers.engine import (
 	EVENT_LABELS,
@@ -326,6 +328,15 @@ def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
 		"owner": doc.owner,
 		"modified": str(doc.modified),
 		"can_manage": bool(can_manage),
+		"intake_source": doc.intake_source or "",
+		"intake_folder": doc.intake_folder or "",
+		"intake_record_doctype": doc.intake_record_doctype or "",
+		"intake_target_doctype": doc.intake_target_doctype or "",
+		"intake_spec": doc.intake_spec or "",
+		"intake_instructions": doc.intake_instructions or "",
+		"allow_incomplete_drafts": cint(doc.allow_incomplete_drafts),
+		"intake_status_field": doc.intake_status_field or "",
+		"intake_link_field": doc.intake_link_field or "",
 	}
 	if can_manage:
 		detail["condition"] = doc.condition or ""
@@ -488,6 +499,71 @@ def delete_triggers_bulk(names: str) -> dict:
 			skipped.append({"name": n, "reason": "error"})
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"deleted": deleted, "skipped": skipped}}
+
+
+# --------------------------------------------------------------------------- #
+# intake form helpers (manager-only)
+# --------------------------------------------------------------------------- #
+# Attachments are what the "Record" source watches, so they are not a folder choice.
+_INTAKE_HIDDEN_FOLDERS = ("Home", "Home/Attachments")
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def list_intake_folders() -> list[str]:
+	"""File folders the manager can see, as paths, for the intake folder picker."""
+	_require_manage()
+	names = frappe.get_list("File", filters={"is_folder": 1}, pluck="name", limit_page_length=0)
+	return sorted(n for n in names if n not in _INTAKE_HIDDEN_FOLDERS)
+
+
+def _intake_field_row(df) -> dict:
+	return {
+		"fieldname": df.fieldname,
+		"label": df.label or df.fieldname,
+		"fieldtype": df.fieldtype,
+		"options": df.options or "",
+		"mandatory": intake_spec._is_mandatory(df),
+	}
+
+
+def _intake_value_fields(meta) -> list:
+	"""Fields an intake can fill: user-writable value fields, no layout, no
+	computed (read-only) ones, no standard columns. Hidden fields stay: a
+	mandatory hidden field still needs a value for strict coverage."""
+	return [
+		df
+		for df in meta.fields
+		if df.fieldtype not in intake_spec._NON_VALUE_TYPES
+		and not df.read_only
+		and df.fieldname not in default_fields
+	]
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def get_intake_field_options(doctype: str) -> dict:
+	"""Fields and child tables of a DocType, for the intake field picker. The
+	DocType gate is the one the trigger itself enforces on save."""
+	_require_manage()
+	frappe.new_doc(TRIGGER)._check_doctype_usable(doctype, intake=True)
+	meta = frappe.get_meta(doctype)
+	tables = []
+	for df in meta.get_table_fields():
+		if df.read_only:
+			continue
+		child = frappe.get_meta(df.options)
+		tables.append(
+			{
+				"fieldname": df.fieldname,
+				"label": df.label or df.fieldname,
+				"child_doctype": df.options,
+				# A required table the spec leaves out can never produce a draft.
+				"mandatory": bool(df.reqd),
+				"columns": [_intake_field_row(c) for c in _intake_value_fields(child)],
+			}
+		)
+	return {"fields": [_intake_field_row(df) for df in _intake_value_fields(meta)], "tables": tables}
 
 
 # --------------------------------------------------------------------------- #
