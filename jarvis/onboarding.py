@@ -598,9 +598,11 @@ def _payment_ui_v2_enabled() -> bool:
 
 @frappe.whitelist(methods=["POST"])
 def get_preset_catalog() -> list:
-	"""Preset catalog for the desk onboarding step + the /ai SPA route.
-	Thin wrapper over admin_client (fetch/cache/bundled fallback)."""
-	return admin_client.get_preset_catalog()
+	"""Preset catalog for the desk onboarding step + the /ai SPA route. Fetched
+	live from the admin; falls back to this site's last-known-good snapshot."""
+	from jarvis.catalog_store import PRESETS
+
+	return PRESETS.refresh()
 
 
 @frappe.whitelist(methods=["POST"])
@@ -859,7 +861,12 @@ def save_llm_pool(
 
 	preset = (preset or "").strip()
 	if preset:
-		keys = {e.get("key") for e in admin_client.get_preset_catalog()}
+		catalog = admin_client.get_preset_catalog()
+		if not catalog:
+			from jarvis.catalog_store import CATALOG_UNAVAILABLE_MESSAGE
+
+			raise frappe.ValidationError(CATALOG_UNAVAILABLE_MESSAGE)
+		keys = {e.get("key") for e in catalog}
 		if preset not in keys:
 			raise frappe.ValidationError(f"unknown preset '{preset}'")
 
