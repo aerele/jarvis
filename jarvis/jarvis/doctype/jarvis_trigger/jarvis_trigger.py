@@ -331,6 +331,14 @@ class JarvisTrigger(NotRenamable, Document):
 		intake_spec.validate(intake_spec.load(self))
 		self._check_intake_duplicates()
 
+	def check_enabled_duplicates(self):
+		"""The duplicate guard that fits this rule's kind, for callers that arm a
+		stored row without ``validate`` (the quick enable toggle)."""
+		if self.action_type == "Intake":
+			self._check_intake_duplicates()
+		else:
+			self.check_duplicates()
+
 	def _check_intake_duplicates(self):
 		"""Two enabled rules reading the same source into the same DocType would
 		create two drafts per upload."""
@@ -589,6 +597,12 @@ class JarvisTrigger(NotRenamable, Document):
 	# ------------------------------------------------------------------ #
 	# cache + realtime
 	# ------------------------------------------------------------------ #
+	def notify_changed(self):
+		"""Bust every registry built from enabled rows and nudge open tabs. Callers
+		that change a row without ``save`` (db_set) go through here, so a new action
+		type cannot be missed by them."""
+		self._notify_changed()
+
 	def _notify_changed(self):
 		clear_cache()
 		clear_intake_cache()

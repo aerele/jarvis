@@ -1,9 +1,17 @@
 """Intake trigger form helpers: the folder list and the field picker."""
 
+import json
+
 import frappe
 
-from jarvis.chat.triggers_api import get_intake_field_options, get_trigger, list_intake_folders
+from jarvis.chat.triggers_api import (
+	get_intake_field_options,
+	get_trigger,
+	list_intake_folders,
+	set_trigger_enabled,
+)
 from jarvis.intake import spec as intake_spec
+from jarvis.intake.capture import clear_intake_cache, intake_map
 from jarvis.tests.test_triggers_api import ADMIN_USER, PLAIN_USER, _TriggersApiTestCase
 
 _FOLDER = "Home/Intake Form Test"
@@ -112,3 +120,56 @@ class TestIntakeFormApi(_TriggersApiTestCase):
 		# Shape stays readable.
 		self.assertEqual(user_view["intake_target_doctype"], "ToDo")
 		self.assertEqual(user_view["intake_folder"], "Home/Attachments")
+
+
+class TestIntakeToggle(_TriggersApiTestCase):
+	"""set_trigger_enabled on Intake rules: db_set skips validate, so the toggle
+	re-runs the intake duplicate guard and busts the intake map itself."""
+
+	def _rule(self, folder: str, target: str = "ToDo", enabled: int = 1) -> str:
+		if not frappe.db.exists("File", folder):
+			frappe.get_doc(
+				{
+					"doctype": "File",
+					"file_name": folder.split("/")[-1],
+					"is_folder": 1,
+					"folder": folder.rsplit("/", 1)[0],
+				}
+			).insert(ignore_permissions=True)
+		doc = frappe.get_doc(
+			{
+				"doctype": "Jarvis Trigger",
+				"trigger_name": f"tg-{frappe.generate_hash(length=8)}",
+				"action_type": "Intake",
+				"intake_source": "Folder",
+				"intake_folder": folder,
+				"intake_target_doctype": target,
+				"intake_spec": json.dumps({"fields": ["description"]}),
+				"enabled": enabled,
+			}
+		).insert(ignore_permissions=True)
+		self._triggers.append(doc.name)
+		return doc.name
+
+	def test_reenabling_an_intake_rule_ignores_other_intake_rules(self):
+		self._rule("Home/Attachments")
+		other = self._rule(_FOLDER, enabled=0)
+		frappe.set_user(ADMIN_USER)
+		self.assertEqual(set_trigger_enabled(other, 1)["data"]["enabled"], 1)
+
+	def test_reenabling_a_true_intake_duplicate_is_refused(self):
+		self._rule("Home/Attachments")
+		same = self._rule("Home/Attachments", enabled=0)
+		frappe.set_user(ADMIN_USER)
+		self.assertRaises(frappe.ValidationError, set_trigger_enabled, same, 1)
+		self.assertEqual(int(frappe.db.get_value("Jarvis Trigger", same, "enabled")), 0)
+
+	def test_toggle_busts_the_intake_map(self):
+		name = self._rule(_FOLDER, enabled=0)
+		clear_intake_cache()
+		self.assertNotIn(_FOLDER, intake_map()["folder"])
+		frappe.set_user(ADMIN_USER)
+		set_trigger_enabled(name, 1)
+		self.assertIn(_FOLDER, intake_map()["folder"])
+		set_trigger_enabled(name, 0)
+		self.assertNotIn(_FOLDER, intake_map()["folder"])

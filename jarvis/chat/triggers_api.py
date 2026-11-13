@@ -26,7 +26,6 @@ from jarvis.triggers.engine import (
 	EVENT_LABELS,
 	LLM_EVENTS,
 	SUPPORTED_EVENTS,
-	clear_cache,
 	eval_context,
 )
 from jarvis.triggers.lookups import LOOKUP_MARKER, lookup_marker
@@ -164,16 +163,6 @@ def _order_by(sort_field: str, sort_dir: str, sortable: dict, default_field: str
 	"""Whitelisted ORDER BY."""
 	col, d = _sort(sort_field, sort_dir, sortable, default_field)
 	return f"`{col}` {d}, `name` asc"
-
-
-def _publish_changed() -> None:
-	"""Best-effort realtime nudge to the actor's own open tabs."""
-	try:
-		from jarvis.chat.events import publish_to_user
-
-		publish_to_user(frappe.session.user, {"kind": "trigger:changed"})
-	except Exception:
-		pass
 
 
 # --------------------------------------------------------------------------- #
@@ -453,10 +442,9 @@ def set_trigger_enabled(name: str, enabled: int) -> dict:
 		doc.check_unsafe_attributes()
 		# db_set skips validate, so re-enabling must re-run the duplicate guard.
 		doc.enabled = 1
-		doc.check_duplicates()
+		doc.check_enabled_duplicates()
 	doc.db_set("enabled", value)
-	clear_cache()
-	_publish_changed()
+	doc.notify_changed()
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name, "enabled": value}}
 
