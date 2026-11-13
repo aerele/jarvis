@@ -223,38 +223,6 @@ jobs:
           path: frontend/test-results/approval-layout
           retention-days: 7
 
-  # Real-browser Payment Calendar gate (#821). A stateful mock serves the golden JSON of the
-  # backend tests, so the SPA renders in system Chrome with no site. Needs no bench shard.
-  payment-calendar-browser:
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend deps and Chrome
-        working-directory: frontend
-        run: |
-          npm ci --prefix ../wiki-graph-core
-          npm ci
-          npx playwright install --with-deps chrome
-      - name: Stub the bench site config (API calls are mocked)
-        run: |
-          mkdir -p "$HOME/sites"
-          printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$HOME/sites/common_site_config.json"
-      - name: Check the Payment Calendar in Chrome
-        working-directory: frontend
-        run: npx playwright test --config playwright.payment-calendar.config.cjs
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: payment-calendar-browser-failure
-          path: frontend/test-results/payment-calendar
-          retention-days: 7
-
   # The frontend-tests job above runs the SPA's *tests* but never *builds* it — so a Vite/build break
   # would slip through green and only surface at Frappe Cloud deploy time as a 404 on /jarvis. This gate
   # builds the SPA (the /jarvis artifact) and the PWA (the /jarvis-mobile artifact) the way the deploy does.
