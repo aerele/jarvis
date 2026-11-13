@@ -175,8 +175,9 @@ class TestIntakeActivityJarvisAdmin(FrappeTestCase):
 	read rule matches the SPA feed: every Intake row, not only their own."""
 
 	def setUp(self):
-		from jarvis.tests.test_triggers_api import JADMIN_USER, PLAIN_USER, _ensure_user as ensure_with_roles
 		from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE, ensure_jarvis_user_role
+		from jarvis.tests.test_triggers_api import JADMIN_USER, PLAIN_USER
+		from jarvis.tests.test_triggers_api import _ensure_user as ensure_with_roles
 
 		ensure_jarvis_user_role()
 		ensure_with_roles(JADMIN_USER, [JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE])
