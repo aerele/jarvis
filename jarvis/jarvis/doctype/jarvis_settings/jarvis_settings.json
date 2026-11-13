@@ -12,35 +12,40 @@
   "enabled",
   "hide_shortcut_without_access",
   "token_budget_monthly",
+  "account_col",
   "conversation_retention_days",
   "budgets_section",
   "agent_run_budget_monthly",
-  "macro_step_budget_monthly",
   "activation_module_ceiling",
+  "budgets_col",
+  "macro_step_budget_monthly",
   "enforce_agent_min_model",
   "branding_section",
   "agent_name",
-  "brand_logo",
-  "brand_favicon",
   "holiday_touches_enabled",
   "birthday_greetings_enabled",
+  "branding_col",
+  "brand_logo",
+  "brand_favicon",
   "documents_section",
   "default_pdf_template",
   "llm_tab",
   "llm_section",
   "models",
+  "llm_provider_section",
   "preset",
   "routing_mode",
-  "proxy_active",
-  "proxy_recommended",
   "llm_provider",
   "llm_model",
   "llm_column_break",
+  "proxy_active",
+  "proxy_recommended",
   "llm_api_key",
   "llm_base_url",
   "llm_advanced_section",
   "llm_temperature",
   "llm_max_output_tokens",
+  "llm_advanced_col",
   "vision_attachments_enabled",
   "llm_auth_section",
   "llm_auth_mode",
@@ -52,18 +57,18 @@
   "pattern_llm_polish",
   "pattern_window_start",
   "pattern_window_end",
+  "bl_col",
   "pattern_max_proposals_per_run",
   "pattern_row_budget_per_night",
-  "bl_col",
   "pattern_last_run_at",
   "pattern_last_run_status",
   "pattern_next_run_at",
   "pattern_scan_mode",
   "personalise_section",
-  "personalise_daily_question_cap",
   "personalise_enabled",
   "chat_question_mining_enabled",
   "personalise_col",
+  "personalise_daily_question_cap",
   "chat_mining_watermark",
   "chat_mining_last_run_at",
   "chat_mining_last_run_status",
@@ -71,9 +76,9 @@
   "voice_features_enabled",
   "wiki_enabled",
   "persona_enabled",
+  "vw_col",
   "wiki_nudge_cooldown_hours",
   "knowledge_language",
-  "vw_col",
   "voice_notes_last_processed_at",
   "voice_notes_last_process_status",
   "wiki_lint_last_run_at",
@@ -101,14 +106,15 @@
   "chat_device_private_key",
   "chat_device_token",
   "agent_tools_section",
-  "run_query_doctype_allowlist",
-  "run_method_blocklist",
   "disable_armed_skip",
-  "core_apps_override",
   "enable_customizations_clause",
   "enable_role_profiles",
   "file_box_sheets",
   "payment_calendar_chat_handoff",
+  "agent_tools_col",
+  "run_query_doctype_allowlist",
+  "run_method_blocklist",
+  "core_apps_override",
   "connectors_section",
   "connectors_col",
   "connector_egress_rules",
@@ -118,26 +124,26 @@
   "last_sync_requested_at",
   "last_sync_status",
   "last_sync_attempt_error",
-  "llm_pool_synced_at",
   "llm_direct_synced_at",
   "chat_was_ready_at",
   "last_sync_col",
+  "llm_pool_synced_at",
   "chat_ready_authority",
   "installed_apps_synced",
+  "max_concurrent_chats",
   "last_subscription_status",
   "subscription_health",
-  "max_concurrent_chats",
   "last_sync_warnings",
   "last_model_statuses",
   "llm_last_apply_fingerprint",
   "skills_sync_section",
   "custom_skills_synced_at",
   "custom_skills_sync_status",
-  "agent_skills_synced_at",
-  "agent_skills_sync_status",
-  "skills_sync_col",
   "learned_skills_synced_at",
   "learned_skills_sync_status",
+  "skills_sync_col",
+  "agent_skills_synced_at",
+  "agent_skills_sync_status",
   "agent_catalog_dirty",
   "agent_catalog_version",
   "last_validated_pool_fp",
@@ -151,20 +157,22 @@
   "release_notice_section",
   "release_notice_active",
   "latest_jarvis_version",
-  "release_notice_message",
   "release_notice_tier",
+  "release_notice_col",
   "release_notice_behind",
   "release_banner_interval_days",
+  "release_notice_message",
   "announcement_section",
   "announcement_active",
   "announcement_id",
   "announcement_title",
-  "announcement_message",
   "announcement_severity",
+  "announcement_expires_on",
+  "announcement_col",
+  "announcement_interval_days",
+  "announcement_message",
   "announcement_link_url",
   "announcement_link_label",
-  "announcement_interval_days",
-  "announcement_expires_on",
   "system_tab",
   "chat_sharing_enabled",
   "deployment_section",
@@ -172,16 +180,18 @@
   "admin_connection_section",
   "jarvis_admin_url",
   "jarvis_admin_api_key",
-  "jarvis_admin_api_secret",
-  "admin_connection_col",
   "jarvis_admin_customer_email",
+  "admin_connection_col",
+  "jarvis_admin_api_secret",
   "jarvis_admin_customer_password",
   "signup_context",
   "private_network_section",
   "network_mode",
+  "private_network_col",
   "public_address",
   "maintenance_notice_section",
   "maintenance_active",
+  "maintenance_col",
   "maintenance_message",
   "catalogue_visibility_section",
   "catalogue_visibility_governed",
@@ -192,8 +202,9 @@
   "holiday_policy_section",
   "holiday_policy_disabled",
   "holiday_policy_disabled_designs",
-  "holiday_policy_names",
-  "holiday_policy_synced_at"
+  "holiday_policy_col",
+  "holiday_policy_synced_at",
+  "holiday_policy_names"
  ],
  "fields": [
   {
@@ -227,6 +238,10 @@
    "description": "0 = unlimited. Otherwise hard cap before overage billing kicks in."
   },
   {
+   "fieldname": "account_col",
+   "fieldtype": "Column Break"
+  },
+  {
    "fieldname": "conversation_retention_days",
    "fieldtype": "Int",
    "label": "Reclaim idle chat memory after (days)",
@@ -247,18 +262,22 @@
    "label": "Agent Run Budget (monthly, per installation)"
   },
   {
-   "default": "500",
-   "description": "#468: monthly budget for UNATTENDED macro work, per macro owner, counted in STEPS (one run is up to 25 agent turns, so a run count would under-bound the real spend by 25x). Scheduled runs only: a manual run is an attended click already priced by the per-user token caps, and manual runs are not counted here either, so a heavy interactive month cannot silently starve the schedule. A refusal records a run with 0 steps, so it contributes nothing and the cap can never self-perpetuate; a run that failed part way through DOES count the steps it really dispatched. Leave blank or 0 to use the default of 500. A configured value below 31 is clamped UP to 31 (a full daily schedule of a single-step macro), so a low value can never wedge every schedule for a month. Raise it to allow more frequent or longer scheduled macros before runs are skipped.",
-   "fieldname": "macro_step_budget_monthly",
-   "fieldtype": "Int",
-   "label": "Scheduled Macro Step Budget (monthly, per owner)"
-  },
-  {
    "default": "1",
    "description": "PP-6: site-wide ceiling on the number of LIVE agent modules (Jarvis Agent Installation.activation_state == live), global across all packs. Default 1: every customer starts with a single live module. The PP-4 promotion path refuses to flip an installation to live once the count of live installations reaches this ceiling. Raised to 2 (the stage maximum, no higher value is accepted) only by a Jarvis Admin, and only with a recorded reviewer-capacity justification (audited via track_changes + a provenance event).",
    "fieldname": "activation_module_ceiling",
    "fieldtype": "Int",
    "label": "Activation Module Ceiling (live agents, site-wide)"
+  },
+  {
+   "fieldname": "budgets_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "500",
+   "description": "#468: monthly budget for UNATTENDED macro work, per macro owner, counted in STEPS (one run is up to 25 agent turns, so a run count would under-bound the real spend by 25x). Scheduled runs only: a manual run is an attended click already priced by the per-user token caps, and manual runs are not counted here either, so a heavy interactive month cannot silently starve the schedule. A refusal records a run with 0 steps, so it contributes nothing and the cap can never self-perpetuate; a run that failed part way through DOES count the steps it really dispatched. Leave blank or 0 to use the default of 500. A configured value below 31 is clamped UP to 31 (a full daily schedule of a single-step macro), so a low value can never wedge every schedule for a month. Raise it to allow more frequent or longer scheduled macros before runs are skipped.",
+   "fieldname": "macro_step_budget_monthly",
+   "fieldtype": "Int",
+   "label": "Scheduled Macro Step Budget (monthly, per owner)"
   },
   {
    "default": "0",
@@ -281,18 +300,6 @@
    "description": "Display name for the assistant. Blank = Jarvis. Max 40 characters."
   },
   {
-   "fieldname": "brand_logo",
-   "fieldtype": "Attach Image",
-   "label": "Logo",
-   "description": "Brand mark shown as the assistant avatar and in the chat header. Square image works best."
-  },
-  {
-   "fieldname": "brand_favicon",
-   "fieldtype": "Attach Image",
-   "label": "Favicon",
-   "description": "Browser-tab icon. Square PNG (or .ico) works best."
-  },
-  {
    "fieldname": "holiday_touches_enabled",
    "fieldtype": "Check",
    "label": "Holiday touches",
@@ -305,6 +312,22 @@
    "label": "Birthday greetings",
    "default": "1",
    "depends_on": "eval:doc.holiday_touches_enabled"
+  },
+  {
+   "fieldname": "branding_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "brand_logo",
+   "fieldtype": "Attach Image",
+   "label": "Logo",
+   "description": "Brand mark shown as the assistant avatar and in the chat header. Square image works best."
+  },
+  {
+   "fieldname": "brand_favicon",
+   "fieldtype": "Attach Image",
+   "label": "Favicon",
+   "description": "Browser-tab icon. Square PNG (or .ico) works best."
   },
   {
    "fieldname": "documents_section",
@@ -335,6 +358,11 @@
    "options": "Jarvis LLM Pool Model"
   },
   {
+   "fieldname": "llm_provider_section",
+   "fieldtype": "Section Break",
+   "label": "Provider"
+  },
+  {
    "fieldname": "preset",
    "fieldtype": "Data",
    "label": "Preset"
@@ -346,18 +374,6 @@
    "options": "\ndynamic\nfailover",
    "default": "dynamic",
    "description": "How the LLM pool routes requests. 'dynamic' uses cost-tier routing; 'failover' tries models in order."
-  },
-  {
-   "fieldname": "proxy_active",
-   "fieldtype": "Check",
-   "label": "Proxy Active",
-   "read_only": 1
-  },
-  {
-   "fieldname": "proxy_recommended",
-   "fieldtype": "Check",
-   "label": "Proxy Recommended",
-   "read_only": 1
   },
   {
    "fieldname": "llm_provider",
@@ -376,6 +392,18 @@
   {
    "fieldname": "llm_column_break",
    "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "proxy_active",
+   "fieldtype": "Check",
+   "label": "Proxy Active",
+   "read_only": 1
+  },
+  {
+   "fieldname": "proxy_recommended",
+   "fieldtype": "Check",
+   "label": "Proxy Recommended",
+   "read_only": 1
   },
   {
    "fieldname": "llm_api_key",
@@ -409,6 +437,10 @@
    "fieldtype": "Int",
    "label": "Max Output Tokens",
    "default": "4096"
+  },
+  {
+   "fieldname": "llm_advanced_col",
+   "fieldtype": "Column Break"
   },
   {
    "fieldname": "vision_attachments_enabled",
@@ -485,6 +517,10 @@
    "description": "Window must be at least 1 hour. End before start is legal: the window crosses midnight."
   },
   {
+   "fieldname": "bl_col",
+   "fieldtype": "Column Break"
+  },
+  {
    "fieldname": "pattern_max_proposals_per_run",
    "fieldtype": "Int",
    "label": "Max Proposals per Run",
@@ -496,10 +532,6 @@
    "label": "Row Scan Budget per Night",
    "default": "500000",
    "description": "EXPLAIN-estimated rows a nightly run may scan before remaining detectors are deferred to later nights."
-  },
-  {
-   "fieldname": "bl_col",
-   "fieldtype": "Column Break"
   },
   {
    "fieldname": "pattern_last_run_at",
@@ -533,13 +565,6 @@
    "description": "Skills-area Personalise tab: per-user Question bank + free-capture Notes (DESIGN.md section 2.5). Gated System Manager | Administrator | Jarvis Admin for editing; readers should treat an unset personalise_enabled as ON, same convention as voice_features_enabled/wiki_enabled above."
   },
   {
-   "fieldname": "personalise_daily_question_cap",
-   "fieldtype": "Int",
-   "label": "Daily Question Cap",
-   "default": "5",
-   "description": "Max learning/chat-pattern questions materialized per user per day. Org-rule questions (Jarvis Personalise Question Rule) and reviewer follow-up questions are never capped by this."
-  },
-  {
    "fieldname": "personalise_enabled",
    "fieldtype": "Check",
    "label": "Enable Personalisation",
@@ -556,6 +581,13 @@
   {
    "fieldname": "personalise_col",
    "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "personalise_daily_question_cap",
+   "fieldtype": "Int",
+   "label": "Daily Question Cap",
+   "default": "5",
+   "description": "Max learning/chat-pattern questions materialized per user per day. Org-rule questions (Jarvis Personalise Question Rule) and reviewer follow-up questions are never capped by this."
   },
   {
    "fieldname": "chat_mining_watermark",
@@ -604,6 +636,10 @@
    "description": "Jarvis/Jara voice picker in the composer. An explicit 0 hides the pill and stops the persona clause fleet-wide. Readers treat an unset value as ON."
   },
   {
+   "fieldname": "vw_col",
+   "fieldtype": "Column Break"
+  },
+  {
    "fieldname": "wiki_nudge_cooldown_hours",
    "fieldtype": "Int",
    "label": "Wiki Nudge Cooldown (hours)",
@@ -617,10 +653,6 @@
    "options": "English\nOriginal",
    "default": "English",
    "description": "Language for extracted knowledge (voice facts, wiki pages, drafted skill text). English (recommended) translates non-English input, keeping proper nouns in their original script with a Latin transliteration; Original keeps the dominant language of the source material. Chat transcription is always verbatim."
-  },
-  {
-   "fieldname": "vw_col",
-   "fieldtype": "Column Break"
   },
   {
    "fieldname": "voice_notes_last_processed_at",
@@ -818,31 +850,11 @@
    "label": "Agent Tool Restrictions"
   },
   {
-   "fieldname": "run_query_doctype_allowlist",
-   "fieldtype": "Small Text",
-   "permlevel": 1,
-   "label": "run_query DocType Allowlist",
-   "description": "Defense-in-depth restriction for the run_query agent tool. Comma- or newline-separated list of DocType names. When non-empty, run_query refuses any query referencing a DocType not on this list - even if the calling user has read permission on it through Frappe's normal permission system. Leave empty (default) to allow any DocType the user can read. Use this to lock the agent to a known-good slice of your data (e.g. 'Sales Invoice, Customer, Item, Sales Invoice Item') so a future allowlist bypass in the SQL parser still can't reach the rest of the bench."
-  },
-  {
-   "fieldname": "run_method_blocklist",
-   "fieldtype": "Small Text",
-   "permlevel": 1,
-   "label": "run_method Blocklist",
-   "description": "Defense-in-depth restriction for the run_method agent tool. Comma- or newline-separated list of fnmatch patterns. When a pattern matches, run_method refuses to call that target - whether it is a whitelisted Python method (dotted path, e.g. 'frappe.*' or '*.delete_doc') or a Server Script API method (matched on its api_method name). Leave empty (default) to block nothing. Every run_method call still parks for a human confirmation card regardless; this list is the categorical 'never even offer these' hardstop."
-  },
-  {
    "fieldname": "disable_armed_skip",
    "fieldtype": "Check",
    "label": "Disable armed skip-confirmation (kill switch)",
    "default": "0",
    "description": "Emergency kill switch. When 1, armed macros (Jarvis Macro.skip_confirmation) STOP skipping confirmation cards immediately, site-wide, with no deploy - every covered write re-gates behind its card. The escape hatch if an armed macro ever misbehaves. Default 0."
-  },
-  {
-   "fieldname": "core_apps_override",
-   "fieldtype": "Small Text",
-   "label": "Additional Core Apps",
-   "description": "Customization discovery treats every installed app outside the known core stack (frappe, erpnext, hrms, india_compliance, payments, webshop, insights, wiki, jarvis) as the customer's own. Comma- or newline-separated app names listed here EXTEND that core set, so their doctypes stop being reported as customizations. Leave empty (default) on most sites."
   },
   {
    "fieldname": "enable_customizations_clause",
@@ -875,6 +887,30 @@
    "hidden": 1,
    "permlevel": 2,
    "description": "On: a chat turn from a user who can open the Payment Calendar tells the agent the page exists, so a per-day cash request can be handed to it. Off (default): no hint is sent and the agent behaves as before. Turned on per site by Jarvis support after a check; only an Administrator can change it."
+  },
+  {
+   "fieldname": "agent_tools_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "run_query_doctype_allowlist",
+   "fieldtype": "Small Text",
+   "permlevel": 1,
+   "label": "run_query DocType Allowlist",
+   "description": "Defense-in-depth restriction for the run_query agent tool. Comma- or newline-separated list of DocType names. When non-empty, run_query refuses any query referencing a DocType not on this list - even if the calling user has read permission on it through Frappe's normal permission system. Leave empty (default) to allow any DocType the user can read. Use this to lock the agent to a known-good slice of your data (e.g. 'Sales Invoice, Customer, Item, Sales Invoice Item') so a future allowlist bypass in the SQL parser still can't reach the rest of the bench."
+  },
+  {
+   "fieldname": "run_method_blocklist",
+   "fieldtype": "Small Text",
+   "permlevel": 1,
+   "label": "run_method Blocklist",
+   "description": "Defense-in-depth restriction for the run_method agent tool. Comma- or newline-separated list of fnmatch patterns. When a pattern matches, run_method refuses to call that target - whether it is a whitelisted Python method (dotted path, e.g. 'frappe.*' or '*.delete_doc') or a Server Script API method (matched on its api_method name). Leave empty (default) to block nothing. Every run_method call still parks for a human confirmation card regardless; this list is the categorical 'never even offer these' hardstop."
+  },
+  {
+   "fieldname": "core_apps_override",
+   "fieldtype": "Small Text",
+   "label": "Additional Core Apps",
+   "description": "Customization discovery treats every installed app outside the known core stack (frappe, erpnext, hrms, india_compliance, payments, webshop, insights, wiki, jarvis) as the customer's own. Comma- or newline-separated app names listed here EXTEND that core set, so their doctypes stop being reported as customizations. Leave empty (default) on most sites."
   },
   {
    "fieldname": "connectors_section",
@@ -930,13 +966,6 @@
    "read_only": 1
   },
   {
-   "description": "Set when a pool (proxy) config was last APPLIED to the container via admin. Distinguishes a provisioned pool from one whose first sync is still pending/failed - is_ready_for_chat gates on it.",
-   "fieldname": "llm_pool_synced_at",
-   "fieldtype": "Datetime",
-   "label": "LLM Pool Synced At",
-   "read_only": 1
-  },
-  {
    "description": "Set when a DIRECT (single-model) LLM config was last CONFIRMED-applied to the container via admin (status=applied). Distinguishes a working direct tenant from one whose first apply is still pending/failed - is_ready_for_chat gates a first direct activation on it so chat never opens on an unconfirmed container (round-4 review R4-P0-6 / P1-10).",
    "fieldname": "llm_direct_synced_at",
    "fieldtype": "Datetime",
@@ -955,6 +984,13 @@
    "fieldtype": "Column Break"
   },
   {
+   "description": "Set when a pool (proxy) config was last APPLIED to the container via admin. Distinguishes a provisioned pool from one whose first sync is still pending/failed - is_ready_for_chat gates on it.",
+   "fieldname": "llm_pool_synced_at",
+   "fieldtype": "Datetime",
+   "label": "LLM Pool Synced At",
+   "read_only": 1
+  },
+  {
    "description": "Authority the established chat-Ready claim is bound to: a digest of (admin principal, container URL, tenant authority generation) captured the last time admin confirmed this workspace Ready. The claim only survives a control-plane outage while this still matches the current authority - a workspace reset, a reconnect to a different principal/container, or an authority-generation change moves it and ends the claim mechanically, without depending on every writer remembering to clear the marker. See account._authority_anchor.",
    "fieldname": "chat_ready_authority",
    "fieldtype": "Small Text",
@@ -967,6 +1003,13 @@
    "label": "Installed Apps Synced",
    "read_only": 1,
    "description": "JSON snapshot of the app list last sent to admin (post_update_llm_creds carries installed_apps). after_migrate compares the live list against this and re-syncs on change so skill gating never runs off a stale app set. Managed by jarvis.installed_apps_sync - do not edit."
+  },
+  {
+   "description": "Set by Jarvis admin from your plan. Changes made here are reset by the next sync. Empty means the default of 4.",
+   "fieldname": "max_concurrent_chats",
+   "fieldtype": "Int",
+   "label": "Max Concurrent Chats",
+   "read_only": 1
   },
   {
    "description": "fleet-agent's subscription_status from the last pool apply: verified | unverified | unchecked | not_applicable. Empty when the fleet didn't report one (older contract) or the last sync failed. Backend-only - the SPA reads this via get_llm_sync_status, not the form.",
@@ -982,13 +1025,6 @@
    "fieldtype": "Long Text",
    "hidden": 1,
    "label": "Subscription Health",
-   "read_only": 1
-  },
-  {
-   "description": "Set by Jarvis admin from your plan. Changes made here are reset by the next sync. Empty means the default of 4.",
-   "fieldname": "max_concurrent_chats",
-   "fieldtype": "Int",
-   "label": "Max Concurrent Chats",
    "read_only": 1
   },
   {
@@ -1033,22 +1069,6 @@
    "read_only": 1
   },
   {
-   "fieldname": "agent_skills_synced_at",
-   "fieldtype": "Datetime",
-   "label": "Agent Skills Synced At",
-   "read_only": 1
-  },
-  {
-   "fieldname": "agent_skills_sync_status",
-   "fieldtype": "Long Text",
-   "label": "Agent Skills Sync Status",
-   "read_only": 1
-  },
-  {
-   "fieldname": "skills_sync_col",
-   "fieldtype": "Column Break"
-  },
-  {
    "fieldname": "learned_skills_synced_at",
    "fieldtype": "Datetime",
    "label": "Learned Skills Synced At",
@@ -1058,6 +1078,22 @@
    "fieldname": "learned_skills_sync_status",
    "fieldtype": "Long Text",
    "label": "Learned Skills Sync Status",
+   "read_only": 1
+  },
+  {
+   "fieldname": "skills_sync_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "agent_skills_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Agent Skills Synced At",
+   "read_only": 1
+  },
+  {
+   "fieldname": "agent_skills_sync_status",
+   "fieldtype": "Long Text",
+   "label": "Agent Skills Sync Status",
    "read_only": 1
   },
   {
@@ -1158,16 +1194,14 @@
    "read_only": 1
   },
   {
-   "fieldname": "release_notice_message",
-   "fieldtype": "Small Text",
-   "label": "Release Notice Message",
-   "read_only": 1
-  },
-  {
    "fieldname": "release_notice_tier",
    "fieldtype": "Data",
    "label": "Release Notice Tier",
    "read_only": 1
+  },
+  {
+   "fieldname": "release_notice_col",
+   "fieldtype": "Column Break"
   },
   {
    "fieldname": "release_notice_behind",
@@ -1179,6 +1213,12 @@
    "fieldname": "release_banner_interval_days",
    "fieldtype": "Int",
    "label": "Release Banner Interval Days",
+   "read_only": 1
+  },
+  {
+   "fieldname": "release_notice_message",
+   "fieldtype": "Small Text",
+   "label": "Release Notice Message",
    "read_only": 1
   },
   {
@@ -1206,15 +1246,31 @@
    "read_only": 1
   },
   {
-   "fieldname": "announcement_message",
-   "fieldtype": "Small Text",
-   "label": "Announcement Message",
-   "read_only": 1
-  },
-  {
    "fieldname": "announcement_severity",
    "fieldtype": "Data",
    "label": "Announcement Severity",
+   "read_only": 1
+  },
+  {
+   "fieldname": "announcement_expires_on",
+   "fieldtype": "Datetime",
+   "label": "Announcement Expires On",
+   "read_only": 1
+  },
+  {
+   "fieldname": "announcement_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "announcement_interval_days",
+   "fieldtype": "Int",
+   "label": "Announcement Interval Days",
+   "read_only": 1
+  },
+  {
+   "fieldname": "announcement_message",
+   "fieldtype": "Small Text",
+   "label": "Announcement Message",
    "read_only": 1
   },
   {
@@ -1227,18 +1283,6 @@
    "fieldname": "announcement_link_label",
    "fieldtype": "Data",
    "label": "Announcement Link Label",
-   "read_only": 1
-  },
-  {
-   "fieldname": "announcement_interval_days",
-   "fieldtype": "Int",
-   "label": "Announcement Interval Days",
-   "read_only": 1
-  },
-  {
-   "fieldname": "announcement_expires_on",
-   "fieldtype": "Datetime",
-   "label": "Announcement Expires On",
    "read_only": 1
   },
   {
@@ -1290,24 +1334,24 @@
    "description": "Native Frappe api_key for the customer's User on the admin site. Paired with the secret below as `Authorization: token <key>:<secret>`."
   },
   {
-   "fieldname": "jarvis_admin_api_secret",
-   "permlevel": 1,
-   "fieldtype": "Password",
-   "label": "Jarvis Admin API Secret",
-   "read_only": 1,
-   "description": "Native Frappe api_secret paired with the API Key. Set automatically at onboarding."
-  },
-  {
-   "fieldname": "admin_connection_col",
-   "fieldtype": "Column Break"
-  },
-  {
    "fieldname": "jarvis_admin_customer_email",
    "permlevel": 1,
    "fieldtype": "Data",
    "label": "Jarvis Admin Customer Email",
    "read_only": 1,
    "description": "The customer's login (email) on the admin site. Used as the OAuth password-grant username. Set automatically at onboarding."
+  },
+  {
+   "fieldname": "admin_connection_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "jarvis_admin_api_secret",
+   "permlevel": 1,
+   "fieldtype": "Password",
+   "label": "Jarvis Admin API Secret",
+   "read_only": 1,
+   "description": "Native Frappe api_secret paired with the API Key. Set automatically at onboarding."
   },
   {
    "fieldname": "jarvis_admin_customer_password",
@@ -1341,6 +1385,10 @@
    "description": "Private makes the bench report the public address below as this site's URL and lifts the localhost onboarding block."
   },
   {
+   "fieldname": "private_network_col",
+   "fieldtype": "Column Break"
+  },
+  {
    "fieldname": "public_address",
    "fieldtype": "Data",
    "permlevel": 1,
@@ -1361,6 +1409,10 @@
    "label": "In Maintenance",
    "read_only": 1,
    "default": "0"
+  },
+  {
+   "fieldname": "maintenance_col",
+   "fieldtype": "Column Break"
   },
   {
    "fieldname": "maintenance_message",
@@ -1433,17 +1485,21 @@
    "description": "JSON list of design keys the operator has turned off."
   },
   {
-   "fieldname": "holiday_policy_names",
-   "fieldtype": "Long Text",
-   "label": "Holiday Policy Names",
-   "read_only": 1,
-   "description": "JSON {aliases, near_misses} of extra holiday names from the operator."
+   "fieldname": "holiday_policy_col",
+   "fieldtype": "Column Break"
   },
   {
    "fieldname": "holiday_policy_synced_at",
    "fieldtype": "Datetime",
    "label": "Holiday Policy Synced At",
    "read_only": 1
+  },
+  {
+   "fieldname": "holiday_policy_names",
+   "fieldtype": "Long Text",
+   "label": "Holiday Policy Names",
+   "read_only": 1,
+   "description": "JSON {aliases, near_misses} of extra holiday names from the operator."
   }
  ],
  "permissions": [
@@ -1483,5 +1539,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-09 12:00:00.000000"
+ "modified": "2026-11-13 19:00:00.000000"
 }
