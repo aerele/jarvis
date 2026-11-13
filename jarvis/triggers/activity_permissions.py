@@ -1,6 +1,7 @@
 """Who may read ``Jarvis Trigger Activity`` rows at the ORM.
 
-System Managers see everything. Everyone else sees only their OWN rows with
+System Managers and Jarvis Admins (the people who manage triggers, same rule as
+the SPA feed) see everything. Everyone else sees only their OWN rows with
 ``action_type = 'Intake'`` (the uploader owns the row because it is inserted in
 their request). Script/LLM activity rows are excluded on purpose: their
 ``detail`` is managers-only and their owner is the event user, so an owner-only
@@ -13,20 +14,23 @@ only DENY, so every allow path returns ``True`` to defer to the role check.
 
 import frappe
 
+from jarvis.permissions import has_jarvis_admin_access
+
 ACTIVITY = "Jarvis Trigger Activity"
 INTAKE = "Intake"
 _READ_PTYPES = ("read", "select", "export", "report")
 
 
-def _is_sm(user: str) -> bool:
-	return user == "Administrator" or "System Manager" in frappe.get_roles(user)
+def _can_see_all(user: str) -> bool:
+	# One definition with triggers_api._can_manage, so the SPA feed and the ORM agree.
+	return has_jarvis_admin_access(user)
 
 
 def activity_query_conditions(user: str | None = None) -> str:
-	"""hooks.permission_query_conditions: empty for System Managers, otherwise
+	"""hooks.permission_query_conditions: empty for managers, otherwise
 	own Intake rows only."""
 	user = user or frappe.session.user
-	if _is_sm(user):
+	if _can_see_all(user):
 		return ""
 	table = f"`tab{ACTIVITY}`"
 	return (
@@ -37,7 +41,7 @@ def activity_query_conditions(user: str | None = None) -> str:
 def has_activity_permission(doc, ptype: str | None = None, user: str | None = None, **kwargs) -> bool:
 	"""hooks.has_permission: non-managers may only read their own Intake rows."""
 	user = user or frappe.session.user
-	if _is_sm(user):
+	if _can_see_all(user):
 		return True
 	if ptype not in _READ_PTYPES:
 		return False

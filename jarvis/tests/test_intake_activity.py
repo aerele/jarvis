@@ -168,3 +168,36 @@ class TestIntakeActivity(FrappeTestCase):
 			self.assertFalse(self._can_retry_onload(hidden), hidden)
 		frappe.set_user("Administrator")
 		self.assertTrue(self._can_retry_onload(theirs))  # a manager may retry anyone's
+
+
+class TestIntakeActivityJarvisAdmin(FrappeTestCase):
+	"""A Jarvis Admin who is not a System Manager manages triggers, so the ORM
+	read rule matches the SPA feed: every Intake row, not only their own."""
+
+	def setUp(self):
+		from jarvis.tests.test_triggers_api import JADMIN_USER, PLAIN_USER, _ensure_user as ensure_with_roles
+		from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE, ensure_jarvis_user_role
+
+		ensure_jarvis_user_role()
+		ensure_with_roles(JADMIN_USER, [JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE])
+		ensure_with_roles(PLAIN_USER, [JARVIS_USER_ROLE])
+		self.admin, self.plain = JADMIN_USER, PLAIN_USER
+		self._orig_user = frappe.session.user
+		self._names: list[str] = []
+
+	def tearDown(self):
+		frappe.set_user(self._orig_user)
+		for name in self._names:
+			frappe.db.delete(ACTIVITY, {"name": name})
+
+	def test_jarvis_admin_reads_another_users_intake_row(self):
+		doc = frappe.get_doc(
+			{"doctype": ACTIVITY, "trigger_label": "t", "action_type": "Intake", "status": "Queued"}
+		).insert(ignore_permissions=True)
+		self._names.append(doc.name)
+		frappe.db.set_value(ACTIVITY, doc.name, "owner", OTHER, update_modified=False)
+		frappe.set_user(self.admin)
+		self.assertTrue(frappe.has_permission(ACTIVITY, "read", doc.name))
+		self.assertEqual(frappe.get_list(ACTIVITY, filters={"name": doc.name}, pluck="name"), [doc.name])
+		frappe.set_user(self.plain)
+		self.assertFalse(frappe.has_permission(ACTIVITY, "read", doc.name))
