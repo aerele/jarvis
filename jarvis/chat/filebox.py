@@ -226,6 +226,35 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 	the run has no source file, or ``{"attach_error": <reason>}`` with the error
 	logged. Idempotent: a draft that already has this file is left as it is. Every
 	document draft the run makes gets the file (each was made from it)."""
+
+	def resolve():
+		from jarvis.chat.filebox_source import selected_file
+
+		src = _source_file(conv, ("name", "file_url", "file_name"))
+		# Native File copies retain the blob. Re-saving a binary PDF through
+		# save_url can decode/re-encode it and change its URL and bytes.
+		return src, bool(src and src.get("file_url") and selected_file(conv) is not None)
+
+	return _attach(doctype, name, resolve, context=conv)
+
+
+def attach_file_to_doc(file_name: str, doctype: str, name: str) -> dict:
+	"""Attach the File ``file_name`` (a File doc name) to ``doctype`` ``name``, as the
+	current user. Same contract as ``attach_source_to_draft``, without a conversation:
+	``{"attached_file": ...}``, ``{}`` when the File has no URL, or ``{"attach_error": ...}``
+	with the error logged. Document Intake uses it for the file a draft was read from."""
+
+	def resolve():
+		src = frappe.db.get_value("File", file_name, ["name", "file_url", "file_name"], as_dict=True)
+		return src, False
+
+	return _attach(doctype, name, resolve, context=file_name)
+
+
+def _attach(doctype: str, name: str, resolve, *, context: str) -> dict:
+	"""Shared body: ``resolve()`` returns ``(file row or None, copy)``; ``copy`` uses a
+	native File copy instead of ``add_attachments``. Savepoint and error handling are
+	the File Box ones, so a failed attach never loses the draft."""
 	from frappe.utils.file_manager import add_attachments
 
 	savepoint = "jarvis_filebox_attach"
@@ -233,7 +262,7 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 	src = None
 	frappe.db.savepoint(savepoint)
 	try:
-		src = _source_file(conv, ("name", "file_url", "file_name"))
+		src, copy = resolve()
 		if not src or not src.get("file_url"):
 			return {}
 		existing = frappe.db.get_value(
@@ -243,11 +272,7 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 		)
 		if existing:
 			return {"attached_file": existing}
-		from jarvis.chat.filebox_source import selected_file
-
-		if selected_file(conv) is not None:
-			# Native File copies retain the blob. Re-saving a binary PDF through
-			# save_url can decode/re-encode it and change its URL and bytes.
+		if copy:
 			if not frappe.has_permission(doctype, "write", doc=name):
 				frappe.throw("Not permitted", frappe.PermissionError)
 			files = [
@@ -266,7 +291,7 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 		file_name = (src or {}).get("file_name") or "the dropped file"
 		frappe.log_error(
 			title="jarvis.file_box.attach_failed",
-			message=f"{conv}: {file_name} -> {doctype} {name}\n{frappe.get_traceback()}",
+			message=f"{context}: {file_name} -> {doctype} {name}\n{frappe.get_traceback()}",
 		)
 		reason = _first_line(str(e)) or type(e).__name__
 		return {
