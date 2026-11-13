@@ -23,7 +23,7 @@
 			<button type="button" class="jv-mon-retry" @click="load">Retry</button>
 		</div>
 		<p
-			v-if="catalogState === 'loading'"
+			v-if="catalogState === 'loading' && (singleMode || loaded)"
 			class="text-p-sm text-ink-gray-5"
 			style="margin: 0 0 12px"
 		>
@@ -5144,6 +5144,11 @@ async function load(opts = {}) {
 		} catch (e) {
 			err.value = _err(e);
 		}
+		// The catalog may land before or after the rows: fill blank models once both
+		// are in. Saved rows always name a model, so they are never touched.
+		const filled = catalogDone.then(() => {
+			if (catalogReady.value) fillBlankModels();
+		});
 		// Re-attach any still-active server-held OAuth capture (plan-05 D2 / P0-04,
 		// P1-05): a reload after a sign-in - and the error-banner Retry, which re-runs
 		// load() - then resumes the SAME capture without a second sign-in. Needs the
@@ -5153,10 +5158,7 @@ async function load(opts = {}) {
 		// Draw once everything is in, but never let the extras hold the spinner past
 		// LOAD_WAIT_MS. The pool read above is not capped: drawing without it would
 		// show an empty pool that a save could write over.
-		await Promise.race([
-			Promise.all([catalogDone, rehydrated, syncDone, presetsDone]),
-			deadline,
-		]);
+		await Promise.race([Promise.all([filled, rehydrated, syncDone, presetsDone]), deadline]);
 	} finally {
 		clearTimeout(waitTimer);
 		loaded.value = true;
