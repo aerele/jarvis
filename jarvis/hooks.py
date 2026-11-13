@@ -274,6 +274,8 @@ scheduler_events = {
 			"jarvis.chat.collaboration_recovery.sweep",
 		],
 		"*/5 * * * *": [
+			# Document Intake: start Queued files whose job was lost or found no slot.
+			"jarvis.intake.worker.pump",
 			"jarvis.chat.stale_scan.scan_and_mark_errored",
 			# Phase-0 admission backstop (chat concurrency, WP-0): reclaim lost
 			# reservations, reconcile dispatching Turn rows against Message truth,
