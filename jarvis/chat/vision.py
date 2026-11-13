@@ -130,13 +130,20 @@ def pdf_parts(
 
 def _encode_under_caps(im, file_name: str) -> dict | None:
 	"""Convert to RGB and return the first JPEG within the byte budget. Quality drops
-	before pixels do (legibility holds longer at lower quality than at fewer pixels);
-	each size step starts from the full image so resampling never compounds."""
+	before pixels do (legibility holds longer at lower quality than at fewer pixels).
+	The full-size photo is cut to the largest step once, so smaller steps copy a
+	~7 MB bitmap rather than a 64 MP one; a step that leaves the size unchanged
+	(an image already that small) is skipped instead of re-encoded."""
 	try:
 		im = im.convert("RGB")
+		im.thumbnail((_SIDE_STEPS[0], _SIDE_STEPS[0]))  # never upscales
+		tried = set()
 		for side in _SIDE_STEPS:
 			scaled = im.copy()
-			scaled.thumbnail((side, side))  # never upscales
+			scaled.thumbnail((side, side))
+			if scaled.size in tried:
+				continue
+			tried.add(scaled.size)
 			for quality in _JPEG_QUALITIES:
 				data = _jpeg(scaled, quality)
 				if len(data) <= _MAX_IMAGE_BYTES:
