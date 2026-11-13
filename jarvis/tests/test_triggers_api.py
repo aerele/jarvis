@@ -827,7 +827,7 @@ class TestGetActivityDetail(_TriggersApiTestCase):
 		# itself (ValidationError). Either error is accepted, as in test_pulse_feedback;
 		# call with keyword arguments and the request condition, as Frappe does.
 		frappe.set_user(ADMIN_USER)
-		with patch.object(frappe, "in_test", True):
+		with patch.dict(frappe.flags, {"in_test": True}):
 			for bad in (None, 7, ["a"], {"a": 1}):
 				with self.subTest(name=bad):
 					# wraps: the permission gate reads through get_value too
