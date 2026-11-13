@@ -6,6 +6,7 @@ vision model must answer with; ``mandatory_fields`` lists what the target needs
 on insert.
 """
 
+import math
 from dataclasses import dataclass, field
 
 import frappe
@@ -148,9 +149,12 @@ def _validate_default(df, value) -> None:
 		if not frappe.db.exists(df.options, value):
 			frappe.throw(_("Default for '{0}': {1} '{2}' does not exist.").format(name, df.options, value))
 	elif df.fieldtype in _INTEGER_TYPES | _NUMBER_TYPES:
+		# float() accepts "nan" and "inf", which no field can store.
 		try:
-			float(value)
+			finite = math.isfinite(float(value))
 		except (TypeError, ValueError):
+			finite = False
+		if not finite:
 			frappe.throw(_("Default for '{0}' must be a number.").format(name))
 
 

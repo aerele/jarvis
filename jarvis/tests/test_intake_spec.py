@@ -154,6 +154,21 @@ class TestIntakeSpec(FrappeTestCase):
 		ok_num = json.dumps({"fields": fields, "defaults": {"shelf_life_in_days": "30"}})
 		self._insert(**item, intake_spec=ok_num, allow_incomplete_drafts=1)
 
+	def test_non_finite_numeric_defaults_refused(self):
+		for fieldname in ("shelf_life_in_days", "weight_per_unit", "valuation_rate"):
+			for bad in ("nan", "inf", "-inf", float("nan"), float("inf")):
+				spec_json = json.dumps(
+					{"fields": ["item_name"], "defaults": {fieldname: bad}}, allow_nan=True
+				)
+				with self.subTest(field=fieldname, value=bad):
+					self.assertRaises(
+						frappe.ValidationError,
+						self._insert,
+						intake_target_doctype="Item",
+						intake_spec=spec_json,
+						allow_incomplete_drafts=1,
+					)
+
 	def test_duplicate_intake_rule_refused(self):
 		self._insert()
 		self.assertRaises(frappe.ValidationError, self._insert)
