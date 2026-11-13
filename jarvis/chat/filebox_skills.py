@@ -15,13 +15,13 @@ record, no refusal, and a pin resolves as ``get_skill`` does."""
 from __future__ import annotations
 
 import json
-import re
 
 import frappe
 from frappe.query_builder import Order
 
 from jarvis._responses import err
 from jarvis.chat.pending_actions._store import filebox_migrated
+from jarvis.chat.safe_text import plain_line
 
 SKILL = "Jarvis Custom Skill"
 CONV = "Jarvis Conversation"
@@ -34,7 +34,6 @@ DESC_CAP = 200
 _CANDIDATES = 200
 _RECORD_CAP = 20
 _BACKSTOP_LIST = 10
-_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _SOURCE_UNAVAILABLE = object()
 
 _LIST_HEAD = (
@@ -72,9 +71,9 @@ _SKIPPED = "Skip this file: make no more changes. Stop and end with a one-line s
 
 
 def _safe(text, cap: int) -> str:
-	"""One DATA-safe line: no markup, control characters or backticks, capped."""
-	text = _CONTROL.sub(" ", frappe.utils.strip_html(str(text or "")))
-	text = " ".join(text.split()).replace("`", "'")
+	"""One DATA-safe line: no markup, control characters or backticks, capped. The body is
+	``safe_text.plain_line``; only the cap and its ellipsis live here."""
+	text = plain_line(text)
 	return text if len(text) <= cap else text[: cap - 1].rstrip() + "…"
 
 

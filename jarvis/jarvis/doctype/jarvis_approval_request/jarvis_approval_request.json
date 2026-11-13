@@ -116,7 +116,7 @@
    "reqd": 1
   },
   {
-   "description": "Markdown context the approver needs: extracted values, discrepancy notes, what was already checked.",
+   "description": "Markdown context the approver needs: extracted values, discrepancy notes, what was already checked. Chat rows hold the agent's plain-text lead-in.",
    "fieldname": "context_md",
    "fieldtype": "Long Text",
    "label": "Context"

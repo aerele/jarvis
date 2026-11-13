@@ -1478,7 +1478,15 @@ def _assemble_prompt(
 	# resolved its own set under the ambient session user while
 	# armed_skill_clause resolved under chat_user, so the two could disagree
 	# on identity, and each paid for its own table scan.
-	turn_invoked_slugs = invoked_skill_slugs(user_message or "", user=chat_user)
+	# A chat decision resuming a card (jarvis-admin-v2#793) is a message the BENCH wrote: no user
+	# typed a /slug in it. A "/daily-timesheet-reminder" inside the question, the lead-in, the
+	# title, the decision or the actor's name must not become a trusted "the user invoked these
+	# skills" clause (nor an armed-skill one). File Box routing answers use the same origin and
+	# keep today's behaviour.
+	if msg_row.get("origin") == "board_answer" and not conv.file_box:
+		turn_invoked_slugs = set()
+	else:
+		turn_invoked_slugs = invoked_skill_slugs(user_message or "", user=chat_user)
 	skill_clause = invoked_skill_clause(user_message or "", chat_user, slugs=turn_invoked_slugs)
 	# Armed-skill first-write fix (issue #580, found on live e2e): silent once a
 	# run is already approved (autorun_run above takes over) or an armed macro
@@ -1520,6 +1528,12 @@ def _assemble_prompt(
 		from jarvis.chat.custom_skills import personal_skill_clause
 
 		personal_clause = (personal_skill_clause(chat_user) or "") if binding is None else ""
+		# A decision resuming a chat (jarvis-admin-v2#793) continues the task its card came
+		# from; "N personal skills saved, search with find_skills" invited a search that
+		# ended in an unrelated write. File Box routing answers also use `board_answer`
+		# (filebox_skills.py), and keep the nudge.
+		if msg_row.get("origin") == "board_answer" and not conv.file_box:
+			personal_clause = ""
 	except Exception:
 		personal_clause = ""
 	try:

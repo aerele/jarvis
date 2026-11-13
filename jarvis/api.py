@@ -4348,7 +4348,10 @@ def _single_flight_error() -> dict:
 		"a confirmation card for a previous action is still awaiting the user in this "
 		"conversation. Only one runs at a time - do NOT retry this call; stop and end "
 		"your turn now. The card does not expire: the user confirms or discards it, and "
-		"once they confirm you'll get a follow-up turn to continue with the next step.",
+		"once they confirm you'll get a follow-up turn to continue with the next step. "
+		"If the waiting card is not what the user asked for, tell them it is wrong and ask "
+		"them to discard it (Discard in the full chat, Deny on the phone); do not ask a "
+		"yes/no question in that reply.",
 	)
 
 

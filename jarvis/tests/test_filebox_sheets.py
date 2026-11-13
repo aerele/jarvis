@@ -744,6 +744,14 @@ class TestFixField(_Base):
 				self.assertEqual(held_sheets._fix("Item", frappe.ValidationError(text))["field"], "stock_uom")
 		self.assertIsNone(held_sheets._fix("Item", frappe.ValidationError("Item Groupings: x"))["field"])
 
+	def test_the_mandatory_list_survives_the_text_sanitizer(self):
+		# held_sheets._fix_text goes through filebox_skills._safe, which must keep the square
+		# brackets of frappe's "[Item, X]: stock_uom" (jarvis-admin-v2#793: the bracket mapping
+		# belongs to chat.safe_text.safe_line, never to _safe).
+		fix = held_sheets._fix("Item", frappe.ValidationError("[Item, X]: stock_uom"))
+		self.assertEqual(fix["field"], "stock_uom")
+		self.assertEqual(fix["message"], "[Item, X]: stock_uom")
+
 
 class TestSandboxCode(_Base):
 	"""jarvis-admin-v2#818 (T4): a Report script that reads a blocked attribute is the model's to
