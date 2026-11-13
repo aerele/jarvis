@@ -26,6 +26,7 @@ from jarvis.triggers.engine import (
 	SUPPORTED_EVENTS,
 	clear_cache,
 	eval_context,
+	trigger_events,
 )
 from jarvis.triggers.lookups import LOOKUP_MARKER, lookup_marker
 
@@ -39,6 +40,7 @@ _ALLOWED_PAYLOAD_FIELDS = {
 	"enabled",
 	"target_doctype",
 	"doc_event",
+	"doc_events",
 	"condition",
 	"action_type",
 	"script_body",
@@ -238,7 +240,15 @@ def list_triggers_page(
 	if "doc_event" in f:
 		if f["doc_event"] not in SUPPORTED_EVENTS:
 			frappe.throw(_("Invalid doc_event filter."))
-		q.server_condition("doc_event = %(doc_event)s", doc_event=f["doc_event"])
+		# Any of the trigger's events (#825), not just the first. Rows saved before
+		# doc_events existed have it blank and match on doc_event.
+		q.server_condition(
+			"(doc_event = %(doc_event)s"
+			" OR CONCAT(%(nl)s, COALESCE(doc_events, ''), %(nl)s) LIKE %(doc_event_line)s)",
+			doc_event=f["doc_event"],
+			nl="\n",
+			doc_event_line=f"%\n{_lk(f['doc_event'])}\n%",
+		)
 
 	q.apply(filters_v2)
 	where = q.where()
@@ -247,7 +257,7 @@ def list_triggers_page(
 
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Trigger` WHERE {where}", params)[0][0]
 	rows = list_filters.bounded_sql(
-		f"""SELECT name, trigger_name, enabled, target_doctype, doc_event,
+		f"""SELECT name, trigger_name, enabled, target_doctype, doc_event, doc_events,
 		action_type, description, modified, owner
 		FROM `tabJarvis Trigger`
 		WHERE {where}
@@ -275,6 +285,7 @@ def list_triggers_page(
 		r["last_activity_at"] = str(s["last_activity_at"]) if s and s["last_activity_at"] else ""
 		r["activity_24h"] = cint(s["activity_24h"]) if s else 0
 		r["modified"] = str(r["modified"])
+		r["doc_events"] = trigger_events(r.get("doc_events"), r.get("doc_event"))
 
 	return {
 		"ok": True,
@@ -300,6 +311,7 @@ def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
 		"enabled": cint(doc.enabled),
 		"target_doctype": doc.target_doctype,
 		"doc_event": doc.doc_event,
+		"doc_events": trigger_events(doc.doc_events, doc.doc_event),
 		"action_type": doc.action_type,
 		"server_script": doc.server_script or "",
 		"llm_daily_cap": cint(doc.llm_daily_cap),

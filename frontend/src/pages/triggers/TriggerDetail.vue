@@ -96,24 +96,38 @@
 						/>
 						<ErrorMessage :message="fieldErrors.target_doctype" class="mt-2" />
 					</div>
-					<div>
-						<FormControl
-							type="select"
-							label="Event"
-							required
-							:options="docEventOptions"
-							:modelValue="form.doc_event"
-							:disabled="readOnly || saving"
-							:aria-invalid="fieldErrors.doc_event ? 'true' : undefined"
-							:description="
-								form.action_type === 'LLM'
-									? 'LLM actions support a reduced set of events.'
-									: ''
-							"
-							@update:modelValue="(v) => (form.doc_event = v)"
-						/>
+					<fieldset
+						class="jv-trigger-events"
+						:aria-invalid="fieldErrors.doc_event ? 'true' : undefined"
+					>
+						<!-- several events run the same action (#825); same label recipe
+						     as the DocType field above -->
+						<legend class="mb-1.5 block text-xs text-ink-gray-5">
+							Events
+							<span class="select-none text-ink-red-3" aria-hidden="true">*</span>
+							<span class="sr-only">(required)</span>
+						</legend>
+						<div class="grid grid-cols-1 gap-x-4 gap-y-1.5 sm:grid-cols-2">
+							<FormControl
+								v-for="opt in docEventOptions"
+								:key="opt.value"
+								type="checkbox"
+								:label="opt.label"
+								:modelValue="form.doc_events.includes(opt.value)"
+								:disabled="readOnly || saving"
+								:data-event="opt.value"
+								@update:modelValue="(v) => toggleEvent(opt.value, v)"
+							/>
+						</div>
+						<p class="mt-1.5 text-p-xs text-ink-gray-5">
+							{{
+								form.action_type === "LLM"
+									? "The action runs on each event you tick. LLM actions support a reduced set of events."
+									: "The action runs on each event you tick."
+							}}
+						</p>
 						<ErrorMessage :message="fieldErrors.doc_event" class="mt-2" />
-					</div>
+					</fieldset>
 				</div>
 			</DocSection>
 
@@ -473,7 +487,8 @@ const form = reactive({
 	description: "",
 	enabled: true,
 	target_doctype: "",
-	doc_event: "",
+	// every event the trigger runs on (#825), in EVENT_ORDER
+	doc_events: [],
 	condition: "",
 	action_type: "LLM",
 	script_body: "",
@@ -490,11 +505,11 @@ const snapshot = ref(null);
 // the moment its field gets a value.
 const fieldErrors = reactive({ trigger_name: "", target_doctype: "", doc_event: "" });
 watch(
-	() => [form.trigger_name, form.target_doctype, form.doc_event],
+	() => [form.trigger_name, form.target_doctype, form.doc_events.length],
 	() => {
 		if (String(form.trigger_name || "").trim()) fieldErrors.trigger_name = "";
 		if (form.target_doctype) fieldErrors.target_doctype = "";
-		if (form.doc_event) fieldErrors.doc_event = "";
+		if (form.doc_events.length) fieldErrors.doc_event = "";
 	}
 );
 
@@ -541,7 +556,7 @@ const FIELDS = [
 	"description",
 	"enabled",
 	"target_doctype",
-	"doc_event",
+	"doc_events",
 	"condition",
 	"action_type",
 	"script_body",
@@ -553,30 +568,53 @@ function normalized(f) {
 	if (f === "enabled") return form.enabled ? 1 : 0;
 	if (f === "llm_allow_lookups") return form.llm_allow_lookups ? 1 : 0;
 	if (f === "llm_daily_cap") return Number(form.llm_daily_cap) || 0;
+	// one per line, the stored form (the server orders and checks them too)
+	if (f === "doc_events") return orderEvents(form.doc_events).join("\n");
 	return String(form[f] == null ? "" : form[f]);
 }
 
-// ── doc_event options (LLM restricts to caps.llm_events) ─────────────────────
+// ── event options (LLM restricts to caps.llm_events) ─────────────────────────
+// The server's order (engine.SUPPORTED_EVENTS), used until caps arrive.
+const EVENT_ORDER = [
+	"validate",
+	"before_submit",
+	"after_insert",
+	"on_update",
+	"on_submit",
+	"on_cancel",
+	"on_trash",
+	"on_update_after_submit",
+];
+function orderEvents(list) {
+	const order = (caps.value.events || []).map((e) => e.value);
+	const known = order.length ? order : EVENT_ORDER;
+	const picked = new Set(list || []);
+	return known.filter((e) => picked.has(e));
+}
 const docEventOptions = computed(() => {
 	let events = caps.value.events || [];
 	if (form.action_type === "LLM") {
 		const allowed = new Set(caps.value.llm_events || []);
 		events = events.filter((e) => allowed.has(e.value));
 	}
-	const opts = events.map((e) => ({ label: e.label, value: e.value }));
-	// a blank leading option keeps the control honest while doc_event is unset
-	// (a native select with no matching option would LOOK like the first choice)
-	if (!form.doc_event) opts.unshift({ label: "Pick an event…", value: "" });
-	return opts;
+	return events.map((e) => ({ label: e.label, value: e.value }));
 });
+
+function toggleEvent(value, on) {
+	const rest = form.doc_events.filter((e) => e !== value);
+	form.doc_events = orderEvents(on ? [...rest, value] : rest);
+}
 
 function setActionType(t) {
 	if (form.action_type === t) return;
 	form.action_type = t;
-	// an event outside the LLM whitelist can't stay selected under LLM
-	if (form.doc_event && !docEventOptions.value.some((o) => o.value === form.doc_event)) {
-		const first = docEventOptions.value.find((o) => o.value);
-		form.doc_event = first ? first.value : "";
+	// events outside the LLM whitelist can't stay ticked under LLM; if none is
+	// left, tick the first allowed one (as the single-event picker did)
+	const allowed = new Set(docEventOptions.value.map((o) => o.value));
+	if (form.doc_events.some((e) => !allowed.has(e))) {
+		const kept = form.doc_events.filter((e) => allowed.has(e));
+		const first = docEventOptions.value[0];
+		form.doc_events = kept.length ? kept : first ? [first.value] : [];
 	}
 }
 
@@ -899,7 +937,13 @@ function seed(data) {
 	form.description = data.description || "";
 	form.enabled = data.enabled == null ? true : !!data.enabled;
 	form.target_doctype = data.target_doctype || "";
-	form.doc_event = data.doc_event || "";
+	form.doc_events = orderEvents(
+		Array.isArray(data.doc_events) && data.doc_events.length
+			? data.doc_events
+			: data.doc_event
+			? [data.doc_event]
+			: []
+	);
 	form.condition = data.condition || "";
 	form.action_type = data.action_type === "Script" ? "Script" : "LLM";
 	form.script_body = data.script_body || "";
@@ -974,11 +1018,11 @@ async function save() {
 		? ""
 		: "Give the trigger a name.";
 	fieldErrors.target_doctype = form.target_doctype ? "" : "Pick a DocType.";
-	fieldErrors.doc_event = form.doc_event ? "" : "Pick an event.";
+	fieldErrors.doc_event = form.doc_events.length ? "" : "Pick at least one event.";
 	const missing = [
 		fieldErrors.trigger_name && "Name",
 		fieldErrors.target_doctype && "DocType",
-		fieldErrors.doc_event && "Event",
+		fieldErrors.doc_event && "Events",
 	].filter(Boolean);
 	if (missing.length) {
 		toast.error(

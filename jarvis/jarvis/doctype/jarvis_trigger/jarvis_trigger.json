@@ -10,6 +10,7 @@
   "enabled",
   "target_doctype",
   "doc_event",
+  "doc_events",
   "description",
   "condition_section",
   "condition",
@@ -57,7 +58,13 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "options": "validate\nbefore_submit\nafter_insert\non_update\non_submit\non_cancel\non_trash\non_update_after_submit",
-   "description": "Frappe document event. validate/before_submit run INSIDE the save and can block it (Script actions only)."
+   "description": "The first of the trigger's events (kept in step with Doc Events). validate/before_submit run INSIDE the save and can block it (Script actions only)."
+  },
+  {
+   "fieldname": "doc_events",
+   "fieldtype": "Small Text",
+   "label": "Doc Events",
+   "description": "Every event the trigger runs on, one per line (e.g. on_submit and on_cancel). Left blank, it is just Doc Event."
   },
   {
    "fieldname": "description",
@@ -139,7 +146,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-07 15:00:00.000000",
+ "modified": "2026-11-10 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Trigger",

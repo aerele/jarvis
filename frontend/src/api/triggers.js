@@ -26,15 +26,17 @@ function unwrap(res) {
 export const getTriggersCaps = () => call(TR + "get_triggers_caps").then(unwrap);
 
 // ── triggers ──────────────────────────────────────────────────────────────────
-// rows: {name, trigger_name, enabled, target_doctype, doc_event, action_type,
-//        description, modified, owner, last_activity_at, activity_24h}
+// rows: {name, trigger_name, enabled, target_doctype, doc_event, doc_events,
+//        action_type, description, modified, owner, last_activity_at, activity_24h}
+// doc_events: every event the trigger runs on (#825); doc_event is the first.
 export const listTriggersPage = (p) => call(TR + "list_triggers_page", _page(p)).then(unwrap);
 
 // full detail: rows fields + condition, script_body, llm_instruction,
 // llm_daily_cap, llm_allow_lookups, server_script, source_conversation
 export const getTrigger = (name) => call(TR + "get_trigger", { name }).then(unwrap);
 
-// payload fields: trigger_name, enabled, target_doctype, doc_event, condition,
+// payload fields: trigger_name, enabled, target_doctype, doc_events (a list, or
+// one per line; or the older single doc_event), condition,
 // action_type ('Script'|'LLM'), script_body, llm_instruction, llm_daily_cap,
 // llm_allow_lookups, description, source_conversation - JSON-encoded (dict arg). -> full detail
 export const createTrigger = (payload = {}) =>
