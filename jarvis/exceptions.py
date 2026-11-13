@@ -158,6 +158,14 @@ class InvalidFieldValueError(InvalidArgumentError):
 	envelope_code = "InvalidArgumentError"
 
 
+class SandboxCodeError(InvalidFieldValueError):
+	"""Agent-written Server Script / Report code that reads an attribute the Frappe
+	sandbox blocks (``.format``). Unlike a bad field value, the model alone can fix it,
+	so a held approval sheet refuses it every time instead of holding it flagged."""
+
+	envelope_code = "InvalidArgumentError"
+
+
 class RetryLaterError(JarvisError):
 	"""The site was busy (a lock held or a lock wait that timed out); nothing was
 	saved and the same request can succeed in a moment (``jarvis._failure_kind``:
