@@ -155,7 +155,9 @@ def _queue_one(doc, rule: dict, event: str, user: str) -> None:
 	if ext not in _READABLE_EXTENSIONS:
 		status, summary = "Skipped", UNREADABLE_TYPE_SUMMARY
 	else:
-		duplicate_of = _earlier_row(rule["name"], doc.content_hash)
+		# A Record rule drafts per record, so the same scan on another record is new work.
+		record = attached_name if rule["intake_source"] == "Record" else None
+		duplicate_of = _earlier_row(rule["name"], doc.content_hash, record)
 		if duplicate_of:
 			status, summary = "Skipped", "Same file as an earlier upload"
 	row = frappe.get_doc(
@@ -191,16 +193,21 @@ def _queue_one(doc, rule: dict, event: str, user: str) -> None:
 	)
 
 
-def _earlier_row(trigger: str, file_hash: str) -> str | None:
+def _earlier_row(trigger: str, file_hash: str, record: str | None = None) -> str | None:
 	"""The first row of this rule that already stands for the same bytes, or None.
 
 	Failed and Skipped rows never produced a draft, so a re-upload may retry. A row that
 	did (Success, or Needs Review with a draft) only counts while its draft still exists:
 	a deleted draft would otherwise leave the file a duplicate for good, with nothing
-	retryable. In-flight and waiting-for-review rows (no draft yet) always count."""
+	retryable. In-flight and waiting-for-review rows (no draft yet) always count.
+
+	``record`` narrows a Record-source rule to the record the file is attached to."""
+	filters = {"trigger": trigger, "file_hash": file_hash, "status": ["not in", ["Failed", "Skipped"]]}
+	if record is not None:
+		filters["target_docname"] = record
 	rows = frappe.get_all(  # system context: the capture hook runs for any uploader
 		ACTIVITY,
-		filters={"trigger": trigger, "file_hash": file_hash, "status": ["not in", ["Failed", "Skipped"]]},
+		filters=filters,
 		fields=["name", "draft_doctype", "draft_name"],
 		order_by="creation asc",
 	)

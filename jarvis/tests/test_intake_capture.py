@@ -221,6 +221,35 @@ class TestIntakeCapture(FrappeTestCase):
 		rows = self._rows(rule)
 		self.assertEqual([r.status for r in rows], ["Queued"])
 
+	def test_record_rule_duplicate_is_per_record(self):
+		rule = self._rule(
+			intake_source="Record",
+			intake_folder=None,
+			intake_record_doctype="Note",
+			intake_target_doctype="ToDo",
+		)
+		notes = []
+		for _i in range(2):
+			note = frappe.get_doc(
+				{"doctype": "Note", "title": "n-" + frappe.generate_hash(length=6)}
+			).insert()
+			self.addCleanup(frappe.delete_doc, "Note", note.name, force=True)
+			notes.append(note)
+		# The same scan on two records: each record needs its own draft.
+		self._upload(
+			"a.pdf", content="scan-per-record", attached_to_doctype="Note", attached_to_name=notes[0].name
+		)
+		self._upload(
+			"a.pdf", content="scan-per-record", attached_to_doctype="Note", attached_to_name=notes[1].name
+		)
+		self.assertEqual([r.status for r in self._rows(rule)], ["Queued", "Queued"])
+		# The same scan on the same record again is a true duplicate.
+		self._upload(
+			"a.pdf", content="scan-per-record", attached_to_doctype="Note", attached_to_name=notes[1].name
+		)
+		last = self._rows(rule)[-1]
+		self.assertEqual((last.status, last.summary), ("Skipped", "Same file as an earlier upload"))
+
 	def _move(self, doc, folder):
 		doc.reload()
 		doc.folder = folder
