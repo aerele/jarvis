@@ -111,3 +111,37 @@ class TestIntakeActivity(FrappeTestCase):
 			self.assertTrue(frappe.db.exists(ACTIVITY, names[status]), status)
 		for status in ("Success", "Failed"):
 			self.assertFalse(frappe.db.exists(ACTIVITY, names[status]), status)
+
+	def test_linked_activity_never_blocks_deleting_what_it_points_at(self):
+		"""The 90-day log row must not hold a draft, a source file or an approval
+		request hostage: a plain delete (no force) works while the row links them."""
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "intake link test"}).insert(
+			ignore_permissions=True
+		)
+		fdoc = frappe.get_doc(
+			{"doctype": "File", "file_name": "link-test.txt", "content": b"x", "is_private": 1}
+		).insert(ignore_permissions=True)
+		request = frappe.get_doc(
+			{
+				"doctype": "Jarvis Approval Request",
+				"title": "link test",
+				"status": "Pending",
+				"source": "Intake",
+				"question": "q",
+			}
+		)
+		request.flags.jarvis_server_write = True
+		request.insert(ignore_permissions=True)
+		self._row(
+			status="Needs Review",
+			draft_doctype="ToDo",
+			draft_name=todo.name,
+			source_file=fdoc.name,
+			approval_request=request.name,
+		)
+		frappe.delete_doc("ToDo", todo.name, ignore_permissions=True)
+		frappe.delete_doc("File", fdoc.name, ignore_permissions=True)
+		frappe.delete_doc("Jarvis Approval Request", request.name, ignore_permissions=True)
+		self.assertFalse(frappe.db.exists("ToDo", todo.name))
+		self.assertFalse(frappe.db.exists("File", fdoc.name))
+		self.assertFalse(frappe.db.exists("Jarvis Approval Request", request.name))

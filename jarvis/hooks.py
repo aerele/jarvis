@@ -746,6 +746,10 @@ ignore_links_on_delete = [
 	"Jarvis Pending Action",
 	"Jarvis Skill Promotion Request",
 	"Jarvis Conversation Share",
+	# An intake log row links its draft, source file and approval request. It is history
+	# reaped after 90 days, so it must never block deleting what it points at; every
+	# reader (File Box, worker, review) tolerates the dangling link.
+	"Jarvis Trigger Activity",
 ]
 
 # ---------------------------------------------------------------------------
