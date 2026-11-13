@@ -694,6 +694,14 @@ def _hide_lookup_rows(query):
 	return query.where(visible)
 
 
+def _scope_intake_rows(query):
+	"""Intake rows belong to the uploader: a non-manager sees one only when they
+	own it, even if they can read its target doc. Done in SQL so page totals and
+	the scan stay consistent; other action types keep the target-read rule."""
+	a = frappe.qb.DocType(ACTIVITY)
+	return query.where((IfNull(a.action_type, "") != "Intake") | (a.owner == frappe.session.user))
+
+
 def _can_read_target(row) -> bool:
 	"""Visibility axis for non-admins: read access on the row's target doc.
 	Any error (deleted doc, broken meta) hides the row."""
@@ -760,7 +768,7 @@ def list_activity_page(
 	f = _load_filters(filters, _ACTIVITY_FILTERS)
 	query = _activity_query(search, f)
 	if not _can_manage():
-		query = _hide_lookup_rows(query)
+		query = _scope_intake_rows(_hide_lookup_rows(query))
 	order_col, order_dir = _sort(sort_field, sort_dir, _ACTIVITY_SORTABLE, "creation")
 	ordered = (
 		query.select(*_ACTIVITY_FIELDS)

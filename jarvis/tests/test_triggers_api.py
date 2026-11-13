@@ -1108,3 +1108,46 @@ class TestDuplicateTriggers(_TriggersApiTestCase):
 		self.assertTrue(
 			any(m.get("indicator") == "orange" for m in map(frappe.parse_json, frappe.local.message_log))
 		)
+
+
+class TestIntakeRowFeedScope(_TriggersApiTestCase):
+	"""Intake rows belong to the uploader in the SPA feed too, even when another
+	user can read the row's target doc. Other action types keep the target rule."""
+
+	def _seed(self):
+		marker = f"intake-feed-{frappe.generate_hash(length=8)}"
+		todo = frappe.get_doc(
+			{"doctype": "ToDo", "description": "intake feed target", "allocated_to": PLAIN_USER}
+		).insert(ignore_permissions=True)
+		self._todos.append(todo.name)
+		rows = {}
+		for key, action, owner in (
+			("mine", "Intake", PLAIN_USER),
+			("theirs", "Intake", ADMIN_USER),
+			("llm", "LLM", ADMIN_USER),
+		):
+			name = self._insert_activity_row(
+				trigger=marker, action_type=action, target_doctype="ToDo", target_docname=todo.name
+			)
+			frappe.db.set_value(ACTIVITY, name, "owner", owner, update_modified=False)
+			rows[key] = name
+		return marker, rows
+
+	def test_non_manager_sees_only_own_intake_rows(self):
+		marker, rows = self._seed()
+		frappe.set_user(PLAIN_USER)
+		names = {
+			r["name"] for r in list_activity_page(filters=frappe.as_json({"trigger": marker}))["data"]["rows"]
+		}
+		self.assertIn(rows["mine"], names)
+		self.assertNotIn(rows["theirs"], names)
+		# Non-Intake rows keep today's rule: visible when the target is readable.
+		self.assertIn(rows["llm"], names)
+
+	def test_manager_sees_all_intake_rows(self):
+		marker, rows = self._seed()
+		frappe.set_user(ADMIN_USER)
+		names = {
+			r["name"] for r in list_activity_page(filters=frappe.as_json({"trigger": marker}))["data"]["rows"]
+		}
+		self.assertEqual(names, set(rows.values()))
