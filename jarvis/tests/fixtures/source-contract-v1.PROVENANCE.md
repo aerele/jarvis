@@ -1,4 +1,4 @@
-# source-contract-v1.json provenance (stored here as source-contract-v1.json.b64, base64 of the exact bytes)
+# source-contract-v1.json provenance
 
 - Canonical repo: jarvis-fleet-agent
 - Canonical path: `jarvis_fleet_agent/claude_redactor/contract/source-contract-v1.json`
@@ -8,3 +8,5 @@
 
 The copy is byte for byte. Never edit it to make a test pass. Change the canonical file, then re-sync and
 re-pin here and in `jarvis/tests/test_source_receipt_contract.py`.
+
+- Branding policy: this fixture holds the bridge prefix, which names the runtime. It has ONE exact line allowance in the runtime-branding policy (`jarvis/ci/data/branding-policy.b64`). Reason: cross-repo contract fixture, must be byte-identical to the plugin and fleet-agent copies.

@@ -7,16 +7,9 @@ import {
 	msUntilSiteMidnight,
 	siteToday,
 } from "@/lib/paymentCalendar/dates";
+import { nextPollDelay, safeError } from "@/lib/paymentCalendar/polling";
+import { RecoveryBudget } from "@/lib/paymentCalendar/recoveryBudget";
 
-const emptyPages = () => ({
-	Payable: { rows: 1, parties: 1 },
-	Receivable: { rows: 1, parties: 1 },
-});
-const safeError = (result) => ({
-	code: result?.code || "internal_error",
-	state: result?.state || "failed",
-	retryable: result?.retryable !== false,
-});
 const WORKER_BUSY_RETRY_MS = 60000;
 
 export function usePaymentCalendar({
@@ -63,43 +56,54 @@ export function usePaymentCalendar({
 		snapshotId = ref(null),
 		selectedDate = ref(""),
 		month = ref("");
-	const detail = shallowRef(null),
-		detailLoading = ref(false),
-		upcoming = ref([]),
+	const upcoming = ref([]),
 		upcomingLoading = ref(false);
-	const activeView = ref("payees"),
-		pages = ref(emptyPages()),
-		error = shallowRef(null),
+	const error = shallowRef(null),
 		notice = ref("");
 	const floorSaving = ref(false),
 		floorError = shallowRef(null),
 		preferenceSaving = ref(false),
 		preferenceError = shallowRef(null);
-	const bucket = ref(null),
-		bucketData = shallowRef(null),
-		bucketLoading = ref(false),
-		bucketPages = ref({ rows: 1, parties: 1 });
-	const side = computed(() => (activeView.value === "customers" ? "Receivable" : "Payable"));
 	const day = computed(() => snapshot.value?.projection?.days?.[selectedDate.value] || null);
 	let generation = 0,
-		detailSequence = 0,
 		upcomingSequence = 0,
-		bucketSequence = 0,
 		disposed = false;
 	let pendingSnapshotId = null,
 		refreshAt = 0,
-		resumeRefresh = false;
+		resumeRefresh = false,
+		resumeRecovery = false;
 	let refreshTimer,
 		pollTimer,
 		expiryTimer,
 		midnightTimer,
 		workerRetryTimer,
-		pollStarted = 0,
-		recoveries = 0;
+		pollStarted = 0;
+	// Survives "ready": only a user action or the passing of time refills it.
+	const recoveries = new RecoveryBudget();
+	const limitReached = { state: "failed", code: "recovery_limit", retryable: true };
 	let workerRetry = null;
 	let preferencePending = null,
 		preferenceDraining = false;
 	const handledMidnights = new Set();
+	// The ledger composable listens here; the core never reads its state.
+	const invalidatedListeners = new Set(),
+		abandonedListeners = new Set();
+	const subscribe = (listeners) => (fn) => {
+		listeners.add(fn);
+		return () => listeners.delete(fn);
+	};
+	// reason: date | snapshot | scope | expiry | cleared
+	// A listener bug must not break the core lifecycle or the other listeners.
+	const notify = (listeners, ...args) =>
+		[...listeners].forEach((fn) => {
+			try {
+				fn(...args);
+			} catch (error) {
+				console.error("Payment calendar listener failed", error);
+			}
+		});
+	const emitInvalidated = (reason) => notify(invalidatedListeners, { reason });
+	const emitAbandoned = () => notify(abandonedListeners);
 	const current = (token) => !disposed && generation === token;
 	const sameSelection = (value) =>
 		value.company === company.value &&
@@ -117,19 +121,13 @@ export function usePaymentCalendar({
 		clearWorkerRetry();
 	};
 
-	function clearFinance() {
+	function clearFinance(reason = "cleared") {
 		snapshot.value = null;
 		snapshotId.value = null;
-		detail.value = null;
 		upcoming.value = [];
-		bucket.value = null;
-		bucketData.value = null;
-		detailLoading.value = false;
 		upcomingLoading.value = false;
-		bucketLoading.value = false;
-		detailSequence++;
 		upcomingSequence++;
-		bucketSequence++;
+		emitInvalidated(reason);
 	}
 	function begin(nextPhase, { preserve = false, keepLayout = false } = {}) {
 		generation++;
@@ -141,6 +139,7 @@ export function usePaymentCalendar({
 		pendingSnapshotId = null;
 		refreshAt = 0;
 		resumeRefresh = false;
+		resumeRecovery = false;
 		if (!preserve) clearFinance();
 		error.value = null;
 		phase.value = nextPhase;
@@ -206,13 +205,13 @@ export function usePaymentCalendar({
 	}
 
 	async function chooseCompany(value, { initialAccounts = [], save = true } = {}) {
-		recoveries = 0;
+		recoveries.reset();
 		notice.value = "";
+		emitInvalidated("scope");
 		const token = begin("loading_company");
 		company.value = value;
 		accounts.value = [];
 		caps.value = null;
-		pages.value = emptyPages();
 		if (!value) {
 			phase.value = "choose_company";
 			return;
@@ -231,6 +230,7 @@ export function usePaymentCalendar({
 		const allowed = new Set((caps.value?.accounts || []).map((account) => account.name));
 		accounts.value = [...new Set(value)].filter((name) => allowed.has(name)).sort();
 		saveSelection();
+		emitInvalidated("scope");
 		await refresh();
 	}
 
@@ -252,11 +252,14 @@ export function usePaymentCalendar({
 		const previousAccounts = [...accounts.value];
 		if (result?.state === "forbidden" || result?.code === "scope_changed") caps.value = null;
 		if (result?.state === "forbidden") accounts.value = [];
-		if (
-			(result?.code === "scope_changed" || result?.state === "forbidden") &&
-			recoveries < 1
-		) {
-			recoveries++;
+		const recoverable =
+			result?.code === "scope_changed" ||
+			result?.state === "forbidden" ||
+			result?.state === "expired";
+		if (recoverable) {
+			// Past the cap a forbidden reply stays "forbidden"; any other ends in the manual message.
+			if (!recoveries.take())
+				return fail(result?.state === "forbidden" ? result : limitReached, token);
 			const recovery = begin("loading_company");
 			const capability = await reloadCapabilities(recovery);
 			if (!current(recovery)) return;
@@ -264,6 +267,11 @@ export function usePaymentCalendar({
 				const allowed = new Set((caps.value.accounts || []).map((value) => value.name));
 				accounts.value = previousAccounts.filter((name) => allowed.has(name));
 				saveSelection();
+				// An automatic refresh never starts during a floor save: resume when it ends.
+				if (floorSaving.value) {
+					resumeRecovery = true;
+					return;
+				}
 				return refresh({ automatic: true });
 			}
 			return fail(capability || result, recovery);
@@ -285,7 +293,7 @@ export function usePaymentCalendar({
 	async function refresh({ automatic = false, background = false, month: requestedMonth } = {}) {
 		if (!company.value || disposed || (automatic && (refreshing.value || floorSaving.value)))
 			return;
-		if (!automatic) recoveries = 0;
+		if (!automatic && !background) recoveries.reset();
 		const preserve =
 			background && !!snapshot.value && Date.parse(snapshot.value.expires_at) > Date.now();
 		const keepLayout = background && !!layout.value;
@@ -363,17 +371,12 @@ export function usePaymentCalendar({
 				refreshing.value = false;
 				waitingForWorker.value = false;
 				refreshIssue.value = safeError(result);
-				detailLoading.value = false;
 				upcomingLoading.value = false;
+				emitAbandoned();
 				scheduleWorkerRetry(token, selection, attempt, WORKER_BUSY_RETRY_MS);
 				return;
 			}
-			scheduleWorkerRetry(
-				token,
-				selection,
-				attempt + 1,
-				[1000, 2000, 3000, 5000][Math.min(attempt, 3)]
-			);
+			scheduleWorkerRetry(token, selection, attempt + 1, nextPollDelay(attempt));
 			return;
 		}
 		if (
@@ -442,12 +445,8 @@ export function usePaymentCalendar({
 			if (Date.parse(data.expires_at) <= Date.now()) return expire();
 			// Publish one snapshot identity before loading any of its panels.
 			snapshotId.value = id;
-			detailSequence++;
 			upcomingSequence++;
-			bucketSequence++;
-			detail.value = null;
 			upcoming.value = [];
-			bucketData.value = null;
 			snapshot.value = data;
 			layout.value = {
 				currency: data.currency,
@@ -460,7 +459,6 @@ export function usePaymentCalendar({
 			if (caps.value) caps.value = { ...caps.value, settings: data.floor };
 			phase.value = "ready";
 			notice.value = "";
-			recoveries = 0;
 			let requested = selectedDate.value || initialDate;
 			if (data.scope.month && !requested.startsWith(data.scope.month + "-"))
 				requested = data.scope.anchor.startsWith(data.scope.month + "-")
@@ -479,13 +477,14 @@ export function usePaymentCalendar({
 			)
 				month.value = selectedDate.value.slice(0, 7);
 			armTimers();
-			await Promise.all([loadPanels(token), bucket.value ? loadBucket() : null]);
+			emitInvalidated("snapshot");
+			await loadUpcoming(token);
 			return;
 		}
 		if (!data || !["queued", "running"].includes(data.state))
 			return fail({ state: "expired", code: "expired" }, token);
 		if (!snapshot.value) phase.value = data.state;
-		const delay = document.hidden ? 15000 : [1000, 2000, 3000, 5000][Math.min(attempt, 3)];
+		const delay = nextPollDelay(attempt);
 		pollTimer = setTimeout(() => {
 			void poll(token, id, selection, attempt + 1);
 		}, delay);
@@ -493,6 +492,7 @@ export function usePaymentCalendar({
 
 	async function expire({ result, verifyAccess = true, retry = false } = {}) {
 		const token = begin("expired");
+		emitInvalidated("expiry");
 		error.value = safeError(result || { code: "expired", state: "expired" });
 		if (!verifyAccess) return;
 		// A permissions hook purges snapshots too. An expired ID alone does not
@@ -507,24 +507,33 @@ export function usePaymentCalendar({
 			accounts.value = permitted;
 			saveSelection();
 		}
-		if (retry) return refresh({ automatic: true, background: true, month: month.value });
+		if (!retry) return;
+		if (recoveries.take()) {
+			// checkClock resumes it when the floor save ends.
+			if (floorSaving.value) {
+				resumeRefresh = true;
+				return;
+			}
+			return refresh({ automatic: true, background: true, month: month.value });
+		}
+		error.value = safeError(limitReached);
 	}
 	function armExpiry() {
 		clearTimeout(expiryTimer);
 		if (!snapshot.value) return;
 		expiryTimer = setTimeout(() => {
 			if (refreshIssue.value) {
-				clearFinance();
+				clearFinance("expiry");
 			} else if (refreshing.value) {
 				// Keep the replacement job alive, but never display expired balances.
-				clearFinance();
+				clearFinance("expiry");
 				phase.value = "running";
 			} else if (document.hidden || floorSaving.value) {
-				clearFinance();
+				clearFinance("expiry");
 				phase.value = "expired";
 				resumeRefresh = true;
 			} else {
-				clearFinance();
+				clearFinance("expiry");
 				void refresh({ automatic: true, background: true });
 			}
 		}, Math.max(1, Date.parse(snapshot.value.expires_at) - Date.now()));
@@ -569,7 +578,7 @@ export function usePaymentCalendar({
 		if (!navigation || !isSelectable(value, navigation)) return;
 		selectedDate.value = value;
 		month.value = value.slice(0, 7);
-		pages.value = emptyPages();
+		emitInvalidated("date");
 		if (
 			!snapshot.value ||
 			(navigation.month &&
@@ -578,7 +587,7 @@ export function usePaymentCalendar({
 					!value.startsWith(navigation.month + "-")))
 		)
 			return loadMonth(month.value);
-		await loadPanels(generation);
+		await loadUpcoming(generation);
 	}
 	async function browseMonth(offset) {
 		const navigation = snapshot.value?.scope || layout.value?.scope;
@@ -591,19 +600,15 @@ export function usePaymentCalendar({
 			month.value = next;
 			if (navigation.month || !snapshot.value) {
 				selectedDate.value = next + "-01";
-				pages.value = emptyPages();
+				emitInvalidated("date");
 				await loadMonth(next);
 			}
 		}
 	}
 	async function loadMonth(value) {
-		detailSequence++;
 		upcomingSequence++;
-		detail.value = null;
 		upcoming.value = [];
-		detailLoading.value = true;
 		upcomingLoading.value = true;
-		closeBucket();
 		if (!refreshing.value) await refresh({ month: value, background: true });
 	}
 	function goToday() {
@@ -611,41 +616,6 @@ export function usePaymentCalendar({
 		return navigation && selectDate(navigation.anchor);
 	}
 
-	async function loadPanels(token) {
-		await Promise.all([loadDetails(token), loadUpcoming(token)]);
-	}
-	async function loadDetails(token = generation) {
-		const data = snapshot.value;
-		if (!data || !current(token)) return;
-		if (data.scope.month && !selectedDate.value.startsWith(data.scope.month + "-")) return;
-		const seq = ++detailSequence,
-			date = selectedDate.value,
-			selectedSide = side.value;
-		detail.value = null;
-		if (data.unavailable?.[selectedSide]) {
-			detailLoading.value = false;
-			return;
-		}
-		detailLoading.value = true;
-		const page = pages.value[selectedSide];
-		const result = await api.getDayDetail(
-			data.snapshot_id,
-			date,
-			selectedSide,
-			page.rows,
-			page.parties
-		);
-		if (
-			!current(token) ||
-			seq !== detailSequence ||
-			snapshotId.value !== data.snapshot_id ||
-			selectedDate.value !== date
-		)
-			return;
-		detailLoading.value = false;
-		if (!result?.ok) return accessFailure(result, token);
-		detail.value = result.data;
-	}
 	async function loadUpcoming(token = generation) {
 		const data = snapshot.value;
 		if (!data || !current(token)) return;
@@ -670,55 +640,6 @@ export function usePaymentCalendar({
 		if (!result?.ok) return accessFailure(result, token);
 		upcoming.value = result.data.rows;
 	}
-	async function setDetailView(value) {
-		if (!["payees", "terms", "customers"].includes(value)) return;
-		activeView.value = value;
-		await loadDetails();
-	}
-	async function changeDetailPage(kind, value) {
-		if (!["rows", "parties"].includes(kind) || !Number.isInteger(value) || value < 1) return;
-		pages.value[side.value][kind] = value;
-		await loadDetails();
-	}
-
-	async function openBucket(selectedSide, name) {
-		if (!snapshot.value) return;
-		bucket.value = { side: selectedSide, name };
-		bucketPages.value = { rows: 1, parties: 1 };
-		await loadBucket();
-	}
-	function closeBucket() {
-		bucketSequence++;
-		bucket.value = null;
-		bucketData.value = null;
-	}
-	async function loadBucket() {
-		if (!snapshot.value || !bucket.value) return;
-		const token = generation,
-			seq = ++bucketSequence,
-			data = snapshot.value,
-			choice = bucket.value;
-		bucketData.value = null;
-		bucketLoading.value = true;
-		const result = await api.getBucketDetail(
-			data.snapshot_id,
-			choice.name,
-			choice.side,
-			bucketPages.value.rows,
-			bucketPages.value.parties
-		);
-		if (!current(token) || seq !== bucketSequence || snapshotId.value !== data.snapshot_id)
-			return;
-		bucketLoading.value = false;
-		if (!result?.ok) return accessFailure(result, token);
-		bucketData.value = result.data;
-	}
-	async function changeBucketPage(kind, value) {
-		if (!["rows", "parties"].includes(kind) || !Number.isInteger(value) || value < 1) return;
-		bucketPages.value[kind] = value;
-		await loadBucket();
-	}
-
 	async function saveFloor(value) {
 		if (floorSaving.value || !caps.value?.can_configure) return { ok: false };
 		const token = generation,
@@ -749,7 +670,10 @@ export function usePaymentCalendar({
 		} finally {
 			if (!disposed) {
 				floorSaving.value = false;
-				checkClock();
+				if (resumeRecovery) {
+					resumeRecovery = false;
+					void refresh({ automatic: true });
+				} else checkClock();
 			}
 		}
 	}
@@ -763,6 +687,8 @@ export function usePaymentCalendar({
 	onScopeDispose(() => {
 		disposed = true;
 		generation++;
+		invalidatedListeners.clear();
+		abandonedListeners.clear();
 		stopTimers();
 		clearFinance();
 		layout.value = null;
@@ -770,6 +696,13 @@ export function usePaymentCalendar({
 		document.removeEventListener("visibilitychange", onActivity);
 	});
 	return {
+		get generation() {
+			return generation;
+		},
+		isCurrent: current,
+		onPanelsInvalidated: subscribe(invalidatedListeners),
+		onPanelsAbandoned: subscribe(abandonedListeners),
+		handleRefusal: accessFailure,
 		loadingSnapshot,
 		waitingForWorker,
 		refreshIssue,
@@ -784,23 +717,14 @@ export function usePaymentCalendar({
 		selectedDate,
 		month,
 		day,
-		detail,
-		detailLoading,
 		upcoming,
 		upcomingLoading,
-		activeView,
-		side,
-		pages,
 		error,
 		notice,
 		floorSaving,
 		floorError,
 		preferenceSaving,
 		preferenceError,
-		bucket,
-		bucketData,
-		bucketLoading,
-		bucketPages,
 		initialize,
 		chooseCompany,
 		setAccounts,
@@ -808,11 +732,6 @@ export function usePaymentCalendar({
 		selectDate,
 		browseMonth,
 		goToday,
-		setDetailView,
-		changeDetailPage,
-		openBucket,
-		closeBucket,
-		changeBucketPage,
 		saveFloor,
 		reloadCapabilities,
 		saveSelection,

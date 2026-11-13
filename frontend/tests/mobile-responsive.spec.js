@@ -21,6 +21,9 @@ const ALLOWLIST = new Set([
 	// to 50% inside a max-w-[280px], overflow-hidden container, so the 560px is
 	// clipped and never reaches the viewport. See PdfTemplatesPane.vue fit-mode.
 	"src/components/settings/PdfTemplatesPane.vue :: fixed-width-over-480px :: w-[560px]",
+	// The table sits in .table-wrap (overflow: auto in the scoped CSS), which the
+	// .vue-only scan cannot see.
+	"src/pages/payment-calendar/InvoiceDetailsDialog.vue :: table-without-overflow-scroller :: <table>",
 ]);
 
 // Each rule returns the offending substrings for a file's source (empty = ok).

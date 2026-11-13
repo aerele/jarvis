@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import { flushPromises } from "@vue/test-utils";
 export const SID = "a".repeat(32);
 export const ok = (data) => ({ ok: true, data });
 export const refusal = (code, state = "unavailable") => ({
@@ -106,7 +107,6 @@ export function detail(date = "2026-10-24", side = "Payable", page = 1, partyPag
 				credit: "0.00",
 				discount: "0.00",
 				settlement: "Unpaid",
-				source_link: "/app/purchase-invoice/example",
 			},
 		],
 		parties: [
@@ -127,6 +127,40 @@ export function detail(date = "2026-10-24", side = "Payable", page = 1, partyPag
 		has_more: page === 1,
 		generated_at: "2026-10-24T12:00:00+00:00",
 	};
+}
+// Serves one snapshot per month, as the server does for a monthly scope.
+export function installMonthlyApi(api) {
+	api.requestSnapshot.mockImplementation(async (company, accounts, month = "2026-10") =>
+		ok({
+			snapshot_id: (month === "current"
+				? new Date(Date.now()).toISOString().slice(0, 7)
+				: month
+			)
+				.replace("-", "")
+				.padStart(32, "0"),
+			state: "queued",
+		})
+	);
+	api.getSnapshotStatus.mockImplementation(async (id) => {
+		const month = id.slice(-6, -2) + "-" + id.slice(-2);
+		const value = complete();
+		value.snapshot_id = id;
+		value.expires_at = new Date(Date.now() + 300000).toISOString();
+		value.scope.anchor = new Date(Date.now()).toISOString().slice(0, 10);
+		value.scope = {
+			...value.scope,
+			month,
+			window_start: month + "-01",
+			window_end:
+				month +
+				"-" +
+				new Date(Number(month.slice(0, 4)), Number(month.slice(5)), 0).getDate(),
+		};
+		value.projection.start = value.scope.window_start;
+		value.projection.end = value.scope.window_end;
+		value.projection.month = month;
+		return ok(value);
+	});
 }
 export function fakeApi() {
 	let current = { company: "Manufacturing", accounts: ["Bank A"] };
@@ -168,5 +202,24 @@ export function fakeApi() {
 		getUpcoming: vi.fn(async () => ok({ rows: [], total: 0 })),
 		getBucketDetail: vi.fn(async () => ok(detail())),
 		configureFloor: vi.fn(async () => ok(complete().floor)),
+		requestAccountBalances: vi.fn(async () => ok({ job_id: "balances-job", state: "queued" })),
+		getAccountBalancesStatus: vi.fn(async () =>
+			ok({
+				state: "complete",
+				generated_at: "2026-10-24T12:01:00+00:00",
+				expires_at: "2026-10-24T12:06:00+00:00",
+				currency: "INR",
+				precision: 2,
+				accounts: [],
+				total: "0.00",
+			})
+		),
 	};
+}
+
+// Ledger reads wait 150 ms (debounce). With fake timers, run the clock past it and flush.
+export async function settleReads() {
+	await flushPromises();
+	await vi.advanceTimersByTimeAsync(200);
+	await flushPromises();
 }

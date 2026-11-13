@@ -31,6 +31,14 @@ AGENT_WRITE = "Jarvis Agent Write"
 PREFIX = "jarvis-wg-"
 
 
+def _gender() -> str:
+	# a site that never ran the setup wizard has no Gender records
+	name = frappe.db.get_value("Gender", {}, "name")
+	if name:
+		return name
+	return frappe.get_doc({"doctype": "Gender", "gender": "Other"}).insert(ignore_permissions=True).name
+
+
 # --------------------------------------------------------------------------- #
 # Whitelisted stand-ins for "a custom app's method" (run_method targets). None of
 # their arguments names a doctype, so only the ORM guard can catch them.
@@ -453,7 +461,7 @@ class TestNestedWritesFromChat(FrappeTestCase):
 			{
 				"doctype": "Employee",
 				"first_name": "Jarvis Wg",
-				"gender": frappe.db.get_value("Gender", {}, "name"),
+				"gender": _gender(),
 				"date_of_birth": "1990-01-01",
 				"date_of_joining": "2020-01-01",
 				"company": company,
@@ -1019,7 +1027,7 @@ class TestConfirmedRunMethod(_RouteBase):
 				"doctype": "Employee",
 				"first_name": "Jarvis Wg Run",
 				"status": "Active",
-				"gender": frappe.db.get_value("Gender", {}, "name"),
+				"gender": _gender(),
 				"date_of_birth": "1990-01-01",
 				"date_of_joining": "2020-01-01",
 				"company": company,
@@ -1424,7 +1432,7 @@ class TestSavedRoutesCycle3(_RouteBase):
 		values = {
 			"first_name": "Jarvis Wg Auto",
 			"status": "Active",
-			"gender": frappe.db.get_value("Gender", {}, "name"),
+			"gender": _gender(),
 			"date_of_birth": "1990-01-01",
 			"date_of_joining": "2020-01-01",
 			"company": company,
@@ -1498,7 +1506,7 @@ class TestSavedRoutesCycle3(_RouteBase):
 		values = {
 			"first_name": "Jarvis Wg Plain",
 			"status": "Active",
-			"gender": frappe.db.get_value("Gender", {}, "name"),
+			"gender": _gender(),
 			"date_of_birth": "1990-01-01",
 			"date_of_joining": "2020-01-01",
 			"company": company,
@@ -1541,7 +1549,7 @@ class TestSavedRoutesCycle3(_RouteBase):
 				"doctype": "Employee",
 				"first_name": "Jarvis Wg Field",
 				"status": "Active",
-				"gender": frappe.db.get_value("Gender", {}, "name"),
+				"gender": _gender(),
 				"date_of_birth": "1990-01-01",
 				"date_of_joining": "2020-01-01",
 				"company": company,

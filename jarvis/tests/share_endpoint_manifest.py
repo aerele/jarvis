@@ -37,11 +37,13 @@ _unrelated(
 	"""
     configure_floor
     get_bucket_detail
+    get_account_balances_status
     get_capabilities
     get_day_detail
     get_preferences
     get_snapshot_status
     get_upcoming
+    request_account_balances
     request_snapshot
     set_preferences
     """,
