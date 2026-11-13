@@ -270,8 +270,10 @@ const SOURCES = [
 	{ value: "Record", label: "Record" },
 ];
 const MAX_INSTRUCTIONS = 4000;
-const STATUS_TYPES = ["Data", "Select"];
-const LINK_TYPES = ["Link", "Data"];
+// What the server accepts for the write-back (jarvis_trigger._validate_intake_record): a
+// Select would refuse "Needs Review", a Link to another doctype would refuse the draft name.
+const STATUS_TYPES = ["Data", "Small Text"];
+const LINK_TYPES = ["Link", "Data", "Dynamic Link"];
 
 const spec = computed(() => parseSpec(props.form.intake_spec));
 const patchSpec = (next) => emit("update", { intake_spec: next });
@@ -486,7 +488,11 @@ const uncovered = computed(() =>
 
 // ── write-back lists ─────────────────────────────────────────────────────────
 function recordFieldOptions(types) {
-	const rows = (recordOptions.value?.fields || []).filter((f) => types.includes(f.fieldtype));
+	const rows = (recordOptions.value?.fields || []).filter(
+		(f) =>
+			types.includes(f.fieldtype) &&
+			(f.fieldtype !== "Link" || f.options === props.form.intake_target_doctype)
+	);
 	return [
 		{ label: "None", value: "" },
 		...rows.map((f) => ({ label: f.label, value: f.fieldname })),
