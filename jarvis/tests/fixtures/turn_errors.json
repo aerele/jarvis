@@ -402,5 +402,33 @@
   {
     "error": "The message contains a character that cannot be sent. Remove it and try again.",
     "code": "directive_refused"
+  },
+  {
+    "error": "This site is not the one registered for this Jarvis account. Contact support if this is wrong.",
+    "code": "gate-wrong-site"
+  },
+  {
+    "error": "Jarvis cannot confirm this site right now. Please try again in a minute.",
+    "code": "gate-unconfirmed"
+  },
+  {
+    "error": "This site needs a Jarvis update before it can use this assistant. Contact support.",
+    "code": "gate-update-needed"
+  },
+  {
+    "error": "This site changed since Jarvis last checked it, for example after a restore or a move. A System Manager can open Jarvis and press \"Re-verify this site\" to reconnect. Contact support if this is wrong.",
+    "code": "gate-site-changed"
+  },
+  {
+    "error": "ERP tools are not available in scheduled background runs.",
+    "code": "gate-background-run"
+  },
+  {
+    "error": "ERP tools are only available in the main conversation. Return your findings to the parent agent instead.",
+    "code": "gate-subagent"
+  },
+  {
+    "error": "This site is not the one registered for this Jarvis account. Contact support if this is wrong. (blocked by jarvis-erp)",
+    "code": "gate-wrong-site"
   }
 ]

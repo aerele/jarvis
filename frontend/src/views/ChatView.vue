@@ -2397,13 +2397,15 @@
 					style="margin-bottom: 10px"
 				>
 					<template v-if="canReverifySite" #action>
-						<button
-							class="jv-btn jv-btn--sm"
+						<Button
+							size="sm"
+							variant="subtle"
+							:loading="reverifying"
 							:disabled="reverifying"
 							@click="reverifySite"
 						>
 							Re-verify this site
-						</button>
+						</Button>
 					</template>
 				</Banner>
 				<Banner

@@ -42,6 +42,54 @@ export default [
     "status": false
   },
   {
+    "code": "gate-wrong-site",
+    "pattern": "this site is not the one registered for this jarvis account",
+    "headline": "This site is not the one registered for this Jarvis account. Contact support if this is wrong.",
+    "hint": "",
+    "retryable": false,
+    "status": false
+  },
+  {
+    "code": "gate-unconfirmed",
+    "pattern": "jarvis cannot confirm this site right now",
+    "headline": "Jarvis cannot confirm this site right now. Please try again in a minute.",
+    "hint": "",
+    "retryable": true,
+    "status": false
+  },
+  {
+    "code": "gate-update-needed",
+    "pattern": "this site needs a jarvis update before it can use this assistant",
+    "headline": "This site needs a Jarvis update before it can use this assistant. Contact support.",
+    "hint": "",
+    "retryable": false,
+    "status": false
+  },
+  {
+    "code": "gate-site-changed",
+    "pattern": "this site changed since jarvis last checked it",
+    "headline": "This site changed since Jarvis last checked it, for example after a restore or a move. A System Manager can open Jarvis and press \"Re-verify this site\" to reconnect. Contact support if this is wrong.",
+    "hint": "",
+    "retryable": false,
+    "status": false
+  },
+  {
+    "code": "gate-background-run",
+    "pattern": "erp tools are not available in scheduled background runs",
+    "headline": "ERP tools are not available in scheduled background runs.",
+    "hint": "",
+    "retryable": false,
+    "status": false
+  },
+  {
+    "code": "gate-subagent",
+    "pattern": "erp tools are only available in the main conversation",
+    "headline": "ERP tools are only available in the main conversation. Return your findings to the parent agent instead.",
+    "hint": "",
+    "retryable": false,
+    "status": false
+  },
+  {
     "code": "subscription-expired",
     "pattern": "refresh_token_(reused|expired|invalidated|revoked)|auth_unavailable[\\s\\S]{0,600}unauthori[sz]ed|please run /login|\\bnot logged in\\b|(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)[\\s\\S]{0,400}(invalid_grant|oauth token has expired|token expired)|(invalid_grant|oauth token has expired|token expired)[\\s\\S]{0,400}(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)",
     "headline": "{provider} sign-in expired",
