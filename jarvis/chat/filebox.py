@@ -1457,6 +1457,7 @@ def retry_intake(activity: str) -> dict:
 		frappe.qb.update(a)
 		.set(a.status, "Queued")
 		.set(a.summary, "Queued again")
+		.set(a.attempts, 0)  # a retry is a fresh run: the stuck-row recovery counts from zero
 		.where((a.name == activity) & a.status.isin(list(_INTAKE_RETRYABLE)))
 	)
 	if row.summary == worker.NO_IMAGE_SUMMARY:

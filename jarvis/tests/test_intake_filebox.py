@@ -162,6 +162,13 @@ class TestIntakeFilebox(FrappeTestCase):
 		# a manager viewing another person's row may retry it
 		self.assertTrue({r["name"]: r for r in self._list(MANAGER, scope="all")["rows"]}[failed]["can_retry"])
 
+	def test_retry_gives_the_row_a_fresh_attempt_count(self):
+		name = self._row(UPLOADER, status="Failed", attempts=3)
+		frappe.set_user(UPLOADER)
+		with mock.patch("frappe.enqueue"):
+			filebox.retry_intake(name)
+		self.assertEqual(frappe.db.get_value(ACTIVITY, name, "attempts"), 0)
+
 	def test_retry_resets_and_enqueues(self):
 		name = self._row(UPLOADER, status="Failed", reading_json='{"description": "x"}')
 		frappe.set_user(UPLOADER)
