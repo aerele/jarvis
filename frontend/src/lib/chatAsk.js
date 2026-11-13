@@ -47,6 +47,22 @@ function nestedField(f) {
 	return f.doctype || f.fieldname ? f : null;
 }
 
+// An option's display text. The spec asks for plain strings, but a model also
+// writes `{label, value}` objects; String() of one draws "[object Object]" (#837).
+// Its readable text comes first, then its value; an option with neither is dropped.
+// chat_asks._option_text agrees.
+const OPTION_KEYS = ["label", "title", "text", "name", "value"];
+export function optionText(o) {
+	if (o == null) return "";
+	if (typeof o !== "object") return String(o).trim();
+	if (Array.isArray(o)) return "";
+	for (const key of OPTION_KEYS) {
+		const v = o[key];
+		if (v != null && typeof v !== "object" && String(v).trim()) return String(v).trim();
+	}
+	return "";
+}
+
 // A bare array, `{questions: [...]}`, or one question object on its own.
 function askItems(a) {
 	if (Array.isArray(a)) return a;
@@ -93,7 +109,7 @@ export function parseAsk(content) {
 				// A Select field's choice list can be long; only the button types stay at 8.
 				const cap = type === "select" ? 200 : 8;
 				const options = Array.isArray(q.options)
-					? q.options.map(String).slice(0, cap)
+					? q.options.map(optionText).filter(Boolean).slice(0, cap)
 					: [];
 				// A dropdown with nothing to pick from is just a typed answer.
 				if (type === "select" && !options.length) type = "text";
