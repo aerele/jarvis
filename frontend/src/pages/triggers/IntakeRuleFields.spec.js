@@ -187,4 +187,40 @@ describe("IntakeRuleFields", () => {
 		const w = await mountIt(formOf());
 		expect(w.find(".error-message").exists()).toBe(true);
 	});
+
+	it("flipping the source clears the other source's picks", async () => {
+		const toFolder = await mountIt(
+			formOf({
+				intake_source: "Record",
+				intake_record_doctype: "ToDo",
+				intake_status_field: "status",
+				intake_link_field: "ref",
+			})
+		);
+		await toFolder.find('button[data-label="Folder"]').trigger("click");
+		expect(patches(toFolder).at(-1)).toEqual({
+			intake_source: "Folder",
+			intake_record_doctype: "",
+			intake_status_field: "",
+			intake_link_field: "",
+		});
+		const toRecord = await mountIt(formOf({ intake_folder: "Home/Production Sheets" }));
+		await toRecord.find('button[data-label="Record"]').trigger("click");
+		expect(patches(toRecord).at(-1)).toEqual({ intake_source: "Record", intake_folder: "" });
+	});
+
+	it("read-only with a redacted spec renders without loading or crashing", async () => {
+		const w = mount(IntakeRuleFields, {
+			props: {
+				form: formOf({ intake_spec: null, intake_instructions: null }),
+				readOnly: true,
+				disabled: true,
+			},
+		});
+		await flushPromises();
+		expect(apiTr.getIntakeFieldOptions).not.toHaveBeenCalled();
+		expect(apiTr.listIntakeFolders).not.toHaveBeenCalled();
+		expect(w.find(".error-message").exists()).toBe(false);
+		expect(w.text()).not.toContain("Needs a value or a default");
+	});
 });

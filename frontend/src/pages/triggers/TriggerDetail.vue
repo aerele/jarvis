@@ -194,6 +194,7 @@
 						v-else-if="isIntake"
 						:form="form"
 						:disabled="readOnly || saving"
+						:read-only="readOnly"
 						@update="applyIntakePatch"
 					/>
 

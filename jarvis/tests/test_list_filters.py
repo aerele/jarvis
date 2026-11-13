@@ -351,7 +351,7 @@ class TestViewExcludedFields(unittest.TestCase):
 	permlevel 0.
 	"""
 
-	REDACTED = ("condition", "script_body", "llm_instruction")
+	REDACTED = ("condition", "script_body", "llm_instruction", "intake_instructions", "intake_spec")
 
 	def test_registry_declares_the_redacted_trigger_fields(self):
 		view = list_registry.get_view("triggers")

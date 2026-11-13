@@ -1526,11 +1526,11 @@ function intakeTrigger(over = {}) {
 	};
 }
 
-async function mountIntake(over = {}) {
+async function mountIntake(over = {}, caps = { can_manage: true }) {
 	apiTr.listIntakeFolders.mockResolvedValue(["Home/Production Sheets"]);
 	apiTr.getIntakeFieldOptions.mockResolvedValue(TODO_OPTIONS);
 	apiTr.getTrigger.mockImplementation(async () => intakeTrigger(over));
-	apiTr.getTriggersCaps.mockResolvedValue({ can_manage: true });
+	apiTr.getTriggersCaps.mockResolvedValue(caps);
 	wrapper = mount(TriggerDetail, {
 		props: { id: "TRG-9", isNew: false },
 		attachTo: document.body,
@@ -1591,5 +1591,21 @@ describe("TriggerDetail Intake kind", () => {
 		expect(w.text()).toContain(
 			"Create the draft even when a mandatory field could not be read."
 		);
+	});
+
+	it("a non-manager sees the redacted intake rule without a crash or field loads", async () => {
+		const w = await mountIntake(
+			{ intake_spec: null, intake_instructions: null },
+			{ can_manage: false }
+		);
+		expect(apiTr.getIntakeFieldOptions).not.toHaveBeenCalled();
+		expect(w.vm.form.intake_spec).toEqual({
+			fields: [],
+			table: null,
+			match: [],
+			defaults: {},
+		});
+		expect(w.vm.form.intake_instructions).toBe("");
+		expect(w.vm.form.intake_target_doctype).toBe("ToDo");
 	});
 });

@@ -308,10 +308,10 @@ def list_triggers_page(
 
 
 def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
-	"""Full trigger detail. ``condition``/``script_body``/``llm_instruction``
-	are the trigger's LOGIC and can embed internal business rules (or a value an
+	"""Full trigger detail. ``condition``/``script_body``/``llm_instruction``/
+	``intake_spec``/``intake_instructions`` are the trigger's LOGIC and can embed internal business rules (or a value an
 	admin surfaces via a script); core keeps Server Script bodies manager-only,
-	so for non-managers (plain Jarvis Users, who get org-wide READ) these three
+	so for non-managers (plain Jarvis Users, who get org-wide READ) these
 	fields are redacted to a marker. Managers see everything."""
 	detail = {
 		"name": doc.name,
@@ -332,8 +332,6 @@ def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
 		"intake_folder": doc.intake_folder or "",
 		"intake_record_doctype": doc.intake_record_doctype or "",
 		"intake_target_doctype": doc.intake_target_doctype or "",
-		"intake_spec": doc.intake_spec or "",
-		"intake_instructions": doc.intake_instructions or "",
 		"allow_incomplete_drafts": cint(doc.allow_incomplete_drafts),
 		"intake_status_field": doc.intake_status_field or "",
 		"intake_link_field": doc.intake_link_field or "",
@@ -342,11 +340,15 @@ def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
 		detail["condition"] = doc.condition or ""
 		detail["script_body"] = doc.script_body or ""
 		detail["llm_instruction"] = doc.llm_instruction or ""
+		detail["intake_spec"] = doc.intake_spec or ""
+		detail["intake_instructions"] = doc.intake_instructions or ""
 	else:
 		redacted = None  # the SPA renders "—" / a locked note for non-managers
 		detail["condition"] = redacted
 		detail["script_body"] = redacted
 		detail["llm_instruction"] = redacted
+		detail["intake_spec"] = redacted
+		detail["intake_instructions"] = redacted
 	return detail
 
 

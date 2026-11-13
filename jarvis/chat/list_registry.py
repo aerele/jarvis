@@ -216,11 +216,12 @@ _VIEWS: tuple[ListView, ...] = (
 			"target_doctype": "target_doctype",
 			"doc_event": "doc_event",
 		},
-		excluded_fields=("condition", "script_body", "llm_instruction"),
+		excluded_fields=("condition", "script_body", "llm_instruction", "intake_instructions", "intake_spec"),
 		notes=(
 			"Manager/non-manager row redaction must survive migration: "
 			"triggers_api._trigger_detail blanks condition/script_body/"
-			"llm_instruction for non-managers, so those three are withheld from "
+			"llm_instruction/intake_instructions/intake_spec for non-managers, so "
+			"those five are withheld from "
 			"the filter catalog too — a LIKE oracle would rebuild them. Withheld "
 			"unconditionally (for managers as well): a per-role exclusion needs a "
 			"view-declared predicate, which is deliberately deferred."

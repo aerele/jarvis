@@ -259,6 +259,9 @@ import { emptySpec, parseSpec, uncoveredLabels } from "./intakeSpec";
 const props = defineProps({
 	form: { type: Object, required: true },
 	disabled: { type: Boolean, default: false },
+	// A non-manager: the field lists are manager-only endpoints, so nothing is loaded and
+	// the redacted spec shows empty.
+	readOnly: { type: Boolean, default: false },
 });
 const emit = defineEmits(["update"]);
 
@@ -277,16 +280,33 @@ const pickValue = (v) => (v ? { label: v, value: v } : null);
 const optValue = (o) => (o && o.value ? String(o.value) : "");
 const fieldLabel = (f) => (f.mandatory ? `${f.label} (required)` : f.label);
 
+// The other source's picks mean nothing under this one, so they are cleared.
 function setSource(value) {
-	if (props.form.intake_source !== value) emit("update", { intake_source: value });
+	if (props.form.intake_source === value) return;
+	emit(
+		"update",
+		value === "Folder"
+			? {
+					intake_source: value,
+					intake_record_doctype: "",
+					intake_status_field: "",
+					intake_link_field: "",
+			  }
+			: { intake_source: value, intake_folder: "" }
+	);
 }
 
 // ── folders ──────────────────────────────────────────────────────────────────
 const folderOptions = ref([]);
-apiTriggers
-	.listIntakeFolders()
-	.then((rows) => (folderOptions.value = (rows || []).map((n) => ({ label: n, value: n }))))
-	.catch(() => (folderOptions.value = []));
+function loadFolders() {
+	if (props.readOnly) return;
+	apiTriggers
+		.listIntakeFolders()
+		.then((rows) => (folderOptions.value = (rows || []).map((n) => ({ label: n, value: n }))))
+		.catch(() => (folderOptions.value = []));
+}
+// `readOnly` is true until the page knows the admin's rights, so the loads wait for it.
+watch(() => props.readOnly, loadFolders, { immediate: true });
 
 // ── DocType pickers (search_link, like the page's own DocType picker) ────────
 const recordDoctypeOptions = ref([]);
@@ -317,7 +337,7 @@ async function loadTarget(doctype) {
 	const mine = ++seq;
 	options.value = null;
 	loadError.value = "";
-	if (!doctype) return;
+	if (!doctype || props.readOnly) return;
 	try {
 		const res = await apiTriggers.getIntakeFieldOptions(doctype);
 		if (mine !== seq) return;
@@ -331,7 +351,7 @@ let recordSeq = 0;
 async function loadRecord(doctype) {
 	const mine = ++recordSeq;
 	recordOptions.value = null;
-	if (!doctype) return;
+	if (!doctype || props.readOnly) return;
 	try {
 		const res = await apiTriggers.getIntakeFieldOptions(doctype);
 		if (mine === recordSeq) recordOptions.value = res;
@@ -340,10 +360,19 @@ async function loadRecord(doctype) {
 	}
 }
 
-watch(() => props.form.intake_target_doctype, loadTarget, { immediate: true });
 watch(
-	() => (props.form.intake_source === "Record" ? props.form.intake_record_doctype : ""),
-	loadRecord,
+	() => [props.form.intake_target_doctype, props.readOnly],
+	([d]) => loadTarget(d),
+	{
+		immediate: true,
+	}
+);
+watch(
+	() => [
+		props.form.intake_source === "Record" ? props.form.intake_record_doctype : "",
+		props.readOnly,
+	],
+	([d]) => loadRecord(d),
 	{ immediate: true }
 );
 

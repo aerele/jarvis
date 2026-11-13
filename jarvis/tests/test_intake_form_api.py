@@ -86,3 +86,29 @@ class TestIntakeFormApi(_TriggersApiTestCase):
 		self.assertEqual(data["intake_target_doctype"], "ToDo")
 		self.assertEqual(data["allow_incomplete_drafts"], 1)
 		self.assertIn("description", data["intake_spec"])
+
+	def test_intake_logic_is_redacted_for_non_managers(self):
+		doc = frappe.get_doc(
+			{
+				"doctype": "Jarvis Trigger",
+				"trigger_name": f"intake-{frappe.generate_hash(length=8)}",
+				"action_type": "Intake",
+				"intake_source": "Folder",
+				"intake_folder": "Home/Attachments",
+				"intake_target_doctype": "ToDo",
+				"intake_spec": frappe.as_json({"fields": ["description"]}),
+				"intake_instructions": "Secret: machine codes look like M-07.",
+			}
+		).insert(ignore_permissions=True)
+		self._triggers.append(doc.name)
+		frappe.set_user(ADMIN_USER)
+		admin_view = get_trigger(doc.name)["data"]
+		self.assertIn("M-07", admin_view["intake_instructions"])
+		self.assertIn("description", admin_view["intake_spec"])
+		frappe.set_user(PLAIN_USER)
+		user_view = get_trigger(doc.name)["data"]
+		self.assertIsNone(user_view["intake_instructions"])
+		self.assertIsNone(user_view["intake_spec"])
+		# Shape stays readable.
+		self.assertEqual(user_view["intake_target_doctype"], "ToDo")
+		self.assertEqual(user_view["intake_folder"], "Home/Attachments")
