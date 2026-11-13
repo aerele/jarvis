@@ -393,21 +393,22 @@ class TestIntakeReview(FrappeTestCase):
 		self.assertEqual(self._shared(row, name), {"request": True, "file": True})
 		self._decide(OWNER, name, {"items.2.qty": 3})
 		frappe.set_user("Administrator")
-		self.assertEqual(self._shared(row, name), {"request": False, "file": False})
+		# The owner keeps their history of the request; the private file is closed again.
+		self.assertEqual(self._shared(row, name), {"request": True, "file": False})
 
 	def test_shares_removed_on_reject(self):
 		_rule, row, name = self._pending()
 		self.assertEqual(self._shared(row, name), {"request": True, "file": True})
 		self._decide(OWNER, name, {}, 0)
 		frappe.set_user("Administrator")
-		self.assertEqual(self._shared(row, name), {"request": False, "file": False})
+		self.assertEqual(self._shared(row, name), {"request": True, "file": False})
 
 	def test_shares_removed_when_the_draft_is_refused(self):
 		_rule, row, name = self._pending()
 		with mock.patch("jarvis.intake.draft.create", side_effect=draft.DraftFailed("no")):
 			self._decide(OWNER, name, {"items.2.qty": 3})
 		frappe.set_user("Administrator")
-		self.assertEqual(self._shared(row, name), {"request": False, "file": False})
+		self.assertEqual(self._shared(row, name), {"request": True, "file": False})
 
 	def test_a_share_that_was_already_there_is_kept(self):
 		rule = self._rule()
@@ -417,7 +418,7 @@ class TestIntakeReview(FrappeTestCase):
 		row.reload()
 		self._decide(OWNER, row.approval_request, {}, 0)
 		frappe.set_user("Administrator")
-		self.assertEqual(self._shared(row, row.approval_request), {"request": False, "file": True})
+		self.assertEqual(self._shared(row, row.approval_request), {"request": True, "file": True})
 
 	def test_odd_answers_are_refused_not_a_500(self):
 		_rule, row, name = self._pending()

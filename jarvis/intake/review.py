@@ -105,8 +105,8 @@ def _trigger_owner(activity_name: str) -> str | None:
 
 def _share_with_owner(request, activity) -> None:
 	"""Read access for the rule owner, so the request shows on their board and badge
-	and the private source file opens for them. Only shares this adds are recorded on
-	the request, and ``_unshare`` takes exactly those back when it is settled. Best
+	and the private source file opens for them. Only the file share this adds is recorded on
+	the request, and ``_unshare`` takes exactly that back when it is settled. Best
 	effort: the request exists either way."""
 	owner = _trigger_owner(activity.name)
 	if not owner or owner in _NO_REVIEWER:
@@ -120,7 +120,9 @@ def _share_with_owner(request, activity) -> None:
 			if doctype == "File" and frappe.db.get_value("File", name, "owner") == owner:
 				continue
 			frappe.share.add(doctype, name, owner, read=1, flags={"ignore_share_permission": True})
-			added.append([doctype, name, owner])
+			# The request share stays for the owner's history; only the private file's goes back.
+			if doctype == "File":
+				added.append([doctype, name, owner])
 		except Exception:
 			frappe.log_error(title="jarvis.intake.review.share_failed", message=frappe.get_traceback())
 	if added:
@@ -129,7 +131,7 @@ def _share_with_owner(request, activity) -> None:
 
 
 def _unshare(request) -> None:
-	"""Take back the shares ``raise_request`` added. A failure is logged and never undoes
+	"""Take back the file share ``raise_request`` added. A failure is logged and never undoes
 	the decision."""
 	for doctype, name, user in _payload(request).get("shares") or []:
 		try:
@@ -137,10 +139,12 @@ def _unshare(request) -> None:
 				"DocShare", {"share_doctype": doctype, "share_name": name, "user": user}
 			)
 			if share:
-				# A system clean-up as Administrator: the deciding user holds no share right
-				# on the file, and DocShare's own delete hook checks the session user.
-				with impersonate("Administrator"):
-					frappe.delete_doc("DocShare", share, ignore_permissions=True, force=True)
+				# frappe.share.remove does not pass its flags to the DocShare, and the deleting
+				# user (the rule owner) holds no share right on the file: use the DocShare's
+				# own bypass flag on the one row recorded at raise time.
+				row = frappe.get_doc("DocShare", share)
+				row.flags.ignore_share_permission = True
+				row.delete(ignore_permissions=True)
 		except Exception:
 			frappe.log_error(title="jarvis.intake.review.unshare_failed", message=frappe.get_traceback())
 
