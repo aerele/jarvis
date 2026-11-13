@@ -169,7 +169,7 @@
   },
   {
    "read": 1,
-   "role": "All",
+   "role": "Desk User",
    "if_owner": 1
   }
  ],

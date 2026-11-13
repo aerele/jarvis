@@ -7,7 +7,7 @@ their request). Script/LLM activity rows are excluded on purpose: their
 ``detail`` is managers-only and their owner is the event user, so an owner-only
 rule alone would leak it.
 
-The DocType JSON grants role ``All`` read with ``if_owner`` so Frappe consults
+The DocType JSON grants role ``Desk User`` read with ``if_owner`` so Frappe consults
 these hooks for non-managers at all; the hooks then narrow that grant. Hooks can
 only DENY, so every allow path returns ``True`` to defer to the role check.
 """

@@ -20,8 +20,12 @@ def _ensure_user(email: str) -> None:
 			"enabled": 1,
 			"send_welcome_email": 0,
 			"user_type": "System User",
+			# Frappe downgrades a role-less System User to Website User, which has no Desk User.
+			"roles": [{"role": "Jarvis User"}],
 		}
 	).insert(ignore_permissions=True)
+	# A previous run cached this address as a non-user (no Desk User role); drop it.
+	frappe.clear_cache(user=email)
 
 
 class TestIntakeActivity(FrappeTestCase):
