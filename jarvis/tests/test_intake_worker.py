@@ -454,6 +454,31 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertEqual((kw["activity"], kw["job_id"]), (later.name, f"intake:{later.name}"))
 		self.assertTrue(kw["deduplicate"])
 
+	def _chain(self, rows_after: int = 3, enqueued=()):
+		"""Finish one job with ``rows_after`` more rows Queued; return the names chained."""
+		rule = self._rule()
+		first = self._row(rule)
+		rest = [self._row(rule, self._file(f"c{i}.png")) for i in range(rows_after)]
+		for i, r in enumerate(rest):
+			frappe.db.set_value(ACTIVITY, r.name, "creation", add_to_date(now_datetime(), seconds=i + 1))
+		skip = {rest[i].name for i in enqueued}
+		with (
+			mock.patch("jarvis.intake.client.vision_task_complete", mock.Mock(return_value=READING)),
+			mock.patch("jarvis.intake.draft.finish"),
+			mock.patch("frappe.enqueue") as enq,
+			mock.patch("jarvis.intake.worker.is_job_enqueued", side_effect=lambda jid: jid[7:] in skip),
+		):
+			worker.run_job(first.name)
+		return [c.kwargs["activity"] for c in enq.call_args_list], [r.name for r in rest]
+
+	def test_finished_job_starts_one_row_per_free_slot(self):
+		chained, rest = self._chain()
+		self.assertEqual(chained, rest[:2])  # two slots free, so two streams, oldest first
+
+	def test_chain_skips_rows_that_are_already_in_the_queue(self):
+		chained, rest = self._chain(enqueued=(0,))
+		self.assertEqual(chained, rest[1:3])
+
 	def test_pump_enqueues_old_queued_rows_only_when_a_slot_is_free(self):
 		rule = self._rule()
 		old = [self._row(rule, self._file(f"o{i}.png")) for i in range(3)]

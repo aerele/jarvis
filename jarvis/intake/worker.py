@@ -13,6 +13,7 @@ import traceback
 
 import frappe
 from frappe.utils import add_to_date, cint, now_datetime, nowdate
+from frappe.utils.background_jobs import is_job_enqueued
 
 from jarvis import _redis_lock, compat
 from jarvis._session import impersonate
@@ -28,6 +29,8 @@ _DEFAULT_SITE_CAP = 300
 _PUMP_AGE_MINUTES = 2
 _STUCK_MINUTES = 10
 _MAX_ATTEMPTS = 3
+# Waiting rows looked at beyond the free slots, so rows already in the queue can be skipped.
+_CHAIN_LOOKAHEAD = 10
 
 NO_IMAGE_SUMMARY = "This site's AI model can't read images for intake yet."
 _READ_FAILED_SUMMARY = "Reading the file failed. Managers can see the details in this activity."
@@ -98,19 +101,35 @@ def _enqueue(activity: str) -> None:
 	)
 
 
+def _free_slots() -> int:
+	cache = frappe.cache()
+	return sum(1 for key in slot_keys() if not cache.exists(key))
+
+
 def _enqueue_next(finished: str) -> None:
-	"""A slot just freed: start the oldest waiting row of the site."""
+	"""A slot just freed: start as many of the oldest waiting rows as there are free
+	slots, so a burst of uploads keeps every stream busy (one row per finished job
+	would let a 100-file burst fall back to a single stream). A row whose job is already
+	in the queue is skipped: enqueueing it again is a no-op, and it would eat the turn."""
 	try:
-		# System context: a background job picks the next row whoever uploaded it.
-		nxt = frappe.get_all(
+		free = _free_slots()
+		if not free:
+			return
+		# System context: a background job picks the next rows whoever uploaded them.
+		waiting = frappe.get_all(
 			ACTIVITY,
 			filters={"action_type": "Intake", "status": "Queued", "name": ["!=", finished]},
 			pluck="name",
 			order_by="creation asc",
-			limit=1,
+			limit=free + _CHAIN_LOOKAHEAD,
 		)
-		if nxt:
-			_enqueue(nxt[0])
+		for name in waiting:
+			if free <= 0:
+				break
+			if is_job_enqueued(f"intake:{name}"):
+				continue
+			_enqueue(name)
+			free -= 1
 	except Exception:
 		frappe.log_error(title="Jarvis Intake: could not start the next file")
 
@@ -301,8 +320,7 @@ def pump() -> None:
 
 def _pump() -> None:
 	_recover_stuck()
-	cache = frappe.cache()
-	free = sum(1 for key in slot_keys() if not cache.exists(key))
+	free = _free_slots()
 	if not free:
 		return
 	# System context: scheduler job, not a user request.
