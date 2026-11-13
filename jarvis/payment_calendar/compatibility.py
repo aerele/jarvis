@@ -23,7 +23,13 @@ class SourceProfile:
 _PROFILES = {
 	"15": SourceProfile(
 		"15",
-		("fb85c419791fe15830f0d5794782897914a4946ef75c0c90972c65145ce07a77",),
+		(
+			"fb85c419791fe15830f0d5794782897914a4946ef75c0c90972c65145ce07a77",
+			# 15.125.0 (2026-11-12) makes the same change as v16 495380b5: the
+			# outstanding/base_outstanding reset moves into set_term_outstanding().
+			# payment_amount and base_payment_amount are computed exactly as before.
+			"2bbc12063ff2646e3a2462e4f221e75e94ca53ea63938cfa58b7184fcaf3d713",
+		),
 		("hget", "defaults"),
 	),
 	"16": SourceProfile(

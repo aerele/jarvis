@@ -1,7 +1,13 @@
 <template>
+	<<<<<<< HEAD
 	<!-- The welcome screen's starter cards and the capability catalog, as two siblings
 	     (no wrapper), so the normal layout and the holiday stage layout put them in the
 	     same place. -->
+	=======
+	<!-- The welcome screen's starter cards, the Payment Calendar link (only when the boot flag
+	     allows it) and the capability catalog, as three siblings (no wrapper), so the normal
+	     layout and the holiday stage layout put them in the same place. -->
+	>>>>>>> 5d98189 (fix(payment-calendar): hide the calendar where it cannot work)
 	<div
 		class="jv-welcome-grid"
 		style="
@@ -60,6 +66,16 @@
 			</div>
 		</button>
 	</div>
+	<<<<<<< HEAD =======
+	<router-link
+		v-if="canViewCalendar"
+		to="/dashboards/payment-calendar"
+		class="mt-4 flex items-center justify-between gap-3 rounded-lg border px-4 py-3 text-sm text-ink-gray-7 hover:bg-surface-gray-1"
+	>
+		<span>Payment Calendar · plan supplier dues and cash</span>
+		<span aria-hidden="true">→</span>
+	</router-link>
+	>>>>>>> 5d98189 (fix(payment-calendar): hide the calendar where it cannot work)
 	<CapabilityCatalog @select="emit('select', $event)" />
 </template>
 
@@ -75,6 +91,10 @@ defineProps({
 	tint: { type: Function, required: true },
 });
 const emit = defineEmits(["select"]);
+
+// Boot-time global (jarvis/www/jarvis.py), frozen for the page's life. UX-only: the backend
+// still gates the data. Strict `=== true`, like the router guard.
+const canViewCalendar = window.can_view_payment_calendar === true;
 </script>
 
 <style scoped>

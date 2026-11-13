@@ -401,7 +401,9 @@ export async function isLlmApplyStuck() {
 // subscriptionNotice.expired: the first entry drives the banner. An admin with another model
 // still answering is told which one; a member (who only ever receives an entry when their chats
 // are failing) is sent to their admin and gets no action.
-export function subscriptionExpiredBanner(expired, isAdmin) {
+// `pinnedModel` is this conversation's model pin ("" = Auto). A chat pinned to a model the dead
+// sign-in serves never fails over, so it gets an honest line and a switch (jarvis-admin-v2#810).
+export function subscriptionExpiredBanner(expired, isAdmin, pinnedModel = "") {
 	const entry = Array.isArray(expired) ? expired[0] : null;
 	if (!entry) return null;
 	const title = `${entry.label} sign-in expired`;
@@ -414,13 +416,20 @@ export function subscriptionExpiredBanner(expired, isAdmin) {
 			showReconnect: false,
 		};
 	}
+	const pinnedDead =
+		!!pinnedModel && !!entry.fallback && (entry.models || []).includes(pinnedModel);
+	let message = "Chats that need it will fail until it is reconnected.";
+	if (pinnedDead) {
+		message = `This chat is pinned to ${pinnedModel}, so it will not switch on its own.`;
+	} else if (entry.fallback) {
+		message = autoLine(entry);
+	}
 	return {
 		title,
-		message: entry.fallback
-			? autoLine(entry)
-			: "Chats that need it will fail until it is reconnected.",
+		message,
 		upstream: entry.upstream,
 		accountRef: entry.account_ref || "",
 		showReconnect: true,
+		...(pinnedDead ? { switchModel: entry.fallback_model || "" } : {}),
 	};
 }

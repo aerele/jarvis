@@ -13,6 +13,17 @@ export function supportGuard(to, from, next) {
 	next(window.support_available && window.has_support_access ? undefined : { name: "Chat" });
 }
 
+// `can_view_payment_calendar` is a boot-time global too (jarvis/www/jarvis.py). It is a UX-only
+// flag: the backend still gates the data. A denied direct visit lands on the Saved tab, where
+// the hidden card would have been. Strict `=== true`: any other value hides the page.
+export function paymentCalendarGuard(to, from, next) {
+	next(
+		window.can_view_payment_calendar === true
+			? undefined
+			: { name: "DashboardsPage", hash: "#saved" }
+	);
+}
+
 const routes = [
 	{
 		path: "/shared",
@@ -180,6 +191,7 @@ const routes = [
 		path: "/dashboards/payment-calendar",
 		name: "PaymentCalendar",
 		component: () => import("@/pages/payment-calendar/PaymentCalendarPage.vue"),
+		beforeEnter: paymentCalendarGuard,
 	},
 	{
 		path: "/dashboards/:id",

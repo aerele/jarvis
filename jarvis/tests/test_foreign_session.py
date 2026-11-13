@@ -180,6 +180,48 @@ class TestForeignSessionHardening(JarvisSettingsSnapshot, FrappeTestCase):
 		enq.assert_not_called()
 		self.assertEqual(_count(), 0)
 
+	def test_claim_only_session_is_not_recorded_foreign(self):
+		"""Prewarm, titles, polish and preflight sessions carry a site claim and no row."""
+		from jarvis.chat import session_claims
+
+		key = "agent:main:dashboard:claim-only"
+		session_claims.claim(key)
+		self.addCleanup(frappe.cache().delete_value, session_claims._cache_key(key))
+		self.addCleanup(_clear_cache, [key])
+		with (
+			patch.object(foreign_session, "has_row_for_key", return_value=False),
+			patch("frappe.enqueue") as enq,
+		):
+			self.assertFalse(foreign_session.record(key))
+		enq.assert_not_called()
+		self.assertEqual(_count(), 0)
+
+	def test_session_with_no_row_and_no_claim_is_still_recorded(self):
+		from jarvis.chat import session_claims
+
+		key = "agent:main:dashboard:no-row-no-claim"
+		frappe.cache().delete_value(session_claims._cache_key(key))
+		self.addCleanup(_clear_cache, [key])
+		with (
+			patch.object(foreign_session, "has_row_for_key", return_value=False),
+			patch("frappe.enqueue") as enq,
+		):
+			self.assertTrue(foreign_session.record(key))
+		enq.assert_called_once()
+		self.assertEqual(_count(), 1)
+
+	def test_claim_lookup_error_is_not_recorded(self):
+		"""A cache error on the claim lookup fails SAFE: do not alert."""
+		with (
+			patch.object(foreign_session, "has_row_for_key", return_value=False),
+			patch("jarvis.chat.session_claims.is_claimed_strict", side_effect=RuntimeError("redis down")),
+			patch("frappe.enqueue") as enq,
+		):
+			self.assertTrue(foreign_session.is_known_key(KEYS[1]))
+			self.assertFalse(foreign_session.record(KEYS[1]))
+		enq.assert_not_called()
+		self.assertEqual(_count(), 0)
+
 	def test_failed_write_releases_the_throttle(self):
 		with (
 			patch("frappe.db.set_single_value", side_effect=RuntimeError("db down")),
