@@ -1,8 +1,8 @@
 <template>
-	<div class="space-y-4" data-testid="intake-fields">
+	<div ref="rootEl" class="min-w-0 max-w-full space-y-4" data-testid="intake-fields">
 		<!-- Source -->
-		<div class="flex flex-col gap-1.5">
-			<label class="text-xs text-ink-gray-5">Source</label>
+		<div class="flex min-w-0 flex-col gap-1.5">
+			<label class="text-xs text-ink-gray-7">Source</label>
 			<div class="flex flex-wrap gap-2">
 				<Button
 					v-for="s in SOURCES"
@@ -15,26 +15,41 @@
 			</div>
 		</div>
 
-		<div v-if="form.intake_source === 'Folder'" class="flex flex-col gap-1.5">
-			<label class="text-xs text-ink-gray-5">Folder</label>
+		<div
+			v-if="form.intake_source === 'Folder'"
+			data-pick="folder"
+			class="flex min-w-0 flex-col gap-1.5"
+		>
+			<label class="text-xs text-ink-gray-7">Folder</label>
 			<Autocomplete
 				v-if="!disabled"
 				:options="folderOptions"
 				:modelValue="pickValue(form.intake_folder)"
 				placeholder="Pick a folder…"
-				@update:modelValue="(o) => emit('update', { intake_folder: optValue(o) })"
+				@update:modelValue="
+					(o) => {
+						emit('update', { intake_folder: optValue(o) });
+						refocus('folder');
+					}
+				"
 			/>
 			<FormControl v-else type="text" :modelValue="form.intake_folder" :disabled="true" />
 		</div>
-		<div v-else class="flex flex-col gap-1.5">
-			<label class="text-xs text-ink-gray-5">Record DocType</label>
+		<div v-else data-pick="record" class="flex min-w-0 flex-col gap-1.5">
+			<label class="text-xs text-ink-gray-7">Record DocType</label>
 			<Autocomplete
 				v-if="!disabled"
-				:options="recordDoctypeOptions"
+				:options="doctypeOptions('record')"
+				:loading="doctypeLoading('record')"
 				:modelValue="pickValue(form.intake_record_doctype)"
 				placeholder="Files attached to records of…"
-				@update:query="(q) => queryDoctypes(q, 'record')"
-				@update:modelValue="setRecordDoctype"
+				@update:query="(q) => doctypeSearch.record.onQuery(q)"
+				@update:modelValue="
+					(o) => {
+						setRecordDoctype(o);
+						refocus('record');
+					}
+				"
 			/>
 			<FormControl
 				v-else
@@ -44,15 +59,21 @@
 			/>
 		</div>
 
-		<div class="flex flex-col gap-1.5">
-			<label class="text-xs text-ink-gray-5">Create draft of</label>
+		<div data-pick="target" class="flex min-w-0 flex-col gap-1.5">
+			<label class="text-xs text-ink-gray-7">Create draft of</label>
 			<Autocomplete
 				v-if="!disabled"
-				:options="targetDoctypeOptions"
+				:options="doctypeOptions('target')"
+				:loading="doctypeLoading('target')"
 				:modelValue="pickValue(form.intake_target_doctype)"
 				placeholder="Pick a DocType…"
-				@update:query="(q) => queryDoctypes(q, 'target')"
-				@update:modelValue="onTargetPick"
+				@update:query="(q) => doctypeSearch.target.onQuery(q)"
+				@update:modelValue="
+					(o) => {
+						onTargetPick(o);
+						refocus('target');
+					}
+				"
 			/>
 			<FormControl
 				v-else
@@ -61,12 +82,15 @@
 				:disabled="true"
 			/>
 			<ErrorMessage :message="loadError" />
+			<p v-if="loadingFields" class="text-p-sm text-ink-gray-7" role="status">
+				Loading the fields of {{ form.intake_target_doctype }}…
+			</p>
 		</div>
 
 		<template v-if="options">
 			<!-- Fields -->
-			<div class="flex flex-col gap-1.5" data-testid="intake-field-list">
-				<label class="text-xs text-ink-gray-5">Fields to read</label>
+			<div class="flex min-w-0 flex-col gap-1.5" data-testid="intake-field-list">
+				<label class="text-xs text-ink-gray-7">Fields to read</label>
 				<div class="max-h-64 space-y-1.5 overflow-auto rounded-md border p-2">
 					<FormControl
 						v-for="f in options.fields"
@@ -81,7 +105,7 @@
 			</div>
 
 			<!-- Child table -->
-			<div v-if="options.tables.length" class="flex flex-col gap-1.5">
+			<div v-if="options.tables.length" class="flex min-w-0 flex-col gap-1.5">
 				<FormControl
 					type="select"
 					label="Table rows"
@@ -107,8 +131,8 @@
 			</div>
 
 			<!-- Match links -->
-			<div v-if="linkFields.length" class="flex flex-col gap-1.5">
-				<label class="text-xs text-ink-gray-5">Match to existing records</label>
+			<div v-if="linkFields.length" class="flex min-w-0 flex-col gap-1.5">
+				<label class="text-xs text-ink-gray-7">Match to existing records</label>
 				<div class="space-y-1.5 rounded-md border p-2">
 					<FormControl
 						v-for="f in linkFields"
@@ -124,7 +148,7 @@
 
 			<!-- Defaults -->
 			<div v-if="defaultFields.length" class="flex flex-col gap-3">
-				<label class="text-xs text-ink-gray-5">
+				<label class="text-xs text-ink-gray-7">
 					Fixed values for mandatory fields that are not read from the file
 				</label>
 				<div
@@ -133,13 +157,14 @@
 					:data-testid="'default-' + f.fieldname"
 				>
 					<template v-if="f.fieldtype === 'Link'">
-						<label class="mb-1.5 block text-xs text-ink-gray-5">{{ f.label }}</label>
+						<label class="mb-1.5 block text-xs text-ink-gray-7">{{ f.label }}</label>
 						<Autocomplete
 							v-if="!disabled"
-							:options="linkOptions[f.fieldname] || []"
+							:options="linkOptions(f)"
+							:loading="linkSearch(f).loading.value"
 							:modelValue="pickValue(spec.defaults[f.fieldname])"
 							:placeholder="'Pick a ' + f.options + '…'"
-							@update:query="(q) => queryLink(f, q)"
+							@update:query="(q) => linkSearch(f).onQuery(q)"
 							@update:modelValue="(o) => setDefault(f.fieldname, optValue(o))"
 						/>
 						<FormControl
@@ -180,18 +205,28 @@
 		</template>
 
 		<!-- Instructions -->
-		<div class="flex flex-col gap-1.5">
+		<div class="flex min-w-0 flex-col gap-1.5">
 			<FormControl
 				type="textarea"
 				label="Instructions"
 				:rows="4"
 				placeholder="e.g. One table row is one item line. Machine codes look like M-07."
+				:maxlength="MAX_INSTRUCTIONS"
 				:modelValue="form.intake_instructions"
 				:disabled="disabled"
-				@update:modelValue="(v) => emit('update', { intake_instructions: v })"
+				@update:modelValue="
+					(v) => emit('update', { intake_instructions: clampInstructions(v) })
+				"
 			/>
-			<p class="text-p-xs text-ink-gray-5">
-				{{ (form.intake_instructions || "").length }} / {{ MAX_INSTRUCTIONS }}
+			<p
+				class="text-p-xs"
+				:class="
+					instructionsLength >= MAX_INSTRUCTIONS ? 'text-ink-red-4' : 'text-ink-gray-7'
+				"
+				aria-live="polite"
+				data-testid="instructions-count"
+			>
+				{{ instructionsLength }} / {{ MAX_INSTRUCTIONS }}
 			</p>
 		</div>
 
@@ -204,7 +239,7 @@
 			@update:modelValue="(v) => emit('update', { llm_daily_cap: v })"
 		/>
 
-		<div class="flex flex-col gap-1.5">
+		<div class="flex min-w-0 flex-col gap-1.5">
 			<FormControl
 				type="checkbox"
 				label="Allow incomplete drafts"
@@ -213,7 +248,7 @@
 				@update:modelValue="(v) => emit('update', { allow_incomplete_drafts: v ? 1 : 0 })"
 			/>
 			<!-- frappe-ui's checkbox ignores the description prop; same classes as the LLM kind's help line -->
-			<p class="text-p-xs text-ink-gray-5">
+			<p class="text-p-xs text-ink-gray-7">
 				Create the draft even when a mandatory field could not be read. Missing fields are
 				listed on the draft. Submit still needs every mandatory field.
 			</p>
@@ -249,9 +284,10 @@
 // The Intake kind's form body, rendered by TriggerDetail when action_type is
 // "Intake". It owns no state of the trigger: it reads `form` and emits
 // `update` with a patch ({key: value}) that TriggerDetail applies to its form.
-import { ref, reactive, computed, watch, onBeforeUnmount } from "vue";
+import { ref, computed, nextTick, watch, onBeforeUnmount } from "vue";
 import { Autocomplete, Button, ErrorMessage, FormControl } from "frappe-ui";
 import { searchLink } from "@/api";
+import { useLinkSearch } from "@/composables/useLinkSearch";
 import * as apiTriggers from "@/api/triggers";
 import { errMessage } from "@/lib/errors";
 import { emptySpec, parseSpec, uncoveredLabels } from "./intakeSpec";
@@ -275,8 +311,22 @@ const MAX_INSTRUCTIONS = 4000;
 const STATUS_TYPES = ["Data", "Small Text"];
 const LINK_TYPES = ["Link", "Data", "Dynamic Link"];
 
+// The server refuses more than this; stop at the limit here instead of failing on save
+// (a paste past the limit is cut, not rejected later).
+const clampInstructions = (v) => String(v ?? "").slice(0, MAX_INSTRUCTIONS);
+const instructionsLength = computed(() => (props.form.intake_instructions || "").length);
+
 const spec = computed(() => parseSpec(props.form.intake_spec));
 const patchSpec = (next) => emit("update", { intake_spec: next });
+
+// A picker closes on pick and the page re-renders around it: put focus back on its button.
+const rootEl = ref(null);
+function refocus(which) {
+	nextTick(() => {
+		const btn = rootEl.value && rootEl.value.querySelector(`[data-pick="${which}"] button`);
+		if (btn) btn.focus();
+	});
+}
 
 const pickValue = (v) => (v ? { label: v, value: v } : null);
 const optValue = (o) => (o && o.value ? String(o.value) : "");
@@ -323,30 +373,23 @@ function loadFolders() {
 watch(() => props.readOnly, loadFolders, { immediate: true });
 
 // ── DocType pickers (search_link, like the page's own DocType picker) ────────
-const recordDoctypeOptions = ref([]);
-const targetDoctypeOptions = ref([]);
-// The template unwraps refs, so the handler gets a key and writes the ref here in script scope.
-const doctypeOptionRefs = { record: recordDoctypeOptions, target: targetDoctypeOptions };
-const dtTimers = {};
-function queryDoctypes(q, which) {
-	const target = doctypeOptionRefs[which];
-	clearTimeout(dtTimers[which]);
-	dtTimers[which] = setTimeout(async () => {
-		try {
-			const r = await searchLink("DocType", q || "");
-			target.value = (r || []).map((x) => ({ label: x.value, value: x.value }));
-		} catch (e) {
-			target.value = [];
-		}
-	}, 300);
-}
-queryDoctypes("", "record");
-queryDoctypes("", "target");
-onBeforeUnmount(() => Object.values(dtTimers).forEach(clearTimeout));
+// useLinkSearch debounces and drops a slow earlier answer, so the list always matches
+// what is typed (latest wins), and it says when a search is still running.
+const docMap = (rows) => (rows || []).map((x) => ({ label: x.value, value: x.value }));
+const doctypeSearch = {
+	record: useLinkSearch((q) => searchLink("DocType", q), { mapper: docMap }),
+	target: useLinkSearch((q) => searchLink("DocType", q), { mapper: docMap }),
+};
+const doctypeOptions = (which) => doctypeSearch[which].options.value;
+const doctypeLoading = (which) => doctypeSearch[which].loading.value;
+doctypeSearch.record.prime();
+doctypeSearch.target.prime();
+onBeforeUnmount(() => Object.values(doctypeSearch).forEach((x) => x.cleanup()));
 
 // ── field options of the target and of the record DocType ────────────────────
 const options = ref(null);
 const loadError = ref("");
+const loadingFields = ref(false);
 const recordOptions = ref(null);
 let seq = 0;
 
@@ -354,13 +397,17 @@ async function loadTarget(doctype) {
 	const mine = ++seq;
 	options.value = null;
 	loadError.value = "";
+	loadingFields.value = false;
 	if (!doctype || props.readOnly) return;
+	loadingFields.value = true;
 	try {
 		const res = await apiTriggers.getIntakeFieldOptions(doctype);
 		if (mine !== seq) return;
 		options.value = { fields: res?.fields || [], tables: res?.tables || [] };
 	} catch (e) {
 		if (mine === seq) loadError.value = errMessage(e);
+	} finally {
+		if (mine === seq) loadingFields.value = false;
 	}
 }
 
@@ -481,20 +528,16 @@ const selectOptions = (f) => [
 		.map((o) => ({ label: o, value: o })),
 ];
 
-const linkOptions = reactive({});
-const linkTimers = {};
-function queryLink(f, q) {
-	clearTimeout(linkTimers[f.fieldname]);
-	linkTimers[f.fieldname] = setTimeout(async () => {
-		try {
-			const r = await searchLink(f.options, q || "");
-			linkOptions[f.fieldname] = (r || []).map((x) => ({ label: x.value, value: x.value }));
-		} catch (e) {
-			linkOptions[f.fieldname] = [];
-		}
-	}, 300);
+const linkSearches = {};
+function linkSearch(f) {
+	if (!linkSearches[f.fieldname])
+		linkSearches[f.fieldname] = useLinkSearch((q) => searchLink(f.options, q), {
+			mapper: docMap,
+		});
+	return linkSearches[f.fieldname];
 }
-onBeforeUnmount(() => Object.values(linkTimers).forEach(clearTimeout));
+const linkOptions = (f) => linkSearch(f).options.value;
+onBeforeUnmount(() => Object.values(linkSearches).forEach((x) => x.cleanup()));
 
 // ── strict-mode coverage ─────────────────────────────────────────────────────
 const uncovered = computed(() =>

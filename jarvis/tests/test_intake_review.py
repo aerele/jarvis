@@ -165,6 +165,14 @@ class TestIntakeReview(FrappeTestCase):
 		frappe.set_user(user)
 		return approvals_api.decide(request, json.dumps(answers), approve)
 
+	def _bells(self, user, text):
+		return frappe.get_all(
+			"Notification Log",
+			filters={"for_user": user, "subject": ["like", f"%{text}%"]},
+			fields=["subject", "document_type", "document_name", "link"],
+			order_by="creation desc",
+		)
+
 	def _request(self, name):
 		return frappe.db.get_value(AR, name, ["status", "decision", "decided_by"], as_dict=True)
 
@@ -296,7 +304,7 @@ class TestIntakeReview(FrappeTestCase):
 		self.assertEqual(res["status"], "Approved")
 		self.assertEqual(frappe.db.count(PARENT), 1)
 
-	def test_refused_draft_marks_the_request_answered(self):
+	def test_refused_draft_keeps_the_request_answerable(self):
 		_rule, row, name = self._pending()
 		# The uploader loses the right to create between the raise and the answer.
 		frappe.set_user("Administrator")
@@ -307,12 +315,24 @@ class TestIntakeReview(FrappeTestCase):
 			lambda: (frappe.get_doc("User", UPLOADER).add_roles(ROLE), frappe.clear_cache(user=UPLOADER))
 		)
 		res = self._decide(OWNER, name, {"items.2.qty": 3})
-		self.assertEqual(res["status"], "Answered")
+		# Not closed: the reviewer sees why on the form and can answer again.
+		self.assertEqual(res["status"], "Pending")
+		self.assertIn("You can't create", res["error"])
 		frappe.set_user("Administrator")
 		row.reload()
-		self.assertEqual(row.status, "Failed")
-		self.assertIn("Draft not created", self._request(name).decision)
+		self.assertEqual(row.status, "Needs Review")
+		self.assertEqual(self._request(name).status, "Pending")
 		self.assertFalse(frappe.db.count(PARENT))
+		frappe.set_user(OWNER)
+		self.assertIn("You can't create", approvals_api.get_approval(name)["intake"]["error"])
+		# Fixed access: the same request can now be approved. No second request, no loop.
+		frappe.set_user("Administrator")
+		frappe.get_doc("User", UPLOADER).add_roles(ROLE)
+		frappe.clear_cache(user=UPLOADER)
+		res = self._decide(OWNER, name, {"items.2.qty": 3})
+		self.assertEqual(res["status"], "Approved")
+		self.assertEqual(frappe.db.count(AR, {"source": "Intake"}), 1)
+		frappe.set_user("Administrator")
 
 	# ---- reject ---------------------------------------------------------------
 	def test_reject_marks_failed(self):
@@ -337,6 +357,72 @@ class TestIntakeReview(FrappeTestCase):
 		self._decide(OWNER, row.approval_request, {}, approve=0)
 		frappe.set_user("Administrator")
 		self.assertEqual(frappe.db.get_value(RECORD, record.name, "progress"), "Failed")
+
+	def test_reject_with_a_reason_reaches_the_row_the_request_and_the_bell(self):
+		_rule, row, name = self._pending()
+		res = self._decide(OWNER, name, {"reason": "Photo is blurry"}, approve=0)
+		self.assertEqual(res["status"], "Rejected")
+		frappe.set_user("Administrator")
+		row.reload()
+		self.assertEqual(row.summary, "Rejected by reviewer: Photo is blurry")
+		self.assertEqual(self._request(name).decision, "Rejected by reviewer: Photo is blurry")
+		bell = self._bells(UPLOADER, "Rejected by reviewer")
+		self.assertTrue(bell)
+		self.assertIn("Photo is blurry", bell[0].subject)
+		# The uploader here is a Jarvis user: the bell opens the File Box list.
+		self.assertEqual(bell[0].link, "/jarvis/files?view=intake")
+
+	def test_reject_reason_is_optional_and_cleaned(self):
+		_rule, row, name = self._pending()
+		self._decide(OWNER, name, {"reason": "<b>bad</b>\n  scan " + "x" * 300}, approve=0)
+		frappe.set_user("Administrator")
+		row.reload()
+		self.assertTrue(row.summary.startswith("Rejected by reviewer: bad scan x"))
+		self.assertNotIn("<b>", row.summary)
+		self.assertLessEqual(len(row.summary), 140)
+
+	def test_raising_a_review_bells_the_rule_owner_and_system_managers(self):
+		_rule, row, name = self._pending()
+		owner_bell = self._bells(OWNER, "Review needed")
+		self.assertTrue(owner_bell)
+		self.assertIn("sheet.png", owner_bell[0].subject)
+		self.assertFalse(self._bells(STRANGER, "Review needed"))
+		self.assertFalse(self._bells("Administrator", "Review needed"))
+
+	def test_reviewer_bell_links_to_the_board_for_jarvis_users(self):
+		_rule, row, name = self._pending()
+		bell = self._bells(OWNER, "Review needed")[0]
+		self.assertEqual(bell.link, f"/jarvis/approvals/{name}")
+
+	def test_row_ended_bell_links_and_says_the_next_step(self):
+		from jarvis.intake import notify
+
+		_rule, row, _name = self._pending()
+		frappe.db.delete("Notification Log", {"for_user": UPLOADER})
+		row.db_set({"status": "Failed", "summary": "Reading the file failed."})
+		with mock.patch("jarvis.permissions.has_jarvis_access", return_value=False):
+			notify.row_ended(row, "Reading the file failed.")
+		bell = self._bells(UPLOADER, "Reading the file failed")[0]
+		self.assertIn("Open it and press Retry", bell.subject)
+		self.assertEqual((bell.document_type, bell.document_name), (ACTIVITY, row.name))
+		frappe.db.delete("Notification Log", {"for_user": UPLOADER})
+		with mock.patch("jarvis.permissions.has_jarvis_access", return_value=True):
+			notify.row_ended(row, "Reading the file failed.")
+		bell = self._bells(UPLOADER, "Reading the file failed")[0]
+		self.assertEqual(bell.link, "/jarvis/files?view=intake")
+		# A permanent end has no retry to press.
+		frappe.db.delete("Notification Log", {"for_user": UPLOADER})
+		notify.row_ended(row, "The file was removed")
+		self.assertNotIn("Retry", self._bells(UPLOADER, "The file was removed")[0].subject)
+
+	def test_review_waiting_bell_says_a_reviewer_will_fill_it_in(self):
+		from jarvis.intake import notify
+
+		_rule, row, _name = self._pending()
+		frappe.db.delete("Notification Log", {"for_user": UPLOADER})
+		notify.review_waiting(row, 2)
+		bell = self._bells(UPLOADER, "Waiting for a reviewer")[0]
+		self.assertIn("A reviewer will fill it in", bell.subject)
 
 	# ---- board reads ----------------------------------------------------------
 	def test_get_approval_gives_the_form_what_it_needs(self):
@@ -412,10 +498,14 @@ class TestIntakeReview(FrappeTestCase):
 		frappe.set_user("Administrator")
 		self.assertEqual(self._shared(row, name), {"request": True, "file": False})
 
-	def test_shares_removed_when_the_draft_is_refused(self):
+	def test_shares_stay_while_a_refused_request_is_answerable(self):
 		_rule, row, name = self._pending()
 		with mock.patch("jarvis.intake.draft.create", side_effect=draft.DraftFailed("no")):
 			self._decide(OWNER, name, {"items.2.qty": 3})
+		frappe.set_user("Administrator")
+		# Still pending, so the reviewer keeps their access; only a settled request takes it back.
+		self.assertEqual(self._shared(row, name), {"request": True, "file": True})
+		self._decide(OWNER, name, {}, 0)
 		frappe.set_user("Administrator")
 		self.assertEqual(self._shared(row, name), {"request": True, "file": False})
 

@@ -13,11 +13,12 @@ vi.mock("frappe-ui", () => ({
 		emits: ["click"],
 		template: '<button :disabled="disabled" @click="$emit(\'click\')">{{ label }}</button>',
 	},
+	FeatherIcon: { template: "<i/>" },
 	FormControl: {
 		props: ["label", "type", "modelValue", "options"],
 		emits: ["update:modelValue"],
 		template:
-			'<label class="fc" :data-type="type">{{ label }}<input :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" /></label>',
+			'<label class="fc" :data-type="type">{{ label }}<textarea v-if="type === \'textarea\'" :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" /><input v-else :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" /></label>',
 	},
 	toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
 }));
@@ -129,13 +130,108 @@ describe("IntakeReviewDetail", () => {
 		expect(onDecided).toHaveBeenCalledWith({ ok: true, status: "Approved" }, "AR-1");
 	});
 
-	it("rejects with an empty json object", async () => {
+	it("asks for an optional reason on Reject, then sends it", async () => {
 		api.decideApproval.mockResolvedValue({ ok: true, status: "Rejected" });
 		const w = mountWith([item()]);
 		await button(w, "Reject").trigger("click");
+		// Nothing is sent by the first click; the reason box opens and takes focus.
+		expect(api.decideApproval).not.toHaveBeenCalled();
+		expect(button(w, "Approve")).toBeUndefined();
+		await w.find("textarea").setValue("Photo is blurry");
+		await button(w, "Confirm reject").trigger("click");
 		await flushPromises();
-		expect(api.decideApproval).toHaveBeenCalledWith("AR-1", "{}", 0);
+		expect(api.decideApproval).toHaveBeenCalledWith("AR-1", '{"reason":"Photo is blurry"}', 0);
 		expect(onDecided).toHaveBeenCalled();
+	});
+
+	it("rejects without a reason too, and Back returns to Approve / Reject", async () => {
+		api.decideApproval.mockResolvedValue({ ok: true, status: "Rejected" });
+		const w = mountWith([item()]);
+		await button(w, "Reject").trigger("click");
+		await button(w, "Back").trigger("click");
+		expect(button(w, "Approve")).toBeDefined();
+		await button(w, "Reject").trigger("click");
+		await button(w, "Confirm reject").trigger("click");
+		await flushPromises();
+		expect(api.decideApproval).toHaveBeenCalledWith("AR-1", '{"reason":""}', 0);
+	});
+
+	it("moves focus into the reason box and back to Reject, never to <body>", async () => {
+		const host = document.createElement("div");
+		document.body.appendChild(host);
+		const w = mount(IntakeReviewDetail, {
+			attachTo: host,
+			props: { approval: approval([item()]), onDecided },
+		});
+		await button(w, "Reject").trigger("click");
+		await flushPromises();
+		expect(document.activeElement).toBe(w.find("textarea").element);
+		await button(w, "Back").trigger("click");
+		await flushPromises();
+		expect(document.activeElement).toBe(button(w, "Reject").element);
+		w.unmount();
+		host.remove();
+	});
+
+	it("stays open with the reason when the site refuses the draft", async () => {
+		api.decideApproval.mockResolvedValue({
+			ok: true,
+			status: "Pending",
+			error: "The draft could not be saved: Qty must be positive",
+		});
+		const host = document.createElement("div");
+		document.body.appendChild(host);
+		const w = mount(IntakeReviewDetail, {
+			attachTo: host,
+			props: { approval: approval([item()]), onDecided },
+		});
+		await w.find(".fc input").setValue("-1");
+		await button(w, "Approve").trigger("click");
+		await flushPromises();
+		expect(onDecided).not.toHaveBeenCalled();
+		const alert = w.find("[role=alert]");
+		expect(alert.text()).toContain("Qty must be positive");
+		expect(document.activeElement).toBe(alert.element);
+		// still answerable: Approve is there and enabled for another try
+		expect(button(w, "Approve").element.disabled).toBe(false);
+		w.unmount();
+		host.remove();
+	});
+
+	it("shows an earlier refusal stored on the request when it opens", () => {
+		const w = mountWith([item()], { error: "The draft could not be saved." });
+		expect(w.find("[role=alert]").text()).toContain("could not be saved");
+	});
+
+	it("keeps the photo in a sticky column beside the values, and the form first", () => {
+		const w = mountWith([item()]);
+		const photo = w.find('[data-testid="intake-photo"]');
+		expect(photo.classes()).toEqual(
+			expect.arrayContaining(["sticky", "top-0", "lg:self-start"])
+		);
+		expect(w.find("[aria-busy]").classes().join(" ")).toContain("lg:grid-cols-");
+		// the values come before "What was read" so the first value sits beside the photo
+		const html = w.html();
+		expect(html.indexOf("Values needed")).toBeLessThan(html.indexOf("What was read"));
+	});
+
+	it("lists table rows as stacked cards, not a table that scrolls sideways", () => {
+		const w = mountWith([item()]);
+		expect(w.find("table").exists()).toBe(false);
+		const card = w.find('[data-testid="intake-row"]');
+		expect(card.text()).toContain("Item Name");
+		expect(card.text()).toContain("bolt");
+		expect(card.text()).toContain("Qty");
+	});
+
+	it("does not nest a button in the link to a non-image file", () => {
+		const w = mountWith([item()], {
+			file: { file_url: "/private/files/a.pdf", file_name: "a.pdf", is_image: false },
+		});
+		const link = w.find('[data-testid="intake-photo"] a');
+		expect(link.attributes("href")).toBe("/private/files/a.pdf");
+		expect(link.find("button").exists()).toBe(false);
+		expect(link.text()).toContain("a.pdf");
 	});
 
 	it("shows the server's refusal and stays open", async () => {

@@ -2,6 +2,7 @@
 	<ListPage
 		:breadcrumbs="[{ label: 'File Box', route: { name: 'FilesList' } }]"
 		:columns="columns"
+		:row-height="narrow ? 'auto' : 40"
 		:rows="rows"
 		:loading="loading"
 		:error="error"
@@ -25,20 +26,51 @@
 		@load-more="loadMore"
 		@refresh="resetLoad"
 	>
+		<template #banner>
+			<div ref="statusEl" tabindex="-1" role="status" class="sr-only">{{ statusText }}</div>
+		</template>
+
 		<template #right-header>
-			<Select
-				v-if="canManage"
-				class="w-28"
-				:options="SCOPE_OPTIONS"
-				:model-value="scope"
-				@update:model-value="(v) => (scope = v || 'mine')"
-			/>
-			<FileBoxSwitch :model-value="'intake'" @update:model-value="$emit('switch', $event)" />
+			<!-- wraps instead of clipping: the switch must stay reachable at 320 px -->
+			<div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
+				<Select
+					v-if="canManage"
+					class="w-28"
+					aria-label="Whose files"
+					:options="SCOPE_OPTIONS"
+					:model-value="scope"
+					@update:model-value="(v) => (scope = v || 'mine')"
+				/>
+				<FileBoxSwitch
+					:model-value="'intake'"
+					@update:model-value="$emit('switch', $event)"
+				/>
+			</div>
 		</template>
 
 		<template #cell-file="{ row }">
-			<div class="flex min-w-0 items-center gap-2 overflow-hidden">
-				<FeatherIcon name="file-text" class="size-4 shrink-0 text-ink-gray-5" />
+			<!-- Narrow screens: the one visible column is a card with everything the other
+			     columns would show, so nothing is squeezed and nothing scrolls sideways. -->
+			<div v-if="narrow" class="flex min-w-0 flex-col gap-1 py-2" data-testid="intake-card">
+				<div class="flex min-w-0 items-center gap-2">
+					<FeatherIcon name="file-text" class="size-4 shrink-0 text-ink-gray-7" />
+					<div class="min-w-0 break-words font-medium text-ink-gray-9">
+						{{ row.file_name }}
+					</div>
+				</div>
+				<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+					<Badge
+						variant="subtle"
+						:theme="intakeBadge(row).theme"
+						:label="intakeBadge(row).label"
+					/>
+					<IntakeDraftLink :row="row" />
+				</div>
+				<div class="break-words text-sm text-ink-gray-7">{{ row.summary }}</div>
+				<div class="break-words text-sm text-ink-gray-7">{{ row.source_label }}</div>
+			</div>
+			<div v-else class="flex min-w-0 items-center gap-2 overflow-hidden">
+				<FeatherIcon name="file-text" class="size-4 shrink-0 text-ink-gray-7" />
 				<div class="truncate text-base font-medium text-ink-gray-9" :title="row.file_name">
 					{{ row.file_name }}
 				</div>
@@ -61,20 +93,7 @@
 
 		<template #cell-draft="{ row }">
 			<div class="min-w-0 truncate text-base">
-				<a
-					v-if="intakeDraftLink(row) && intakeDraftLink(row).kind === 'desk'"
-					:href="intakeDraftLink(row).href"
-					target="_blank"
-					rel="noopener noreferrer"
-					class="text-ink-blue-3 hover:underline"
-					>{{ intakeDraftLink(row).label }}</a
-				>
-				<router-link
-					v-else-if="intakeDraftLink(row)"
-					:to="intakeDraftLink(row).href"
-					class="text-ink-blue-3 hover:underline"
-					>{{ intakeDraftLink(row).label }}</router-link
-				>
+				<IntakeDraftLink :row="row" />
 			</div>
 		</template>
 
@@ -86,11 +105,13 @@
 
 		<template #cell-_retry="{ row }">
 			<div class="flex w-full items-center justify-end">
+				<!-- the file name is in the name, so a screen reader can tell the Retry buttons apart -->
 				<Button
 					v-if="row.can_retry"
 					variant="ghost"
 					size="sm"
 					label="Retry"
+					:aria-label="`Retry ${row.file_name || row.name}`"
 					:loading="retrying === row.name"
 					:disabled="!!retrying"
 					@click="retry(row)"
@@ -104,8 +125,10 @@
 // File Box "Intake" view: the Document Intake files the caller uploaded (or, for
 // managers, everyone's), with their status, draft and a Retry for failed ones.
 // Polls every 10 s while a row is Queued or Running.
-import { ref, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { Badge, Button, FeatherIcon, Select, toast } from "frappe-ui";
+import IntakeDraftLink from "./IntakeDraftLink.vue";
+import { useNarrow } from "@/composables/useNarrow";
 import ListPage from "@/components/list/ListPage.vue";
 import FileBoxSwitch from "./FileBoxSwitch.vue";
 import { useListPage } from "@/composables/useListPage";
@@ -121,7 +144,7 @@ import {
 
 defineEmits(["switch"]);
 
-const columns = [
+const ALL_COLUMNS = [
 	{ label: "File", key: "file", width: 3 },
 	{ label: "Source", key: "source", width: 2 },
 	{ label: "Status", key: "status", width: "9rem" },
@@ -129,6 +152,13 @@ const columns = [
 	{ label: "Summary", key: "summary", width: 3 },
 	{ label: "", key: "_retry", width: "5rem", align: "right" },
 ];
+// Below ~640 px six columns do not fit: the File cell turns into a card that carries the
+// status, draft, summary and source, and only Retry stays beside it (same lever as
+// SupportListPage and ActivityTab: a narrower `columns` prop).
+const narrow = useNarrow();
+const columns = computed(() =>
+	narrow.value ? ALL_COLUMNS.filter((c) => c.key === "file" || c.key === "_retry") : ALL_COLUMNS
+);
 const quickFilters = [
 	{ key: "search", label: "Search files", type: "text" },
 	{ key: "status", label: "Status", type: "select", options: INTAKE_STATUS_OPTIONS },
@@ -177,18 +207,25 @@ const {
 watch(scope, () => resetLoad());
 
 const retrying = ref("");
+// A busy frappe-ui Button is disabled, and a disabled control loses focus, so after a
+// retry focus goes to a stable status line (also read out by screen readers).
+const statusEl = ref(null);
+const statusText = ref("");
 async function retry(row) {
 	if (retrying.value) return;
 	retrying.value = row.name;
 	try {
 		await intakeRetry(row.name);
 		toast.success("Queued again");
-		refreshKeep();
+		statusText.value = `${row.file_name || row.name} queued again`;
 	} catch (e) {
 		toast.error(errHtml(e));
-		refreshKeep();
+		statusText.value = `${row.file_name || row.name} could not be queued again`;
 	} finally {
 		retrying.value = "";
+		refreshKeep();
+		await nextTick();
+		if (statusEl.value) statusEl.value.focus();
 	}
 }
 

@@ -251,7 +251,7 @@
 // with ?status= deep link, date-range filter, processing/applying poll (5s) +
 // visibilitychange refresh, per-row file preview (FilePreview dialog), bulk
 // delete with skip reasons, Clear Processed.
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
 	Button,
@@ -288,7 +288,16 @@ const route = useRoute();
 const router = useRouter();
 const store = useShellStore();
 // "dropped" (files added by hand, the default) or "intake" (Document Intake files)
-const view = ref("dropped");
+// ?view=intake is the link the intake bells carry.
+const view = ref(route.query.view === "intake" ? "intake" : "dropped");
+
+// The switch is rebuilt with the other view, so the clicked button is gone: put focus back
+// on the selected view's button instead of letting it fall to <body>.
+watch(view, async () => {
+	await nextTick();
+	const on = document.querySelector("[data-filebox-switch] [role=radio][aria-checked=true]");
+	if (on) on.focus();
+});
 
 // ── list config ──────────────────────────────────────────────────────────────
 // statuses, badges and result links live in @/lib/fileboxStatus (tested).
@@ -599,14 +608,15 @@ function clearProcessed() {
 
 // ── freshness: poll while a row is processing/applying + refetch on visible ──
 let pollTimer = null;
+// The Intake view is its own list with its own poll; this one is not on screen then.
 function onVisibility() {
-	if (document.visibilityState === "visible") refreshKeep();
+	if (view.value === "dropped" && document.visibilityState === "visible") refreshKeep();
 }
 onMounted(() => {
 	loadSkills();
 	// cheap tick: only refetches when such a row is on screen
 	pollTimer = setInterval(() => {
-		if (rows.value.some(isLive)) refreshKeep();
+		if (view.value === "dropped" && rows.value.some(isLive)) refreshKeep();
 	}, 5000);
 	document.addEventListener("visibilitychange", onVisibility);
 });

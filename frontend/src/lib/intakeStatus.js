@@ -25,7 +25,7 @@ export function intakeIsLive(row) {
 	return !!row && (row.status === "Queued" || row.status === "Running");
 }
 
-/** The draft's desk form (new tab), the approval on the board (in-app), or nothing. */
+/** The draft's desk form (new tab), the approval on the board (in-app, reviewers only), or nothing. */
 export function intakeDraftLink(row) {
 	if (!row) return null;
 	if (row.draft_doctype && row.draft_name) {
@@ -36,7 +36,9 @@ export function intakeDraftLink(row) {
 			href: `/app/${slug}/${encodeURIComponent(row.draft_name)}`,
 		};
 	}
-	if (row.status === "Needs Review" && row.approval_request) {
+	// can_review comes from the server: an uploader who may not decide would only reach
+	// "Not permitted", so they get no link.
+	if (row.status === "Needs Review" && row.approval_request && row.can_review) {
 		return {
 			kind: "route",
 			label: "Open review",

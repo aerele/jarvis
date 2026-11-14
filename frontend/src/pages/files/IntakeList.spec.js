@@ -33,8 +33,8 @@ vi.mock("frappe-ui", () => ({
 }));
 vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
-		props: ["rows", "emptyState"],
-		template: `<div><slot name="right-header" /><div v-if="!rows.length" class="empty">{{ emptyState.description }}</div><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-file" :row="row" /><slot name="cell-source" :row="row" /><slot name="cell-status" :row="row" /><slot name="cell-draft" :row="row" /><slot name="cell-summary" :row="row" /><slot name="cell-_retry" :row="row" /></div></div>`,
+		props: ["rows", "emptyState", "columns", "rowHeight"],
+		template: `<div :data-cols="columns.map((c) => c.key).join()" :data-row-height="rowHeight"><slot name="banner" /><slot name="right-header" /><div v-if="!rows.length" class="empty">{{ emptyState.description }}</div><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-file" :row="row" /><slot name="cell-source" :row="row" /><slot name="cell-status" :row="row" /><slot name="cell-draft" :row="row" /><slot name="cell-summary" :row="row" /><slot name="cell-_retry" :row="row" /></div></div>`,
 	},
 }));
 vi.mock("@/api", () => ({
@@ -60,6 +60,7 @@ const row = (over = {}) => ({
 	draft_name: "PINV-0001",
 	approval_request: "",
 	can_retry: false,
+	can_review: false,
 	...over,
 });
 
@@ -115,9 +116,91 @@ describe("IntakeList", () => {
 				draft_doctype: "",
 				draft_name: "",
 				approval_request: "AR-1",
+				can_review: true,
 			}),
 		]);
 		expect(w.find(".row a").attributes("href")).toBe("/approvals/AR-1");
+		expect(w.find(".row a").attributes("aria-label")).toBe("Open review of bill.pdf");
+	});
+
+	it("gives an uploader who may not review no link to a review that would refuse them", async () => {
+		w = await mountList([
+			row({
+				status: "Needs Review",
+				draft_doctype: "",
+				draft_name: "",
+				approval_request: "AR-1",
+				can_review: false,
+			}),
+		]);
+		expect(w.find(".row a").exists()).toBe(false);
+	});
+
+	describe("narrow screens", () => {
+		const setNarrow = (matches) => {
+			window.matchMedia = vi.fn().mockReturnValue({
+				matches,
+				addEventListener: vi.fn(),
+				removeEventListener: vi.fn(),
+			});
+		};
+		afterEach(() => delete window.matchMedia);
+
+		it("keeps all six columns on a wide screen", async () => {
+			setNarrow(false);
+			w = await mountList([row()]);
+			expect(w.find("[data-cols]").attributes("data-cols")).toBe(
+				"file,source,status,draft,summary,_retry"
+			);
+			expect(w.find('[data-testid="intake-card"]').exists()).toBe(false);
+		});
+
+		it("stacks status, draft, summary and source into one card beside Retry", async () => {
+			setNarrow(true);
+			w = await mountList([row({ status: "Failed", can_retry: true, summary: "It broke" })]);
+			expect(w.find("[data-cols]").attributes("data-cols")).toBe("file,_retry");
+			expect(w.find("[data-cols]").attributes("data-row-height")).toBe("auto");
+			const card = w.find('[data-testid="intake-card"]');
+			expect(card.text()).toContain("bill.pdf");
+			expect(card.text()).toContain("It broke");
+			expect(card.text()).toContain("Folder: Bills");
+			expect(card.find(".badge").exists()).toBe(true);
+			// the name wraps instead of truncating to one letter
+			expect(card.find(".truncate").exists()).toBe(false);
+		});
+	});
+
+	it("names each Retry button after its file so a screen reader can tell them apart", async () => {
+		w = await mountList([
+			row({ name: "F1", file_name: "a.pdf", status: "Failed", can_retry: true }),
+			row({ name: "F2", file_name: "b.pdf", status: "Failed", can_retry: true }),
+		]);
+		const names = w.findAll(".btn").map((b) => b.attributes("aria-label"));
+		expect(names).toEqual(["Retry a.pdf", "Retry b.pdf"]);
+	});
+
+	it("moves focus to the status line after a retry, not to <body>", async () => {
+		w = await mountList([row({ name: "F1", status: "Failed", can_retry: true })]);
+		intakeRetry.mockResolvedValue({ ok: true, status: "Queued" });
+		const host = document.createElement("div");
+		document.body.appendChild(host);
+		w.unmount();
+		getTriggersCaps.mockResolvedValue({ can_manage: false });
+		intakeListPage.mockResolvedValue({
+			rows: [row({ name: "F1", status: "Failed", can_retry: true })],
+			total: 1,
+			has_more: false,
+		});
+		w = mount(IntakeList, { attachTo: host, global: { stubs: { "router-link": true } } });
+		await flushPromises();
+		await w.find(".btn").trigger("click");
+		await flushPromises();
+		const status = w.find('[role="status"]');
+		expect(status.text()).toContain("bill.pdf queued again");
+		expect(document.activeElement).toBe(status.element);
+		w.unmount();
+		host.remove();
+		w = null;
 	});
 
 	it("shows the empty copy", async () => {

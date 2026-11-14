@@ -26,7 +26,7 @@
 	>
 		<template #actions>
 			<Dropdown v-if="!isNew && caps.can_manage" :options="overflowOptions">
-				<Button icon="more-horizontal" variant="ghost" />
+				<Button icon="more-horizontal" variant="ghost" label="More actions" />
 			</Dropdown>
 			<Button
 				v-if="caps.can_manage"
@@ -42,7 +42,7 @@
 			<!-- 1. Trigger -->
 			<DocSection label="Trigger">
 				<div class="space-y-4">
-					<div>
+					<div data-testid="trigger-name">
 						<FormControl
 							type="text"
 							label="Name"
@@ -1078,6 +1078,11 @@ async function save() {
 		toast.error(errHtml(e));
 	} finally {
 		saving.value = false;
+		// Save is disabled while it runs and after it, so it drops focus: land on the name field
+		// (when focus fell to <body>) instead of leaving a keyboard user at the top of the page.
+		await nextTick();
+		if (!document.activeElement || document.activeElement === document.body)
+			document.querySelector('[data-testid="trigger-name"] input')?.focus();
 	}
 }
 

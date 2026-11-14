@@ -132,6 +132,7 @@ class TestIntakeFilebox(FrappeTestCase):
 				"draft_missing",
 				"approval_request",
 				"can_retry",
+				"can_review",
 			},
 		)
 
@@ -265,3 +266,34 @@ class TestIntakeFilebox(FrappeTestCase):
 				filebox.retry_intake(perm)
 			filebox.retry_intake(limit)
 		self.assertEqual(enq.call_count, 1)
+
+	def test_can_review_only_for_those_who_may_decide(self):
+		own = self._rule()
+		other = self._rule(intake_source="Record", intake_record_doctype="Customer", intake_folder="")
+		frappe.db.set_value(TRIGGER, own, "owner", UPLOADER)
+		frappe.db.set_value(TRIGGER, other, "owner", OTHER)
+		mine = self._row(UPLOADER, trigger=other, status="Needs Review")
+		ruled = self._row(UPLOADER, trigger=own, status="Needs Review")
+		failed = self._row(UPLOADER, trigger=own, status="Failed")
+		# The link field is not validated on a plain DB write: no request is needed here.
+		frappe.db.set_value(ACTIVITY, mine, "approval_request", "AR-x", update_modified=False)
+		frappe.db.set_value(ACTIVITY, ruled, "approval_request", "AR-y", update_modified=False)
+		rows = {r["name"]: r["can_review"] for r in self._list(UPLOADER)["rows"]}
+		# The uploader may not decide a review of somebody else's rule; the rule owner may.
+		self.assertEqual(rows, {mine: False, ruled: True, failed: False})
+		managed = {r["name"]: r["can_review"] for r in self._list(MANAGER, scope="all")["rows"]}
+		self.assertTrue(managed[mine] and managed[ruled])
+		self.assertFalse(managed[failed])
+
+	def test_a_rejected_row_is_retried_by_a_manager_only(self):
+		row = self._row(UPLOADER, status="Failed", summary="Rejected by reviewer: blurry")
+		own = {r["name"]: r["can_retry"] for r in self._list(UPLOADER)["rows"]}
+		self.assertFalse(own[row])
+		frappe.set_user(UPLOADER)
+		with self.assertRaises(frappe.ValidationError):
+			filebox.retry_intake(row)
+		managed = {r["name"]: r["can_retry"] for r in self._list(MANAGER, scope="all")["rows"]}
+		self.assertTrue(managed[row])
+		frappe.set_user(MANAGER)
+		with mock.patch("jarvis.chat.filebox.frappe.enqueue"):
+			self.assertEqual(filebox.retry_intake(row)["status"], "Queued")
