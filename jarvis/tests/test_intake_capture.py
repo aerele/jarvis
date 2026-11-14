@@ -559,11 +559,22 @@ class TestIntakeCapture(FrappeTestCase):
 			capture.on_record_submit(note, "on_submit")
 		self.assertEqual(len(self._rows(attached)), 1)
 
-	def test_duplicate_check_is_per_event(self):
+	def test_one_record_rule_per_record_doctype_and_target_whatever_the_event(self):
 		self._event_rule("After Insert")
-		self._event_rule("On Submit")  # same doctype and target, different moment: allowed
-		with self.assertRaises(frappe.ValidationError):
-			self._event_rule("After Insert")
+		for event in ("On Submit", "File attached", "After Insert"):
+			with self.subTest(event=event), self.assertRaises(frappe.ValidationError):
+				self._event_rule(event)
+
+	def test_on_submit_and_after_insert_skip_files_older_than_the_rule(self):
+		note = self._note()
+		old = self._bind(note, "old.pdf")
+		past = frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-3)
+		frappe.db.set_value("File", old.name, "creation", past, update_modified=False)
+		rule = self._event_rule("On Submit")
+		new = self._bind(note, "new.pdf")
+		with mock.patch("frappe.enqueue"):
+			capture.on_record_submit(note.reload(), "on_submit")
+		self.assertEqual([r.source_file for r in self._rows(rule)], [new.name])
 
 	def test_a_submit_or_cancel_save_captures_nothing(self):
 		rule, note = self._watched_note()

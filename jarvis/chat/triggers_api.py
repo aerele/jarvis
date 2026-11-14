@@ -18,6 +18,7 @@ from frappe.utils.safe_exec import is_safe_exec_enabled
 
 from jarvis.chat import list_filters
 from jarvis.chat.macros_api import _bool01, _clamp_page, _lk, _load_filters
+from jarvis.intake import capture as intake_capture
 from jarvis.intake import guards as intake_guards
 from jarvis.intake import spec as intake_spec
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
@@ -320,7 +321,7 @@ def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
 		"intake_source": doc.intake_source or "",
 		"intake_folder": doc.intake_folder or "",
 		"intake_record_doctype": doc.intake_record_doctype or "",
-		"intake_record_event": doc.intake_record_event or "File attached",
+		"intake_record_event": intake_capture.record_event(doc),
 		"intake_target_doctype": doc.intake_target_doctype or "",
 		"allow_incomplete_drafts": cint(doc.allow_incomplete_drafts),
 		"intake_status_field": doc.intake_status_field or "",

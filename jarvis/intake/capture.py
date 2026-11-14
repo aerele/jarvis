@@ -9,7 +9,7 @@ NEVER raise: a failure here may not break the user's upload.
 """
 
 import frappe
-from frappe.utils import cint
+from frappe.utils import cint, get_datetime
 
 from jarvis import compat
 from jarvis.intake import guards, notify
@@ -49,6 +49,7 @@ _RULE_FIELDS = (
 	"intake_record_doctype",
 	"intake_record_event",
 	"intake_target_doctype",
+	"creation",
 )
 # A Record rule's "Run when" values. An empty one (a rule saved before the field) is the first.
 EVENT_FILE, EVENT_INSERT, EVENT_SUBMIT = "File attached", "After Insert", "On Submit"
@@ -160,7 +161,8 @@ def _capture(doc, event: str, check_changes: bool) -> None:
 			pass
 
 
-def _record_event(rule: dict) -> str:
+def record_event(rule) -> str:
+	"""A Record rule's "Run when" (an empty value, a rule saved before the field, is the first)."""
 	return rule.get("intake_record_event") or EVENT_FILE
 
 
@@ -186,7 +188,7 @@ def _capture_record(doc, events: set, event: str, since_save: bool) -> None:
 		# A rule's own save must not rebuild the map it just busted.
 		if _skip_context() or doc.doctype in ("File", "Jarvis Trigger"):
 			return
-		rules = [r for r in intake_map()["record"].get(doc.doctype, []) if _record_event(r) in events]
+		rules = [r for r in intake_map()["record"].get(doc.doctype, []) if record_event(r) in events]
 		user = frappe.session.user
 		if not rules or not doc.name or not user or user == "Guest" or not guards.is_desk_user(user):
 			return
@@ -206,6 +208,7 @@ def _capture_record(doc, events: set, event: str, since_save: bool) -> None:
 				"file_name",
 				"file_url",
 				"content_hash",
+				"creation",
 				"attached_to_doctype",
 				"attached_to_name",
 			],
@@ -215,8 +218,14 @@ def _capture_record(doc, events: set, event: str, since_save: bool) -> None:
 		if not files:
 			return
 		for rule in rules:
-			# "File attached" keeps its per-save window; the other two need no extra filter here.
-			_capture_bound(rule, files, user, event)
+			# "After Insert" and "On Submit" read only files made after the rule existed:
+			# older attachments were never meant for it. "File attached" has its save window.
+			own = (
+				files
+				if record_event(rule) == EVENT_FILE
+				else [f for f in files if get_datetime(f.creation) >= get_datetime(rule["creation"])]
+			)
+			_capture_bound(rule, own, user, event)
 	except Exception:
 		frappe.log_error(title="Jarvis intake: capture failed")
 
@@ -284,7 +293,7 @@ def _matching_rules(doc, rules: dict, check_changes: bool) -> list[dict]:
 		was_empty = check_changes and not before.get("attached_to_name")
 		if not check_changes or was_empty:
 			matched.extend(
-				r for r in rules["record"].get(doc.attached_to_doctype, []) if _record_event(r) == EVENT_FILE
+				r for r in rules["record"].get(doc.attached_to_doctype, []) if record_event(r) == EVENT_FILE
 			)
 	return matched
 
