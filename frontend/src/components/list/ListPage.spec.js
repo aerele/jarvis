@@ -142,3 +142,19 @@ describe("ListPage: a select quick filter", () => {
 		expect(w.emitted("update:filters").at(-1)[0]).toEqual({});
 	});
 });
+
+describe("ListPage: the toolbar at narrow widths", () => {
+	it("wraps, gives the quick filters a full row below sm, and drops the divider there", () => {
+		const w = mount(ListPage, {
+			props: { rows: [], quickFilters: [{ key: "search", label: "Search", type: "text" }] },
+		});
+		const bar = w.find(".px-5.py-4");
+		expect(bar.classes()).toContain("flex-wrap");
+		const filters = bar.element.children[0];
+		expect(filters.className).toContain("basis-full");
+		expect(filters.className).toContain("sm:flex-1");
+		expect(filters.className).toContain("min-w-0");
+		expect(bar.element.children[1].className).toContain("hidden");
+		expect(bar.element.children[1].className).toContain("sm:block");
+	});
+});

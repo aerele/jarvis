@@ -180,6 +180,20 @@ describe("FilesList: the Dropped / Intake switch", () => {
 		delete useRoute().query.view;
 		w.unmount();
 	});
+
+	it("switches an open File Box when a bell link changes ?view=, keeping the scope", async () => {
+		const { useRoute } = await import("vue-router");
+		const w = await mountList([applying]);
+		expect(w.find(".intake-view").exists()).toBe(false);
+		useRoute().query.view = "intake";
+		await flushPromises();
+		expect(w.find(".intake-view").exists()).toBe(true);
+		useRoute().query.view = "dropped";
+		await flushPromises();
+		expect(w.find(".intake-view").exists()).toBe(false);
+		delete useRoute().query.view;
+		w.unmount();
+	});
 });
 
 describe("FilesList: the File Box skill picker and a bulk drop", () => {
