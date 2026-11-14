@@ -60,7 +60,9 @@
 						<div
 							v-if="!route.meta.chat && !route.meta.chromeless"
 							class="flex border-b"
-							:class="store.mobile ? 'min-h-12 shrink-0 items-center gap-2 px-3' : ''"
+							:class="
+								store.mobile ? 'min-h-12 shrink-0 items-center gap-2 px-3' : ''
+							"
 						>
 							<button
 								v-if="store.mobile"
