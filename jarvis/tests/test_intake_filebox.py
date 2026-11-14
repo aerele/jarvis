@@ -222,6 +222,15 @@ class TestIntakeFilebox(FrappeTestCase):
 			filebox.retry_intake(name)
 		self.assertFalse(frappe.db.get_value(ACTIVITY, name, "reading_json"))
 
+	def test_retry_clears_reading_after_read_nothing(self):
+		name = self._row(
+			UPLOADER, status="Failed", summary=worker.READ_NOTHING_SUMMARY, reading_json='{"a": null}'
+		)
+		frappe.set_user(UPLOADER)
+		with mock.patch("frappe.enqueue"):
+			filebox.retry_intake(name)
+		self.assertFalse(frappe.db.get_value(ACTIVITY, name, "reading_json"))
+
 	def test_retry_refused_when_draft_exists(self):
 		name = self._row(UPLOADER, status="Failed", draft_doctype="User", draft_name=OTHER)
 		frappe.set_user(UPLOADER)

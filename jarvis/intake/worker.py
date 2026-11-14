@@ -38,6 +38,7 @@ _MAX_ATTEMPTS = 3
 _CHAIN_LOOKAHEAD = 10
 
 NO_IMAGE_SUMMARY = "This site's AI model can't read images for intake yet."
+READ_NOTHING_SUMMARY = "Jarvis read nothing from this file. Check that the photo is clear, then press Retry."
 NO_AGENT_UPDATE_SUMMARY = "Intake needs the latest agent update on this site."
 # A row over a daily limit is not failed: it waits for the day to turn (the pump retries it
 # once ``modified`` is before today). A paused site keeps its rows Queued and retried.
@@ -523,10 +524,13 @@ def _read(row, trigger) -> bool:
 		_end(row, "Failed", str(e), str(e), trigger)
 		return False
 	_count_call(row)  # the model answered, whatever it answered
-	if reading.get("error") == "NO_IMAGE" or reader.is_empty_reading(reading, s):
-		# A text-only model often answers an all-null object instead of NO_IMAGE: a blank
-		# draft (or review) of that would look like a read. It still cost a call.
-		_end(row, "Failed", NO_IMAGE_SUMMARY, "The model read nothing from the file.", trigger)
+	if reading.get("error") == "NO_IMAGE":
+		_end(row, "Failed", NO_IMAGE_SUMMARY, "The model answered NO_IMAGE.", trigger)
+		return False
+	if reader.is_empty_reading(reading, s):
+		# The vision check passed, so an all-null object means a blank or unclear file. A blank
+		# draft (or review) of it would look like a read. It still cost a call.
+		_end(row, "Failed", READ_NOTHING_SUMMARY, "The model read nothing from the file.", trigger)
 		return False
 	if note:
 		# Inside the reading so it survives a draft-only retry; draft.finish pops it.

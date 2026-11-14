@@ -1546,7 +1546,7 @@ def retry_intake(activity: str) -> dict:
 		.set(a.attempts, 0)  # a retry is a fresh run: the stuck-row recovery counts from zero
 		.where((a.name == activity) & a.status.isin(list(_INTAKE_RETRYABLE)))
 	)
-	if row.summary == worker.NO_IMAGE_SUMMARY:
+	if row.summary in (worker.NO_IMAGE_SUMMARY, worker.READ_NOTHING_SUMMARY):
 		update = update.set(a.reading_json, "")  # the model must look at the file again
 	if update_rowcount(update) != 1:
 		frappe.throw("This file was already run again.")

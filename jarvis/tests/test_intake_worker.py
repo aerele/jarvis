@@ -763,13 +763,15 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertEqual(llm_action.daily_count(rule.name), 0)
 		self.assertEqual(cint(frappe.cache().get_value(f"{worker.site_cap_key()}:count")), 0)
 
-	def test_all_null_reading_is_treated_as_no_image(self):
+	def test_all_null_reading_fails_as_read_nothing(self):
+		# The vision check already passed, so an all-null object means a blank or unclear
+		# file: saying "the model can't read images" would send the admin the wrong way.
 		rule = self._rule()
 		row = self._row(rule)
 		client, fin = self._run(row, reply={"description": None})
 		fin.assert_not_called()
 		got = self._get(row)
-		self.assertEqual((got.status, got.summary), ("Failed", worker.NO_IMAGE_SUMMARY))
+		self.assertEqual((got.status, got.summary), ("Failed", worker.READ_NOTHING_SUMMARY))
 		self.assertFalse(got.reading_json)
 		self.assertEqual(llm_action.daily_count(rule.name), 1)  # R23: the call was made
 
