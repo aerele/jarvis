@@ -63,9 +63,10 @@ TARGET_REFUSED_SUMMARY = "This rule's target is not allowed"
 CREATE_REFUSAL_PREFIX = "You can't create"
 
 
-def refused_doctype(doctype: str) -> bool:
-	"""True when ``doctype`` may be neither an intake target nor a Record source: a
-	structure or sensitive doctype, a Single, or a child table."""
+def refused_by_name(doctype: str) -> bool:
+	"""The deny-list half of ``refused_doctype``: structure, sensitive and access doctypes,
+	judged by name and meta only. A caller that already knows the doctype is neither a
+	Single nor a child table (the picker filters on both in its one query) uses this alone."""
 	# Late import: the write-risk module pulls in the tool layer.
 	from jarvis.tools import _write_risk
 
@@ -73,11 +74,16 @@ def refused_doctype(doctype: str) -> bool:
 		return True
 	if doctype in _PORTAL_ONLY:
 		# Only the portal-users table is risky for these: refuse if a role list shows up too.
-		if _write_risk._role_tables(doctype):
-			return True
+		return bool(_write_risk._role_tables(doctype))
 	# Any other classified doctype (code, scripts, HTML/JS content, access grants,
 	# Jarvis's own configuration, Employee, Auto Repeat) is refused (ruling R24).
-	elif _write_risk.risk_class(doctype):
+	return bool(_write_risk.risk_class(doctype))
+
+
+def refused_doctype(doctype: str) -> bool:
+	"""True when ``doctype`` may be neither an intake target nor a Record source: a
+	structure or sensitive doctype, a Single, or a child table."""
+	if refused_by_name(doctype):
 		return True
 	row = frappe.db.get_value("DocType", doctype, ["issingle", "istable"], as_dict=True)
 	return bool(row and (cint(row.issingle) or cint(row.istable)))
