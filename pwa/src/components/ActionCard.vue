@@ -56,12 +56,6 @@ watch(
 const view = computed(() => actionCardView(props.action, agentName));
 const invalid = computed(() => (view.value.kind === "write" ? view.value.invalid : ""));
 
-// Child tables show as one summary line each (view.tableLines), and the proposed
-// rows are applied as-is (cardTableValues): the server edits named rows in place and
-// refuses a nameless table on a document that already has rows. An update that
-// would delete saved rows is refused here (cardTableRemovals): the phone cannot
-// show which rows those are, so it never removes them (CR-3).
-
 async function apply() {
 	const v = view.value;
 	if (v.kind !== "write" || state.value === "busy") return;
@@ -91,6 +85,11 @@ async function apply() {
 			if (fieldname) values[fieldname] = f.value;
 			else unmapped.push(f.label);
 		}
+		// Child tables show as one summary line each (view.tableLines), and the proposed
+		// rows are applied as-is (cardTableValues): the server edits named rows in place
+		// and refuses a nameless table on a document that already has rows. An update
+		// that would delete saved rows is refused below (cardTableRemovals): the phone
+		// cannot show which rows those are, so it never removes them (CR-3).
 		try {
 			Object.assign(values, cardTableValues(props.action, meta));
 		} catch (e) {
@@ -216,7 +215,11 @@ async function copyBody() {
 		</div>
 	</div>
 
-	<div v-else-if="view.kind === 'write'" class="jv-action" :class="{ 'is-done': state === 'done' }">
+	<div
+		v-else-if="view.kind === 'write'"
+		class="jv-action"
+		:class="{ 'is-done': state === 'done' }"
+	>
 		<div class="jv-action-head">
 			<svg
 				viewBox="0 0 24 24"
@@ -272,7 +275,8 @@ async function copyBody() {
 			</svg>
 			<template v-if="note">{{ note }}</template>
 			<template v-else>
-				{{ view.verb === "create" ? "Created" : "Updated" }}{{ applied ? ` ${applied}` : "" }}
+				{{ view.verb === "create" ? "Created" : "Updated"
+				}}{{ applied ? ` ${applied}` : "" }}
 			</template>
 		</div>
 

@@ -185,8 +185,22 @@ describe("the two gates that disagreed stay mirrored", () => {
 		expect(src).toContain('v-else-if="isEditVerb(activeAction)"');
 		expect(src).toContain('if (!a || a.kind === "email" || !isEditVerb(a)) return;');
 		expect(src).not.toContain(
-			'if (!(a && a.kind === "doc" && (a.verb === "create" || a.verb === "update" || !a.verb)))',
+			'if (!(a && a.kind === "doc" && (a.verb === "create" || a.verb === "update" || !a.verb)))'
 		);
+	});
+
+	it("a draft block error replaces the draft card and never renders beside it", () => {
+		// The live draft is switched off whenever the error text is set ...
+		expect(src).toContain("_cardMessage.value && !draftBlockErrorText.value");
+		// ... the error alert renders on that same text ...
+		expect(src).toMatch(/v-if="\s*draftBlockErrorText &&/);
+		expect(src).toContain("<span>{{ draftBlockErrorText }}</span>");
+		// ... and the summary card is the next link of the SAME chain, so the two
+		// can never both draw.
+		const err = src.indexOf("<span>{{ draftBlockErrorText }}</span>");
+		const head = src.indexOf('<template v-else-if="actionFor === m.name && activeAction">');
+		expect(head).toBeGreaterThan(err);
+		expect(src.slice(err, head)).not.toMatch(/<template v-if=|<div v-if=/);
 	});
 
 	it("never dumps raw dry-run JSON into a confirmation card body", () => {

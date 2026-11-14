@@ -103,6 +103,37 @@ export const ACTION_FIXTURES = [
 		block: block({ ...base, verb: "create", fields, tables: [null, 5] }),
 		expect: "error",
 	},
+	{
+		id: "field-no-label",
+		block: block({
+			...base,
+			verb: "create",
+			fields: [
+				{ fieldname: "employee", value: "E" },
+				{ label: "company", value: "C" },
+			],
+		}),
+		expect: "error",
+	},
+	{
+		id: "field-object-value",
+		block: block({
+			...base,
+			verb: "create",
+			fields: { employee: { name: "E" }, company: "C" },
+		}),
+		expect: "error",
+	},
+	{
+		id: "row-not-object",
+		block: block({
+			...base,
+			verb: "create",
+			fields,
+			tables: [{ fieldname: "time_logs", rows: [null, { hours: 1 }] }],
+		}),
+		expect: "error",
+	},
 	{ id: "json-broken", block: '{"kind":"doc",', expect: "error" },
 	{ id: "json-array", block: "[1,2]", expect: "error" },
 ];
