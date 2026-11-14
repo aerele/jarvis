@@ -9,6 +9,11 @@
 		     (a select's portal counts as an outside click). -->
 		<Button
 			:icon="dir === 'asc' ? 'arrow-up' : 'arrow-down'"
+			:label="
+				dir === 'asc'
+					? 'Sorted ascending - click for descending'
+					: 'Sorted descending - click for ascending'
+			"
 			class="rounded-r-none border-r"
 			:tooltip="
 				dir === 'asc'
