@@ -58,7 +58,11 @@ export function intakeDraftLink(row) {
 const BADGE_INK = {
 	orange: "!text-amber-800 dark:!text-ink-amber-3",
 	green: "!text-green-800 dark:!text-ink-green-3",
+	blue: "!text-blue-800 dark:!text-ink-blue-3",
 };
+export function badgeInkClass(theme) {
+	return BADGE_INK[theme] || "";
+}
 export function intakeBadgeClass(row) {
-	return BADGE_INK[intakeBadge(row).theme] || "";
+	return badgeInkClass(intakeBadge(row).theme);
 }

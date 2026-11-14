@@ -37,8 +37,12 @@
 			@load-more="loadMore"
 			@refresh="resetLoad"
 		>
-			<template #right-header>
+			<!-- same slot in both views: the switch stays where it was when it is clicked -->
+			<template #left-extra>
 				<FileBoxSwitch v-model="view" />
+			</template>
+
+			<template #right-header>
 				<Button label="Clear Processed" @click="clearProcessed" />
 				<Button
 					variant="solid"
@@ -155,6 +159,7 @@
 				<Badge
 					variant="subtle"
 					:theme="statusBadge(row).theme"
+					:class="badgeInkClass(statusBadge(row).theme)"
 					:label="statusBadge(row).label"
 				/>
 			</template>
@@ -273,6 +278,7 @@ import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { brand } from "@/branding";
 import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
+import { badgeInkClass } from "@/lib/intakeStatus";
 import { skillOptions as buildSkillOptions, pinnedLabel } from "@/lib/fileboxSkills";
 import {
 	STATUSES,
@@ -292,6 +298,14 @@ const store = useShellStore();
 // "Whose files" of the Intake view, kept here because that view is rebuilt on each switch
 const intakeScope = ref("mine");
 const view = ref(route.query.view === "intake" ? "intake" : "dropped");
+// A bell link to ?view=intake lands while File Box is already open: the route changes, the
+// page is reused, so follow the query. intakeScope stays as the user chose it.
+watch(
+	() => route.query.view,
+	(v) => {
+		view.value = v === "intake" ? "intake" : "dropped";
+	}
+);
 
 // The switch is rebuilt with the other view, so the clicked button is gone: put focus back
 // on the selected view's button instead of letting it fall to <body>. Each page teleports

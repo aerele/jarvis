@@ -8,6 +8,8 @@
 		<LayoutHeader v-if="showHeader">
 			<template #left-header>
 				<Breadcrumbs :items="breadcrumbs" />
+				<!-- optional, fixed beside the breadcrumbs: does not move when the right cluster changes -->
+				<slot name="left-extra" />
 			</template>
 			<template #right-header>
 				<slot name="right-header" />
@@ -15,8 +17,12 @@
 		</LayoutHeader>
 
 		<!-- toolbar: quick filters | divider | Refresh · Filter · Sort · Columns -->
-		<div class="flex items-center justify-between gap-2 px-5 py-4">
-			<div class="-ml-1 flex h-9 flex-1 items-center overflow-x-auto">
+		<!-- wraps below sm: the quick filters take their own full row, so Search is never
+		     squeezed out and Columns is never clipped at 320 px -->
+		<div class="flex flex-wrap items-center justify-between gap-2 px-5 py-4">
+			<div
+				class="-ml-1 flex h-9 min-w-0 basis-full items-center overflow-x-auto sm:basis-0 sm:flex-1"
+			>
 				<div v-for="qf in quickFilters" :key="qf.key" class="m-1 min-w-36">
 					<!-- A Dropdown, not FormControl select: frappe-ui's Select opens item-aligned,
 					     over its field, so a chosen option moved the list up the page. -->
@@ -56,7 +62,7 @@
 					/>
 				</div>
 			</div>
-			<div class="-ml-2 h-[70%] border-l" />
+			<div class="-ml-2 hidden h-[70%] border-l sm:block" />
 			<div class="flex items-center gap-2">
 				<Button
 					:tooltip="'Refresh'"

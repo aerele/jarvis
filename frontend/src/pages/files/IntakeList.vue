@@ -32,8 +32,13 @@
 			<div ref="statusEl" tabindex="-1" role="status" class="sr-only">{{ statusText }}</div>
 		</template>
 
+		<!-- same slot in both views: the switch stays where it was when it is clicked -->
+		<template #left-extra>
+			<FileBoxSwitch :model-value="'intake'" @update:model-value="$emit('switch', $event)" />
+		</template>
+
 		<template #right-header>
-			<!-- wraps instead of clipping: the switch must stay reachable at 320 px -->
+			<!-- wraps instead of clipping -->
 			<div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
 				<Select
 					v-if="canManage"
@@ -42,10 +47,6 @@
 					:options="SCOPE_OPTIONS"
 					:model-value="scope"
 					@update:model-value="(v) => (scope = v || 'mine')"
-				/>
-				<FileBoxSwitch
-					:model-value="'intake'"
-					@update:model-value="$emit('switch', $event)"
 				/>
 			</div>
 		</template>

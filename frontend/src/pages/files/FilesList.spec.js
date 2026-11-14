@@ -43,7 +43,7 @@ vi.mock("frappe-ui", () => ({
 vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
 		props: ["rows"],
-		template: `<div><slot name="right-header" /><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-status" :row="row" /><slot name="cell-result" :row="row" /><slot name="cell-_rerun" :row="row" /></div></div>`,
+		template: `<div><div class="left"><slot name="left-extra" /></div><div class="right"><slot name="right-header" /></div><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-status" :row="row" /><slot name="cell-result" :row="row" /><slot name="cell-_rerun" :row="row" /></div></div>`,
 	},
 }));
 vi.mock("@/components/FilePreview.vue", () => ({ default: { template: "<div/>" } }));
@@ -148,6 +148,14 @@ describe("FilesList: the Dropped / Intake switch", () => {
 		w.unmount();
 	});
 
+	it("puts the Dropped/Intake switch in the fixed left slot, not the right-hand buttons", async () => {
+		const w = await mountList([applying]);
+		expect(w.find(".left .tabs").exists()).toBe(true);
+		expect(w.find(".right .tabs").exists()).toBe(false);
+		expect(w.find(".right").text()).toContain("Add Files");
+		w.unmount();
+	});
+
 	it("moves focus to the selected switch button after a switch, waiting for the new header", async () => {
 		const w = await mountList([applying]);
 		const host = document.createElement("div");
@@ -177,6 +185,20 @@ describe("FilesList: the Dropped / Intake switch", () => {
 		useRoute().query.view = "intake";
 		const w = await mountList([applying]);
 		expect(w.find(".intake-view").exists()).toBe(true);
+		delete useRoute().query.view;
+		w.unmount();
+	});
+
+	it("switches an open File Box when a bell link changes ?view=, keeping the scope", async () => {
+		const { useRoute } = await import("vue-router");
+		const w = await mountList([applying]);
+		expect(w.find(".intake-view").exists()).toBe(false);
+		useRoute().query.view = "intake";
+		await flushPromises();
+		expect(w.find(".intake-view").exists()).toBe(true);
+		useRoute().query.view = "dropped";
+		await flushPromises();
+		expect(w.find(".intake-view").exists()).toBe(false);
 		delete useRoute().query.view;
 		w.unmount();
 	});
