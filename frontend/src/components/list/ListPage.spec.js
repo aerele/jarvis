@@ -67,6 +67,15 @@ describe("ListPage: a list that failed to load", () => {
 		expect(w.text()).toContain("No Macros Found");
 		expect(tryAgain(w)).toBeUndefined();
 	});
+
+	it("uses the same responsive width for the empty state as for the error state", () => {
+		const empty = mount(ListPage, { props: { rows: [], error: "" } });
+		const failed = mount(ListPage, { props: { rows: [], error: "No." } });
+		const box = (w) => w.find(".absolute.left-1\\/2");
+		expect(box(empty).classes()).toEqual(expect.arrayContaining(["w-9/12", "sm:w-4/12"]));
+		expect(box(empty).classes()).not.toContain("w-4/12");
+		expect(box(failed).classes()).toEqual(expect.arrayContaining(["w-9/12", "sm:w-4/12"]));
+	});
 });
 
 describe("ListPage: the selection bar", () => {

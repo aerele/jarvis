@@ -14,6 +14,7 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import strip_html
 
 from jarvis.chat.triggers_api import (
+	_shape_intake_row,
 	activity_stats,
 	create_trigger,
 	delete_trigger,
@@ -1150,6 +1151,47 @@ class TestIntakeRowFeedScope(_TriggersApiTestCase):
 			r["name"] for r in list_activity_page(filters=frappe.as_json({"trigger": marker}))["data"]["rows"]
 		}
 		self.assertEqual(names, set(rows.values()))
+
+
+class TestIntakeListRowShape(FrappeTestCase):
+	"""The list shows an Intake rule's target doctype, source and Run when, not the blank
+	doctype and a doctype event it does not have."""
+
+	def _row(self, **kw):
+		row = frappe._dict(
+			action_type="Intake",
+			target_doctype="",
+			doc_event="before_save",
+			intake_source="Folder",
+			intake_folder="Home/Invoices",
+			intake_record_doctype="",
+			intake_record_event="",
+			intake_target_doctype="Purchase Invoice",
+		)
+		row.update(kw)
+		_shape_intake_row(row)
+		return row
+
+	def test_folder_rule(self):
+		row = self._row()
+		self.assertEqual(row.target_doctype, "Purchase Invoice")
+		self.assertEqual(row.doc_event, "Folder: Home/Invoices")
+		self.assertNotIn("intake_folder", row)
+
+	def test_record_rule_names_run_when(self):
+		row = self._row(
+			intake_source="Record", intake_record_doctype="Expense Claim", intake_record_event="On Submit"
+		)
+		self.assertEqual(row.doc_event, "Expense Claim: On Submit")
+
+	def test_record_rule_defaults_to_file_attached(self):
+		row = self._row(intake_source="Record", intake_record_doctype="Expense Claim")
+		self.assertEqual(row.doc_event, "Expense Claim: File attached")
+
+	def test_other_rules_keep_their_event(self):
+		row = self._row(action_type="LLM", target_doctype="ToDo", doc_event="on_update")
+		self.assertEqual((row.target_doctype, row.doc_event), ("ToDo", "on_update"))
+		self.assertNotIn("intake_source", row)
 
 
 class TestWhitelistTypeValidation(_TriggersApiTestCase):
