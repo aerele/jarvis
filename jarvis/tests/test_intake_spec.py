@@ -205,6 +205,28 @@ class TestIntakeSpec(FrappeTestCase):
 		for dt in ("ToDo", "Note", "Event"):
 			self.assertFalse(guards.refused_doctype(dt))
 
+	def test_risk_classified_doctypes_are_refused_but_portal_only_ones_are_not(self):
+		# R24: anything the write-risk module classifies stays refused, except the two
+		# doctypes that are risky only through the optional portal-users table.
+		for dt in (
+			"Web Page",
+			"Notification",
+			"Letter Head",
+			"Report",
+			"Web Form",
+			"Employee",
+			"Auto Repeat",
+			"Jarvis Custom Skill",
+			"Jarvis Connector",
+			"Jarvis Trigger",
+		):
+			if frappe.db.exists("DocType", dt):
+				with self.subTest(dt=dt):
+					self.assertTrue(guards.refused_doctype(dt))
+		for dt in ("Customer", "Supplier"):
+			with self.subTest(dt=dt):
+				self.assertFalse(guards.refused_doctype(dt))
+
 	def test_a_record_rule_cannot_draft_the_doctype_it_watches(self):
 		with self.assertRaises(frappe.ValidationError):
 			self._insert(

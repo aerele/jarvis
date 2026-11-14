@@ -22,6 +22,8 @@ _EXTRA_REFUSED = frozenset(
 		"Webhook",
 		"Workflow",
 		"Print Format",
+		"Print Style",
+		"Letter Head",
 		"Server Script",
 		"Client Script",
 		"DocType",
@@ -30,6 +32,9 @@ _EXTRA_REFUSED = frozenset(
 		"Jarvis Settings",
 	}
 )
+# Risky only through the optional portal-users child table (``_write_risk._FIELD_SENSITIVE``
+# lists nothing else for them). A page cannot fill that table, so a draft cannot grant access.
+_PORTAL_ONLY = frozenset({"Customer", "Supplier"})
 TARGET_REFUSED_SUMMARY = "This rule's target is not allowed"
 
 
@@ -39,14 +44,15 @@ def refused_doctype(doctype: str) -> bool:
 	# Late import: the write-risk module pulls in the tool layer.
 	from jarvis.tools import _write_risk
 
-	if (
-		doctype in _EXTRA_REFUSED
-		or doctype in _write_risk.STRUCTURE_DOCTYPES
-		or doctype in _write_risk.SENSITIVE_DOCTYPES
-		# A record that holds a role list grants access through it. The conditional
-		# risks (a Customer's portal users) are not refused: a page cannot fill them.
-		or _write_risk._role_tables(doctype)
-	):
+	if doctype in _EXTRA_REFUSED or doctype in _write_risk.STRUCTURE_DOCTYPES:
+		return True
+	if doctype in _PORTAL_ONLY:
+		# Only the portal-users table is risky for these: refuse if a role list shows up too.
+		if _write_risk._role_tables(doctype):
+			return True
+	# Any other classified doctype (code, scripts, HTML/JS content, access grants,
+	# Jarvis's own configuration, Employee, Auto Repeat) is refused (ruling R24).
+	elif _write_risk.risk_class(doctype):
 		return True
 	row = frappe.db.get_value("DocType", doctype, ["issingle", "istable"], as_dict=True)
 	return bool(row and (cint(row.issingle) or cint(row.istable)))
