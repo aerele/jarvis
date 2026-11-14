@@ -524,7 +524,10 @@ def search_intake_doctypes(txt: str = "") -> list[dict]:
 		filters["name"] = ["like", f"%{list_filters.escape_like(txt)}%"]
 	out: list[dict] = []
 	for batch in range(_DOCTYPE_PICK_BATCHES):
-		names = frappe.get_list(
+		# System context on purpose: DocType read is System Manager only, but a Jarvis Admin
+		# may manage rules. ``_require_manage`` gates the call; only names leave, and
+		# ``refused_doctype`` still filters them.
+		names = frappe.get_all(
 			"DocType",
 			filters=filters,
 			pluck="name",

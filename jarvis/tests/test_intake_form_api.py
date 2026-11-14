@@ -13,7 +13,7 @@ from jarvis.chat.triggers_api import (
 )
 from jarvis.intake import spec as intake_spec
 from jarvis.intake.capture import clear_intake_cache, intake_map
-from jarvis.tests.test_triggers_api import ADMIN_USER, PLAIN_USER, _TriggersApiTestCase
+from jarvis.tests.test_triggers_api import ADMIN_USER, JADMIN_USER, PLAIN_USER, _TriggersApiTestCase
 
 _FOLDER = "Home/Intake Form Test"
 
@@ -58,6 +58,14 @@ class TestIntakeFormApi(_TriggersApiTestCase):
 		self.assertNotIn(
 			"Sales Invoice Item", [r["value"] for r in search_intake_doctypes("Sales Invoice Item")]
 		)
+
+	def test_jarvis_admin_without_system_manager_gets_the_doctype_list(self):
+		# DocType read is a System Manager right; the picker reads names in system context.
+		self.assertNotIn("System Manager", frappe.get_roles(JADMIN_USER))
+		frappe.set_user(JADMIN_USER)
+		names = [r["value"] for r in search_intake_doctypes("ToDo")]
+		self.assertIn("ToDo", names)
+		self.assertNotIn("Server Script", [r["value"] for r in search_intake_doctypes("Server")])
 
 	def test_folders_listed_sorted_without_home_and_attachments(self):
 		self._folder(_FOLDER)
