@@ -28,6 +28,9 @@ TRIGGER = "Jarvis Trigger"
 SOURCE = "Intake"
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 _DECISION_CAP = 500
+_MAX_REVIEWER_BELLS = 25
+_REASON_CAP = 100
+REJECTED = "Rejected by reviewer"
 _NO_REVIEWER = ("Administrator", "Guest")
 
 
@@ -101,7 +104,25 @@ def raise_request(activity, values: dict, missing: list[dict]) -> str:
 	if owner and owner not in _NO_REVIEWER:
 		frappe.db.set_value(AR, request.name, "owner", owner, update_modified=False)
 	_share_with_owner(request, activity)
+	_bell_reviewers(request, file_name)
 	return request.name
+
+
+def _reviewers(activity_name: str) -> list[str]:
+	"""Who may decide: the rule owner and the System Managers (see ``may_decide``)."""
+	# System context: the job runs as Administrator and the lookup is the permission rule itself.
+	managers = frappe.get_all("Has Role", {"role": "System Manager", "parenttype": "User"}, pluck="parent")
+	users = {u for u in [_trigger_owner(activity_name), *managers] if u and u not in _NO_REVIEWER}
+	if not users:
+		return []
+	return frappe.get_all(
+		"User", {"name": ["in", list(users)], "enabled": 1, "user_type": "System User"}, pluck="name"
+	)[:_MAX_REVIEWER_BELLS]
+
+
+def _bell_reviewers(request, file_name: str) -> None:
+	for user in _reviewers(request.intake_activity):
+		notify.review_needed(user, request, file_name)
 
 
 def _trigger_owner(activity_name: str) -> str | None:
@@ -183,7 +204,13 @@ def view(request) -> dict:
 	payload = _payload(request)
 	activity_name = request.get("intake_activity")
 	activity = frappe.db.get_value(ACTIVITY, activity_name, ["trigger", "source_file"], as_dict=True)
-	out = {"missing": payload.get("missing") or [], "read": [], "table": None, "file": None}
+	out = {
+		"missing": payload.get("missing") or [],
+		"error": payload.get("error") or "",
+		"read": [],
+		"table": None,
+		"file": None,
+	}
 	if not activity:
 		return out
 	values = payload.get("values") or {}
@@ -226,7 +253,7 @@ def decide(request, decision: str, approve: bool) -> dict:
 	status = frappe.db.get_value(AR, request.name, "status", for_update=True)
 	if status != "Pending":
 		frappe.throw(_("Approval {0} is already {1}").format(request.name, status))
-	answers = _answers(decision) if approve else {}
+	answers = _answers(decision) if approve else {"reason": _reason(decision)}
 	result = apply_decision(request, approve, answers)
 	request.reload()
 	# Same as the generic decide: the badge refresh and the trace comment hang on on_update.
@@ -236,11 +263,14 @@ def decide(request, decision: str, approve: bool) -> dict:
 
 def apply_decision(request, approve: bool, answers: dict) -> dict:
 	"""Approve (build the draft from the stored reading plus ``answers``, no AI call) or
-	reject (the upload ends Failed). Returns ``{"status", ...}``. Callers check who may
+	reject (the upload ends Failed; ``answers["reason"]`` is the reviewer's note). Returns
+	``{"status", ...}``; a draft the site refuses leaves the request Pending, with ``error``. Callers check who may
 	decide and hold the request's row lock (see ``decide``)."""
 	activity_name = request.get("intake_activity")
 	activity = frappe.get_doc(ACTIVITY, activity_name) if frappe.db.exists(ACTIVITY, activity_name) else None
-	return _approve(request, activity, answers) if approve else _reject(request, activity)
+	if approve:
+		return _approve(request, activity, answers)
+	return _reject(request, activity, _clean_reason(answers.get("reason")))
 
 
 def _settle(request, status: str, text: str) -> dict:
@@ -260,15 +290,32 @@ def _settle(request, status: str, text: str) -> dict:
 	return {"status": status}
 
 
-def _reject(request, activity) -> dict:
+def _clean_reason(value) -> str:
+	"""The reviewer's note as one short plain line: it goes into the row summary and the
+	uploader's bell, so no markup and no length beyond a sentence."""
+	text = frappe.utils.strip_html(str(value or ""))
+	return " ".join(text.split())[:_REASON_CAP]
+
+
+def _reason(decision: str) -> str:
+	"""The reject reason from the board's decision text: ``{"reason": ...}`` or plain text."""
+	try:
+		parsed = frappe.parse_json(decision)
+	except Exception:
+		parsed = decision
+	return parsed.get("reason") if isinstance(parsed, dict) else (parsed if isinstance(parsed, str) else "")
+
+
+def _reject(request, activity, reason: str = "") -> dict:
+	text = f"{REJECTED}: {reason}" if reason else REJECTED
 	if activity is not None and activity.status == "Needs Review":
 		trigger = frappe.db.get_value(TRIGGER, activity.trigger, intake_spec.TRIGGER_FIELDS, as_dict=True)
 		try:
-			draft._fail(activity, trigger or frappe._dict(), _("Rejected by reviewer"), tell_uploader=False)
+			draft._fail(activity, trigger or frappe._dict(), text, tell_uploader=False)
 		except draft.DraftFailed:
 			pass  # the row is Failed and written back; nothing more to do
-		notify.notify(activity.event_user, f"Rejected by reviewer: {request.title}"[:140])
-	return _settle(request, "Rejected", "Rejected by reviewer")
+		notify.rejected(activity, reason)
+	return _settle(request, "Rejected", text)
 
 
 def _approve(request, activity, answers: dict) -> dict:
@@ -289,11 +336,25 @@ def _approve(request, activity, answers: dict) -> dict:
 		uploader = draft._uploader(activity, trigger)
 		values = _merge(s, payload, answers, uploader)
 		doctype, name = draft.create(activity, values, allow_missing=False)
-	except draft.DraftFailed:
-		summary = frappe.db.get_value(ACTIVITY, activity.name, "summary") or ""
-		# The reviewer did their part and the draft was refused: answered, not rejected.
-		return _settle(request, "Answered", f"Draft not created: {summary}")
+	except draft.DraftFailed as e:
+		return _still_pending(request, activity, trigger, payload, str(e))
 	return _settle(request, "Approved", _decision_text(payload, answers, doctype, name)) | {"draft": name}
+
+
+def _still_pending(request, activity, trigger, payload: dict, why: str) -> dict:
+	"""The site refused the reviewer's answers (``draft.create`` already set the row Failed).
+	Put the row back in review and keep the request Pending with the reason on the form, so
+	the reviewer fixes the values or rejects: one request, no new one on retry, no loop."""
+	activity.db_set({"status": "Needs Review", "summary": f"Waiting for a reviewer: {why}"[:140]})
+	draft._guarded(draft._write_back, activity, trigger, "Needs Review", None)
+	frappe.db.set_value(
+		AR,
+		request.name,
+		"intake_missing",
+		frappe.as_json({**payload, "error": why}, indent=None),
+		update_modified=False,
+	)
+	return {"status": "Pending", "error": why}
 
 
 def _answers(decision: str) -> dict:

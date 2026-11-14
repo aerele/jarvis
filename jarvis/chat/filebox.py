@@ -1282,11 +1282,29 @@ def live_drafts(rows: list[dict]) -> set[tuple[str, str]]:
 	return live
 
 
+def _was_rejected(summary: str | None) -> bool:
+	from jarvis.intake.review import REJECTED
+
+	return (summary or "").startswith(REJECTED)
+
+
+def can_review_row(row: dict, me: str, system_manager: bool) -> bool:
+	"""Same rule as ``review.may_decide``: a System Manager or the owner of the rule. The
+	File Box shows "Open review" only then, so an uploader is never sent to "Not permitted"."""
+	if row.get("status") != "Needs Review" or not row.get("approval_request"):
+		return False
+	return system_manager or row.get("rule_owner") == me
+
+
 def can_retry_row(row: dict, me: str, manager: bool, live: set[tuple[str, str]]) -> bool:
 	"""Failed or Skipped, no draft yet, not a duplicate, and the caller's to retry."""
 	if row.get("status") not in _INTAKE_RETRYABLE or row.get("duplicate_of"):
 		return False
 	if row.get("summary") in PERMANENT_SUMMARIES:
+		return False
+	# A reviewer's "no" is not undone by the uploader pressing Retry; a manager may
+	# (that puts the file back in front of a reviewer on purpose).
+	if _was_rejected(row.get("summary")) and not manager:
 		return False
 	if row.get("draft_name") and (row.get("draft_doctype"), row["draft_name"]) in live:
 		return False
@@ -1384,6 +1402,7 @@ def list_intake_page(
 			t.intake_source,
 			t.intake_folder,
 			t.intake_record_doctype,
+			t.owner.as_("rule_owner"),
 		)
 		.orderby(a.creation, order=frappe.qb.desc)
 		.orderby(a.name, order=frappe.qb.desc)
@@ -1392,6 +1411,7 @@ def list_intake_page(
 		.run(as_dict=True)
 	)
 	live = live_drafts(rows)
+	reviewer = "System Manager" in frappe.get_roles(me)
 	# A draft deleted since is a dangling link: flag it and hide the name, the stored row stays.
 	missing = {
 		r["name"] for r in rows if r["draft_name"] and (r["draft_doctype"], r["draft_name"]) not in live
@@ -1410,6 +1430,7 @@ def list_intake_page(
 			"draft_missing": r["name"] in missing,
 			"approval_request": r["approval_request"] or "",
 			"can_retry": can_retry_row(r, me, manager, live),
+			"can_review": can_review_row(r, me, reviewer),
 		}
 		for r in rows
 	]
@@ -1454,6 +1475,8 @@ def retry_intake(activity: str) -> dict:
 		frappe.throw("The file was removed, so running it again would not help.")
 	if row.status not in _INTAKE_RETRYABLE:
 		frappe.throw("Only a failed or skipped file can be run again.")
+	if _was_rejected(row.summary) and not _can_manage(me):
+		frappe.throw("A reviewer rejected this file. Ask a manager to run it again.")
 	if (row.draft_doctype, row.draft_name) in live_drafts([row]):
 		frappe.throw("A draft already exists for this file.")
 
