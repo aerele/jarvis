@@ -52,3 +52,13 @@ export function intakeDraftLink(row) {
 	}
 	return null;
 }
+
+// The library's subtle orange and green badges are 3.0:1 and 3.7:1 in the light theme.
+// A darker ink fixes the light theme; the dark theme keeps the library ink.
+const BADGE_INK = {
+	orange: "!text-amber-800 dark:!text-ink-amber-3",
+	green: "!text-green-800 dark:!text-ink-green-3",
+};
+export function intakeBadgeClass(row) {
+	return BADGE_INK[intakeBadge(row).theme] || "";
+}

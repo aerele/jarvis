@@ -19,7 +19,8 @@ vi.mock("frappe-ui", () => ({
 	Button: {
 		props: ["label"],
 		emits: ["click"],
-		template: '<button class="btn" @click="$emit(\'click\')">{{ label }}</button>',
+		template:
+			'<button class="btn" :aria-label="label" @click="$emit(\'click\')"><slot>{{ label }}</slot></button>',
 	},
 	FeatherIcon: { template: "<i/>" },
 	Select: {

@@ -65,7 +65,7 @@
 				     empty; refreshes with every normal list refresh. -->
 				<div v-if="awaitingReply.length" class="border-b">
 					<div
-						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
+						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-7"
 					>
 						Waiting for your reply
 					</div>
@@ -84,12 +84,12 @@
 								<div class="truncate text-base text-ink-gray-9">
 									{{ w.title || w.conversation }}
 								</div>
-								<div class="mt-0.5 truncate text-sm text-ink-gray-6">
+								<div class="mt-0.5 truncate text-sm text-ink-gray-7">
 									{{ w.question_excerpt }}
 								</div>
 								<div class="mt-1 flex items-center gap-2">
 									<Tooltip :text="exactDate(w.last_at)">
-										<span class="whitespace-nowrap text-sm text-ink-gray-5">{{
+										<span class="whitespace-nowrap text-sm text-ink-gray-7">{{
 											timeAgo(w.last_at)
 										}}</span>
 									</Tooltip>
@@ -108,7 +108,7 @@
 				>
 					<div
 						id="drafts-title"
-						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
+						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-7"
 					>
 						Drafts open in your chats
 					</div>
@@ -127,13 +127,13 @@
 								<div class="truncate text-base text-ink-gray-9">
 									{{ d.summary || draftLabel(d) }}
 								</div>
-								<div class="mt-0.5 truncate text-sm text-ink-gray-6">
+								<div class="mt-0.5 truncate text-sm text-ink-gray-7">
 									{{ d.title || "Untitled chat" }}
 								</div>
 								<div class="mt-1 flex items-center gap-2">
 									<Badge variant="subtle" theme="gray" :label="draftLabel(d)" />
 									<Tooltip :text="exactDate(d.last_at)">
-										<span class="whitespace-nowrap text-sm text-ink-gray-5">{{
+										<span class="whitespace-nowrap text-sm text-ink-gray-7">{{
 											timeAgo(d.last_at)
 										}}</span>
 									</Tooltip>
@@ -152,7 +152,7 @@
 				>
 					<div
 						id="reports-title"
-						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
+						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-7"
 					>
 						Reports ready in your chats
 					</div>
@@ -171,12 +171,12 @@
 								<div class="truncate text-base text-ink-gray-9">
 									{{ r.report_name }}
 								</div>
-								<div class="mt-0.5 truncate text-sm text-ink-gray-6">
+								<div class="mt-0.5 truncate text-sm text-ink-gray-7">
 									{{ [r.filters, r.title].filter(Boolean).join(" · ") }}
 								</div>
 								<div class="mt-1 flex items-center gap-2">
 									<Tooltip :text="exactDate(r.ready_at)">
-										<span class="whitespace-nowrap text-sm text-ink-gray-5"
+										<span class="whitespace-nowrap text-sm text-ink-gray-7"
 											>Ready {{ timeAgo(r.ready_at) }}</span
 										>
 									</Tooltip>
@@ -203,7 +203,7 @@
 						/>
 						<span
 							id="actions-title"
-							class="text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
+							class="text-2xs font-medium uppercase tracking-wide text-ink-gray-7"
 							>Needs your decision ({{ decisionCount }})</span
 						>
 					</button>
@@ -241,7 +241,7 @@
 									<div class="truncate text-base text-ink-gray-9">
 										{{ a.title }}
 									</div>
-									<div class="mt-0.5 truncate text-sm text-ink-gray-6">
+									<div class="mt-0.5 truncate text-sm text-ink-gray-7">
 										{{ a.meta }}
 									</div>
 									<div class="mt-1 flex items-center gap-2">
@@ -258,7 +258,7 @@
 										/>
 										<Tooltip :text="exactDate(a.created_at)">
 											<span
-												class="whitespace-nowrap text-sm text-ink-gray-5"
+												class="whitespace-nowrap text-sm text-ink-gray-7"
 												>{{ timeAgo(a.created_at) }}</span
 											>
 										</Tooltip>
@@ -277,7 +277,7 @@
 						</div>
 						<div
 							v-if="wikiTotal > wikiShown"
-							class="border-t px-4 py-2 text-sm text-ink-gray-5"
+							class="border-t px-4 py-2 text-sm text-ink-gray-7"
 						>
 							{{ wikiShown }} of {{ wikiTotal }} wiki notes
 						</div>
@@ -286,7 +286,7 @@
 				<template v-if="railRows.length">
 					<div
 						v-if="showActions"
-						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-4"
+						class="px-4 pb-1 pt-3 text-2xs font-medium uppercase tracking-wide text-ink-gray-7"
 					>
 						Questions
 					</div>
@@ -313,7 +313,7 @@
 										row.requester_name &&
 										!row.is_requester
 									"
-									class="mt-0.5 truncate text-sm text-ink-gray-6"
+									class="mt-0.5 truncate text-sm text-ink-gray-7"
 								>
 									From {{ row.requester_name }}
 								</div>
@@ -336,7 +336,7 @@
 										label="Not sent to chat"
 									/>
 									<Tooltip :text="exactDate(row.creation)">
-										<span class="whitespace-nowrap text-sm text-ink-gray-5">{{
+										<span class="whitespace-nowrap text-sm text-ink-gray-7">{{
 											timeAgo(row.creation)
 										}}</span>
 									</Tooltip>
@@ -359,7 +359,7 @@
 							@click="loadMore()"
 						/>
 						<div v-else />
-						<div class="text-sm text-ink-gray-5">
+						<div class="text-sm text-ink-gray-7">
 							{{ railRows.length }} of {{ railTotal }} questions
 						</div>
 					</div>
@@ -385,7 +385,7 @@
 						<span class="text-lg font-medium text-ink-gray-8">{{
 							emptyState.title
 						}}</span>
-						<span class="text-p-base text-ink-gray-6">{{
+						<span class="text-p-base text-ink-gray-7">{{
 							emptyState.description
 						}}</span>
 					</div>
@@ -474,7 +474,7 @@
 					<FeatherIcon name="inbox" class="size-7.5 text-ink-gray-5" />
 					<div class="flex flex-col items-center gap-1">
 						<span class="text-lg font-medium text-ink-gray-8">Select an approval</span>
-						<span class="text-p-base text-ink-gray-6">
+						<span class="text-p-base text-ink-gray-7">
 							Pick a request from the list to review it, decide or tag someone in the
 							comments.
 						</span>
@@ -485,7 +485,7 @@
 					class="flex h-full flex-col items-center justify-center gap-1 px-8 text-center"
 				>
 					<div class="text-lg font-medium text-ink-gray-8">Approval not found</div>
-					<div class="text-p-base text-ink-gray-6">{{ paneError }}</div>
+					<div class="text-p-base text-ink-gray-7">{{ paneError }}</div>
 				</div>
 				<div v-else-if="!selected" class="flex h-full items-center justify-center">
 					<JvSpinner />
@@ -532,7 +532,7 @@
 					</div>
 					<div class="mt-4 flex flex-col gap-3">
 						<div class="flex items-center gap-2 leading-5">
-							<div class="w-[35%] min-w-20 shrink-0 text-sm text-ink-gray-5">
+							<div class="w-[35%] min-w-20 shrink-0 text-sm text-ink-gray-7">
 								Type
 							</div>
 							<div class="flex w-[65%] items-center text-base">
@@ -543,7 +543,7 @@
 							v-if="selected.ref_doctype && selected.ref_name"
 							class="flex items-center gap-2 leading-5"
 						>
-							<div class="w-[35%] min-w-20 shrink-0 text-sm text-ink-gray-5">
+							<div class="w-[35%] min-w-20 shrink-0 text-sm text-ink-gray-7">
 								Reference
 							</div>
 							<div class="flex w-[65%] items-center text-base">
@@ -564,7 +564,7 @@
 							</div>
 						</div>
 						<div class="flex items-center gap-2 leading-5">
-							<div class="w-[35%] min-w-20 shrink-0 text-sm text-ink-gray-5">
+							<div class="w-[35%] min-w-20 shrink-0 text-sm text-ink-gray-7">
 								Created
 							</div>
 							<div class="flex w-[65%] items-center text-base text-ink-gray-8">
@@ -574,7 +574,7 @@
 							</div>
 						</div>
 						<div v-if="scoped" class="flex items-center gap-2 leading-5">
-							<div class="w-[35%] min-w-20 shrink-0 text-sm text-ink-gray-5">
+							<div class="w-[35%] min-w-20 shrink-0 text-sm text-ink-gray-7">
 								Requested by
 							</div>
 							<div class="flex w-[65%] items-center text-base text-ink-gray-8">
@@ -584,7 +584,7 @@
 							</div>
 						</div>
 						<div v-if="scoped" class="flex items-start gap-2 leading-5">
-							<div class="w-[35%] min-w-20 shrink-0 pt-0.5 text-sm text-ink-gray-5">
+							<div class="w-[35%] min-w-20 shrink-0 pt-0.5 text-sm text-ink-gray-7">
 								Reviewers
 							</div>
 							<div class="flex w-[65%] flex-wrap items-center gap-1.5 text-base">
@@ -605,7 +605,7 @@
 										@click="removeReviewer(r)"
 									/>
 								</div>
-								<span v-if="!reviewers.length" class="text-sm text-ink-gray-5"
+								<span v-if="!reviewers.length" class="text-sm text-ink-gray-7"
 									>No reviewer tagged</span
 								>
 							</div>
@@ -614,7 +614,7 @@
 							v-if="selected.conversation"
 							class="flex items-center gap-2 leading-5"
 						>
-							<div class="w-[35%] min-w-20 shrink-0 text-sm text-ink-gray-5">
+							<div class="w-[35%] min-w-20 shrink-0 text-sm text-ink-gray-7">
 								Conversation
 							</div>
 							<div class="flex w-[65%] items-center text-base">
@@ -701,7 +701,6 @@
 										<template v-else>
 											<Button
 												variant="solid"
-												theme="green"
 												:label="
 													sourceOf(selected) === 'Agent Review'
 														? 'Acknowledge review'
@@ -798,11 +797,11 @@
 											</template>
 										</Popover>
 									</div>
-									<div class="mt-2 text-sm text-ink-gray-5">
+									<div class="mt-2 text-sm text-ink-gray-7">
 										{{ decisionHint }}
 									</div>
 								</div>
-								<div v-else class="text-sm text-ink-gray-5">
+								<div v-else class="text-sm text-ink-gray-7">
 									Waiting for a decision - comment below and @mention someone who
 									can approve.
 								</div>
@@ -811,7 +810,7 @@
 								<div class="text-base text-ink-gray-8">
 									{{ selected.decision }}
 								</div>
-								<div v-if="decidedLine" class="mt-2 text-sm text-ink-gray-5">
+								<div v-if="decidedLine" class="mt-2 text-sm text-ink-gray-7">
 									{{ decidedLine }}
 								</div>
 								<!-- a review-scoped question's decision that did not reach the
@@ -837,7 +836,7 @@
 								<div
 									v-else-if="scoped && selected.continuation === 'pending'"
 									role="status"
-									class="mt-2 text-sm text-ink-gray-5"
+									class="mt-2 text-sm text-ink-gray-7"
 								>
 									{{ PENDING_NOTICE }}
 								</div>

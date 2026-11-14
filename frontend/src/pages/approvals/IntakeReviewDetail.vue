@@ -132,7 +132,6 @@
 					<template v-if="!rejecting">
 						<Button
 							variant="solid"
-							theme="green"
 							label="Approve"
 							:loading="busy === 'approve'"
 							:disabled="busy !== null || !ready"

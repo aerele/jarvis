@@ -11,6 +11,8 @@
 		:quick-filters="quickFilters"
 		:filter-defs="filterDefs"
 		:filters="filters"
+		plain-rows
+		strong-header
 		:sort-options="[]"
 		:sort="sort"
 		:page-length="pageLength"
@@ -62,6 +64,7 @@
 					<Badge
 						variant="subtle"
 						:theme="intakeBadge(row).theme"
+						:class="intakeBadgeClass(row)"
 						:label="intakeBadge(row).label"
 					/>
 					<IntakeDraftLink :row="row" />
@@ -87,6 +90,7 @@
 			<Badge
 				variant="subtle"
 				:theme="intakeBadge(row).theme"
+				:class="intakeBadgeClass(row)"
 				:label="intakeBadge(row).label"
 			/>
 		</template>
@@ -105,17 +109,18 @@
 
 		<template #cell-_retry="{ row }">
 			<div class="flex w-full items-center justify-end">
-				<!-- the file name is in the name, so a screen reader can tell the Retry buttons apart -->
+				<!-- frappe-ui's Button sets aria-label from `label` and wins over an aria-label
+				     attribute, so the long name rides `label` and the visible text is the slot. -->
 				<Button
 					v-if="row.can_retry"
 					variant="ghost"
 					size="sm"
-					label="Retry"
-					:aria-label="`Retry ${row.file_name || row.name}`"
+					:label="`Retry ${row.file_name || row.name}`"
 					:loading="retrying === row.name"
 					:disabled="!!retrying"
 					@click="retry(row)"
-				/>
+					>Retry</Button
+				>
 			</div>
 		</template>
 	</ListPage>
@@ -138,6 +143,7 @@ import { errHtml } from "@/lib/errors";
 import {
 	INTAKE_STATUS_OPTIONS,
 	intakeBadge,
+	intakeBadgeClass,
 	intakeDraftLink,
 	intakeIsLive,
 } from "@/lib/intakeStatus";

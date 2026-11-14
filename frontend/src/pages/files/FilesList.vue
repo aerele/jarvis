@@ -292,12 +292,16 @@ const store = useShellStore();
 const view = ref(route.query.view === "intake" ? "intake" : "dropped");
 
 // The switch is rebuilt with the other view, so the clicked button is gone: put focus back
-// on the selected view's button instead of letting it fall to <body>.
-watch(view, async () => {
+// on the selected view's button instead of letting it fall to <body>. Each page teleports
+// its own header one tick after it mounts, so wait up to a few frames for the new switch.
+const SWITCH_ON = "[data-filebox-switch] [role=radio][aria-checked=true]";
+async function focusSwitch(tries = 10) {
 	await nextTick();
-	const on = document.querySelector("[data-filebox-switch] [role=radio][aria-checked=true]");
-	if (on) on.focus();
-});
+	const on = document.querySelector(SWITCH_ON);
+	if (on) return on.focus();
+	if (tries > 0) requestAnimationFrame(() => focusSwitch(tries - 1));
+}
+watch(view, () => focusSwitch());
 
 // ── list config ──────────────────────────────────────────────────────────────
 // statuses, badges and result links live in @/lib/fileboxStatus (tested).
