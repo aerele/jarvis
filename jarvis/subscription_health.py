@@ -7,6 +7,10 @@ One map on ``Jarvis Settings.subscription_health``, keyed by ``account_ref``, wi
   later successful turn (``record_chat_success``) and never by admin's reply;
 * a completed sign-in (``record_signin_complete``): clears that upstream's entries.
 
+Usage caps live apart from that map, in the cache (``LIMITS_KEY``): ``{model: {since, until}}`` from a
+failed turn's Retry-After. They are this site's own reading, never sent to admin (whose heartbeat reply
+rewrites the map above), and they lapse on their own at ``until``.
+
 Pending transitions are queued in Redis and ride the next heartbeat to admin
 (``drain_signals``). Nothing here sends a completion or raises into a caller that is serving a
 chat turn or the heartbeat.
@@ -39,6 +43,11 @@ SIGNAL_KEY = "jarvis:subscription_signals"
 CLEARED_KEY_PREFIX = "jarvis:subscription_cleared:"
 _LOG_KEY = "jarvis:subscription_log_hour"
 CODE_EXPIRED = "subscription-expired"
+CODE_USAGE_CAP = "quota"
+# Same persistent prefix: the AI models row keeps its "Usage limit reached" across a cache clear.
+LIMITS_KEY = "jarvis:subscription_limits"
+# A provider's longest allowance window is a week; a larger Retry-After is not believed past that.
+_MAX_LIMIT_S = 8 * 24 * 3600
 CODE_OK = "ok"
 MAX_SIGNALS = 8
 _QUEUE_CAP = 50
@@ -363,6 +372,7 @@ def record_signin_complete(upstream: str, account_ref: str | None = None, all_so
 		if upstream not in LABELS:
 			return
 		live = _live_accounts()
+		_clear_usage_limits({row.model_id for row in _enabled_rows() if row.upstream == upstream})
 		if _clear_upstream(upstream, account_ref=account_ref, all_sources=all_sources, live=live):
 			return
 		still = [e for ref, e in current_health().items() if ref in live and e.get("upstream") == upstream]
@@ -440,18 +450,86 @@ _PROVIDER_UPSTREAM = {
 
 
 def note_turn_error(err_text, code) -> None:
-	"""Called at the run-error publish sites (never from the classifier). Records only a dead
-	sign-in whose text names an upstream. Never raises."""
-	if code != CODE_EXPIRED:
-		return
+	"""Called at the run-error publish sites (never from the classifier). Records a dead sign-in whose
+	text names an upstream, and a model's usage cap with the wait the provider gave. A failover error
+	("All models failed (N): ...") is read one model at a time, since each names its own cause.
+	Never raises."""
 	try:
-		from jarvis.chat.error_taxonomy import subscription_upstream_from_error
+		from jarvis.chat.error_taxonomy import model_failures, model_wait, subscription_upstream_from_error
 
-		upstream = subscription_upstream_from_error(err_text)
-		if upstream:
-			record_chat_failure(upstream)
+		parts = [p for p in model_failures(err_text) if p["code"]]
+		if parts:
+			for part in parts:
+				_note_one(part["code"], part["upstream"], part["model"], part["retry_after_s"])
+			return
+		if code == CODE_EXPIRED:
+			_note_one(code, subscription_upstream_from_error(err_text), "", None)
+		elif code == CODE_USAGE_CAP:
+			_note_one(code, "", *model_wait(err_text))
 	except Exception:
 		_log_throttled()
+
+
+def _note_one(code: str, upstream: str, model: str, wait_s: int | None) -> None:
+	if code == CODE_EXPIRED and upstream:
+		record_chat_failure(upstream)
+	elif code == CODE_USAGE_CAP and model and wait_s:
+		record_usage_limit(model, wait_s)
+
+
+# ---- usage caps (site-local) ------------------------------------------------------------------------
+
+
+def _bare(model: str) -> str:
+	return (model or "").strip().split("/")[-1]
+
+
+def _read_limits(now: int) -> dict:
+	"""``{bare model id: {since, until}}`` still in force at ``now``."""
+	raw = frappe.cache().get_value(LIMITS_KEY)
+	if not isinstance(raw, dict):
+		return {}
+	return {
+		model: entry
+		for model, entry in raw.items()
+		if isinstance(entry, dict) and _int(entry.get("until")) > now
+	}
+
+
+def _write_limits(limits: dict, now: int) -> None:
+	if limits:
+		ttl = max(_int(e.get("until")) for e in limits.values()) - now
+		frappe.cache().set_value(LIMITS_KEY, limits, expires_in_sec=max(ttl, 60))
+	else:
+		frappe.cache().delete_value(LIMITS_KEY)
+	_publish_changed()
+
+
+def record_usage_limit(model: str, wait_s: int) -> None:
+	"""A turn on ``model`` failed on its usage cap and the provider said to wait ``wait_s`` seconds."""
+	bare = _bare(model)
+	now = int(time.time())
+	until = now + min(max(_int(wait_s), 0), _MAX_LIMIT_S)
+	if not bare or until <= now:
+		return
+	limits = _read_limits(now)
+	if abs(_int((limits.get(bare) or {}).get("until")) - until) < 60:
+		return  # the same reading again (a retry of the same failure): no event
+	limits[bare] = {"since": now, "until": until}
+	_write_limits(limits, now)
+
+
+def _clear_usage_limits(models) -> None:
+	now = int(time.time())
+	limits = _read_limits(now)
+	drop = {_bare(m) for m in models} & set(limits)
+	if drop:
+		_write_limits({m: e for m, e in limits.items() if m not in drop}, now)
+
+
+def usage_limits() -> dict[str, int]:
+	"""``{bare model id: until epoch}`` for every model still on its usage cap."""
+	return {model: _int(entry["until"]) for model, entry in _read_limits(int(time.time())).items()}
 
 
 def upstream_for_serving(model: str, provider: str) -> str:
@@ -478,9 +556,11 @@ def upstream_for_serving(model: str, provider: str) -> str:
 
 
 def note_turn_success(model: str, provider: str) -> None:
-	"""A completed turn is first-hand proof the sign-in it ran on works: clear a chat-detected expiry
-	for the serving upstream. One read when nothing is flagged. Never raises."""
+	"""A completed turn is first-hand proof the sign-in it ran on works: clear the served model's usage
+	cap and a chat-detected expiry for the serving upstream. Two reads when nothing is flagged. Never
+	raises."""
 	try:
+		_clear_usage_limits({model})
 		chat_upstreams = {e.get("upstream") for e in current_health().values() if e.get("source") == "chat"}
 		if not chat_upstreams:
 			return
@@ -627,16 +707,18 @@ def get_subscription_notice() -> dict:
 	# Nothing expired is the common case (every chat load, every realtime event): answer before any
 	# pool row is read. Only the admin's upstreams list reads the accounts, once, in _live_accounts.
 	entries = expired_entries()
+	# Model ids and reset times only: nothing about accounts, so members get them too.
+	limited = usage_limits()
 	if not entries:
 		if is_admin:
-			return {"expired": [], "upstreams": _upstreams()}
-		return {"expired": [], "expired_models": [], "upstreams": None}
+			return {"expired": [], "upstreams": _upstreams(), "limited": limited}
+		return {"expired": [], "expired_models": [], "upstreams": None, "limited": limited}
 	rows = _enabled_rows()
 	entries = _with_fallbacks(entries, rows)
 	served = _account_models({e["account_ref"] for e in entries}, rows)
 	entries = [{**e, "models": served.get(e["account_ref"], [])} for e in entries]
 	if is_admin:
-		return {"expired": entries, "upstreams": _upstreams()}
+		return {"expired": entries, "upstreams": _upstreams(), "limited": limited}
 	failing = [_member_entry(e) for e in entries if not e["fallback"]]
 	# The banner shows only a failing entry with no fallback, but an explicit pick of ANY expired
 	# model does not fail over, so the error card needs every expired entry's models.
@@ -644,4 +726,5 @@ def get_subscription_notice() -> dict:
 		"expired": failing[:1],
 		"expired_models": [_member_entry(e) for e in entries],
 		"upstreams": None,
+		"limited": limited,
 	}

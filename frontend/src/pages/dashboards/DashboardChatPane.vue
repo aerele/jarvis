@@ -87,6 +87,12 @@
 					<div v-else-if="m.error" class="flex">
 						<div class="max-w-[95%] text-sm text-ink-red-4" role="status">
 							<strong>{{ m.err.headline }}</strong>
+							<div v-if="m.err.models" class="mt-1 text-xs">
+								<div v-for="(mod, mdi) in m.err.models" :key="mdi">
+									<strong>{{ mod.model }}</strong> {{ mod.reason }}.
+									{{ mod.next }}
+								</div>
+							</div>
 							<p>
 								{{ m.err.hint }}
 								<a
@@ -98,20 +104,9 @@
 									>{{ m.err.statusLabel }}
 									<span aria-hidden="true">&#8599;</span></a
 								>
-								<span v-if="m.err.hint" aria-hidden="true"> &middot; </span>
-								<button
-									type="button"
-									class="underline underline-offset-2"
-									:aria-expanded="rawOpen.has(m.name) ? 'true' : 'false'"
-									:aria-controls="`dash-err-raw-${m.name}`"
-									@click="toggleRaw(m.name)"
-								>
-									{{ rawOpen.has(m.name) ? "Hide details" : "Details" }}
-								</button>
 							</p>
 							<pre
-								v-if="rawOpen.has(m.name)"
-								:id="`dash-err-raw-${m.name}`"
+								v-if="showsRawReason(m.err) && m.error"
 								class="mt-1 whitespace-pre-wrap break-words font-sans text-xs"
 								>{{ m.error }}</pre
 							>
@@ -432,7 +427,7 @@ import {
 	retryMessage,
 } from "@/api";
 import { brand } from "@/branding";
-import { errHtml, escapeHtml, turnErrorInfo } from "@/lib/errors";
+import { errHtml, escapeHtml, turnErrorInfo, showsRawReason } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { sortPendingCards } from "@/lib/sortPendingCards";
 import { discardedTokens } from "@/lib/typedCardReply";
@@ -757,13 +752,6 @@ const scroller = ref(null);
 // failure the same way ChatView does for the same event. Not persisted: a
 // reload has only the row's error text and reclassifies from that.
 const errorMeta = ref({});
-// Failed bubbles whose raw error text is expanded ("Details" in the note).
-const rawOpen = ref(new Set());
-function toggleRaw(name) {
-	const next = new Set(rawOpen.value);
-	next.has(name) ? next.delete(name) : next.add(name);
-	rawOpen.value = next;
-}
 function errorNote(m) {
 	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", { provider: m.provider });
 }

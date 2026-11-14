@@ -50,6 +50,7 @@ class _Base(unittest.TestCase):
 
 	def _clear_epochs(self):
 		frappe.cache().delete_value(sh.SIGNAL_KEY)
+		frappe.cache().delete_value(sh.LIMITS_KEY)
 		for upstream in ("openai", "anthropic"):
 			frappe.cache().delete_value(sh.CLEARED_KEY_PREFIX + upstream)
 
@@ -966,8 +967,8 @@ class TestAttentionAndNotice(_Base):
 			admin = self._notice(admin=True)
 			member = self._notice(admin=False)
 		read.assert_not_called()
-		self.assertEqual(admin, {"expired": [], "upstreams": ["anthropic", "openai"]})
-		self.assertEqual(member, {"expired": [], "expired_models": [], "upstreams": None})
+		self.assertEqual(admin, {"expired": [], "upstreams": ["anthropic", "openai"], "limited": {}})
+		self.assertEqual(member, {"expired": [], "expired_models": [], "upstreams": None, "limited": {}})
 
 	def test_an_expired_entry_reads_each_enabled_subscription_row_once(self):
 		from jarvis.jarvis import pool_serialize
@@ -1003,6 +1004,7 @@ class TestAttentionAndNotice(_Base):
 				"expired": [{"upstream": "openai", "label": "OpenAI", "models": []}],
 				"expired_models": [{"upstream": "openai", "label": "OpenAI", "models": []}],
 				"upstreams": None,
+				"limited": {},
 			},
 		)
 
@@ -1268,5 +1270,97 @@ class TestUnmigratedSite(unittest.TestCase):
 		self.assertNotEqual(status["attention_reason"], "subscription_expired")
 		self.assertEqual((status["attention_detail"], status["subscription_health"]), ({}, []))
 		self.assertEqual(health, {"state": "ok"})
-		self.assertEqual(admin_notice, {"expired": [], "upstreams": []})
-		self.assertEqual(notice, {"expired": [], "expired_models": [], "upstreams": None})
+		self.assertEqual(admin_notice, {"expired": [], "upstreams": [], "limited": {}})
+		self.assertEqual(notice, {"expired": [], "expired_models": [], "upstreams": None, "limited": {}})
+
+
+# The insider failure, 2026-11-14: one model out of allowance, the other signed out.
+FAILOVER = (
+	"All models failed (2): openai_compat/jarvis-pool: 429 All credentials for model gpt-5.6-terra are "
+	"cooling down (last error: usage_limit_reached: The usage limit has been reached); Retry-After: 169907 "
+	"seconds (rate_limit) | anthropic/claude-opus-5: Failed to authenticate: OAuth session expired and could "
+	"not be refreshed (auth)."
+)
+CLAUDE_CLI_EXPIRED = "Failed to authenticate: OAuth session expired and could not be refreshed"
+
+
+class TestFailoverCauses(unittest.TestCase):
+	"""Each failed model of a failover error is recorded under its own cause."""
+
+	def test_a_usage_cap_and_a_dead_sign_in_are_both_recorded(self):
+		with (
+			patch.object(sh, "record_chat_failure") as fail,
+			patch.object(sh, "record_usage_limit") as cap,
+		):
+			sh.note_turn_error(FAILOVER, "subscription-expired")
+		fail.assert_called_once_with("anthropic")
+		cap.assert_called_once_with("gpt-5.6-terra", 169907)
+
+	def test_the_claude_cli_bare_expiry_is_an_anthropic_sign_in(self):
+		with patch.object(sh, "record_chat_failure") as fail:
+			sh.note_turn_error(CLAUDE_CLI_EXPIRED, "subscription-expired")
+		fail.assert_called_once_with("anthropic")
+
+	def test_a_single_model_usage_cap_names_its_model_and_wait(self):
+		text = FAILOVER.split(": ", 1)[1].split(" | ")[0].split(": ", 1)[1]
+		with patch.object(sh, "record_usage_limit") as cap:
+			sh.note_turn_error(text, "quota")
+		cap.assert_called_once_with("gpt-5.6-terra", 169907)
+
+	def test_the_turn_handler_passes_a_failover_error_on_whatever_its_code(self):
+		from jarvis.chat import turn_handler
+
+		with (
+			patch.object(sh, "record_chat_failure") as fail,
+			patch.object(sh, "record_usage_limit") as cap,
+		):
+			turn_handler._note_subscription_error(FAILOVER, "models-exhausted")
+		fail.assert_called_once_with("anthropic")
+		cap.assert_called_once()
+
+
+class TestUsageLimits(_Base):
+	def test_a_cap_is_kept_until_its_reset(self):
+		with patch.object(sh.time, "time", return_value=1_000_000):
+			sh.record_usage_limit("openai_compat/gpt-5.6-terra", 3600)
+			self.assertEqual(sh.usage_limits(), {"gpt-5.6-terra": 1_003_600})
+		with patch.object(sh.time, "time", return_value=1_003_601):
+			self.assertEqual(sh.usage_limits(), {})
+		self.assertEqual(len(self.events), 1)
+
+	def test_the_same_reading_again_publishes_nothing(self):
+		with patch.object(sh.time, "time", return_value=1_000_000):
+			sh.record_usage_limit("gpt-5.6-terra", 3600)
+		with patch.object(sh.time, "time", return_value=1_000_010):
+			sh.record_usage_limit("gpt-5.6-terra", 3590)
+		self.assertEqual(len(self.events), 1)
+
+	def test_an_absurd_wait_is_capped_at_eight_days(self):
+		with patch.object(sh.time, "time", return_value=1_000_000):
+			sh.record_usage_limit("gpt-5.6-terra", 10**9)
+			self.assertEqual(sh.usage_limits()["gpt-5.6-terra"], 1_000_000 + 8 * 24 * 3600)
+
+	def test_a_successful_turn_on_the_model_clears_its_cap(self):
+		sh.record_usage_limit("gpt-5.6-terra", 3600)
+		sh.record_usage_limit("claude-opus-5", 3600)
+		sh.note_turn_success("openai_compat/gpt-5.6-terra", "openai_compat")
+		self.assertEqual(list(sh.usage_limits()), ["claude-opus-5"])
+
+	def test_a_new_sign_in_clears_the_caps_of_that_upstreams_models(self):
+		sh.record_usage_limit("gpt-5.6-terra", 3600)
+		sh.record_usage_limit("claude-opus-5", 3600)
+		rows = [_row("gpt-5.6-terra", order=1), _row("claude-opus-5", upstream="anthropic", order=2)]
+		with patch.object(sh, "_settings", return_value=frappe._dict(models=rows)):
+			sh.record_signin_complete("openai")
+		self.assertEqual(list(sh.usage_limits()), ["claude-opus-5"])
+
+	def test_the_notice_carries_the_caps_for_admins_and_members(self):
+		with patch.object(sh.time, "time", return_value=1_000_000):
+			sh.record_usage_limit("gpt-5.6-terra", 3600)
+			frappe.set_user("Administrator")
+			for admin in (True, False):
+				with (
+					patch("jarvis.permissions.require_jarvis_access"),
+					patch("jarvis.permissions.has_jarvis_admin_access", return_value=admin),
+				):
+					self.assertEqual(sh.get_subscription_notice()["limited"], {"gpt-5.6-terra": 1_003_600})

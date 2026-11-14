@@ -69,6 +69,7 @@
 				:editable="isSM"
 				:directStatus="directSub"
 				:expiredEntries="subscriptionNotice.expired"
+				:limitedModels="subscriptionNotice.limited"
 				:reconnectRef="reconnectRef"
 				@reconnect-handled="reconnectRef = ''"
 				:hostScrim="true"
