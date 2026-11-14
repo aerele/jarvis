@@ -64,6 +64,9 @@
 						:modelValue="form.intake_record_doctype"
 						:disabled="true"
 					/>
+					<p class="text-p-xs text-ink-gray-7">
+						Files attached to these records are read
+					</p>
 				</div>
 				<div class="flex min-w-0 flex-col gap-1.5">
 					<label class="text-xs text-ink-gray-7">Run when</label>
@@ -134,7 +137,7 @@
 		<template v-if="options">
 			<!-- Fields -->
 			<div class="flex min-w-0 flex-col gap-1.5" data-testid="intake-field-list">
-				<label class="text-xs text-ink-gray-7">Fields to read</label>
+				<h3 class="text-sm font-medium text-ink-gray-8">Fields to read</h3>
 				<IntakeFieldGrid
 					:fields="options.fields"
 					:selected="spec.fields"
@@ -150,14 +153,16 @@
 				data-testid="intake-table-section"
 			>
 				<h3 class="text-sm font-medium text-ink-gray-8">Table rows</h3>
-				<FormControl
-					type="select"
-					label="Table"
-					:options="tableOptions"
-					:modelValue="spec.table ? spec.table.fieldname : ''"
-					:disabled="disabled"
-					@update:modelValue="onTablePick"
-				/>
+				<div class="flex min-w-0 flex-col gap-1.5">
+					<label class="text-xs text-ink-gray-7">Table</label>
+					<Select
+						class="w-full"
+						:options="tableOptions"
+						:modelValue="spec.table ? spec.table.fieldname : ''"
+						:disabled="disabled"
+						@update:modelValue="onTablePick"
+					/>
+				</div>
 				<div v-if="pickedTable" class="flex min-w-0 flex-col gap-1.5 pl-3">
 					<label class="text-xs text-ink-gray-7"
 						>Columns of {{ pickedTable.label }}</label
@@ -173,7 +178,10 @@
 
 			<!-- Match links -->
 			<div v-if="linkFields.length" class="flex min-w-0 flex-col gap-1.5">
-				<label class="text-xs text-ink-gray-7">Match to existing records</label>
+				<h3 class="text-sm font-medium text-ink-gray-8">Match to existing records</h3>
+				<p class="text-p-xs text-ink-gray-7">
+					Only use values that already exist in the site
+				</p>
 				<div
 					class="grid grid-cols-1 gap-x-4 gap-y-2 rounded-md border p-3 sm:grid-cols-2 xl:grid-cols-3"
 					data-testid="match-grid"
@@ -182,7 +190,7 @@
 						v-for="f in linkFields"
 						:key="f.fieldname"
 						type="checkbox"
-						:label="'Match: ' + f.label"
+						:label="f.label"
 						:modelValue="spec.match.includes(f.fieldname)"
 						:disabled="disabled"
 						@update:modelValue="(v) => toggleMatch(f.fieldname, v)"
@@ -192,9 +200,10 @@
 
 			<!-- Defaults -->
 			<div v-if="defaultFields.length" class="flex flex-col gap-3">
-				<label class="text-xs text-ink-gray-7">
-					Fixed values for mandatory fields that are not read from the file
-				</label>
+				<h3 class="text-sm font-medium text-ink-gray-8">Fixed values</h3>
+				<p class="text-p-xs text-ink-gray-7">
+					Set on every draft, for fields that are not read from the file
+				</p>
 				<div
 					v-for="f in defaultFields"
 					:key="f.fieldname"
@@ -536,7 +545,9 @@ function toggleMatch(name, on) {
 // ── defaults ─────────────────────────────────────────────────────────────────
 const defaultFields = computed(() =>
 	(options.value?.fields || []).filter(
-		(f) => f.mandatory && !spec.value.fields.includes(f.fieldname)
+		(f) =>
+			!spec.value.fields.includes(f.fieldname) &&
+			(f.mandatory || f.fieldname in spec.value.defaults)
 	)
 );
 
