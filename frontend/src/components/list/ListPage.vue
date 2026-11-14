@@ -237,7 +237,7 @@
 		     toolbar's Refresh, put where the reader is looking. -->
 		<div v-else-if="error" class="relative flex-1">
 			<div
-				class="absolute left-1/2 flex w-4/12 -translate-x-1/2 flex-col items-center gap-3"
+				class="absolute left-1/2 flex w-9/12 -translate-x-1/2 sm:w-4/12 flex-col items-center gap-3"
 				:style="{ top: '35%' }"
 			>
 				<FeatherIcon name="alert-circle" class="size-7.5 text-ink-red-4" />
@@ -262,7 +262,7 @@
 					class="size-7.5 text-ink-gray-5"
 				/>
 				<div class="flex flex-col items-center gap-1">
-					<span class="text-lg font-medium text-ink-gray-8">
+					<span class="text-center text-lg font-medium text-ink-gray-8">
 						{{ (emptyState && emptyState.title) || "No records found" }}
 					</span>
 					<span

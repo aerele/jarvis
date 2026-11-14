@@ -58,13 +58,16 @@
 				<div class="mb-3">
 					<!-- optional extra skill, applied ALONGSIDE the system's chosen skill,
 					     to the files dropped next -->
-					<div class="mb-2 flex items-center gap-2">
+					<div
+						class="mb-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2"
+						title="Automatic: File Box picks the matching skill"
+					>
 						<span class="shrink-0 text-p-sm text-ink-gray-6">Also apply skill</span>
 						<Autocomplete
-							class="w-72"
+							class="w-full sm:w-72"
 							:options="skillOptions"
 							:modelValue="pinnedSkill"
-							placeholder="Automatic (File Box picks the matching skill)"
+							placeholder="Automatic"
 							@update:modelValue="(o) => (pinnedSkill = o ? o.value : '')"
 						/>
 					</div>
