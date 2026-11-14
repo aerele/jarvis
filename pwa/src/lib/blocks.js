@@ -11,6 +11,7 @@
 //
 // A relative import, not the @shared alias, so bare `node --test` can run this file.
 import { actionBlockState, normaliseAction } from "../../../frontend/src/lib/chatAction.js";
+import { stripBlocks } from "../../../frontend/src/lib/chatBlocks.js";
 import { parseGoto } from "../../../frontend/src/lib/chatGoto.js";
 
 export { actionBlockState };
@@ -41,10 +42,15 @@ const STRIP_RES = [
 // Separate object (not shared with STRIP_RES) so its /g lastIndex can't collide.
 const DIAGRAM_RE = /```mermaid[ \t]*\n(?![ \t]*xychart-beta)[\s\S]*?```/g;
 
-/** The agent's prose, with every control block removed. */
-export function stripAgentBlocks(text) {
+/**
+ * The agent's prose, with every control block removed. While `streaming`, an
+ * unclosed opener and a half-typed fence tag are hidden too (stripBlocks owns
+ * that part); the PWA list above still removes non-xychart mermaid.
+ */
+export function stripAgentBlocks(text, streaming = false) {
 	let t = text || "";
 	for (const re of STRIP_RES) t = t.replace(re, "");
+	if (streaming) t = stripBlocks(t, true);
 	return t.replace(/\n{3,}/g, "\n\n").trim();
 }
 
