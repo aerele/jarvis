@@ -82,7 +82,7 @@
 					<label class="text-xs text-ink-gray-7">Status field on record</label>
 					<FormControl
 						type="select"
-						placeholder="Optional"
+						class="w-full"
 						:options="recordFieldOptions(STATUS_TYPES)"
 						:modelValue="form.intake_status_field || ''"
 						:disabled="disabled"
@@ -94,7 +94,7 @@
 					<label class="text-xs text-ink-gray-7">Draft link field on record</label>
 					<FormControl
 						type="select"
-						placeholder="Optional"
+						class="w-full"
 						:options="recordFieldOptions(LINK_TYPES)"
 						:modelValue="form.intake_link_field || ''"
 						:disabled="disabled"
@@ -176,7 +176,10 @@
 			<!-- Match links -->
 			<div v-if="linkFields.length" class="flex min-w-0 flex-col gap-1.5">
 				<label class="text-xs text-ink-gray-7">Match to existing records</label>
-				<div class="space-y-1.5 rounded-md border p-2">
+				<div
+					class="grid grid-cols-1 gap-x-4 gap-y-2 rounded-md border p-3 sm:grid-cols-2 xl:grid-cols-3"
+					data-testid="match-grid"
+				>
 					<FormControl
 						v-for="f in linkFields"
 						:key="f.fieldname"
@@ -577,7 +580,7 @@ function recordFieldOptions(types) {
 			(f.fieldtype !== "Link" || f.options === props.form.intake_target_doctype)
 	);
 	return [
-		{ label: "", value: "" },
+		{ label: "Optional", value: "" },
 		...rows.map((f) => ({ label: f.label, value: f.fieldname })),
 	];
 }

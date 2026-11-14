@@ -21,7 +21,7 @@
 		     squeezed out and Columns is never clipped at 320 px -->
 		<div class="flex flex-wrap items-center justify-between gap-2 px-5 py-4">
 			<div
-				class="-ml-1 flex h-9 min-w-0 basis-full items-center overflow-x-auto sm:basis-0 sm:flex-1"
+				class="-ml-1 flex min-h-9 min-w-0 basis-full flex-wrap items-center sm:basis-0 sm:flex-1"
 			>
 				<div v-for="qf in quickFilters" :key="qf.key" class="m-1 min-w-36">
 					<!-- A Dropdown, not FormControl select: frappe-ui's Select opens item-aligned,

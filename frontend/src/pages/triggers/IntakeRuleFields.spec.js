@@ -418,8 +418,12 @@ describe("IntakeRuleFields", () => {
 		expect(sec.text()).toContain("Jarvis writes the draft's name here");
 		expect(sec.text()).not.toContain("None");
 		const selects = w.findAllComponents({ name: "FormControl" });
-		const placeholders = selects.map((c) => c.props("placeholder")).filter(Boolean);
-		expect(placeholders.filter((p) => p === "Optional")).toHaveLength(2);
+		const optional = selects.filter(
+			(c) => (c.props("options") || [])[0]?.label === "Optional"
+		);
+		expect(optional).toHaveLength(2);
+		expect(optional.every((c) => c.classes().includes("w-full"))).toBe(true);
+		expect(optional[0].props("options")[0].value).toBe("");
 	});
 
 	it("Run when emits intake_record_event with the stored value", async () => {
@@ -437,5 +441,14 @@ describe("IntakeRuleFields", () => {
 		expect(ctrl.props("modelValue")).toBe("File attached");
 		await ctrl.vm.$emit("update:modelValue", "On Submit");
 		expect(patches(w).at(-1)).toEqual({ intake_record_event: "On Submit" });
+	});
+
+	it("keeps a long field label and its hint on separate lines", async () => {
+		const w = await mountIt(formOf());
+		const row = w.find('[data-testid="intake-check-row"]');
+		expect(row.classes()).toContain("flex-col");
+		const hint = row.find('[data-testid="type-hint"]');
+		expect(hint.classes()).not.toContain("truncate");
+		expect(hint.classes()).toContain("break-words");
 	});
 });
