@@ -189,3 +189,17 @@ test("waits read as rounded minutes, hours or days", () => {
   assert.equal(waitPhrase(60), "about 1 minute");
   assert.equal(waitPhrase(0), "");
 });
+
+test("without the failure time the wait is stated as it was, not counted down", () => {
+  const info = turnErrorInfo(INSIDER);
+  assert.equal(info.models[0].next, "Resets about 2 days after it failed.");
+});
+
+test("a single model on its usage cap says when it resets", () => {
+  const text =
+    "429 cooling down (last error: usage_limit_reached: The usage limit has been reached); Retry-After: 7200 seconds";
+  const info = turnErrorInfo(text, undefined, { failedAtMs: Date.now() });
+  assert.equal(info.code, "quota");
+  assert.match(info.hint, /^Resets in about 2 hours\. /);
+  assert.equal(info.retryable, false);
+});
