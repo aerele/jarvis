@@ -169,8 +169,73 @@ describe("IntakeRuleFields", () => {
 				},
 			})
 		);
-		expect(box(w, "Match: Allocated To").exists()).toBe(true);
-		expect(box(w, "Match: Status").exists()).toBe(false);
+		const grid = w.find('[data-testid="match-grid"]');
+		expect(grid.find('input[aria-label="Allocated To"]').exists()).toBe(true);
+		expect(grid.find('input[aria-label="Status"]').exists()).toBe(false);
+	});
+
+	it("shows every spec default under Fixed values, not only the mandatory ones", async () => {
+		const w = await mountIt(
+			formOf({
+				intake_spec: {
+					fields: ["description"],
+					table: null,
+					match: [],
+					defaults: { status: "Closed" },
+				},
+			})
+		);
+		expect(w.find('[data-testid="default-status"]').exists()).toBe(true);
+		expect(w.text()).toContain("Fixed values");
+		// a field the file already fills gets no fixed value
+		const read = await mountIt(
+			formOf({
+				intake_spec: {
+					fields: ["description", "status"],
+					table: null,
+					match: [],
+					defaults: { status: "Closed" },
+				},
+			})
+		);
+		expect(read.find('[data-testid="default-status"]').exists()).toBe(false);
+	});
+
+	it("styles every intake sub-section heading alike and words the match help plainly", async () => {
+		const w = await mountIt(
+			formOf({
+				intake_source: "Record",
+				intake_record_doctype: "ToDo",
+				intake_spec: {
+					fields: ["description", "allocated_to"],
+					table: null,
+					match: [],
+					defaults: {},
+				},
+			})
+		);
+		const heads = w.findAll("h3").map((h) => [h.text(), h.classes().join(" ")]);
+		const names = heads.map((h) => h[0]);
+		for (const n of [
+			"Record source",
+			"Fields to read",
+			"Match to existing records",
+			"Fixed values",
+		])
+			expect(names).toContain(n);
+		expect(new Set(heads.map((h) => h[1])).size).toBe(1);
+		expect(w.text()).toContain("Only use values that already exist in the site");
+		expect(w.text()).toContain("Files attached to these records are read");
+	});
+
+	it("gives the Table picker the full width", async () => {
+		apiTr.getIntakeFieldOptions.mockResolvedValue({
+			...TODO,
+			tables: [{ fieldname: "items", label: "Items", child_doctype: "Row", columns: [] }],
+		});
+		const w = await mountIt(formOf());
+		const section = w.find('[data-testid="intake-table-section"]');
+		expect(section.find("select").classes()).toContain("w-full");
 	});
 
 	it("shows write-back fields for the Record source only", async () => {

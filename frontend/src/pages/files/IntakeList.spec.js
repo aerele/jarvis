@@ -308,4 +308,32 @@ describe("IntakeList", () => {
 		expect(intakeListPage.mock.calls.length).toBe(calls);
 		w = null;
 	});
+
+	it("does not repeat the draft in the summary, and keeps what follows it", async () => {
+		w = await mountList([
+			row({ summary: "Draft ready: Purchase Invoice PINV-0001" }),
+			row({ name: "A2", summary: "Draft ready: Purchase Invoice PINV-0001. Answered: yes" }),
+		]);
+		const rows = w.findAll(".row");
+		expect(rows[0].text().match(/PINV-0001/g)).toHaveLength(1);
+		expect(rows[1].text()).toContain("Answered: yes");
+		expect(rows[1].text().match(/PINV-0001/g)).toHaveLength(1);
+	});
+
+	it("lets a long summary wrap to two lines with the full text in the title", async () => {
+		const long = "Jarvis read nothing from this file. Check it and press Retry.";
+		w = await mountList([
+			row({
+				status: "Failed",
+				draft_name: "",
+				draft_doctype: "",
+				summary: long,
+				can_retry: true,
+			}),
+		]);
+		const cell = w.find(".line-clamp-2");
+		expect(cell.exists()).toBe(true);
+		expect(cell.attributes("title")).toBe(long);
+		expect(w.find('button[aria-label="Retry bill.pdf"]').exists()).toBe(true);
+	});
 });

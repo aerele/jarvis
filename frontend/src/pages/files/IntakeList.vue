@@ -70,7 +70,9 @@
 					/>
 					<IntakeDraftLink :row="row" />
 				</div>
-				<div class="break-words text-sm text-ink-gray-7">{{ row.summary }}</div>
+				<div v-if="summaryText(row)" class="break-words text-sm text-ink-gray-7">
+					{{ summaryText(row) }}
+				</div>
 				<div class="break-words text-sm text-ink-gray-7">{{ row.source_label }}</div>
 			</div>
 			<div v-else class="flex min-w-0 items-center gap-2 overflow-hidden">
@@ -103,8 +105,8 @@
 		</template>
 
 		<template #cell-summary="{ row }">
-			<div class="truncate text-base text-ink-gray-7" :title="row.summary">
-				{{ row.summary }}
+			<div class="line-clamp-2 break-words text-base text-ink-gray-7" :title="row.summary">
+				{{ summaryText(row) }}
 			</div>
 		</template>
 
@@ -114,7 +116,7 @@
 				     attribute, so the long name rides `label` and the visible text is the slot. -->
 				<Button
 					v-if="row.can_retry"
-					variant="ghost"
+					variant="subtle"
 					size="sm"
 					:label="`Retry ${row.file_name || row.name}`"
 					:loading="retrying === row.name"
@@ -150,6 +152,14 @@ import {
 } from "@/lib/intakeStatus";
 
 defineEmits(["switch"]);
+
+// The Draft link already names the draft, so "Draft ready: ToDo X" is not said twice;
+// anything after it (an answered question) stays.
+function summaryText(row) {
+	const said = `Draft ready: ${row.draft_doctype} ${row.draft_name}`;
+	if (!row.draft_name || !(row.summary || "").startsWith(said)) return row.summary;
+	return row.summary.slice(said.length).replace(/^\.\s*/, "");
+}
 
 const ALL_COLUMNS = [
 	{ label: "File", key: "file", width: 3 },

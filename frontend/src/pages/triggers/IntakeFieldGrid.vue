@@ -2,7 +2,7 @@
 	<!-- One aligned row per field: checkbox with its label, then a small muted type hint on its own line below, so a long label never overlaps it.
 	     1 column on a phone, 2 from sm, 3 from xl. -->
 	<ul
-		class="grid max-h-64 grid-cols-1 gap-x-4 gap-y-2 overflow-auto rounded-md border p-3 sm:grid-cols-2 xl:grid-cols-3"
+		class="grid grid-cols-1 gap-x-4 gap-y-2 rounded-md border p-3 pb-5 sm:max-h-64 sm:grid-cols-2 sm:overflow-auto xl:grid-cols-3"
 		data-testid="intake-check-grid"
 	>
 		<li
