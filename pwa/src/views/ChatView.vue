@@ -31,6 +31,7 @@ import { advanceViewGeneration, isViewCurrent } from "../lib/viewGeneration.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
+	actionBlockState,
 	messageChips,
 	parseAction,
 	parseCards,
@@ -476,6 +477,8 @@ const view = (m) => {
 	const html = renderMarkdown(stripAgentBlocks(content));
 	const cards = parseCards(content);
 	const charts = parseCharts(content);
+	const action = parseAction(content);
+	const actionBad = actionBlockState(content) === "bad";
 	return {
 		html,
 		cards,
@@ -483,7 +486,8 @@ const view = (m) => {
 		// Mermaid diagrams and page hand-offs can't be drawn or followed here; each
 		// gets its own chip to the web chat.
 		chips: messageChips(content),
-		action: parseAction(content),
+		action,
+		actionBad,
 		skills: parseSkillsUsed(content),
 		took: spanBetween(m.creation, m.modified),
 		// A turn can end with nothing to show: the runtime aborts a stalled model
@@ -499,7 +503,8 @@ const view = (m) => {
 			!html &&
 			!cards &&
 			!charts.length &&
-			!parseAction(content) &&
+			!action &&
+			!actionBad &&
 			!m.error &&
 			!(m.canvas || []).length &&
 			!m.stopped,
@@ -1651,7 +1656,7 @@ onUnmounted(() => {
 					<div v-if="it.msg.stopped" class="jv-stopped">You stopped this reply.</div>
 					<ActionCard
 						v-if="
-							it.view.action &&
+							(it.view.action || it.view.actionBad) &&
 							it.key === lastAssistantKey &&
 							!dismissedActions.has(it.key)
 						"
@@ -1844,7 +1849,7 @@ onUnmounted(() => {
 		<!-- the turn in flight -->
 		<template v-if="live">
 			<div v-if="live.text" class="jv-msg-agent">
-				<div class="jv-md" v-html="renderMarkdown(stripAgentBlocks(live.text))" />
+				<div class="jv-md" v-html="renderMarkdown(stripAgentBlocks(live.text, true))" />
 			</div>
 		</template>
 
