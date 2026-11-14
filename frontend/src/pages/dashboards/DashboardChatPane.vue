@@ -111,15 +111,24 @@
 								>{{ m.error }}</pre
 							>
 							<!-- the same retry API and target rule as ChatView -->
-							<Button
-								v-if="m.err.retryable && m.name === retryTarget"
-								class="mt-1.5"
-								variant="subtle"
-								size="sm"
-								:label="retryButtonLabel"
-								:disabled="retryDisabled"
-								@click="retryFailed(m)"
-							/>
+							<div class="mt-1.5 flex gap-1.5">
+								<Button
+									v-if="m.err.retryable && m.name === retryTarget"
+									variant="subtle"
+									size="sm"
+									:label="retryButtonLabel"
+									:disabled="retryDisabled"
+									@click="retryFailed(m)"
+								/>
+								<Button
+									v-if="supportOn"
+									variant="subtle"
+									size="sm"
+									label="Report error"
+									:disabled="reportingError"
+									@click="reportError(m)"
+								/>
+							</div>
 						</div>
 					</div>
 					<!-- assistant: markdown, same renderer + prose classes as the
@@ -425,7 +434,10 @@ import {
 	getConversationContext,
 	compactConversation,
 	retryMessage,
+	getErrorReportDetails,
 } from "@/api";
+import { useRouter } from "vue-router";
+import { supportErrorDraft } from "@/lib/supportErrorDraft";
 import { brand } from "@/branding";
 import { errHtml, escapeHtml, turnErrorInfo, showsRawReason } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
@@ -753,7 +765,42 @@ const scroller = ref(null);
 // reload has only the row's error text and reclassifies from that.
 const errorMeta = ref({});
 function errorNote(m) {
-	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", { provider: m.provider });
+	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", {
+		provider: m.provider,
+		admin: canConnectModel,
+	});
+}
+// Report error, as in the main chat: a ticket draft carrying the server's scrubbed copy of the
+// error and the run id, since support works from the ticket alone.
+const router = useRouter();
+const supportOn =
+	typeof window !== "undefined" && !!(window.support_available && window.has_support_access);
+const reportingError = ref(false);
+async function reportError(m) {
+	if (reportingError.value || !supportOn || !conversation.value || !m?.name) return;
+	reportingError.value = true;
+	try {
+		let details = null;
+		try {
+			const res = await getErrorReportDetails(conversation.value, m.name);
+			details = res && res.data ? res.data : null;
+		} catch {
+			details = null;
+		}
+		const draft = supportErrorDraft({
+			code: m.err?.code,
+			upstream: m.err?.upstream,
+			conversation: conversation.value,
+			message: m.name,
+			at: m.modified || m.creation,
+			details,
+		});
+		if (draft) await router.push({ name: "SupportNew", query: draft });
+	} catch {
+		toast.error("Could not open Support. Try again.");
+	} finally {
+		reportingError.value = false;
+	}
 }
 // `err` is classified once here, not per template read (five reads per bubble).
 const bubbles = computed(() =>

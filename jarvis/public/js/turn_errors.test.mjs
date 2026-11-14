@@ -214,3 +214,47 @@ test("a system error keeps its raw text as the reason (which file, which resourc
   assert.equal(showsRawReason(turnErrorInfo(INSIDER)), false);
   assert.equal(showsRawReason(turnErrorInfo("Please run /login")), false);
 });
+
+test("an admin is never told to ask an admin, for any known error", () => {
+  const cases = JSON.parse(
+    readFileSync(
+      new URL("../../tests/fixtures/turn_errors.json", import.meta.url),
+      "utf8"
+    )
+  );
+  const extra = [
+    "ECONNREFUSED connecting to OpenAI",
+    ...FAILOVER_CASES.map((c) => c.error),
+  ];
+  for (const text of [...cases.map((c) => c.error), ...extra]) {
+    const info = turnErrorInfo(text, undefined, {
+      admin: true,
+      failedAtMs: Date.now(),
+    });
+    const said = [info.hint, ...(info.models || []).map((m) => m.next)].join(
+      " "
+    );
+    assert.doesNotMatch(said, /\badmin(istrator)?\b/i, `${text} -> ${said}`);
+  }
+});
+
+test("a member is pointed at their workspace admin for an admin fix", () => {
+  const info = turnErrorInfo(
+    "OpenAI API error: 401 Unauthorized. Incorrect API key"
+  );
+  assert.equal(
+    info.hint,
+    "Ask your workspace admin to reconnect the service or update its key."
+  );
+  const admin = turnErrorInfo(
+    "OpenAI API error: 401 Unauthorized. Incorrect API key",
+    undefined,
+    {
+      admin: true,
+    }
+  );
+  assert.equal(
+    admin.hint,
+    "Reconnect the service or update its key in AI models."
+  );
+});
