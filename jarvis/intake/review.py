@@ -333,20 +333,22 @@ def _approve(request, activity, answers: dict) -> dict:
 	payload = _payload(request)
 	trigger, s = draft._load_spec(activity)
 	try:
-		uploader = draft._uploader(activity, trigger)
+		uploader = draft._uploader(activity, trigger, keep=True)
 		values = _merge(s, payload, answers, uploader)
-		doctype, name = draft.create(activity, values, allow_missing=False)
+		# keep_row: a refusal raises and leaves the row, the source record and the
+		# uploader's bell alone, so the request stays answerable.
+		doctype, name = draft.create(
+			activity, values, allow_missing=False, keep_row=True, tell_uploader=False
+		)
 	except draft.DraftFailed as e:
-		return _still_pending(request, activity, trigger, payload, str(e))
+		return _still_pending(request, payload, str(e))
 	return _settle(request, "Approved", _decision_text(payload, answers, doctype, name)) | {"draft": name}
 
 
-def _still_pending(request, activity, trigger, payload: dict, why: str) -> dict:
-	"""The site refused the reviewer's answers (``draft.create`` already set the row Failed).
-	Put the row back in review and keep the request Pending with the reason on the form, so
-	the reviewer fixes the values or rejects: one request, no new one on retry, no loop."""
-	activity.db_set({"status": "Needs Review", "summary": f"Waiting for a reviewer: {why}"[:140]})
-	draft._guarded(draft._write_back, activity, trigger, "Needs Review", None)
+def _still_pending(request, payload: dict, why: str) -> dict:
+	"""The site refused the reviewer's answers (``draft.create(keep_row=True)`` left the row
+	in review). Keep the request Pending with the reason on the form, so the reviewer fixes
+	the values or rejects: one request, no new one on retry, no loop."""
 	frappe.db.set_value(
 		AR,
 		request.name,

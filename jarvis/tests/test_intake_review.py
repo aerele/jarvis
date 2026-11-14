@@ -234,6 +234,24 @@ class TestIntakeReview(FrappeTestCase):
 		self.assertEqual((state.status, state.decided_by), ("Approved", OWNER))
 		self.assertIn(f"Draft ready: {PARENT} {doc.name}", state.decision)
 
+	def test_pages_note_is_information_and_never_blocks_approval(self):
+		_rule, row, name = self._pending()
+		payload = frappe.parse_json(frappe.db.get_value(AR, name, "intake_missing"))
+		_trigger, s = draft._load_spec(row)
+		note = review._describe(s, draft._truncated_item("Read 3 of 8 pages"))
+		self.assertEqual(
+			(note["key"], note["answerable"], note["label"], note["reason"]),
+			("_pages", False, "Pages", "Only 3 of 8 pages read"),
+		)
+		payload["missing"].append(note)
+		frappe.db.set_value(AR, name, "intake_missing", json.dumps(payload))
+		# Answering the real gap is enough; the pages entry asks for nothing.
+		res = self._decide(OWNER, name, {"items.2.qty": "7"})
+		self.assertEqual(res["status"], "Approved")
+		frappe.set_user("Administrator")
+		row.reload()
+		self.assertEqual(row.status, "Success")
+
 	def test_system_manager_may_approve(self):
 		_rule, row, name = self._pending()
 		res = self._decide("Administrator", name, {"items.2.qty": 3})
@@ -314,6 +332,7 @@ class TestIntakeReview(FrappeTestCase):
 		self.addCleanup(
 			lambda: (frappe.get_doc("User", UPLOADER).add_roles(ROLE), frappe.clear_cache(user=UPLOADER))
 		)
+		before = frappe.db.get_value(ACTIVITY, row.name, ["status", "summary", "detail"], as_dict=True)
 		res = self._decide(OWNER, name, {"items.2.qty": 3})
 		# Not closed: the reviewer sees why on the form and can answer again.
 		self.assertEqual(res["status"], "Pending")
@@ -321,6 +340,12 @@ class TestIntakeReview(FrappeTestCase):
 		frappe.set_user("Administrator")
 		row.reload()
 		self.assertEqual(row.status, "Needs Review")
+		# Stream A's keep_row contract: the row is untouched and no failed bell goes out.
+		self.assertEqual(
+			frappe.db.get_value(ACTIVITY, row.name, ["status", "summary", "detail"], as_dict=True), before
+		)
+		self.assertFalse(self._bells(UPLOADER, "You can't create"))
+		self.assertFalse(self._bells(UPLOADER, "Open it and press Retry"))
 		self.assertEqual(self._request(name).status, "Pending")
 		self.assertFalse(frappe.db.count(PARENT))
 		frappe.set_user(OWNER)
