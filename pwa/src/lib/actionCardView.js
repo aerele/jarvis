@@ -2,6 +2,7 @@
 // write, or an error. Never a throw, so the card is never blank. Relative imports
 // only, so bare `node --test` can run this file.
 import { cardTableSummary } from "./cardTables.js";
+import { GATED_VERBS } from "../../../frontend/src/lib/chatAction.js";
 
 const errorView = (agentName) => ({
 	kind: "error",
@@ -17,6 +18,8 @@ function buildView(action, agentName) {
 		return { kind: "email", to: action.to, subject: action.subject, body: action.body };
 
 	const verb = action.verb ? String(action.verb).trim().toLowerCase() : "create";
+	// The server builds the real confirmation card for these; draw nothing here.
+	if (GATED_VERBS.has(verb)) return { kind: "none" };
 	if (verb !== "create" && verb !== "update") return errorView(agentName);
 
 	const fields = (action.fields || []).map((f) => ({ label: f.label, value: f.value }));

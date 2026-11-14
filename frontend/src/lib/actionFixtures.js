@@ -1,7 +1,8 @@
 /**
  * Golden jarvis-action blocks shared by the desktop (vitest) and phone (node:test)
  * suites. `block` is the raw text between the fences and may be invalid JSON.
- * `expect` is what a client must do with it: show a "card" or the "error" view.
+ * `expect` is what a client must do with it: show a "card", the "error" view, or
+ * "none" (a valid action that draws no card of its own: the server sends one).
  *
  * Relative-import friendly and dependency-free: the phone app's node tests load it.
  */
@@ -62,6 +63,11 @@ export const ACTION_FIXTURES = [
 		id: "verb-unknown",
 		block: block({ ...base, verb: "draft", fields }),
 		expect: "error",
+	},
+	{
+		id: "verb-gated",
+		block: block({ kind: "doc", verb: "submit", doctype: "Timesheet", name: "TS-0001" }),
+		expect: "none",
 	},
 	{
 		id: "docs-batch",
