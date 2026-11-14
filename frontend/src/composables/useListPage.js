@@ -231,8 +231,11 @@ export function useListPage({
 				applyFilterError(info);
 				return;
 			}
-			error.value = errMsg(e); // keep last-good rows visible
-			toast.error(error.value);
+			// Keep last-good rows visible. A list that polls fails every tick while the
+			// server is down: tell the user once, then again only after a good load.
+			const alreadyFailing = !!error.value;
+			error.value = errMsg(e);
+			if (!alreadyFailing) toast.error(error.value);
 		} finally {
 			if (id === reqId) loading.value = false;
 		}

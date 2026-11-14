@@ -821,11 +821,10 @@ class TestGetActivityDetail(_TriggersApiTestCase):
 				get_activity_detail(blank)
 
 	def test_non_string_name_is_rejected_before_any_read(self):
-		# Frappe's whitelist type check (FrappeTypeError) is a no-op for this module:
-		# ``from __future__ import annotations`` makes the annotations strings, which
-		# frappe.utils.typing_validations skips. So the body must reject a non-str
-		# itself (ValidationError). Either error is accepted, as in test_pulse_feedback;
-		# call with keyword arguments and the request condition, as Frappe does.
+		# Frappe's whitelist type check (FrappeTypeError) runs on a request; a direct call
+		# skips it, so the body must reject a non-str itself (ValidationError). Either error
+		# is accepted, as in test_pulse_feedback; call with keyword arguments and the
+		# request condition, as Frappe does.
 		frappe.set_user(ADMIN_USER)
 		with patch.object(frappe, "in_test", True):
 			for bad in (None, 7, ["a"], {"a": 1}):
@@ -1108,3 +1107,46 @@ class TestDuplicateTriggers(_TriggersApiTestCase):
 		self.assertTrue(
 			any(m.get("indicator") == "orange" for m in map(frappe.parse_json, frappe.local.message_log))
 		)
+
+
+class TestIntakeRowFeedScope(_TriggersApiTestCase):
+	"""Intake rows belong to the uploader in the SPA feed too, even when another
+	user can read the row's target doc. Other action types keep the target rule."""
+
+	def _seed(self):
+		marker = f"intake-feed-{frappe.generate_hash(length=8)}"
+		todo = frappe.get_doc(
+			{"doctype": "ToDo", "description": "intake feed target", "allocated_to": PLAIN_USER}
+		).insert(ignore_permissions=True)
+		self._todos.append(todo.name)
+		rows = {}
+		for key, action, owner in (
+			("mine", "Intake", PLAIN_USER),
+			("theirs", "Intake", ADMIN_USER),
+			("llm", "LLM", ADMIN_USER),
+		):
+			name = self._insert_activity_row(
+				trigger=marker, action_type=action, target_doctype="ToDo", target_docname=todo.name
+			)
+			frappe.db.set_value(ACTIVITY, name, "owner", owner, update_modified=False)
+			rows[key] = name
+		return marker, rows
+
+	def test_non_manager_sees_only_own_intake_rows(self):
+		marker, rows = self._seed()
+		frappe.set_user(PLAIN_USER)
+		names = {
+			r["name"] for r in list_activity_page(filters=frappe.as_json({"trigger": marker}))["data"]["rows"]
+		}
+		self.assertIn(rows["mine"], names)
+		self.assertNotIn(rows["theirs"], names)
+		# Non-Intake rows keep today's rule: visible when the target is readable.
+		self.assertIn(rows["llm"], names)
+
+	def test_manager_sees_all_intake_rows(self):
+		marker, rows = self._seed()
+		frappe.set_user(ADMIN_USER)
+		names = {
+			r["name"] for r in list_activity_page(filters=frappe.as_json({"trigger": marker}))["data"]["rows"]
+		}
+		self.assertEqual(names, set(rows.values()))

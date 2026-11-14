@@ -1,11 +1,13 @@
 <template>
 	<Teleport v-if="showHeader" to="#app-header">
 		<slot>
-			<header class="flex h-10.5 items-center justify-between py-[7px] sm:pl-5 pl-2 pr-5">
+			<header
+				class="flex min-h-10.5 flex-wrap items-center justify-between gap-y-1 py-[7px] sm:pl-5 pl-2 pr-5"
+			>
 				<div class="flex items-center gap-2">
 					<slot name="left-header" />
 				</div>
-				<div class="flex items-center gap-2">
+				<div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
 					<!-- "Go to Desk" - uniform across every page, and always the
 					     LEFTMOST item of the right cluster so each page's primary
 					     action keeps the rightmost corner (the design standard). -->
