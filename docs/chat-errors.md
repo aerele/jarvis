@@ -72,6 +72,14 @@ workspace admin; its `adminHint` is the step an admin can take (AI models) or
 Desk widget: System Manager or Jarvis Admin). A test sweeps every fixture as an
 admin and fails if a hint says "admin".
 
+Report error shows only on a failure no one on the workspace can fix: rules
+flagged `support: true` (server permission, storage, setup, unreachable,
+connection, invalid request, provider outage, site checks, unknown) and a
+failover where some model's reason is support-only or was never received. A
+failure the user or admin can fix (sign-in, usage cap, key, model, context,
+size, timeout, safety, empty reply) shows its step and no button. A test fails
+if a rule's copy mentions support but the rule is not flagged, or the reverse.
+
 Report error (desktop chat and the dashboard chat pane, when support is on)
 opens a ticket draft that carries what support needs, since support cannot open
 the customer's site: the summary, each failed model's cause, the run id (the
