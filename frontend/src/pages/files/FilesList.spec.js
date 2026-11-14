@@ -25,6 +25,13 @@ vi.mock("frappe-ui", () => ({
 	Dropdown: { template: "<div/>" },
 	FeatherIcon: { template: "<i/>" },
 	Tooltip: { template: "<span><slot/></span>" },
+	Select: { template: "<select/>" },
+	TabButtons: {
+		props: ["buttons", "modelValue"],
+		emits: ["update:modelValue"],
+		template:
+			'<div class="tabs"><button v-for="b in buttons" :key="b.value" class="tab" :data-value="b.value" @click="$emit(\'update:modelValue\', b.value)">{{ b.label }}</button></div>',
+	},
 	toast: {
 		success: vi.fn(),
 		error: vi.fn(),
@@ -36,7 +43,7 @@ vi.mock("frappe-ui", () => ({
 vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
 		props: ["rows"],
-		template: `<div><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-status" :row="row" /><slot name="cell-result" :row="row" /><slot name="cell-_rerun" :row="row" /></div></div>`,
+		template: `<div><slot name="right-header" /><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-status" :row="row" /><slot name="cell-result" :row="row" /><slot name="cell-_rerun" :row="row" /></div></div>`,
 	},
 }));
 vi.mock("@/components/FilePreview.vue", () => ({ default: { template: "<div/>" } }));
@@ -44,6 +51,14 @@ const shell = vi.hoisted(() => ({ refreshApprovalsCount: vi.fn() }));
 vi.mock("@/stores/shell", () => ({ useShellStore: () => shell }));
 vi.mock("@/utils/datetime", () => ({ timeAgo: () => "now", exactDate: () => "" }));
 vi.mock("@/branding", () => ({ brand: { agentName: "Jarvis" } }));
+vi.mock("@/pages/files/IntakeList.vue", () => ({
+	default: {
+		props: ["scope"],
+		emits: ["update:scope", "switch"],
+		template:
+			'<div class="intake-view" :data-scope="scope || \'mine\'"><button class="pick-all" @click="$emit(\'update:scope\', \'all\')"/><button class="go-dropped" @click="$emit(\'switch\', \'dropped\')"/></div>',
+	},
+}));
 vi.mock("@/api", () => ({
 	fileboxListPage: vi.fn(),
 	listCustomSkills: vi.fn(async () => []),
@@ -108,6 +123,62 @@ describe("FilesList: a sheet being applied", () => {
 		const settled = api.fileboxListPage.mock.calls.length;
 		await vi.advanceTimersByTimeAsync(15000);
 		expect(api.fileboxListPage.mock.calls.length).toBe(settled);
+	});
+});
+
+describe("FilesList: the Dropped / Intake switch", () => {
+	it("opens on Dropped and swaps to the Intake view and back", async () => {
+		const w = await mountList([applying]);
+		expect(w.find(".row").exists()).toBe(true);
+		expect(w.find(".intake-view").exists()).toBe(false);
+		await w.find('.tab[data-value="intake"]').trigger("click");
+		expect(w.find(".intake-view").exists()).toBe(true);
+		expect(w.find(".row").exists()).toBe(false);
+		w.unmount();
+	});
+
+	it("keeps the chosen Whose files scope across a Dropped round trip", async () => {
+		const w = await mountList([applying]);
+		await w.find('.tab[data-value="intake"]').trigger("click");
+		expect(w.find(".intake-view").attributes("data-scope")).toBe("mine");
+		await w.find(".pick-all").trigger("click"); // the admin picks All
+		await w.find(".go-dropped").trigger("click");
+		await w.find('.tab[data-value="intake"]').trigger("click");
+		expect(w.find(".intake-view").attributes("data-scope")).toBe("all");
+		w.unmount();
+	});
+
+	it("moves focus to the selected switch button after a switch, waiting for the new header", async () => {
+		const w = await mountList([applying]);
+		const host = document.createElement("div");
+		host.innerHTML =
+			'<div data-filebox-switch><button role="radio" aria-checked="false">Dropped</button><button role="radio" aria-checked="true" id="on">Intake</button></div>';
+		document.body.appendChild(host);
+		await w.find('.tab[data-value="intake"]').trigger("click");
+		await new Promise((r) => setTimeout(r, 50));
+		expect(document.activeElement && document.activeElement.id).toBe("on");
+		host.remove();
+		w.unmount();
+	});
+
+	it("stops polling the Dropped list while the Intake view is shown", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		const w = await mountList([applying]);
+		await w.find('.tab[data-value="intake"]').trigger("click");
+		const calls = api.fileboxListPage.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(20000);
+		expect(api.fileboxListPage.mock.calls.length).toBe(calls);
+		w.unmount();
+		vi.useRealTimers();
+	});
+
+	it("opens on Intake from the ?view=intake link a bell carries", async () => {
+		const { useRoute } = await import("vue-router");
+		useRoute().query.view = "intake";
+		const w = await mountList([applying]);
+		expect(w.find(".intake-view").exists()).toBe(true);
+		delete useRoute().query.view;
+		w.unmount();
 	});
 });
 
