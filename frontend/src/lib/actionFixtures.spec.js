@@ -42,6 +42,20 @@ describe("ACTION_FIXTURES through normaliseAction", () => {
 		}
 	});
 
+	it("every none fixture is a readable, valid action", () => {
+		const none = valid.filter((x) => x.expect === "none");
+		expect(none.length).toBeGreaterThan(0);
+		for (const f of none) {
+			const a = normaliseAction(parse(f));
+			expect(a, f.id).not.toBeNull();
+			expect(a.unreadable, f.id).toBeUndefined();
+		}
+	});
+
+	it("every fixture expects card, error or none", () => {
+		for (const f of ACTION_FIXTURES) expect(["card", "error", "none"], f.id).toContain(f.expect);
+	});
+
 	it("every error fixture is unreadable or rejected by the model rules", () => {
 		for (const f of valid.filter((x) => x.expect === "error" && x.id !== "json-array")) {
 			const a = normaliseAction(parse(f));

@@ -295,7 +295,7 @@ async function copyBody() {
 		</div>
 	</div>
 
-	<div v-else class="jv-action">
+	<div v-else-if="view.kind === 'error'" class="jv-action">
 		<div class="jv-action-err">{{ view.message }}</div>
 	</div>
 </template>

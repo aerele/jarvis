@@ -101,6 +101,9 @@ export function actionBlockState(content) {
 	}
 }
 
+/** Verbs whose real confirmation card is built by the server and arrives separately. */
+export const GATED_VERBS = new Set(["submit", "cancel", "delete", "amend"]);
+
 /**
  * The red error-card copy for a draft block the desktop cannot show, or "".
  * Error when the closed fence is not a JSON object, the action has unreadable
@@ -119,6 +122,7 @@ export function draftBlockError(content, action, agentName) {
 				(action.kind !== "email" &&
 					!!action.verb &&
 					action.verb !== "create" &&
-					action.verb !== "update")));
+					action.verb !== "update" &&
+					!GATED_VERBS.has(action.verb))));
 	return bad ? `Couldn't show this draft. Ask ${agentName} to send it again.` : "";
 }

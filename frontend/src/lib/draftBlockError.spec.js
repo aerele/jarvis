@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { ACTION_FIXTURES } from "./actionFixtures";
-import { draftBlockError, normaliseAction } from "./chatAction";
+import { draftBlockError, GATED_VERBS, normaliseAction } from "./chatAction";
 
 const COPY = "Couldn't show this draft. Ask Jarvis to send it again.";
 const wrap = (block) => "Here is the draft.\n```jarvis-action\n" + block + "\n```\n";
@@ -24,6 +24,18 @@ describe("draftBlockError", () => {
 			expect(out).toBe(wantsError ? COPY : "");
 		});
 	}
+
+	it("verb-gated (submit) is not an error: the waiting note shows instead", () => {
+		const f = ACTION_FIXTURES.find((x) => x.id === "verb-gated");
+		expect(draftBlockError(wrap(f.block), actionOf(f.block), "Jarvis")).toBe("");
+		for (const verb of GATED_VERBS)
+			expect(draftBlockError("", { kind: "doc", verb }, "Jarvis")).toBe("");
+	});
+
+	it("verb-unknown (draft) still shows the copy", () => {
+		const f = ACTION_FIXTURES.find((x) => x.id === "verb-unknown");
+		expect(draftBlockError(wrap(f.block), actionOf(f.block), "Jarvis")).toBe(COPY);
+	});
 
 	it("uses the agent name it is given", () => {
 		expect(draftBlockError(wrap("{bad"), null, "Terra")).toBe(
