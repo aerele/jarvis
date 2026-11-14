@@ -202,14 +202,19 @@ reaper, cancel and expiry keep working. Switching it off resumes the queue.
 
    ```python
    from jarvis.tools._export.clock import now_datetime
+
    for name in frappe.get_all(
-       "Jarvis Export Job", filters={"status": ["in", ["queued", "paused"]]}, pluck="name"
+   	"Jarvis Export Job", filters={"status": ["in", ["queued", "paused"]]}, pluck="name"
    ):
-       frappe.db.set_value("Jarvis Export Job", name, {
-           "status": "cancelled",
-           "error": "Background exports were turned off on this site.",
-           "finished_at": now_datetime(),
-       })
+   	frappe.db.set_value(
+   		"Jarvis Export Job",
+   		name,
+   		{
+   			"status": "cancelled",
+   			"error": "Background exports were turned off on this site.",
+   			"finished_at": now_datetime(),
+   		},
+   	)
    frappe.db.commit()
    ```
 3. Wait until no row is `running` (Desk list, System Manager), or cancel those from

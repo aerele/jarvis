@@ -1028,6 +1028,20 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertEqual(client.call_count, 1)
 		self.assertEqual(self._get(stale).status, "Skipped")
 
+	def test_turned_off_rule_rows_ring_one_bell_per_uploader(self):
+		rule = self._rule()
+		for i in range(3):
+			self._row(rule, self._file(f"off{i}.png"))
+		frappe.db.set_value(TRIGGER, rule.name, "enabled", 0)
+		engine.clear_cache()
+		capture.clear_intake_cache()
+		subject = "%files were not read: the rule is turned off%"
+		before = frappe.db.count("Notification Log", {"subject": ["like", subject]})
+		with mock.patch("frappe.enqueue"):
+			worker.pump()
+		self.assertEqual(frappe.db.count("Notification Log", {"subject": ["like", subject]}), before + 1)
+		self.assertEqual(frappe.db.count(ACTIVITY, {"trigger": rule.name, "status": "Skipped"}), 3)
+
 	def test_pump_ends_queued_rows_when_no_rule_is_enabled_at_all(self):
 		rule = self._rule()
 		row = self._row(rule)

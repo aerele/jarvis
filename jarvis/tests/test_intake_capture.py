@@ -488,6 +488,83 @@ class TestIntakeCapture(FrappeTestCase):
 			capture.on_record_save(note, "on_update")
 		self.assertEqual([r.source_file for r in self._rows(rule)], [doc.name])
 
+	def _event_rule(self, event):
+		return self._rule(
+			intake_source="Record",
+			intake_folder=None,
+			intake_record_doctype="Note",
+			intake_record_event=event,
+			intake_target_doctype="ToDo",
+		)
+
+	def _note(self):
+		note = frappe.get_doc({"doctype": "Note", "title": "n-" + frappe.generate_hash(length=6)}).insert()
+		self.addCleanup(frappe.delete_doc, "Note", note.name, force=True)
+		return note
+
+	def test_run_when_defaults_to_file_attached(self):
+		rule = self._event_rule("File attached")
+		self.assertEqual(frappe.db.get_value(TRIGGER, rule.name, "intake_record_event"), "File attached")
+		fresh = self._rule(
+			intake_source="Record",
+			intake_folder=None,
+			intake_record_doctype="Event",
+			intake_target_doctype="ToDo",
+		)
+		self.assertEqual(fresh.intake_record_event, "File attached")
+
+	def test_after_insert_reads_files_bound_in_the_insert_only(self):
+		rule = self._event_rule("After Insert")
+		# A file attached to a saved record (the upload hook) is not an insert-time file.
+		note = self._note()
+		self._upload("late.pdf", attached_to_doctype="Note", attached_to_name=note.name)
+		self.assertEqual(self._rows(rule), [])
+		self._bind(note, "later.pdf")
+		with mock.patch("frappe.enqueue"):
+			note.reload().save()
+		self.assertEqual(self._rows(rule), [])
+		# In the insert request: captured once.
+		fresh = frappe.get_doc({"doctype": "Note", "title": "n-" + frappe.generate_hash(length=6)})
+		fresh.flags.in_insert = True
+		fresh.name = "n-new-" + frappe.generate_hash(length=6)
+		doc = self._bind(fresh, "atinsert.pdf")
+		with mock.patch("frappe.enqueue"):
+			capture.on_record_save(fresh, "on_update")
+		rows = self._rows(rule)
+		self.assertEqual([(r.source_file, r.doc_event) for r in rows], [(doc.name, "on_update")])
+
+	def test_on_submit_reads_every_unread_attachment_once(self):
+		rule = self._event_rule("On Submit")
+		note = self._note()
+		first = self._upload("a.pdf", attached_to_doctype="Note", attached_to_name=note.name)[0]
+		second = self._bind(note, "b.pdf")
+		# Not at upload, not on a save.
+		self.assertEqual(self._rows(rule), [])
+		with mock.patch("frappe.enqueue"):
+			note.reload().save()
+		self.assertEqual(self._rows(rule), [])
+		with mock.patch("frappe.enqueue") as enq:
+			capture.on_record_submit(note.reload(), "on_submit")
+			capture.on_record_submit(note, "on_submit")
+		rows = self._rows(rule)
+		self.assertEqual({r.source_file for r in rows}, {first.name, second.name})
+		self.assertEqual({r.doc_event for r in rows}, {"on_submit"})
+		self.assertEqual(enq.call_count, 2)
+
+	def test_file_attached_rules_ignore_submit_and_other_modes_ignore_file_upload(self):
+		attached = self._event_rule("File attached")
+		note = self._note()
+		with mock.patch("frappe.enqueue"):
+			self._upload("a.pdf", attached_to_doctype="Note", attached_to_name=note.name)
+			capture.on_record_submit(note, "on_submit")
+		self.assertEqual(len(self._rows(attached)), 1)
+
+	def test_duplicate_check_is_per_event(self):
+		self._event_rule("After Insert")
+		self._event_rule("On Submit")  # same doctype and target, different moment: allowed
+		with self.assertRaises(frappe.ValidationError):
+			self._event_rule("After Insert")
+
 	def test_a_submit_or_cancel_save_captures_nothing(self):
 		rule, note = self._watched_note()
 		self._bind(note)
