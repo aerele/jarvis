@@ -60,6 +60,7 @@
 			<div class="flex items-center gap-2">
 				<Button
 					:tooltip="'Refresh'"
+					label="Refresh"
 					icon="refresh-cw"
 					:loading="loading"
 					@click="$emit('refresh')"
@@ -179,9 +180,12 @@
 						v-for="column in visibleColumns"
 						:key="column.key"
 						:item="column"
+						:class="strongHeader ? '!text-ink-gray-7' : ''"
 					/>
 				</ListHeader>
-				<ListRows class="mx-3 sm:mx-5" />
+				<ListRows class="mx-3 sm:mx-5">
+					<PlainRows v-if="plainRows" />
+				</ListRows>
 				<!-- frappe-ui's bar is bg-surface-white, the page colour in dark mode, where its black
 				     shadow does not show; the popover surface and a border keep it raised in both. -->
 				<ListSelectBanner
@@ -320,6 +324,7 @@ import FilterButton from "@/components/list/FilterButton.vue";
 import FilterGroup from "@/components/list/FilterGroup.vue";
 import SortButton from "@/components/list/SortButton.vue";
 import ColumnsButton from "@/components/list/ColumnsButton.vue";
+import PlainRows from "@/components/list/PlainRows.vue";
 import { focusOpenMenu } from "@/lib/focusOpenMenu";
 
 const props = defineProps({
@@ -344,6 +349,11 @@ const props = defineProps({
 	pageLength: { type: Number, default: 20 },
 	defaultSort: { type: Object, default: () => ({ field: "", dir: "" }) },
 	selectable: { type: Boolean, default: false },
+	// Rows are plain divs, not frappe-ui's row button, for a list whose cells hold their own
+	// links or buttons (no row click, no row route).
+	plainRows: { type: Boolean, default: false },
+	// Column headers in the darker ink (the stock gray-5 is 4.17:1 on white).
+	strongHeader: { type: Boolean, default: false },
 	getRowRoute: { type: Function, default: null },
 	onRowClick: { type: Function, default: null },
 	emptyState: { type: Object, default: () => ({}) }, // {title, description, icon?}
