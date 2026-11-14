@@ -1014,7 +1014,7 @@ class TestIntakeWorker(FrappeTestCase):
 		off = self._rule()
 		other = self._rule(intake_target_doctype="Note", intake_spec=json.dumps({"fields": ["title"]}))
 		stale = self._row(off)
-		frappe.db.set_value(TRIGGER, off.name, "enabled", 0)
+		self._turn_off(off)
 		engine.clear_cache()
 		capture.clear_intake_cache()
 		# Another rule is on, so the pump runs its normal path.
@@ -1032,7 +1032,7 @@ class TestIntakeWorker(FrappeTestCase):
 		rule = self._rule()
 		for i in range(3):
 			self._row(rule, self._file(f"off{i}.png"))
-		frappe.db.set_value(TRIGGER, rule.name, "enabled", 0)
+		self._turn_off(rule)
 		engine.clear_cache()
 		capture.clear_intake_cache()
 		subject = "%files were not read: the rule is turned off%"
@@ -1042,10 +1042,62 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertEqual(frappe.db.count("Notification Log", {"subject": ["like", subject]}), before + 1)
 		self.assertEqual(frappe.db.count(ACTIVITY, {"trigger": rule.name, "status": "Skipped"}), 3)
 
+	def _turn_off(self, rule, hours=2):
+		"""Disabled ``hours`` ago (``modified`` is the disabled-at stamp)."""
+		frappe.db.set_value(TRIGGER, rule.name, "enabled", 0, update_modified=False)
+		frappe.db.set_value(
+			TRIGGER,
+			rule.name,
+			"modified",
+			add_to_date(now_datetime(), hours=-hours),
+			update_modified=False,
+		)
+
+	def test_a_rule_switched_off_for_a_moment_keeps_its_queued_rows(self):
+		rule = self._rule()
+		row = self._row(rule)
+		self._turn_off(rule, hours=0)
+		engine.clear_cache()
+		capture.clear_intake_cache()
+		with mock.patch("frappe.enqueue"):
+			worker.pump()
+		self.assertEqual(self._get(row).status, "Queued")
+
+	def test_rows_of_a_deleted_rule_end_at_once(self):
+		rule = self._rule()
+		row = self._row(rule)
+		frappe.delete_doc(TRIGGER, rule.name, ignore_permissions=True, force=True)
+		self._triggers.remove(rule.name)
+		engine.clear_cache()
+		capture.clear_intake_cache()
+		with mock.patch("frappe.enqueue"):
+			worker.pump()
+		self.assertEqual(self._get(row).status, "Skipped")
+
+	def test_start_failures_are_counted_in_the_row_when_redis_is_down(self):
+		row = self._row(self._rule())
+		with mock.patch.object(frappe, "cache", side_effect=ConnectionError("redis down")):
+			counts = [worker._count_start_failure(row) for _i in range(3)]
+		self.assertEqual(counts, [1, 2, 3])
+		self.assertEqual(self._get(row).detail, "Start failures: 3")
+
+	def test_the_caps_are_read_once_per_row(self):
+		row = self._row(self._rule())
+		with (
+			mock.patch.object(worker, "_site_cap", return_value=300) as site,
+			mock.patch.object(worker, "_user_cap", return_value=50) as user,
+			mock.patch.object(worker, "_enqueue_next"),  # the chain reads the caps for the NEXT row
+			mock.patch("frappe.enqueue"),
+			mock.patch("jarvis.intake.client.vision_task_complete", mock.Mock(return_value=READING)),
+			mock.patch("jarvis.intake.draft.finish"),
+		):
+			worker.run_job(row.name)
+		self.assertEqual((site.call_count, user.call_count), (1, 1))
+
 	def test_pump_ends_queued_rows_when_no_rule_is_enabled_at_all(self):
 		rule = self._rule()
 		row = self._row(rule)
-		frappe.db.set_value(TRIGGER, rule.name, "enabled", 0)
+		self._turn_off(rule)
 		engine.clear_cache()
 		capture.clear_intake_cache()
 		worker.pump()
