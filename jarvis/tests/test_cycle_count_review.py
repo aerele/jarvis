@@ -278,8 +278,9 @@ class TestCycleCountFreshReviewSnapshots(FrappeTestCase):
 		adapter = SimpleNamespace(
 			AGENT=review.AGENT,
 			fresh_source_snapshot=fresh_snapshot,
-			collect=lambda scope, policy: events.append(("collect", scope, policy))
-			or {"source_digest": "fresh"},
+			collect=lambda scope, policy: (
+				events.append(("collect", scope, policy)) or {"source_digest": "fresh"}
+			),
 		)
 		self.assertEqual(
 			operator_review._collect_current(adapter, {"scope": "current"}, {"policy": "current"}),

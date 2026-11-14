@@ -111,6 +111,10 @@ def _body_hash(trigger) -> str:
 _STATUS_FIELD_TYPES = ("Data", "Small Text")
 
 
+def _record_event(rule) -> str:
+	return rule.get("intake_record_event") or "File attached"
+
+
 class JarvisTrigger(NotRenamable, Document):
 	def validate(self):
 		self._validate_name()
@@ -355,7 +359,7 @@ class JarvisTrigger(NotRenamable, Document):
 		by_source = {"Folder": "intake_folder", "Record": "intake_record_doctype"}[self.intake_source]
 		# System context on purpose: rules are site-wide, so a permission-filtered
 		# read would miss another user's duplicate.
-		duplicate = frappe.get_all(
+		rows = frappe.get_all(
 			"Jarvis Trigger",
 			filters={
 				"name": ["!=", self.name or ""],
@@ -365,9 +369,12 @@ class JarvisTrigger(NotRenamable, Document):
 				by_source: self.get(by_source),
 				"intake_target_doctype": self.intake_target_doctype,
 			},
-			limit=1,
-			pluck="name",
+			fields=["name", "intake_record_event"],
 		)
+		# A Record rule's source key is the record doctype AND when it runs: an empty value
+		# (a rule saved before the field existed) reads as the default.
+		own = _record_event(self) if self.intake_source == "Record" else None
+		duplicate = [r.name for r in rows if own is None or _record_event(r) == own]
 		if duplicate:
 			frappe.throw(
 				_("Another enabled intake rule already creates {0} from {1}.").format(

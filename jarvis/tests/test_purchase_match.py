@@ -447,9 +447,9 @@ class TestPurchaseMatch(FrappeTestCase):
 			patch.object(
 				matching.frappe,
 				"get_doc",
-				side_effect=lambda doctype, name: fiscal_document()
-				if doctype == "Fiscal Year"
-				else MagicMock(),
+				side_effect=lambda doctype, name: (
+					fiscal_document() if doctype == "Fiscal Year" else MagicMock()
+				),
 			),
 			patch.object(matching.frappe.utils, "today", return_value="2026-09-30"),
 		):

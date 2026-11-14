@@ -963,8 +963,9 @@ class TestAnArmedRunAndItsSkills(SkillsBase):
 			patch.object(
 				macros,
 				"_send_step",
-				side_effect=lambda r, i, p, o: sent.append(p)
-				or {"ok": True, "run_id": macros._step_turn_id(r.name, i)},
+				side_effect=lambda r, i, p, o: (
+					sent.append(p) or {"ok": True, "run_id": macros._step_turn_id(r.name, i)}
+				),
 			),
 			patch.object(macros, "_publish_progress"),
 		):

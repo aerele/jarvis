@@ -286,8 +286,10 @@ class TestDispatchAndWrapEnrichment(FrappeTestCase):
 		frappe.local.conf["disable_global_search"] = 1
 		self.addCleanup(lambda: frappe.local.conf.pop("disable_global_search", None))
 		self.addCleanup(
-			lambda: frappe.db.exists("ToDo", {"description": marker})
-			and frappe.db.delete("ToDo", {"description": marker})
+			lambda: (
+				frappe.db.exists("ToDo", {"description": marker})
+				and frappe.db.delete("ToDo", {"description": marker})
+			)
 		)
 
 		def apply_ok(tool, args):
@@ -325,8 +327,10 @@ class TestApplyActionContract(FrappeTestCase):
 		).insert(ignore_permissions=True)
 		# Tolerant cleanup: a real rollback under test may have already dropped it.
 		self.addCleanup(
-			lambda: frappe.db.exists("Jarvis Conversation", conv.name)
-			and frappe.delete_doc("Jarvis Conversation", conv.name, force=True, ignore_permissions=True)
+			lambda: (
+				frappe.db.exists("Jarvis Conversation", conv.name)
+				and frappe.delete_doc("Jarvis Conversation", conv.name, force=True, ignore_permissions=True)
+			)
 		)
 		return conv.name
 
