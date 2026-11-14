@@ -470,7 +470,11 @@ def note_turn_error(err_text, code) -> None:
 		parts = [p for p in model_failures(err_text) if p["code"]]
 		if parts:
 			for part in parts:
-				_note_one(part["code"], part["upstream"], part["model"], part["retry_after_s"])
+				upstream = part["upstream"]
+				if part["code"] == CODE_EXPIRED and not upstream:
+					# The part names no provider: the whole text may (a providers= token).
+					upstream = subscription_upstream_from_error(err_text)
+				_note_one(part["code"], upstream, part["model"], part["retry_after_s"])
 			return
 		if code == CODE_EXPIRED:
 			_note_one(code, subscription_upstream_from_error(err_text), "", None)
@@ -495,24 +499,15 @@ def _bare(model: str) -> str:
 
 
 def _read_limits(now: int) -> dict:
-	"""``{bare model id: {since, until}}`` still in force at ``now``."""
-	raw = frappe.cache().get_value(LIMITS_KEY)
-	if not isinstance(raw, dict):
-		return {}
-	return {
-		model: entry
-		for model, entry in raw.items()
-		if isinstance(entry, dict) and _int(entry.get("until")) > now
-	}
-
-
-def _write_limits(limits: dict, now: int) -> None:
-	if limits:
-		ttl = max(_int(e.get("until")) for e in limits.values()) - now
-		frappe.cache().set_value(LIMITS_KEY, limits, expires_in_sec=max(ttl, 60))
-	else:
-		frappe.cache().delete_value(LIMITS_KEY)
-	_publish_changed()
+	"""``{bare model id: {since, until}}`` still in force at ``now``. One hash field per model, so two
+	turns failing at once on different models cannot overwrite each other; lapsed fields are dropped."""
+	cache = frappe.cache()
+	raw = cache.hgetall(LIMITS_KEY) or {}
+	live = {m: e for m, e in raw.items() if isinstance(e, dict) and _int(e.get("until")) > now}
+	lapsed = [m for m in raw if m not in live]
+	if lapsed:
+		cache.hdel(LIMITS_KEY, lapsed)
+	return {(m.decode() if isinstance(m, bytes) else m): e for m, e in live.items()}
 
 
 def record_usage_limit(model: str, wait_s: int) -> None:
@@ -525,16 +520,19 @@ def record_usage_limit(model: str, wait_s: int) -> None:
 	limits = _read_limits(now)
 	if abs(_int((limits.get(bare) or {}).get("until")) - until) < 60:
 		return  # the same reading again (a retry of the same failure): no event
-	limits[bare] = {"since": now, "until": until}
-	_write_limits(limits, now)
+	cache = frappe.cache()
+	cache.hset(LIMITS_KEY, bare, {"since": now, "until": until})
+	latest = max([until, *(_int(e.get("until")) for e in limits.values())])
+	cache.expire_key(LIMITS_KEY, max(latest - now, 60))
+	_publish_changed()
 
 
 def _clear_usage_limits(models) -> None:
-	now = int(time.time())
-	limits = _read_limits(now)
-	drop = {_bare(m) for m in models} & set(limits)
+	limits = _read_limits(int(time.time()))
+	drop = sorted({_bare(m) for m in models} & set(limits))
 	if drop:
-		_write_limits({m: e for m, e in limits.items() if m not in drop}, now)
+		frappe.cache().hdel(LIMITS_KEY, drop)
+		_publish_changed()
 
 
 def usage_limits() -> dict[str, int]:

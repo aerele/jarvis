@@ -163,6 +163,8 @@ _FAILOVER_PART = re.compile(r"^([\w.-]+)/([^\s:]+):\s*\S", _FLAGS)
 # A pool proxy answers under its own alias; the model it was asked for is named in the reason.
 _NAMED_MODEL = re.compile(r"\bfor model ([\w.:+-]+)", _FLAGS)
 _RETRY_AFTER = re.compile(r"\bretry-after:\s*(\d+)\s*s", _FLAGS)
+# Older rows were stored cut at 240 characters ("... | anthropic/claude-...").
+_CUT_TAIL = re.compile(r"(?:\.\.\.|\u2026)\s*$")
 
 
 def model_failures(raw) -> list[dict]:
@@ -174,13 +176,17 @@ def model_failures(raw) -> list[dict]:
 	if not head:
 		return []
 	out = []
-	for segment in _FAILOVER_SPLIT.split(text[head.end() :]):
+	segments = _FAILOVER_SPLIT.split(text[head.end() :])
+	for i, segment in enumerate(segments):
 		segment = segment.strip()
+		cut = i == len(segments) - 1 and bool(_CUT_TAIL.search(segment))
 		named = _FAILOVER_PART.match(segment)
 		if not named:
 			out.append({"model": "", "code": "", "upstream": "", "retry_after_s": None})
 			continue
 		code = classify_error_text(segment)
+		if cut and code == "gateway":
+			code = ""  # a reason cut mid-sentence that no rule recognises says nothing
 		retry = _RETRY_AFTER.search(segment)
 		model = _NAMED_MODEL.search(segment)
 		out.append(

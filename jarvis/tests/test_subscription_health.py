@@ -1306,6 +1306,12 @@ class TestFailoverCauses(unittest.TestCase):
 			sh.note_turn_error(text, "quota")
 		cap.assert_called_once_with("gpt-5.6-terra", 169907)
 
+	def test_an_expired_part_naming_no_provider_falls_back_to_the_whole_text(self):
+		text = "providers=codex: All models failed (2): pool/alias: 500 auth_unavailable: unauthorized | x/m: timeout"
+		with patch.object(sh, "record_chat_failure") as fail:
+			sh.note_turn_error(text, "subscription-expired")
+		fail.assert_called_once_with("openai")
+
 	def test_the_turn_handler_passes_a_failover_error_on_whatever_its_code(self):
 		from jarvis.chat import turn_handler
 

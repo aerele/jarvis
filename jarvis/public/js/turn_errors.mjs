@@ -193,80 +193,78 @@ function inferCode(text) {
 }
 
 function singleErrorInfo(text, explicitCode, context) {
-  {
-    const inferred = inferCode(text);
-    // Older servers publish broad gateway/provider codes. Refine those from
-    // the saved text too, so historical and live errors get the same remedy.
-    let code =
-      !explicitCode || ["gateway", "provider"].includes(explicitCode)
-        ? inferred === "gateway"
-          ? explicitCode || inferred
-          : inferred
-        : explicitCode;
-    // A dead chat-subscription sign-in needs an upstream to name. Without one, or
-    // when the caller says the workspace has no subscription row for it (an array
-    // that lacks it; undefined means "unknown"), the plain authentication copy fits.
-    let upstream = "";
-    if (code === "subscription-expired") {
-      upstream = subscriptionUpstreamFromError(text, context?.provider);
-      const known = context?.subscriptionUpstreams;
-      if (!upstream || (Array.isArray(known) && !known.includes(upstream)))
-        code = "authentication";
-    }
-    // The site already holds this model's sign-in as expired (admin poll): a generic failure on
-    // that model is that sign-in, whatever the flattened error text says.
-    const expiredUpstream = expiredUpstreamFor(code, context, text);
-    if (expiredUpstream) {
-      code = "subscription-expired";
-      upstream = expiredUpstream;
-    }
-    const rule = Object.hasOwn(byCode, code) ? byCode[code] : byCode.internal;
-    if (code === "subscription-expired") {
-      const label = SUBSCRIPTION_LABELS[upstream];
-      return {
-        code,
-        headline: rule.headline.replace("{provider}", label),
-        hint:
-          context?.admin === true
-            ? "Reconnect it in AI models, then send again."
-            : rule.hint,
-        retryable: rule.retryable,
-        statusUrl: "",
-        statusLabel: "",
-        action: "reconnect",
-        actionLabel: `Reconnect ${label}`,
-        upstream,
-      };
-    }
-    const provider = rule.status ? providerFor(text, context) : undefined;
-    // A status link supplements the cause-specific guidance; it must not
-    // turn a timeout or connection failure into an asserted provider outage.
-    const providerCopy = provider
-      ? {
-          "service-unavailable": {
-            headline: `${provider[1]} could not complete this request`,
-            hint: "Try again shortly, or choose another available model.",
-          },
-          timeout: {
-            headline: `${provider[1]} did not respond in time`,
-            hint: "Try again, split a large request into smaller parts, or choose another available model.",
-          },
-          connection: {
-            headline: `Jarvis could not connect to ${provider[1]}`,
-            hint: "Try again or choose another available model. If this continues, ask your administrator to check the connection.",
-          },
-        }
-      : {};
-    const copy = Object.hasOwn(providerCopy, code) ? providerCopy[code] : rule;
+  const inferred = inferCode(text);
+  // Older servers publish broad gateway/provider codes. Refine those from
+  // the saved text too, so historical and live errors get the same remedy.
+  let code =
+    !explicitCode || ["gateway", "provider"].includes(explicitCode)
+      ? inferred === "gateway"
+        ? explicitCode || inferred
+        : inferred
+      : explicitCode;
+  // A dead chat-subscription sign-in needs an upstream to name. Without one, or
+  // when the caller says the workspace has no subscription row for it (an array
+  // that lacks it; undefined means "unknown"), the plain authentication copy fits.
+  let upstream = "";
+  if (code === "subscription-expired") {
+    upstream = subscriptionUpstreamFromError(text, context?.provider);
+    const known = context?.subscriptionUpstreams;
+    if (!upstream || (Array.isArray(known) && !known.includes(upstream)))
+      code = "authentication";
+  }
+  // The site already holds this model's sign-in as expired (admin poll): a generic failure on
+  // that model is that sign-in, whatever the flattened error text says.
+  const expiredUpstream = expiredUpstreamFor(code, context, text);
+  if (expiredUpstream) {
+    code = "subscription-expired";
+    upstream = expiredUpstream;
+  }
+  const rule = Object.hasOwn(byCode, code) ? byCode[code] : byCode.internal;
+  if (code === "subscription-expired") {
+    const label = SUBSCRIPTION_LABELS[upstream];
     return {
       code,
-      headline: copy.headline,
-      hint: copy.hint,
+      headline: rule.headline.replace("{provider}", label),
+      hint:
+        context?.admin === true
+          ? "Reconnect it in AI models, then send again."
+          : rule.hint,
       retryable: rule.retryable,
-      statusUrl: provider?.[2] || "",
-      statusLabel: provider ? `Check ${provider[1]} status` : "",
+      statusUrl: "",
+      statusLabel: "",
+      action: "reconnect",
+      actionLabel: `Reconnect ${label}`,
+      upstream,
     };
   }
+  const provider = rule.status ? providerFor(text, context) : undefined;
+  // A status link supplements the cause-specific guidance; it must not
+  // turn a timeout or connection failure into an asserted provider outage.
+  const providerCopy = provider
+    ? {
+        "service-unavailable": {
+          headline: `${provider[1]} could not complete this request`,
+          hint: "Try again shortly, or choose another available model.",
+        },
+        timeout: {
+          headline: `${provider[1]} did not respond in time`,
+          hint: "Try again, split a large request into smaller parts, or choose another available model.",
+        },
+        connection: {
+          headline: `Jarvis could not connect to ${provider[1]}`,
+          hint: "Try again or choose another available model. If this continues, ask your administrator to check the connection.",
+        },
+      }
+    : {};
+  const copy = Object.hasOwn(providerCopy, code) ? providerCopy[code] : rule;
+  return {
+    code,
+    headline: copy.headline,
+    hint: copy.hint,
+    retryable: rule.retryable,
+    statusUrl: provider?.[2] || "",
+    statusLabel: provider ? `Check ${provider[1]} status` : "",
+  };
 }
 
 // "All models failed (2): <provider>/<model>: <reason> | <provider>/<model>: <reason>" is how the
@@ -405,10 +403,19 @@ function modelLine(failure, context) {
   };
 }
 
-// Codes whose headline cannot name the cause. For these the stored error text is the only reason
-// there is, so the card shows it as a plain line; every other card says the cause in its headline
-// (and one line per model), with no raw text to expand.
-const RAW_REASON_CODES = new Set(["gateway", "provider", "internal"]);
+// Codes whose headline cannot name the cause, or not the thing that failed (which file, which
+// resource, which field). For these the stored error text is the reason, so the card shows it as a
+// plain line. Every other card says the cause in its headline (one line per model), with no raw text.
+const RAW_REASON_CODES = new Set([
+  "gateway",
+  "provider",
+  "internal",
+  "runtime-permission",
+  "storage",
+  "runtime-setup",
+  "not-found",
+  "invalid-request",
+]);
 
 export function showsRawReason(info) {
   return Boolean(info) && !info.models && RAW_REASON_CODES.has(info.code);

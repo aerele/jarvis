@@ -1716,3 +1716,44 @@ class TestUncutErrorMessage(FrappeTestCase):
 	def test_capped_at_the_stored_column_length(self):
 		full = "a" * 1500
 		self.assertEqual(uncut_error_message("a" * 240 + "...", full), "a" * 1000)
+
+	def _relay_error(self, lifecycle_error, chat_message):
+		sess, ws = _build_session()
+		ws._frames.append(
+			_frame(
+				{
+					"type": "event",
+					"event": "agent",
+					"payload": {
+						"runId": "run-1",
+						"stream": "lifecycle",
+						"data": {"phase": "error", "error": lifecycle_error},
+					},
+				}
+			)
+		)
+		ws._frames.append(
+			_frame(
+				{
+					"type": "event",
+					"event": "chat",
+					"payload": {
+						"runId": "run-1",
+						"sessionKey": "s1",
+						"state": "error",
+						"errorMessage": chat_message,
+					},
+				}
+			)
+		)
+		events = list(sess.relay_turn_events("s1", "run-1", soft_deadline_s=5))
+		return events[-1]
+
+	def test_the_direct_relay_stores_the_lifecycle_frames_whole_text(self):
+		out = self._relay_error(self.FULL, self.FULL[:240] + "...")
+		self.assertEqual(out["kind"], "relay:error")
+		self.assertEqual(out["error"], self.FULL)
+
+	def test_the_direct_relay_keeps_a_whole_chat_message(self):
+		out = self._relay_error(self.FULL, "rate limited")
+		self.assertEqual(out["error"], "rate limited")
