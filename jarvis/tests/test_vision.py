@@ -15,6 +15,26 @@ def _png(w=12, h=12) -> bytes:
 	return buf.getvalue()
 
 
+def _noisy_jpeg(w, h, blur=0) -> bytes:
+	"""Photo-like noise at a high JPEG quality. ``blur`` smooths it so it compresses."""
+	import numpy as np
+	from PIL import Image, ImageFilter
+
+	rng = np.random.default_rng(1)
+	im = Image.fromarray(rng.integers(0, 256, (h, w, 3), dtype=np.uint8))
+	if blur:
+		im = im.filter(ImageFilter.GaussianBlur(blur))
+	buf = io.BytesIO()
+	im.save(buf, format="JPEG", quality=95)
+	return buf.getvalue()
+
+
+def _size(part) -> tuple[int, int]:
+	from PIL import Image
+
+	return Image.open(io.BytesIO(base64.b64decode(part["data_b64"]))).size
+
+
 def _sideways_photo(w=200, h=100, orientation=6) -> bytes:
 	"""A camera JPEG: pixels stored sideways, EXIF says how to turn them upright.
 	A dark block marks the STORED top-left corner."""
@@ -89,6 +109,27 @@ class TestVision(unittest.TestCase):
 		part = vision.image_part(_png(4000, 4000), "big.png")
 		self.assertIsNotNone(part)
 		self.assertLessEqual(len(base64.b64decode(part["data_b64"])), vision._MAX_IMAGE_BYTES)
+
+	def test_photo_keeps_1568_px_when_a_lower_quality_fits(self):
+		part = vision.image_part(_noisy_jpeg(4000, 3000, blur=6), "photo.jpg")
+		data = base64.b64decode(part["data_b64"])
+		self.assertLessEqual(len(data), vision._MAX_IMAGE_BYTES)
+		self.assertEqual(_size(part), (1568, 1176))
+
+	def test_noisy_image_steps_down_in_size_but_is_still_returned(self):
+		part = vision.image_part(_noisy_jpeg(4000, 3000, blur=0), "noise.jpg")
+		self.assertIsNotNone(part)
+		self.assertLessEqual(len(base64.b64decode(part["data_b64"])), vision._MAX_IMAGE_BYTES)
+		self.assertLess(max(_size(part)), 1568)
+
+	def test_small_image_keeps_its_pixel_size(self):
+		self.assertEqual(_size(vision.image_part(_png(800, 600), "s.png")), (800, 600))
+
+	def test_pdf_pages_respect_the_byte_budget(self):
+		parts, _ = vision.pdf_parts(_pdf(2), "doc.pdf")
+		self.assertTrue(parts)
+		for p in parts:
+			self.assertLessEqual(len(base64.b64decode(p["data_b64"])), vision._MAX_IMAGE_BYTES)
 
 	def test_pdf_parts(self):
 		parts, total = vision.pdf_parts(_pdf(3), "doc.pdf")
