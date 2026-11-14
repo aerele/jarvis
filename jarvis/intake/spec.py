@@ -19,6 +19,8 @@ from frappe.model import (
 )
 from frappe.utils import cint
 
+from jarvis.intake import guards
+
 MAX_INSTRUCTIONS_LEN = 4000
 # Header fields plus table columns one rule may read. More only bloats the prompt and the schema.
 MAX_PICKED_FIELDS = 60
@@ -157,6 +159,11 @@ def validate(s: IntakeSpec) -> None:
 	if len(s.fields) + len(columns) > MAX_PICKED_FIELDS:
 		frappe.throw(_("Pick at most {0} fields and columns to read.").format(MAX_PICKED_FIELDS))
 
+	if picks := sensitive_picks(s):
+		frappe.throw(
+			_("{0} cannot be filled by intake: it can give someone access.").format(", ".join(picks))
+		)
+
 	meta = frappe.get_meta(s.target)
 	for fieldname in s.fields:
 		_value_field(meta, fieldname, _("Fields"))
@@ -178,6 +185,23 @@ def validate(s: IntakeSpec) -> None:
 
 	if not s.allow_incomplete:
 		_validate_coverage(s, meta)
+
+
+def sensitive_picks(s: IntakeSpec) -> list[str]:
+	"""Fields or the table of this spec that the write-risk list marks as access-granting for
+	the target (Employee ``user_id``, Customer ``portal_users`` ...): saving the draft would
+	make ERPNext create a User or grant a role, so no rule may fill them."""
+	from jarvis.tools import _write_risk
+
+	_risk, risky = _write_risk._FIELD_SENSITIVE.get(_write_risk.canonical(s.target), ("", ()))
+	picked = [*s.fields, *s.match, *s.defaults, (s.table or {}).get("fieldname")]
+	return sorted({f for f in picked if f in risky})
+
+
+def table_refused(s: IntakeSpec) -> bool:
+	"""True when the chosen child table is a structure, sensitive or role-list doctype."""
+	child = _child_doctype(s)
+	return bool(child and guards.refused_child(child))
 
 
 def _is_blank(value) -> bool:
@@ -220,6 +244,8 @@ def _validate_table(s: IntakeSpec, meta) -> None:
 	df = meta.get_field(table.get("fieldname"))
 	if not df or df.fieldtype != "Table":
 		frappe.throw(_("'{0}' is not a table on {1}.").format(table.get("fieldname"), s.target))
+	if guards.refused_child(df.options):
+		frappe.throw(_("The table '{0}' cannot be filled by intake.").format(table.get("fieldname")))
 	columns = table.get("columns") or []
 	child_meta = frappe.get_meta(df.options)
 	for column in columns:
