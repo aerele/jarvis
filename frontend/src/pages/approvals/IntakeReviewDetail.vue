@@ -3,7 +3,8 @@
 	     read, and one control per value still needed. Approve sends the answers as
 	     JSON; the server builds the draft from the stored reading, no AI call.
 	     Wide: the photo sits in its own sticky column, so it stays on screen while the
-	     reviewer fills the values. Narrow: the photo is pinned above the form. -->
+	     reviewer fills the values. Narrow: the photo is a normal block above the form (never pinned: it would cover
+	     the list rail and crowd the field when the keyboard is open). -->
 	<div
 		ref="root"
 		:aria-busy="busy ? 'true' : 'false'"
@@ -12,7 +13,7 @@
 		<section
 			v-if="file"
 			aria-label="Source file"
-			class="sticky top-0 z-10 min-w-0 bg-surface-white pb-2 lg:self-start lg:pb-0"
+			class="min-w-0 lg:sticky lg:top-0 lg:self-start"
 			data-testid="intake-photo"
 		>
 			<!-- A Button inside the link would nest two controls: style the link itself -->
@@ -21,10 +22,11 @@
 				:href="file.file_url"
 				target="_blank"
 				rel="noopener"
-				class="inline-flex min-h-7 items-center gap-1.5 rounded bg-surface-gray-2 px-2 text-base text-ink-gray-8 hover:bg-surface-gray-3"
+				:title="file.file_name || undefined"
+				class="inline-flex min-h-7 max-w-full min-w-0 items-center gap-1.5 rounded bg-surface-gray-2 px-2 text-base text-ink-gray-8 hover:bg-surface-gray-3"
 			>
-				<FeatherIcon name="paperclip" class="size-4" aria-hidden="true" />
-				{{ file.file_name || "Open file" }}
+				<FeatherIcon name="paperclip" class="size-4 shrink-0" aria-hidden="true" />
+				<span class="min-w-0 truncate">{{ file.file_name || "Open file" }}</span>
 			</a>
 			<a v-else :href="file.file_url" target="_blank" rel="noopener">
 				<img
@@ -112,7 +114,7 @@
 				ref="errorEl"
 				role="alert"
 				tabindex="-1"
-				class="rounded border border-outline-red-1 bg-surface-red-1 p-2 text-sm text-ink-red-4"
+				class="rounded border border-outline-red-1 bg-surface-red-1 p-2 text-sm text-ink-red-5"
 			>
 				{{ error }}
 			</div>
@@ -142,7 +144,7 @@
 							ref="rejectBtn"
 							variant="outline"
 							theme="red"
-							class="!text-ink-red-4"
+							class="!text-ink-red-5"
 							label="Reject"
 							:disabled="busy !== null"
 							@click="startReject"
