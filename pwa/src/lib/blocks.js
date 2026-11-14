@@ -10,7 +10,10 @@
 // still disappear from the prose rather than leak.
 //
 // A relative import, not the @shared alias, so bare `node --test` can run this file.
+import { actionBlockState, normaliseAction } from "../../../frontend/src/lib/chatAction.js";
 import { parseGoto } from "../../../frontend/src/lib/chatGoto.js";
+
+export { actionBlockState };
 
 const CARDS_RE = /```jarvis-cards[ \t]*\n([\s\S]*?)```/;
 const SKILL_RE = /```jarvis-skill[ \t]*\n([\s\S]*?)```/;
@@ -141,8 +144,8 @@ export function parseAction(content) {
 	const mt = content.match(ACTION_RE);
 	if (!mt) return null;
 	try {
-		const a = JSON.parse(mt[1].trim());
-		if (!a || typeof a !== "object") return null;
+		const a = normaliseAction(JSON.parse(mt[1].trim()));
+		if (!a) return null;
 		if (Array.isArray(a.fields)) {
 			a.fields = a.fields.map((f) => ({
 				label: String(f.label || ""),

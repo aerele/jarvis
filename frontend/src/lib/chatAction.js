@@ -21,9 +21,10 @@
  *
  * All are absorbed rather than rejected: the data is unambiguous, and the field
  * keys resolve either way because the builder matches on fieldname OR label.
- * Anything still unbuildable is left alone so it reaches the builder and raises
- * the honest error card, which is the rule that module already states: an action
- * we cannot render must fail, never render empty.
+ * Anything unreadable (a tables value that is not a list of {fieldname, rows},
+ * a fields item that is not an object) sets `unreadable: true` rather than being
+ * dropped quietly, so the client shows its error view: an action we cannot
+ * render must fail, never render a partial card.
  *
  * Pure and dependency-free so it is unit-testable without mounting the view.
  */
@@ -38,20 +39,64 @@ export function normaliseAction(a) {
 	// default, and the card's own render gate has always treated a missing kind as
 	// one, so infer it rather than letting the two gates disagree.
 	if (!a.kind && a.doctype) a.kind = "doc";
-	if (a.fields && !Array.isArray(a.fields) && typeof a.fields === "object") {
-		a.fields = Object.entries(a.fields).map(([label, value]) => ({ label, value }));
-	}
-	// {items:{rows:[...]}} and {items:[...]} both mean the same thing as the
-	// canonical [{fieldname:"items", rows:[...]}]. A table whose rows cannot be
-	// read as a list is dropped rather than guessed at: a half-populated grid the
-	// user confirms believing it is the full set is worse than an empty one.
-	if (a.tables && !Array.isArray(a.tables) && typeof a.tables === "object") {
-		a.tables = Object.entries(a.tables)
-			.map(([fieldname, spec]) => {
-				const rows = Array.isArray(spec) ? spec : spec && spec.rows;
-				return Array.isArray(rows) ? { fieldname, rows } : null;
-			})
-			.filter(Boolean);
-	}
+	if (typeof a.verb === "string") a.verb = a.verb.trim().toLowerCase();
+	if (a.fields !== undefined && a.fields !== null) normaliseFields(a);
+	if (a.tables !== undefined && a.tables !== null) normaliseTables(a);
 	return a;
+}
+
+const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+
+// Anything we cannot read is flagged, never dropped quietly: the client shows
+// its error view instead of a card that hides part of what Create would send.
+// The bad value is removed so the field stays an array a consumer can iterate.
+function normaliseFields(a) {
+	if (isPlainObject(a.fields)) {
+		a.fields = Object.entries(a.fields).map(([label, value]) => ({ label, value }));
+	} else if (!Array.isArray(a.fields)) {
+		a.fields = [];
+		a.unreadable = true;
+	}
+	const good = a.fields.filter(isPlainObject);
+	if (good.length !== a.fields.length) a.unreadable = true;
+	a.fields = good;
+}
+
+function normaliseTables(a) {
+	if (isPlainObject(a.tables)) {
+		// {items:{rows:[...]}} and {items:[...]} both mean the same thing as the
+		// canonical [{fieldname:"items", rows:[...]}].
+		a.tables = Object.entries(a.tables).map(([fieldname, spec]) => ({
+			fieldname,
+			rows: Array.isArray(spec) ? spec : spec && spec.rows,
+		}));
+	} else if (!Array.isArray(a.tables)) {
+		a.tables = [];
+		a.unreadable = true;
+	}
+	const good = a.tables.filter(
+		(t) => isPlainObject(t) && typeof t.fieldname === "string" && Array.isArray(t.rows)
+	);
+	if (good.length !== a.tables.length) a.unreadable = true;
+	a.tables = good;
+}
+
+const CLOSED_ACTION_RE = /```jarvis-action[ \t]*\n([\s\S]*?)```/;
+
+/**
+ * Tells a closed jarvis-action fence whose body is not a JSON object ("bad")
+ * from no closed fence at all ("none", including one still streaming in).
+ * @param {string} content
+ * @returns {"none"|"ok"|"bad"}
+ */
+export function actionBlockState(content) {
+	if (!content || !content.includes("jarvis-action")) return "none";
+	const mt = content.match(CLOSED_ACTION_RE);
+	if (!mt) return "none";
+	try {
+		const a = JSON.parse(mt[1].trim());
+		return isPlainObject(a) ? "ok" : "bad";
+	} catch {
+		return "bad";
+	}
 }
