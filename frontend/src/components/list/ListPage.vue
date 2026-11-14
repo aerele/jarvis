@@ -8,6 +8,8 @@
 		<LayoutHeader v-if="showHeader">
 			<template #left-header>
 				<Breadcrumbs :items="breadcrumbs" />
+				<!-- optional, fixed beside the breadcrumbs: does not move when the right cluster changes -->
+				<slot name="left-extra" />
 			</template>
 			<template #right-header>
 				<slot name="right-header" />

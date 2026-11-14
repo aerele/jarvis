@@ -29,7 +29,7 @@ vi.mock("frappe-ui", () => ({
 	},
 	FormControl: {
 		name: "FormControl",
-		props: ["modelValue", "type", "label", "options", "disabled"],
+		props: ["modelValue", "type", "label", "options", "disabled", "placeholder"],
 		emits: ["update:modelValue"],
 		template: `<input :type="type === 'checkbox' ? 'checkbox' : 'text'" :aria-label="label" :value="modelValue" :checked="type === 'checkbox' ? !!modelValue : undefined" :disabled="disabled" @input="type !== 'checkbox' && $emit('update:modelValue', $event.target.value)" @change="type === 'checkbox' && $emit('update:modelValue', $event.target.checked)" />`,
 	},
@@ -348,5 +348,94 @@ describe("IntakeRuleFields", () => {
 		expect(document.activeElement).toBe(w.find('[data-pick="target"] button').element);
 		w.unmount();
 		host.remove();
+	});
+
+	it("lays the fields out as one aligned grid with a muted type hint per row", async () => {
+		const w = await mountIt(formOf());
+		const grid = w.find('[data-testid="intake-check-grid"]');
+		expect(grid.classes()).toEqual(
+			expect.arrayContaining(["grid", "grid-cols-1", "sm:grid-cols-2", "xl:grid-cols-3"])
+		);
+		const rows = grid.findAll('[data-testid="intake-check-row"]');
+		expect(rows.length).toBeGreaterThan(0);
+		expect(rows[0].find('[data-testid="type-hint"]').text()).not.toBe("");
+	});
+
+	it("shows the same match-by hint on Link fields", async () => {
+		const w = await mountIt(formOf());
+		expect(w.text()).toContain("Link, match by");
+	});
+
+	it("groups the table under a Table rows section with its columns in the same grid", async () => {
+		apiTr.getIntakeFieldOptions.mockResolvedValue({
+			...TODO,
+			tables: [
+				{
+					fieldname: "items",
+					label: "Items",
+					columns: [
+						{ fieldname: "item", label: "Item", fieldtype: "Link", options: "Item" },
+						{ fieldname: "qty", label: "Qty", fieldtype: "Float", options: "" },
+					],
+				},
+			],
+		});
+		const w = await mountIt(
+			formOf({
+				intake_spec: {
+					fields: ["description"],
+					table: { fieldname: "items", columns: ["qty"] },
+					match: [],
+					defaults: {},
+				},
+			})
+		);
+		const section = w.find('[data-testid="intake-table-section"]');
+		expect(section.text()).toContain("Table rows");
+		const grid = section.find('[data-testid="intake-check-grid"]');
+		expect(grid.findAll('[data-testid="intake-check-row"]')).toHaveLength(2);
+		expect(grid.text()).toContain("Link, match by Item");
+		expect(section.find(".pl-3").exists()).toBe(true);
+	});
+
+	it("the Record source section is one grid: doctype, Run when, status, link; Optional, not None", async () => {
+		const w = await mountIt(
+			formOf({ intake_source: "Record", intake_record_doctype: "ToDo" })
+		);
+		const sec = w.find('[data-testid="writeback"]');
+		expect(sec.text()).toContain("Record source");
+		expect(sec.find(".grid").classes()).toEqual(
+			expect.arrayContaining(["grid-cols-1", "sm:grid-cols-2"])
+		);
+		const labels = sec.findAll("label").map((l) => l.text());
+		expect(labels).toEqual([
+			"Record doctype",
+			"Run when",
+			"Status field on record",
+			"Draft link field on record",
+		]);
+		expect(sec.text()).toContain("Jarvis writes the intake status here");
+		expect(sec.text()).toContain("Jarvis writes the draft's name here");
+		expect(sec.text()).not.toContain("None");
+		const selects = w.findAllComponents({ name: "FormControl" });
+		const placeholders = selects.map((c) => c.props("placeholder")).filter(Boolean);
+		expect(placeholders.filter((p) => p === "Optional")).toHaveLength(2);
+	});
+
+	it("Run when emits intake_record_event with the stored value", async () => {
+		const w = await mountIt(
+			formOf({ intake_source: "Record", intake_record_doctype: "ToDo" })
+		);
+		const ctrl = w
+			.findAllComponents({ name: "FormControl" })
+			.find((c) => (c.props("options") || []).some((o) => o.value === "On Submit"));
+		expect(ctrl.props("options").map((o) => o.label)).toEqual([
+			"When a file is attached",
+			"After Insert",
+			"On Submit",
+		]);
+		expect(ctrl.props("modelValue")).toBe("File attached");
+		await ctrl.vm.$emit("update:modelValue", "On Submit");
+		expect(patches(w).at(-1)).toEqual({ intake_record_event: "On Submit" });
 	});
 });

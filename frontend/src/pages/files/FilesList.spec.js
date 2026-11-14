@@ -43,7 +43,7 @@ vi.mock("frappe-ui", () => ({
 vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
 		props: ["rows"],
-		template: `<div><slot name="right-header" /><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-status" :row="row" /><slot name="cell-result" :row="row" /><slot name="cell-_rerun" :row="row" /></div></div>`,
+		template: `<div><div class="left"><slot name="left-extra" /></div><div class="right"><slot name="right-header" /></div><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-status" :row="row" /><slot name="cell-result" :row="row" /><slot name="cell-_rerun" :row="row" /></div></div>`,
 	},
 }));
 vi.mock("@/components/FilePreview.vue", () => ({ default: { template: "<div/>" } }));
@@ -145,6 +145,14 @@ describe("FilesList: the Dropped / Intake switch", () => {
 		await w.find(".go-dropped").trigger("click");
 		await w.find('.tab[data-value="intake"]').trigger("click");
 		expect(w.find(".intake-view").attributes("data-scope")).toBe("all");
+		w.unmount();
+	});
+
+	it("puts the Dropped/Intake switch in the fixed left slot, not the right-hand buttons", async () => {
+		const w = await mountList([applying]);
+		expect(w.find(".left .tabs").exists()).toBe(true);
+		expect(w.find(".right .tabs").exists()).toBe(false);
+		expect(w.find(".right").text()).toContain("Add Files");
 		w.unmount();
 	});
 

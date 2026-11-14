@@ -35,29 +35,75 @@
 			/>
 			<FormControl v-else type="text" :modelValue="form.intake_folder" :disabled="true" />
 		</div>
-		<div v-else data-pick="record" class="flex min-w-0 flex-col gap-1.5">
-			<label class="text-xs text-ink-gray-7">Record DocType</label>
-			<Autocomplete
-				v-if="!disabled"
-				:options="doctypeOptions('record')"
-				:loading="doctypeLoading('record')"
-				:modelValue="pickValue(form.intake_record_doctype)"
-				placeholder="Files attached to records of…"
-				@update:query="(q) => doctypeSearch.record.onQuery(q)"
-				@update:modelValue="
-					(o) => {
-						setRecordDoctype(o);
-						refocus('record');
-					}
-				"
-			/>
-			<FormControl
-				v-else
-				type="text"
-				:modelValue="form.intake_record_doctype"
-				:disabled="true"
-			/>
-		</div>
+		<section
+			v-if="form.intake_source === 'Record'"
+			class="flex min-w-0 flex-col gap-3"
+			data-testid="writeback"
+		>
+			<h3 class="text-sm font-medium text-ink-gray-8">Record source</h3>
+			<div class="grid grid-cols-1 gap-x-4 gap-y-3 sm:grid-cols-2">
+				<div data-pick="record" class="flex min-w-0 flex-col gap-1.5">
+					<label class="text-xs text-ink-gray-7">Record doctype</label>
+					<Autocomplete
+						v-if="!disabled"
+						:options="doctypeOptions('record')"
+						:loading="doctypeLoading('record')"
+						:modelValue="pickValue(form.intake_record_doctype)"
+						placeholder="Files attached to records of…"
+						@update:query="(q) => doctypeSearch.record.onQuery(q)"
+						@update:modelValue="
+							(o) => {
+								setRecordDoctype(o);
+								refocus('record');
+							}
+						"
+					/>
+					<FormControl
+						v-else
+						type="text"
+						:modelValue="form.intake_record_doctype"
+						:disabled="true"
+					/>
+				</div>
+				<div class="flex min-w-0 flex-col gap-1.5">
+					<label class="text-xs text-ink-gray-7">Run when</label>
+					<FormControl
+						type="select"
+						:options="EVENT_OPTIONS"
+						:modelValue="form.intake_record_event || 'File attached'"
+						:disabled="disabled"
+						@update:modelValue="(v) => emit('update', { intake_record_event: v })"
+					/>
+					<p class="text-p-xs text-ink-gray-7">
+						When Jarvis reads the files of a record.
+					</p>
+				</div>
+				<div class="flex min-w-0 flex-col gap-1.5">
+					<label class="text-xs text-ink-gray-7">Status field on record</label>
+					<FormControl
+						type="select"
+						placeholder="Optional"
+						:options="recordFieldOptions(STATUS_TYPES)"
+						:modelValue="form.intake_status_field || ''"
+						:disabled="disabled"
+						@update:modelValue="(v) => emit('update', { intake_status_field: v })"
+					/>
+					<p class="text-p-xs text-ink-gray-7">Jarvis writes the intake status here</p>
+				</div>
+				<div class="flex min-w-0 flex-col gap-1.5">
+					<label class="text-xs text-ink-gray-7">Draft link field on record</label>
+					<FormControl
+						type="select"
+						placeholder="Optional"
+						:options="recordFieldOptions(LINK_TYPES)"
+						:modelValue="form.intake_link_field || ''"
+						:disabled="disabled"
+						@update:modelValue="(v) => emit('update', { intake_link_field: v })"
+					/>
+					<p class="text-p-xs text-ink-gray-7">Jarvis writes the draft's name here</p>
+				</div>
+			</div>
+		</section>
 
 		<div data-pick="target" class="flex min-w-0 flex-col gap-1.5">
 			<label class="text-xs text-ink-gray-7">Create draft of</label>
@@ -91,44 +137,41 @@
 			<!-- Fields -->
 			<div class="flex min-w-0 flex-col gap-1.5" data-testid="intake-field-list">
 				<label class="text-xs text-ink-gray-7">Fields to read</label>
-				<div class="max-h-64 space-y-1.5 overflow-auto rounded-md border p-2">
-					<FormControl
-						v-for="f in options.fields"
-						:key="f.fieldname"
-						type="checkbox"
-						:label="fieldLabel(f)"
-						:modelValue="spec.fields.includes(f.fieldname)"
-						:disabled="disabled"
-						@update:modelValue="(v) => toggleField(f.fieldname, v)"
-					/>
-				</div>
+				<IntakeFieldGrid
+					:fields="options.fields"
+					:selected="spec.fields"
+					:disabled="disabled"
+					@toggle="toggleField"
+				/>
 			</div>
 
 			<!-- Child table -->
-			<div v-if="options.tables.length" class="flex min-w-0 flex-col gap-1.5">
+			<section
+				v-if="options.tables.length"
+				class="flex min-w-0 flex-col gap-2"
+				data-testid="intake-table-section"
+			>
+				<h3 class="text-sm font-medium text-ink-gray-8">Table rows</h3>
 				<FormControl
 					type="select"
-					label="Table rows"
+					label="Table"
 					:options="tableOptions"
 					:modelValue="spec.table ? spec.table.fieldname : ''"
 					:disabled="disabled"
 					@update:modelValue="onTablePick"
 				/>
-				<div
-					v-if="pickedTable"
-					class="max-h-48 space-y-1.5 overflow-auto rounded-md border p-2"
-				>
-					<FormControl
-						v-for="c in pickedTable.columns"
-						:key="c.fieldname"
-						type="checkbox"
-						:label="fieldLabel(c)"
-						:modelValue="spec.table.columns.includes(c.fieldname)"
+				<div v-if="pickedTable" class="flex min-w-0 flex-col gap-1.5 pl-3">
+					<label class="text-xs text-ink-gray-7"
+						>Columns of {{ pickedTable.label }}</label
+					>
+					<IntakeFieldGrid
+						:fields="pickedTable.columns"
+						:selected="spec.table.columns"
 						:disabled="disabled"
-						@update:modelValue="(v) => toggleColumn(c.fieldname, v)"
+						@toggle="toggleColumn"
 					/>
 				</div>
-			</div>
+			</section>
 
 			<!-- Match links -->
 			<div v-if="linkFields.length" class="flex min-w-0 flex-col gap-1.5">
@@ -253,30 +296,6 @@
 				listed on the draft. Submit still needs every mandatory field.
 			</p>
 		</div>
-
-		<!-- Write-back (record source only) -->
-		<div
-			v-if="form.intake_source === 'Record'"
-			class="flex flex-col gap-3"
-			data-testid="writeback"
-		>
-			<FormControl
-				type="select"
-				label="Status field on the record"
-				:options="recordFieldOptions(STATUS_TYPES)"
-				:modelValue="form.intake_status_field || ''"
-				:disabled="disabled"
-				@update:modelValue="(v) => emit('update', { intake_status_field: v })"
-			/>
-			<FormControl
-				type="select"
-				label="Draft link field on the record"
-				:options="recordFieldOptions(LINK_TYPES)"
-				:modelValue="form.intake_link_field || ''"
-				:disabled="disabled"
-				@update:modelValue="(v) => emit('update', { intake_link_field: v })"
-			/>
-		</div>
 	</div>
 </template>
 
@@ -290,6 +309,7 @@ import { searchLink } from "@/api";
 import { useLinkSearch } from "@/composables/useLinkSearch";
 import * as apiTriggers from "@/api/triggers";
 import { errMessage } from "@/lib/errors";
+import IntakeFieldGrid from "./IntakeFieldGrid.vue";
 import { emptySpec, parseSpec, uncoveredLabels } from "./intakeSpec";
 
 const props = defineProps({
@@ -304,6 +324,12 @@ const emit = defineEmits(["update"]);
 const SOURCES = [
 	{ value: "Folder", label: "Folder" },
 	{ value: "Record", label: "Record" },
+];
+// Stored values are the server's; the labels are what the admin reads.
+const EVENT_OPTIONS = [
+	{ label: "When a file is attached", value: "File attached" },
+	{ label: "After Insert", value: "After Insert" },
+	{ label: "On Submit", value: "On Submit" },
 ];
 const MAX_INSTRUCTIONS = 4000;
 // What the server accepts for the write-back (jarvis_trigger._validate_intake_record): a
@@ -330,7 +356,6 @@ function refocus(which) {
 
 const pickValue = (v) => (v ? { label: v, value: v } : null);
 const optValue = (o) => (o && o.value ? String(o.value) : "");
-const fieldLabel = (f) => (f.mandatory ? `${f.label} (required)` : f.label);
 
 // The other source's picks mean nothing under this one, so they are cleared.
 function setSource(value) {
@@ -552,7 +577,7 @@ function recordFieldOptions(types) {
 			(f.fieldtype !== "Link" || f.options === props.form.intake_target_doctype)
 	);
 	return [
-		{ label: "None", value: "" },
+		{ label: "", value: "" },
 		...rows.map((f) => ({ label: f.label, value: f.fieldname })),
 	];
 }
