@@ -16,6 +16,37 @@ describe("safe support error draft", () => {
 		expect(d.body).toContain("Message: reply788fixture");
 		expect(d.body).toContain("Saved (server time): 2026-10-29 12:01:07.123456");
 	});
+	it("carries the server-scrubbed error, each model's cause and the run id", () => {
+		const d = supportErrorDraft({
+			...context,
+			code: "subscription-expired",
+			upstream: "anthropic",
+			details: {
+				error:
+					"All models failed (2): openai_compat/jarvis-pool: 429 for model gpt-5.6-terra " +
+					"(last error: usage_limit_reached: The usage limit has been reached) | " +
+					"anthropic/claude-opus-5: Failed to authenticate: OAuth session expired and could not be refreshed (auth)",
+				model: "",
+				run: "89200d04e322",
+			},
+		});
+		expect(d.subject).toBe("Chat error: None of your models could answer");
+		expect(d.body).toContain("- gpt-5.6-terra: Usage limit reached");
+		expect(d.body).toContain("- claude-opus-5: Anthropic sign-in expired");
+		expect(d.body).toContain("Run: 89200d04e322");
+		expect(d.body).toMatch(/Error text \(secrets removed\):\nAll models failed \(2\)/);
+	});
+	it("drops malformed details and bounds the error text", () => {
+		for (const details of [null, {}, { error: 42 }, { error: "  " }, "text"])
+			expect(supportErrorDraft({ ...context, details }).body).not.toContain("Error text");
+		const d = supportErrorDraft({
+			...context,
+			details: { error: "x".repeat(5000), model: "bad model\nSECRET", run: "id\nSECRET" },
+		});
+		expect(d.body).toContain("x".repeat(1000));
+		expect(d.body).not.toContain("x".repeat(1001));
+		expect(d.body).not.toContain("SECRET");
+	});
 	it("never reads raw errors, transcripts, tools, files, URLs or caller headlines", () => {
 		const input = { ...context };
 		for (const key of [

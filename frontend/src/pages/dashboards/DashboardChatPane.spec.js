@@ -104,7 +104,13 @@ vi.mock("@/api", () => ({
 	getConversationContext: vi.fn(async () => null),
 	compactConversation: vi.fn(async () => ({ ok: true })),
 	retryMessage: vi.fn(async () => ({ ok: true, run_id: "r2" })),
+	getErrorReportDetails: vi.fn(async () => ({
+		ok: true,
+		data: { error: "Request timed out", model: "gpt-5.6-terra", run: "89200d04e322" },
+	})),
 }));
+const routerPush = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("vue-router", () => ({ useRouter: () => ({ push: routerPush }) }));
 
 import {
 	confirmTool,
@@ -233,6 +239,33 @@ describe("DashboardChatPane failed-turn card names the exact cause", () => {
 		localStorage.removeItem("jarvis-dash-conv-u@x.com");
 		return wrapper.find(".text-ink-red-4");
 	}
+
+	it("Report error opens a ticket draft carrying the scrubbed error and run id", async () => {
+		window.support_available = true;
+		window.has_support_access = true;
+		try {
+			const note = await mountWithError("Request timed out");
+			const report = note.findAll("button").find((b) => b.text() === "Report error");
+			expect(report).toBeTruthy();
+			await report.trigger("click");
+			await flushPromises();
+			expect(routerPush).toHaveBeenCalledOnce();
+			const { name, query } = routerPush.mock.calls[0][0];
+			expect(name).toBe("SupportNew");
+			expect(query.body).toContain("Conversation: conv1");
+			expect(query.body).toContain("Run: 89200d04e322");
+			expect(query.body).toContain("Error text (secrets removed):\nRequest timed out");
+		} finally {
+			delete window.support_available;
+			delete window.has_support_access;
+			routerPush.mockClear();
+		}
+	});
+
+	it("shows no Report error where support is off", async () => {
+		const note = await mountWithError("Request timed out");
+		expect(note.findAll("button").some((b) => b.text() === "Report error")).toBe(false);
+	});
 
 	it("lists each failed model and has no Details toggle", async () => {
 		const note = await mountWithError(
