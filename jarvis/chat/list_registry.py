@@ -655,6 +655,9 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 	"jarvis.chat.triggers_api.list_intake_folders": (
 		"manager-only folder-path picker for the intake trigger form, not a browsable document list"
 	),
+	"jarvis.chat.triggers_api.search_intake_doctypes": (
+		"manager-only capped DocType type-ahead for the intake rule form, not a browsable document list"
+	),
 	"jarvis.chat.approvals_api.list_approvals": "unpaginated companion of approvals (list_approvals_page)",
 	"jarvis.chat.approvals_api.list_approval_reviewers": (
 		"capped role-filtered Tag-for-review people picker, not a browsable document list"
