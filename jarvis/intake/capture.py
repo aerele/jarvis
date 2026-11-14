@@ -170,18 +170,64 @@ def on_record_save(doc, method=None) -> None:
 		user = frappe.session.user
 		if not rules or not doc.name or not user or user == "Guest" or not guards.is_desk_user(user):
 			return
+		since = _bound_since(doc)
+		if since is False:
+			return
+		filters = {"attached_to_doctype": doc.doctype, "attached_to_name": doc.name, "is_folder": 0}
+		if since:
+			filters["creation"] = [">=", since]
 		# System context: the uploader is whoever saved the record, checked per rule below.
 		files = frappe.get_all(
 			"File",
-			filters={"attached_to_doctype": doc.doctype, "attached_to_name": doc.name, "is_folder": 0},
-			fields=["name", "file_name", "content_hash", "attached_to_doctype", "attached_to_name"],
+			filters=filters,
+			fields=[
+				"name",
+				"file_name",
+				"file_url",
+				"content_hash",
+				"attached_to_doctype",
+				"attached_to_name",
+			],
 		)
+		copies = _intake_copy_urls(doc) if files else set()
+		files = [f for f in files if f.file_url not in copies]
 		if not files:
 			return
 		for rule in rules:
 			_capture_bound(rule, files, user)
 	except Exception:
 		frappe.log_error(title="Jarvis intake: capture failed")
+
+
+def _bound_since(doc):
+	"""Only files bound during THIS save count, never the older attachments of a record
+	that is saved again (they cost an AI call each and were attached for other reasons).
+	Returns the earliest ``File.creation`` that counts (the record's previous ``modified``),
+	None for a new record (everything attached now counts), or False when this save captures
+	nothing: a submit or cancel."""
+	if doc.get("_action") in ("submit", "cancel"):
+		return False
+	if doc.flags.in_insert:
+		return None
+	before = doc.get_doc_before_save()
+	if not before or not before.get("modified"):
+		return False  # unknown history: capturing everything would be the old bug
+	return before.modified
+
+
+def _intake_copy_urls(doc) -> set:
+	"""``file_url`` of the source files of the intake rows whose draft is ``doc``: the copy
+	of a source file that a draft carries is not a new upload."""
+	activity, source = frappe.qb.DocType(ACTIVITY), frappe.qb.DocType("File")
+	rows = (
+		frappe.qb.from_(activity)
+		.join(source)
+		.on(source.name == activity.source_file)
+		.select(source.file_url)
+		.where((activity.draft_doctype == doc.doctype) & (activity.draft_name == doc.name))
+		.run()
+	)
+	return {r[0] for r in rows if r[0]}
 
 
 def _capture_bound(rule: dict, files: list, user: str) -> None:
@@ -196,7 +242,8 @@ def _capture_bound(rule: dict, files: list, user: str) -> None:
 	)
 	for f in files:
 		if f.name not in done and f.content_hash:
-			_queue_one(f, rule, "on_update", user)
+			# No bell for an unreadable type here: the user saved a record, not uploaded a file.
+			_queue_one(f, rule, "on_update", user, bell=False)
 
 
 def _matching_rules(doc, rules: dict, check_changes: bool) -> list[dict]:
@@ -218,7 +265,7 @@ def _matching_rules(doc, rules: dict, check_changes: bool) -> list[dict]:
 	return matched
 
 
-def _queue_one(doc, rule: dict, event: str, user: str) -> None:
+def _queue_one(doc, rule: dict, event: str, user: str, bell: bool = True) -> None:
 	file_name = doc.get("file_name") or ""
 	ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
 	# A Record rule drafts per record, so the same scan on another record is new work.
@@ -231,7 +278,7 @@ def _queue_one(doc, rule: dict, event: str, user: str) -> None:
 	else:
 		row, duplicate_of = _insert_unless_duplicate(doc, rule, event, record)
 	status, summary = row.status, row.summary
-	if status == "Skipped" and not duplicate_of:
+	if bell and status == "Skipped" and not duplicate_of:
 		# An unreadable type will never be drafted; the uploader may have no Jarvis access,
 		# so the bell is how they learn of it. A duplicate stays quiet.
 		notify.row_ended(row, summary)

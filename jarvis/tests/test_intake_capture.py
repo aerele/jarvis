@@ -441,6 +441,104 @@ class TestIntakeCapture(FrappeTestCase):
 		)
 		self.assertEqual(enq.call_count, 1)
 
+	def _watched_note(self):
+		rule = self._rule(
+			intake_source="Record",
+			intake_folder=None,
+			intake_record_doctype="Note",
+			intake_target_doctype="ToDo",
+		)
+		note = frappe.get_doc({"doctype": "Note", "title": "n-" + frappe.generate_hash(length=6)}).insert()
+		self.addCleanup(frappe.delete_doc, "Note", note.name, force=True)
+		return rule, note
+
+	def _bind(self, note, name="bound.pdf", **over):
+		doc, _ = self._upload(name, folder="Home")
+		frappe.db.set_value(
+			"File", doc.name, {"attached_to_doctype": "Note", "attached_to_name": note.name, **over}
+		)
+		return doc
+
+	def test_an_old_attachment_is_not_captured_on_a_later_save(self):
+		rule, note = self._watched_note()
+		old = self._bind(note)
+		past = frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-3)
+		frappe.db.set_value("File", old.name, "creation", past, update_modified=False)
+		with mock.patch("frappe.enqueue") as enq:
+			note.reload().save()
+		self.assertEqual(self._rows(rule), [])
+		enq.assert_not_called()
+
+	def test_a_file_bound_during_this_save_is_captured_once(self):
+		rule, note = self._watched_note()
+		doc = self._bind(note)
+		with mock.patch("frappe.enqueue") as enq:
+			note.reload().save()
+			note.save()
+		self.assertEqual([r.source_file for r in self._rows(rule)], [doc.name])
+		self.assertEqual(enq.call_count, 1)
+
+	def test_a_new_record_captures_every_file_attached_now(self):
+		rule, _ = self._watched_note()
+		note = frappe.get_doc({"doctype": "Note", "title": "n-" + frappe.generate_hash(length=6)})
+		note.flags.in_insert = True
+		note.name = "n-new-" + frappe.generate_hash(length=6)
+		doc = self._bind(note)
+		with mock.patch("frappe.enqueue"):
+			capture.on_record_save(note, "on_update")
+		self.assertEqual([r.source_file for r in self._rows(rule)], [doc.name])
+
+	def test_a_submit_or_cancel_save_captures_nothing(self):
+		rule, note = self._watched_note()
+		self._bind(note)
+		note = note.reload()
+		for action in ("submit", "cancel"):
+			note._action = action
+			with mock.patch("frappe.enqueue") as enq:
+				capture.on_record_save(note, "on_update")
+			enq.assert_not_called()
+		self.assertEqual(self._rows(rule), [])
+
+	def test_an_unreadable_bound_file_gets_a_row_but_no_bell(self):
+		rule, note = self._watched_note()
+		self._bind(note, "notes.txt")
+		before = frappe.db.count("Notification Log")
+		with mock.patch("frappe.enqueue"):
+			note.reload().save()
+		self.assertEqual(
+			[(r.status, r.summary) for r in self._rows(rule)], [("Skipped", capture.UNREADABLE_TYPE_SUMMARY)]
+		)
+		self.assertEqual(frappe.db.count("Notification Log"), before)
+
+	def test_the_copy_an_intake_draft_carries_is_not_captured_again(self):
+		rule, note = self._watched_note()
+		source, _ = self._upload("src.pdf", folder="Home")
+		frappe.db.set_value(
+			"File", source.name, "file_url", "/private/files/src-" + frappe.generate_hash(length=6) + ".pdf"
+		)
+		url = frappe.db.get_value("File", source.name, "file_url")
+		frappe.get_doc(
+			{
+				"doctype": ACTIVITY,
+				"trigger": rule.name,
+				"trigger_label": rule.trigger_name,
+				"action_type": "Intake",
+				"status": "Success",
+				"source_file": source.name,
+				"file_hash": source.content_hash,
+				"target_doctype": "ToDo",
+				"draft_doctype": "Note",
+				"draft_name": note.name,
+				"event_user": "Administrator",
+			}
+		).insert(ignore_permissions=True)
+		copy = self._bind(note, "src.pdf")
+		frappe.db.set_value("File", copy.name, "file_url", url)
+		with mock.patch("frappe.enqueue") as enq:
+			note.reload().save()
+		self.assertEqual([r.source_file for r in self._rows(rule)], [source.name])
+		enq.assert_not_called()
+
 	def test_record_save_costs_nothing_for_a_doctype_no_rule_watches(self):
 		self._rule()
 		note = frappe.get_doc({"doctype": "Note", "title": "n-" + frappe.generate_hash(length=6)})
