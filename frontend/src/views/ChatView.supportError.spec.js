@@ -30,7 +30,7 @@ function deferred() {
 }
 function harness({
 	enabled = true,
-	error = "Request timed out",
+	error = "ws open failed",
 	overrides = {},
 	mountCard = true,
 	index = 0,
@@ -57,7 +57,7 @@ function harness({
 			getErrorReportDetails: vi.fn(async () => ({
 				ok: true,
 				data: {
-					error: "Request timed out (secrets removed)",
+					error: "ws open failed (secrets removed)",
 					model: "gpt-5.6-terra",
 					run: "89200d04e322",
 				},
@@ -168,7 +168,7 @@ describe("Report error in the real ChatView card", () => {
 		expect(h.s.router.push.mock.calls[0][0]).toEqual({
 			name: "SupportNew",
 			query: supportErrorDraft({
-				code: "timeout",
+				code: "unreachable",
 				conversation: "conv788fixture",
 				message: "reply788fixture",
 				at: h.m.modified,
@@ -206,12 +206,38 @@ describe("Report error in the real ChatView card", () => {
 		expect(h.s.router.push).not.toHaveBeenCalled();
 		h.w.unmount();
 	});
-	it("retains Report on nonretryable errors with no Details toggle", async () => {
-		const h = harness({ error: "Please run /login" });
-		expect(reportButton(h)).toBeDefined();
+	it.each([
+		["Please run /login", "a sign-in the admin reconnects"],
+		["Request timed out", "a timeout the user retries"],
+		["OpenAI API error: 401 Unauthorized. Incorrect API key", "a key the admin replaces"],
+		[
+			"All models failed (2): openai_compat/jarvis-pool: 429 for model gpt-5.6-terra " +
+				"(last error: usage_limit_reached: The usage limit has been reached) | " +
+				"anthropic/claude-opus-5: Failed to authenticate: OAuth session expired and could not be refreshed (auth)",
+			"a failover the admin fixes",
+		],
+	])("offers no Report for %s (%s): the card shows the step", async (error) => {
+		const h = harness({ error });
+		expect(reportButton(h)).toBeUndefined();
 		expect(h.w.findAll("button").some((b) => b.text() === "Details")).toBe(false);
 		// A named cause needs no raw text: the headline says it.
-		expect(h.w.text()).not.toContain("Please run /login");
+		expect(h.w.text()).not.toContain(error);
+		await h.openErrorSupport(h.m);
+		expect(h.s.router.push).not.toHaveBeenCalled();
+		h.w.unmount();
+	});
+	it.each([
+		["ws open failed", "the assistant cannot be reached"],
+		["frobnicator jammed", "no rule names the cause"],
+		["Error: EPERM: operation not permitted, chmod /data/agent.sqlite", "a server permission"],
+		[
+			"All models failed (2): openai_compat/jarvis-pool: 429 for model gpt-5.6-terra " +
+				"(last error: usage_limit_reached: The usage limit has been reached) | anthropic/claude-...",
+			"a failover whose second reason was never received",
+		],
+	])("offers Report for %s (%s): only support can fix it", async (error) => {
+		const h = harness({ error });
+		expect(reportButton(h)).toBeDefined();
 		h.w.unmount();
 	});
 	it("shows the raw text as the reason when no rule names the cause", async () => {

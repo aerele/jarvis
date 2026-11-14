@@ -5465,7 +5465,9 @@ function canReportError(m) {
 		!row.hidden &&
 		!row.stopped &&
 		!row.streaming &&
-		errorInfo(row).code !== "cancelled"
+		errorInfo(row).code !== "cancelled" &&
+		// Only a failure no one on the workspace can fix: the card shows the step for the rest.
+		errorInfo(row).support === true
 	);
 }
 

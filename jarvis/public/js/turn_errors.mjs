@@ -235,6 +235,7 @@ function singleErrorInfo(text, explicitCode, context) {
           ? "Reconnect it in AI models, then send again."
           : rule.hint,
       retryable: rule.retryable,
+      support: false,
       statusUrl: "",
       statusLabel: "",
       action: "reconnect",
@@ -270,6 +271,7 @@ function singleErrorInfo(text, explicitCode, context) {
     headline: copy.headline,
     hint: copy === rule ? ruleHint(rule, context) : copy.hint,
     retryable: rule.retryable,
+    support: rule.support === true,
     statusUrl: provider?.[2] || "",
     statusLabel: provider ? `Check ${provider[1]} status` : "",
   };
@@ -356,11 +358,13 @@ function resetLine(left) {
     : `Resets ${left.phrase} after it failed.`;
 }
 
+// The reason was never received, so only support can find out what it was.
 const NOT_RECEIVED = {
   code: "",
   reason: "Reason not received",
   next: "",
   retryable: true,
+  support: true,
 };
 
 // One short line per failed model: what went wrong, and the one next step.
@@ -407,6 +411,7 @@ function modelLine(failure, context) {
     next: copy[1],
     // A usage cap whose wait has run out is worth one more try.
     retryable: info.retryable || left.over,
+    support: info.support === true,
     upstream: info.upstream || "",
   };
 }
@@ -471,6 +476,8 @@ export function turnErrorInfo(raw, explicitCode, context = {}) {
         : "None of your models could answer",
       hint: oneCause && rule && !signedOut ? ruleHint(rule, context) : "",
       retryable: models.some((m) => m.retryable),
+      // Report error only when some model failed in a way only support can fix.
+      support: models.some((m) => m.support),
       statusUrl: "",
       statusLabel: "",
       models,
@@ -488,6 +495,7 @@ export function turnErrorInfo(raw, explicitCode, context = {}) {
       headline: byCode.internal.headline,
       hint: byCode.internal.hint,
       retryable: true,
+      support: true,
       statusUrl: "",
       statusLabel: "",
     };

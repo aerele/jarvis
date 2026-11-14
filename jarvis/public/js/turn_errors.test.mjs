@@ -258,3 +258,23 @@ test("a member is pointed at their workspace admin for an admin fix", () => {
     "Reconnect the service or update its key in AI models."
   );
 });
+
+test("Report error shows exactly where the copy sends people to support", async () => {
+  const { default: rules } = await import("./turn_error_rules.mjs");
+  for (const rule of rules) {
+    const copy = [rule.headline, rule.hint, rule.adminHint || ""].join(" ");
+    assert.equal(
+      /\bsupport\b/i.test(copy),
+      rule.support === true,
+      `${rule.code}: copy and the support flag disagree`
+    );
+  }
+});
+
+test("a failover offers Report only when some model needs support", () => {
+  assert.equal(turnErrorInfo(INSIDER).support, false);
+  assert.equal(turnErrorInfo(`${INSIDER.slice(0, 240)}...`).support, true);
+  assert.equal(turnErrorInfo("Please run /login").support, false);
+  assert.equal(turnErrorInfo("ws open failed").support, true);
+  assert.equal(turnErrorInfo("frobnicator jammed").support, true);
+});

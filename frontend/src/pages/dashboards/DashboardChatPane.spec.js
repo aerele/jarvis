@@ -244,7 +244,7 @@ describe("DashboardChatPane failed-turn card names the exact cause", () => {
 		window.support_available = true;
 		window.has_support_access = true;
 		try {
-			const note = await mountWithError("Request timed out");
+			const note = await mountWithError("ws open failed");
 			const report = note.findAll("button").find((b) => b.text() === "Report error");
 			expect(report).toBeTruthy();
 			await report.trigger("click");
@@ -263,8 +263,20 @@ describe("DashboardChatPane failed-turn card names the exact cause", () => {
 	});
 
 	it("shows no Report error where support is off", async () => {
-		const note = await mountWithError("Request timed out");
+		const note = await mountWithError("ws open failed");
 		expect(note.findAll("button").some((b) => b.text() === "Report error")).toBe(false);
+	});
+
+	it("shows no Report error on a failure the user or admin can fix", async () => {
+		window.support_available = true;
+		window.has_support_access = true;
+		try {
+			const note = await mountWithError("Please run /login");
+			expect(note.findAll("button").some((b) => b.text() === "Report error")).toBe(false);
+		} finally {
+			delete window.support_available;
+			delete window.has_support_access;
+		}
 	});
 
 	it("lists each failed model and has no Details toggle", async () => {
