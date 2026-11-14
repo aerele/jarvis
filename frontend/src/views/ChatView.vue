@@ -7853,7 +7853,10 @@ function draftModelViewIsCurrent(view, model) {
 	);
 }
 const confirmFor = computed(() =>
-	_lastAssistant.value && !activeAction.value && confirmLabel(_lastAssistant.value)
+	_lastAssistant.value &&
+		!activeAction.value &&
+		!draftBlockErrorText.value &&
+		confirmLabel(_lastAssistant.value)
 		? _lastAssistant.value.name
 		: null
 );
@@ -9450,7 +9453,9 @@ async function resyncQueuedTurn(id) {
 
 // --- interactive clarifying questions (card on the last assistant message) ---
 const activeAsk = computed(() =>
-	_lastAssistant.value && !activeAction.value ? askOf(_lastAssistant.value) : null
+	_lastAssistant.value && !activeAction.value && !draftBlockErrorText.value
+		? askOf(_lastAssistant.value)
+		: null
 );
 const askFor = computed(() => (activeAsk.value ? _lastAssistant.value.name : null));
 // The draft state, readiness and answer formatting live in <AskCard> +

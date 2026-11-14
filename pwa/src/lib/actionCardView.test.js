@@ -17,7 +17,10 @@ for (const f of ACTION_FIXTURES) {
 			assert.equal(v.kind, "write");
 			assert.equal(v.invalid, "");
 			if (f.tableRows) assert.equal(v.tableLines[0].value, `${f.tableRows} rows`);
+		} else if (f.expect === "none") {
+			assert.deepEqual(v, { kind: "none" });
 		} else {
+			assert.equal(f.expect, "error");
 			assert.ok(v.kind === "error" || (v.kind === "write" && v.invalid));
 			if (
 				[
