@@ -10,7 +10,8 @@ const errorView = (agentName) => ({
 });
 
 function buildView(action, agentName) {
-	if (!action || typeof action !== "object" || Array.isArray(action)) return errorView(agentName);
+	if (!action || typeof action !== "object" || Array.isArray(action))
+		return errorView(agentName);
 	// Normalising already removed what it could not read: that is an error, never
 	// a card built from what is left.
 	if (action.unreadable) return errorView(agentName);
@@ -33,7 +34,9 @@ function buildView(action, agentName) {
 	return {
 		kind: "write",
 		verb,
-		heading: action.title || `${verb === "create" ? "Create" : "Update"} ${action.doctype || "record"}`,
+		heading:
+			action.title ||
+			`${verb === "create" ? "Create" : "Update"} ${action.doctype || "record"}`,
 		doctype: action.doctype,
 		fields,
 		tableLines,

@@ -230,7 +230,10 @@ test("actionBlockState tells a broken closed block from no block", () => {
 });
 
 test("a half-written block is hidden while streaming", () => {
-	assert.equal(stripAgentBlocks('Drafting.\n\n```jarvis-action\n{"kind":"do', true), "Drafting.");
+	assert.equal(
+		stripAgentBlocks('Drafting.\n\n```jarvis-action\n{"kind":"do', true),
+		"Drafting."
+	);
 	assert.equal(stripAgentBlocks("Drafting.\n\n```jarv", true), "Drafting.");
 });
 test("a settled reply keeps today's behaviour", () => {
