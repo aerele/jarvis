@@ -47,6 +47,14 @@ export function normaliseAction(a) {
 
 const isPlainObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 
+// A field needs a label to be shown and sent; its value may be any scalar or null,
+// but an object or array has no faithful one-line rendering.
+const isReadableField = (f) =>
+	isPlainObject(f) &&
+	typeof f.label === "string" &&
+	f.label.trim() !== "" &&
+	!(f.value !== null && typeof f.value === "object");
+
 // Anything we cannot read is flagged, never dropped quietly: the client shows
 // its error view instead of a card that hides part of what Create would send.
 // The bad value is removed so the field stays an array a consumer can iterate.
@@ -57,7 +65,7 @@ function normaliseFields(a) {
 		a.fields = [];
 		a.unreadable = true;
 	}
-	const good = a.fields.filter(isPlainObject);
+	const good = a.fields.filter(isReadableField);
 	if (good.length !== a.fields.length) a.unreadable = true;
 	a.fields = good;
 }
@@ -75,7 +83,11 @@ function normaliseTables(a) {
 		a.unreadable = true;
 	}
 	const good = a.tables.filter(
-		(t) => isPlainObject(t) && typeof t.fieldname === "string" && Array.isArray(t.rows)
+		(t) =>
+			isPlainObject(t) &&
+			typeof t.fieldname === "string" &&
+			Array.isArray(t.rows) &&
+			t.rows.every(isPlainObject)
 	);
 	if (good.length !== a.tables.length) a.unreadable = true;
 	a.tables = good;
@@ -108,7 +120,8 @@ export const GATED_VERBS = new Set(["submit", "cancel", "delete", "amend"]);
  * The red error-card copy for a draft block the desktop cannot show, or "".
  * Error when the closed fence is not a JSON object, the action has unreadable
  * fields or tables, or a non-email action names a verb other than create / update.
- * A missing verb is not an error (the desktop treats it as create).
+ * A missing verb is not an error (the desktop treats it as create), and the gated
+ * verbs (submit, cancel, delete, amend) return "" because the server sends their card.
  * @param {string} content the assistant message text
  * @param {object|null} action the normalised action, or null
  * @param {string} agentName

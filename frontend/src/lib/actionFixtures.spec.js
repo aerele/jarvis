@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 
 import { ACTION_FIXTURES } from "./actionFixtures";
-import { normaliseAction } from "./chatAction";
+import { actionBlockState, draftBlockError, normaliseAction } from "./chatAction";
 
 const parse = (f) => {
 	try {
@@ -11,9 +11,7 @@ const parse = (f) => {
 	}
 };
 
-// Rejected by the draft-model rules (verb allow-list, empty create, batch docs),
-// not by normaliseAction.
-const MODEL_REJECTED = new Set(["verb-unknown", "docs-batch", "create-empty"]);
+const fence = (f) => "```jarvis-action\n" + f.block + "\n```";
 
 describe("ACTION_FIXTURES through normaliseAction", () => {
 	const valid = ACTION_FIXTURES.filter((f) => parse(f) !== undefined);
@@ -25,7 +23,9 @@ describe("ACTION_FIXTURES through normaliseAction", () => {
 	});
 
 	it("json-array is not an action", () => {
-		expect(normaliseAction(parse(ACTION_FIXTURES.find((f) => f.id === "json-array")))).toBeNull();
+		expect(
+			normaliseAction(parse(ACTION_FIXTURES.find((f) => f.id === "json-array")))
+		).toBeNull();
 	});
 
 	it("canonicalises every table shape to an array with all rows", () => {
@@ -53,13 +53,42 @@ describe("ACTION_FIXTURES through normaliseAction", () => {
 	});
 
 	it("every fixture expects card, error or none", () => {
-		for (const f of ACTION_FIXTURES) expect(["card", "error", "none"], f.id).toContain(f.expect);
+		for (const f of ACTION_FIXTURES)
+			expect(["card", "error", "none"], f.id).toContain(f.expect);
 	});
 
-	it("every error fixture is unreadable or rejected by the model rules", () => {
-		for (const f of valid.filter((x) => x.expect === "error" && x.id !== "json-array")) {
+	it("every error fixture is rejected for a real, asserted reason", () => {
+		for (const f of ACTION_FIXTURES.filter((x) => x.expect === "error")) {
+			if (f.id === "json-broken" || f.id === "json-array") {
+				expect(actionBlockState(fence(f)), f.id).toBe("bad");
+				continue;
+			}
 			const a = normaliseAction(parse(f));
-			expect(a.unreadable === true || MODEL_REJECTED.has(f.id), f.id).toBe(true);
+			if (f.id === "verb-unknown") {
+				expect(a.unreadable, f.id).toBeUndefined();
+				expect(draftBlockError(fence(f), a, "Jarvis"), f.id).not.toBe("");
+			} else if (f.id === "docs-batch") {
+				// Rejected by buildDraftModel (ChatView.vue) on desktop and by actionCardView
+				// `invalid` on the phone (asserted in pwa/src/lib/actionCardView.test.js).
+				expect(Array.isArray(a.docs), f.id).toBe(true);
+				expect(a.unreadable, f.id).toBeUndefined();
+			} else if (f.id === "create-empty") {
+				// Same user-visible source as docs-batch: an empty create has nothing to draw.
+				expect(a.verb, f.id).toBe("create");
+				expect((a.fields || []).length + (a.tables || []).length, f.id).toBe(0);
+				expect(a.unreadable, f.id).toBeUndefined();
+			} else {
+				expect(a.unreadable, f.id).toBe(true);
+				expect(draftBlockError(fence(f), a, "Jarvis"), f.id).not.toBe("");
+			}
+		}
+	});
+
+	it("every none fixture shows no error", () => {
+		for (const f of ACTION_FIXTURES.filter((x) => x.expect === "none")) {
+			const a = normaliseAction(parse(f));
+			expect(a.unreadable, f.id).toBeUndefined();
+			expect(draftBlockError(fence(f), a, "Jarvis"), f.id).toBe("");
 		}
 	});
 
@@ -72,7 +101,9 @@ describe("ACTION_FIXTURES through normaliseAction", () => {
 	});
 
 	it("lower-cases a capitalised verb and leaves a missing one missing", () => {
-		const cap = normaliseAction(parse(ACTION_FIXTURES.find((f) => f.id === "verb-capitalised")));
+		const cap = normaliseAction(
+			parse(ACTION_FIXTURES.find((f) => f.id === "verb-capitalised"))
+		);
 		expect(cap.verb).toBe("create");
 		const none = normaliseAction(parse(ACTION_FIXTURES.find((f) => f.id === "verb-missing")));
 		expect(none.verb).toBeUndefined();

@@ -56,7 +56,10 @@ test("email wins over verb", () => {
 });
 
 test("an unreadable action is the error view, not a card from what is left", () => {
-	const v = actionCardView({ doctype: "X", verb: "create", fields: [], tables: [], unreadable: true }, "Jarvis");
+	const v = actionCardView(
+		{ doctype: "X", verb: "create", fields: [], tables: [], unreadable: true },
+		"Jarvis"
+	);
 	assert.equal(v.kind, "error");
 });
 
@@ -76,11 +79,17 @@ test("a getter that throws becomes the error view", () => {
 });
 
 test("docs batch and empty create keep their specific messages", () => {
-	const docs = actionCardView({ doctype: "X", verb: "create", fields: [], tables: [], docs: [{}] }, "Jarvis");
+	const docs = actionCardView(
+		{ doctype: "X", verb: "create", fields: [], tables: [], docs: [{}] },
+		"Jarvis"
+	);
 	assert.equal(docs.kind, "write");
 	assert.match(docs.invalid, /`docs` batch/);
 	assert.match(docs.invalid, /Ask Jarvis to apply them as a batch/);
-	const empty = actionCardView({ doctype: "X", verb: "create", fields: [], tables: [] }, "Jarvis");
+	const empty = actionCardView(
+		{ doctype: "X", verb: "create", fields: [], tables: [] },
+		"Jarvis"
+	);
 	assert.equal(empty.invalid, "This draft has no fields to show.");
 });
 

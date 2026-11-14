@@ -8049,9 +8049,9 @@ function draftModelViewIsCurrent(view, model) {
 }
 const confirmFor = computed(() =>
 	_lastAssistant.value &&
-		!activeAction.value &&
-		!draftBlockErrorText.value &&
-		confirmLabel(_lastAssistant.value)
+	!activeAction.value &&
+	!draftBlockErrorText.value &&
+	confirmLabel(_lastAssistant.value)
 		? _lastAssistant.value.name
 		: null
 );

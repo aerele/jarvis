@@ -478,7 +478,7 @@ const view = (m) => {
 	const cards = parseCards(content);
 	const charts = parseCharts(content);
 	const action = parseAction(content);
-	const actionBad = actionBlockState(content) === "bad";
+	const actionBad = !m.streaming && actionBlockState(content) === "bad";
 	return {
 		html,
 		cards,
