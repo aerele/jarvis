@@ -35,7 +35,7 @@ vi.mock("frappe-ui", () => ({
 vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
 		props: ["rows", "emptyState", "columns", "rowHeight"],
-		template: `<div :data-cols="columns.map((c) => c.key).join()" :data-row-height="rowHeight"><slot name="banner" /><slot name="right-header" /><div v-if="!rows.length" class="empty">{{ emptyState.description }}</div><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-file" :row="row" /><slot name="cell-source" :row="row" /><slot name="cell-status" :row="row" /><slot name="cell-draft" :row="row" /><slot name="cell-summary" :row="row" /><slot name="cell-_retry" :row="row" /></div></div>`,
+		template: `<div :data-cols="columns.map((c) => c.key).join()" :data-row-height="rowHeight"><slot name="banner" /><div class="left"><slot name="left-extra" /></div><div class="right"><slot name="right-header" /></div><div v-if="!rows.length" class="empty">{{ emptyState.description }}</div><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-file" :row="row" /><slot name="cell-source" :row="row" /><slot name="cell-status" :row="row" /><slot name="cell-draft" :row="row" /><slot name="cell-summary" :row="row" /><slot name="cell-_retry" :row="row" /></div></div>`,
 	},
 }));
 vi.mock("@/api", () => ({
@@ -78,6 +78,13 @@ async function mountList(rows, can_manage = false) {
 }
 
 describe("IntakeList", () => {
+	it("puts the switch in the same left slot as the Dropped view, whatever the right side holds", async () => {
+		const w = await mountList([row()], true);
+		expect(w.find(".left .tabs, .left [data-filebox-switch]").exists()).toBe(true);
+		expect(w.find(".right [data-filebox-switch]").exists()).toBe(false);
+		w.unmount();
+	});
+
 	let w;
 	beforeEach(() => {
 		vi.clearAllMocks();
