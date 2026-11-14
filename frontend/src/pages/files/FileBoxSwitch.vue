@@ -1,9 +1,11 @@
 <template>
-	<TabButtons
-		:buttons="VIEWS"
-		:model-value="modelValue"
-		@update:model-value="(v) => v && v !== modelValue && $emit('update:modelValue', v)"
-	/>
+	<div data-filebox-switch class="shrink-0">
+		<TabButtons
+			:buttons="VIEWS"
+			:model-value="modelValue"
+			@update:model-value="(v) => v && v !== modelValue && $emit('update:modelValue', v)"
+		/>
+	</div>
 </template>
 
 <script setup>

@@ -167,7 +167,7 @@
 				selectable,
 				getRowRoute: getRowRoute || null,
 				onRowClick: onRowClick || null,
-				rowHeight: 40,
+				rowHeight,
 				resizeColumn: false,
 				showTooltip: true,
 			}"
@@ -326,6 +326,7 @@ const props = defineProps({
 	breadcrumbs: { type: Array, default: () => [] }, // [{label, route?}]
 	showHeader: { type: Boolean, default: true }, // false = embedded (host owns the LayoutHeader)
 	columns: { type: Array, default: () => [] }, // frappe-ui ListView columns
+	rowHeight: { type: [Number, String], default: 40 }, // "auto" for a list whose cells stack
 	rows: { type: Array, default: () => [] },
 	rowKey: { type: String, default: "name" },
 	loading: { type: Boolean, default: false },

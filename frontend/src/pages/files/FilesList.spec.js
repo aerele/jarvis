@@ -131,6 +131,26 @@ describe("FilesList: the Dropped / Intake switch", () => {
 		expect(w.find(".row").exists()).toBe(false);
 		w.unmount();
 	});
+
+	it("stops polling the Dropped list while the Intake view is shown", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		const w = await mountList([applying]);
+		await w.find('.tab[data-value="intake"]').trigger("click");
+		const calls = api.fileboxListPage.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(20000);
+		expect(api.fileboxListPage.mock.calls.length).toBe(calls);
+		w.unmount();
+		vi.useRealTimers();
+	});
+
+	it("opens on Intake from the ?view=intake link a bell carries", async () => {
+		const { useRoute } = await import("vue-router");
+		useRoute().query.view = "intake";
+		const w = await mountList([applying]);
+		expect(w.find(".intake-view").exists()).toBe(true);
+		delete useRoute().query.view;
+		w.unmount();
+	});
 });
 
 describe("FilesList: the File Box skill picker and a bulk drop", () => {
