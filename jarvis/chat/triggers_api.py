@@ -352,8 +352,8 @@ def get_activity_detail(name: str) -> dict:
 	error for a real and a missing name) and the row is read with ``get_value``,
 	never ``get_doc().check_permission`` / ``get_list``."""
 	_require_manage()
-	# ``from __future__ import annotations`` makes Frappe's whitelist type check skip
-	# this module, so a non-str is rejected here.
+	# Frappe's whitelist type check rejects a non-str on a real request; direct Python
+	# callers skip it, so the body checks too.
 	if not isinstance(name, str) or not name.strip():
 		frappe.throw(_("Activity name is required."))
 	row = frappe.db.get_value(ACTIVITY, name.strip(), ["name", "detail"], as_dict=True)

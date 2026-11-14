@@ -821,11 +821,10 @@ class TestGetActivityDetail(_TriggersApiTestCase):
 				get_activity_detail(blank)
 
 	def test_non_string_name_is_rejected_before_any_read(self):
-		# Frappe's whitelist type check (FrappeTypeError) is a no-op for this module:
-		# ``from __future__ import annotations`` makes the annotations strings, which
-		# frappe.utils.typing_validations skips. So the body must reject a non-str
-		# itself (ValidationError). Either error is accepted, as in test_pulse_feedback;
-		# call with keyword arguments and the request condition, as Frappe does.
+		# Frappe's whitelist type check (FrappeTypeError) runs on a request; a direct call
+		# skips it, so the body must reject a non-str itself (ValidationError). Either error
+		# is accepted, as in test_pulse_feedback; call with keyword arguments and the
+		# request condition, as Frappe does.
 		frappe.set_user(ADMIN_USER)
 		with patch.object(frappe, "in_test", True):
 			for bad in (None, 7, ["a"], {"a": 1}):
