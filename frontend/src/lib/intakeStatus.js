@@ -15,6 +15,8 @@ export const INTAKE_STATUS_OPTIONS = [
 ];
 
 export function intakeBadge(row) {
+	// The draft was deleted after the row finished: not "Draft created" any more.
+	if (row && row.draft_missing) return { label: "Draft deleted", theme: "gray" };
 	return INTAKE_BADGE[row && row.status] || { label: (row && row.status) || "", theme: "gray" };
 }
 

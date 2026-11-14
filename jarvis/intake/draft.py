@@ -468,9 +468,17 @@ def _review(row, trigger, values: dict, missing: list[dict], note: str) -> None:
 	notify.notify(row.event_user, f"Waiting for a reviewer: {count} field(s) need a value")
 
 
+def _has_default(meta, fieldname: str) -> bool:
+	"""True when the DocField carries its own default: Frappe fills it on insert, so a blank
+	reading is not something the engineer has to check."""
+	df = meta.get_field(fieldname)
+	return bool(df and df.default not in (None, ""))
+
+
 def _ignored_blanks(s, values: dict, missing: list[dict], unresolved: list[dict]) -> list[str]:
 	"""Lines for the draft's comment: every mandatory field left blank, then each optional
-	field that was read as blank or whose link did not resolve."""
+	field that was read as blank or whose link did not resolve. A blank optional field whose
+	DocField has a default is left out (the doctype applies it)."""
 	meta = frappe.get_meta(s.target)
 	lines = [m["reason"] for m in missing]
 	seen = {(m["field"], m["row"]) for m in missing}
@@ -482,13 +490,21 @@ def _ignored_blanks(s, values: dict, missing: list[dict], unresolved: list[dict]
 			lines.append(_issue_text(label, u["row"], u))
 			seen.add((u["field"], u["row"]))
 	for fieldname in s.fields:
-		if (fieldname, None) not in seen and _blank(values.get(fieldname)):
+		if (
+			(fieldname, None) not in seen
+			and _blank(values.get(fieldname))
+			and not _has_default(meta, fieldname)
+		):
 			lines.append(f"{_label(meta, fieldname)}: unreadable")
 	table = (s.table or {}).get("fieldname")
 	if table and child_meta:
 		for i, row in enumerate(values.get(table) or [], start=1):
 			for fieldname in s.table.get("columns") or []:
-				if (fieldname, i) not in seen and _blank(row.get(fieldname)):
+				if (
+					(fieldname, i) not in seen
+					and _blank(row.get(fieldname))
+					and not _has_default(child_meta, fieldname)
+				):
 					lines.append(f"{_label(child_meta, fieldname)}, row {i}: unreadable")
 	return lines
 

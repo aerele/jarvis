@@ -129,10 +129,25 @@ class TestIntakeFilebox(FrappeTestCase):
 				"summary",
 				"draft_doctype",
 				"draft_name",
+				"draft_missing",
 				"approval_request",
 				"can_retry",
 			},
 		)
+
+	def test_deleted_draft_is_flagged_and_blanked(self):
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "intake draft"}).insert(
+			ignore_permissions=True
+		)
+		live = self._row(status="Success", draft_doctype="ToDo", draft_name=todo.name)
+		gone = self._row(status="Success", draft_doctype="ToDo", draft_name="no-such-todo")
+		rows = {r["name"]: r for r in self._list(UPLOADER)["rows"]}
+		self.assertEqual(rows[live]["draft_name"], todo.name)
+		self.assertFalse(rows[live]["draft_missing"])
+		self.assertTrue(rows[gone]["draft_missing"])
+		self.assertEqual(rows[gone]["draft_name"], "")
+		# The stored row keeps its link.
+		self.assertEqual(frappe.db.get_value(ACTIVITY, gone, "draft_name"), "no-such-todo")
 
 	def test_filters_search_and_paging(self):
 		self._row(status="Failed", summary="alpha_one")

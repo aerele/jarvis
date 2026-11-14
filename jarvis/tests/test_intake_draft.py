@@ -97,6 +97,7 @@ class TestIntakeDraft(FrappeTestCase):
 				_field("customer", "Link", options=CUSTOMER),
 				_field("notes", "Small Text"),
 				_field("priority", "Select", options="Low\nHigh"),
+				_field("urgency", "Select", options="Low\nMedium\nHigh", default="Medium"),
 				_field("items", "Table", options=CHILD),
 			],
 			[
@@ -337,6 +338,36 @@ class TestIntakeDraft(FrappeTestCase):
 			),
 			1,
 		)
+
+	def test_blank_optional_field_with_a_default_is_not_listed(self):
+		# The doctype fills its own default on insert, so there is nothing to check.
+		rule = self._rule(
+			{
+				"fields": ["title", "notes", "urgency"],
+				"table": {"fieldname": "items", "columns": ["item_name", "qty"]},
+			},
+			allow_incomplete_drafts=1,
+		)
+		row = self._row(rule)
+		reading = {
+			"title": None,
+			"notes": None,
+			"urgency": None,
+			"items": [{"item_name": "bolt", "qty": 1}],
+		}
+		draft.finish(row, reading)
+		state = self._state(row)
+		# Mandatory Title and optional Notes (no default) are listed; Urgency is not.
+		self.assertIn("(2 field(s) to check)", state.summary)
+		comment = frappe.db.get_value(
+			"Comment",
+			{"reference_doctype": PARENT, "reference_name": state.draft_name, "comment_type": "Comment"},
+			"content",
+		)
+		self.assertIn("Title: unreadable", comment)
+		self.assertIn("Notes: unreadable", comment)
+		self.assertNotIn("Urgency", comment)
+		self.assertEqual(frappe.db.get_value(PARENT, state.draft_name, "urgency"), "Medium")
 
 	def test_complete_reading_is_success(self):
 		rule = self._rule()

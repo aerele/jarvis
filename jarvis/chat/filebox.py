@@ -1392,6 +1392,10 @@ def list_intake_page(
 		.run(as_dict=True)
 	)
 	live = live_drafts(rows)
+	# A draft deleted since is a dangling link: flag it and hide the name, the stored row stays.
+	missing = {
+		r["name"] for r in rows if r["draft_name"] and (r["draft_doctype"], r["draft_name"]) not in live
+	}
 	out = [
 		{
 			"name": r["name"],
@@ -1402,7 +1406,8 @@ def list_intake_page(
 			"status": r["status"],
 			"summary": r["summary"] or "",
 			"draft_doctype": r["draft_doctype"] or "",
-			"draft_name": r["draft_name"] or "",
+			"draft_name": "" if r["name"] in missing else (r["draft_name"] or ""),
+			"draft_missing": r["name"] in missing,
 			"approval_request": r["approval_request"] or "",
 			"can_retry": can_retry_row(r, me, manager, live),
 		}

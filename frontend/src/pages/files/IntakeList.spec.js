@@ -100,6 +100,14 @@ describe("IntakeList", () => {
 		expect(w.findAll(".row")[1].find(".badge").attributes("data-theme")).toBe("red");
 	});
 
+	it("shows a deleted draft as Draft deleted, neutral, with no link", async () => {
+		w = await mountList([row({ draft_name: "", draft_missing: true })]);
+		const first = w.findAll(".row")[0];
+		expect(first.find(".badge").text()).toBe("Draft deleted");
+		expect(first.find(".badge").attributes("data-theme")).toBe("gray");
+		expect(first.find("a").exists()).toBe(false);
+	});
+
 	it("links a review row without a draft to its approval", async () => {
 		w = await mountList([
 			row({
