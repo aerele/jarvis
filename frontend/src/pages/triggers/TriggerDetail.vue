@@ -502,6 +502,7 @@ const form = reactive({
 	allow_incomplete_drafts: 0,
 	intake_status_field: "",
 	intake_link_field: "",
+	intake_record_event: "File attached",
 });
 const isIntake = computed(() => form.action_type === "Intake");
 // Intake pieces report their edits as one patch ({key: value}).
@@ -582,6 +583,7 @@ const FIELDS = [
 	"allow_incomplete_drafts",
 	"intake_status_field",
 	"intake_link_field",
+	"intake_record_event",
 ];
 // What each kind sends: an intake has no event, condition, script or instruction, and the
 // other kinds have no intake settings (the server rejects nothing, but stray values would
@@ -969,6 +971,7 @@ function seed(data) {
 	form.allow_incomplete_drafts = data.allow_incomplete_drafts ? 1 : 0;
 	form.intake_status_field = data.intake_status_field || "";
 	form.intake_link_field = data.intake_link_field || "";
+	form.intake_record_event = data.intake_record_event || "File attached";
 	const snap = {};
 	for (const f of FIELDS) snap[f] = normalized(f);
 	snapshot.value = snap;

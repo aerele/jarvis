@@ -37,8 +37,12 @@
 			@load-more="loadMore"
 			@refresh="resetLoad"
 		>
-			<template #right-header>
+			<!-- same slot in both views: the switch stays where it was when it is clicked -->
+			<template #left-extra>
 				<FileBoxSwitch v-model="view" />
+			</template>
+
+			<template #right-header>
 				<Button label="Clear Processed" @click="clearProcessed" />
 				<Button
 					variant="solid"
