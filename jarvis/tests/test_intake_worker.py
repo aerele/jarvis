@@ -1012,9 +1012,7 @@ class TestIntakeWorker(FrappeTestCase):
 	# ---- rows of a turned-off rule ---------------------------------------------------
 	def test_pump_ends_queued_rows_of_a_turned_off_rule_and_reading_never_starts(self):
 		off = self._rule()
-		other = self._rule(
-			intake_target_doctype="Note", intake_spec=json.dumps({"fields": ["title"]})
-		)
+		other = self._rule(intake_target_doctype="Note", intake_spec=json.dumps({"fields": ["title"]}))
 		stale = self._row(off)
 		frappe.db.set_value(TRIGGER, off.name, "enabled", 0)
 		engine.clear_cache()

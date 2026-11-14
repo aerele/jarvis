@@ -283,7 +283,9 @@ class TestIntakeSpec(FrappeTestCase):
 	def test_employee_login_fields_are_refused_by_the_spec(self):
 		for fieldname in ("user_id", "create_user_permission"):
 			with self.subTest(fieldname=fieldname):
-				picked = intake_spec.IntakeSpec(target="Employee", fields=["first_name", fieldname], table=None)
+				picked = intake_spec.IntakeSpec(
+					target="Employee", fields=["first_name", fieldname], table=None
+				)
 				with self.assertRaises(frappe.ValidationError):
 					intake_spec.validate(picked)
 
