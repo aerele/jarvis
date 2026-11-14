@@ -20,6 +20,8 @@ from frappe.model import (
 from frappe.utils import cint
 
 MAX_INSTRUCTIONS_LEN = 4000
+# Header fields plus table columns one rule may read. More only bloats the prompt and the schema.
+MAX_PICKED_FIELDS = 60
 # The Jarvis Trigger columns every intake stage reads (draft, review, worker).
 TRIGGER_FIELDS = [
 	"intake_source",
@@ -36,6 +38,9 @@ _INTEGER_TYPES = {"Int", "Check"}
 _NUMBER_TYPES = {"Float", "Currency", "Percent"}
 # Layout/display types never hold an extracted value.
 _NON_VALUE_TYPES = set(no_value_fields) | set(display_fieldtypes) | set(table_fields)
+# Values a page image cannot carry: files, secrets, code and structured blobs, and links
+# whose target type is itself a value.
+_NOT_READABLE_TYPES = {"Attach", "Attach Image", "Password", "Code", "JSON", "Dynamic Link"}
 
 
 @dataclass
@@ -85,6 +90,22 @@ def _is_mandatory(df) -> bool:
 	)
 
 
+def depends_mandatory(df, doc_values: dict) -> bool:
+	"""True when ``df`` has a ``mandatory_depends_on`` expression that holds for
+	``doc_values`` (the merged header values, or one child row). Frappe evaluates it with
+	``doc`` in scope and an optional ``eval:`` prefix; a broken expression counts as not
+	mandatory, as the desk form treats it."""
+	expression = (df.get("mandatory_depends_on") or "").strip()
+	if not expression or df.read_only or df.fieldtype in _NON_VALUE_TYPES:
+		return False
+	if expression.startswith("eval:"):
+		expression = expression[5:]
+	try:
+		return bool(frappe.safe_eval(expression, None, {"doc": frappe._dict(doc_values)}))
+	except Exception:
+		return False
+
+
 def _child_doctype(s: IntakeSpec) -> str | None:
 	if not s.table:
 		return None
@@ -103,9 +124,21 @@ def mandatory_fields(s: IntakeSpec) -> tuple[list[str], list[str]]:
 	return header, columns
 
 
+def _fillable(df) -> bool:
+	"""A field a reading can fill: a value type the user can write, not computed."""
+	return bool(
+		df
+		and df.fieldtype not in _NON_VALUE_TYPES
+		and df.fieldtype not in _NOT_READABLE_TYPES
+		and not df.read_only
+		and not df.fetch_from
+		and not df.get("is_virtual")
+	)
+
+
 def _value_field(meta, fieldname, where):
 	df = meta.get_field(fieldname)
-	if not df or df.fieldtype in _NON_VALUE_TYPES:
+	if not _fillable(df):
 		frappe.throw(_("{0}: '{1}' is not a fillable field on {2}.").format(where, fieldname, meta.name))
 	return df
 
@@ -118,6 +151,10 @@ def validate(s: IntakeSpec) -> None:
 		frappe.throw(_("Instructions must be at most {0} characters.").format(MAX_INSTRUCTIONS_LEN))
 	if not s.fields or not all(isinstance(f, str) for f in s.fields):
 		frappe.throw(_("List at least one field to read."))
+
+	columns = (s.table.get("columns") or []) if isinstance(s.table, dict) else []
+	if len(s.fields) + len(columns) > MAX_PICKED_FIELDS:
+		frappe.throw(_("Pick at most {0} fields and columns to read.").format(MAX_PICKED_FIELDS))
 
 	meta = frappe.get_meta(s.target)
 	for fieldname in s.fields:
@@ -222,7 +259,7 @@ def _property(df) -> dict:
 	back null instead of a guess."""
 	if df.fieldtype in _INTEGER_TYPES:
 		base = "integer"
-	elif df.fieldtype in _NUMBER_TYPES:
+	elif df.fieldtype in _NUMBER_TYPES or df.fieldtype in ("Duration", "Rating"):
 		base = "number"
 	else:
 		base = "string"

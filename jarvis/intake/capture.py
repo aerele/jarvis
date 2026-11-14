@@ -12,7 +12,7 @@ import frappe
 from frappe.utils import cint
 
 from jarvis import compat
-from jarvis.intake import notify
+from jarvis.intake import guards, notify
 
 INTAKE_MAP_CACHE_KEY = "jarvis:intake_map"
 # Short TTL backstops a bust that races a concurrent rebuild.
@@ -21,9 +21,13 @@ _READABLE_EXTENSIONS = ("jpg", "jpeg", "png", "webp", "pdf")
 ACTIVITY = "Jarvis Trigger Activity"
 # A permanent skip: the row can never be read, so File Box offers no retry.
 UNREADABLE_TYPE_SUMMARY = "This file type can't be read for intake"
+DUPLICATE_SUMMARY = "Same file as an earlier upload"
 # Also permanent: the source File was deleted before (or while) the job read it.
 FILE_REMOVED_SUMMARY = "The file was removed"
 PERMANENT_SUMMARIES = (UNREADABLE_TYPE_SUMMARY, FILE_REMOVED_SUMMARY)
+# Held from the duplicate check until the row commits; the TTL is only the crash backstop.
+_LOCK_TTL_S = 15
+_LOCK_WAIT_S = 5
 _RULE_FIELDS = (
 	"name",
 	"trigger_name",
@@ -95,10 +99,22 @@ def on_file_update(doc, method=None) -> None:
 	_capture(doc, "on_update", check_changes=True)
 
 
+def _skip_context() -> bool:
+	"""Installs, migrations and imports never capture; neither does a File the intake worker
+	itself attaches to a draft (it would queue the draft's own photo again)."""
+	flags = frappe.local.flags
+	return bool(
+		flags.in_install
+		or flags.in_patch
+		or flags.in_migrate
+		or flags.in_import
+		or flags.get("jarvis_intake_attach")
+	)
+
+
 def _capture(doc, event: str, check_changes: bool) -> None:
 	try:
-		flags = frappe.local.flags
-		if flags.in_install or flags.in_patch or flags.in_migrate or flags.in_import:
+		if _skip_context() or doc.flags.get("jarvis_intake_attach"):
 			return
 		if cint(doc.get("is_folder")):
 			return
@@ -111,9 +127,11 @@ def _capture(doc, event: str, check_changes: bool) -> None:
 		matched = _matching_rules(doc, rules, check_changes)
 		if not matched:
 			return
+		if not guards.is_desk_user(user):
+			return  # a portal or signup user may upload, but never starts an AI read
 		if not doc.get("content_hash"):
 			frappe.log_error(
-				title="Jarvis Intake: file has no content hash",
+				title="Jarvis intake: file has no content hash",
 				message=f"File {doc.name} has no content_hash, so intake skipped it.",
 			)
 			return
@@ -121,9 +139,50 @@ def _capture(doc, event: str, check_changes: bool) -> None:
 			_queue_one(doc, rule, event, user)
 	except Exception:
 		try:
-			frappe.log_error(title="Jarvis Intake: capture failed")
+			frappe.log_error(title="Jarvis intake: capture failed")
 		except Exception:
 			pass
+
+
+def on_record_save(doc, method=None) -> None:
+	"""``doc_events "*"`` on_update: a Record rule also captures files that Frappe bound to
+	the record through an Attach or Attach Image field. Those are bound with a plain DB
+	write, so no File save fires; this runs after Frappe's own on_update hook has bound them.
+	Costs one cached-map lookup for a doctype no Record rule watches."""
+	try:
+		if _skip_context() or doc.doctype == "File":
+			return
+		rules = intake_map()["record"].get(doc.doctype)
+		user = frappe.session.user
+		if not rules or not doc.name or not user or user == "Guest" or not guards.is_desk_user(user):
+			return
+		# System context: the uploader is whoever saved the record, checked per rule below.
+		files = frappe.get_all(
+			"File",
+			filters={"attached_to_doctype": doc.doctype, "attached_to_name": doc.name, "is_folder": 0},
+			fields=["name", "file_name", "content_hash", "attached_to_doctype", "attached_to_name"],
+		)
+		if not files:
+			return
+		for rule in rules:
+			_capture_bound(rule, files, user)
+	except Exception:
+		frappe.log_error(title="Jarvis intake: capture failed")
+
+
+def _capture_bound(rule: dict, files: list, user: str) -> None:
+	"""Queue the files of ``files`` this rule has no row for yet (a row of any status counts,
+	so a Retry stays the uploader's decision and a later save never re-queues)."""
+	done = set(
+		frappe.get_all(  # system context: capture runs for any saver
+			ACTIVITY,
+			filters={"trigger": rule["name"], "source_file": ["in", [f.name for f in files]]},
+			pluck="source_file",
+		)
+	)
+	for f in files:
+		if f.name not in done and f.content_hash:
+			_queue_one(f, rule, "on_update", user)
 
 
 def _matching_rules(doc, rules: dict, check_changes: bool) -> list[dict]:
@@ -148,35 +207,16 @@ def _matching_rules(doc, rules: dict, check_changes: bool) -> list[dict]:
 def _queue_one(doc, rule: dict, event: str, user: str) -> None:
 	file_name = doc.get("file_name") or ""
 	ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
-	attached_name = doc.get("attached_to_name") or ""
-	if attached_name.startswith("new-"):
-		attached_name = ""
-	status, summary, duplicate_of = "Queued", f"Queued {doc.get('file_name') or doc.name}"[:140], None
+	# A Record rule drafts per record, so the same scan on another record is new work.
+	record = _attached_name(doc) if rule["intake_source"] == "Record" else None
 	if ext not in _READABLE_EXTENSIONS:
-		status, summary = "Skipped", UNREADABLE_TYPE_SUMMARY
+		row, duplicate_of = _insert_row(doc, rule, event, "Skipped", UNREADABLE_TYPE_SUMMARY)
+	elif refusal := guards.create_refusal(user, rule["intake_target_doctype"]):
+		# No AI call, no cap use: the draft could never be created for this uploader.
+		row, duplicate_of = _insert_row(doc, rule, event, "Skipped", refusal)
 	else:
-		# A Record rule drafts per record, so the same scan on another record is new work.
-		record = attached_name if rule["intake_source"] == "Record" else None
-		duplicate_of = _earlier_row(rule["name"], doc.content_hash, record)
-		if duplicate_of:
-			status, summary = "Skipped", "Same file as an earlier upload"
-	row = frappe.get_doc(
-		{
-			"doctype": ACTIVITY,
-			"trigger": rule["name"],
-			"trigger_label": rule["trigger_name"],
-			"action_type": "Intake",
-			"status": status,
-			"source_file": doc.name,
-			"file_hash": doc.content_hash,
-			"target_doctype": rule["intake_target_doctype"],
-			"target_docname": attached_name,
-			"doc_event": event,
-			"event_user": frappe.session.user,
-			"summary": summary,
-			"duplicate_of": duplicate_of,
-		}
-	).insert(ignore_permissions=True)
+		row, duplicate_of = _insert_unless_duplicate(doc, rule, event, record)
+	status, summary = row.status, row.summary
 	if status == "Skipped" and not duplicate_of:
 		# An unreadable type will never be drafted; the uploader may have no Jarvis access,
 		# so the bell is how they learn of it. A duplicate stays quiet.
@@ -193,7 +233,90 @@ def _queue_one(doc, rule: dict, event: str, user: str) -> None:
 	)
 
 
-def _earlier_row(trigger: str, file_hash: str, record: str | None = None) -> str | None:
+def _insert_row(doc, rule: dict, event: str, status: str, summary: str, duplicate_of: str | None = None):
+	row = frappe.get_doc(
+		{
+			"doctype": ACTIVITY,
+			"trigger": rule["name"],
+			"trigger_label": rule["trigger_name"],
+			"action_type": "Intake",
+			"status": status,
+			"source_file": doc.name,
+			"file_hash": doc.content_hash,
+			"target_doctype": rule["intake_target_doctype"],
+			"target_docname": _attached_name(doc),
+			"doc_event": event,
+			"event_user": frappe.session.user,
+			"summary": summary,
+			"duplicate_of": duplicate_of,
+		}
+	).insert(ignore_permissions=True)
+	return row, duplicate_of
+
+
+def _attached_name(doc) -> str:
+	name = doc.get("attached_to_name") or ""
+	return "" if name.startswith("new-") else name
+
+
+def _insert_unless_duplicate(doc, rule: dict, event: str, record: str | None):
+	"""Check for an earlier row and insert this one under one Redis lock, so two uploads of
+	the same bytes at once cannot both pass the check. (The worker re-checks after its claim:
+	that is the guarantee, this keeps the second row from being Queued at all.)"""
+	release = _lock(rule["name"], doc.content_hash, record)
+	try:
+		duplicate_of = earlier_row(rule["name"], doc.content_hash, record)
+		if duplicate_of:
+			return _insert_row(doc, rule, event, "Skipped", DUPLICATE_SUMMARY, duplicate_of)
+		return _insert_row(doc, rule, event, "Queued", f"Queued {doc.get('file_name') or doc.name}"[:140])
+	finally:
+		# The lock must outlive this function: the row is not visible to another request
+		# until the transaction commits.
+		_release_when_settled(release)
+
+
+def _lock(trigger: str, file_hash: str, record: str | None):
+	"""Take the (rule, bytes, record) lock, waiting a few seconds. Returns the release
+	callable, or None when Redis is unavailable (the worker's re-check still protects)."""
+	try:
+		cache = frappe.cache()
+		lock = cache.lock(
+			cache.make_key(f"jarvis:intake:capture:{trigger}:{file_hash}:{record or ''}"),
+			timeout=_LOCK_TTL_S,
+			blocking_timeout=_LOCK_WAIT_S,
+		)
+		if not lock.acquire(blocking=True):
+			return None
+	except Exception:
+		return None
+
+	def release():
+		try:
+			lock.release()
+		except Exception:
+			pass  # the TTL is the backstop
+
+	return release
+
+
+def _release_when_settled(release) -> None:
+	if not release:
+		return
+	try:
+		frappe.db.after_commit.add(release)
+		frappe.db.after_rollback.add(release)
+	except Exception:
+		release()
+
+
+def earlier_row(
+	trigger: str,
+	file_hash: str,
+	record: str | None = None,
+	*,
+	exclude: str | None = None,
+	created_before=None,
+) -> str | None:
 	"""The first row of this rule that already stands for the same bytes, or None.
 
 	Failed and Skipped rows never produced a draft, so a re-upload may retry. A row that
@@ -201,10 +324,16 @@ def _earlier_row(trigger: str, file_hash: str, record: str | None = None) -> str
 	a deleted draft would otherwise leave the file a duplicate for good, with nothing
 	retryable. In-flight and waiting-for-review rows (no draft yet) always count.
 
-	``record`` narrows a Record-source rule to the record the file is attached to."""
+	``record`` narrows a Record-source rule to the record the file is attached to. The worker
+	passes ``exclude`` (its own row) and ``created_before`` (its creation) so that of two rows
+	for the same file only the older one proceeds."""
 	filters = {"trigger": trigger, "file_hash": file_hash, "status": ["not in", ["Failed", "Skipped"]]}
 	if record is not None:
 		filters["target_docname"] = record
+	if exclude:
+		filters["name"] = ["!=", exclude]
+	if created_before:
+		filters["creation"] = ["<=", created_before]
 	rows = frappe.get_all(  # system context: the capture hook runs for any uploader
 		ACTIVITY,
 		filters=filters,

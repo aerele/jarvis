@@ -8,8 +8,6 @@ tester, and the visibility-filtered activity feed. Mirrors the shape of
 ``jarvis.chat.macros_api`` (whose list-page helpers it reuses).
 """
 
-from __future__ import annotations
-
 import frappe
 from frappe import _
 from frappe.model import default_fields
@@ -521,13 +519,7 @@ def _intake_value_fields(meta) -> list:
 	"""Fields an intake can fill: user-writable value fields, no layout, no
 	computed (read-only) ones, no standard columns. Hidden fields stay: a
 	mandatory hidden field still needs a value for strict coverage."""
-	return [
-		df
-		for df in meta.fields
-		if df.fieldtype not in intake_spec._NON_VALUE_TYPES
-		and not df.read_only
-		and df.fieldname not in default_fields
-	]
+	return [df for df in meta.fields if intake_spec._fillable(df) and df.fieldname not in default_fields]
 
 
 @frappe.whitelist(methods=["POST"])

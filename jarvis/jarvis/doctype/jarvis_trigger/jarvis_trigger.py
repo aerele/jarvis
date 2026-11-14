@@ -24,6 +24,7 @@ from frappe.model.document import Document
 from frappe.utils import cint
 from frappe.utils.safe_exec import is_safe_exec_enabled
 
+from jarvis.intake import guards
 from jarvis.intake import spec as intake_spec
 from jarvis.intake.capture import clear_intake_cache
 from jarvis.permissions import NotRenamable
@@ -302,6 +303,9 @@ class JarvisTrigger(NotRenamable, Document):
 				if not intake
 				else _("Intake on '{0}' is not allowed. It is an internal DocType.").format(doctype)
 			)
+		if intake and guards.refused_doctype(doctype):
+			# Drafts of config and access doctypes are live records, not drafts.
+			frappe.throw(_("Intake cannot use '{0}'. It holds access or configuration.").format(doctype))
 
 	def _validate_event_action(self):
 		if self.doc_event not in SUPPORTED_EVENTS:
@@ -330,12 +334,16 @@ class JarvisTrigger(NotRenamable, Document):
 		self._check_doctype_usable(self.intake_target_doctype, intake=True)
 		intake_spec.validate(intake_spec.load(self))
 		self._check_intake_duplicates()
+		if self.intake_source == "Record":
+			self._check_intake_loops()
 
 	def check_enabled_duplicates(self):
 		"""The duplicate guard that fits this rule's kind, for callers that arm a
 		stored row without ``validate`` (the quick enable toggle)."""
 		if self.action_type == "Intake":
 			self._check_intake_duplicates()
+			if self.intake_source == "Record":
+				self._check_intake_loops()
 		else:
 			self.check_duplicates()
 
@@ -366,6 +374,35 @@ class JarvisTrigger(NotRenamable, Document):
 					self.intake_target_doctype, self.get(by_source)
 				),
 				frappe.ValidationError,
+			)
+
+	def _check_intake_loops(self):
+		"""A draft gets the source file attached, so a draft of the watched DocType (or of
+		a DocType another rule watches back) would queue the same photo again."""
+		record, target = self.intake_record_doctype, self.intake_target_doctype
+		if record == target:
+			frappe.throw(_("The drafts cannot be the same DocType as the records being watched."))
+		if not cint(self.enabled):
+			return
+		# System context: rules are site-wide.
+		back = frappe.get_all(
+			"Jarvis Trigger",
+			filters={
+				"name": ["!=", self.name or ""],
+				"enabled": 1,
+				"action_type": "Intake",
+				"intake_source": "Record",
+				"intake_record_doctype": target,
+				"intake_target_doctype": record,
+			},
+			limit=1,
+			pluck="name",
+		)
+		if back:
+			frappe.throw(
+				_("Rule {0} creates {1} from {2}, so the two rules would feed each other.").format(
+					back[0], record, target
+				)
 			)
 
 	def _validate_intake_folder(self):

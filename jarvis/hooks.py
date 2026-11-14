@@ -761,6 +761,23 @@ ignore_links_on_delete = [
 # other wildcard handlers are preserved.
 _TRIGGER_DISPATCH = "jarvis.triggers.engine.dispatch"
 _star_doc_events = doc_events.setdefault("*", {})
+
+
+def _merge_doc_event(events: dict, event: str, handler: str, first: bool = False) -> None:
+	"""Add ``handler`` to ``events[event]`` (a doctype's doc_events dict), keeping whatever
+	is already there: a missing entry, a single string or a list. ``first`` puts it in
+	front, so it runs before the others."""
+	existing = events.get(event)
+	if existing is None:
+		events[event] = [handler]
+	elif isinstance(existing, str):
+		events[event] = [handler, existing] if first else [existing, handler]
+	elif first:
+		existing.insert(0, handler)
+	else:
+		existing.append(handler)
+
+
 for _trigger_event in (
 	"validate",
 	"before_submit",
@@ -771,13 +788,7 @@ for _trigger_event in (
 	"on_trash",
 	"on_update_after_submit",
 ):
-	_existing_handlers = _star_doc_events.get(_trigger_event)
-	if _existing_handlers is None:
-		_star_doc_events[_trigger_event] = [_TRIGGER_DISPATCH]
-	elif isinstance(_existing_handlers, str):
-		_star_doc_events[_trigger_event] = [_existing_handlers, _TRIGGER_DISPATCH]
-	else:
-		_existing_handlers.append(_TRIGGER_DISPATCH)
+	_merge_doc_event(_star_doc_events, _trigger_event, _TRIGGER_DISPATCH)
 
 # Document Intake: watch File uploads (folder rules on insert, record rules when a
 # file gets attached to a saved record). No-op unless an Intake rule exists.
@@ -786,13 +797,11 @@ for _intake_event, _intake_handler in (
 	("after_insert", "jarvis.intake.capture.on_file_insert"),
 	("on_update", "jarvis.intake.capture.on_file_update"),
 ):
-	_existing_handlers = _intake_file_events.get(_intake_event)
-	if _existing_handlers is None:
-		_intake_file_events[_intake_event] = _intake_handler
-	elif isinstance(_existing_handlers, str):
-		_intake_file_events[_intake_event] = [_existing_handlers, _intake_handler]
-	else:
-		_existing_handlers.append(_intake_handler)
+	_merge_doc_event(_intake_file_events, _intake_event, _intake_handler)
+# A Record rule also captures files Frappe bound through an Attach field (a plain DB write,
+# so no File save fires): after the record saves, and after Frappe's own on_update binds them.
+# One cached-map lookup for a doctype no Record rule watches.
+_merge_doc_event(_star_doc_events, "on_update", "jarvis.intake.capture.on_record_save")
 
 # Write-risk guard (round 2, jarvis.tools._write_risk): while a Jarvis tool call
 # runs, a ROOT write of a structure / sensitive document is refused unless the card
@@ -809,13 +818,7 @@ for _guard_handler, _guard_events in (
 	(_WRITE_BRAKE, ("before_cancel", "before_discard", "before_change", "on_trash")),
 ):
 	for _guard_event in _guard_events:
-		_existing_handlers = _star_doc_events.get(_guard_event)
-		if _existing_handlers is None:
-			_star_doc_events[_guard_event] = [_guard_handler]
-		elif isinstance(_existing_handlers, str):
-			_star_doc_events[_guard_event] = [_guard_handler, _existing_handlers]
-		else:
-			_existing_handlers.insert(0, _guard_handler)
+		_merge_doc_event(_star_doc_events, _guard_event, _guard_handler, first=True)
 
 # Jarvis Trigger Activity is an append-only log; frappe's standard Log
 # Settings clearing reaps rows older than 90 days (the controller's
@@ -1011,8 +1014,9 @@ has_permission.update(
 # ---------------------------------------------------------------------------
 # Read is org-wide for jarvis users (the doctype rows grant Jarvis User read;
 # no row scoping), but write/create/delete are denied at the ORM for everyone
-# below System Manager / Jarvis Admin. Jarvis Trigger Activity deliberately
-# has NO hooks: its doctype perms are SM-only and
+# below System Manager / Jarvis Admin. Jarvis Trigger Activity has no doc_events:
+# its doctype perms are SM-only (plus the uploader's own Intake rows, see
+# jarvis.triggers.activity_permissions) and
 # jarvis.chat.triggers_api.list_activity_page serves visibility-filtered rows
 # (read access on the target doc) to everyone else.
 permission_query_conditions.update(

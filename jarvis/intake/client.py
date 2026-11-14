@@ -6,11 +6,10 @@ transport, size cap and error mapping are the ``llm-task`` client's, reused so
 a 404 (older plugin without the route) and a refusal behave the same way.
 """
 
-from __future__ import annotations
-
 import frappe
 
 from jarvis.chat import plugin_routes
+from jarvis.intake import limits
 from jarvis.triggers import llm_task_client as lt
 
 LLMTaskError = lt.LLMTaskError
@@ -38,6 +37,7 @@ def vision_task_complete(
 	Raises ``LLMTaskNotAvailableError`` on a 404 (plugin without the route), ``LLMTaskError``
 	on anything else (transport, refusal, gateway error, non-object reply).
 	"""
+	_check_limits(images)
 	args = {
 		"prompt": prompt,
 		"schema": schema,
@@ -56,10 +56,21 @@ def vision_task_complete(
 		raise LLMTaskError(_vision_wording(str(e))) from e
 
 
+def _check_limits(images: list[dict]) -> None:
+	"""Refuse a request the plugin would refuse, before any bytes leave the site."""
+	if not images:
+		raise LLMTaskError("vision task needs at least one image")
+	if len(images) > limits.MAX_IMAGES:
+		raise LLMTaskError(f"vision task takes at most {limits.MAX_IMAGES} images")
+	# base64 grows the bytes by 4/3.
+	if any(len(i["data_b64"]) > limits.IMAGE_BYTES * 4 // 3 + 4 for i in images):
+		raise LLMTaskError(f"vision task images must be at most {limits.IMAGE_BYTES} bytes each")
+
+
 def _run_vision_task(args: dict, timeout: int) -> dict:
-	status, raw = lt._call_route(
-		plugin_routes.VISION_TASK_PATH, {"args": args}, timeout + lt._TIMEOUT_BUFFER_S
-	)
+	# Waits longer than the plugin's own 105 s limit, so its 504 reaches the row.
+	wait = max(timeout + lt._TIMEOUT_BUFFER_S, limits.SITE_WAIT_S)
+	status, raw = lt._call_route(plugin_routes.VISION_TASK_PATH, {"args": args}, wait)
 
 	if status in (401, 403):
 		raise LLMTaskError("vision task request was refused by the agent plugin")

@@ -23,6 +23,7 @@
   "draft_name",
   "reading_json",
   "attempts",
+  "read_on",
   "approval_request",
   "duplicate_of"
  ],
@@ -129,6 +130,13 @@
    "fieldname": "attempts",
    "fieldtype": "Int",
    "label": "Attempts"
+  },
+  {
+   "fieldname": "read_on",
+   "fieldtype": "Date",
+   "label": "Read On",
+   "search_index": 1,
+   "description": "Intake: the day the model read this file. Daily limits are counted from it when the cache counters are gone."
   },
   {
    "fieldname": "approval_request",

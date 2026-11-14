@@ -17,7 +17,16 @@ from datetime import datetime
 
 import frappe
 from frappe import _
-from frappe.utils import escape_html, get_datetime, getdate
+from frappe.utils import (
+	cint,
+	escape_html,
+	get_datetime,
+	getdate,
+	validate_email_address,
+	validate_phone_number,
+	validate_url,
+)
+from frappe.utils.data import duration_to_seconds
 
 from jarvis._session import impersonate
 from jarvis.chat.filebox import attach_file_to_doc
@@ -56,11 +65,13 @@ def merge_values(s, reading: dict) -> dict:
 	if s.table:
 		columns = s.table.get("columns") or []
 		rows = reading.get(s.table["fieldname"])
-		values[s.table["fieldname"]] = [
+		cells = [
 			{c: row.get(c) for c in columns}
 			for row in (rows if isinstance(rows, list) else [])
 			if isinstance(row, dict)
 		]
+		# An empty row (the model's padding) would insert a blank line item.
+		values[s.table["fieldname"]] = [row for row in cells if not all(_blank(v) for v in row.values())]
 	return values
 
 
@@ -147,21 +158,35 @@ def _site_formats() -> tuple[str, str]:
 	)
 
 
+def _separators(number_format: str) -> tuple[str, str]:
+	"""(thousands separator, decimal separator) of a System Settings number format.
+
+	``frappe.utils.number_format`` exists on Frappe 16 only; Frappe 15 (and a v15 backport)
+	has ``get_number_format_info`` instead, which v16 keeps as a deprecated alias."""
+	try:
+		from frappe.utils.number_format import NumberFormat
+	except ImportError:
+		from frappe.utils import get_number_format_info
+
+		decimal, thousands, _precision = get_number_format_info(number_format)
+		return thousands, decimal
+	info = NumberFormat.from_string(number_format)
+	return info.thousands_separator, info.decimal_separator
+
+
 def _number_pattern(number_format: str) -> re.Pattern:
 	"""Regex for a number written in the site's format: optional sign, digits grouped the
 	way the format groups them (3-3-3, or 2-2-3 for the Indian format), at most one
 	decimal separator that is the format's own. Anything else is not a number."""
-	from frappe.utils.number_format import NumberFormat
-
-	info = NumberFormat.from_string(number_format)
-	group, decimal = re.escape(info.thousands_separator), re.escape(info.decimal_separator)
+	thousands, decimal_separator = _separators(number_format)
+	group, decimal = re.escape(thousands), re.escape(decimal_separator)
 	if number_format == "#,##,###.##":
 		whole = rf"\d{{1,2}}(?:{group}\d{{2}})*{group}\d{{3}}|\d+"
 	else:
 		whole = rf"\d{{1,3}}(?:{group}\d{{3}})+|\d+"
 	# "#.###" and "#,###" have no decimal separator (it is ""): integers only, or an
 	# over-long group such as "1.2345" would read as 1234.5.
-	fraction = rf"(?:{decimal}(\d+))?" if info.decimal_separator else "()"
+	fraction = rf"(?:{decimal}(\d+))?" if decimal_separator else "()"
 	return re.compile(rf"([+-]?)({whole}){fraction}")
 
 
@@ -178,10 +203,7 @@ def _number(value, fieldtype: str, number_format: str):
 		match = _number_pattern(number_format).fullmatch(sign + _CURRENCY_END.sub("", text[len(sign) :]))
 		if not match:
 			return None
-		from frappe.utils.number_format import NumberFormat
-
-		info = NumberFormat.from_string(number_format)
-		digits = match.group(2).replace(info.thousands_separator, "")
+		digits = match.group(2).replace(_separators(number_format)[0], "")
 		number = float(f"{match.group(1)}{digits}.{match.group(3) or 0}")
 	else:
 		number = float(value)
@@ -199,12 +221,32 @@ def _date_format_string(date_format: str) -> str:
 	return out
 
 
+_ISO_ZONED = r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})"
+
+
+def _zoned(text: str, fieldtype: str) -> str | None:
+	"""An ISO datetime that carries Z or an offset: a Date keeps the written day, a
+	Datetime is moved to the site's time zone (Frappe stores naive local time)."""
+	try:
+		parsed = datetime.fromisoformat(text.replace(" ", "T", 1))
+	except ValueError:
+		return None
+	if fieldtype == "Date":
+		return str(parsed.date())
+	from zoneinfo import ZoneInfo
+
+	zone = ZoneInfo(frappe.utils.get_system_timezone())
+	return str(parsed.astimezone(zone).replace(tzinfo=None, microsecond=0))
+
+
 def _date(value, fieldtype: str, date_format: str) -> str | None:
 	"""ISO text as is; any other text only in the site's own date format. A guess
 	between day-first and month-first would silently store the wrong date."""
 	if not isinstance(value, str):
 		return None
 	text = value.strip()
+	if re.fullmatch(_ISO_ZONED, text):
+		return _zoned(text, fieldtype)
 	if re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?", text):
 		try:
 			return str(getdate(text) if fieldtype == "Date" else get_datetime(text))
@@ -240,7 +282,76 @@ def _clean(df, value):
 	if df.fieldtype == "Check":
 		flag = _yes_no(value)
 		return (flag, None) if flag is not None else (None, "not a yes/no value")
+	if df.fieldtype == "Time":
+		clock = _time(value)
+		return (clock, None) if clock else (None, "not a time")
+	if df.fieldtype == "Duration":
+		seconds = _duration(value)
+		return (seconds, None) if seconds is not None else (None, "not a duration")
+	if df.fieldtype == "Rating":
+		rating = _rating(value, df)
+		return (rating, None) if rating is not None else (None, "not a rating")
+	if df.fieldtype in _TEXT_TYPES:
+		return _text(df, value)
 	return value, None
+
+
+_TEXT_TYPES = {"Data", "Phone"}
+_DEFAULT_DATA_LENGTH = 140
+
+
+def _text(df, value):
+	"""Data and Phone values: within the field's length, and well formed when the field
+	says it is an Email, Phone or URL."""
+	text = str(value).strip()
+	if len(text) > (cint(df.length) or _DEFAULT_DATA_LENGTH):
+		return None, "too long"
+	kind = df.options if df.fieldtype == "Data" else "Phone"
+	if kind == "Email" and not validate_email_address(text):
+		return None, "not an email address"
+	if kind == "Phone" and not validate_phone_number(text):
+		return None, "not a phone number"
+	if kind == "URL" and not validate_url(text):
+		return None, "not a URL"
+	return text, None
+
+
+def _time(value) -> str | None:
+	"""HH:MM or HH:MM:SS (24 hour) as HH:MM:SS, else None."""
+	match = re.fullmatch(r"(\d{1,2}):(\d{2})(?::(\d{2}))?", str(value).strip())
+	if not match:
+		return None
+	hour, minute, second = (int(g or 0) for g in match.groups())
+	return f"{hour:02d}:{minute:02d}:{second:02d}" if hour < 24 and minute < 60 and second < 60 else None
+
+
+def _duration(value) -> int | None:
+	"""Seconds, from a plain number or '1d 2h 3m 4s' style text, else None."""
+	if isinstance(value, bool):
+		return None
+	if isinstance(value, int | float):
+		return int(value) if math.isfinite(value) and value >= 0 else None
+	text = str(value).strip()
+	if re.fullmatch(r"\d+", text):
+		return int(text)
+	if re.fullmatch(r"(?:\d+\s*[dhms]\s*)+", text, re.I):
+		return int(duration_to_seconds(text))
+	return None
+
+
+def _rating(value, df) -> float | None:
+	"""Frappe stores a rating as a fraction of its stars (0 to 1); the prompt asks the model
+	for a star count, 0 up to the field's star count (``options``, default 5)."""
+	if isinstance(value, bool) or not isinstance(value, int | float | str):
+		return None
+	try:
+		number = float(str(value).strip())
+	except ValueError:
+		return None
+	stars = cint(df.options) or 5
+	if not math.isfinite(number) or number < 0 or number > stars:
+		return None
+	return round(number / stars, 4)
 
 
 _YES_NO = {"1": 1, "true": 1, "0": 0, "false": 0}
@@ -335,6 +446,8 @@ def resolve_links(s, values: dict) -> tuple[dict, list[dict]]:
 # What is still missing
 # --------------------------------------------------------------------------- #
 def _label(meta, fieldname: str) -> str:
+	if fieldname == PAGES_FIELD:
+		return "Pages"
 	df = meta.get_field(fieldname)
 	return (df.label if df and df.label else fieldname).strip()
 
@@ -345,6 +458,12 @@ def missing_fields(s, values: dict, unresolved: list[dict]) -> list[dict]:
 	they appear here through the same blank check, with the reason from ``unresolved``."""
 	header, columns = intake_spec.mandatory_fields(s)
 	meta = frappe.get_meta(s.target)
+	# Mandatory only when its own condition holds for the values read (mandatory_depends_on).
+	header += [
+		df.fieldname
+		for df in meta.fields
+		if df.fieldname not in header and intake_spec.depends_mandatory(df, values)
+	]
 	out = []
 
 	def add(fieldname, row, label):
@@ -378,7 +497,12 @@ def missing_fields(s, values: dict, unresolved: list[dict]) -> list[dict]:
 				}
 			)
 		for i, row in enumerate(rows, start=1):
-			for fieldname in columns:
+			row_columns = columns + [
+				df.fieldname
+				for df in child_meta.fields
+				if df.fieldname not in columns and intake_spec.depends_mandatory(df, row)
+			]
+			for fieldname in row_columns:
 				if _blank(row.get(fieldname)):
 					add(fieldname, i, _label(child_meta, fieldname))
 	return out
@@ -399,10 +523,13 @@ def _issue_text(label: str, row, hit: dict | None) -> str:
 # --------------------------------------------------------------------------- #
 # finish and create
 # --------------------------------------------------------------------------- #
-def _fail(row, trigger, summary: str, detail: str = "", tell_uploader: bool = True):
+def _fail(row, trigger, summary: str, detail: str = "", tell_uploader: bool = True, keep: bool = False):
 	"""End the row Failed (``detail`` is a short reason, never raw exception text), mark the
 	source record's status field Failed too, tell the uploader (a reviewer's reject sends
-	its own notice) and stop the caller."""
+	its own notice) and stop the caller. With ``keep`` the row is left exactly as it is
+	(a reviewer's answers were refused and the request stays open): only the raise happens."""
+	if keep:
+		raise DraftFailed(summary)
 	row.db_set({"status": "Failed", "summary": summary, "detail": detail[:140]})
 	_guarded(_write_back, row, trigger, "Failed", None)
 	if tell_uploader:
@@ -417,13 +544,19 @@ def _load_spec(row):
 	return trigger, intake_spec.load(trigger)
 
 
-def _uploader(row, trigger) -> str:
+def _uploader(row, trigger, keep: bool = False, tell_uploader: bool = True) -> str:
 	from jarvis.permissions import is_valid_unattended_owner
 
 	user = row.event_user
 	# Checked again here: a review approval can run days after the worker's own check.
 	if not is_valid_unattended_owner(user):
-		_fail(row, trigger, _("The uploader can't be used for unattended work."))
+		_fail(
+			row,
+			trigger,
+			_("The uploader can't be used for unattended work."),
+			tell_uploader=tell_uploader,
+			keep=keep,
+		)
 	return user
 
 
@@ -446,10 +579,26 @@ def _finish(row, reading: dict, note: str) -> None:
 	with impersonate(uploader):
 		values, unresolved = resolve_links(s, merge_values(s, reading))
 		missing = missing_fields(s, values, unresolved)
+	if note and not s.allow_incomplete:
+		# A file read in part may lack line items or totals: strict mode never saves it unseen.
+		missing = [*missing, _truncated_item(note)]
 	if missing and not s.allow_incomplete:
 		_review(row, trigger, values, missing, note)
 		return
 	create(row, values, allow_missing=bool(missing), unresolved=unresolved, note=note)
+
+
+# Not a field: the one "missing" entry that says the file was read only in part.
+PAGES_FIELD = "_pages"
+
+
+def _truncated_item(note: str) -> dict:
+	"""The review entry for a file read in part; ``note`` is ``Read N of M pages``."""
+	match = re.search(r"(\d+) of (\d+)", note)
+	text = (
+		f"Only {match.group(1)} of {match.group(2)} pages read" if match else "Only part of the file was read"
+	)
+	return {"field": PAGES_FIELD, "row": None, "value": None, "candidates": [], "reason": text}
 
 
 def _with_note(summary: str, note: str) -> str:
@@ -465,7 +614,7 @@ def _review(row, trigger, values: dict, missing: list[dict], note: str) -> None:
 	summary = _with_note(f"Waiting for a reviewer: {count} field(s) need a value", note)
 	row.db_set({"status": "Needs Review", "approval_request": approval, "summary": summary})
 	_guarded(_write_back, row, trigger, "Needs Review", None)
-	notify.notify(row.event_user, f"Waiting for a reviewer: {count} field(s) need a value")
+	notify.review_waiting(row, count)
 
 
 def _has_default(meta, fieldname: str) -> bool:
@@ -516,15 +665,20 @@ def create(
 	allow_missing: bool,
 	unresolved: list[dict] | None = None,
 	note: str | None = None,
+	keep_row: bool = False,
+	tell_uploader: bool = True,
 ) -> tuple[str, str]:
 	"""Insert the draft as the uploader, attach the source file, comment on blanks, end the
 	row, write back to the source record and tell the uploader. Returns
 	``(doctype, name)``. A permission or validation refusal ends the row Failed and raises
 	``DraftFailed`` (callers outside ``finish`` catch it). ``values`` are already resolved;
-	``note`` defaults to the one saved with the reading."""
+	``note`` defaults to the one saved with the reading. With ``keep_row`` a refusal raises
+	``DraftFailed`` (its text is the reason) and leaves the row, the source record and the
+	uploader's bell untouched: a reviewer's approval uses it so the request can stay open.
+	``tell_uploader=False`` sends no "failed" bell when a refusal does end the row Failed."""
 	row = activity
 	trigger, s = _load_spec(row)
-	uploader = _uploader(row, trigger)
+	uploader = _uploader(row, trigger, keep_row, tell_uploader)
 	unresolved = unresolved or []
 	if note is None:
 		note = frappe.parse_json(row.get("reading_json") or "{}").get("_note", "") or ""
@@ -533,12 +687,12 @@ def create(
 		doc = _existing_draft(row)
 		resumed = doc is not None
 		if not resumed:
-			doc = _insert(row, trigger, s, values, allow_missing)
+			doc = _insert(row, trigger, s, values, allow_missing, keep_row, tell_uploader)
 			# Linked at once: if anything below raises, a retry finds this draft
 			# instead of inserting a second one.
 			row.db_set({"draft_doctype": doc.doctype, "draft_name": doc.name})
 		lines = _ignored_blanks(s, values, missing, unresolved)
-		_attach_and_comment(row, doc, lines, resumed)
+		_attach_and_comment(row, doc, lines, resumed, note)
 	status = "Needs Review" if missing else "Success"
 	summary = f"Draft ready: {doc.doctype} {doc.name}"
 	if lines:
@@ -552,7 +706,7 @@ def create(
 		}
 	)
 	_guarded(_write_back, row, trigger, status, doc.name)
-	notify.notify(uploader, f"Draft ready: {doc.doctype} {doc.name}", doc)
+	notify.notify(uploader, _with_note(f"Draft ready: {doc.doctype} {doc.name}", note), doc)
 	return doc.doctype, doc.name
 
 
@@ -579,7 +733,7 @@ def _guarded(fn, *args) -> None:
 		fn(*args)
 	except Exception:
 		frappe.log_error(
-			title=f"jarvis.intake.draft.{getattr(fn, '__name__', 'step')}_failed",
+			title=f"Jarvis intake: {getattr(fn, '__name__', 'step').strip('_')} failed",
 			message=frappe.get_traceback(),
 		)
 
@@ -594,16 +748,21 @@ def _already_attached(row, doc) -> bool:
 	)
 
 
-def _attach_and_comment(row, doc, lines: list[str], resumed: bool) -> None:
-	"""Attach the source file and leave one Comment on the blanks; both are best effort.
-	On a resume the Comment is only added when the first run never got to it."""
+def _attach_and_comment(row, doc, lines: list[str], resumed: bool, note: str = "") -> None:
+	"""Attach the source file and leave one Comment on the blanks (and on a file read in
+	part); both are best effort. On a resume the Comment is only added when the first run
+	never got to it."""
 	attached = {}
 	if row.source_file and not (resumed and _already_attached(row, doc)):
+		# The attached copy is a new File: capture must not queue it again.
+		frappe.flags.jarvis_intake_attach = True
 		try:
 			attached = attach_file_to_doc(row.source_file, doc.doctype, doc.name)
 		except Exception:
-			frappe.log_error(title="jarvis.intake.draft.attach_failed", message=frappe.get_traceback())
-	extra = [attached["attach_error"]] if attached.get("attach_error") else []
+			frappe.log_error(title="Jarvis intake: attach failed", message=frappe.get_traceback())
+		finally:
+			frappe.flags.jarvis_intake_attach = False
+	extra = ([note] if note else []) + ([attached["attach_error"]] if attached.get("attach_error") else [])
 	has_comment = resumed and frappe.db.exists(
 		"Comment",
 		{"reference_doctype": doc.doctype, "reference_name": doc.name, "comment_type": "Comment"},
@@ -612,7 +771,9 @@ def _attach_and_comment(row, doc, lines: list[str], resumed: bool) -> None:
 		_guarded(doc.add_comment, "Comment", "<br>".join(escape_html(line) for line in lines + extra))
 
 
-def _insert(row, trigger, s, values: dict, allow_missing: bool):
+def _insert(
+	row, trigger, s, values: dict, allow_missing: bool, keep: bool = False, tell_uploader: bool = True
+):
 	payload = {"doctype": s.target}
 	table = (s.table or {}).get("fieldname")
 	for fieldname, value in values.items():
@@ -628,17 +789,33 @@ def _insert(row, trigger, s, values: dict, allow_missing: bool):
 		doc = frappe.get_doc(payload).insert(ignore_mandatory=allow_missing)
 	except frappe.PermissionError:
 		frappe.db.rollback(save_point=savepoint)
-		_fail(row, trigger, _("You can't create {0}").format(s.target))
+		_fail(
+			row, trigger, _("You can't create {0}").format(s.target), tell_uploader=tell_uploader, keep=keep
+		)
 	except frappe.ValidationError as e:
 		frappe.db.rollback(save_point=savepoint)
-		_fail(row, trigger, _("The draft could not be saved: {0}").format(_short(e)), _short(e))
+		_fail(
+			row,
+			trigger,
+			_("The draft could not be saved: {0}").format(_short(e)),
+			_short(e),
+			tell_uploader=tell_uploader,
+			keep=keep,
+		)
 	except Exception as e:
 		# A duplicate name or a type error from a hook: nothing half-written stays.
 		frappe.db.rollback(save_point=savepoint)
-		frappe.log_error(title="jarvis.intake.draft.insert_failed", message=frappe.get_traceback())
+		frappe.log_error(title="Jarvis intake: draft insert failed", message=frappe.get_traceback())
 		# The uploader sees the summary; raw exception text (paths, SQL, record values)
 		# goes to the manager-only detail and the Error Log, never the summary.
-		_fail(row, trigger, _("The draft could not be saved."), _short(e))
+		_fail(
+			row,
+			trigger,
+			_("The draft could not be saved."),
+			_short(e),
+			tell_uploader=tell_uploader,
+			keep=keep,
+		)
 	return doc
 
 
@@ -647,13 +824,27 @@ def _short(e: Exception) -> str:
 	return text[:140]
 
 
+def write_back(row, trigger, status: str, draft_name: str | None = None) -> None:
+	"""Mark the source record of a Record rule with the row's final state. Called from every
+	terminal state (the worker's included), never raises: the row's own state matters more."""
+	_guarded(_write_back, row, trigger, status, draft_name)
+
+
 def _write_back(row, trigger, status: str, draft_name: str | None) -> None:
 	"""Record sources only: the two fields the admin configured, set with a plain DB write
-	(a system write, outside impersonation) and nothing else on the record is touched."""
+	(a system write, outside impersonation: it works even when the uploader cannot write the
+	record) and nothing else on the record is touched. A submitted or cancelled record is left
+	alone: a quiet DB write there would change a document the books rely on."""
 	if trigger.get("intake_source") != "Record" or not row.target_docname:
 		return
 	record_doctype = trigger.get("intake_record_doctype")
 	if not record_doctype:
+		return
+	if cint(frappe.db.get_value(record_doctype, row.target_docname, "docstatus")) in (1, 2):
+		frappe.log_error(
+			title="Jarvis intake: write-back skipped",
+			message=f"{record_doctype} {row.target_docname} is submitted or cancelled; its status field was not changed.",
+		)
 		return
 	meta = frappe.get_meta(record_doctype)
 	updates = {}

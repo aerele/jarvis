@@ -47,3 +47,23 @@ class JarvisTriggerActivity(NotRenamable, Document):
 			table,
 			filters=(table.creation < (Now() - Interval(days=days))) & table.status.notin(OPEN_STATUSES),
 		)
+
+
+def on_doctype_update():
+	"""Composite indexes for the intake queries on this shared table.
+
+	The table also holds every Script and LLM firing for 90 days, and only ``trigger``,
+	``target_doctype`` and ``file_hash`` were indexed. The intake pump, stuck-row recovery
+	and slot chaining filter on (action_type, status, creation); the File Box list and the
+	permission query filter on (owner, action_type, creation). ``add_index`` no-ops when the
+	index exists, so repeated migrates are harmless."""
+	frappe.db.add_index(
+		"Jarvis Trigger Activity",
+		["action_type", "status", "creation"],
+		index_name="action_status_creation_index",
+	)
+	frappe.db.add_index(
+		"Jarvis Trigger Activity",
+		["owner", "action_type", "creation"],
+		index_name="owner_action_creation_index",
+	)

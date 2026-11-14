@@ -6,14 +6,11 @@ admin's instructions sit inside a delimited block below the fixed rules.
 """
 
 import frappe
+from frappe.utils import cint
 
 from jarvis import compat
 from jarvis.chat import vision
-from jarvis.intake import client, spec
-
-# Under chat's 240 KB so the base64 request stays small across up to 10 pages.
-IMAGE_BYTES = 200_000
-MAX_PAGES = 10
+from jarvis.intake import client, limits, spec
 
 _FIXED_RULES = (
 	"You read one business document from the attached page images and return JSON that "
@@ -39,6 +36,12 @@ def _type_word(df) -> str:
 		return "number"
 	if df.fieldtype in ("Date", "Datetime"):
 		return df.fieldtype.lower() + " (ISO format)"
+	if df.fieldtype == "Time":
+		return "time (HH:MM:SS, 24 hour)"
+	if df.fieldtype == "Duration":
+		return "duration in whole seconds"
+	if df.fieldtype == "Rating":
+		return f"rating, number of stars out of {cint(df.options) or 5}"
 	return "text"
 
 
@@ -67,18 +70,39 @@ def build_prompt(s: spec.IntakeSpec) -> str:
 def _parts(fdoc, content: bytes) -> tuple[list[dict], str]:
 	name = fdoc.file_name or fdoc.name
 	if name.lower().endswith(".pdf") or content[:5] == b"%PDF-":
-		parts, total = vision.pdf_parts(content, name, max_pages=MAX_PAGES, max_bytes=IMAGE_BYTES)
+		parts, total = vision.pdf_parts(
+			content, name, max_pages=limits.MAX_PAGES, max_bytes=limits.IMAGE_BYTES
+		)
 		note = f"Read {len(parts)} of {total} pages" if total > len(parts) else ""
 		return parts, note
-	part = vision.image_part(content, name, max_bytes=IMAGE_BYTES)
+	part = vision.image_part(content, name, max_bytes=limits.IMAGE_BYTES)
 	return ([part] if part else []), ""
 
 
-def read_file(file_name: str, s: spec.IntakeSpec, before_call=None) -> tuple[dict, str]:
-	"""Read the File with ONE model call; return ``(json, note)``.
+def vision_available() -> bool:
+	"""True when this site's model can read images: the operator toggle is on (a blank one
+	counts as on) and the provider is a multimodal one, the test chat uses for attachments."""
+	settings = frappe.get_cached_doc("Jarvis Settings")
+	toggle = settings.get("vision_attachments_enabled")
+	return (toggle is None or bool(toggle)) and vision.supports_vision(settings.get("llm_provider"))
 
-	``before_call`` runs after the pages are rendered and just before the call, so
-	the caller counts a call against its limits only when one is really made."""
+
+def is_empty_reading(reading: dict, s: spec.IntakeSpec) -> bool:
+	"""True when every asked field is blank and no table row came back: a model that
+	could not see the image often answers an all-null object instead of ``NO_IMAGE``."""
+	if any(not _blank(reading.get(name)) for name in s.fields):
+		return False
+	rows = reading.get((s.table or {}).get("fieldname"))
+	return not any(isinstance(row, dict) and any(not _blank(v) for v in row.values()) for row in rows or [])
+
+
+def _blank(value) -> bool:
+	return value is None or (isinstance(value, str) and not value.strip())
+
+
+def read_file(file_name: str, s: spec.IntakeSpec) -> tuple[dict, str]:
+	"""Read the File with ONE model call; return ``(json, note)``. The caller counts the
+	call against its limits once this returns a real reading."""
 	# get_doc, not get_value: file_bytes() needs the File Document to fetch the content.
 	fdoc = frappe.get_doc("File", file_name)
 	try:
@@ -87,7 +111,5 @@ def read_file(file_name: str, s: spec.IntakeSpec, before_call=None) -> tuple[dic
 		raise UnreadableFile("The file could not be opened as an image or PDF.") from e
 	if not parts:
 		raise UnreadableFile("The file could not be turned into readable pages.")
-	if before_call:
-		before_call()
 	data = client.vision_task_complete(prompt=build_prompt(s), schema=spec.build_schema(s), images=parts)
 	return data, note

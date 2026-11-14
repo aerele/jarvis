@@ -6,7 +6,7 @@ from unittest import mock
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import add_to_date, now_datetime
+from frappe.utils import add_to_date, cint, now_datetime
 
 from jarvis import _redis_lock
 from jarvis.intake import capture, reader, spec, worker
@@ -16,6 +16,8 @@ from jarvis.triggers import llm_task_client as lt
 TRIGGER = "Jarvis Trigger"
 ACTIVITY = "Jarvis Trigger Activity"
 READING = {"description": "buy milk"}
+# setUp patches the module attribute; the capability test needs the real function.
+_REAL_VISION_AVAILABLE = reader.vision_available
 
 
 def _png() -> bytes:
@@ -49,6 +51,10 @@ class TestIntakeWorker(FrappeTestCase):
 		p = mock.patch("jarvis.permissions.is_valid_unattended_owner", return_value=True)
 		p.start()
 		self.addCleanup(p.stop)
+		# The test site has no vision provider; the capability gate has its own tests.
+		v = mock.patch("jarvis.intake.reader.vision_available", return_value=True)
+		v.start()
+		self.addCleanup(v.stop)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -71,6 +77,12 @@ class TestIntakeWorker(FrappeTestCase):
 		for key in worker.slot_keys():
 			cache.delete(cache.make_key(key))
 		cache.delete(cache.make_key(worker.site_cap_key()))
+		cache.delete(cache.make_key(f"{worker.site_cap_key()}:count"))
+		cache.delete(cache.make_key(f"jarvis:intake:capbell:Administrator:{frappe.utils.nowdate()}"))
+		cache.delete(cache.make_key("jarvis:intake:failalert"))
+		for user in ("Administrator", "intake.uploader@example.com"):
+			cache.delete(cache.make_key(worker.user_cap_key(user)))
+			cache.delete(cache.make_key(f"{worker.user_cap_key(user)}:count"))
 
 	def _rule(self, **over):
 		doc = {
@@ -151,7 +163,7 @@ class TestIntakeWorker(FrappeTestCase):
 		got = self._get(row)
 		self.assertEqual((got.status, got.summary), ("Skipped", "rule turned off"))
 
-	def test_daily_cap_skips(self):
+	def test_rule_cap_defers(self):
 		rule = self._rule(llm_daily_cap=2)
 		llm_action.bump(llm_action.cap_key(rule.name))
 		llm_action.bump(llm_action.cap_key(rule.name))
@@ -159,9 +171,12 @@ class TestIntakeWorker(FrappeTestCase):
 		client, _ = self._run(row)
 		client.assert_not_called()
 		got = self._get(row)
-		self.assertEqual((got.status, got.summary), ("Skipped", "daily limit reached"))
+		self.assertEqual(
+			(got.status, got.summary),
+			("Queued", "Waiting: daily limit reached for this rule (resets tomorrow)"),
+		)
 
-	def test_site_cap_skips(self):
+	def test_site_cap_defers(self):
 		rule = self._rule()
 		row = self._row(rule)
 		llm_action.bump(worker.site_cap_key())
@@ -169,7 +184,10 @@ class TestIntakeWorker(FrappeTestCase):
 			client, _ = self._run(row)
 		client.assert_not_called()
 		got = self._get(row)
-		self.assertEqual((got.status, got.summary), ("Skipped", "daily limit reached"))
+		self.assertEqual(
+			(got.status, got.summary),
+			("Queued", "Waiting: daily limit reached for the site (resets tomorrow)"),
+		)
 
 	def test_ai_call_counts_once_against_both_caps(self):
 		rule = self._rule()
@@ -374,7 +392,9 @@ class TestIntakeWorker(FrappeTestCase):
 		with mock.patch("jarvis.intake.client.vision_task_complete", client), mock.patch("frappe.enqueue"):
 			worker.run_job(row.name)
 		got = self._get(row)
-		self.assertEqual((got.status, got.summary), ("Failed", llm_action.NO_AGENT_UPDATE_MESSAGE))
+		self.assertEqual((got.status, got.summary), ("Failed", worker.NO_AGENT_UPDATE_SUMMARY))
+		self.assertEqual(worker.NO_AGENT_UPDATE_SUMMARY, "Intake needs the latest agent update on this site.")
+		self.assertNotIn("LLM", got.summary)
 
 	def test_failure_stores_short_reason_and_logs_traceback(self):
 		rule = self._rule()
@@ -389,7 +409,7 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertLessEqual(len(got.detail), 260)
 		self.assertTrue(log.called)
 		self.assertIn("Traceback", log.call_args.kwargs["message"])
-		self.assertEqual(log.call_args.kwargs["title"], "jarvis.intake.worker")
+		self.assertEqual(log.call_args.kwargs["title"], "Jarvis intake: draft failed")
 
 	def test_crash_stores_no_traceback(self):
 		rule = self._rule()
@@ -426,7 +446,8 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertEqual(got.status, "Failed")
 		self.assertEqual(got.summary, "This site's AI model can't read images for intake yet.")
 		self.assertFalse(got.reading_json)
-		self.assertEqual(llm_action.daily_count(rule.name), 1)
+		# Nothing was read, so nothing counts against the limits.
+		self.assertEqual(llm_action.daily_count(rule.name), 0)
 
 	def test_prompt_has_fixed_rules_labels_and_no_file_text(self):
 		rule = self._rule(intake_instructions="Dates are day first.")
@@ -519,3 +540,308 @@ class TestIntakeWorker(FrappeTestCase):
 		with mock.patch("frappe.enqueue") as enq:
 			worker.pump()
 		enq.assert_not_called()
+
+	# ---- review fixes: who may run, which limit, what counts --------------------------
+
+	def test_refused_target_fails_at_run_time_without_a_call(self):
+		rule = self._rule()
+		# A rule saved before the refused list grew, or edited around validation.
+		frappe.db.set_value(TRIGGER, rule.name, "intake_target_doctype", "Role")
+		row = self._row(rule)
+		client, fin = self._run(row)
+		client.assert_not_called()
+		fin.assert_not_called()
+		got = self._get(row)
+		self.assertEqual((got.status, got.summary), ("Failed", "This rule's target is not allowed"))
+		self.assertEqual(llm_action.daily_count(rule.name), 0)
+
+	def test_uploader_without_create_permission_is_skipped_before_any_call(self):
+		rule = self._rule()
+		row = self._row(rule)
+		with mock.patch("jarvis.intake.guards.frappe.has_permission", return_value=False):
+			client, fin = self._run(row)
+		client.assert_not_called()
+		fin.assert_not_called()
+		got = self._get(row)
+		self.assertEqual((got.status, got.summary), ("Skipped", "You can't create ToDo"))
+		self.assertEqual(llm_action.daily_count(rule.name), 0)
+		self.assertEqual(cint(frappe.cache().get_value(f"{worker.site_cap_key()}:count")), 0)
+
+	def test_website_user_uploader_is_skipped_before_any_call(self):
+		rule = self._rule()
+		row = self._row(rule)
+		with mock.patch("jarvis.intake.guards.is_desk_user", return_value=False):
+			client, _ = self._run(row)
+		client.assert_not_called()
+		self.assertEqual(self._get(row).status, "Skipped")
+
+	def test_per_user_cap_defers_and_names_the_limit(self):
+		rule = self._rule()
+		row = self._row(rule)
+		llm_action.bump(worker.user_cap_key("Administrator"))
+		with mock.patch.object(worker, "_user_cap", return_value=1):
+			client, _ = self._run(row)
+		client.assert_not_called()
+		got = self._get(row)
+		self.assertEqual(
+			(got.status, got.summary),
+			("Queued", "Waiting: daily limit reached for your uploads (resets tomorrow)"),
+		)
+
+	def test_zero_site_cap_pauses_intake_and_keeps_rows_queued(self):
+		rule = self._rule()
+		row = self._row(rule)
+		before = frappe.db.count("Notification Log", {"subject": ["like", "Intake:%"]})
+		with mock.patch.object(worker, "_site_cap", return_value=0):
+			client, _ = self._run(row)
+		client.assert_not_called()
+		got = self._get(row)
+		self.assertEqual((got.status, got.summary), ("Queued", "Intake is paused on this site"))
+		self.assertEqual(frappe.db.count("Notification Log", {"subject": ["like", "Intake:%"]}), before)
+
+	def test_zero_per_user_cap_means_no_per_user_limit(self):
+		rule = self._rule()
+		row = self._row(rule)
+		for _i in range(3):
+			llm_action.bump(worker.user_cap_key("Administrator"))
+		with mock.patch.object(worker, "_user_cap", return_value=0):
+			client, _ = self._run(row)
+		client.assert_called_once()
+
+	def test_unsaved_settings_read_as_defaults_and_zero_is_kept(self):
+		with mock.patch("frappe.qb.from_") as q:
+			q.return_value.select.return_value.where.return_value.run.return_value = []
+			self.assertEqual(worker._setting("intake_daily_cap", 300), 300)
+			q.return_value.select.return_value.where.return_value.run.return_value = [("0",)]
+			self.assertEqual(worker._setting("intake_daily_cap", 300), 0)
+
+	def test_deferrals_ring_one_bell_per_uploader_per_day(self):
+		rule = self._rule(llm_daily_cap=1)
+		llm_action.bump(llm_action.cap_key(rule.name))
+		rows = [self._row(rule, self._file(f"w{i}.png")) for i in range(3)]
+		before = frappe.db.count("Notification Log", {"subject": ["like", "Intake: daily limit%"]})
+		for row in rows:
+			self._run(row)
+		after = frappe.db.count("Notification Log", {"subject": ["like", "Intake: daily limit%"]})
+		self.assertEqual(after - before, 1)
+
+	def test_pump_leaves_todays_waiting_rows_and_picks_them_up_tomorrow(self):
+		rule = self._rule()
+		waiting = self._row(rule, summary="Waiting: daily limit reached for the site (resets tomorrow)")
+		fresh = self._row(rule, self._file("next.png"))
+		old = add_to_date(now_datetime(), minutes=-10)
+		for name in (waiting.name, fresh.name):
+			frappe.db.set_value(ACTIVITY, name, "creation", old, update_modified=False)
+		frappe.db.set_value(
+			ACTIVITY, waiting.name, "creation", add_to_date(old, minutes=-1), update_modified=False
+		)
+		with mock.patch("frappe.enqueue") as enq:
+			worker.pump()
+		self.assertEqual([c.kwargs["activity"] for c in enq.call_args_list], [fresh.name])
+		# The day turns: the row was last touched yesterday.
+		frappe.db.set_value(
+			ACTIVITY, waiting.name, "modified", add_to_date(now_datetime(), days=-1), update_modified=False
+		)
+		with mock.patch("frappe.enqueue") as enq:
+			worker.pump()
+		self.assertIn(waiting.name, [c.kwargs["activity"] for c in enq.call_args_list])
+
+	def test_usage_comes_from_the_rows_when_the_cache_counters_are_gone(self):
+		rule = self._rule(llm_daily_cap=2)
+		for i in range(2):
+			self._row(rule, self._file(f"d{i}.png"), status="Success", read_on=frappe.utils.nowdate())
+		# No Redis counter at all (a flush): the day's read_on stamps stand in for it.
+		self.assertEqual(llm_action.daily_count(rule.name), 0)
+		row = self._row(rule, self._file("late.png"))
+		client, _ = self._run(row)
+		client.assert_not_called()
+		self.assertIn("Waiting:", self._get(row).summary)
+
+	def test_a_real_read_stamps_read_on_and_counts_the_user(self):
+		rule = self._rule()
+		row = self._row(rule)
+		self._run(row)
+		self.assertEqual(str(frappe.db.get_value(ACTIVITY, row.name, "read_on")), frappe.utils.nowdate())
+		self.assertEqual(cint(frappe.cache().get_value(f"{worker.user_cap_key('Administrator')}:count")), 1)
+
+	def test_failed_read_is_not_counted(self):
+		rule = self._rule()
+		row = self._row(rule)
+		client = mock.Mock(side_effect=lt.LLMTaskError("agent down"))
+		with mock.patch("jarvis.intake.client.vision_task_complete", client), mock.patch("frappe.enqueue"):
+			worker.run_job(row.name)
+		self.assertEqual(llm_action.daily_count(rule.name), 0)
+		self.assertEqual(cint(frappe.cache().get_value(f"{worker.site_cap_key()}:count")), 0)
+
+	def test_all_null_reading_is_treated_as_no_image(self):
+		rule = self._rule()
+		row = self._row(rule)
+		client, fin = self._run(row, reply={"description": None})
+		fin.assert_not_called()
+		got = self._get(row)
+		self.assertEqual((got.status, got.summary), ("Failed", worker.NO_IMAGE_SUMMARY))
+		self.assertFalse(got.reading_json)
+		self.assertEqual(llm_action.daily_count(rule.name), 0)
+
+	def test_text_only_model_fails_before_the_call_with_intake_wording(self):
+		rule = self._rule()
+		row = self._row(rule)
+		with mock.patch("jarvis.intake.reader.vision_available", return_value=False):
+			client, _ = self._run(row)
+		client.assert_not_called()
+		got = self._get(row)
+		self.assertEqual(
+			(got.status, got.summary), ("Failed", "This site's AI model can't read images for intake yet.")
+		)
+		self.assertEqual(llm_action.daily_count(rule.name), 0)
+
+	def test_vision_available_needs_a_multimodal_provider_and_the_toggle(self):
+		for provider, toggle, expected in (
+			("Anthropic", 1, True),
+			("openai", None, True),
+			("Anthropic", 0, False),
+			("Ollama", 1, False),
+			("", 1, False),
+		):
+			settings = frappe._dict(llm_provider=provider, vision_attachments_enabled=toggle)
+			with (
+				self.subTest(provider=provider, toggle=toggle),
+				mock.patch("frappe.get_cached_doc", return_value=settings),
+			):
+				self.assertIs(_REAL_VISION_AVAILABLE(), expected)
+
+	def test_error_before_the_claim_leaves_the_row_queued(self):
+		rule = self._rule()
+		row = self._row(rule)
+		frappe.db.commit()  # a real row is committed before its job runs; the job rolls back
+		with mock.patch.object(worker, "_claim_slot", side_effect=ConnectionError("redis down")):
+			client, fin = self._run(row)
+		client.assert_not_called()
+		got = self._get(row)
+		self.assertEqual((got.status, got.attempts), ("Queued", 0))
+
+	def test_error_in_the_claim_leaves_the_row_queued_and_frees_the_slot(self):
+		rule = self._rule()
+		row = self._row(rule)
+		frappe.db.commit()  # a real row is committed before its job runs; the job rolls back
+		with mock.patch.object(worker, "_claim_row", side_effect=RuntimeError("deadlock")):
+			client, _ = self._run(row)
+		client.assert_not_called()
+		self.assertEqual(self._get(row).status, "Queued")
+		cache = frappe.cache()
+		self.assertFalse(any(cache.exists(k) for k in worker.slot_keys()))
+
+	def test_older_in_flight_row_for_the_same_bytes_wins_after_the_claim(self):
+		rule = self._rule()
+		fdoc = self._file()
+		older = self._row(rule, fdoc, status="Running")
+		newer = self._row(rule, fdoc)
+		bells = frappe.db.count("Notification Log", {"for_user": "Administrator"})
+		client, _ = self._run(newer)
+		client.assert_not_called()
+		got = frappe.db.get_value(ACTIVITY, newer.name, ["status", "summary", "duplicate_of"], as_dict=True)
+		self.assertEqual((got.status, got.duplicate_of), ("Skipped", older.name))
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": "Administrator"}), bells)
+
+	def test_the_older_row_is_not_skipped_by_a_newer_in_flight_one(self):
+		rule = self._rule()
+		fdoc = self._file()
+		older = self._row(rule, fdoc)
+		self._row(rule, fdoc, status="Running")
+		client, _ = self._run(older)
+		client.assert_called_once()
+
+	def test_worker_endings_write_back_to_the_source_record(self):
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "scan holder"}).insert()
+		self.addCleanup(frappe.delete_doc, "ToDo", todo.name, force=True, ignore_permissions=True)
+		rule = self._rule(
+			intake_source="Record",
+			intake_folder=None,
+			intake_record_doctype="ToDo",
+			intake_target_doctype="Note",
+			intake_status_field="sender",
+			intake_spec=json.dumps({"fields": ["title"]}),
+		)
+		row = self._row(rule, target_docname=todo.name, target_doctype="Note")
+		self._run(row, reply={"error": "NO_IMAGE"})
+		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "sender"), "Failed")
+		# A rule turned off ends Skipped, and the record says so.
+		row2 = self._row(rule, self._file("z.png"), target_docname=todo.name, target_doctype="Note")
+		frappe.db.set_value(TRIGGER, rule.name, "enabled", 0)
+		self._run(row2)
+		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "sender"), "Skipped")
+
+	def test_a_duplicate_does_not_overwrite_the_records_status(self):
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "scan holder"}).insert()
+		self.addCleanup(frappe.delete_doc, "ToDo", todo.name, force=True, ignore_permissions=True)
+		rule = self._rule(
+			intake_source="Record",
+			intake_folder=None,
+			intake_record_doctype="ToDo",
+			intake_target_doctype="Note",
+			intake_status_field="sender",
+			intake_spec=json.dumps({"fields": ["title"]}),
+		)
+		fdoc = self._file()
+		self._row(rule, fdoc, status="Running", target_docname=todo.name, target_doctype="Note")
+		frappe.db.set_value("ToDo", todo.name, "sender", "Running")
+		dup = self._row(rule, fdoc, target_docname=todo.name, target_doctype="Note")
+		self._run(dup)
+		self.assertEqual(frappe.db.get_value("ToDo", todo.name, "sender"), "Running")
+
+	def test_five_failures_in_an_hour_alert_the_managers_once(self):
+		rule = self._rule()
+		manager = "intake.manager@example.com"
+		if not frappe.db.exists("User", manager):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": manager,
+					"first_name": "Intake",
+					"send_welcome_email": 0,
+					"roles": [{"role": "System Manager"}],
+				}
+			).insert(ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "User", manager, force=True, ignore_permissions=True)
+		rows = [self._row(rule, self._file(f"f{i}.png")) for i in range(6)]
+		before = frappe.db.count(
+			"Notification Log", {"for_user": manager, "subject": ["like", "Document Intake: % files failed%"]}
+		)
+		err = mock.Mock(side_effect=lt.LLMTaskError("agent down"))
+		with mock.patch("jarvis.intake.client.vision_task_complete", err), mock.patch("frappe.enqueue"):
+			for row in rows:
+				worker.run_job(row.name)
+		alerts = frappe.get_all(
+			"Notification Log",
+			filters={"for_user": manager, "subject": ["like", "Document Intake: % files failed%"]},
+			pluck="name",
+		)
+		self.assertEqual(len(alerts) - before, 1)
+
+	def test_expected_read_failures_log_once_an_hour_under_a_named_class(self):
+		rule = self._rule()
+		rows = [self._row(rule, self._file(f"e{i}.png")) for i in range(3)]
+		err = mock.Mock(side_effect=lt.LLMTaskError("agent down"))
+		cache = frappe.cache()
+		cache.delete(cache.make_key("jarvis:intake:errlog:Jarvis intake: read failed"))
+		with (
+			mock.patch("jarvis.intake.client.vision_task_complete", err),
+			mock.patch("frappe.enqueue"),
+			mock.patch("frappe.log_error") as log,
+		):
+			for row in rows:
+				worker.run_job(row.name)
+		titles = [c.kwargs.get("title") for c in log.call_args_list]
+		self.assertEqual(titles.count("Jarvis intake: read failed"), 1)
+
+	def test_recover_failure_logs_the_traceback_not_just_the_row_name(self):
+		rule = self._rule()
+		row = self._stuck(rule, 1)
+		with (
+			mock.patch.object(worker, "_enqueue", side_effect=RuntimeError("queue down")),
+			mock.patch("frappe.log_error") as log,
+		):
+			worker._recover_stuck()
+		message = log.call_args.kwargs["message"]
+		self.assertIn(row.name, message)
+		self.assertIn("RuntimeError", message)
