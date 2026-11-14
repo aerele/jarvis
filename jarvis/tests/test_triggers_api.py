@@ -1222,6 +1222,12 @@ class TestWhitelistTypeValidation(_TriggersApiTestCase):
 				self.assertIsInstance(self._call("search_intake_doctypes", txt=txt), list)
 		self.assertIn("fields", self._call("get_intake_field_options", doctype="ToDo"))
 
+	def test_intake_pickers_hide_access_granting_fields_and_tables(self):
+		frappe.set_user(ADMIN_USER)
+		res = self._call("get_intake_field_options", doctype="Customer")
+		self.assertNotIn("portal_users", [t["fieldname"] for t in res["tables"]])
+		self.assertNotIn("portal_users", [f["fieldname"] for f in res["fields"]])
+
 	def test_test_trigger_condition(self):
 		frappe.set_user(ADMIN_USER)
 		for condition, docname in (("", ""), ("doc.status == 'Open'", ""), (None, None)):
