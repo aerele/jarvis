@@ -2,8 +2,9 @@
 //
 // DUPLICATED from frontend/src/onboarding/readiness.js by necessity, not by
 // choice: this widget is plain Vue + .mjs served straight into Desk (see
-// jarvis_widget.bundle.js) and cannot import from frontend/src or use the "@/"
-// alias the SPA's Vite build resolves. Keep NOT_ONBOARDED_REASONS and the
+// jarvis_widget.bundle.js) and cannot use the "@/" alias the SPA's Vite build
+// resolves (relative imports from frontend/src work, as panel_markdown.mjs
+// does). Keep NOT_ONBOARDED_REASONS and the
 // fail-open contract below in sync with that file BY HAND. See its comments
 // for the full reasoning behind each reason's placement - repeated here only
 // to the extent this module needs it to classify a verdict.

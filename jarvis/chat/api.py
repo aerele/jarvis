@@ -2919,7 +2919,10 @@ def send_message(
 	# Floating-widget auto-context: {doctype, name, label} of the doc the user
 	# is viewing, OR {report_name, filters} when the user is on a
 	# query-report route, OR {page: "triggers"|"dashboards"} when the user is
-	# on the Triggers / Dashboards page. Only forwarded when present, for the
+	# on the Triggers / Dashboards page, OR {handoff_pages: ["payment-calendar"]}
+	# when the web chat can open the Payment Calendar page (a capability, not a
+	# viewing context; see the allow-list below and
+	# turn_handler._payment_calendar_clause). Only forwarded when present, for the
 	# same not-yet-reloaded worker safety as attachments above. The narrowing
 	# here is deliberate (allow-list, not passthrough) so a compromised /
 	# stale frontend can't smuggle arbitrary keys into the worker payload;
@@ -2932,11 +2935,23 @@ def send_message(
 			# context payload when EITHER a doc/report ref OR ground_wiki OR a
 			# page marker is set.
 			ground_wiki = 1 if (isinstance(ctx, dict) and frappe.utils.cint(ctx.get("ground_wiki"))) else 0
+			# Payment Calendar hand-off capability: the web chat names the pages it
+			# can open. A literal allow-list of ONE value (never a passthrough): the
+			# server hint (turn_handler._payment_calendar_clause) only checks that
+			# this one literal is present, and still gates on the switch and on the
+			# user's own visibility. Anything else the client sends is dropped.
+			_pages_raw = ctx.get("handoff_pages") if isinstance(ctx, dict) else None
+			handoff_pages = (
+				["payment-calendar"]
+				if isinstance(_pages_raw, list) and "payment-calendar" in _pages_raw
+				else []
+			)
 			if isinstance(ctx, dict) and (
 				ctx.get("doctype")
 				or ctx.get("report_name")
 				or ground_wiki
 				or ctx.get("page") in ("triggers", "dashboards")
+				or handoff_pages
 			):
 				enqueue_kwargs["context"] = {
 					"doctype": ctx.get("doctype") or "",
@@ -2950,6 +2965,11 @@ def send_message(
 					# One-shot wiki grounding (allow-listed, boolean only).
 					"ground_wiki": ground_wiki,
 				}
+				# Only set when present — an absent key, not a null/empty one,
+				# so a plain send's context dict looks exactly as it did before
+				# (mirrors how `page` below is handled).
+				if handoff_pages:
+					enqueue_kwargs["context"]["handoff_pages"] = handoff_pages
 				# `page` is a literal allow-list of two values (not a
 				# passthrough) — the prompt-side only consumes "triggers"
 				# and "dashboards".
@@ -3083,7 +3103,7 @@ def send_message(
 	return result
 
 
-def _api_key_models() -> dict[str, list[dict]]:
+def _api_key_models(catalog: list | None = None) -> dict[str, list[dict]]:
 	"""Provider label -> api-key-tier model rows for the pool editor's datalist.
 
 	Replaces the frontend's hardcoded STATIC_MODEL_SUGGESTIONS. Only display
@@ -3092,7 +3112,7 @@ def _api_key_models() -> dict[str, list[dict]]:
 	from jarvis import admin_client
 
 	out: dict[str, list[dict]] = {}
-	for provider in admin_client.get_model_catalog() or []:
+	for provider in catalog if catalog is not None else admin_client.get_model_catalog() or []:
 		rows = [m for m in provider.get("models") or [] if m.get("tier") == "api_key"]
 		rows.sort(key=lambda m: (m.get("sort_order") or 0, m.get("model_id") or ""))
 		out[provider.get("label") or provider.get("provider_id") or ""] = [
@@ -3240,7 +3260,7 @@ def _catalog_models_for_pool(settings, *, routable_only: bool = False) -> dict[s
 	return out
 
 
-def _subscription_connect_providers() -> list[dict]:
+def _subscription_connect_providers(catalog: list | None = None) -> list[dict]:
 	"""Providers offering DirectSubscriptionCard's paste-back OAuth connect flow.
 
 	Gated on a non-empty auth_profile_id (R7), NEVER on supports_subscription:
@@ -3253,7 +3273,7 @@ def _subscription_connect_providers() -> list[dict]:
 	from jarvis import admin_client
 
 	out: list[dict] = []
-	for provider in admin_client.get_model_catalog() or []:
+	for provider in catalog if catalog is not None else admin_client.get_model_catalog() or []:
 		if not (provider.get("auth_profile_id") or "").strip():
 			continue
 		label = provider.get("subscription_label") or provider.get("label") or ""
@@ -3265,24 +3285,43 @@ def _subscription_connect_providers() -> list[dict]:
 	return out
 
 
+def _provider_base_urls(catalog: list) -> dict[str, str]:
+	"""Provider label -> the admin catalog's default base URL, for the editor's
+	provider defaults (it used to hardcode these)."""
+	return {
+		p.get("label") or p.get("provider_id") or "": (p.get("default_base_url") or "").strip()
+		for p in catalog
+		if (p.get("default_base_url") or "").strip()
+	}
+
+
 @frappe.whitelist(methods=["POST"])
-def get_model_catalog_ui() -> dict:
+def get_model_catalog_ui(retry: bool = False) -> dict:
 	"""Catalog slice the pool editor and subscription card need, independent of
 	get_chat_ui_settings so the onboarding wizard (which never calls that) works.
 
 	Deliberately NOT on the chat hot path: mount-time only.
 	"""
 	require_jarvis_access()
+	# Settings and the onboarding wizard read the admin live (this also refreshes
+	# the site snapshot); the hot paths below it only read Redis or the snapshot.
+	from jarvis._subscription_models import mappings_from
+	from jarvis.catalog_store import MODELS
 
-	# dict() is MANDATORY here (R9): SUBSCRIPTION_MODELS/DEFAULT_MODEL are Mapping
-	# subclasses, and frappe's json_handler serialises a bare Mapping to its KEYS
-	# with no error. _api_key_models() and _subscription_connect_providers()
-	# already return plain dict/list structures.
+	catalog = MODELS.refresh(force=bool(retry))
+
+	# Every slice comes from this one catalog, so the flag and the lists can never
+	# disagree (a failed cache write must not leave the lists stale or empty).
+	subscription_models, default_models = mappings_from(catalog)
 	return {
-		"api_key_models": _api_key_models(),
-		"subscription_models": dict(_SUBSCRIPTION_MODELS),
-		"default_models": dict(_DEFAULT_MODEL),
-		"subscription_connect_providers": _subscription_connect_providers(),
+		# False only on a site that has never reached the admin: the editor shows
+		# an error with Retry and disables actions that would save a blank model.
+		"catalog_available": bool(catalog),
+		"provider_base_urls": _provider_base_urls(catalog),
+		"api_key_models": _api_key_models(catalog),
+		"subscription_models": subscription_models,
+		"default_models": default_models,
+		"subscription_connect_providers": _subscription_connect_providers(catalog),
 	}
 
 

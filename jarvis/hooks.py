@@ -225,6 +225,9 @@ never_skip_patches = [
 	"jarvis.patches.v2_31_disable_ticket_triage_installations",
 ]
 
+# Tests run without an admin; seed the catalog snapshot from test fixtures.
+before_tests = "jarvis.tests.catalog_seed.seed_catalog_snapshot"
+
 # Keep the Agents Marketplace catalog (Jarvis Agent Listing) in lockstep with
 # the BUNDLED jarvis/agents/registry.json on every migrate (never a runtime
 # fetch — bundles are reviewed deploy artifacts, adversarial S2).
@@ -249,6 +252,9 @@ after_migrate = [
 	# Re-send installed_apps to admin when the app set changed (the fleet
 	# gates skills/tool-denies off the admin-persisted list).
 	"jarvis.installed_apps_sync.after_migrate",
+	# Queue a pull of the admin model and preset catalogs into this site's
+	# snapshot so a freshly deployed site has a last-known-good copy for outages.
+	"jarvis.catalog_store.enqueue_refresh_all",
 	# File "Home/Jarvis Exports", where finished background exports are kept. A fresh install
 	# never reaches this hook; the first publish creates the folder then.
 	"jarvis.tools._export.jobs.after_migrate",
