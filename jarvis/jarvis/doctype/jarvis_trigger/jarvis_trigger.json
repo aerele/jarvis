@@ -20,6 +20,15 @@
   "llm_instruction",
   "llm_daily_cap",
   "llm_allow_lookups",
+  "intake_source",
+  "intake_folder",
+  "intake_record_doctype",
+  "intake_target_doctype",
+  "intake_spec",
+  "intake_instructions",
+  "allow_incomplete_drafts",
+  "intake_status_field",
+  "intake_link_field",
   "source_conversation"
  ],
  "fields": [
@@ -44,20 +53,22 @@
    "fieldtype": "Link",
    "options": "DocType",
    "label": "DocType",
-   "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,
-   "description": "The DocType whose events fire this trigger."
+   "description": "The DocType whose events fire this trigger.",
+   "mandatory_depends_on": "eval:doc.action_type!='Intake'",
+   "depends_on": "eval:doc.action_type!='Intake'"
   },
   {
    "fieldname": "doc_event",
    "fieldtype": "Select",
    "label": "Doc Event",
-   "reqd": 1,
    "in_list_view": 1,
    "in_standard_filter": 1,
    "options": "validate\nbefore_submit\nafter_insert\non_update\non_submit\non_cancel\non_trash\non_update_after_submit",
-   "description": "Frappe document event. validate/before_submit run INSIDE the save and can block it (Script actions only)."
+   "description": "Frappe document event. validate/before_submit run INSIDE the save and can block it (Script actions only).",
+   "mandatory_depends_on": "eval:doc.action_type!='Intake'",
+   "depends_on": "eval:doc.action_type!='Intake'"
   },
   {
    "fieldname": "description",
@@ -87,8 +98,8 @@
    "label": "Action Type",
    "reqd": 1,
    "in_standard_filter": 1,
-   "options": "Script\nLLM",
-   "description": "Script = deterministic sandboxed Python (runs inside the transaction, can block saves). LLM = background LLM evaluation after commit (never blocks)."
+   "options": "Script\nLLM\nIntake",
+   "description": "Script = deterministic sandboxed Python (runs inside the transaction, can block saves). LLM = background LLM evaluation after commit (never blocks). Intake = turns documents dropped in a folder, or attached to a record, into draft records."
   },
   {
    "fieldname": "script_body",
@@ -128,6 +139,74 @@
    "default": "0",
    "depends_on": "eval:doc.action_type=='LLM'",
    "description": "Lets the LLM read related records (up to 3 lookups, 20 rows each) before it answers. Lookups read as the trigger owner (a trigger owned by Administrator reads as Administrator), so they can see whatever the owner can. Findings of such triggers are visible only to the owner and to managers. Contact, Address and framework tables (users, roles, queues, logs, files) cannot be looked up. Reads only."
+  },
+  {
+   "fieldname": "intake_source",
+   "fieldtype": "Select",
+   "label": "Intake source",
+   "options": "Folder\nRecord",
+   "default": "Folder",
+   "depends_on": "eval:doc.action_type=='Intake'",
+   "description": "Where the documents come from: a Files folder, or files attached to a record."
+  },
+  {
+   "fieldname": "intake_folder",
+   "fieldtype": "Data",
+   "label": "Folder",
+   "depends_on": "eval:doc.action_type=='Intake' && doc.intake_source=='Folder'",
+   "description": "Files folder path to watch, e.g. Home/Production Sheets."
+  },
+  {
+   "fieldname": "intake_record_doctype",
+   "fieldtype": "Link",
+   "options": "DocType",
+   "label": "Record DocType",
+   "depends_on": "eval:doc.action_type=='Intake' && doc.intake_source=='Record'",
+   "description": "DocType whose attachments are read."
+  },
+  {
+   "fieldname": "intake_target_doctype",
+   "fieldtype": "Link",
+   "options": "DocType",
+   "label": "Create drafts in",
+   "depends_on": "eval:doc.action_type=='Intake'",
+   "description": "DocType the draft records are created in."
+  },
+  {
+   "fieldname": "intake_spec",
+   "fieldtype": "JSON",
+   "label": "Fields to read",
+   "depends_on": "eval:doc.action_type=='Intake'",
+   "description": "Fields, optional table, match fields and defaults."
+  },
+  {
+   "fieldname": "intake_instructions",
+   "fieldtype": "Text",
+   "label": "Reading instructions",
+   "depends_on": "eval:doc.action_type=='Intake'",
+   "description": "Extra guidance for reading the document (max 4000 characters)."
+  },
+  {
+   "fieldname": "allow_incomplete_drafts",
+   "fieldtype": "Check",
+   "label": "Allow incomplete drafts",
+   "default": "0",
+   "depends_on": "eval:doc.action_type=='Intake'",
+   "description": "Create the draft even when a mandatory field could not be read. Missing fields are listed on the draft. Submit still needs every mandatory field."
+  },
+  {
+   "fieldname": "intake_status_field",
+   "fieldtype": "Data",
+   "label": "Status field on record",
+   "depends_on": "eval:doc.action_type=='Intake' && doc.intake_source=='Record'",
+   "description": "Optional field on the record that receives the intake status."
+  },
+  {
+   "fieldname": "intake_link_field",
+   "fieldtype": "Data",
+   "label": "Draft link field on record",
+   "depends_on": "eval:doc.action_type=='Intake' && doc.intake_source=='Record'",
+   "description": "Optional field on the record that receives a link to the draft."
   },
   {
    "fieldname": "source_conversation",

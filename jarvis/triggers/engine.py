@@ -157,7 +157,8 @@ def _build_triggers_map() -> dict:
 	"""{doctype: {event: [row dicts]}} over all ENABLED Jarvis Trigger rows."""
 	rows = frappe.get_all(
 		TRIGGER,
-		filters={"enabled": 1},
+		# Intake rows run from uploads, never from doc events.
+		filters={"enabled": 1, "action_type": ["!=", "Intake"]},
 		fields=[
 			"name",
 			"trigger_name",
@@ -418,9 +419,9 @@ def _llm_cap_reached(row: dict) -> bool:
 	one marker. Also True once today's queue budget (cap + 1 queued, #1563) is
 	used up, so a bulk insert stops paying the snapshot cost. Never raises."""
 	try:
-		from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP, daily_count, queued_count
+		from jarvis.triggers.llm_action import DEFAULT_DAILY_CAP, daily_count, queued_count
 
-		cap = _llm_cap(row, _DEFAULT_DAILY_CAP)
+		cap = _llm_cap(row, DEFAULT_DAILY_CAP)
 		return daily_count(row.get("name")) > cap or queued_count(row.get("name")) > cap
 	except Exception:
 		return False
@@ -433,7 +434,7 @@ def _llm_cap(row: dict, default: int) -> int:
 def _queue_llm_action(row: dict, doc, method: str) -> None:
 	if _llm_cap_reached(row):
 		return
-	from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP
+	from jarvis.triggers.llm_action import DEFAULT_DAILY_CAP
 
 	if getattr(frappe.local, "_jarvis_trigger_llm_queue", None) is None:
 		frappe.local._jarvis_trigger_llm_queue = []
@@ -447,7 +448,7 @@ def _queue_llm_action(row: dict, doc, method: str) -> None:
 			event=method,
 			snapshot_json=_snapshot_json(doc),
 			fired_by=frappe.session.user,
-			cap=_llm_cap(row, _DEFAULT_DAILY_CAP),
+			cap=_llm_cap(row, DEFAULT_DAILY_CAP),
 		)
 	)
 

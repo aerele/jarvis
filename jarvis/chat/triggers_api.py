@@ -8,10 +8,9 @@ tester, and the visibility-filtered activity feed. Mirrors the shape of
 ``jarvis.chat.macros_api`` (whose list-page helpers it reuses).
 """
 
-from __future__ import annotations
-
 import frappe
 from frappe import _
+from frappe.model import default_fields
 from frappe.query_builder import CustomFunction, Order
 from frappe.query_builder.functions import Count, IfNull
 from frappe.utils import add_to_date, cint, getdate, now_datetime
@@ -19,12 +18,13 @@ from frappe.utils.safe_exec import is_safe_exec_enabled
 
 from jarvis.chat import list_filters
 from jarvis.chat.macros_api import _bool01, _clamp_page, _lk, _load_filters
+from jarvis.intake import guards as intake_guards
+from jarvis.intake import spec as intake_spec
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 from jarvis.triggers.engine import (
 	EVENT_LABELS,
 	LLM_EVENTS,
 	SUPPORTED_EVENTS,
-	clear_cache,
 	eval_context,
 )
 from jarvis.triggers.lookups import LOOKUP_MARKER, lookup_marker
@@ -47,10 +47,19 @@ _ALLOWED_PAYLOAD_FIELDS = {
 	"llm_allow_lookups",
 	"description",
 	"source_conversation",
+	"intake_source",
+	"intake_folder",
+	"intake_record_doctype",
+	"intake_target_doctype",
+	"intake_spec",
+	"intake_instructions",
+	"allow_incomplete_drafts",
+	"intake_status_field",
+	"intake_link_field",
 }
 
-_ACTION_TYPES = {"Script", "LLM"}
-_ACTIVITY_STATUSES = {"Success", "Failed", "Blocked", "Skipped"}
+_ACTION_TYPES = {"Script", "LLM", "Intake"}
+_ACTIVITY_STATUSES = {"Success", "Failed", "Blocked", "Skipped", "Queued", "Running", "Needs Review"}
 
 _TRIGGER_FILTERS = {"enabled", "action_type", "target_doctype", "doc_event"}
 _TRIGGER_SORTABLE = {
@@ -70,6 +79,7 @@ _ACTIVITY_FILTERS = {
 	"doc_event",
 	"from_date",
 	"to_date",
+	"file_hash",
 }
 _ACTIVITY_SORTABLE = {
 	"creation": "creation",
@@ -100,6 +110,13 @@ _ACTIVITY_FIELDS = (
 	"summary",
 	"duration_ms",
 	"event_user",
+	"source_file",
+	"file_hash",
+	"draft_doctype",
+	"draft_name",
+	"attempts",
+	"approval_request",
+	"duplicate_of",
 	"creation",
 )
 
@@ -145,16 +162,6 @@ def _order_by(sort_field: str, sort_dir: str, sortable: dict, default_field: str
 	"""Whitelisted ORDER BY."""
 	col, d = _sort(sort_field, sort_dir, sortable, default_field)
 	return f"`{col}` {d}, `name` asc"
-
-
-def _publish_changed() -> None:
-	"""Best-effort realtime nudge to the actor's own open tabs."""
-	try:
-		from jarvis.chat.events import publish_to_user
-
-		publish_to_user(frappe.session.user, {"kind": "trigger:changed"})
-	except Exception:
-		pass
 
 
 # --------------------------------------------------------------------------- #
@@ -289,10 +296,10 @@ def list_triggers_page(
 
 
 def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
-	"""Full trigger detail. ``condition``/``script_body``/``llm_instruction``
-	are the trigger's LOGIC and can embed internal business rules (or a value an
+	"""Full trigger detail. ``condition``/``script_body``/``llm_instruction``/
+	``intake_spec``/``intake_instructions`` are the trigger's LOGIC and can embed internal business rules (or a value an
 	admin surfaces via a script); core keeps Server Script bodies manager-only,
-	so for non-managers (plain Jarvis Users, who get org-wide READ) these three
+	so for non-managers (plain Jarvis Users, who get org-wide READ) these
 	fields are redacted to a marker. Managers see everything."""
 	detail = {
 		"name": doc.name,
@@ -309,16 +316,27 @@ def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
 		"owner": doc.owner,
 		"modified": str(doc.modified),
 		"can_manage": bool(can_manage),
+		"intake_source": doc.intake_source or "",
+		"intake_folder": doc.intake_folder or "",
+		"intake_record_doctype": doc.intake_record_doctype or "",
+		"intake_target_doctype": doc.intake_target_doctype or "",
+		"allow_incomplete_drafts": cint(doc.allow_incomplete_drafts),
+		"intake_status_field": doc.intake_status_field or "",
+		"intake_link_field": doc.intake_link_field or "",
 	}
 	if can_manage:
 		detail["condition"] = doc.condition or ""
 		detail["script_body"] = doc.script_body or ""
 		detail["llm_instruction"] = doc.llm_instruction or ""
+		detail["intake_spec"] = doc.intake_spec or ""
+		detail["intake_instructions"] = doc.intake_instructions or ""
 	else:
 		redacted = None  # the SPA renders "—" / a locked note for non-managers
 		detail["condition"] = redacted
 		detail["script_body"] = redacted
 		detail["llm_instruction"] = redacted
+		detail["intake_spec"] = redacted
+		detail["intake_instructions"] = redacted
 	return detail
 
 
@@ -334,8 +352,8 @@ def get_activity_detail(name: str) -> dict:
 	error for a real and a missing name) and the row is read with ``get_value``,
 	never ``get_doc().check_permission`` / ``get_list``."""
 	_require_manage()
-	# ``from __future__ import annotations`` makes Frappe's whitelist type check skip
-	# this module, so a non-str is rejected here.
+	# Frappe's whitelist type check rejects a non-str on a real request; direct Python
+	# callers skip it, so the body checks too.
 	if not isinstance(name, str) or not name.strip():
 		frappe.throw(_("Activity name is required."))
 	row = frappe.db.get_value(ACTIVITY, name.strip(), ["name", "detail"], as_dict=True)
@@ -423,10 +441,9 @@ def set_trigger_enabled(name: str, enabled: int) -> dict:
 		doc.check_unsafe_attributes()
 		# db_set skips validate, so re-enabling must re-run the duplicate guard.
 		doc.enabled = 1
-		doc.check_duplicates()
+		doc.check_enabled_duplicates()
 	doc.db_set("enabled", value)
-	clear_cache()
-	_publish_changed()
+	doc.notify_changed()
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"name": doc.name, "enabled": value}}
 
@@ -471,6 +488,100 @@ def delete_triggers_bulk(names: str) -> dict:
 			skipped.append({"name": n, "reason": "error"})
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True, "data": {"deleted": deleted, "skipped": skipped}}
+
+
+# --------------------------------------------------------------------------- #
+# intake form helpers (manager-only)
+# --------------------------------------------------------------------------- #
+# Attachments are what the "Record" source watches, so they are not a folder choice.
+_INTAKE_HIDDEN_FOLDERS = ("Home", "Home/Attachments")
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def list_intake_folders() -> list[str]:
+	"""File folders the manager can see, as paths, for the intake folder picker."""
+	_require_manage()
+	names = frappe.get_list("File", filters={"is_folder": 1}, pluck="name", limit_page_length=0)
+	return sorted(n for n in names if n not in _INTAKE_HIDDEN_FOLDERS)
+
+
+_DOCTYPE_PICK_LIMIT = 20
+_DOCTYPE_PICK_BATCH = 50
+_DOCTYPE_PICK_BATCHES = 6
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def search_intake_doctypes(txt: str = "") -> list[dict]:
+	"""DocTypes the intake pickers may offer (target and Record source), as
+	``[{"value": name}]``: the ones the rule save would accept, so a refused one is never
+	listed to be rejected later. Singles and child tables are left out too."""
+	_require_manage()
+	txt = (txt or "").strip()[:140]
+	filters = {"issingle": 0, "istable": 0}
+	if txt:
+		filters["name"] = ["like", f"%{list_filters.escape_like(txt)}%"]
+	out: list[dict] = []
+	for batch in range(_DOCTYPE_PICK_BATCHES):
+		# System context on purpose: DocType read is System Manager only, but a Jarvis Admin
+		# may manage rules. ``_require_manage`` gates the call; only names leave, and
+		# ``refused_doctype`` still filters them.
+		names = frappe.get_all(
+			"DocType",
+			filters=filters,
+			pluck="name",
+			order_by="name asc",
+			start=batch * _DOCTYPE_PICK_BATCH,
+			limit=_DOCTYPE_PICK_BATCH,
+		)
+		out += [{"value": n} for n in names if not intake_guards.refused_doctype(n)]
+		if len(out) >= _DOCTYPE_PICK_LIMIT or len(names) < _DOCTYPE_PICK_BATCH:
+			break
+	return out[:_DOCTYPE_PICK_LIMIT]
+
+
+def _intake_field_row(df) -> dict:
+	return {
+		"fieldname": df.fieldname,
+		"label": df.label or df.fieldname,
+		"fieldtype": df.fieldtype,
+		"options": df.options or "",
+		"mandatory": intake_spec._is_mandatory(df),
+	}
+
+
+def _intake_value_fields(meta) -> list:
+	"""Fields an intake can fill: user-writable value fields, no layout, no
+	computed (read-only) ones, no standard columns. Hidden fields stay: a
+	mandatory hidden field still needs a value for strict coverage."""
+	return [df for df in meta.fields if intake_spec._fillable(df) and df.fieldname not in default_fields]
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def get_intake_field_options(doctype: str) -> dict:
+	"""Fields and child tables of a DocType, for the intake field picker. The
+	DocType gate is the one the trigger itself enforces on save."""
+	_require_manage()
+	frappe.new_doc(TRIGGER)._check_doctype_usable(doctype, intake=True)
+	meta = frappe.get_meta(doctype)
+	tables = []
+	for df in meta.get_table_fields():
+		if df.read_only:
+			continue
+		child = frappe.get_meta(df.options)
+		tables.append(
+			{
+				"fieldname": df.fieldname,
+				"label": df.label or df.fieldname,
+				"child_doctype": df.options,
+				# A required table the spec leaves out can never produce a draft.
+				"mandatory": bool(df.reqd),
+				"columns": [_intake_field_row(c) for c in _intake_value_fields(child)],
+			}
+		)
+	return {"fields": [_intake_field_row(df) for df in _intake_value_fields(meta)], "tables": tables}
 
 
 # --------------------------------------------------------------------------- #
@@ -655,6 +766,8 @@ def _activity_query(search: str, f: dict):
 		query = query.where(a.action_type == f["action_type"])
 	if "target_doctype" in f:
 		query = query.where(a.target_doctype == str(f["target_doctype"]))
+	if "file_hash" in f:
+		query = query.where(a.file_hash == str(f["file_hash"]))
 	if "doc_event" in f:
 		if f["doc_event"] not in SUPPORTED_EVENTS:
 			frappe.throw(_("Invalid doc_event filter."))
@@ -682,6 +795,14 @@ def _hide_lookup_rows(query):
 	hidden = detail.like(f"{_lk(LOOKUP_MARKER)}%")
 	visible = ~hidden | detail.like(f"{_lk(lookup_marker(frappe.session.user))}%")
 	return query.where(visible)
+
+
+def _scope_intake_rows(query):
+	"""Intake rows belong to the uploader: a non-manager sees one only when they
+	own it, even if they can read its target doc. Done in SQL so page totals and
+	the scan stay consistent; other action types keep the target-read rule."""
+	a = frappe.qb.DocType(ACTIVITY)
+	return query.where((IfNull(a.action_type, "") != "Intake") | (a.owner == frappe.session.user))
 
 
 def _can_read_target(row) -> bool:
@@ -750,7 +871,7 @@ def list_activity_page(
 	f = _load_filters(filters, _ACTIVITY_FILTERS)
 	query = _activity_query(search, f)
 	if not _can_manage():
-		query = _hide_lookup_rows(query)
+		query = _scope_intake_rows(_hide_lookup_rows(query))
 	order_col, order_dir = _sort(sort_field, sort_dir, _ACTIVITY_SORTABLE, "creation")
 	ordered = (
 		query.select(*_ACTIVITY_FIELDS)

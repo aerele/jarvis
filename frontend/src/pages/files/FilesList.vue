@@ -6,7 +6,9 @@
 		@dragleave="onDragLeave"
 		@drop.prevent="onDrop"
 	>
+		<IntakeList v-if="view === 'intake'" v-model:scope="intakeScope" @switch="view = $event" />
 		<ListPage
+			v-else
 			:breadcrumbs="[{ label: 'File Box', route: { name: 'FilesList' } }]"
 			:columns="columns"
 			:rows="rows"
@@ -36,6 +38,7 @@
 			@refresh="resetLoad"
 		>
 			<template #right-header>
+				<FileBoxSwitch v-model="view" />
 				<Button label="Clear Processed" @click="clearProcessed" />
 				<Button
 					variant="solid"
@@ -248,7 +251,7 @@
 // with ?status= deep link, date-range filter, processing/applying poll (5s) +
 // visibilitychange refresh, per-row file preview (FilePreview dialog), bulk
 // delete with skip reasons, Clear Processed.
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
 	Button,
@@ -262,6 +265,8 @@ import {
 } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import FilePreview from "@/components/FilePreview.vue";
+import FileBoxSwitch from "./FileBoxSwitch.vue";
+import IntakeList from "./IntakeList.vue";
 import { useListPage } from "@/composables/useListPage";
 import { useShellStore } from "@/stores/shell";
 import { timeAgo, exactDate } from "@/utils/datetime";
@@ -282,6 +287,23 @@ import {
 const route = useRoute();
 const router = useRouter();
 const store = useShellStore();
+// "dropped" (files added by hand, the default) or "intake" (Document Intake files)
+// ?view=intake is the link the intake bells carry.
+// "Whose files" of the Intake view, kept here because that view is rebuilt on each switch
+const intakeScope = ref("mine");
+const view = ref(route.query.view === "intake" ? "intake" : "dropped");
+
+// The switch is rebuilt with the other view, so the clicked button is gone: put focus back
+// on the selected view's button instead of letting it fall to <body>. Each page teleports
+// its own header one tick after it mounts, so wait up to a few frames for the new switch.
+const SWITCH_ON = "[data-filebox-switch] [role=radio][aria-checked=true]";
+async function focusSwitch(tries = 10) {
+	await nextTick();
+	const on = document.querySelector(SWITCH_ON);
+	if (on) return on.focus();
+	if (tries > 0) requestAnimationFrame(() => focusSwitch(tries - 1));
+}
+watch(view, () => focusSwitch());
 
 // ── list config ──────────────────────────────────────────────────────────────
 // statuses, badges and result links live in @/lib/fileboxStatus (tested).
@@ -485,13 +507,14 @@ function hasFiles(ev) {
 	return Array.from(types).includes("Files");
 }
 function onDragEnter(ev) {
-	if (hasFiles(ev)) dragDepth.value++;
+	if (view.value === "dropped" && hasFiles(ev)) dragDepth.value++;
 }
 function onDragLeave() {
 	dragDepth.value = Math.max(0, dragDepth.value - 1);
 }
 function onDrop(ev) {
 	dragDepth.value = 0;
+	if (view.value !== "dropped") return;
 	uploadBatch(ev.dataTransfer && ev.dataTransfer.files);
 }
 
@@ -591,14 +614,15 @@ function clearProcessed() {
 
 // ── freshness: poll while a row is processing/applying + refetch on visible ──
 let pollTimer = null;
+// The Intake view is its own list with its own poll; this one is not on screen then.
 function onVisibility() {
-	if (document.visibilityState === "visible") refreshKeep();
+	if (view.value === "dropped" && document.visibilityState === "visible") refreshKeep();
 }
 onMounted(() => {
 	loadSkills();
 	// cheap tick: only refetches when such a row is on screen
 	pollTimer = setInterval(() => {
-		if (rows.value.some(isLive)) refreshKeep();
+		if (view.value === "dropped" && rows.value.some(isLive)) refreshKeep();
 	}, 5000);
 	document.addEventListener("visibilitychange", onVisibility);
 });
