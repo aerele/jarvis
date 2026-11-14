@@ -5,11 +5,17 @@ import json
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.intake import guards
 from jarvis.intake import spec as intake_spec
 from jarvis.intake.capture import INTAKE_MAP_CACHE_KEY, clear_intake_cache
 from jarvis.triggers import engine
 
 TRIGGER = "Jarvis Trigger"
+# A Record rule on ToDo that drafts Notes (the draft may not be the watched DocType).
+_NOTE_DRAFTS = {
+	"intake_target_doctype": "Note",
+	"intake_spec": json.dumps({"fields": ["title"]}),
+}
 
 
 class TestIntakeSpec(FrappeTestCase):
@@ -79,7 +85,53 @@ class TestIntakeSpec(FrappeTestCase):
 		table_ok = json.dumps(
 			{"fields": header, "table": {"fieldname": "event_participants", "columns": cols}}
 		)
-		self._insert(intake_target_doctype="Event", intake_spec=table_ok)
+		# reference_docname is a Dynamic Link: a page cannot carry it, so it is no longer
+		# a fillable column and the table can never be covered in strict mode.
+		self.assertRaises(
+			frappe.ValidationError, self._insert, intake_target_doctype="Event", intake_spec=table_ok
+		)
+
+	def test_fields_a_page_cannot_carry_are_refused(self):
+		for fields in (["description", "no_such_field"],):
+			with self.subTest(fields=fields):
+				self.assertRaises(
+					frappe.ValidationError,
+					self._insert,
+					intake_spec=json.dumps({"fields": fields}),
+					allow_incomplete_drafts=1,
+				)
+		for df in (
+			frappe._dict(fieldtype="Attach"),
+			frappe._dict(fieldtype="Attach Image"),
+			frappe._dict(fieldtype="Password"),
+			frappe._dict(fieldtype="Code"),
+			frappe._dict(fieldtype="JSON"),
+			frappe._dict(fieldtype="Dynamic Link"),
+			frappe._dict(fieldtype="Data", read_only=1),
+			frappe._dict(fieldtype="Data", fetch_from="customer.name"),
+			frappe._dict(fieldtype="Data", is_virtual=1),
+		):
+			with self.subTest(df=df):
+				self.assertFalse(intake_spec._fillable(df))
+		self.assertTrue(intake_spec._fillable(frappe._dict(fieldtype="Data")))
+
+	def test_too_many_picked_fields_refused(self):
+		meta = frappe.get_meta("Event")
+		many = [df.fieldname for df in meta.fields if intake_spec._fillable(df)]
+		spec = intake_spec.IntakeSpec(
+			target="Event", fields=many * 5, table=None
+		)  # over the cap whatever the real count
+		with self.assertRaises(frappe.ValidationError):
+			intake_spec.validate(spec)
+
+	def test_mandatory_depends_on_is_evaluated_against_the_values(self):
+		df = frappe._dict(
+			fieldname="x", fieldtype="Data", read_only=0, mandatory_depends_on="eval:doc.kind=='A'"
+		)
+		self.assertTrue(intake_spec.depends_mandatory(df, {"kind": "A"}))
+		self.assertFalse(intake_spec.depends_mandatory(df, {"kind": "B"}))
+		broken = frappe._dict(fieldname="x", fieldtype="Data", mandatory_depends_on="eval:doc.(")
+		self.assertFalse(intake_spec.depends_mandatory(broken, {}))
 
 	def test_incomplete_allowed_skips_coverage(self):
 		spec_json = json.dumps({"fields": ["priority"]})
@@ -102,13 +154,19 @@ class TestIntakeSpec(FrappeTestCase):
 			"intake_source": "Record",
 			"intake_folder": None,
 			"intake_record_doctype": "ToDo",
+			**_NOTE_DRAFTS,
 		}
 		self.assertRaises(frappe.ValidationError, self._insert, **base, intake_status_field="no_such_field")
 		self.assertRaises(frappe.ValidationError, self._insert, **{**base, "intake_record_doctype": "User"})
 		self._insert(**base, intake_status_field="sender", intake_link_field="reference_name")
 
 	def test_writeback_fields_must_be_able_to_hold_the_value(self):
-		base = {"intake_source": "Record", "intake_folder": None, "intake_record_doctype": "ToDo"}
+		base = {
+			"intake_source": "Record",
+			"intake_folder": None,
+			"intake_record_doctype": "ToDo",
+			**_NOTE_DRAFTS,
+		}
 		# A Select would refuse "Needs Review"; a Link to another doctype would refuse a draft name.
 		with self.assertRaises(frappe.ValidationError):
 			self._insert(**base, intake_status_field="status")
@@ -117,6 +175,61 @@ class TestIntakeSpec(FrappeTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self._insert(**base, intake_link_field="date")
 		self._insert(**base, intake_status_field="sender", intake_link_field="reference_name")
+
+	def test_sensitive_doctypes_are_refused_as_target_and_as_record_source(self):
+		for dt in (
+			"Role",
+			"User Permission",
+			"DocPerm",
+			"Custom DocPerm",
+			"Custom Field",
+			"Property Setter",
+			"Webhook",
+			"Workflow",
+			"Print Format",
+			"Server Script",
+			"Client Script",
+			"DocType",
+			"Module Def",
+			"System Settings",
+			"Jarvis Settings",
+		):
+			with self.subTest(dt=dt):
+				self.assertTrue(guards.refused_doctype(dt))
+				with self.assertRaises(frappe.ValidationError):
+					self._insert(intake_target_doctype=dt)
+				with self.assertRaises(frappe.ValidationError):
+					self._insert(
+						intake_source="Record", intake_folder=None, intake_record_doctype=dt, **_NOTE_DRAFTS
+					)
+		for dt in ("ToDo", "Note", "Event"):
+			self.assertFalse(guards.refused_doctype(dt))
+
+	def test_a_record_rule_cannot_draft_the_doctype_it_watches(self):
+		with self.assertRaises(frappe.ValidationError):
+			self._insert(
+				intake_source="Record",
+				intake_folder=None,
+				intake_record_doctype="ToDo",
+				intake_target_doctype="ToDo",
+			)
+
+	def test_two_record_rules_cannot_feed_each_other(self):
+		self._insert(intake_source="Record", intake_folder=None, intake_record_doctype="ToDo", **_NOTE_DRAFTS)
+		back = {
+			"intake_source": "Record",
+			"intake_folder": None,
+			"intake_record_doctype": "Note",
+			"intake_target_doctype": "ToDo",
+			"intake_spec": json.dumps({"fields": ["description"]}),
+		}
+		with self.assertRaises(frappe.ValidationError):
+			self._insert(**back)
+		# Disabled it may be saved, but switching it on is refused.
+		off = self._insert(**back, enabled=0)
+		off.enabled = 1
+		with self.assertRaises(frappe.ValidationError):
+			off.save(ignore_permissions=True)
 
 	def test_target_doctype_gated(self):
 		# User is denylisted, Website Settings is Single, Note Seen By is a child table.
@@ -210,7 +323,12 @@ class TestIntakeSpec(FrappeTestCase):
 		dup.enabled = 1
 		self.assertRaises(frappe.ValidationError, dup.save, ignore_permissions=True)
 		# Same record doctype + target is a duplicate too.
-		rec = {"intake_source": "Record", "intake_folder": None, "intake_record_doctype": "ToDo"}
+		rec = {
+			"intake_source": "Record",
+			"intake_folder": None,
+			"intake_record_doctype": "ToDo",
+			**_NOTE_DRAFTS,
+		}
 		self._insert(**rec)
 		self.assertRaises(frappe.ValidationError, self._insert, **rec)
 

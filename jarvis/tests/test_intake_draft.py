@@ -6,7 +6,8 @@ from unittest import mock
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.intake import draft, spec
+from jarvis.intake import draft, notify, spec
+from jarvis.intake import spec as intake_spec_module
 
 PARENT = "Intake Test Order"
 CHILD = "Intake Test Order Item"
@@ -137,6 +138,10 @@ class TestIntakeDraft(FrappeTestCase):
 		p = mock.patch("jarvis.permissions.is_valid_unattended_owner", return_value=True)
 		p.start()
 		self.addCleanup(p.stop)
+		# notify.review_waiting lives on the UI branch until the two are merged.
+		w = mock.patch.object(notify, "review_waiting", create=True)
+		self.review_waiting = w.start()
+		self.addCleanup(w.stop)
 		self.addCleanup(frappe.set_user, "Administrator")
 		# The class shares one transaction, so earlier tests' drafts would skew the counts.
 		frappe.db.delete(PARENT)
@@ -752,3 +757,210 @@ class TestIntakeDraft(FrappeTestCase):
 		with mock.patch("jarvis.intake.draft._write_back", side_effect=RuntimeError("w")):
 			draft.finish(row, self._simple_reading())
 		self.assertEqual(self._state(row).status, "Failed")
+
+	# ---- review fixes ------------------------------------------------------------
+	def test_number_parsing_works_without_the_frappe_16_module(self):
+		"""Frappe 15 has no frappe.utils.number_format and its own get_number_format_info
+		answers (decimal, thousands, precision): the fallback must give the same answers."""
+		import sys
+
+		v15 = {
+			"#,###.##": (".", ",", 2),
+			"#.###,##": (",", ".", 2),
+			"#,##,###.##": (".", ",", 2),
+		}
+		for fmt, text, expected in (
+			("#,###.##", "1,200.50", 1200.5),
+			("#.###,##", "1.200,50", 1200.5),
+			("#,##,###.##", "12,34,567.8", 1234567.8),
+		):
+			with self.subTest(fmt=fmt):
+				self.assertEqual(self._num(text, fmt), (expected, None))
+				with (
+					mock.patch.dict(sys.modules, {"frappe.utils.number_format": None}),
+					mock.patch("frappe.utils.get_number_format_info", side_effect=v15.get),
+				):
+					self.assertEqual(self._num(text, fmt), (expected, None))
+					self.assertEqual(draft._separators("#.###,##"), (".", ","))
+
+	def test_other_field_types_are_validated_not_left_to_fail_the_insert(self):
+		def clean(fieldtype, value, **df):
+			return draft._clean(frappe._dict(fieldtype=fieldtype, **df), value)
+
+		self.assertEqual(clean("Data", "x" * 141), (None, "too long"))
+		self.assertEqual(clean("Data", "x" * 20, length=10), (None, "too long"))
+		self.assertEqual(clean("Data", "ok"), ("ok", None))
+		self.assertEqual(clean("Data", "nope", options="Email"), (None, "not an email address"))
+		self.assertEqual(clean("Data", "a@b.com", options="Email"), ("a@b.com", None))
+		self.assertEqual(clean("Data", "abc", options="Phone"), (None, "not a phone number"))
+		self.assertEqual(clean("Data", "+91 98765 43210", options="Phone")[1], None)
+		self.assertEqual(clean("Data", "not a url", options="URL"), (None, "not a URL"))
+		self.assertEqual(clean("Data", "https://example.com/x", options="URL")[1], None)
+		self.assertEqual(clean("Time", "9:05"), ("09:05:00", None))
+		self.assertEqual(clean("Time", "25:00"), (None, "not a time"))
+		self.assertEqual(clean("Time", "noon"), (None, "not a time"))
+		self.assertEqual(clean("Duration", 90), (90, None))
+		self.assertEqual(clean("Duration", "1h 30m"), (5400, None))
+		self.assertEqual(clean("Duration", "-5"), (None, "not a duration"))
+		self.assertEqual(clean("Rating", 4, options="5"), (0.8, None))
+		self.assertEqual(clean("Rating", 7, options="5"), (None, "not a rating"))
+		self.assertEqual(clean("Rating", "great"), (None, "not a rating"))
+
+	def test_a_bad_value_is_blanked_and_listed_and_the_draft_still_saves(self):
+		rule = self._rule(allow_incomplete_drafts=1)
+		row = self._row(rule)
+		# title is Data (140): a 200 character read is blanked, the other values survive.
+		draft.finish(row, self._simple_reading(title="t" * 200, notes="keep me"))
+		state = self._state(row)
+		self.assertEqual(state.status, "Needs Review")
+		doc = frappe.get_doc(state.draft_doctype, state.draft_name)
+		self.assertEqual(doc.notes, "keep me")
+		comment = frappe.db.get_value("Comment", {"reference_name": doc.name}, "content")
+		self.assertIn("too long", comment)
+
+	def test_iso_datetimes_with_zone_are_accepted(self):
+		with self._site():
+			dt = frappe._dict(fieldtype="Datetime")
+			value, reason = draft._clean(dt, "2026-11-03T10:30:00Z")
+			self.assertIsNone(reason)
+			self.assertRegex(value, r"^2026-11-0[34] \d\d:\d\d:\d\d$")
+			self.assertIsNone(draft._clean(dt, "2026-11-03T10:30:00+05:30")[1])
+			self.assertEqual(
+				draft._clean(frappe._dict(fieldtype="Date"), "2026-11-03T23:30:00Z"), ("2026-11-03", None)
+			)
+
+	def test_all_blank_child_rows_are_dropped(self):
+		s = self._spec()
+		values = draft.merge_values(
+			s,
+			{
+				"title": "T",
+				"items": [
+					{"item_name": "bolt", "qty": 1, "rate": 2},
+					{"item_name": None, "qty": "", "rate": None},
+					{"item_name": " ", "qty": None, "rate": None},
+				],
+			},
+		)
+		self.assertEqual(len(values["items"]), 1)
+
+	def test_strict_mode_honours_mandatory_depends_on(self):
+		s = self._spec()
+
+		def depends(df, values):
+			return df.fieldname == "notes" and values.get("title") == "needs notes"
+
+		with mock.patch.object(intake_spec_module, "depends_mandatory", side_effect=depends):
+			missing = draft.missing_fields(s, {"title": "needs notes", "items": []}, [])
+			self.assertIn("notes", [m["field"] for m in missing])
+			missing = draft.missing_fields(s, {"title": "other", "items": []}, [])
+			self.assertNotIn("notes", [m["field"] for m in missing])
+
+	def test_truncated_file_goes_to_review_in_strict_mode_and_the_reviewer_is_told(self):
+		rule = self._rule()
+		row = self._row(rule)
+		reading = self._simple_reading(_note="Read 10 of 14 pages")
+		with mock.patch("jarvis.intake.review.raise_request", return_value=self._approval()) as rr:
+			draft.finish(row, reading)
+		missing = rr.call_args.args[2]
+		pages = [m for m in missing if m["field"] == draft.PAGES_FIELD]
+		self.assertEqual([m["reason"] for m in pages], ["Only 10 of 14 pages read"])
+		self.assertEqual(self._state(row).status, "Needs Review")
+		self.review_waiting.assert_called_once()
+		self.assertEqual(self.review_waiting.call_args.args[1], len(missing))
+
+	def test_truncated_file_in_incomplete_mode_notes_it_on_the_draft_comment_and_the_bell(self):
+		rule = self._rule(allow_incomplete_drafts=1)
+		row = self._row(rule)
+		draft.finish(row, self._simple_reading(_note="Read 10 of 14 pages"))
+		state = self._state(row)
+		self.assertIn("Read 10 of 14 pages", state.summary)
+		comment = frappe.db.get_value("Comment", {"reference_name": state.draft_name}, "content")
+		self.assertIn("Read 10 of 14 pages", comment)
+		bell = frappe.db.get_value(
+			"Notification Log",
+			{"for_user": MAKER, "document_name": state.draft_name},
+			"subject",
+		)
+		self.assertIn("Read 10 of 14 pages", bell)
+
+	def test_create_can_refuse_without_touching_the_row_or_the_uploader(self):
+		"""A reviewer's approval that fails insert keeps the request open: no Failed row, no bell."""
+		rule = self._rule()
+		row = self._row(rule, uploader=READER_ONLY)
+		before = frappe.db.count("Notification Log", {"for_user": READER_ONLY})
+		with self.assertRaises(draft.DraftFailed) as cm:
+			draft.create(row, {"title": "T", "items": []}, allow_missing=False, keep_row=True)
+		self.assertIn("You can't create", str(cm.exception))
+		self.assertEqual(self._state(row).status, "Running")
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": READER_ONLY}), before)
+
+	def test_tell_uploader_false_sends_no_failed_bell(self):
+		rule = self._rule()
+		row = self._row(rule, uploader=READER_ONLY)
+		before = frappe.db.count("Notification Log", {"for_user": READER_ONLY})
+		with self.assertRaises(draft.DraftFailed):
+			draft.create(row, {"title": "T", "items": []}, allow_missing=False, tell_uploader=False)
+		self.assertEqual(self._state(row).status, "Failed")
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": READER_ONLY}), before)
+		# The default still tells them.
+		row2 = self._row(rule, uploader=READER_ONLY)
+		with self.assertRaises(draft.DraftFailed):
+			draft.create(row2, {"title": "T", "items": []}, allow_missing=False)
+		self.assertEqual(frappe.db.count("Notification Log", {"for_user": READER_ONLY}), before + 1)
+
+	def test_strict_create_does_not_ignore_mandatory(self):
+		"""allow_missing=False must reach insert as ignore_mandatory=False: a missing title fails."""
+		rule = self._rule()
+		row = self._row(rule)
+		with self.assertRaises(draft.DraftFailed):
+			draft.create(row, {"title": None, "items": []}, allow_missing=False)
+		self.assertEqual(self._state(row).status, "Failed")
+		self.assertIn("could not be saved", self._state(row).summary)
+
+	def test_attach_marks_the_copy_so_capture_ignores_it(self):
+		seen = []
+
+		def attach(*a, **kw):
+			seen.append(frappe.flags.get("jarvis_intake_attach"))
+			return {}
+
+		row = self._row(self._rule())
+		with mock.patch("jarvis.intake.draft.attach_file_to_doc", side_effect=attach):
+			draft.finish(row, self._simple_reading())
+		self.assertEqual(seen, [True])
+		self.assertFalse(frappe.flags.get("jarvis_intake_attach"))
+
+	def test_write_back_works_when_the_uploader_cannot_write_the_record(self):
+		sheet = frappe.get_doc({"doctype": RECORD, "progress": "new"}).insert()
+		rule = self._rule(
+			intake_source="Record",
+			intake_folder=None,
+			intake_record_doctype=RECORD,
+			intake_status_field="progress",
+		)
+		# MAKER has no right on the sheet doctype at all; the system write still lands.
+		row = self._row(rule, target_docname=sheet.name)
+		draft.finish(row, self._simple_reading())
+		self.assertEqual(frappe.db.get_value(RECORD, sheet.name, "progress"), "Success")
+
+	def test_write_back_leaves_a_submitted_record_alone_and_logs(self):
+		sheet = frappe.get_doc({"doctype": RECORD, "progress": "new"}).insert()
+		frappe.db.set_value(RECORD, sheet.name, "docstatus", 1, update_modified=False)
+		rule = self._rule(
+			intake_source="Record",
+			intake_folder=None,
+			intake_record_doctype=RECORD,
+			intake_status_field="progress",
+		)
+		row = self._row(rule, target_docname=sheet.name)
+		with mock.patch("frappe.log_error") as log:
+			draft.finish(row, self._simple_reading())
+		self.assertEqual(frappe.db.get_value(RECORD, sheet.name, "progress"), "new")
+		self.assertEqual(log.call_args.kwargs["title"], "Jarvis intake: write-back skipped")
+
+	def test_the_draft_belongs_to_the_uploader(self):
+		rule = self._rule()
+		row = self._row(rule, uploader=MAKER)
+		draft.finish(row, self._simple_reading())
+		self.assertEqual(frappe.db.get_value(PARENT, self._state(row).draft_name, "owner"), MAKER)

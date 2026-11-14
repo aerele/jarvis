@@ -292,3 +292,167 @@ class TestIntakeCapture(FrappeTestCase):
 		with mock.patch.object(capture, "_queue_one", side_effect=RuntimeError("boom")):
 			doc, _ = self._upload("c.jpg")
 		self.assertTrue(frappe.db.exists("File", doc.name))
+
+	# ---- review fixes ------------------------------------------------------------
+	def _desk_user(self, email="intake.capture@example.com", roles=("Desk User",), user_type=None):
+		if frappe.db.exists("User", email):
+			frappe.delete_doc("User", email, force=True, ignore_permissions=True)
+		doc = frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": "Capture",
+				"send_welcome_email": 0,
+				"roles": [{"role": r} for r in roles],
+				**({"user_type": user_type} if user_type else {}),
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "User", email, force=True, ignore_permissions=True)
+		return doc.name
+
+	def test_a_non_admin_desk_uploader_is_the_row_and_draft_owner_end_to_end(self):
+		from jarvis.intake import worker
+
+		user = self._desk_user()
+		rule = self._rule()
+		frappe.set_user(user)
+		doc, _ = self._upload("sheet-user.jpg")
+		frappe.set_user("Administrator")
+		row = self._rows(rule)[0]
+		self.assertEqual((row.status, row.event_user), ("Queued", user))
+		with (
+			mock.patch("jarvis.intake.reader.vision_available", return_value=True),
+			mock.patch(
+				"jarvis.intake.client.vision_task_complete", return_value={"description": "from the photo"}
+			),
+			mock.patch("frappe.enqueue"),
+		):
+			worker.run_job(row.name)
+		state = frappe.db.get_value(
+			ACTIVITY, row.name, ["status", "draft_doctype", "draft_name"], as_dict=True
+		)
+		self.assertEqual(state.status, "Success")
+		self.assertEqual(frappe.db.get_value("ToDo", state.draft_name, "owner"), user)
+		self.addCleanup(frappe.delete_doc, "ToDo", state.draft_name, force=True, ignore_permissions=True)
+
+	def test_capture_guards_install_migrate_import_guest_and_no_hash(self):
+		rule = self._rule()
+		for flag in ("in_install", "in_migrate", "in_import", "in_patch"):
+			with self.subTest(flag=flag):
+				setattr(frappe.local.flags, flag, True)
+				try:
+					self._upload("g-%s.jpg" % flag)
+				finally:
+					setattr(frappe.local.flags, flag, False)
+		frappe.set_user("Guest")
+		try:
+			self._upload("guest.jpg")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(self._rows(rule), [])
+		doc = frappe.get_doc(
+			{"doctype": "File", "file_name": "nohash.jpg", "folder": FOLDER, "content": b"x"}
+		)
+		doc.content_hash = None
+		with mock.patch("frappe.log_error") as log:
+			capture.on_file_insert(doc)
+		self.assertEqual(self._rows(rule), [])
+		self.assertEqual(log.call_args.kwargs["title"], "Jarvis intake: file has no content hash")
+
+	def test_a_website_user_starts_no_ai_read(self):
+		rule = self._rule()
+		user = self._desk_user("intake.web@example.com", roles=(), user_type="Website User")
+		frappe.set_user(user)
+		try:
+			self._upload("web.jpg")
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(self._rows(rule), [])
+
+	def test_an_uploader_who_cannot_create_the_target_is_skipped_with_no_job(self):
+		rule = self._rule()
+		with mock.patch("jarvis.intake.guards.frappe.has_permission", return_value=False):
+			_doc, enq = self._upload("noperm.jpg")
+		row = self._rows(rule)[0]
+		self.assertEqual((row.status, row.summary), ("Skipped", "You can't create ToDo"))
+		enq.assert_not_called()
+
+	def test_a_file_the_worker_attached_to_a_draft_is_never_captured(self):
+		rule = self._rule()
+		frappe.flags.jarvis_intake_attach = True
+		try:
+			self._upload("copy.jpg")
+		finally:
+			frappe.flags.jarvis_intake_attach = False
+		self.assertEqual(self._rows(rule), [])
+		doc = frappe.get_doc({"doctype": "File", "file_name": "c.jpg", "folder": FOLDER, "content": b"x"})
+		doc.flags.jarvis_intake_attach = True
+		with mock.patch.object(capture, "_queue_one") as queue:
+			capture.on_file_insert(doc)
+		queue.assert_not_called()
+
+	def test_the_duplicate_check_runs_under_a_lock_that_outlives_the_function(self):
+		rule = self._rule()
+		release = mock.Mock()
+		with (
+			mock.patch.object(capture, "_lock", return_value=release) as lock,
+			mock.patch.object(capture, "_release_when_settled") as settle,
+		):
+			self._upload("locked.jpg")
+		lock.assert_called_once()
+		settle.assert_called_once_with(release)
+		self.assertEqual(len(self._rows(rule)), 1)
+
+	def test_the_lock_is_released_after_commit_or_rollback(self):
+		release = mock.Mock()
+		with mock.patch("frappe.db.after_commit") as ac, mock.patch("frappe.db.after_rollback") as ar:
+			capture._release_when_settled(release)
+		ac.add.assert_called_once_with(release)
+		ar.add.assert_called_once_with(release)
+		capture._release_when_settled(None)  # no lock held: nothing to do
+
+	def test_a_redis_outage_does_not_stop_capture(self):
+		rule = self._rule()
+		with mock.patch("frappe.cache", side_effect=ConnectionError("redis down")):
+			self.assertIsNone(capture._lock("t", "h", None))
+		self.assertEqual(rule.action_type, "Intake")
+
+	def test_files_bound_through_an_attach_field_are_captured_on_record_save(self):
+		rule = self._rule(
+			intake_source="Record",
+			intake_folder=None,
+			intake_record_doctype="Note",
+			intake_target_doctype="ToDo",
+		)
+		note = frappe.get_doc({"doctype": "Note", "title": "n-" + frappe.generate_hash(length=6)}).insert()
+		self.addCleanup(frappe.delete_doc, "Note", note.name, force=True)
+		doc, _ = self._upload("bound.pdf", folder="Home")
+		# Frappe binds an Attach field's file with a plain db write: no File save fires.
+		frappe.db.set_value("File", doc.name, {"attached_to_doctype": "Note", "attached_to_name": note.name})
+		self.assertEqual(self._rows(rule), [])
+		with mock.patch("frappe.enqueue") as enq:
+			note.reload().save()
+			note.save()
+		rows = self._rows(rule)
+		self.assertEqual(
+			[(r.status, r.source_file, r.target_docname) for r in rows], [("Queued", doc.name, note.name)]
+		)
+		self.assertEqual(enq.call_count, 1)
+
+	def test_record_save_costs_nothing_for_a_doctype_no_rule_watches(self):
+		self._rule()
+		note = frappe.get_doc({"doctype": "Note", "title": "n-" + frappe.generate_hash(length=6)})
+		capture.intake_map()  # warm: the rest must be pure cache reads
+		with mock.patch("frappe.get_all") as ga:
+			capture.on_record_save(note, "on_update")
+		ga.assert_not_called()
+
+	def test_doc_event_merge_keeps_existing_handlers(self):
+		from jarvis import hooks
+
+		events = {"a": "one", "b": ["one"]}
+		hooks._merge_doc_event(events, "a", "two")
+		hooks._merge_doc_event(events, "b", "two", first=True)
+		hooks._merge_doc_event(events, "c", "two")
+		self.assertEqual(events, {"a": ["one", "two"], "b": ["two", "one"], "c": ["two"]})
+		self.assertIn("jarvis.intake.capture.on_record_save", hooks.doc_events["*"]["on_update"])

@@ -446,8 +446,8 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertEqual(got.status, "Failed")
 		self.assertEqual(got.summary, "This site's AI model can't read images for intake yet.")
 		self.assertFalse(got.reading_json)
-		# Nothing was read, so nothing counts against the limits.
-		self.assertEqual(llm_action.daily_count(rule.name), 0)
+		# The model was called, so a NO_IMAGE answer counts (R23): junk uploads cannot dodge the caps.
+		self.assertEqual(llm_action.daily_count(rule.name), 1)
 
 	def test_prompt_has_fixed_rules_labels_and_no_file_text(self):
 		rule = self._rule(intake_instructions="Dates are day first.")
@@ -664,12 +664,30 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertEqual(str(frappe.db.get_value(ACTIVITY, row.name, "read_on")), frappe.utils.nowdate())
 		self.assertEqual(cint(frappe.cache().get_value(f"{worker.user_cap_key('Administrator')}:count")), 1)
 
-	def test_failed_read_is_not_counted(self):
+	def _failing(self, error):
 		rule = self._rule()
 		row = self._row(rule)
-		client = mock.Mock(side_effect=lt.LLMTaskError("agent down"))
+		client = mock.Mock(side_effect=error)
 		with mock.patch("jarvis.intake.client.vision_task_complete", client), mock.patch("frappe.enqueue"):
 			worker.run_job(row.name)
+		return rule, row
+
+	def test_error_after_the_request_reached_the_model_counts(self):
+		err = lt.LLMTaskError("agent timed out")
+		err.reached_model = True
+		rule, row = self._failing(err)
+		self.assertEqual(llm_action.daily_count(rule.name), 1)
+		self.assertEqual(cint(frappe.cache().get_value(f"{worker.site_cap_key()}:count")), 1)
+		self.assertEqual(cint(frappe.cache().get_value(f"{worker.user_cap_key('Administrator')}:count")), 1)
+		self.assertEqual(str(frappe.db.get_value(ACTIVITY, row.name, "read_on")), frappe.utils.nowdate())
+
+	def test_error_before_the_request_left_the_site_is_not_counted(self):
+		rule, row = self._failing(lt.LLMTaskError("llm-task request failed"))
+		self.assertEqual(llm_action.daily_count(rule.name), 0)
+		self.assertFalse(frappe.db.get_value(ACTIVITY, row.name, "read_on"))
+
+	def test_old_plugin_404_is_not_counted(self):
+		rule, row = self._failing(lt.LLMTaskNotAvailableError("404"))
 		self.assertEqual(llm_action.daily_count(rule.name), 0)
 		self.assertEqual(cint(frappe.cache().get_value(f"{worker.site_cap_key()}:count")), 0)
 
@@ -681,7 +699,7 @@ class TestIntakeWorker(FrappeTestCase):
 		got = self._get(row)
 		self.assertEqual((got.status, got.summary), ("Failed", worker.NO_IMAGE_SUMMARY))
 		self.assertFalse(got.reading_json)
-		self.assertEqual(llm_action.daily_count(rule.name), 0)
+		self.assertEqual(llm_action.daily_count(rule.name), 1)  # R23: the call was made
 
 	def test_text_only_model_fails_before_the_call_with_intake_wording(self):
 		rule = self._rule()

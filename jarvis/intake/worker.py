@@ -21,7 +21,7 @@ from frappe.utils.background_jobs import is_job_enqueued
 
 from jarvis import _redis_lock, compat
 from jarvis._session import impersonate
-from jarvis.intake import _db, capture, draft, guards, notify, reader, spec
+from jarvis.intake import _db, capture, client, draft, guards, notify, reader, spec
 from jarvis.triggers import llm_action
 from jarvis.triggers import llm_task_client as lt
 
@@ -272,7 +272,11 @@ def _enqueue_next(finished: str) -> None:
 
 
 def _count_call(row) -> None:
-	"""One real reading: count it against the rule, the site and the uploader."""
+	"""One request that reached the model: count it against the rule, the site and the
+	uploader, whatever came back (a blank page or an error costs the same as a good read).
+	Only a request that never ran (old plugin, no connection, refused first) is not counted.
+	``read_on`` is the durable record of today's count (see ``_used``)."""
+	row.db_set("read_on", nowdate(), update_modified=False)
 	llm_action.bump(llm_action.cap_key(row.trigger))
 	llm_action.bump(site_cap_key())
 	if row.event_user:
@@ -476,10 +480,13 @@ def _read(row, trigger) -> bool:
 	try:
 		reading, note = reader.read_file(row.source_file, s)
 	except lt.LLMTaskNotAvailableError as e:
+		# Nothing ran on an old plugin: not counted.
 		_log_class("Jarvis intake: agent update needed", str(e))
 		_end(row, "Failed", NO_AGENT_UPDATE_SUMMARY, _reason(e), trigger)
 		return False
 	except lt.LLMTaskError as e:
+		if client.reached_model(e):
+			_count_call(row)
 		# Expected (agent refusal, timeout): a short reason on the row, one Error Log an hour.
 		_log_class("Jarvis intake: read failed", str(e))
 		_end(row, "Failed", _READ_FAILED_SUMMARY, _reason(e), trigger)
@@ -490,18 +497,17 @@ def _read(row, trigger) -> bool:
 	except reader.UnreadableFile as e:
 		_end(row, "Failed", str(e), str(e), trigger)
 		return False
+	_count_call(row)  # the model answered, whatever it answered
 	if reading.get("error") == "NO_IMAGE" or reader.is_empty_reading(reading, s):
 		# A text-only model often answers an all-null object instead of NO_IMAGE: a blank
-		# draft (or review) of that would look like a read. Not counted: nothing was read.
+		# draft (or review) of that would look like a read. It still cost a call.
 		_end(row, "Failed", NO_IMAGE_SUMMARY, "The model read nothing from the file.", trigger)
 		return False
-	_count_call(row)
 	if note:
 		# Inside the reading so it survives a draft-only retry; draft.finish pops it.
 		reading["_note"] = note
 	# Saved before the draft stage: a retry reuses it instead of paying for another read.
-	# ``read_on`` is the durable record of today's count (see ``_used``).
-	_set(row, reading_json=json.dumps(reading), read_on=nowdate())
+	_set(row, reading_json=json.dumps(reading))
 	return True
 
 

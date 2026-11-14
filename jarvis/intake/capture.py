@@ -150,7 +150,8 @@ def on_record_save(doc, method=None) -> None:
 	write, so no File save fires; this runs after Frappe's own on_update hook has bound them.
 	Costs one cached-map lookup for a doctype no Record rule watches."""
 	try:
-		if _skip_context() or doc.doctype == "File":
+		# A rule's own save must not rebuild the map it just busted.
+		if _skip_context() or doc.doctype in ("File", "Jarvis Trigger"):
 			return
 		rules = intake_map()["record"].get(doc.doctype)
 		user = frappe.session.user

@@ -7,6 +7,7 @@ a 404 (older plugin without the route) and a refusal behave the same way.
 """
 
 import frappe
+import requests
 
 from jarvis.chat import plugin_routes
 from jarvis.intake import limits
@@ -14,6 +15,14 @@ from jarvis.triggers import llm_task_client as lt
 
 LLMTaskError = lt.LLMTaskError
 LLMTaskNotAvailableError = lt.LLMTaskNotAvailableError
+
+
+def reached_model(e: Exception) -> bool:
+	"""True when the request got as far as the model (so it is billable): a reply, a model
+	refusal or a timeout after sending. False when nothing was run: the site refused it first,
+	the connection failed before sending, the plugin does not know the route (404) or refused
+	the signature (401/403)."""
+	return bool(getattr(e, "reached_model", False))
 
 
 def _vision_wording(message: str) -> str:
@@ -53,7 +62,9 @@ def vision_task_complete(
 	except LLMTaskNotAvailableError as e:
 		raise LLMTaskNotAvailableError(_vision_wording(str(e))) from e
 	except LLMTaskError as e:
-		raise LLMTaskError(_vision_wording(str(e))) from e
+		reworded = LLMTaskError(_vision_wording(str(e)))
+		reworded.reached_model = reached_model(e)
+		raise reworded from e
 
 
 def _check_limits(images: list[dict]) -> None:
@@ -70,7 +81,12 @@ def _check_limits(images: list[dict]) -> None:
 def _run_vision_task(args: dict, timeout: int) -> dict:
 	# Waits longer than the plugin's own 105 s limit, so its 504 reaches the row.
 	wait = max(timeout + lt._TIMEOUT_BUFFER_S, limits.SITE_WAIT_S)
-	status, raw = lt._call_route(plugin_routes.VISION_TASK_PATH, {"args": args}, wait)
+	try:
+		status, raw = lt._call_route(plugin_routes.VISION_TASK_PATH, {"args": args}, wait)
+	except LLMTaskError as e:
+		# A timeout means the request was sent and may have run; anything else failed first.
+		e.reached_model = isinstance(e.__cause__, requests.Timeout)
+		raise
 
 	if status in (401, 403):
 		raise LLMTaskError("vision task request was refused by the agent plugin")
@@ -78,6 +94,16 @@ def _run_vision_task(args: dict, timeout: int) -> dict:
 	if status == 404:
 		raise LLMTaskNotAvailableError(lt._gateway_error_message(status, raw))
 
+	try:
+		return _parse_reply(status, raw)
+	except LLMTaskNotAvailableError:
+		raise
+	except LLMTaskError as e:
+		e.reached_model = True  # the plugin answered after running the task
+		raise
+
+
+def _parse_reply(status: int, raw: bytes) -> dict:
 	try:
 		payload = frappe.parse_json(raw.decode("utf-8")) if raw else {}
 	except Exception as e:
