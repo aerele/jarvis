@@ -100,3 +100,25 @@ export function actionBlockState(content) {
 		return "bad";
 	}
 }
+
+/**
+ * The red error-card copy for a draft block the desktop cannot show, or "".
+ * Error when the closed fence is not a JSON object, the action has unreadable
+ * fields or tables, or a non-email action names a verb other than create / update.
+ * A missing verb is not an error (the desktop treats it as create).
+ * @param {string} content the assistant message text
+ * @param {object|null} action the normalised action, or null
+ * @param {string} agentName
+ * @returns {string}
+ */
+export function draftBlockError(content, action, agentName) {
+	const bad =
+		actionBlockState(content) === "bad" ||
+		(!!action &&
+			(action.unreadable === true ||
+				(action.kind !== "email" &&
+					!!action.verb &&
+					action.verb !== "create" &&
+					action.verb !== "update")));
+	return bad ? `Couldn't show this draft. Ask ${agentName} to send it again.` : "";
+}
