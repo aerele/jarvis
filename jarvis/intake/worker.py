@@ -181,10 +181,10 @@ def _set(row, quiet: bool = False, **values) -> None:
 		frappe.log_error(title="Jarvis intake: could not publish a status change")
 
 
-def _end(row, status: str, summary: str, detail: str = "", trigger=None) -> None:
+def _end(row, status: str, summary: str, detail: str = "", trigger=None, quiet: bool = False) -> None:
 	"""End the row Failed or Skipped, mark a Record rule's source record the same way, and
 	(for a failure) tell the managers when failures pile up."""
-	_set(row, status=status, summary=summary, detail=detail)
+	_set(row, quiet=quiet, status=status, summary=summary, detail=detail)
 	if trigger is None and row.trigger:
 		trigger = frappe.db.get_value("Jarvis Trigger", row.trigger, spec.TRIGGER_FIELDS, as_dict=True)
 	if trigger:
@@ -658,20 +658,29 @@ def _end_orphaned_rows() -> None:
 		frappe.qb.from_(row)
 		.left_join(rule)
 		.on(rule.name == row.trigger)
-		.select(row.name)
+		.select(row.name, row.event_user)
 		.where((row.action_type == "Intake") & (row.status == "Queued"))
 		.where(rule.name.isnull() | (rule.enabled == 0) | (rule.action_type != "Intake"))
 		.limit(_ORPHAN_BATCH)
 		.run()
 	)
-	for (name,) in names:
+	ended: dict[str, int] = {}
+	for name, user in names:
 		try:
-			_end(frappe.get_doc(ACTIVITY, name), "Skipped", RULE_OFF_SUMMARY)
+			# Quiet: one bell per uploader below, not one per row.
+			_end(frappe.get_doc(ACTIVITY, name), "Skipped", RULE_OFF_SUMMARY, quiet=True)
+			ended[user] = ended.get(user, 0) + 1
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(
 				title="Jarvis intake: could not end a row of a turned-off rule",
 				message=f"{name}\n\n{frappe.get_traceback()}",
+			)
+
+	for user, count in ended.items():
+		if user:
+			notify.notify(
+				user, f"{count} {'file was' if count == 1 else 'files were'} not read: the rule is turned off"
 			)
 
 

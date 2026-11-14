@@ -128,6 +128,28 @@ class TestIntakeFormApi(_TriggersApiTestCase):
 		self.assertEqual(data["allow_incomplete_drafts"], 1)
 		self.assertIn("description", data["intake_spec"])
 
+	def test_run_when_round_trips_through_create_update_and_get(self):
+		from jarvis.chat.triggers_api import create_trigger, update_trigger
+
+		frappe.set_user(ADMIN_USER)
+		payload = {
+			"trigger_name": f"intake-{frappe.generate_hash(length=8)}",
+			"action_type": "Intake",
+			"intake_source": "Record",
+			"intake_record_doctype": "Note",
+			"intake_record_event": "On Submit",
+			"intake_target_doctype": "ToDo",
+			"intake_spec": frappe.as_json({"fields": ["description"]}),
+		}
+		name = create_trigger(frappe.as_json(payload))["data"]["name"]
+		self._triggers.append(name)
+		self.assertEqual(get_trigger(name)["data"]["intake_record_event"], "On Submit")
+		update_trigger(name, frappe.as_json({"intake_record_event": "After Insert"}))
+		self.assertEqual(get_trigger(name)["data"]["intake_record_event"], "After Insert")
+		# A rule saved before the field existed reads as the default.
+		frappe.db.set_value("Jarvis Trigger", name, "intake_record_event", None)
+		self.assertEqual(get_trigger(name)["data"]["intake_record_event"], "File attached")
+
 	def test_intake_logic_is_redacted_for_non_managers(self):
 		doc = frappe.get_doc(
 			{

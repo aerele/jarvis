@@ -797,6 +797,8 @@ for _intake_event, _intake_handler in (
 # so no File save fires): after the record saves, and after Frappe's own on_update binds them.
 # One cached-map lookup for a doctype no Record rule watches.
 _merge_doc_event(_star_doc_events, "on_update", "jarvis.intake.capture.on_record_save")
+# "On Submit" Record rules read every attachment of the record once it is submitted.
+_merge_doc_event(_star_doc_events, "on_submit", "jarvis.intake.capture.on_record_submit")
 
 # Write-risk guard (round 2, jarvis.tools._write_risk): while a Jarvis tool call
 # runs, a ROOT write of a structure / sensitive document is refused unless the card

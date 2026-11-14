@@ -23,6 +23,7 @@
   "intake_source",
   "intake_folder",
   "intake_record_doctype",
+  "intake_record_event",
   "intake_target_doctype",
   "intake_spec",
   "intake_instructions",
@@ -163,6 +164,15 @@
    "label": "Record DocType",
    "depends_on": "eval:doc.action_type=='Intake' && doc.intake_source=='Record'",
    "description": "DocType whose attachments are read."
+  },
+  {
+   "fieldname": "intake_record_event",
+   "fieldtype": "Select",
+   "label": "Run when",
+   "options": "File attached\nAfter Insert\nOn Submit",
+   "default": "File attached",
+   "depends_on": "eval:doc.action_type=='Intake' && doc.intake_source=='Record'",
+   "description": "File attached: each file added to the record. After Insert: files attached when the record is created. On Submit: every attachment not yet read, when the record is submitted."
   },
   {
    "fieldname": "intake_target_doctype",
