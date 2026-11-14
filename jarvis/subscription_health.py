@@ -372,12 +372,22 @@ def record_signin_complete(upstream: str, account_ref: str | None = None, all_so
 		if upstream not in LABELS:
 			return
 		live = _live_accounts()
-		_clear_usage_limits({row.model_id for row in _enabled_rows() if row.upstream == upstream})
-		if _clear_upstream(upstream, account_ref=account_ref, all_sources=all_sources, live=live):
-			return
-		still = [e for ref, e in current_health().items() if ref in live and e.get("upstream") == upstream]
-		if not any(e.get("state") == "expired" for e in still):
-			_queue_signal(upstream, CODE_OK)
+		if not _clear_upstream(upstream, account_ref=account_ref, all_sources=all_sources, live=live):
+			still = [
+				e for ref, e in current_health().items() if ref in live and e.get("upstream") == upstream
+			]
+			if not any(e.get("state") == "expired" for e in still):
+				_queue_signal(upstream, CODE_OK)
+	except Exception:
+		_log_throttled()
+	_clear_upstream_usage_limits(upstream)
+
+
+def _clear_upstream_usage_limits(upstream: str) -> None:
+	"""A new sign-in may lift the cap on the models its upstream serves. Never raises."""
+	try:
+		if usage_limits():
+			_clear_usage_limits({row.model_id for row in _enabled_rows() if row.upstream == upstream})
 	except Exception:
 		_log_throttled()
 
@@ -560,13 +570,15 @@ def note_turn_success(model: str, provider: str) -> None:
 	cap and a chat-detected expiry for the serving upstream. Two reads when nothing is flagged. Never
 	raises."""
 	try:
-		_clear_usage_limits({model})
 		chat_upstreams = {e.get("upstream") for e in current_health().values() if e.get("source") == "chat"}
-		if not chat_upstreams:
-			return
-		upstream = upstream_for_serving(model, provider)
-		if upstream in chat_upstreams:
-			record_chat_success(upstream)
+		if chat_upstreams:
+			upstream = upstream_for_serving(model, provider)
+			if upstream in chat_upstreams:
+				record_chat_success(upstream)
+	except Exception:
+		_log_throttled()
+	try:
+		_clear_usage_limits({model})
 	except Exception:
 		_log_throttled()
 
@@ -707,12 +719,12 @@ def get_subscription_notice() -> dict:
 	# Nothing expired is the common case (every chat load, every realtime event): answer before any
 	# pool row is read. Only the admin's upstreams list reads the accounts, once, in _live_accounts.
 	entries = expired_entries()
-	# Model ids and reset times only: nothing about accounts, so members get them too.
-	limited = usage_limits()
+	# For the AI models rows, which only an admin can open.
+	limited = usage_limits() if is_admin else None
 	if not entries:
 		if is_admin:
 			return {"expired": [], "upstreams": _upstreams(), "limited": limited}
-		return {"expired": [], "expired_models": [], "upstreams": None, "limited": limited}
+		return {"expired": [], "expired_models": [], "upstreams": None}
 	rows = _enabled_rows()
 	entries = _with_fallbacks(entries, rows)
 	served = _account_models({e["account_ref"] for e in entries}, rows)
@@ -726,5 +738,4 @@ def get_subscription_notice() -> dict:
 		"expired": failing[:1],
 		"expired_models": [_member_entry(e) for e in entries],
 		"upstreams": None,
-		"limited": limited,
 	}

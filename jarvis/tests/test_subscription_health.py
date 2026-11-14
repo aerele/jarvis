@@ -968,7 +968,7 @@ class TestAttentionAndNotice(_Base):
 			member = self._notice(admin=False)
 		read.assert_not_called()
 		self.assertEqual(admin, {"expired": [], "upstreams": ["anthropic", "openai"], "limited": {}})
-		self.assertEqual(member, {"expired": [], "expired_models": [], "upstreams": None, "limited": {}})
+		self.assertEqual(member, {"expired": [], "expired_models": [], "upstreams": None})
 
 	def test_an_expired_entry_reads_each_enabled_subscription_row_once(self):
 		from jarvis.jarvis import pool_serialize
@@ -1004,7 +1004,6 @@ class TestAttentionAndNotice(_Base):
 				"expired": [{"upstream": "openai", "label": "OpenAI", "models": []}],
 				"expired_models": [{"upstream": "openai", "label": "OpenAI", "models": []}],
 				"upstreams": None,
-				"limited": {},
 			},
 		)
 
@@ -1271,7 +1270,7 @@ class TestUnmigratedSite(unittest.TestCase):
 		self.assertEqual((status["attention_detail"], status["subscription_health"]), ({}, []))
 		self.assertEqual(health, {"state": "ok"})
 		self.assertEqual(admin_notice, {"expired": [], "upstreams": [], "limited": {}})
-		self.assertEqual(notice, {"expired": [], "expired_models": [], "upstreams": None, "limited": {}})
+		self.assertEqual(notice, {"expired": [], "expired_models": [], "upstreams": None})
 
 
 # The insider failure, 2026-11-14: one model out of allowance, the other signed out.
@@ -1354,13 +1353,23 @@ class TestUsageLimits(_Base):
 			sh.record_signin_complete("openai")
 		self.assertEqual(list(sh.usage_limits()), ["claude-opus-5"])
 
-	def test_the_notice_carries_the_caps_for_admins_and_members(self):
+	def _notice(self, admin):
+		frappe.set_user("Administrator")
+		with (
+			patch("jarvis.permissions.require_jarvis_access"),
+			patch("jarvis.permissions.has_jarvis_admin_access", return_value=admin),
+		):
+			return sh.get_subscription_notice()
+
+	def test_the_notice_carries_the_caps_for_an_admin_only(self):
 		with patch.object(sh.time, "time", return_value=1_000_000):
 			sh.record_usage_limit("gpt-5.6-terra", 3600)
-			frappe.set_user("Administrator")
-			for admin in (True, False):
-				with (
-					patch("jarvis.permissions.require_jarvis_access"),
-					patch("jarvis.permissions.has_jarvis_admin_access", return_value=admin),
-				):
-					self.assertEqual(sh.get_subscription_notice()["limited"], {"gpt-5.6-terra": 1_003_600})
+			self.assertEqual(self._notice(admin=True)["limited"], {"gpt-5.6-terra": 1_003_600})
+			self.assertNotIn("limited", self._notice(admin=False))
+
+	def test_a_fault_reading_rows_never_stops_the_sign_in_clear(self):
+		sh.record_usage_limit("gpt-5.6-terra", 3600)
+		self.seed({"ACC_CL1": _entry("ACC_CL1", source="chat")})
+		with patch.object(sh, "_enabled_rows", side_effect=RuntimeError("boom")):
+			sh.record_signin_complete("anthropic", all_sources=True)
+		self.assertEqual(sh.current_health(), {})

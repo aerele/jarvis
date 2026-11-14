@@ -325,6 +325,16 @@ class TestLLMTaskFailover(unittest.TestCase):
 		note.assert_called_once()
 		self.assertEqual(note.call_args.args[1], "subscription-expired")
 
+	def test_a_model_on_its_usage_cap_fails_over_to_the_next(self):
+		capped = (
+			"429 All credentials for model claude-a are cooling down (last error: usage_limit_reached: "
+			"The usage limit has been reached); Retry-After: 3600 seconds (rate_limit)"
+		)
+		out, calls, note, _err = self._run([lt.LLMTaskError(capped), "found it"])
+		self.assertEqual(out, "found it")
+		self.assertEqual(len(calls), 2)
+		self.assertEqual(note.call_args.args[1], "quota")
+
 	def test_upstream_already_flagged_expired_is_skipped(self):
 		out, calls, _note, _err = self._run([lt.LLMTaskError(_EXPIRED), "from grok"], expired=("openai",))
 		self.assertEqual(out, "from grok")
