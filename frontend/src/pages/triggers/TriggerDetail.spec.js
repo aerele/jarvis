@@ -228,6 +228,12 @@ describe("TriggerDetail Recent activity: first page", () => {
 		expect(rowEls(wrapper)).toHaveLength(10);
 	});
 
+	it("names the icon-only overflow button so a screen reader can find it", async () => {
+		serverOf(3);
+		await mountDetail();
+		expect(wrapper.find('button[data-label="More actions"]').exists()).toBe(true);
+	});
+
 	it("has no View all link any more", async () => {
 		serverOf(37);
 		await mountDetail();

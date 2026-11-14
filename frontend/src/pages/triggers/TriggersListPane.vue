@@ -116,7 +116,7 @@
 					{ label: 'Delete', onClick: () => bulkDelete(selections, unselectAll) },
 				]"
 			>
-				<Button icon="more-horizontal" variant="ghost" />
+				<Button icon="more-horizontal" variant="ghost" label="More actions" />
 			</Dropdown>
 		</template>
 	</ListPage>

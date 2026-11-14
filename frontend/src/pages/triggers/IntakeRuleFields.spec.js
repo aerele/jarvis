@@ -11,9 +11,9 @@ vi.mock("@/api", () => ({ searchLink: vi.fn(() => Promise.resolve([])) }));
 vi.mock("frappe-ui", () => ({
 	Autocomplete: {
 		name: "Autocomplete",
-		props: ["options", "modelValue", "placeholder"],
+		props: ["options", "modelValue", "placeholder", "loading"],
 		emits: ["update:modelValue", "update:query"],
-		template: `<div class="autocomplete" :data-placeholder="placeholder" />`,
+		template: `<div class="autocomplete" :data-placeholder="placeholder" :data-loading="loading ? '1' : '0'"><button type="button">pick</button></div>`,
 	},
 	Button: {
 		name: "Button",
@@ -269,5 +269,80 @@ describe("IntakeRuleFields", () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("a slow earlier DocType search never overwrites a newer one (latest wins)", async () => {
+		vi.useFakeTimers();
+		try {
+			const w = mount(IntakeRuleFields, { props: { form: formOf() } });
+			await vi.advanceTimersByTimeAsync(400);
+			let release;
+			searchLink.mockImplementationOnce(
+				() => new Promise((res) => (release = () => res([{ value: "Old" }])))
+			);
+			searchLink.mockResolvedValueOnce([{ value: "New" }]);
+			const picker = w
+				.findAllComponents({ name: "Autocomplete" })
+				.find((p) => p.attributes("data-placeholder") === "Pick a DocType…");
+			picker.vm.$emit("update:query", "O");
+			await vi.advanceTimersByTimeAsync(400);
+			picker.vm.$emit("update:query", "Ne");
+			await vi.advanceTimersByTimeAsync(400);
+			release();
+			await flushPromises();
+			expect(picker.props("options")).toEqual([{ label: "New", value: "New" }]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("says the fields are loading while the field list is on its way", async () => {
+		let release;
+		apiTr.getIntakeFieldOptions.mockImplementationOnce(
+			() => new Promise((res) => (release = () => res(TODO)))
+		);
+		const w = mount(IntakeRuleFields, { props: { form: formOf() } });
+		await flushPromises();
+		expect(w.find("[role=status]").text()).toContain("Loading the fields of ToDo");
+		release();
+		await flushPromises();
+		expect(w.find("[role=status]").exists()).toBe(false);
+	});
+
+	it("stops the instructions at 4000 characters and says so", async () => {
+		const w = await mountIt(formOf({ intake_instructions: "x".repeat(4000) }));
+		const box = w.find('input[aria-label="Instructions"]');
+		expect(box.attributes("maxlength")).toBe("4000");
+		expect(w.find('[data-testid="instructions-count"]').text()).toBe("4000 / 4000");
+		expect(w.find('[data-testid="instructions-count"]').classes()).toContain("text-ink-red-4");
+		// a paste past the limit is cut, not sent on to fail on save
+		await box.setValue("y".repeat(4100));
+		const sent = patches(w)
+			.filter((p) => "intake_instructions" in p)
+			.at(-1);
+		expect(sent.intake_instructions).toHaveLength(4000);
+	});
+
+	it("keeps the form inside its column so a picker's list cannot be wider than the screen", async () => {
+		const w = await mountIt(formOf());
+		expect(w.find('[data-testid="intake-fields"]').classes()).toEqual(
+			expect.arrayContaining(["min-w-0", "max-w-full"])
+		);
+		for (const pick of w.findAll("[data-pick]")) expect(pick.classes()).toContain("min-w-0");
+	});
+
+	it("puts focus back on the picker after a pick", async () => {
+		const host = document.createElement("div");
+		document.body.appendChild(host);
+		const w = mount(IntakeRuleFields, { attachTo: host, props: { form: formOf() } });
+		await flushPromises();
+		const picker = w
+			.findAllComponents({ name: "Autocomplete" })
+			.find((p) => p.attributes("data-placeholder") === "Pick a DocType…");
+		picker.vm.$emit("update:modelValue", { value: "Note" });
+		await flushPromises();
+		expect(document.activeElement).toBe(w.find('[data-pick="target"] button').element);
+		w.unmount();
+		host.remove();
 	});
 });
