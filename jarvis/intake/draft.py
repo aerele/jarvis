@@ -563,11 +563,7 @@ def _uploader(row, trigger, keep: bool = False, tell_uploader: bool = True) -> s
 def _refuse_target(row, trigger, s, uploader: str, keep: bool, tell_uploader: bool) -> None:
 	"""The last gate before an insert, for the worker and a review approval alike: a rule
 	saved before the deny-list grew, or edited around validation, must not produce a draft."""
-	if (
-		guards.refused_doctype(s.target)
-		or intake_spec.sensitive_picks(s)
-		or intake_spec.table_refused(s)
-	):
+	if guards.refused_doctype(s.target) or intake_spec.sensitive_picks(s) or intake_spec.table_refused(s):
 		_fail(row, trigger, guards.TARGET_REFUSED_SUMMARY, tell_uploader=tell_uploader, keep=keep)
 	if refusal := guards.create_refusal(uploader, s.target):
 		_fail(row, trigger, refusal, tell_uploader=tell_uploader, keep=keep)

@@ -1150,3 +1150,86 @@ class TestIntakeRowFeedScope(_TriggersApiTestCase):
 			r["name"] for r in list_activity_page(filters=frappe.as_json({"trigger": marker}))["data"]["rows"]
 		}
 		self.assertEqual(names, set(rows.values()))
+
+
+class TestWhitelistTypeValidation(_TriggersApiTestCase):
+	"""Each endpoint through Frappe's own call path (``frappe.call`` runs the whitelist type
+	check on a request or in a test), with the payload shape the SPA sends (api/triggers.js and
+	api/listPageArgs.js): numbers as numbers, JSON as strings, and blank search text."""
+
+	API = "jarvis.chat.triggers_api."
+
+	def _call(self, method, **kwargs):
+		with patch.object(frappe, "in_test", True):
+			return frappe.call(self.API + method, **kwargs)
+
+	def _page_args(self, **extra):
+		args = {
+			"search": "",
+			"filters": "{}",
+			"sort_field": "",
+			"sort_dir": "",
+			"start": 0,
+			"page_length": 20,
+		}
+		args.update(extra)
+		return args
+
+	def test_list_triggers_page(self):
+		frappe.set_user(ADMIN_USER)
+		for args in (
+			self._page_args(),
+			self._page_args(filters='{"enabled": 1}', filters_v2="[]"),
+			# lenient shapes: an object, a numeric string, a null
+			self._page_args(filters={"enabled": 1}, start="0", page_length="20", search=None),
+		):
+			with self.subTest(args=args):
+				self.assertIn("rows", self._call("list_triggers_page", **args)["data"])
+
+	def test_list_activity_page(self):
+		frappe.set_user(ADMIN_USER)
+		for args in (self._page_args(), self._page_args(filters={"status": "Failed"}, start="0")):
+			with self.subTest(args=args):
+				self.assertIn("rows", self._call("list_activity_page", **args)["data"])
+
+	def test_get_activity_detail_and_get_trigger(self):
+		name = self._create_as_admin()
+		row = self._insert_activity_row(trigger=name)
+		self.assertEqual(self._call("get_activity_detail", name=row)["data"]["name"], row)
+		self.assertEqual(self._call("get_trigger", name=name)["data"]["name"], name)
+
+	def test_create_update_toggle_delete(self):
+		frappe.set_user(ADMIN_USER)
+		made = self._call("create_trigger", payload=frappe.as_json(self._llm_payload()))
+		name = made["data"]["name"]
+		self._triggers.append(name)
+		self._call("update_trigger", name=name, payload=frappe.as_json({"description": "x"}))
+		for enabled in (0, 1, True):
+			with self.subTest(enabled=enabled):
+				self._call("set_trigger_enabled", name=name, enabled=enabled)
+		self.assertEqual(self._call("delete_trigger", name=name)["data"], {"deleted": 1})
+
+	def test_delete_triggers_bulk(self):
+		name = self._create_as_admin()
+		frappe.set_user(ADMIN_USER)
+		res = self._call("delete_triggers_bulk", names=frappe.as_json([name]))
+		self.assertEqual(res["data"]["deleted"], 1)
+
+	def test_intake_pickers(self):
+		frappe.set_user(ADMIN_USER)
+		for txt in ("", "To", None):
+			with self.subTest(txt=txt):
+				self.assertIsInstance(self._call("search_intake_doctypes", txt=txt), list)
+		self.assertIn("fields", self._call("get_intake_field_options", doctype="ToDo"))
+
+	def test_test_trigger_condition(self):
+		frappe.set_user(ADMIN_USER)
+		for condition, docname in (("", ""), ("doc.status == 'Open'", ""), (None, None)):
+			with self.subTest(condition=condition):
+				res = self._call(
+					"test_trigger_condition",
+					target_doctype="ToDo",
+					condition=condition,
+					docname=docname,
+				)
+				self.assertTrue(res["data"]["valid"])

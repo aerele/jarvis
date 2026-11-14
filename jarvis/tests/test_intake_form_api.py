@@ -1,6 +1,7 @@
 """Intake trigger form helpers: the folder list and the field picker."""
 
 import json
+from unittest.mock import patch
 
 import frappe
 
@@ -205,3 +206,12 @@ class TestIntakeToggle(_TriggersApiTestCase):
 		self.assertIn(_FOLDER, intake_map()["folder"])
 		set_trigger_enabled(name, 0)
 		self.assertNotIn(_FOLDER, intake_map()["folder"])
+
+	def test_search_does_not_read_each_doctype_again(self):
+		frappe.set_user(ADMIN_USER)
+		with patch("jarvis.intake.guards.refused_doctype") as full:
+			names = [r["value"] for r in search_intake_doctypes("ToDo")]
+		full.assert_not_called()
+		self.assertIn("ToDo", names)
+		# Still the same deny-list: a name that is refused never shows.
+		self.assertNotIn("Server Script", [r["value"] for r in search_intake_doctypes("Server Script")])

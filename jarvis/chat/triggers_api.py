@@ -199,13 +199,13 @@ def get_triggers_caps() -> dict:
 @require_jarvis_user
 @list_filters.filter_errors_to_envelope
 def list_triggers_page(
-	search: str = "",
-	filters: str = "{}",
+	search: str | None = "",
+	filters: str | dict | None = "{}",
 	filters_v2: str | list | None = None,
-	sort_field: str = "modified",
-	sort_dir: str = "desc",
-	start: int = 0,
-	page_length: int = 20,
+	sort_field: str | None = "modified",
+	sort_dir: str | None = "desc",
+	start: int | str | None = 0,
+	page_length: int | str | None = 20,
 ) -> dict:
 	"""Org-wide triggers (read is not row-scoped), server-side search / filter
 	/ sort / paginate, plus per-row activity stats (one grouped query for the
@@ -400,7 +400,7 @@ def _with_warning(response: dict, doc) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def create_trigger(payload: str) -> dict:
+def create_trigger(payload: str | dict) -> dict:
 	"""Create a trigger from a whitelisted-fields JSON payload. Validation
 	(denylist, event/action compatibility, condition, script compile, caps)
 	runs in the doctype validate(); the controller materializes the managed
@@ -415,7 +415,7 @@ def create_trigger(payload: str) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def update_trigger(name: str, payload: str) -> dict:
+def update_trigger(name: str, payload: str | dict) -> dict:
 	"""Update whitelisted fields of a trigger (manage-gated)."""
 	_require_manage()
 	fields = _parse_payload(payload)
@@ -428,7 +428,7 @@ def update_trigger(name: str, payload: str) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def set_trigger_enabled(name: str, enabled: int) -> dict:
+def set_trigger_enabled(name: str, enabled: int | bool | str) -> dict:
 	"""Quick enable/disable toggle (manage-gated): raw db_set — no full
 	revalidation of an unchanged trigger — plus the engine-cache bust the
 	controller would have done. Turning a trigger ON re-checks its stored code
@@ -462,7 +462,7 @@ def delete_trigger(name: str) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def delete_triggers_bulk(names: str) -> dict:
+def delete_triggers_bulk(names: str | list) -> dict:
 	"""Bulk delete (manage-gated, cap 50). Per-row try/except so one bad row
 	never aborts the batch; internal errors are logged, never leaked."""
 	_require_manage()
@@ -513,7 +513,7 @@ _DOCTYPE_PICK_BATCHES = 6
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def search_intake_doctypes(txt: str = "") -> list[dict]:
+def search_intake_doctypes(txt: str | None = "") -> list[dict]:
 	"""DocTypes the intake pickers may offer (target and Record source), as
 	``[{"value": name}]``: the ones the rule save would accept, so a refused one is never
 	listed to be rejected later. Singles and child tables are left out too."""
@@ -535,7 +535,9 @@ def search_intake_doctypes(txt: str = "") -> list[dict]:
 			start=batch * _DOCTYPE_PICK_BATCH,
 			limit=_DOCTYPE_PICK_BATCH,
 		)
-		out += [{"value": n} for n in names if not intake_guards.refused_doctype(n)]
+		# The query above already left out Singles and child tables, so the name check
+		# is enough (``refused_doctype`` would read each one's flags again).
+		out += [{"value": n} for n in names if not intake_guards.refused_by_name(n)]
 		if len(out) >= _DOCTYPE_PICK_LIMIT or len(names) < _DOCTYPE_PICK_BATCH:
 			break
 	return out[:_DOCTYPE_PICK_LIMIT]
@@ -646,7 +648,7 @@ def _readonly_eval_doc(doc) -> "_ConditionDoc":
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def test_trigger_condition(target_doctype: str, condition: str = "", docname: str = "") -> dict:
+def test_trigger_condition(target_doctype: str, condition: str | None = "", docname: str | None = "") -> dict:
 	"""READ-ONLY condition tester. Without ``docname``: compile/eval against an
 	empty doc (webhook-style validation). With ``docname`` (caller needs read
 	on that doc): also report whether the trigger WOULD fire. A bad expression
@@ -854,12 +856,12 @@ def _readable_target_doctypes(query) -> list:
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_activity_page(
-	search: str = "",
-	filters: str = "{}",
-	sort_field: str = "creation",
-	sort_dir: str = "desc",
-	start: int = 0,
-	page_length: int = 20,
+	search: str | None = "",
+	filters: str | dict | None = "{}",
+	sort_field: str | None = "creation",
+	sort_dir: str | None = "desc",
+	start: int | str | None = 0,
+	page_length: int | str | None = 20,
 ) -> dict:
 	"""Activity feed. System Manager / Jarvis Admin see everything (exact
 	total). Everyone else sees a row iff they can READ its target doc —

@@ -16,9 +16,9 @@ import re
 
 import frappe
 from frappe.query_builder.functions import IfNull
-from pypika.terms import Case
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime, nowdate
 from frappe.utils.background_jobs import is_job_enqueued
+from pypika.terms import Case
 
 from jarvis import _redis_lock, compat
 from jarvis._session import impersonate
@@ -495,9 +495,7 @@ def _stay_queued(row) -> bool:
 	_log_class("Jarvis intake: could not start a job", trace)
 	try:
 		if _count_start_failure(row) >= _MAX_START_FAILURES:
-			frappe.log_error(
-				title="Jarvis intake: gave up starting a file", message=f"{row.name}\n\n{trace}"
-			)
+			frappe.log_error(title="Jarvis intake: gave up starting a file", message=f"{row.name}\n\n{trace}")
 			_clear_start_failures(row)
 			_end(row, "Failed", COULD_NOT_START_SUMMARY, "Starting the job failed several times.")
 		else:
