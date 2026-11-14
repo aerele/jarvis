@@ -1304,7 +1304,8 @@ def row_badge(row: dict) -> str:
 
 	summary = row.get("summary") or ""
 	if row.get("status") == "Queued" and (
-		summary.startswith(worker.WAITING_PREFIX) or summary == worker.PAUSED_SUMMARY
+		summary.startswith(worker.WAITING_PREFIX)
+		or summary in (worker.PAUSED_SUMMARY, worker.USER_PAUSED_SUMMARY)
 	):
 		return "waiting"
 	if row.get("status") in _INTAKE_RETRYABLE and (

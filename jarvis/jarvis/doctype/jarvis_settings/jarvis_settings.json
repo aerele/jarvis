@@ -257,14 +257,14 @@
   },
   {
    "default": "300",
-   "description": "Most documents Document Intake reads per day, across the whole site. 0 pauses intake site-wide (uploads wait).",
+   "description": "Most documents Document Intake reads per day, across the whole site. Leave empty for the default (300). 0 pauses intake.",
    "fieldname": "intake_daily_cap",
    "fieldtype": "Int",
    "label": "Intake daily limit (site)"
   },
   {
    "default": "50",
-   "description": "Most documents Document Intake reads per day for one uploader. 0 means no per-user limit.",
+   "description": "Most documents Document Intake reads per day for one uploader. Leave empty for the default (50). 0 pauses intake.",
    "fieldname": "intake_daily_cap_per_user",
    "fieldtype": "Int",
    "label": "Intake daily limit (per user)"
