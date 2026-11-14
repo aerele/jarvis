@@ -599,6 +599,51 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertEqual((got.status, got.summary), ("Queued", "Intake is paused on this site"))
 		self.assertEqual(frappe.db.count("Notification Log", {"subject": ["like", "Intake:%"]}), before)
 
+	def _three_waiting(self):
+		rule = self._rule()
+		rows = [self._row(rule, self._file(f"p{i}.png")) for i in range(3)]
+		old = add_to_date(now_datetime(), minutes=-10)
+		for i, r in enumerate(rows):
+			frappe.db.set_value(
+				ACTIVITY, r.name, "creation", add_to_date(old, seconds=i), update_modified=False
+			)
+		return rows
+
+	def test_paused_site_starts_no_job_chain_and_resumes_when_unpaused(self):
+		rows = self._three_waiting()
+		with mock.patch.object(worker, "_site_cap", return_value=0):
+			client, _ = self._run(rows[0])
+			with mock.patch("frappe.enqueue") as enq:
+				worker.run_job(rows[0].name)
+				worker.run_job(rows[1].name)
+				worker.pump()
+				worker._enqueue_next("none")
+			enq.assert_not_called()
+		client.assert_not_called()
+		for r in rows:
+			self.assertEqual(self._get(r).status, "Queued")
+		self.assertEqual(self._get(rows[0]).summary, worker.PAUSED_SUMMARY)
+		# Un-paused: the pump starts the oldest rows again, and a finished job chains.
+		with mock.patch("frappe.enqueue") as enq:
+			worker.pump()
+		self.assertEqual([c.kwargs["activity"] for c in enq.call_args_list], [rows[0].name, rows[1].name])
+		with (
+			mock.patch("jarvis.intake.client.vision_task_complete", mock.Mock(return_value=READING)),
+			mock.patch("jarvis.intake.draft.finish"),
+			mock.patch("frappe.enqueue") as enq,
+			mock.patch("jarvis.intake.worker.is_job_enqueued", return_value=False),
+		):
+			worker.run_job(rows[0].name)
+		self.assertEqual([c.kwargs["activity"] for c in enq.call_args_list], [rows[1].name, rows[2].name])
+
+	def test_paused_site_does_not_work_a_row_with_a_saved_reading(self):
+		rule = self._rule()
+		row = self._row(rule, reading_json=json.dumps(READING))
+		with mock.patch.object(worker, "_site_cap", return_value=0):
+			_client, fin = self._run(row)
+		fin.assert_not_called()
+		self.assertEqual(self._get(row).status, "Queued")
+
 	def test_zero_per_user_cap_means_no_per_user_limit(self):
 		rule = self._rule()
 		row = self._row(rule)
@@ -656,6 +701,35 @@ class TestIntakeWorker(FrappeTestCase):
 		client, _ = self._run(row)
 		client.assert_not_called()
 		self.assertIn("Waiting:", self._get(row).summary)
+
+	def test_a_flushed_counter_is_seeded_from_the_rows_when_it_is_recreated(self):
+		rule = self._rule()
+		today = frappe.utils.nowdate()
+		for i in range(2):
+			self._row(rule, self._file(f"s{i}.png"), status="Success", read_on=today)
+		row = self._row(rule, self._file("s3.png"))
+		# No Redis counters (a flush): the first call after it must not restart them at 1.
+		worker._count_call(row)
+		cache = frappe.cache()
+		self.assertEqual(cint(cache.get_value(f"{worker.site_cap_key()}:count")), 3)
+		self.assertEqual(cint(cache.get_value(f"{worker.user_cap_key('Administrator')}:count")), 3)
+		self.assertEqual(llm_action.daily_count(rule.name), 3)
+		worker._count_call(row)  # an existing counter just moves on by one
+		self.assertEqual(cint(cache.get_value(f"{worker.site_cap_key()}:count")), 4)
+
+	def test_a_database_error_loading_the_rule_leaves_the_row_queued(self):
+		rule = self._rule()
+		row = self._row(rule)
+		frappe.db.commit()  # the guard rolls back, as a real job does after a failed query
+		for target in ("_load_rule", "_may_not_run"):
+			with self.subTest(target=target):
+				with (
+					mock.patch.object(worker, target, side_effect=frappe.QueryTimeoutError("lock")),
+					mock.patch("frappe.enqueue") as enq,
+				):
+					worker.run_job(row.name)
+				enq.assert_not_called()
+				self.assertEqual(self._get(row).status, "Queued")
 
 	def test_a_real_read_stamps_read_on_and_counts_the_user(self):
 		rule = self._rule()

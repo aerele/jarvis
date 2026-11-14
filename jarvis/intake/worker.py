@@ -123,6 +123,12 @@ def _used(key: str, **durable_filters) -> int:
 	return frappe.db.count(ACTIVITY, {"action_type": "Intake", "read_on": nowdate(), **durable_filters})
 
 
+def _paused() -> bool:
+	"""A site cap of 0 pauses intake: no job starts, and nothing is enqueued to start one.
+	Rows stay Queued and are picked up by the pump once intake is turned back on."""
+	return _site_cap() <= 0
+
+
 def _cap_hit(row, trigger_cap: int) -> str:
 	"""Which limit stops this row today: ``paused``, ``rule``, ``site``, ``user`` or ``""``."""
 	site_cap = _site_cap()
@@ -258,7 +264,7 @@ def _enqueue_next(finished: str) -> None:
 	in the queue is skipped: enqueueing it again is a no-op, and it would eat the turn."""
 	try:
 		free = _free_slots()
-		if not free:
+		if not free or _paused():
 			return
 		for name in _waiting_rows(free + _CHAIN_LOOKAHEAD, exclude=finished):
 			if free <= 0:
@@ -277,10 +283,21 @@ def _count_call(row) -> None:
 	Only a request that never ran (old plugin, no connection, refused first) is not counted.
 	``read_on`` is the durable record of today's count (see ``_used``)."""
 	row.db_set("read_on", nowdate(), update_modified=False)
-	llm_action.bump(llm_action.cap_key(row.trigger))
-	llm_action.bump(site_cap_key())
+	_bump_seeded(llm_action.cap_key(row.trigger), trigger=row.trigger)
+	_bump_seeded(site_cap_key())
 	if row.event_user:
-		llm_action.bump(user_cap_key(row.event_user))
+		_bump_seeded(user_cap_key(row.event_user), event_user=row.event_user)
+
+
+def _bump_seeded(key: str, **durable_filters) -> None:
+	"""Count one call. A counter that was just (re)created (a Redis flush) restarts at 1,
+	which would hand out the whole day's limit again, so it is seeded from the day's
+	``read_on`` stamps (this call's own row is already stamped)."""
+	if llm_action.bump(key) != 1:
+		return
+	durable = frappe.db.count(ACTIVITY, {"action_type": "Intake", "read_on": nowdate(), **durable_filters})
+	if durable > 1:
+		llm_action.bump(key, durable - 1)
 
 
 def run_job(activity: str) -> None:
@@ -379,12 +396,20 @@ def _bell_once_a_day(user: str, wording: str) -> None:
 
 
 def _run_guarded(row):
-	"""Return False when the row did not start (no slot, or an error before the claim): it
-	stays Queued and nothing chains."""
-	trigger = _load_rule(row)
-	needs_ai = not row.reading_json
-	if _may_not_run(row, trigger, needs_ai):
-		return True
+	"""Return False when the row did not start (paused, no slot, or an error before the
+	claim): it stays Queued and nothing chains."""
+	try:
+		if _paused():
+			# Chaining here would ping-pong the Queued rows between jobs for nothing.
+			if row.summary != PAUSED_SUMMARY:
+				_set(row, summary=PAUSED_SUMMARY)
+			return False
+		trigger = _load_rule(row)
+		needs_ai = not row.reading_json
+		if _may_not_run(row, trigger, needs_ai):
+			return True
+	except Exception:
+		return _stay_queued(row)
 	try:
 		if needs_ai and _defer_if_capped(row, trigger):
 			return True
@@ -561,7 +586,7 @@ def _pump() -> None:
 	if not rules["folder"] and not rules["record"]:
 		return  # no enabled Intake rule: nothing new can be waiting for a read
 	free = _free_slots()
-	if not free:
+	if not free or _paused():
 		return
 	for name in _waiting_rows(free, older_than=add_to_date(now_datetime(), minutes=-_PUMP_AGE_MINUTES)):
 		_enqueue(name)
