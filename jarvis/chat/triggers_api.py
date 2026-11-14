@@ -571,9 +571,11 @@ def get_intake_field_options(doctype: str) -> dict:
 	_require_manage()
 	frappe.new_doc(TRIGGER)._check_doctype_usable(doctype, intake=True)
 	meta = frappe.get_meta(doctype)
+	# Save refuses these (spec.validate), so the pickers do not offer them.
+	refused = intake_spec.sensitive_fieldnames(doctype)
 	tables = []
 	for df in meta.get_table_fields():
-		if df.read_only:
+		if df.read_only or df.fieldname in refused or intake_guards.refused_child(df.options):
 			continue
 		child = frappe.get_meta(df.options)
 		tables.append(
@@ -586,7 +588,8 @@ def get_intake_field_options(doctype: str) -> dict:
 				"columns": [_intake_field_row(c) for c in _intake_value_fields(child)],
 			}
 		)
-	return {"fields": [_intake_field_row(df) for df in _intake_value_fields(meta)], "tables": tables}
+	fields = [_intake_field_row(df) for df in _intake_value_fields(meta) if df.fieldname not in refused]
+	return {"fields": fields, "tables": tables}
 
 
 # --------------------------------------------------------------------------- #

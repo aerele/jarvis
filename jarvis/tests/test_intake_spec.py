@@ -280,6 +280,36 @@ class TestIntakeSpec(FrappeTestCase):
 					intake_spec.validate(portal)
 				self.assertEqual(intake_spec.sensitive_picks(portal), ["portal_users"])
 
+	def test_refusal_names_the_field_by_its_label(self):
+		portal = intake_spec.IntakeSpec(
+			target="Customer",
+			fields=["customer_name"],
+			table={"fieldname": "portal_users", "columns": ["user"]},
+		)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			intake_spec.validate(portal)
+		text = str(ctx.exception)
+		self.assertIn("Portal Users can't be filled by intake", text)
+		self.assertNotIn("portal_users", text)
+
+	def test_blank_default_for_a_field_with_a_doctype_default_is_refused(self):
+		# Frappe re-applies the doctype default to a blank value, so "empty" is never kept.
+		bad = intake_spec.IntakeSpec(
+			target="ToDo", fields=["description"], table=None, defaults={"priority": ""}
+		)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			intake_spec.validate(bad)
+		self.assertIn("Priority always starts as Medium; intake can't leave it empty", str(ctx.exception))
+		# A field with no doctype default may still carry a blank (it just covers nothing).
+		ok = intake_spec.IntakeSpec(
+			target="ToDo",
+			fields=["description"],
+			table=None,
+			defaults={"allocated_to": ""},
+			allow_incomplete=True,
+		)
+		intake_spec.validate(ok)
+
 	def test_employee_login_fields_are_refused_by_the_spec(self):
 		for fieldname in ("user_id", "create_user_permission"):
 			with self.subTest(fieldname=fieldname):
