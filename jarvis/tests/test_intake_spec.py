@@ -1,6 +1,7 @@
 """Intake trigger kind: config validation (controller) and the spec helpers."""
 
 import json
+from unittest import mock
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
@@ -90,6 +91,47 @@ class TestIntakeSpec(FrappeTestCase):
 		self.assertRaises(
 			frappe.ValidationError, self._insert, intake_target_doctype="Event", intake_spec=table_ok
 		)
+
+	def _coverage(self, fields, defaults, meta_fields):
+		"""Run the strict coverage check against a made-up target meta."""
+		D = frappe._dict
+		meta = D(fields=[D(reqd=1, read_only=0, default=None, **mf) for mf in meta_fields])
+		s = intake_spec.IntakeSpec(
+			target="X",
+			fields=fields,
+			table=None,
+			match=[],
+			defaults=defaults,
+			instructions="",
+			allow_incomplete=False,
+		)
+		with mock.patch("frappe.get_meta", return_value=meta):
+			intake_spec._validate_coverage(s, meta)
+
+	def test_mandatory_fetch_from_is_covered_by_its_source_link(self):
+		fields = [
+			{"fieldname": "customer", "fieldtype": "Link", "options": "Customer"},
+			{"fieldname": "customer_name", "fieldtype": "Data", "fetch_from": "customer.customer_name"},
+		]
+		self._coverage(["customer"], {}, fields)  # the source is read: the name follows
+		self._coverage([], {"customer": "ACME"}, fields)  # or defaulted
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._coverage([], {}, fields)  # source neither read nor defaulted: nothing to fetch from
+		self.assertIn("customer_name", str(ctx.exception))
+
+	def test_mandatory_attach_field_is_refused_with_its_own_message(self):
+		fields = [
+			{"fieldname": "title", "fieldtype": "Data"},
+			{"fieldname": "scan", "fieldtype": "Attach Image"},
+			{"fieldname": "doc_file", "fieldtype": "Attach"},
+		]
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._coverage(["title"], {}, fields)
+		text = str(ctx.exception)
+		for name in ("scan", "doc_file"):
+			self.assertIn(f"{name} needs a file; intake cannot fill it", text)
+		self.assertIn("Allow incomplete drafts", text)
+		self.assertNotIn("Add them to the fields or defaults", text)
 
 	def test_fields_a_page_cannot_carry_are_refused(self):
 		for fields in (["description", "no_such_field"],):

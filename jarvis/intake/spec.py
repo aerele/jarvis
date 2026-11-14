@@ -40,6 +40,7 @@ _NUMBER_TYPES = {"Float", "Currency", "Percent"}
 _NON_VALUE_TYPES = set(no_value_fields) | set(display_fieldtypes) | set(table_fields)
 # Values a page image cannot carry: files, secrets, code and structured blobs, and links
 # whose target type is itself a value.
+_FILE_TYPES = {"Attach", "Attach Image"}
 _NOT_READABLE_TYPES = {"Attach", "Attach Image", "Password", "Code", "JSON", "Dynamic Link"}
 
 
@@ -231,7 +232,12 @@ def _validate_coverage(s: IntakeSpec, meta) -> None:
 	header, columns = mandatory_fields(s)
 	# A blank default fills nothing, so it never counts as coverage.
 	covered = set(s.fields) | {k for k, v in s.defaults.items() if not _is_blank(v)}
-	missing = [f for f in header if f not in covered]
+	by_name = {df.fieldname: df for df in meta.fields}
+	needs_file = [f for f in header if by_name[f].fieldtype in _FILE_TYPES]
+	# A fetched field is filled by Frappe once its source Link has a value.
+	missing = [
+		f for f in header if f not in covered and f not in needs_file and not _fetched(by_name[f], covered)
+	]
 	missing_columns = [c for c in columns if c not in ((s.table or {}).get("columns") or [])]
 	# A mandatory table that the spec does not fill can never be satisfied.
 	table_name = (s.table or {}).get("fieldname")
@@ -240,6 +246,14 @@ def _validate_coverage(s: IntakeSpec, meta) -> None:
 		for df in meta.fields
 		if df.fieldtype == "Table" and df.reqd and df.fieldname != table_name
 	]
+	if needs_file:
+		# Checked first: the generic "add it to the fields" advice cannot work for a file.
+		frappe.throw(
+			"; ".join(
+				_("{0} needs a file; intake cannot fill it, use Allow incomplete drafts").format(name)
+				for name in needs_file
+			)
+		)
 	if missing or missing_columns or missing_tables:
 		parts = missing + [f"{table_name}.{c}" for c in missing_columns] + missing_tables
 		frappe.throw(
@@ -247,6 +261,13 @@ def _validate_coverage(s: IntakeSpec, meta) -> None:
 				"Mandatory fields are not covered: {0}. Add them to the fields or defaults, or allow incomplete drafts."
 			).format(", ".join(parts))
 		)
+
+
+def _fetched(df, covered: set) -> bool:
+	"""True when ``df`` is filled from a Link field (``fetch_from`` "link.field") that is
+	read or defaulted."""
+	source = (df.get("fetch_from") or "").split(".")[0]
+	return bool(source) and source in covered
 
 
 def select_options(df) -> list[str]:
