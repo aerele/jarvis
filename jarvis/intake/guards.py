@@ -43,7 +43,9 @@ def refused_doctype(doctype: str) -> bool:
 		doctype in _EXTRA_REFUSED
 		or doctype in _write_risk.STRUCTURE_DOCTYPES
 		or doctype in _write_risk.SENSITIVE_DOCTYPES
-		or _write_risk.risk_class(doctype)
+		# A record that holds a role list grants access through it. The conditional
+		# risks (a Customer's portal users) are not refused: a page cannot fill them.
+		or _write_risk._role_tables(doctype)
 	):
 		return True
 	row = frappe.db.get_value("DocType", doctype, ["issingle", "istable"], as_dict=True)
