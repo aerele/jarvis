@@ -77,6 +77,22 @@ async function mountList(rows, can_manage = false) {
 	return w;
 }
 
+describe("IntakeList empty state", () => {
+	it("says no files yet when nothing is filtered", async () => {
+		const w = await mountList([]);
+		expect(w.find(".empty").text()).toBe("Files dropped into a watched folder show up here.");
+		w.unmount();
+	});
+
+	it("says no files match when a filter is active", async () => {
+		const w = await mountList([]);
+		w.findComponent({ name: "ListPage" }).vm.$emit("update:filters", { search: "zzz" });
+		await flushPromises();
+		expect(w.find(".empty").text()).toBe("Try a different search or filter.");
+		w.unmount();
+	});
+});
+
 describe("IntakeList", () => {
 	it("puts the switch in the same left slot as the Dropped view, whatever the right side holds", async () => {
 		const w = await mountList([row()], true);
