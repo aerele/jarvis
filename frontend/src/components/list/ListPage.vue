@@ -254,7 +254,7 @@
 		<!-- empty state (loaded, zero rows) -->
 		<div v-else-if="!loading" class="relative flex-1">
 			<div
-				class="absolute left-1/2 flex w-4/12 -translate-x-1/2 flex-col items-center gap-3"
+				class="absolute left-1/2 flex w-9/12 -translate-x-1/2 sm:w-4/12 flex-col items-center gap-3"
 				:style="{ top: '35%' }"
 			>
 				<FeatherIcon

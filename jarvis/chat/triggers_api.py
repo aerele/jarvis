@@ -257,7 +257,8 @@ def list_triggers_page(
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Trigger` WHERE {where}", params)[0][0]
 	rows = list_filters.bounded_sql(
 		f"""SELECT name, trigger_name, enabled, target_doctype, doc_event,
-		action_type, description, modified, owner
+		action_type, description, modified, owner,
+		intake_source, intake_folder, intake_record_doctype, intake_record_event, intake_target_doctype
 		FROM `tabJarvis Trigger`
 		WHERE {where}
 		ORDER BY {order}
@@ -284,6 +285,7 @@ def list_triggers_page(
 		r["last_activity_at"] = str(s["last_activity_at"]) if s and s["last_activity_at"] else ""
 		r["activity_24h"] = cint(s["activity_24h"]) if s else 0
 		r["modified"] = str(r["modified"])
+		_shape_intake_row(r)
 
 	return {
 		"ok": True,
@@ -295,6 +297,22 @@ def list_triggers_page(
 			"page_length": pl,
 		},
 	}
+
+
+def _shape_intake_row(r) -> None:
+	"""An Intake rule has no doctype event: show its target doctype, what it watches and
+	"Run when" in the list's DocType / Event columns. The intake columns are not part of
+	the list's row shape, so they are dropped here."""
+	source, folder = r.pop("intake_source", ""), r.pop("intake_folder", "")
+	record_doctype, event = r.pop("intake_record_doctype", ""), r.pop("intake_record_event", "")
+	target = r.pop("intake_target_doctype", "")
+	if r.get("action_type") != "Intake":
+		return
+	r["target_doctype"] = target or ""
+	if source == "Record":
+		r["doc_event"] = f"{record_doctype or ''}: {event or intake_capture.EVENT_FILE}"
+	else:
+		r["doc_event"] = f"Folder: {folder or ''}"
 
 
 def _trigger_detail(doc, *, can_manage: bool = True) -> dict:

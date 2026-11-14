@@ -18,11 +18,7 @@
 		:page-length="pageLength"
 		:default-sort="DEFAULT_SORT"
 		storage-key="files-intake"
-		:empty-state="{
-			icon: 'inbox',
-			title: 'No intake files yet',
-			description: 'Files dropped into a watched folder show up here.',
-		}"
+		:empty-state="emptyState"
 		@update:filters="setFilters"
 		@update:page-length="(v) => (pageLength = v)"
 		@load-more="loadMore"
@@ -208,6 +204,7 @@ const {
 	resetLoad,
 	loadMore,
 	refreshKeep,
+	filterClauses,
 } = useListPage({
 	fetchFn: (p) => {
 		// the backend whitelists filter keys: search rides its own param
@@ -224,6 +221,26 @@ const {
 });
 
 watch(scope, () => resetLoad());
+
+// A search or filter that matches nothing says so, instead of "no files yet".
+const isFiltered = computed(
+	() =>
+		Object.values(filters).some((v) => v !== "" && v != null) ||
+		(filterClauses.value || []).length > 0
+);
+const emptyState = computed(() =>
+	isFiltered.value
+		? {
+				icon: "search",
+				title: "No files match",
+				description: "Try a different search or filter.",
+		  }
+		: {
+				icon: "inbox",
+				title: "No intake files yet",
+				description: "Files dropped into a watched folder show up here.",
+		  }
+);
 
 const retrying = ref("");
 // A busy frappe-ui Button is disabled, and a disabled control loses focus, so after a
