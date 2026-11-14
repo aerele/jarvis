@@ -27,6 +27,12 @@ vi.mock("frappe-ui", () => ({
 		props: ["message"],
 		template: `<div v-if="message" class="error-message">{{ message }}</div>`,
 	},
+	Select: {
+		name: "Select",
+		props: ["modelValue", "options", "disabled", "placeholder"],
+		emits: ["update:modelValue"],
+		template: `<select :value="modelValue" :disabled="disabled" @change="$emit('update:modelValue', $event.target.value)"><option v-for="o in options" :key="o.value" :value="o.value">{{ o.label }}</option></select>`,
+	},
 	FormControl: {
 		name: "FormControl",
 		props: ["modelValue", "type", "label", "options", "disabled", "placeholder"],
@@ -417,7 +423,7 @@ describe("IntakeRuleFields", () => {
 		expect(sec.text()).toContain("Jarvis writes the intake status here");
 		expect(sec.text()).toContain("Jarvis writes the draft's name here");
 		expect(sec.text()).not.toContain("None");
-		const selects = w.findAllComponents({ name: "FormControl" });
+		const selects = w.findAllComponents({ name: "Select" });
 		const optional = selects.filter(
 			(c) => (c.props("options") || [])[0]?.label === "Optional"
 		);
@@ -431,7 +437,7 @@ describe("IntakeRuleFields", () => {
 			formOf({ intake_source: "Record", intake_record_doctype: "ToDo" })
 		);
 		const ctrl = w
-			.findAllComponents({ name: "FormControl" })
+			.findAllComponents({ name: "Select" })
 			.find((c) => (c.props("options") || []).some((o) => o.value === "On Submit"));
 		expect(ctrl.props("options").map((o) => o.label)).toEqual([
 			"When a file is attached",
