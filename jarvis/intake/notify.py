@@ -7,7 +7,6 @@ place they learn that a file was drafted, needs a reviewer, failed or was skippe
 import frappe
 from frappe.utils import escape_html
 
-
 ACTIVITY = "Jarvis Trigger Activity"
 FILE_BOX_LINK = "/jarvis/files?view=intake"
 RETRY_HINT = " Open it and press Retry."
