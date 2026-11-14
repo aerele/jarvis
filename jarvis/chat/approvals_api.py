@@ -7,6 +7,8 @@ through the normal ``send_message`` path, so the agent resumes the flow
 in the same chat with full context - no separate notification plumbing.
 """
 
+from __future__ import annotations
+
 import hashlib
 import hmac
 import json
@@ -910,6 +912,10 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	agent sees it exactly like any chat turn - same session, same context.
 	"""
 	refuse_in_tool_dispatch()
+	# Frappe does not type-check this module (see ``from __future__``), and an Intake
+	# approval is answered with a JSON object, so a non-text value is refused up front.
+	if decision is not None and not isinstance(decision, str):
+		frappe.throw("Decision must be text")
 	decision = (decision or "").strip()
 	if not decision:
 		frappe.throw("Decision text is required")

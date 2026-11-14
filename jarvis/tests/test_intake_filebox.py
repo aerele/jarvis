@@ -298,11 +298,34 @@ class TestIntakeFilebox(FrappeTestCase):
 					filebox.retry_intake(name)
 		enq.assert_not_called()
 
-	def test_whitelisted_endpoints_run_frappe_type_validation(self):
-		# No ``from __future__ import annotations``: it makes Frappe skip the type check.
+	def test_intake_endpoints_validate_their_own_inputs(self):
+		# ``from __future__ import annotations`` is back (Frappe's type check would newly
+		# apply to ~40 old endpoints), so the intake endpoints check their inputs themselves.
 		frappe.set_user(UPLOADER)
-		with self.assertRaises(TypeError):  # FrappeTypeError
-			frappe.call(filebox.retry_intake, activity=["not", "a", "name"])
+		with self.assertRaises(frappe.ValidationError):
+			filebox.retry_intake(activity=["not", "a", "name"])
+		with self.assertRaises(frappe.ValidationError):
+			filebox.retry_intake(activity="  ")
+		bad_pages = (
+			{"search": ["x"]},
+			{"filters": 7},
+			{"filters": "[1, 2]"},
+			{"filters": "not json"},
+			{"scope": "everyone"},
+			{"scope": None},
+			{"start": -1},
+			{"start": "abc"},
+			{"start": True},
+			{"page_length": 0},
+			{"page_length": 101},
+			{"page_length": [5]},
+		)
+		for kwargs in bad_pages:
+			with self.subTest(**kwargs), self.assertRaises(frappe.ValidationError):
+				filebox.list_intake_page(**kwargs)
+		# null search/filters/paging fall back to the defaults, as the SPA may send them.
+		out = filebox.list_intake_page(search=None, filters=None, start=None, page_length="5")
+		self.assertEqual(out["page_length"], 5)
 
 	def test_can_review_only_for_those_who_may_decide(self):
 		own = self._rule()

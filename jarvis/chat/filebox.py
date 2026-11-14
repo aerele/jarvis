@@ -13,6 +13,8 @@ File Box is just the directed entry point, so streaming, drafts,
 approvals and recovery all behave exactly like a hand-typed turn.
 """
 
+from __future__ import annotations
+
 import json
 import re
 
@@ -1342,6 +1344,43 @@ def _intake_filters(filters) -> dict:
 	return f
 
 
+def _int_arg(value, name: str, low: int, high: int) -> int:
+	"""An integer request argument within ``[low, high]``. Whitelisted functions in this
+	module are not type-checked by Frappe (``from __future__ import annotations`` keeps
+	the old endpoints working as they were), so the intake endpoints check themselves."""
+	if isinstance(value, bool) or not isinstance(value, int | str):
+		frappe.throw(f"{name} must be a whole number")
+	try:
+		number = int(value)
+	except ValueError:
+		frappe.throw(f"{name} must be a whole number")
+	if not low <= number <= high:
+		frappe.throw(f"{name} must be between {low} and {high}")
+	return number
+
+
+def _validate_intake_page_args(search, filters, scope, start, page_length) -> tuple[str, int, int]:
+	"""Explicit input checks for ``list_intake_page``; returns (search, start, page_length)."""
+	if search is not None and not isinstance(search, str):
+		frappe.throw("search must be text")
+	if filters is not None and not isinstance(filters, str | dict):
+		frappe.throw("filters must be an object")
+	if isinstance(filters, str) and filters.strip():
+		try:
+			parsed = frappe.parse_json(filters)
+		except Exception:
+			parsed = None
+		if not isinstance(parsed, dict):
+			frappe.throw("filters must be an object")
+	if scope not in ("mine", "all"):
+		frappe.throw("Invalid scope")
+	return (
+		(search or "")[:140],
+		_int_arg(0 if start is None else start, "start", 0, 1_000_000),
+		_int_arg(20 if page_length is None else page_length, "page_length", 1, 100),
+	)
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_intake_page(
@@ -1361,14 +1400,12 @@ def list_intake_page(
 
 	me = frappe.session.user
 	manager = _can_manage(me)
-	if scope not in ("mine", "all"):
-		frappe.throw("Invalid scope")
+	search, start, pl = _validate_intake_page_args(search, filters, scope, start, page_length)
 	if scope == "all" and not manager:
 		frappe.throw(
 			"You need the Jarvis Admin or System Manager role to see everyone's files.",
 			frappe.PermissionError,
 		)
-	start, pl = _clamp_page(start, page_length)
 	f = _intake_filters(filters)
 
 	a, fl, t = frappe.qb.DocType(ACTIVITY), frappe.qb.DocType("File"), frappe.qb.DocType("Jarvis Trigger")
@@ -1473,6 +1510,8 @@ def retry_intake(activity: str) -> dict:
 	from jarvis.intake import worker
 	from jarvis.intake._db import update_rowcount
 
+	if not isinstance(activity, str) or not activity.strip():
+		frappe.throw("Activity name is required")
 	me = frappe.session.user
 	row = frappe.db.get_value(
 		ACTIVITY,

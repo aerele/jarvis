@@ -257,6 +257,15 @@ class TestIntakeReview(FrappeTestCase):
 		res = self._decide("Administrator", name, {"items.2.qty": 3})
 		self.assertEqual(res["status"], "Approved")
 
+	def test_decision_must_be_text_holding_a_json_object(self):
+		_rule, row, name = self._pending()
+		frappe.set_user(OWNER)
+		for bad in ({"items.2.qty": 3}, ["x"], 5, "[1, 2]", "not json"):
+			with self.subTest(decision=bad), self.assertRaises(frappe.ValidationError):
+				approvals_api.decide(name, bad, 1)
+		frappe.set_user("Administrator")
+		self.assertEqual(self._request(name).status, "Pending")
+
 	def test_answers_still_missing_rejected(self):
 		_rule, row, name = self._pending()
 		for answers in ({}, {"items.2.qty": "  "}, {"items.2.qty": "lots"}):
