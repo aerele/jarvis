@@ -322,7 +322,7 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(rail(w).classes()).toEqual(
 			expect.arrayContaining([
 				"w-full",
-				"max-h-[35%]",
+				"max-h-[35vh]",
 				"border-b",
 				"lg:w-[360px]",
 				"lg:max-h-none",
@@ -562,6 +562,30 @@ describe("ApprovalsBoard one inbox", () => {
 			"Review acknowledged: no posting authorised",
 			1
 		);
+	});
+
+	it("labels an Intake review's rail row Intake, not File Box", async () => {
+		state.ar = [ar("AR-9", { source: "Intake" })];
+		approvals.getApproval.mockImplementation(async (name) => ({
+			...ar(name, { source: "Intake" }),
+			can_act: 0,
+		}));
+		const w = await board();
+		const badges = w.find('[data-testid="approvals-rail"]').findAll(".badge, [class*=badge]");
+		const rail = w.find('[data-testid="approvals-rail"]').text();
+		expect(rail).toContain("Intake");
+		expect(rail).not.toContain("File Box");
+		expect(badges.length).toBeGreaterThan(0);
+	});
+
+	it("names the Refresh icon button and keeps the stacked rail within the viewport", async () => {
+		const w = await board();
+		expect(w.find('button[data-tip="Refresh"]').exists()).toBe(true);
+		const rail = w.find('[data-testid="approvals-rail"]');
+		// vh, not %: a percentage max-height of an auto-height flex parent is ignored, which let
+		// the rail grow over the review form at phone widths.
+		expect(rail.classes()).toContain("max-h-[35vh]");
+		expect(rail.classes()).toContain("lg:max-h-none");
 	});
 
 	it("shows source recovery when a saved File Box decision cannot resume", async () => {

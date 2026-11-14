@@ -39,6 +39,7 @@
 			</div>
 			<Button
 				:tooltip="'Refresh'"
+				label="Refresh"
 				icon="refresh-cw"
 				:loading="loading"
 				@click="refreshAll()"
@@ -55,7 +56,7 @@
 			     sidebar pattern; dark gray-1 ≠ surface-selected per §2.5) -->
 			<div
 				data-testid="approvals-rail"
-				class="max-h-[35%] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
+				class="max-h-[35vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
 			>
 				<!-- "Waiting for your reply" strip (notify-approvals Part 3): prose
 				     questions the agent asked in chat — derived server-side
@@ -394,7 +395,13 @@
 			<!-- RIGHT pane: review + act on the selected approval -->
 			<!-- min-w-0 prevents a long detail/control row from widening the desktop
 			     split view beyond its container. -->
-			<div class="min-h-0 min-w-0 flex-1 overflow-y-auto">
+			<div
+				ref="detailPane"
+				tabindex="-1"
+				data-testid="approvals-detail"
+				aria-label="Approval detail"
+				class="min-h-0 min-w-0 flex-1 overflow-y-auto outline-none"
+			>
 				<!-- a held write / chat card / wiki note: its own detail, keyed so every
 				     selection mounts (and loads) a fresh one -->
 				<div
@@ -888,7 +895,7 @@
 // One inbox: held File Box writes, approval sheets, chat cards and wiki notes are
 // rail rows in a "Needs your decision" group above the questions (Pending view),
 // each opening its own detail in the right pane; ?held= / ?wiki= deep-link them.
-import { ref, computed, watch, inject, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, inject, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
 	Autocomplete,
@@ -1113,6 +1120,8 @@ function docType(row) {
 // NULL/absent source predates the field — reads as File Box (backend contract)
 function sourceOf(row) {
 	if (row && row.source === "Agent Review") return "Agent Review";
+	// An Intake review is Document Intake's, not a File Box drop: the rail says so.
+	if (row && row.source === "Intake") return "Intake";
 	return row && row.source === "Chat" ? "Chat" : "File Box";
 }
 
@@ -1630,6 +1639,7 @@ async function sendDecisionToChat() {
 	}
 }
 
+const detailPane = ref(null);
 // A Document Intake review settled (approved, rejected or refused by the draft): the
 // row leaves the Pending rail like any decided row.
 // ``id`` is the row that was decided, not whatever is selected by now.
@@ -1638,6 +1648,8 @@ function onIntakeDecided(_res, id) {
 	store.refreshApprovalsCount();
 	if ((filters.status || "Pending") === "Pending") advanceAfterDecide(id);
 	else loadRecord(id, { keep: true });
+	// The form that held focus is gone: park it on the detail pane (it shows the next row).
+	nextTick(() => detailPane.value && detailPane.value.focus());
 }
 
 // Ignore = dismiss off the board with no verdict and no chat resume. Same
