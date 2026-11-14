@@ -30,10 +30,33 @@ _EXTRA_REFUSED = frozenset(
 		"Module Def",
 		"System Settings",
 		"Jarvis Settings",
+		# Outbound mail, public pages and automation (ruling R29: still a deny-list). Most
+		# are already refused through ``_write_risk``; a doctype missing on a Frappe
+		# version is harmless here.
+		"Communication",
+		"Email Template",
+		"Email Account",
+		"Email Queue",
+		"Notification",
+		"Assignment Rule",
+		"Auto Email Report",
+		"Newsletter",
+		"Web Page",
+		"Web Form",
+		"Blog Post",
+		"Website Settings",
+		"Portal Settings",
+		"Contact Us Settings",
+		"Energy Point Rule",
+		"Milestone Tracker",
+		"Document Naming Rule",
+		"Workflow Action",
 	}
 )
-# Risky only through the optional portal-users child table (``_write_risk._FIELD_SENSITIVE``
-# lists nothing else for them). A page cannot fill that table, so a draft cannot grant access.
+# Risky only through the portal-users child table (``_write_risk._FIELD_SENSITIVE`` lists
+# nothing else for them). They stay valid targets, but a rule may not pick that table:
+# ``spec.sensitive_picks`` refuses it on save and ``draft.create`` again at run time,
+# because ERPNext gives each portal user the Customer role when the record is inserted.
 _PORTAL_ONLY = frozenset({"Customer", "Supplier"})
 TARGET_REFUSED_SUMMARY = "This rule's target is not allowed"
 # ``create_refusal`` and the draft stage word it "You can't create <doctype>".
@@ -58,6 +81,20 @@ def refused_doctype(doctype: str) -> bool:
 		return True
 	row = frappe.db.get_value("DocType", doctype, ["issingle", "istable"], as_dict=True)
 	return bool(row and (cint(row.issingle) or cint(row.istable)))
+
+
+def refused_child(doctype: str) -> bool:
+	"""True when a child table of ``doctype`` must not be filled by a rule: a structure or
+	sensitive child, or a plain role list (Has Role and the like)."""
+	from jarvis.tools import _write_risk
+
+	name = _write_risk.canonical(doctype)
+	return bool(
+		name in _EXTRA_REFUSED
+		or name in _write_risk.STRUCTURE_DOCTYPES
+		or _write_risk.risk_class(name)
+		or _write_risk._role_list(name)
+	)
 
 
 def is_desk_user(user: str) -> bool:
