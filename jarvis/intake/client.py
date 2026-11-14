@@ -7,7 +7,6 @@ a 404 (older plugin without the route) and a refusal behave the same way.
 """
 
 import frappe
-import requests
 
 from jarvis.chat import plugin_routes
 from jarvis.intake import limits
@@ -18,11 +17,14 @@ LLMTaskNotAvailableError = lt.LLMTaskNotAvailableError
 
 
 def reached_model(e: Exception) -> bool:
-	"""True when the request got as far as the model (so it is billable): a reply, a model
-	refusal or a timeout after sending. False when nothing was run: the site refused it first,
-	the connection failed before sending, the plugin does not know the route (404) or refused
-	the signature (401/403)."""
-	return bool(getattr(e, "reached_model", False))
+	"""True when the request may have reached the model, so it is billable. False ONLY for a
+	failure before the request left the site (copy check, no agent configured, a connect
+	failure, a refused request over the limits) and for a 404 (an older plugin without the
+	route). Anything after the request was sent, or whose state is unknown, counts: failing
+	open here would let junk uploads dodge the daily limits."""
+	if isinstance(e, LLMTaskNotAvailableError):
+		return False
+	return bool(getattr(e, "reached_model", True))
 
 
 def _vision_wording(message: str) -> str:
@@ -70,23 +72,18 @@ def vision_task_complete(
 def _check_limits(images: list[dict]) -> None:
 	"""Refuse a request the plugin would refuse, before any bytes leave the site."""
 	if not images:
-		raise LLMTaskError("vision task needs at least one image")
+		raise lt.not_sent(LLMTaskError("vision task needs at least one image"))
 	if len(images) > limits.MAX_IMAGES:
-		raise LLMTaskError(f"vision task takes at most {limits.MAX_IMAGES} images")
+		raise lt.not_sent(LLMTaskError(f"vision task takes at most {limits.MAX_IMAGES} images"))
 	# base64 grows the bytes by 4/3.
 	if any(len(i["data_b64"]) > limits.IMAGE_BYTES * 4 // 3 + 4 for i in images):
-		raise LLMTaskError(f"vision task images must be at most {limits.IMAGE_BYTES} bytes each")
+		raise lt.not_sent(LLMTaskError(f"vision task images must be at most {limits.IMAGE_BYTES} bytes each"))
 
 
 def _run_vision_task(args: dict, timeout: int) -> dict:
 	# Waits longer than the plugin's own 105 s limit, so its 504 reaches the row.
 	wait = max(timeout + lt._TIMEOUT_BUFFER_S, limits.SITE_WAIT_S)
-	try:
-		status, raw = lt._call_route(plugin_routes.VISION_TASK_PATH, {"args": args}, wait)
-	except LLMTaskError as e:
-		# A timeout means the request was sent and may have run; anything else failed first.
-		e.reached_model = isinstance(e.__cause__, requests.Timeout)
-		raise
+	status, raw = lt._call_route(plugin_routes.VISION_TASK_PATH, {"args": args}, wait)
 
 	if status in (401, 403):
 		raise LLMTaskError("vision task request was refused by the agent plugin")
@@ -94,13 +91,7 @@ def _run_vision_task(args: dict, timeout: int) -> dict:
 	if status == 404:
 		raise LLMTaskNotAvailableError(lt._gateway_error_message(status, raw))
 
-	try:
-		return _parse_reply(status, raw)
-	except LLMTaskNotAvailableError:
-		raise
-	except LLMTaskError as e:
-		e.reached_model = True  # the plugin answered after running the task
-		raise
+	return _parse_reply(status, raw)
 
 
 def _parse_reply(status: int, raw: bytes) -> dict:

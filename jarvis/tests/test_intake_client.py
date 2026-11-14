@@ -100,30 +100,92 @@ class TestVisionTaskComplete(unittest.TestCase):
 		self.assertIs(reader.limits, limits)
 		self.assertEqual((limits.MAX_PAGES, limits.MAX_IMAGES, limits.IMAGE_BYTES), (10, 10, 200_000))
 
-	def test_reached_model_distinguishes_sent_from_unsent(self):
-		import requests
+	# ---- billing state: did the request reach the model? (R23) ------------------------
+	def _route(self, *, raises=None, status=200, body=b"{}", chunks=None):
+		"""Run vision_task_complete through the real transport with ``route_request`` faked."""
+		from unittest import mock
 
-		def transport(cause):
-			err = LLMTaskError("llm-task request failed")
-			err.__cause__ = cause
-			return err
+		class Response:
+			status_code = status
 
-		cases = (
-			(patch(_CALL, side_effect=transport(requests.ConnectionError("refused"))), False),
-			(patch(_CALL, side_effect=transport(requests.Timeout("slow"))), True),
-			(patch(_CALL, return_value=(404, b"nope")), False),
-			(patch(_CALL, return_value=(403, b"")), False),
-			(patch(_CALL, return_value=(200, b"not json")), True),
-			(
-				patch(
-					_CALL,
-					return_value=(500, json.dumps({"ok": False, "error": {"message": "boom"}}).encode()),
-				),
-				True,
+			def __enter__(self):
+				return self
+
+			def __exit__(self, *a):
+				return False
+
+			def iter_content(self, size):
+				return iter(chunks if chunks is not None else [body])
+
+		patches = (
+			mock.patch("jarvis.triggers.llm_task_client._agent_url", return_value="http://agent"),
+			mock.patch("jarvis.triggers.llm_task_client.session_claims.claim"),
+			mock.patch("jarvis.chat.site_pin.assert_not_copy"),
+			mock.patch(
+				"jarvis.chat.plugin_routes.route_request",
+				side_effect=raises if raises else lambda *a, **kw: Response(),
 			),
 		)
-		for mocked, expected in cases:
-			with self.subTest(expected=expected), mocked:
-				with self.assertRaises(LLMTaskError) as cm:
-					client.vision_task_complete("p", {}, _IMG)
-				self.assertIs(client.reached_model(cm.exception), expected)
+		for p in patches:
+			p.start()
+			self.addCleanup(p.stop)
+		try:
+			client.vision_task_complete("p", {}, _IMG)
+		except LLMTaskError as e:
+			return e
+		self.fail("expected an error")
+
+	def _plugin_error(self, cause):
+		from jarvis.chat import plugin_routes
+
+		err = plugin_routes.PluginRouteError("The agent route request failed.")
+		err.__cause__ = cause
+		return err
+
+	def test_failures_before_the_request_left_the_site_are_not_counted(self):
+		import requests
+		from urllib3.exceptions import NewConnectionError
+
+		refused = requests.ConnectionError(NewConnectionError(None, "refused"))
+		for cause in (requests.ConnectTimeout("slow connect"), refused):
+			with self.subTest(cause=type(cause).__name__):
+				err = self._route(raises=self._plugin_error(cause))
+				self.assertFalse(client.reached_model(err))
+
+	def test_no_agent_configured_and_a_missing_key_are_not_counted(self):
+		from unittest import mock
+
+		with mock.patch("jarvis.triggers.llm_task_client._agent_url", return_value=""):
+			with self.assertRaises(LLMTaskError) as cm:
+				client.vision_task_complete("p", {}, _IMG)
+		self.assertFalse(client.reached_model(cm.exception))
+		self.assertFalse(client.reached_model(self._route(raises=self._plugin_error(None))))
+
+	def test_failures_after_the_request_was_sent_are_counted(self):
+		import requests
+
+		for cause in (
+			requests.ReadTimeout("model took too long"),
+			requests.ConnectionError("Connection aborted."),
+			requests.exceptions.ChunkedEncodingError("cut off"),
+		):
+			with self.subTest(cause=type(cause).__name__):
+				err = self._route(raises=self._plugin_error(cause))
+				self.assertTrue(client.reached_model(err))
+
+	def test_an_http_error_after_the_send_is_counted(self):
+		body = json.dumps({"ok": False, "error": {"message": "bad gateway"}}).encode()
+		self.assertTrue(client.reached_model(self._route(status=502, body=body)))
+		self.assertTrue(client.reached_model(self._route(status=403)))
+		self.assertTrue(client.reached_model(self._route(status=200, body=b"not json")))
+
+	def test_an_oversized_response_is_counted(self):
+		from jarvis.triggers import llm_task_client as lt
+
+		huge = [b"x" * (lt._MAX_RESPONSE_BYTES + 1)]
+		self.assertTrue(client.reached_model(self._route(chunks=huge)))
+
+	def test_a_404_old_plugin_is_not_counted(self):
+		err = self._route(status=404, body=b"<html>nope</html>")
+		self.assertIsInstance(err, LLMTaskNotAvailableError)
+		self.assertFalse(client.reached_model(err))

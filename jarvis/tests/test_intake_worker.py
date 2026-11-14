@@ -673,16 +673,14 @@ class TestIntakeWorker(FrappeTestCase):
 		return rule, row
 
 	def test_error_after_the_request_reached_the_model_counts(self):
-		err = lt.LLMTaskError("agent timed out")
-		err.reached_model = True
-		rule, row = self._failing(err)
+		rule, row = self._failing(lt.LLMTaskError("agent timed out"))
 		self.assertEqual(llm_action.daily_count(rule.name), 1)
 		self.assertEqual(cint(frappe.cache().get_value(f"{worker.site_cap_key()}:count")), 1)
 		self.assertEqual(cint(frappe.cache().get_value(f"{worker.user_cap_key('Administrator')}:count")), 1)
 		self.assertEqual(str(frappe.db.get_value(ACTIVITY, row.name, "read_on")), frappe.utils.nowdate())
 
 	def test_error_before_the_request_left_the_site_is_not_counted(self):
-		rule, row = self._failing(lt.LLMTaskError("llm-task request failed"))
+		rule, row = self._failing(lt.not_sent(lt.LLMTaskError("llm-task request failed")))
 		self.assertEqual(llm_action.daily_count(rule.name), 0)
 		self.assertFalse(frappe.db.get_value(ACTIVITY, row.name, "read_on"))
 
@@ -863,3 +861,13 @@ class TestIntakeWorker(FrappeTestCase):
 		message = log.call_args.kwargs["message"]
 		self.assertIn(row.name, message)
 		self.assertIn("RuntimeError", message)
+
+	def test_pump_does_nothing_for_new_rows_when_no_intake_rule_is_enabled(self):
+		with (
+			mock.patch.object(capture, "intake_map", return_value={"folder": {}, "record": {}}),
+			mock.patch.object(worker, "_waiting_rows") as waiting,
+			mock.patch.object(worker, "_recover_stuck") as recover,
+		):
+			worker.pump()
+		waiting.assert_not_called()
+		recover.assert_called_once()  # a row stuck Running is still rescued

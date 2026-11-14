@@ -313,6 +313,8 @@ class TestIntakeCapture(FrappeTestCase):
 	def test_a_non_admin_desk_uploader_is_the_row_and_draft_owner_end_to_end(self):
 		from jarvis.intake import worker
 
+		# The worker commits, so tearDown's deletions must be committed too.
+		self.addCleanup(frappe.db.commit)
 		user = self._desk_user()
 		rule = self._rule()
 		frappe.set_user(user)

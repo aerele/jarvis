@@ -206,3 +206,13 @@ class TestIntakeActivityJarvisAdmin(FrappeTestCase):
 		self.assertEqual(frappe.get_list(ACTIVITY, filters={"name": doc.name}, pluck="name"), [doc.name])
 		frappe.set_user(self.plain)
 		self.assertFalse(frappe.has_permission(ACTIVITY, "read", doc.name))
+
+	def test_composite_indexes_and_read_on_exist(self):
+		table = frappe.qb.DocType("Jarvis Trigger Activity")
+		self.assertIsNotNone(frappe.get_meta("Jarvis Trigger Activity").get_field("read_on"))
+		indexes = {}
+		for row in frappe.db.sql("SHOW INDEX FROM `tabJarvis Trigger Activity`", as_dict=True):
+			indexes.setdefault(row["Key_name"], []).append(row["Column_name"])
+		self.assertEqual(indexes.get("action_status_creation_index"), ["action_type", "status", "creation"])
+		self.assertEqual(indexes.get("owner_action_creation_index"), ["owner", "action_type", "creation"])
+		self.assertIsNotNone(table)
