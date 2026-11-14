@@ -132,6 +132,19 @@ describe("FilesList: the Dropped / Intake switch", () => {
 		w.unmount();
 	});
 
+	it("moves focus to the selected switch button after a switch, waiting for the new header", async () => {
+		const w = await mountList([applying]);
+		const host = document.createElement("div");
+		host.innerHTML =
+			'<div data-filebox-switch><button role="radio" aria-checked="false">Dropped</button><button role="radio" aria-checked="true" id="on">Intake</button></div>';
+		document.body.appendChild(host);
+		await w.find('.tab[data-value="intake"]').trigger("click");
+		await new Promise((r) => setTimeout(r, 50));
+		expect(document.activeElement && document.activeElement.id).toBe("on");
+		host.remove();
+		w.unmount();
+	});
+
 	it("stops polling the Dropped list while the Intake view is shown", async () => {
 		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 		const w = await mountList([applying]);
