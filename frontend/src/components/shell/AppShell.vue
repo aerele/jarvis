@@ -56,7 +56,7 @@
 						     Chat renders its own hamburger inside its header. -->
 						<div
 							v-if="store.mobile && !route.meta.chat && !route.meta.chromeless"
-							class="flex h-12 shrink-0 items-center gap-2 border-b px-3"
+							class="flex min-h-12 shrink-0 items-center gap-2 border-b px-3"
 						>
 							<button
 								class="jv-focus-ring grid size-9 place-items-center rounded-md text-ink-gray-7"
