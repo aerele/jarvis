@@ -87,6 +87,12 @@
 					<div v-else-if="m.error" class="flex">
 						<div class="max-w-[95%] text-sm text-ink-red-4" role="status">
 							<strong>{{ m.err.headline }}</strong>
+							<div v-if="m.err.models" class="mt-1 text-xs">
+								<div v-for="(mod, mdi) in m.err.models" :key="mdi">
+									<strong>{{ mod.model }}</strong> {{ mod.reason }}.
+									{{ mod.next }}
+								</div>
+							</div>
 							<p>
 								{{ m.err.hint }}
 								<a
@@ -98,33 +104,31 @@
 									>{{ m.err.statusLabel }}
 									<span aria-hidden="true">&#8599;</span></a
 								>
-								<span v-if="m.err.hint" aria-hidden="true"> &middot; </span>
-								<button
-									type="button"
-									class="underline underline-offset-2"
-									:aria-expanded="rawOpen.has(m.name) ? 'true' : 'false'"
-									:aria-controls="`dash-err-raw-${m.name}`"
-									@click="toggleRaw(m.name)"
-								>
-									{{ rawOpen.has(m.name) ? "Hide details" : "Details" }}
-								</button>
 							</p>
 							<pre
-								v-if="rawOpen.has(m.name)"
-								:id="`dash-err-raw-${m.name}`"
+								v-if="showsRawReason(m.err) && m.error"
 								class="mt-1 whitespace-pre-wrap break-words font-sans text-xs"
 								>{{ m.error }}</pre
 							>
 							<!-- the same retry API and target rule as ChatView -->
-							<Button
-								v-if="m.err.retryable && m.name === retryTarget"
-								class="mt-1.5"
-								variant="subtle"
-								size="sm"
-								:label="retryButtonLabel"
-								:disabled="retryDisabled"
-								@click="retryFailed(m)"
-							/>
+							<div class="mt-1.5 flex gap-1.5">
+								<Button
+									v-if="m.err.retryable && m.name === retryTarget"
+									variant="subtle"
+									size="sm"
+									:label="retryButtonLabel"
+									:disabled="retryDisabled"
+									@click="retryFailed(m)"
+								/>
+								<Button
+									v-if="supportOn"
+									variant="subtle"
+									size="sm"
+									label="Report error"
+									:disabled="reportingError"
+									@click="reportError(m)"
+								/>
+							</div>
 						</div>
 					</div>
 					<!-- assistant: markdown, same renderer + prose classes as the
@@ -430,9 +434,12 @@ import {
 	getConversationContext,
 	compactConversation,
 	retryMessage,
+	getErrorReportDetails,
 } from "@/api";
+import { useRouter } from "vue-router";
+import { supportErrorDraft } from "@/lib/supportErrorDraft";
 import { brand } from "@/branding";
-import { errHtml, escapeHtml, turnErrorInfo } from "@/lib/errors";
+import { errHtml, escapeHtml, turnErrorInfo, showsRawReason } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { sortPendingCards } from "@/lib/sortPendingCards";
 import { discardedTokens } from "@/lib/typedCardReply";
@@ -757,15 +764,43 @@ const scroller = ref(null);
 // failure the same way ChatView does for the same event. Not persisted: a
 // reload has only the row's error text and reclassifies from that.
 const errorMeta = ref({});
-// Failed bubbles whose raw error text is expanded ("Details" in the note).
-const rawOpen = ref(new Set());
-function toggleRaw(name) {
-	const next = new Set(rawOpen.value);
-	next.has(name) ? next.delete(name) : next.add(name);
-	rawOpen.value = next;
-}
 function errorNote(m) {
-	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", { provider: m.provider });
+	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", {
+		provider: m.provider,
+		admin: canConnectModel,
+	});
+}
+// Report error, as in the main chat: a ticket draft carrying the server's scrubbed copy of the
+// error and the run id, since support works from the ticket alone.
+const router = useRouter();
+const supportOn =
+	typeof window !== "undefined" && !!(window.support_available && window.has_support_access);
+const reportingError = ref(false);
+async function reportError(m) {
+	if (reportingError.value || !supportOn || !conversation.value || !m?.name) return;
+	reportingError.value = true;
+	try {
+		let details = null;
+		try {
+			const res = await getErrorReportDetails(conversation.value, m.name);
+			details = res && res.data ? res.data : null;
+		} catch {
+			details = null;
+		}
+		const draft = supportErrorDraft({
+			code: m.err?.code,
+			upstream: m.err?.upstream,
+			conversation: conversation.value,
+			message: m.name,
+			at: m.modified || m.creation,
+			details,
+		});
+		if (draft) await router.push({ name: "SupportNew", query: draft });
+	} catch {
+		toast.error("Could not open Support. Try again.");
+	} finally {
+		reportingError.value = false;
+	}
 }
 // `err` is classified once here, not per template read (five reads per bubble).
 const bubbles = computed(() =>

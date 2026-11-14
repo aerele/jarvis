@@ -1097,20 +1097,28 @@
 											No changes were made to your data.
 										</div>
 										<!-- #702: the "what you can do" line - mirrors ActionError.vue's
-										     `.jv-ae-hint`, so a turn failure gets the same headline + hint +
-										     expandable-raw-detail treatment an ACTION-card failure already
-										     does (headline/hint from errorInfo(m); the raw detail is m.error,
-										     shown behind the inline "Details" toggle), instead of a bare
-										     message with no next step. -->
-										<!-- One guidance line: the hint, then the status link and the
-										     raw-detail toggle inline at its end, the way production chat
-										     UIs keep a failed turn to a title + one action line. -->
+										     `.jv-ae-hint`. A failover error lists each model and why it
+										     failed; the raw text shows only when it is the sole reason. -->
 										<div
-											v-if="
-												errorInfo(m).hint ||
-												errorInfo(m).statusUrl ||
-												m.error
+											v-if="errorInfo(m).models"
+											style="
+												font-size: 12.5px;
+												color: var(--text-2);
+												line-height: 1.5;
+												margin-top: 6px;
 											"
+										>
+											<div
+												v-for="(mod, mdi) in errorInfo(m).models"
+												:key="mdi"
+											>
+												<strong>{{ mod.model }}</strong>
+												{{ mod.reason }}.
+												{{ mod.next }}
+											</div>
+										</div>
+										<div
+											v-if="errorInfo(m).hint || errorInfo(m).statusUrl"
 											style="
 												font-size: 12.5px;
 												color: var(--text-2);
@@ -1128,30 +1136,9 @@
 												>{{ errorInfo(m).statusLabel }}
 												<span aria-hidden="true">&#8599;</span></a
 											>
-											<template v-if="m.error">
-												<span v-if="errorInfo(m).hint" aria-hidden="true">
-													&middot;
-												</span>
-												<button
-													type="button"
-													class="jv-err-link"
-													:aria-expanded="
-														rawOpen[m.name] ? 'true' : 'false'
-													"
-													:aria-controls="`jv-err-raw-${m.name}`"
-													@click="toggleRaw(m.name)"
-												>
-													{{
-														rawOpen[m.name]
-															? "Hide details"
-															: "Details"
-													}}
-												</button>
-											</template>
 										</div>
 										<div
-											v-if="rawOpen[m.name]"
-											:id="`jv-err-raw-${m.name}`"
+											v-if="showsRawReason(errorInfo(m)) && m.error"
 											style="
 												font-size: 12px;
 												color: var(--text-2);
@@ -4855,7 +4842,7 @@ import {
 	receiptRecord,
 	shouldHideNextStep,
 } from "@/lib/chatCardActions";
-import { errMessage, turnErrorInfo } from "@/lib/errors";
+import { errMessage, turnErrorInfo, showsRawReason } from "@/lib/errors";
 import { __ } from "@/lib/i18n";
 import { conversationLoadFailure } from "@/lib/conversationLoadFailure";
 import { openChatShare } from "@/composables/useChatSharing";
@@ -5620,16 +5607,27 @@ async function openErrorSupport(m) {
 	if (openSupportInFlight.value || !canReportError(m)) return;
 	const row = messages.value.find((item) => item.name === m.name);
 	const info = errorInfo(row);
-	const draft = supportErrorDraft({
-		code: info.code,
-		upstream: info.upstream,
-		conversation: currentId.value,
-		message: row.name,
-		at: row.modified || row.creation,
-	});
-	if (!draft) return;
+	const conversation = currentId.value;
 	openSupportInFlight.value = true;
 	try {
+		// Support works from the ticket alone, so it carries the server's scrubbed copy of the error
+		// and the run id. A failed read still opens the ticket, with the references only.
+		let details = null;
+		try {
+			const res = await api.getErrorReportDetails(conversation, row.name);
+			details = res && res.data ? res.data : null;
+		} catch {
+			details = null;
+		}
+		const draft = supportErrorDraft({
+			code: info.code,
+			upstream: info.upstream,
+			conversation,
+			message: row.name,
+			at: row.modified || row.creation,
+			details,
+		});
+		if (!draft) return;
 		await router.push({ name: "SupportNew", query: draft });
 	} catch {
 		notify(__("Could not open Support. Try again."), { type: "error" });
@@ -6213,11 +6211,6 @@ const currentRunId = ref(null);
 const stoppedRunId = ref(null);
 const stoppedMsgIds = ref(new Set()); // assistant rows the user stopped — ignore later (incl. "recovered") events for them
 const currentMsgId = ref(null); // in-flight assistant row id (from run:start) — lets Stop pin the reply even before the first token
-// Raw error text disclosure per failed message ("Details" in the guidance line).
-const rawOpen = ref({});
-function toggleRaw(id) {
-	rawOpen.value = { ...rawOpen.value, [id]: !rawOpen.value[id] };
-}
 const errorMeta = ref({}); // { [message_id]: { code, changed_data } } from a live run:error (not persisted; a refresh falls back to classifying the error string)
 // Pump streaming (Relay Pump) end-to-end epoch/seq fence (CDX-3 + CDX-12). The pure fence
 // logic lives in @/utils/eventFence.js (extracted so it is unit-tested by a real node test
@@ -6634,7 +6627,9 @@ function errorInfo(m) {
 		meta.changed_data
 	}\u0000${m.provider || ""}\u0000${canConnectModel ? 1 : 0}\u0000${
 		known ? known.join(",") : "-"
-	}\u0000${m.model || ""}\u0000${Object.entries(expiredModels.value)
+	}\u0000${m.model || ""}\u0000${m.modified || m.creation || ""}\u0000${Object.entries(
+		expiredModels.value
+	)
 		.map(([id, e]) => `${id}:${e.upstream}`)
 		.join(",")}`;
 	let info = errorInfoCache.get(key);
@@ -6646,6 +6641,7 @@ function errorInfo(m) {
 				subscriptionUpstreams: known || undefined,
 				model: m.model,
 				expiredModels: expiredModels.value,
+				failedAtMs: toLocalMs(m.modified || m.creation) || undefined,
 			}),
 			noChange: meta.changed_data === false,
 		};

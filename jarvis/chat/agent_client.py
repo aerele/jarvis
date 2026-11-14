@@ -535,6 +535,34 @@ def failed_final_error(detail: str | None = None) -> str:
 	)
 
 
+# The gateway's chat ``state == "error"`` event runs its ``errorMessage`` through a log formatter
+# that keeps the first 240 characters and appends "...". A failover error names each model's
+# reason in turn ("All models failed (2): a: <reason> | b: <reason>"), so the cut drops every
+# reason after the first. The run's lifecycle error frame, which arrives before the chat event,
+# carries the same text uncut.
+_GATEWAY_CUT_SUFFIX = "..."
+# Same cap as the Message.error writes in settlement / turn_state.
+_FULL_ERROR_MAX_CHARS = 1000
+
+
+def uncut_error_message(message: str | None, lifecycle_detail: str | None) -> str | None:
+	"""The chat error event's ``errorMessage``, or the lifecycle frame's text when the message is
+	that same text cut short. Only a strict prefix match swaps them, and never when the longer text
+	adds a marker that steers the turn handler (see ``_ERROR_DETAIL_REROUTE_MARKERS``)."""
+	msg = message or ""
+	detail = (lifecycle_detail or "").strip()
+	if not detail or not msg.endswith(_GATEWAY_CUT_SUFFIX):
+		return message
+	kept = msg[: -len(_GATEWAY_CUT_SUFFIX)]
+	if len(detail) <= len(kept) or not detail.startswith(kept):
+		return message
+	lowered = msg.lower()
+	full = detail[:_FULL_ERROR_MAX_CHARS]
+	if any(m in full.lower() and m not in lowered for m in _ERROR_DETAIL_REROUTE_MARKERS):
+		return message
+	return full
+
+
 def _chat_final_failed(payload: dict, text: str | None) -> bool:
 	"""True when a ``state == "final"`` chat event actually represents a FAILED
 	turn that produced NO real answer. Such a "final" must surface as an error,
@@ -1576,10 +1604,16 @@ class AgentSession:
 					# from a genuine partial-content abort - see
 					# relay_yield_continuation. Absent for a plain error/aborted
 					# today, so this is a harmless addition for every OTHER caller.
+					# ``failure_detail`` was scrubbed at parse time; scrub the chat text the same
+					# way so a brand word inside the first 240 chars cannot break the prefix match.
+					message = payload.get("errorMessage")
+					error = uncut_error_message(
+						egress_rules.redact(message) if message else message, failure_detail
+					)
 					yield {
 						"kind": "relay:error",
 						"state": state,
-						"error": egress_rules.redact(payload.get("errorMessage") or state),
+						"error": egress_rules.redact(error or state),
 						"text": _chat_final_text(payload) or "",
 					}
 					return

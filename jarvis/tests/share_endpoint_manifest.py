@@ -850,6 +850,11 @@ ENDPOINTS.update(
 			"arguments": {"conversation": "$conversation"},
 			"scope": "chat_scoped",
 		},
+		# Report error ticket draft: the owner's own failed reply only (message permission hook).
+		"jarvis.support.api.error_report_details": {
+			"arguments": {"conversation": "$conversation", "message": "$message"},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.api.get_conversation_context": {
 			"arguments": {"conversation": "$conversation"},
 			"scope": "chat_scoped",

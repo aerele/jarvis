@@ -462,12 +462,14 @@
 						</div>
 						<div v-else-if="turnError" class="jvp-turn-err" role="alert">
 							<div class="jvp-turn-err-h">{{ turnErrorHeadline }}</div>
+							<div v-if="turnErrorDetails.models" class="jvp-turn-err-models">
+								<div v-for="(mod, mdi) in turnErrorDetails.models" :key="mdi">
+									<strong>{{ mod.model }}</strong> {{ mod.reason }}.
+									{{ mod.next }}
+								</div>
+							</div>
 							<div
-								v-if="
-									turnErrorHint ||
-									turnErrorDetails.statusUrl ||
-									turnErrorHasDetail
-								"
+								v-if="turnErrorHint || turnErrorDetails.statusUrl"
 								class="jvp-turn-err-hint"
 							>
 								{{ turnErrorHint }}
@@ -480,25 +482,10 @@
 									>{{ turnErrorDetails.statusLabel }}
 									<span aria-hidden="true">&#8599;</span></a
 								>
-								<template v-if="turnErrorHasDetail">
-									<span v-if="turnErrorHint" aria-hidden="true"> &middot; </span>
-									<button
-										type="button"
-										class="jvp-turn-err-link"
-										:aria-expanded="turnErrorOpen ? 'true' : 'false'"
-										aria-controls="jvp-turn-err-raw"
-										@click="turnErrorOpen = !turnErrorOpen"
-									>
-										{{ turnErrorOpen ? "Hide details" : "Details" }}
-									</button>
-								</template>
 							</div>
-							<pre
-								v-if="turnErrorOpen"
-								id="jvp-turn-err-raw"
-								class="jvp-turn-err-raw"
-								>{{ turnError }}</pre
-							>
+							<pre v-if="turnErrorShowsRaw" class="jvp-turn-err-raw">{{
+								turnError
+							}}</pre>
 							<div v-if="turnErrorDetails.retryable" class="jvp-turn-err-acts">
 								<button class="jvp-btn-subtle" type="button" @click="retryLast">
 									Retry
@@ -819,7 +806,7 @@
 
 <script setup>
 import { computed, ref, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
-import { turnErrorInfo } from "../../turn_errors.mjs";
+import { turnErrorInfo, showsRawReason } from "../../turn_errors.mjs";
 import { contextLabel } from "./desk_context.mjs";
 import { isDarkNow, watchTheme } from "./desk_theme.mjs";
 import { renderReply } from "./panel_markdown.mjs";
@@ -1001,24 +988,25 @@ const turnErrorCode = ref("");
 // its persisted `provider` (which model actually served the turn) is what
 // decides the status link, exactly as the full chat passes m.provider.
 const turnErrorMsgId = ref("");
-const turnErrorOpen = ref(false); // "Details" disclosure
 const turnErrorDetails = computed(() => {
 	const id = turnErrorMsgId.value;
 	const row = id ? messages.value.find((m) => m.name === id) : undefined;
-	return turnErrorInfo(turnError.value, turnErrorCode.value, { provider: row?.provider });
+	return turnErrorInfo(turnError.value, turnErrorCode.value, {
+		provider: row?.provider,
+		// An admin is told the fix; a member, who can do it for them.
+		admin: canOnboard,
+	});
 });
 const turnErrorHeadline = computed(() => turnErrorDetails.value.headline);
 const turnErrorHint = computed(() => turnErrorDetails.value.hint);
-// Only offer the raw text when it says more than the headline already does.
-const turnErrorHasDetail = computed(() => {
-	const t = (turnError.value || "").trim();
-	return !!t && t !== turnErrorHeadline.value;
-});
+// The raw text shows only when it is the sole reason available.
+const turnErrorShowsRaw = computed(
+	() => !!(turnError.value || "").trim() && showsRawReason(turnErrorDetails.value)
+);
 function clearTurnError() {
 	turnError.value = "";
 	turnErrorCode.value = "";
 	turnErrorMsgId.value = "";
-	turnErrorOpen.value = false;
 }
 const draft = ref("");
 const sending = ref(false);
@@ -2900,6 +2888,12 @@ defineExpose({ load, startNewChat, convId });
 	cursor: pointer;
 	text-decoration: underline;
 	text-underline-offset: 2px;
+}
+.jvp-turn-err-models {
+	font-size: 11.5px;
+	line-height: 1.4;
+	color: var(--jv-text-2, inherit);
+	opacity: 0.85;
 }
 .jvp-turn-err-raw {
 	margin: 0;

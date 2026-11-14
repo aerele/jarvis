@@ -31,6 +31,7 @@ from jarvis.chat.agent_client import (
 	AgentSession,
 	is_definitive_refusal,
 	is_session_changed,
+	uncut_error_message,
 )
 from jarvis.chat.device import ChatDeviceCredentials
 from jarvis.chat.socket_io import SendNotStarted, SendUncertain
@@ -1680,3 +1681,79 @@ class TestHandshakeSignsPresentedToken(FrappeTestCase):
 		with self.assertRaises(Exception):
 			_verify_connect_signature(sent, "", creds.public_key)
 		sess.close()
+
+
+class TestUncutErrorMessage(FrappeTestCase):
+	"""The chat error event keeps 240 chars + "..."; the lifecycle frame has the whole text."""
+
+	FULL = (
+		"All models failed (2): openai_compat/jarvis-pool: 429 All credentials for model "
+		"gpt-5.6-terra are cooling down (last error: usage_limit_reached: The usage limit has been "
+		"reached); Retry-After: 169907 seconds (rate_limit) | anthropic/claude-opus-5: Failed to "
+		"authenticate: OAuth session expired and could not be refreshed (auth)"
+	)
+
+	def test_cut_message_takes_the_lifecycle_text(self):
+		cut = self.FULL[:240] + "..."
+		self.assertEqual(uncut_error_message(cut, self.FULL), self.FULL)
+
+	def test_whole_message_is_kept(self):
+		self.assertEqual(uncut_error_message("rate limited", "rate limited (more)"), "rate limited")
+
+	def test_lifecycle_text_about_something_else_is_ignored(self):
+		cut = self.FULL[:240] + "..."
+		self.assertEqual(uncut_error_message(cut, "Some other failure " * 20), cut)
+
+	def test_no_lifecycle_text_keeps_the_message(self):
+		self.assertEqual(uncut_error_message("x" * 240 + "...", None), "x" * 240 + "...")
+		self.assertIsNone(uncut_error_message(None, self.FULL))
+
+	def test_a_new_reroute_marker_keeps_the_cut_message(self):
+		full = self.FULL + " | other/model: request aborted"
+		cut = full[:240] + "..."
+		self.assertEqual(uncut_error_message(cut, full), cut)
+
+	def test_capped_at_the_stored_column_length(self):
+		full = "a" * 1500
+		self.assertEqual(uncut_error_message("a" * 240 + "...", full), "a" * 1000)
+
+	def _relay_error(self, lifecycle_error, chat_message):
+		sess, ws = _build_session()
+		ws._frames.append(
+			_frame(
+				{
+					"type": "event",
+					"event": "agent",
+					"payload": {
+						"runId": "run-1",
+						"stream": "lifecycle",
+						"data": {"phase": "error", "error": lifecycle_error},
+					},
+				}
+			)
+		)
+		ws._frames.append(
+			_frame(
+				{
+					"type": "event",
+					"event": "chat",
+					"payload": {
+						"runId": "run-1",
+						"sessionKey": "s1",
+						"state": "error",
+						"errorMessage": chat_message,
+					},
+				}
+			)
+		)
+		events = list(sess.relay_turn_events("s1", "run-1", soft_deadline_s=5))
+		return events[-1]
+
+	def test_the_direct_relay_stores_the_lifecycle_frames_whole_text(self):
+		out = self._relay_error(self.FULL, self.FULL[:240] + "...")
+		self.assertEqual(out["kind"], "relay:error")
+		self.assertEqual(out["error"], self.FULL)
+
+	def test_the_direct_relay_keeps_a_whole_chat_message(self):
+		out = self._relay_error(self.FULL, "rate limited")
+		self.assertEqual(out["error"], "rate limited")

@@ -138,6 +138,20 @@ class TestFinalCallSiteRedaction(FrappeTestCase):
 		self.assertEqual(kind, "relay:error")
 		self.assertEqual(payload["error"], " failed")
 
+	def test_a_cut_error_takes_the_lifecycle_text_and_is_still_redacted(self):
+		from jarvis.tests.test_relay_mux import _Recorder
+
+		full = "All models failed (2): acme/m1: " + "x" * 230 + " | other/m2: Failed to authenticate (auth)"
+		rec = _Recorder()
+		mux, lane = self._mux_lane(rec)
+		lane.failure_detail = full  # the pump lane keeps the lifecycle text raw (redact=False)
+		mux._route_terminal(lane, {"state": "error", "errorMessage": full[:240] + "..."})
+		mux.dispatch()
+		kind, payload = rec.terminal
+		self.assertEqual(kind, "relay:error")
+		self.assertTrue(payload["error"].endswith("other/m2: Failed to authenticate (auth)"))
+		self.assertNotIn("acme", payload["error"])
+
 
 class TestRecoveryRedaction(FrappeTestCase):
 	def setUp(self):

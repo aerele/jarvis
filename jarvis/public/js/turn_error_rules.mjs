@@ -13,7 +13,8 @@ export default [
     "code": "internal",
     "pattern": "^unexpected worker error",
     "headline": "Jarvis hit an unexpected error",
-    "hint": "Try again. If the error returns, share the details with your administrator or support.",
+    "hint": "Try again. If it happens again, tell your administrator or support.",
+    "adminHint": "Try again. If it happens again, report it to support.",
     "retryable": true,
     "status": false
   },
@@ -91,7 +92,7 @@ export default [
   },
   {
     "code": "subscription-expired",
-    "pattern": "refresh_token_(reused|expired|invalidated|revoked)|auth_unavailable[\\s\\S]{0,600}unauthori[sz]ed|please run /login|\\bnot logged in\\b|(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)[\\s\\S]{0,400}(invalid_grant|oauth token has expired|token expired)|(invalid_grant|oauth token has expired|token expired)[\\s\\S]{0,400}(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)",
+    "pattern": "refresh_token_(reused|expired|invalidated|revoked)|auth_unavailable[\\s\\S]{0,600}unauthori[sz]ed|please run /login|\\bnot logged in\\b|failed to authenticate:\\s*oauth session expired and could not be refreshed|oauth token refresh failed|access token could not be refreshed|authentication session could not be refreshed automatically|(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)[\\s\\S]{0,400}(invalid_grant|oauth token has expired|token expired)|(invalid_grant|oauth token has expired|token expired)[\\s\\S]{0,400}(providers=(codex|xai|kimi)|\\b(codex|kimi|xai)\\b|claude code)",
     "headline": "{provider} sign-in expired",
     "hint": "Ask your workspace admin to reconnect it, then send again.",
     "retryable": false,
@@ -111,7 +112,7 @@ export default [
         "claude": "anthropic",
         "anthropic": "anthropic"
       },
-      "signal": "refresh_token_(?:reused|expired|invalidated|revoked)|auth_unavailable[\\s\\S]{0,600}unauthori[sz]ed|please run /login|\\bnot logged in\\b|invalid_grant|oauth token has expired|token expired",
+      "signal": "refresh_token_(?:reused|expired|invalidated|revoked)|auth_unavailable[\\s\\S]{0,600}unauthori[sz]ed|please run /login|\\bnot logged in\\b|failed to authenticate:\\s*oauth session expired and could not be refreshed|oauth token refresh failed|access token could not be refreshed|authentication session could not be refreshed automatically|invalid_grant|oauth token has expired|token expired",
       "mentions": {
         "openai": "\\b(?:codex|openai|chatgpt)\\b",
         "anthropic": "\\b(?:claude code|anthropic|claude)\\b",
@@ -124,7 +125,8 @@ export default [
     "code": "models-exhausted",
     "pattern": "all (models|providers|fallbacks) failed",
     "headline": "The models tried could not complete this request",
-    "hint": "Try again. If it returns, share the details with your administrator to check each connection.",
+    "hint": "Try again. If it happens again, ask your workspace admin to check AI models.",
+    "adminHint": "Open AI models and check each model, then try again.",
     "retryable": true,
     "status": false
   },
@@ -132,7 +134,8 @@ export default [
     "code": "runtime-permission",
     "pattern": "\\b(eperm|eacces|erofs)\\b|operation not permitted|read.only (file system|database)",
     "headline": "Jarvis was blocked from accessing a required file",
-    "hint": "A server permission setting needs attention. Share the details with your administrator or support.",
+    "hint": "A server permission setting needs attention. Ask your administrator or support to fix it.",
+    "adminHint": "A server permission setting needs attention. Report it to support.",
     "retryable": false,
     "status": false
   },
@@ -140,7 +143,8 @@ export default [
     "code": "storage",
     "pattern": "\\b(enospc|edquot|sqlite_full|sqlite_corrupt|sqlite_busy)\\b|no space left on device|database (is locked|disk image is malformed)|disk quota exceeded",
     "headline": "Jarvis could not use its storage",
-    "hint": "Ask your administrator or support to check the server’s storage and database. Share the details below.",
+    "hint": "Ask your administrator or support to check the server’s storage and database.",
+    "adminHint": "Report it to support so they can check the server's storage and database.",
     "retryable": false,
     "status": false
   },
@@ -148,7 +152,8 @@ export default [
     "code": "runtime-setup",
     "pattern": "\\benoent\\b|cannot find module|module not found|pairing required|device.{0,80}(pairing|signature).{0,80}invalid|no auth profiles|no api key found|agent_url not set",
     "headline": "The assistant’s setup needs attention",
-    "hint": "Ask your administrator to check the assistant’s configuration. The details below can help identify what needs fixing.",
+    "hint": "Ask your administrator to check the assistant’s setup.",
+    "adminHint": "Report it to support so they can check the assistant's setup.",
     "retryable": false,
     "status": false
   },
@@ -165,6 +170,7 @@ export default [
     "pattern": "ws open failed|\\bunreachable\\b|connection timed out",
     "headline": "Jarvis could not reach the assistant",
     "hint": "Try again shortly. If the error returns, ask your administrator to check the assistant’s connection.",
+    "adminHint": "Try again shortly. If it happens again, report it to support.",
     "retryable": true,
     "status": false
   },
@@ -196,7 +202,8 @@ export default [
     "code": "model-unavailable",
     "pattern": "model[_ ]not[_ ]found|unknown model|no such model|model.*(does not exist|not available|not supported|decommissioned|not allowed)",
     "headline": "This model is not available for this connection",
-    "hint": "Choose another available model, or ask your administrator to check the model settings and account access.",
+    "hint": "Choose another available model, or ask your workspace admin to check this model.",
+    "adminHint": "Choose another model, or check this model's settings in AI models.",
     "retryable": false,
     "status": false
   },
@@ -210,7 +217,7 @@ export default [
   },
   {
     "code": "rate-limit",
-    "pattern": "rate[_ -]?limit|too many requests|cooldown|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*429\\b|^429\\b)|resource_exhausted",
+    "pattern": "^(?![\\s\\S]*(?:usage_limit_reached|usage limit has been reached))(?:[\\s\\S]*?)(?:rate[_ -]?limit|too many requests|cooldown|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*429\\b|^429\\b)|resource_exhausted)",
     "headline": "The model’s request limit was reached",
     "hint": "Wait before trying again, or choose another available model. If the error returns, ask the account owner to check the usage limit.",
     "retryable": true,
@@ -218,7 +225,7 @@ export default [
   },
   {
     "code": "quota",
-    "pattern": "\\bquota\\b|usage limit|usage cap|\\b(?:session|weekly|daily|monthly|hourly|5-hour|five-hour) limit\\b[^\\n]{0,80}\\bresets?\\b|\\blimit reached\\b[^\\n]{0,40}\\bresets?\\b|\\bhit your [a-z0-9 -]{0,20}\\blimit\\b",
+    "pattern": "\\bquota\\b|usage[_ ]limit|usage cap|\\b(?:session|weekly|daily|monthly|hourly|5-hour|five-hour) limit\\b[^\\n]{0,80}\\bresets?\\b|\\blimit reached\\b[^\\n]{0,40}\\bresets?\\b|\\bhit your [a-z0-9 -]{0,20}\\blimit\\b",
     "headline": "The model account’s usage allowance was reached",
     "hint": "Try another available model, or ask the account owner when the allowance resets and whether it can be increased.",
     "retryable": false,
@@ -226,9 +233,10 @@ export default [
   },
   {
     "code": "authentication",
-    "pattern": "authentication[_ ]error|unauthenticated|unauthori[sz]ed|invalid[_ ]api[_ ]key|incorrect api key|api key.*(invalid|expired|revoked)|token.*(expired|revoked)|invalid_grant|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*401\\b|^401\\b)|auth_permanent|(?:auth|oauth|token)_expired|api_key_invalid|authentication failed|invalid x-api-key",
+    "pattern": "authentication[_ ]error|unauthenticated|unauthori[sz]ed|invalid[_ ]api[_ ]key|incorrect api key|api key.*(invalid|expired|revoked)|token.*(expired|revoked)|invalid_grant|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*401\\b|^401\\b)|auth_permanent|(?:auth|oauth|token)_expired|api_key_invalid|authentication failed|failed to authenticate|invalid x-api-key",
     "headline": "The service could not verify this connection",
-    "hint": "Ask your administrator to reconnect the service or update its access key.",
+    "hint": "Ask your workspace admin to reconnect the service or update its key.",
+    "adminHint": "Reconnect the service or update its key in AI models.",
     "retryable": false,
     "status": false
   },
@@ -237,6 +245,7 @@ export default [
     "pattern": "content[_ ](policy|filter)|safety.*(block|reject)|blocked.*safety|prohibited_content|responsibleaipolicyviolation",
     "headline": "The model declined this request under its safety rules",
     "hint": "Review your message and attachments. If you think this was a mistake, ask your administrator to raise it with the model provider.",
+    "adminHint": "Review the message and attachments. If you think this was a mistake, raise it with the model provider.",
     "retryable": false,
     "status": false
   },
@@ -244,7 +253,8 @@ export default [
     "code": "permission",
     "pattern": "permission[_ ](denied|error)|access denied|forbidden|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*403\\b|^403\\b)",
     "headline": "Access was denied for this request",
-    "hint": "Ask your administrator to check permission to use the affected model, service, or record.",
+    "hint": "Ask your workspace admin to check your access to this model, service, or record.",
+    "adminHint": "Check the roles and permissions for this model, service, or record.",
     "retryable": false,
     "status": false
   },
@@ -252,7 +262,8 @@ export default [
     "code": "invalid-request",
     "pattern": "invalid[_ ]request|bad request|unsupported.*(parameter|format|image|media|file)|invalid.*(parameter|schema)|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*(400|415|422)\\b|^(400|415|422)\\b)",
     "headline": "The service could not accept this request",
-    "hint": "Check your message and attachments. If the error returns, share the details with your administrator.",
+    "hint": "Check your message and attachments. If it happens again, tell your administrator.",
+    "adminHint": "Check the message and attachments. If it happens again, report it to support.",
     "retryable": false,
     "status": false
   },
@@ -260,7 +271,8 @@ export default [
     "code": "service-unavailable",
     "pattern": "overload|service[_ ]unavailable|temporarily unavailable|high demand|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*(500|502|503|529)\\b|^(500|502|503|529)\\b)|internal server error|bad gateway|server_error|no endpoints found",
     "headline": "The service could not complete this request",
-    "hint": "Wait a little and try again. If the error returns, share the details with your administrator or support.",
+    "hint": "Wait a little and try again. If it happens again, tell your administrator or support.",
+    "adminHint": "Wait a little and try again. If it happens again, report it to support.",
     "retryable": true,
     "status": true
   },
@@ -268,7 +280,7 @@ export default [
     "code": "timeout",
     "pattern": "timed out|timeout|deadline|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*(408|504)\\b|^(408|504)\\b)",
     "headline": "The request took too long to finish",
-    "hint": "Try again, or split a large request into smaller parts. If the error returns, share the details with your administrator.",
+    "hint": "Try again, or split a large request into smaller parts.",
     "retryable": true,
     "status": true
   },
@@ -276,7 +288,8 @@ export default [
     "code": "connection",
     "pattern": "\\b(econnreset|econnrefused|enotfound|eai_again|etimedout)\\b|failed to fetch|socket hang up|certificate.*(expired|invalid)|tls handshake",
     "headline": "Jarvis could not connect to the service",
-    "hint": "Try again. If the error returns, ask your administrator to check the service’s connection. Share the details below.",
+    "hint": "Try again. If it happens again, ask your administrator to check the service’s connection.",
+    "adminHint": "Try again. If it happens again, report it to support.",
     "retryable": true,
     "status": true
   },
@@ -284,7 +297,7 @@ export default [
     "code": "not-found",
     "pattern": "not[_ ]found|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*404\\b|^404\\b)",
     "headline": "Something needed for this request could not be found",
-    "hint": "Check that the referenced item still exists. Share the details with your administrator if you need help.",
+    "hint": "Check that the referenced item still exists.",
     "retryable": false,
     "status": false
   },
@@ -308,7 +321,7 @@ export default [
     "code": "provider",
     "pattern": "(?!)",
     "headline": "The model provider could not complete this request",
-    "hint": "Share the details with the model account owner to check what prevented the request.",
+    "hint": "Ask the model account owner to check what blocked the request.",
     "retryable": false,
     "status": false
   },
@@ -316,7 +329,8 @@ export default [
     "code": "gateway",
     "pattern": "(?!)",
     "headline": "Jarvis could not complete this request",
-    "hint": "The cause is not clear from the error received. Try again. If it happens again, share the details with your administrator or support.",
+    "hint": "Try again. If it happens again, tell your administrator or support.",
+    "adminHint": "Try again. If it happens again, report it to support.",
     "retryable": true,
     "status": false
   }

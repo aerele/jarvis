@@ -4,7 +4,7 @@ import * as Vue from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { supportErrorDraft } from "@/lib/supportErrorDraft";
-import { turnErrorInfo } from "@/lib/errors";
+import { showsRawReason, turnErrorInfo } from "@/lib/errors";
 // Run the actual SFC functions and compiled error-card markup. Chromium covers
 // the full view. Router and Retry are observed boundaries, never real writes.
 const source = fs.readFileSync("src/views/ChatView.vue", "utf8");
@@ -53,6 +53,16 @@ function harness({
 		messages: Vue.ref([m]),
 		errorInfo: (row) => turnErrorInfo(row.error),
 		supportErrorDraft,
+		api: {
+			getErrorReportDetails: vi.fn(async () => ({
+				ok: true,
+				data: {
+					error: "Request timed out (secrets removed)",
+					model: "gpt-5.6-terra",
+					run: "89200d04e322",
+				},
+			})),
+		},
 		router: { push: vi.fn(async () => undefined) },
 		notify: vi.fn(),
 		__: (x) => x,
@@ -67,8 +77,7 @@ function harness({
 			"\nreturn {canReportError,openErrorSupport,openSupport};"
 	)(...Object.values(s));
 	const retry = vi.fn(),
-		reconnect = vi.fn(),
-		rawOpen = Vue.reactive({});
+		reconnect = vi.fn();
 	const w = mountCard
 		? mount({
 				render,
@@ -85,8 +94,7 @@ function harness({
 					busy: false,
 					retryText: "Retry",
 					retry,
-					rawOpen,
-					toggleRaw: (id) => (rawOpen[id] = !rawOpen[id]),
+					showsRawReason,
 					canConnectModel: true,
 					goReconnectSubscription: reconnect,
 				}),
@@ -147,11 +155,16 @@ describe("Report error in the real ChatView card", () => {
 		h.w.unmount();
 	});
 
-	it("opens selected draft without retry or a backend call", async () => {
+	it("opens a draft carrying the server's scrubbed error and run id, without retry", async () => {
 		const h = harness();
 		await reportButton(h).trigger("click");
 		await flushPromises();
+		expect(h.s.api.getErrorReportDetails).toHaveBeenCalledWith(
+			"conv788fixture",
+			"reply788fixture"
+		);
 		expect(h.s.router.push).toHaveBeenCalledOnce();
+		const query = h.s.router.push.mock.calls[0][0].query;
 		expect(h.s.router.push.mock.calls[0][0]).toEqual({
 			name: "SupportNew",
 			query: supportErrorDraft({
@@ -159,10 +172,23 @@ describe("Report error in the real ChatView card", () => {
 				conversation: "conv788fixture",
 				message: "reply788fixture",
 				at: h.m.modified,
+				details: (await h.s.api.getErrorReportDetails.mock.results[0].value).data,
 			}),
 		});
+		expect(query.body).toContain("Run: 89200d04e322");
+		expect(query.body).toContain("Error text (secrets removed):");
 		expect(h.retry).not.toHaveBeenCalled();
 		expect(h.s.supportStore.getCopyPref).not.toHaveBeenCalled();
+		h.w.unmount();
+	});
+	it("still opens the draft, with references only, when the details cannot be read", async () => {
+		const h = harness();
+		h.s.api.getErrorReportDetails.mockRejectedValueOnce(new Error("offline"));
+		await reportButton(h).trigger("click");
+		await flushPromises();
+		const query = h.s.router.push.mock.calls[0][0].query;
+		expect(query.body).toContain("Message: reply788fixture");
+		expect(query.body).not.toContain("Error text");
 		h.w.unmount();
 	});
 	it.each([
@@ -180,14 +206,32 @@ describe("Report error in the real ChatView card", () => {
 		expect(h.s.router.push).not.toHaveBeenCalled();
 		h.w.unmount();
 	});
-	it("retains Report on nonretryable errors and retains Details", async () => {
+	it("retains Report on nonretryable errors with no Details toggle", async () => {
 		const h = harness({ error: "Please run /login" });
 		expect(reportButton(h)).toBeDefined();
-		const b = h.w.findAll("button").find((b) => b.text() === "Details");
-		await b.trigger("click");
-		expect(h.w.text()).toContain("Please run /login");
-		await b.trigger("click");
-		expect(b.text()).toBe("Details");
+		expect(h.w.findAll("button").some((b) => b.text() === "Details")).toBe(false);
+		// A named cause needs no raw text: the headline says it.
+		expect(h.w.text()).not.toContain("Please run /login");
+		h.w.unmount();
+	});
+	it("shows the raw text as the reason when no rule names the cause", async () => {
+		const h = harness({ error: "frobnicator jammed" });
+		expect(h.w.text()).toContain("frobnicator jammed");
+		expect(h.w.findAll("button").some((b) => b.text() === "Details")).toBe(false);
+		h.w.unmount();
+	});
+	it("lists each failed model of a failover error under the headline", async () => {
+		const h = harness({
+			error:
+				"All models failed (2): openai_compat/jarvis-pool: 429 for model gpt-5.6-terra " +
+				"(last error: usage_limit_reached: The usage limit has been reached) | " +
+				"anthropic/claude-opus-5: Failed to authenticate: OAuth session expired and could not be refreshed (auth)",
+		});
+		const text = h.w.text();
+		expect(text).toContain("None of your models could answer");
+		expect(text).toContain("gpt-5.6-terra Usage limit reached.");
+		expect(text).toContain("claude-opus-5 Anthropic sign-in expired.");
+		expect(h.w.findAll("button").some((b) => b.text() === "Retry")).toBe(false);
 		h.w.unmount();
 	});
 	it("retains Retry as a separate action", async () => {
