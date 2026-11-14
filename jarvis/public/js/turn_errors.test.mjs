@@ -203,3 +203,14 @@ test("a single model on its usage cap says when it resets", () => {
   assert.match(info.hint, /^Resets in about 2 hours\. /);
   assert.equal(info.retryable, false);
 });
+
+test("a system error keeps its raw text as the reason (which file, which resource)", async () => {
+  const { showsRawReason } = await import("./turn_errors.mjs");
+  const eperm = turnErrorInfo(
+    "Error: EPERM: operation not permitted, chmod /data/agent.sqlite"
+  );
+  assert.equal(eperm.code, "runtime-permission");
+  assert.equal(showsRawReason(eperm), true);
+  assert.equal(showsRawReason(turnErrorInfo(INSIDER)), false);
+  assert.equal(showsRawReason(turnErrorInfo("Please run /login")), false);
+});
