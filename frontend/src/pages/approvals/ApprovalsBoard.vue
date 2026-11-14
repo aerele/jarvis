@@ -56,7 +56,7 @@
 			     sidebar pattern; dark gray-1 ≠ surface-selected per §2.5) -->
 			<div
 				data-testid="approvals-rail"
-				class="max-h-[35vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
+				class="max-h-[30vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
 			>
 				<!-- "Waiting for your reply" strip (notify-approvals Part 3): prose
 				     questions the agent asked in chat — derived server-side

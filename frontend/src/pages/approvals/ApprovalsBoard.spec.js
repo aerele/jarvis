@@ -322,7 +322,7 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(rail(w).classes()).toEqual(
 			expect.arrayContaining([
 				"w-full",
-				"max-h-[35vh]",
+				"max-h-[30vh]",
 				"border-b",
 				"lg:w-[360px]",
 				"lg:max-h-none",
@@ -584,7 +584,7 @@ describe("ApprovalsBoard one inbox", () => {
 		const rail = w.find('[data-testid="approvals-rail"]');
 		// vh, not %: a percentage max-height of an auto-height flex parent is ignored, which let
 		// the rail grow over the review form at phone widths.
-		expect(rail.classes()).toContain("max-h-[35vh]");
+		expect(rail.classes()).toContain("max-h-[30vh]");
 		expect(rail.classes()).toContain("lg:max-h-none");
 	});
 
