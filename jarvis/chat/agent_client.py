@@ -1604,7 +1604,12 @@ class AgentSession:
 					# from a genuine partial-content abort - see
 					# relay_yield_continuation. Absent for a plain error/aborted
 					# today, so this is a harmless addition for every OTHER caller.
-					error = uncut_error_message(payload.get("errorMessage"), failure_detail)
+					# ``failure_detail`` was scrubbed at parse time; scrub the chat text the same
+					# way so a brand word inside the first 240 chars cannot break the prefix match.
+					message = payload.get("errorMessage")
+					error = uncut_error_message(
+						egress_rules.redact(message) if message else message, failure_detail
+					)
 					yield {
 						"kind": "relay:error",
 						"state": state,

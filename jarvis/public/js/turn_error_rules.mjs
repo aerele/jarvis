@@ -13,7 +13,7 @@ export default [
     "code": "internal",
     "pattern": "^unexpected worker error",
     "headline": "Jarvis hit an unexpected error",
-    "hint": "Try again. If it happens again, press Report error to tell support.",
+    "hint": "Try again. If it happens again, tell your administrator or support.",
     "retryable": true,
     "status": false
   },
@@ -316,7 +316,7 @@ export default [
     "code": "gateway",
     "pattern": "(?!)",
     "headline": "Jarvis could not complete this request",
-    "hint": "Try again. If it happens again, press Report error to tell support.",
+    "hint": "Try again. If it happens again, tell your administrator or support.",
     "retryable": true,
     "status": false
   }

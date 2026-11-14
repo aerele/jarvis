@@ -330,15 +330,24 @@ const WAIT_CODES = new Set(["quota", "rate-limit"]);
 
 // The wait still left: Retry-After counts from when the turn failed (`failedAtMs`, when the caller
 // knows it), not from now.
+// Without the failure time the stated wait is reported as it was, never counted down from now.
 function waitLeft(seconds, failedAtMs) {
   if (!Number.isFinite(Number(seconds)) || Number(seconds) <= 0)
-    return { phrase: "", over: false };
+    return { phrase: "", over: false, known: false };
   if (!Number.isFinite(failedAtMs))
-    return { phrase: waitPhrase(seconds), over: false };
+    return { phrase: waitPhrase(seconds), over: false, known: false };
   const left = (failedAtMs + Number(seconds) * 1000 - Date.now()) / 1000;
   return left > 0
-    ? { phrase: waitPhrase(left), over: false }
-    : { phrase: "", over: true };
+    ? { phrase: waitPhrase(left), over: false, known: true }
+    : { phrase: "", over: true, known: true };
+}
+
+function resetLine(left) {
+  if (left.over) return "It may have reset. Try again.";
+  if (!left.phrase) return "Wait for it to reset.";
+  return left.known
+    ? `Resets in ${left.phrase}.`
+    : `Resets ${left.phrase} after it failed.`;
 }
 
 const NOT_RECEIVED = {
@@ -362,20 +371,14 @@ function modelLine(failure, context) {
   const admin = context?.admin === true;
   const left = WAIT_CODES.has(info.code)
     ? waitLeft(failure.retryAfterS, context?.failedAtMs)
-    : { phrase: "", over: false };
-  const wait = left.phrase;
+    : { phrase: "", over: false, known: false };
   const copy = {
-    quota: [
-      "Usage limit reached",
-      wait
-        ? `Resets in ${wait}.`
-        : left.over
-        ? "It may have reset. Try again."
-        : "Wait for it to reset.",
-    ],
+    quota: ["Usage limit reached", resetLine(left)],
     "rate-limit": [
       "Too many requests",
-      wait ? `Try again in ${wait}.` : "Try again shortly.",
+      left.phrase && left.known
+        ? `Try again in ${left.phrase}.`
+        : "Try again shortly.",
     ],
     "subscription-expired": [
       info.headline,
@@ -427,7 +430,17 @@ export function turnErrorInfo(raw, explicitCode, context = {}) {
     const whole = singleErrorInfo(text, explicitCode, context);
     const failures =
       explicitCode && !TEXT_CODES.has(explicitCode) ? [] : modelFailures(text);
-    if (failures.length < 2) return whole;
+    if (failures.length < 2) {
+      // A single model on its usage cap (an explicit pick never fails over): say when it resets.
+      const retry = whole.code === "quota" ? RETRY_AFTER.exec(text) : null;
+      if (!retry) return whole;
+      const left = waitLeft(Number(retry[1]), context?.failedAtMs);
+      return {
+        ...whole,
+        hint: `${resetLine(left)} ${whole.hint}`.trim(),
+        retryable: left.over,
+      };
+    }
     const models = failures.map((failure) => modelLine(failure, context));
     const signedOut = models.find((m) => m.code === "subscription-expired");
     const causes = new Set(models.map((m) => m.code));
