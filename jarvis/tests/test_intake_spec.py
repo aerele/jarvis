@@ -295,6 +295,26 @@ class TestIntakeSpec(FrappeTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			off.save(ignore_permissions=True)
 
+	def test_three_record_rules_cannot_form_a_cycle(self):
+		def rule(record, target, field, **over):
+			return {
+				"intake_source": "Record",
+				"intake_folder": None,
+				"intake_record_doctype": record,
+				"intake_target_doctype": target,
+				"intake_spec": json.dumps({"fields": [field]}),
+				"allow_incomplete_drafts": 1,
+				**over,
+			}
+
+		self._insert(**rule("ToDo", "Note", "title"))
+		self._insert(**rule("Note", "Event", "subject"))
+		# Event -> ToDo closes ToDo -> Note -> Event -> ToDo.
+		with self.assertRaises(frappe.ValidationError):
+			self._insert(**rule("Event", "ToDo", "description"))
+		# A chain that does not come back is fine.
+		self._insert(**rule("Event", "Note", "title", enabled=0))
+
 	def test_target_doctype_gated(self):
 		# User is denylisted, Website Settings is Single, Note Seen By is a child table.
 		for dt in ("User", "Website Settings", "Note Seen By", "No Such DocType"):

@@ -385,25 +385,33 @@ class JarvisTrigger(NotRenamable, Document):
 		if not cint(self.enabled):
 			return
 		# System context: rules are site-wide.
-		back = frappe.get_all(
+		edges: dict[str, set[str]] = {}
+		for rule in frappe.get_all(
 			"Jarvis Trigger",
 			filters={
 				"name": ["!=", self.name or ""],
 				"enabled": 1,
 				"action_type": "Intake",
 				"intake_source": "Record",
-				"intake_record_doctype": target,
-				"intake_target_doctype": record,
 			},
-			limit=1,
-			pluck="name",
-		)
-		if back:
-			frappe.throw(
-				_("Rule {0} creates {1} from {2}, so the two rules would feed each other.").format(
-					back[0], record, target
+			fields=["name", "intake_record_doctype", "intake_target_doctype"],
+		):
+			edges.setdefault(rule.intake_record_doctype, set()).add(rule.intake_target_doctype)
+		# Drafts of ``target`` feed the rules watching it, and so on: reaching ``record``
+		# again, directly or through any number of rules, is a loop.
+		seen, queue = set(), [target]
+		while queue:
+			current = queue.pop()
+			if current == record:
+				frappe.throw(
+					_("The enabled rules would feed each other: {0} leads back to {1}.").format(
+						target, record
+					)
 				)
-			)
+			if current in seen:
+				continue
+			seen.add(current)
+			queue.extend(edges.get(current, ()))
 
 	def _validate_intake_folder(self):
 		path = (self.intake_folder or "").strip().strip("/")
