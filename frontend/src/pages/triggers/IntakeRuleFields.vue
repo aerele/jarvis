@@ -67,8 +67,8 @@
 				</div>
 				<div class="flex min-w-0 flex-col gap-1.5">
 					<label class="text-xs text-ink-gray-7">Run when</label>
-					<FormControl
-						type="select"
+					<Select
+						class="w-full"
 						:options="EVENT_OPTIONS"
 						:modelValue="form.intake_record_event || 'File attached'"
 						:disabled="disabled"
@@ -80,8 +80,7 @@
 				</div>
 				<div class="flex min-w-0 flex-col gap-1.5">
 					<label class="text-xs text-ink-gray-7">Status field on record</label>
-					<FormControl
-						type="select"
+					<Select
 						class="w-full"
 						:options="recordFieldOptions(STATUS_TYPES)"
 						:modelValue="form.intake_status_field || ''"
@@ -92,8 +91,7 @@
 				</div>
 				<div class="flex min-w-0 flex-col gap-1.5">
 					<label class="text-xs text-ink-gray-7">Draft link field on record</label>
-					<FormControl
-						type="select"
+					<Select
 						class="w-full"
 						:options="recordFieldOptions(LINK_TYPES)"
 						:modelValue="form.intake_link_field || ''"
@@ -307,7 +305,7 @@
 // "Intake". It owns no state of the trigger: it reads `form` and emits
 // `update` with a patch ({key: value}) that TriggerDetail applies to its form.
 import { ref, computed, nextTick, watch, onBeforeUnmount } from "vue";
-import { Autocomplete, Button, ErrorMessage, FormControl } from "frappe-ui";
+import { Autocomplete, Button, ErrorMessage, FormControl, Select } from "frappe-ui";
 import { searchLink } from "@/api";
 import { useLinkSearch } from "@/composables/useLinkSearch";
 import * as apiTriggers from "@/api/triggers";
