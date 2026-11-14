@@ -40,7 +40,7 @@
 			<section aria-label="Values needed" class="flex flex-col gap-3">
 				<h3 class="text-sm font-medium text-ink-gray-8">Values needed</h3>
 				<div
-					v-for="m in missing"
+					v-for="m in inputs"
 					:key="m.key"
 					:data-key="m.key"
 					class="flex flex-col gap-1"
@@ -93,6 +93,17 @@
 						{{ m.reason }}. Reject this review and add the document by hand.
 					</p>
 				</div>
+				<!-- Information, not an input: the file was read in part (draft.PAGES_FIELD).
+				     Approve does not wait for it; the draft comment carries the same note. -->
+				<p
+					v-for="m in notes"
+					:key="m.key"
+					role="note"
+					data-testid="intake-note"
+					class="rounded bg-surface-gray-2 p-2 text-sm text-ink-gray-8"
+				>
+					{{ m.reason }}. The rest of the file was not read.
+				</p>
 			</section>
 
 			<!-- A refused draft: the request is still open, this says why -->
@@ -233,13 +244,17 @@ const errorEl = ref(null);
 const reasonEl = ref(null);
 const rejectBtn = ref(null);
 
-const answerable = computed(() => missing.value.filter((m) => m.answerable));
+// The server's entry for a file read only in part (draft.PAGES_FIELD): shown, never asked.
+const NOTE_FIELD = "_pages";
+const notes = computed(() => missing.value.filter((m) => m.field === NOTE_FIELD));
+const inputs = computed(() => missing.value.filter((m) => m.field !== NOTE_FIELD));
+const answerable = computed(() => inputs.value.filter((m) => m.answerable));
 const blank = (v) => v === undefined || v === null || String(v).trim() === "";
 // A value the form cannot ask for ("no rows read") blocks Approve: only Reject is left.
 const ready = computed(
 	() =>
 		missing.value.length > 0 &&
-		missing.value.every((m) => m.answerable && !blank(answers[m.key]))
+		inputs.value.every((m) => m.answerable && !blank(answers[m.key]))
 );
 
 function controlType(m) {
@@ -286,7 +301,7 @@ function linkSearch(m) {
 }
 // Each picker lists its first page on open, as the dashboard filter bar does.
 onMounted(() =>
-	missing.value
+	inputs.value
 		.filter((m) => m.answerable && m.fieldtype === "Link")
 		.forEach((m) => linkSearch(m).prime())
 );

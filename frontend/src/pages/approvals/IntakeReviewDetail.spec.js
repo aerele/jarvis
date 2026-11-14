@@ -97,6 +97,46 @@ describe("IntakeReviewDetail", () => {
 		expect(w.text()).toContain("bolt");
 	});
 
+	it("shows a partly read file as information and lets Approve go without it", async () => {
+		api.decideApproval.mockResolvedValue({ status: "Approved" });
+		const note = item({
+			key: "_pages",
+			field: "_pages",
+			row: null,
+			label: "Pages",
+			fieldtype: "Data",
+			answerable: false,
+			reason: "Only 3 of 8 pages read",
+		});
+		const w = mountWith([item(), note]);
+		expect(w.find("[data-testid='intake-note']").text()).toContain("Only 3 of 8 pages read");
+		expect(w.findAll(".fc").length).toBe(1);
+		expect(w.text()).not.toContain("Reject this review and add the document by hand");
+		expect(button(w, "Approve").attributes("disabled")).toBeDefined();
+		await w.find(".fc input").setValue("7");
+		expect(button(w, "Approve").attributes("disabled")).toBeUndefined();
+		await button(w, "Approve").trigger("click");
+		await flushPromises();
+		expect(api.decideApproval).toHaveBeenCalledWith(
+			"AR-1",
+			JSON.stringify({ "items.3.qty": 7 }),
+			1
+		);
+	});
+
+	it("approves with no answers when the only entry is the pages note", async () => {
+		const w = mountWith([
+			item({
+				key: "_pages",
+				field: "_pages",
+				row: null,
+				answerable: false,
+				reason: "Only 3 of 8 pages read",
+			}),
+		]);
+		expect(button(w, "Approve").attributes("disabled")).toBeUndefined();
+	});
+
 	it("keeps Approve off until every needed value has an answer", async () => {
 		const w = mountWith([item()]);
 		expect(button(w, "Approve").element.disabled).toBe(true);
