@@ -10,6 +10,7 @@ from jarvis.chat.error_taxonomy import (
 	SUBSCRIPTION_LABELS,
 	classify_error_text,
 	headline_for,
+	model_failures,
 	subscription_upstream_from_error,
 )
 
@@ -111,3 +112,18 @@ class TestSubscriptionExpiredRule(unittest.TestCase):
 		self.assertEqual(headline_for(cases[5]["error"]), "Kimi (Moonshot) sign-in expired")
 		# A strong signal that names no upstream still has no placeholder in it.
 		self.assertEqual(headline_for("auth_unavailable: unauthorized"), "Sign-in expired")
+
+
+class TestModelFailures(unittest.TestCase):
+	"""One cause per model of a failover error; the JS side reads the same fixture."""
+
+	def test_fixture_cases(self):
+		cases = json.loads((Path(__file__).parent / "fixtures/model_failures.json").read_text())
+		for case in cases:
+			with self.subTest(error=case["error"][:60]):
+				self.assertEqual(model_failures(case["error"]), case["models"])
+
+	def test_a_usage_cap_behind_a_429_is_quota_not_rate_limit(self):
+		text = "429 cooling down (last error: usage_limit_reached: The usage limit has been reached)"
+		self.assertEqual(classify_error_text(text), "quota")
+		self.assertEqual(classify_error_text("429 Too Many Requests"), "rate-limit")

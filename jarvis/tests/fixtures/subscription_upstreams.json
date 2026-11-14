@@ -30,5 +30,13 @@
   {
     "error": "MCP connector failed: invalid_grant",
     "upstream": ""
+  },
+  {
+    "error": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    "upstream": "anthropic"
+  },
+  {
+    "error": "All models failed (2): openai_compat/jarvis-pool: 429 All credentials for model gpt-5.6-terra are cooling down (last error: usage_limit_reached: The usage limit has been reached); Retry-After: 169907 seconds (rate_limit) | anthropic/claude-opus-5: Failed to authenticate: OAuth session expired and could not be refreshed (auth).",
+    "upstream": "anthropic"
   }
 ]

@@ -2441,6 +2441,7 @@ import {
 	apiKeyModelHealth,
 	subscriptionAccountHealth,
 	dirtyAccountHealth,
+	usageLimitHealth,
 	isCodeOnlyPaste,
 	effectiveApiKey,
 	LOCAL_PROVIDER_IDS,
@@ -2496,6 +2497,8 @@ const props = defineProps({
 	// Expired chat sign-ins from the site (subscriptionNotice.expired): { account_ref, upstream, label,
 	// email, since, fallback }. Never passed by onboarding. `direct:openai` keys a direct-mode OpenAI row.
 	expiredEntries: { type: Array, default: () => [] },
+	// Models on their usage cap (subscriptionNotice.limited): { "<bare model id>": <until epoch s> }.
+	limitedModels: { type: Object, default: () => ({}) },
 	// One-shot request from a Reconnect link: the account_ref to reconnect (or `direct:openai`).
 	reconnectRef: { type: String, default: "" },
 });
@@ -4506,7 +4509,11 @@ function accountHealth(m) {
 // (@/llm/pool.js) has a settled value to compare "what did we last actually measure"
 // against "is that measurement stale".
 function settledAccountHealth(m) {
+	// A usage cap is read per MODEL from the site's own failed turns, so it holds even where the
+	// pool-wide probe below cannot say which row it means.
+	const limit = usageLimitHealth(m.model, props.limitedModels);
 	if (m.credentialType !== "subscription") {
+		if (limit) return limit;
 		// api-key rows carry a PER-MODEL verdict (contract 1.11 model_statuses), probed
 		// in isolation, so each shows its own health instead of the presence-only "key
 		// set" that once made a dead model look identical to a healthy one. Onboarding
@@ -4519,6 +4526,7 @@ function settledAccountHealth(m) {
 	// "more than one subscription row -> neutral" short-circuit below.
 	const expiry = rowExpiry(m, props.expiredEntries);
 	if (expiry) return subscriptionAccountHealth("", { expired: expiry.entry });
+	if (limit) return limit;
 	if (singleMode.value) {
 		// Onboarding's one connected account skips the failover-list's multi-row
 		// disambiguation below (there is only ever one row here) but must NOT inherit

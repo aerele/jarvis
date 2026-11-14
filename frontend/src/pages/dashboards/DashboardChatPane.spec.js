@@ -209,16 +209,47 @@ describe("DashboardChatPane surfaces a run that failed before its first token", 
 		await flushPromises();
 		const note = wrapper.find(".text-ink-red-4");
 		expect(note.exists()).toBe(true);
-		// The row renders the classified headline and guidance, not the raw
-		// provider text; the raw text sits behind the inline Details toggle.
+		// The row renders the classified headline and guidance. A named cause
+		// never shows the raw provider text, and there is no Details toggle.
 		expect(note.text()).toContain("The model’s request limit was reached");
 		expect(note.text()).not.toContain("API rate limit reached");
-		const details = note.findAll("button").find((b) => b.text() === "Details");
-		expect(details).toBeTruthy();
-		await details.trigger("click");
-		expect(note.text()).toContain("API rate limit reached. Please try again later.");
-		expect(note.find("button[aria-expanded='true']").text()).toBe("Hide details");
+		expect(note.findAll("button").some((b) => b.text() === "Details")).toBe(false);
 		localStorage.removeItem("jarvis-dash-conv-u@x.com");
+	});
+});
+
+describe("DashboardChatPane failed-turn card names the exact cause", () => {
+	async function mountWithError(error) {
+		localStorage.setItem("jarvis-dash-conv-u@x.com", "conv1");
+		api.getDashboardConversation.mockResolvedValueOnce({
+			conversation: { name: "conv1" },
+			messages: [
+				{ name: "m1", role: "user", content: "Build me a dashboard" },
+				{ name: "m2", role: "assistant", content: "", error },
+			],
+		});
+		const { wrapper } = mountPane();
+		await flushPromises();
+		localStorage.removeItem("jarvis-dash-conv-u@x.com");
+		return wrapper.find(".text-ink-red-4");
+	}
+
+	it("lists each failed model and has no Details toggle", async () => {
+		const note = await mountWithError(
+			"All models failed (2): openai_compat/jarvis-pool: 429 All credentials for model gpt-5.6-terra are cooling down (last error: usage_limit_reached: The usage limit has been reached); Retry-After: 169907 seconds (rate_limit) | anthropic/claude-opus-5: Failed to authenticate: OAuth session expired and could not be refreshed (auth)."
+		);
+		expect(note.text()).toContain("None of your models could answer");
+		expect(note.text()).toContain("gpt-5.6-terra");
+		expect(note.text()).toContain("Usage limit reached.");
+		expect(note.text()).toContain("claude-opus-5");
+		expect(note.findAll("button").some((b) => b.text() === "Details")).toBe(false);
+		expect(note.find("pre").exists()).toBe(false);
+	});
+
+	it("shows the raw text with no toggle when it is the only reason", async () => {
+		const note = await mountWithError("zzq unclassifiable backend failure 4821");
+		expect(note.find("pre").text()).toContain("zzq unclassifiable backend failure 4821");
+		expect(note.findAll("button").some((b) => b.text() === "Details")).toBe(false);
 	});
 });
 

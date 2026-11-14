@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
 	subscriptionAccountHealth,
 	dirtyAccountHealth,
+	usageLimitHealth,
 	expiredLine,
 	expiredEntryMap,
 	accountExpiryStates,
@@ -155,5 +156,27 @@ describe("per-account state (Review Focus 5)", () => {
 		expect(rowExpiry(row(), [entry("A1")])).toBeNull();
 		expect(expiredEntryMap([null, {}, entry("A1")]).size).toBe(1);
 		expect(expiredEntryMap(undefined).size).toBe(0);
+	});
+});
+
+describe("usageLimitHealth", () => {
+	const now = 1_000_000_000;
+	const limited = { "gpt-5.6-terra": now / 1000 + 2 * 86400 };
+
+	it("marks a capped model amber with its reset", () => {
+		const h = usageLimitHealth("openai_compat/gpt-5.6-terra", limited, now);
+		expect(h).toMatchObject({ level: "warn", limited: true, label: "Usage limit reached" });
+		expect(h.title).toBe("Resets in about 2 days.");
+	});
+
+	it("says nothing once the reset has passed, or for another model", () => {
+		expect(usageLimitHealth("gpt-5.6-terra", limited, now + 3 * 86400e3)).toBeNull();
+		expect(usageLimitHealth("claude-opus-5", limited, now)).toBeNull();
+		expect(usageLimitHealth("constructor", limited, now)).toBeNull();
+	});
+
+	it("survives unsaved edits like an expired sign-in does", () => {
+		const h = usageLimitHealth("gpt-5.6-terra", limited, now);
+		expect(dirtyAccountHealth(h, true)).toBe(h);
 	});
 });

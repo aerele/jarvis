@@ -10,7 +10,7 @@ Desk chat, dashboard chat, and mobile chat use the shared formatter.
 
 | Failure | Customer action |
 | --- | --- |
-| All model / failover attempts failed | Administrator reviews each connection’s error |
+| All model / failover attempts failed | One line per model with its own cause and next step (see below) |
 | Runtime file permissions / read-only filesystem | Administrator checks file ownership and permissions |
 | Full disk / disk quota / locked or corrupt database | Administrator checks storage and database |
 | Missing runtime files / missing credentials / pairing | Administrator repairs assistant setup |
@@ -20,9 +20,9 @@ Desk chat, dashboard chat, and mobile chat use the shared formatter.
 | Request too large | Smaller files or split the request |
 | Insufficient credits / billing / spending cap | Model account owner checks billing |
 | Rate limit / cooldown | Wait or use another available model |
-| Usage quota | Wait for reset or ask the account owner to review limits |
+| Usage quota (incl. a 429 carrying `usage_limit_reached`) | Wait for the reset shown, or use another model; AI models marks the row |
 | Invalid or expired authentication | Administrator reconnects the affected service |
-| Expired chat-subscription sign-in (OpenAI, Anthropic, xAI Grok, Kimi) | Administrator reconnects it in AI models; a member is told to ask their administrator |
+| Expired chat-subscription sign-in (OpenAI, Anthropic, xAI Grok, Kimi; incl. the Claude CLI's `OAuth session expired and could not be refreshed`) | Administrator reconnects it in AI models; a member is told to ask their administrator |
 | Safety rejection | Review content or contact the provider |
 | Missing / unsupported / inaccessible model | Select another model or check its configuration |
 | Access denied | Administrator reviews access to the model, service, or record |
@@ -37,7 +37,7 @@ Desk chat, dashboard chat, and mobile chat use the shared formatter.
 | Empty reply from the model | Retry; if it returns, start a new chat or choose another model |
 | Empty reply after tool actions | Check for completed actions, then retry |
 | Cancelled | Muted cancellation, without retry advice |
-| Unknown | Explain that the error did not establish a clear cause |
+| Unknown | Retry; the stored error text shows as the reason; Report error to support |
 
 Classification reads at most the first 8 KB of the error text and matches
 ASCII-only on both engines (Python uses `re.ASCII`), so a reload agrees with
@@ -57,7 +57,36 @@ authoritative. An `AgentUnreachableError` wrapper only overrides a generic
 error or timeout; a specific rejection such as invalid credentials survives.
 
 Immediate Retry buttons are hidden for known failures requiring input,
-configuration, access, or account changes. Raw error details remain available.
+configuration, access, or account changes.
+
+There is no "Details" toggle. A classified failure names its cause in the
+headline. Only `gateway`, `provider` and `internal` (no rule names the cause)
+show the stored error text, as a plain line under the hint.
+
+## Failover errors: one line per model
+
+The runtime reports a failover run as `All models failed (N): <provider>/<model>:
+<reason> | ...`. `modelFailures` (JS) and `model_failures` (Python) split it and
+classify each part on its own (`fixtures/model_failures.json` pins both). The
+card lists every model with its cause and one next step. A pool alias
+(`openai_compat/jarvis-pool`) is shown as the model named in its reason (`for
+model gpt-5.6-terra`). A part's `Retry-After` becomes "Resets in about N days",
+counted from the message's failure time. When every part shares one cause, the
+headline is that cause; otherwise it reads "None of your models could answer".
+Retry shows only if some part is retryable; Reconnect shows for a dead sign-in.
+
+The gateway's chat error event cuts its text at 240 characters plus `...`, which
+dropped every model after the first. The relay keeps the lifecycle error frame's
+uncut text instead (`agent_client.uncut_error_message`), on both the direct and
+pump lanes. Rows stored before that fix end in a cut part, shown as "Reason not
+received".
+
+On the server, `subscription_health.note_turn_error` records each part: a dead
+sign-in marks the account expired (the AI models row turns red, General names
+it), and a usage cap is kept per model in the cache (`LIMITS_KEY`, site-local,
+never sent to admin) until its reset. The AI models row shows "Usage limit
+reached" in amber with the reset time; a later successful turn on that model,
+or a new sign-in on its upstream, clears it.
 After a runtime error, the pump sends a turn again by itself in two cases only,
 once per turn: the runtime refused to resume a CLI live session (always on; log
 line `pump redispatch_refused_session run_id=<id>`; the turn keeps its recovery

@@ -3204,12 +3204,12 @@ def _classify_error(err_text: str, exc=None) -> str:
 
 
 def _note_subscription_error(err_text: str, code: str) -> None:
-	"""Remember a dead chat sign-in seen at a run-error publish site (never inside the classifier,
-	which the pump's pre-ack paths also call). Never raises."""
-	if code == "subscription-expired":
-		from jarvis import subscription_health
+	"""Remember a dead chat sign-in or a model's usage cap seen at a run-error publish site (never
+	inside the classifier, which the pump's pre-ack paths also call). A failover error names one cause
+	per model, whatever its overall code, so every code is passed on. Never raises."""
+	from jarvis import subscription_health
 
-		subscription_health.note_turn_error(err_text, code)
+	subscription_health.note_turn_error(err_text, code)
 
 
 def _note_empty_reply(run_id: str, conversation: str, err_text: str, code: str) -> None:
