@@ -497,7 +497,6 @@ const view = (m) => {
 			!cards &&
 			!charts.length &&
 			!action &&
-			!actionBad &&
 			!m.error &&
 			!(m.canvas || []).length &&
 			!m.stopped,
@@ -570,6 +569,17 @@ const lastAssistantKey = computed(() => {
 	const assistants = items.value.filter((i) => i.type === "assistant" && i.msg);
 	return assistants.length ? assistants[assistants.length - 1].key : "";
 });
+
+// The draft card (or its error view) shows only on the newest assistant message
+// and until it is dismissed; every other message falls back to its prose or the
+// "didn't return a reply" line, so a broken block never leaves a blank gap.
+function showsDraftCard(it) {
+	return !!(
+		(it.view.action || it.view.actionBad) &&
+		it.key === lastAssistantKey.value &&
+		!dismissedActions.value.has(it.key)
+	);
+}
 
 // The write leaves a receipt in the conversation (a closed failure, the assistant's
 // explanation), so reload rather than guess.
@@ -1642,7 +1652,7 @@ onUnmounted(() => {
 					<ReportScope :tools="reportToolsByTurn[it.key] || []" />
 					<ExportCard v-if="exportSummary(it.msg)" :summary="exportSummary(it.msg)" />
 					<div v-else-if="it.view.html" class="jv-md" v-html="it.view.html" />
-					<div v-else-if="it.view.empty" class="jv-msg-error">
+					<div v-else-if="it.view.empty && !showsDraftCard(it)" class="jv-msg-error">
 						{{ agentName }} didn't return a reply for this turn. Try asking again.
 					</div>
 					<!-- SIBLING of the chain above, not a v-else-if in it: a partial stop
@@ -1652,11 +1662,7 @@ onUnmounted(() => {
 					     partial and the empty stop. -->
 					<div v-if="it.msg.stopped" class="jv-stopped">You stopped this reply.</div>
 					<ActionCard
-						v-if="
-							(it.view.action || it.view.actionBad) &&
-							it.key === lastAssistantKey &&
-							!dismissedActions.has(it.key)
-						"
+						v-if="showsDraftCard(it)"
 						:action="it.view.action"
 						:conversation="convId"
 						:parked-note="parkedActions.get(it.key) || parkedByCard(pending, it.key)"
