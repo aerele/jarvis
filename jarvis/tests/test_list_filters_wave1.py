@@ -312,7 +312,7 @@ class TestWithholdingSurvivesMigration(Wave1Base):
 		_mk_trigger(USER_A, "lfw-trig-secret")
 
 	def test_redacted_trigger_logic_is_not_filterable_by_anyone(self):
-		for field in ("condition", "script_body", "llm_instruction"):
+		for field in ("condition", "script_body", "llm_instruction", "intake_instructions", "intake_spec"):
 			for user in (USER_A, USER_SM):
 				with self.subTest(field=field, user=user), _as(user):
 					res = list_triggers_page(

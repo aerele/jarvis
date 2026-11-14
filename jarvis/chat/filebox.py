@@ -22,6 +22,8 @@ import frappe
 from frappe.rate_limiter import rate_limit
 
 from jarvis.chat import filebox_skills
+from jarvis.intake import guards
+from jarvis.intake.capture import FILE_REMOVED_SUMMARY, UNREADABLE_TYPE_SUMMARY, is_permanent
 from jarvis.permissions import message_origin, refuse_in_tool_dispatch, require_jarvis_user
 
 # The persona fallback skill (SHARED_CORE_SKILLS, role_profiles.py) - always
@@ -226,6 +228,35 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 	the run has no source file, or ``{"attach_error": <reason>}`` with the error
 	logged. Idempotent: a draft that already has this file is left as it is. Every
 	document draft the run makes gets the file (each was made from it)."""
+
+	def resolve():
+		from jarvis.chat.filebox_source import selected_file
+
+		src = _source_file(conv, ("name", "file_url", "file_name"))
+		# Native File copies retain the blob. Re-saving a binary PDF through
+		# save_url can decode/re-encode it and change its URL and bytes.
+		return src, bool(src and src.get("file_url") and selected_file(conv) is not None)
+
+	return _attach(doctype, name, resolve, context=conv)
+
+
+def attach_file_to_doc(file_name: str, doctype: str, name: str) -> dict:
+	"""Attach the File ``file_name`` (a File doc name) to ``doctype`` ``name``, as the
+	current user. Same contract as ``attach_source_to_draft``, without a conversation:
+	``{"attached_file": ...}``, ``{}`` when the File has no URL, or ``{"attach_error": ...}``
+	with the error logged. Document Intake uses it for the file a draft was read from."""
+
+	def resolve():
+		src = frappe.db.get_value("File", file_name, ["name", "file_url", "file_name"], as_dict=True)
+		return src, False
+
+	return _attach(doctype, name, resolve, context=file_name)
+
+
+def _attach(doctype: str, name: str, resolve, *, context: str) -> dict:
+	"""Shared body: ``resolve()`` returns ``(file row or None, copy)``; ``copy`` uses a
+	native File copy instead of ``add_attachments``. Savepoint and error handling are
+	the File Box ones, so a failed attach never loses the draft."""
 	from frappe.utils.file_manager import add_attachments
 
 	savepoint = "jarvis_filebox_attach"
@@ -233,7 +264,7 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 	src = None
 	frappe.db.savepoint(savepoint)
 	try:
-		src = _source_file(conv, ("name", "file_url", "file_name"))
+		src, copy = resolve()
 		if not src or not src.get("file_url"):
 			return {}
 		existing = frappe.db.get_value(
@@ -243,11 +274,7 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 		)
 		if existing:
 			return {"attached_file": existing}
-		from jarvis.chat.filebox_source import selected_file
-
-		if selected_file(conv) is not None:
-			# Native File copies retain the blob. Re-saving a binary PDF through
-			# save_url can decode/re-encode it and change its URL and bytes.
+		if copy:
 			if not frappe.has_permission(doctype, "write", doc=name):
 				frappe.throw("Not permitted", frappe.PermissionError)
 			files = [
@@ -266,7 +293,7 @@ def attach_source_to_draft(conv: str, doctype: str, name: str) -> dict:
 		file_name = (src or {}).get("file_name") or "the dropped file"
 		frappe.log_error(
 			title="jarvis.file_box.attach_failed",
-			message=f"{conv}: {file_name} -> {doctype} {name}\n{frappe.get_traceback()}",
+			message=f"{context}: {file_name} -> {doctype} {name}\n{frappe.get_traceback()}",
 		)
 		reason = _first_line(str(e)) or type(e).__name__
 		return {
@@ -1221,6 +1248,317 @@ def list_inbound_page(
 		"start": start,
 		"page_length": pl,
 	}
+
+
+# --------------------------------------------------------------------------- #
+# Document Intake rows (Jarvis Trigger Activity, action_type Intake)
+# --------------------------------------------------------------------------- #
+ACTIVITY = "Jarvis Trigger Activity"
+_INTAKE_STATUSES = ("Queued", "Running", "Needs Review", "Success", "Failed", "Skipped")
+_INTAKE_RETRYABLE = ("Failed", "Skipped")
+_INTAKE_FILTERS = {"status", "trigger", "from_date", "to_date"}
+
+
+def _intake_source_label(row: dict) -> str:
+	"""``Folder: <path without Home/>`` or ``Record: <doctype> <name>`` from the rule."""
+	if row.get("intake_source") == "Record":
+		return f"Record: {row.get('intake_record_doctype') or ''} {row.get('target_docname') or ''}".strip()
+	folder = row.get("intake_folder") or ""
+	return f"Folder: {folder[5:] if folder.startswith('Home/') else folder}"
+
+
+def live_drafts(rows: list[dict]) -> set[tuple[str, str]]:
+	"""The ``(doctype, name)`` drafts that still exist: one query per doctype, not per row."""
+	wanted: dict[str, set[str]] = {}
+	for r in rows:
+		if r.get("draft_doctype") and r.get("draft_name"):
+			wanted.setdefault(r["draft_doctype"], set()).add(r["draft_name"])
+	live: set[tuple[str, str]] = set()
+	for doctype, names in wanted.items():
+		if not frappe.db.exists("DocType", doctype):
+			continue
+		table = frappe.qb.DocType(doctype)
+		found = frappe.qb.from_(table).select(table.name).where(table.name.isin(list(names))).run(pluck=True)
+		live.update((doctype, n) for n in found)
+	return live
+
+
+def _was_rejected(summary: str | None) -> bool:
+	from jarvis.intake.review import REJECTED
+
+	return (summary or "").startswith(REJECTED)
+
+
+def can_review_row(row: dict, me: str, system_manager: bool) -> bool:
+	"""Same rule as ``review.may_decide``: a System Manager or the owner of the rule. The
+	File Box shows "Open review" only then, so an uploader is never sent to "Not permitted"."""
+	if row.get("status") != "Needs Review" or not row.get("approval_request"):
+		return False
+	return system_manager or row.get("rule_owner") == me
+
+
+def row_badge(row: dict) -> str:
+	"""A hint for the badge: ``waiting`` (Queued behind a daily limit or a pause) or
+	``not_allowed`` (the rule's target or the uploader's right to create is refused)."""
+	from jarvis.intake import worker
+
+	summary = row.get("summary") or ""
+	if row.get("status") == "Queued" and (
+		summary.startswith(worker.WAITING_PREFIX) or summary == worker.PAUSED_SUMMARY
+	):
+		return "waiting"
+	if row.get("status") in _INTAKE_RETRYABLE and (
+		summary == guards.TARGET_REFUSED_SUMMARY or summary.startswith(guards.CREATE_REFUSAL_PREFIX)
+	):
+		return "not_allowed"
+	return ""
+
+
+def can_retry_row(row: dict, me: str, manager: bool, live: set[tuple[str, str]]) -> bool:
+	"""Failed or Skipped, no draft yet, not a duplicate, and the caller's to retry."""
+	if row.get("status") not in _INTAKE_RETRYABLE or row.get("duplicate_of"):
+		return False
+	if is_permanent(row.get("summary")):
+		return False
+	# A reviewer's "no" is not undone by the uploader pressing Retry; a manager may
+	# (that puts the file back in front of a reviewer on purpose).
+	if _was_rejected(row.get("summary")) and not manager:
+		return False
+	if row.get("draft_name") and (row.get("draft_doctype"), row["draft_name"]) in live:
+		return False
+	return manager or row.get("owner") == me
+
+
+def _intake_filters(filters) -> dict:
+	from frappe.utils import getdate
+
+	f = _load_filters(filters, _INTAKE_FILTERS)
+	if "status" in f and f["status"] not in _INTAKE_STATUSES:
+		frappe.throw("Invalid status filter")
+	for key in ("from_date", "to_date"):
+		if key in f:
+			try:
+				f[key] = getdate(f[key])
+			except Exception:
+				frappe.throw(f"Invalid {key} (expected YYYY-MM-DD)")
+	return f
+
+
+def _int_arg(value, name: str, low: int, high: int) -> int:
+	"""An integer request argument within ``[low, high]``. Whitelisted functions in this
+	module are not type-checked by Frappe (``from __future__ import annotations`` keeps
+	the old endpoints working as they were), so the intake endpoints check themselves."""
+	if isinstance(value, bool) or not isinstance(value, int | str):
+		frappe.throw(f"{name} must be a whole number")
+	try:
+		number = int(value)
+	except ValueError:
+		frappe.throw(f"{name} must be a whole number")
+	if not low <= number <= high:
+		frappe.throw(f"{name} must be between {low} and {high}")
+	return number
+
+
+def _validate_intake_page_args(search, filters, scope, start, page_length) -> tuple[str, int, int]:
+	"""Explicit input checks for ``list_intake_page``; returns (search, start, page_length)."""
+	if search is not None and not isinstance(search, str):
+		frappe.throw("search must be text")
+	if filters is not None and not isinstance(filters, str | dict):
+		frappe.throw("filters must be an object")
+	if isinstance(filters, str) and filters.strip():
+		try:
+			parsed = frappe.parse_json(filters)
+		except Exception:
+			parsed = None
+		if not isinstance(parsed, dict):
+			frappe.throw("filters must be an object")
+	if scope not in ("mine", "all"):
+		frappe.throw("Invalid scope")
+	return (
+		(search or "")[:140],
+		_int_arg(0 if start is None else start, "start", 0, 1_000_000),
+		_int_arg(20 if page_length is None else page_length, "page_length", 1, 100),
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def list_intake_page(
+	search: str = "",
+	filters: str | dict | None = None,
+	scope: str = "mine",
+	start: int = 0,
+	page_length: int = 20,
+) -> dict:
+	"""Document Intake files, newest first, as ``{rows, total, has_more, start, page_length}``.
+	``scope="mine"`` is the caller's own uploads; ``"all"`` needs the trigger-manager role.
+	Never returns ``detail`` (managers only). Filters: status, trigger, from_date, to_date."""
+	from frappe.utils import add_days
+	from pypika.functions import Count
+
+	from jarvis.chat.triggers_api import _can_manage
+
+	me = frappe.session.user
+	manager = _can_manage(me)
+	search, start, pl = _validate_intake_page_args(search, filters, scope, start, page_length)
+	if scope == "all" and not manager:
+		frappe.throw(
+			"You need the Jarvis Admin or System Manager role to see everyone's files.",
+			frappe.PermissionError,
+		)
+	f = _intake_filters(filters)
+
+	a, fl, t = frappe.qb.DocType(ACTIVITY), frappe.qb.DocType("File"), frappe.qb.DocType("Jarvis Trigger")
+	conds = [a.action_type == "Intake"]
+	if scope == "mine":
+		conds.append(a.owner == me)
+	if "status" in f:
+		conds.append(a.status == f["status"])
+	if "trigger" in f:
+		conds.append(a.trigger == f["trigger"])
+	if "from_date" in f:
+		conds.append(a.creation >= f["from_date"])
+	if "to_date" in f:
+		conds.append(a.creation < add_days(f["to_date"], 1))
+	if search:
+		like = f"%{_lk(search)}%"
+		conds.append(fl.file_name.like(like) | a.summary.like(like))
+
+	def base(*cols):
+		q = (
+			frappe.qb.from_(a)
+			.left_join(fl)
+			.on(fl.name == a.source_file)
+			.left_join(t)
+			.on(t.name == a.trigger)
+			.select(*cols)
+		)
+		for c in conds:
+			q = q.where(c)
+		return q
+
+	total = base(Count("*")).run()[0][0]
+	rows = (
+		base(
+			a.name,
+			a.creation,
+			a.owner,
+			fl.file_name,
+			fl.file_url,
+			a.status,
+			a.summary,
+			a.draft_doctype,
+			a.draft_name,
+			a.approval_request,
+			a.duplicate_of,
+			a.target_docname,
+			t.intake_source,
+			t.intake_folder,
+			t.intake_record_doctype,
+			t.owner.as_("rule_owner"),
+		)
+		.orderby(a.creation, order=frappe.qb.desc)
+		.orderby(a.name, order=frappe.qb.desc)
+		.limit(pl)
+		.offset(start)
+		.run(as_dict=True)
+	)
+	live = live_drafts(rows)
+	reviewer = "System Manager" in frappe.get_roles(me)
+	# A draft deleted since is a dangling link: flag it and hide the name, the stored row stays.
+	missing = {
+		r["name"] for r in rows if r["draft_name"] and (r["draft_doctype"], r["draft_name"]) not in live
+	}
+	out = [
+		{
+			"name": r["name"],
+			"creation": r["creation"],
+			"file_name": r["file_name"] or "",
+			"file_url": r["file_url"] or "",
+			"source_label": _intake_source_label(r),
+			"status": r["status"],
+			"summary": r["summary"] or "",
+			"draft_doctype": r["draft_doctype"] or "",
+			"draft_name": "" if r["name"] in missing else (r["draft_name"] or ""),
+			"draft_missing": r["name"] in missing,
+			"approval_request": r["approval_request"] or "",
+			"badge": row_badge(r),
+			"can_retry": can_retry_row(r, me, manager, live),
+			"can_review": can_review_row(r, me, reviewer),
+		}
+		for r in rows
+	]
+	return {
+		"rows": out,
+		"total": total,
+		"has_more": start + len(out) < total,
+		"start": start,
+		"page_length": pl,
+	}
+
+
+# Deliberately NOT behind ``require_jarvis_user``: the uploader of an intake file may have
+# no Jarvis access at all (they only upload), yet they must be able to run their own
+# failed file again. The ownership check in the body (row owner or trigger manager) is
+# the gate; see ``_OWNER_GATED_ALLOWLIST`` in test_chat_endpoint_gating.
+@frappe.whitelist(methods=["POST"])
+def retry_intake(activity: str) -> dict:
+	"""Run a Failed or Skipped intake file again. Claim-first: one conditional UPDATE
+	moves the row to Queued, so a double click retries once. A saved reading is kept
+	(a draft-only retry costs no AI call) unless the model could not read the image."""
+	from jarvis.chat.triggers_api import _can_manage
+	from jarvis.intake import worker
+	from jarvis.intake._db import update_rowcount
+
+	if not isinstance(activity, str) or not activity.strip():
+		frappe.throw("Activity name is required")
+	me = frappe.session.user
+	row = frappe.db.get_value(
+		ACTIVITY,
+		{"name": activity, "action_type": "Intake"},
+		["name", "owner", "status", "summary", "draft_doctype", "draft_name", "duplicate_of"],
+		as_dict=True,
+	)
+	if not row or not (row.owner == me or _can_manage(me)):
+		frappe.throw("Not permitted", frappe.PermissionError)
+	if row.duplicate_of:
+		frappe.throw(
+			"This file is a duplicate of an earlier upload, so running it again would only repeat it."
+		)
+	if row.summary == UNREADABLE_TYPE_SUMMARY:
+		frappe.throw("This file type can't be read for intake, so running it again would not help.")
+	if row.summary == FILE_REMOVED_SUMMARY:
+		frappe.throw("The file was removed, so running it again would not help.")
+	if is_permanent(row.summary):
+		frappe.throw("This file was refused for a reason a new run would not change.")
+	if row.status not in _INTAKE_RETRYABLE:
+		frappe.throw("Only a failed or skipped file can be run again.")
+	if _was_rejected(row.summary) and not _can_manage(me):
+		frappe.throw("A reviewer rejected this file. Ask a manager to run it again.")
+	if (row.draft_doctype, row.draft_name) in live_drafts([row]):
+		frappe.throw("A draft already exists for this file.")
+
+	a = frappe.qb.DocType(ACTIVITY)
+	update = (
+		frappe.qb.update(a)
+		.set(a.status, "Queued")
+		.set(a.summary, "Queued again")
+		.set(a.attempts, 0)  # a retry is a fresh run: the stuck-row recovery counts from zero
+		.where((a.name == activity) & a.status.isin(list(_INTAKE_RETRYABLE)))
+	)
+	if row.summary in (worker.NO_IMAGE_SUMMARY, worker.READ_NOTHING_SUMMARY):
+		update = update.set(a.reading_json, "")  # the model must look at the file again
+	if update_rowcount(update) != 1:
+		frappe.throw("This file was already run again.")
+	frappe.enqueue(
+		"jarvis.intake.worker.run_job",
+		queue="default",
+		enqueue_after_commit=True,
+		job_id=f"intake:{activity}",
+		deduplicate=True,
+		activity=activity,
+	)
+	return {"ok": True, "status": "Queued"}
 
 
 # --------------------------------------------------------------------------- #

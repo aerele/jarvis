@@ -131,6 +131,17 @@ class TestVision(unittest.TestCase):
 		for p in parts:
 			self.assertLessEqual(len(base64.b64decode(p["data_b64"])), vision._MAX_IMAGE_BYTES)
 
+	def test_custom_byte_budget_respected(self):
+		part = vision.image_part(_noisy_jpeg(2000, 1500, blur=3), "a.jpg", max_bytes=60_000)
+		self.assertIsNotNone(part)
+		self.assertLessEqual(len(base64.b64decode(part["data_b64"])), 60_000)
+		parts, _ = vision.pdf_parts(_pdf(1), "d.pdf", max_bytes=60_000)
+		self.assertTrue(parts)
+		self.assertLessEqual(len(base64.b64decode(parts[0]["data_b64"])), 60_000)
+		# None keeps the chat default, so a larger part than 60 KB is still allowed.
+		default = vision.image_part(_noisy_jpeg(2000, 1500, blur=3), "a.jpg")
+		self.assertGreater(len(base64.b64decode(default["data_b64"])), 60_000)
+
 	def test_pdf_parts(self):
 		parts, total = vision.pdf_parts(_pdf(3), "doc.pdf")
 		self.assertEqual(total, 3)

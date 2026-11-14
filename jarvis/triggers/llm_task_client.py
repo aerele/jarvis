@@ -128,10 +128,34 @@ def _extract_object_reply(payload: dict) -> dict | str:
 	return _extract_text(payload)
 
 
+def not_sent(error: LLMTaskError) -> LLMTaskError:
+	"""Mark ``error`` as raised before the request left the site (nothing ran, nothing to
+	bill). Every other transport error counts as sent: see ``jarvis.intake.client``."""
+	error.reached_model = False
+	return error
+
+
+def _is_connect_failure(exc: Exception) -> bool:
+	"""True for a failure to CONNECT (refused, DNS, connect timeout): the request body was
+	never sent. A reset or timeout after the connection was made is not one."""
+	import requests
+	from urllib3.exceptions import ConnectTimeoutError, NewConnectionError
+
+	if isinstance(exc, requests.ConnectTimeout):
+		return True
+	if isinstance(exc, requests.ConnectionError):
+		inner = exc.args[0] if exc.args else None
+		reason = getattr(inner, "reason", inner)
+		return isinstance(reason, NewConnectionError | ConnectTimeoutError)
+	return False
+
+
 def _call_route(path: str, body: dict, read_timeout_s: float) -> tuple[int, bytes]:
 	"""POST ``body`` to a plugin route on the tenant's agent and return ``(status, raw body)``.
 
-	Every transport failure is an ``LLMTaskError`` (never carrying the signing key)."""
+	Every transport failure is an ``LLMTaskError`` (never carrying the signing key). One
+	raised before the request left the site carries ``reached_model = False``; one raised
+	once the response headers arrived, or after the body was sent, is left to count."""
 	import requests
 
 	# Third door to the tenant's agent besides AgentSession.connect: a restored copy
@@ -142,16 +166,17 @@ def _call_route(path: str, body: dict, read_timeout_s: float) -> tuple[int, byte
 	try:
 		site_pin.assert_not_copy()
 	except SiteIsCopyError as e:
-		raise LLMTaskError(str(e)) from e
+		raise not_sent(LLMTaskError(str(e))) from e
 
 	agent_url = _agent_url()
 	if not agent_url:
-		raise LLMTaskError("agent gateway is not configured on this site")
+		raise not_sent(LLMTaskError("agent gateway is not configured on this site"))
 
 	# The plugin vouches this key with the site before it runs the task, so claim it
 	# first: a trigger key has no row until the activity is written.
 	session_key = f"agent:main:trigger-{uuid.uuid4().hex}"
 	session_claims.claim(session_key)
+	sent = False
 	try:
 		# route_request never follows a redirect: the route only ever answers
 		# 200/4xx/5xx, so a 3xx would mean a compromised gateway trying to pivot the
@@ -165,11 +190,19 @@ def _call_route(path: str, body: dict, read_timeout_s: float) -> tuple[int, byte
 			read_timeout_s=read_timeout_s,
 			stream=True,
 		) as response:
+			sent = True  # headers arrived: the request was sent and the plugin answered
 			return response.status_code, _read_bounded(response)
-	except LLMTaskError:
+	except LLMTaskError as e:
+		if sent:
+			e.reached_model = True
 		raise
 	except plugin_routes.PluginRouteError as e:
-		raise LLMTaskError(str(e)) from e
+		error = LLMTaskError(str(e))
+		cause = e.__cause__
+		# No cause: refused before anything was sent (no URL, no key). A requests failure
+		# counts as sent unless it was a connect failure.
+		error.reached_model = bool(cause) and not _is_connect_failure(cause)
+		raise error from e
 	except requests.Timeout as e:
 		raise LLMTaskError("llm-task request timed out") from e
 	except Exception as e:

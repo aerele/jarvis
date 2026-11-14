@@ -24,6 +24,9 @@ from frappe.model.document import Document
 from frappe.utils import cint
 from frappe.utils.safe_exec import is_safe_exec_enabled
 
+from jarvis.intake import guards
+from jarvis.intake import spec as intake_spec
+from jarvis.intake.capture import clear_intake_cache
 from jarvis.permissions import NotRenamable
 from jarvis.tools._sandbox_attrs import capped, unsafe_attribute_errors
 from jarvis.triggers.engine import (
@@ -105,9 +108,19 @@ def _body_hash(trigger) -> str:
 	return hashlib.sha256((text or "").strip().encode()).hexdigest()
 
 
+_STATUS_FIELD_TYPES = ("Data", "Small Text")
+
+
 class JarvisTrigger(NotRenamable, Document):
 	def validate(self):
 		self._validate_name()
+		if self.action_type == "Intake":
+			# Intake never fires through doc events, so none of the event, condition,
+			# script or duplicate checks apply to it.
+			self._validate_intake()
+			self._guard_server_script_link()
+			self._guard_owner_immutable()
+			return
 		self._validate_target_doctype()
 		self._validate_event_action()
 		self._validate_condition()
@@ -255,27 +268,44 @@ class JarvisTrigger(NotRenamable, Document):
 	def _validate_target_doctype(self):
 		if not self.target_doctype:
 			frappe.throw(_("Target DocType is required."))
-		row = frappe.db.get_value("DocType", self.target_doctype, ["issingle", "istable"], as_dict=True)
+		self._check_doctype_usable(self.target_doctype)
+
+	def _check_doctype_usable(self, doctype, intake=False):
+		"""One gate for every doctype a trigger touches (event target, intake
+		target, intake record): exists, not Single, not a child table, not on the
+		denylist. ``intake`` only changes the wording."""
+		row = frappe.db.get_value("DocType", doctype, ["issingle", "istable"], as_dict=True)
 		if not row:
-			frappe.throw(_("DocType '{0}' does not exist.").format(self.target_doctype))
+			frappe.throw(_("DocType '{0}' does not exist.").format(doctype))
 		if cint(row.issingle):
 			frappe.throw(
-				_("Triggers cannot target single DocTypes ('{0}' is a Single).").format(self.target_doctype)
+				_("Triggers cannot target single DocTypes ('{0}' is a Single).").format(doctype)
+				if not intake
+				else _("Intake cannot use single DocTypes ('{0}' is a Single).").format(doctype)
 			)
 		if cint(row.istable):
 			frappe.throw(
 				_(
 					"Triggers cannot target child tables ('{0}'). Target the parent "
 					"DocType instead. Child rows ride its events."
-				).format(self.target_doctype)
+				).format(doctype)
+				if not intake
+				else _("Intake cannot use child tables ('{0}'). Use the parent DocType instead.").format(
+					doctype
+				)
 			)
-		if self.target_doctype in DENYLISTED_DOCTYPES:
+		if doctype in DENYLISTED_DOCTYPES:
 			frappe.throw(
 				_(
 					"Triggers on '{0}' are not allowed. They could loop on their own "
 					"logs or fire on internal plumbing."
-				).format(self.target_doctype)
+				).format(doctype)
+				if not intake
+				else _("Intake on '{0}' is not allowed. It is an internal DocType.").format(doctype)
 			)
+		if intake and guards.refused_doctype(doctype):
+			# Drafts of config and access doctypes are live records, not drafts.
+			frappe.throw(_("Intake cannot use '{0}'. It holds access or configuration.").format(doctype))
 
 	def _validate_event_action(self):
 		if self.doc_event not in SUPPORTED_EVENTS:
@@ -290,6 +320,133 @@ class JarvisTrigger(NotRenamable, Document):
 					"Script action to block a save, or pick a post-event like "
 					"After Save."
 				).format(self.doc_event)
+			)
+
+	def _validate_intake(self):
+		if self.intake_source not in ("Folder", "Record"):
+			frappe.throw(_("Pick where the documents come from: a folder or a record."))
+		if self.intake_source == "Folder":
+			self._validate_intake_folder()
+		else:
+			self._validate_intake_record()
+		if not self.intake_target_doctype:
+			frappe.throw(_("Pick the DocType the drafts are created in."))
+		self._check_doctype_usable(self.intake_target_doctype, intake=True)
+		intake_spec.validate(intake_spec.load(self))
+		self._check_intake_duplicates()
+		if self.intake_source == "Record":
+			self._check_intake_loops()
+
+	def check_enabled_duplicates(self):
+		"""The duplicate guard that fits this rule's kind, for callers that arm a
+		stored row without ``validate`` (the quick enable toggle)."""
+		if self.action_type == "Intake":
+			self._check_intake_duplicates()
+			if self.intake_source == "Record":
+				self._check_intake_loops()
+		else:
+			self.check_duplicates()
+
+	def _check_intake_duplicates(self):
+		"""Two enabled rules reading the same source into the same DocType would
+		create two drafts per upload."""
+		if not cint(self.enabled):
+			return
+		by_source = {"Folder": "intake_folder", "Record": "intake_record_doctype"}[self.intake_source]
+		# System context on purpose: rules are site-wide, so a permission-filtered
+		# read would miss another user's duplicate.
+		duplicate = frappe.get_all(
+			"Jarvis Trigger",
+			filters={
+				"name": ["!=", self.name or ""],
+				"enabled": 1,
+				"action_type": "Intake",
+				"intake_source": self.intake_source,
+				by_source: self.get(by_source),
+				"intake_target_doctype": self.intake_target_doctype,
+			},
+			limit=1,
+			pluck="name",
+		)
+		if duplicate:
+			frappe.throw(
+				_("Another enabled intake rule already creates {0} from {1}.").format(
+					self.intake_target_doctype, self.get(by_source)
+				),
+				frappe.ValidationError,
+			)
+
+	def _check_intake_loops(self):
+		"""A draft gets the source file attached, so a draft of the watched DocType (or of
+		a DocType another rule watches back) would queue the same photo again."""
+		record, target = self.intake_record_doctype, self.intake_target_doctype
+		if record == target:
+			frappe.throw(_("The drafts cannot be the same DocType as the records being watched."))
+		if not cint(self.enabled):
+			return
+		# System context: rules are site-wide.
+		edges: dict[str, set[str]] = {}
+		for rule in frappe.get_all(
+			"Jarvis Trigger",
+			filters={
+				"name": ["!=", self.name or ""],
+				"enabled": 1,
+				"action_type": "Intake",
+				"intake_source": "Record",
+			},
+			fields=["name", "intake_record_doctype", "intake_target_doctype"],
+		):
+			edges.setdefault(rule.intake_record_doctype, set()).add(rule.intake_target_doctype)
+		# Drafts of ``target`` feed the rules watching it, and so on: reaching ``record``
+		# again, directly or through any number of rules, is a loop.
+		seen, queue = set(), [target]
+		while queue:
+			current = queue.pop()
+			if current == record:
+				frappe.throw(
+					_("The enabled rules would feed each other: {0} leads back to {1}.").format(
+						target, record
+					)
+				)
+			if current in seen:
+				continue
+			seen.add(current)
+			queue.extend(edges.get(current, ()))
+
+	def _validate_intake_folder(self):
+		path = (self.intake_folder or "").strip().strip("/")
+		if not path or not frappe.db.exists("File", {"name": path, "is_folder": 1}):
+			frappe.throw(_("Folder '{0}' does not exist in Files.").format(path))
+		self.intake_folder = path
+
+	def _validate_intake_record(self):
+		doctype = self.intake_record_doctype
+		if not doctype:
+			frappe.throw(_("Record DocType is required."))
+		self._check_doctype_usable(doctype, intake=True)
+		meta = frappe.get_meta(doctype)
+		for fieldname in (self.intake_status_field, self.intake_link_field):
+			if fieldname and not meta.has_field(fieldname):
+				frappe.throw(_("Field '{0}' does not exist on {1}.").format(fieldname, doctype))
+		# The write-back is a plain DB write, but the value must still fit what the field
+		# is: a Select would refuse "Needs Review", a Link to another doctype a draft name.
+		# A standard column (owner, name) has no field row, so it is refused here too.
+		status = self.intake_status_field
+		if status and getattr(meta.get_field(status), "fieldtype", None) not in _STATUS_FIELD_TYPES:
+			frappe.throw(_("Status field '{0}' must be a Data or Small Text field.").format(status))
+		link = self.intake_link_field
+		df = meta.get_field(link) if link else None
+		if link and not (
+			df
+			and (
+				df.fieldtype in ("Data", "Dynamic Link")
+				or (df.fieldtype == "Link" and df.options == self.intake_target_doctype)
+			)
+		):
+			frappe.throw(
+				_("Link field '{0}' must be a Data field, a Dynamic Link, or a Link to {1}.").format(
+					self.intake_link_field, self.intake_target_doctype
+				)
 			)
 
 	def _validate_condition(self):
@@ -485,8 +642,15 @@ class JarvisTrigger(NotRenamable, Document):
 	# ------------------------------------------------------------------ #
 	# cache + realtime
 	# ------------------------------------------------------------------ #
+	def notify_changed(self):
+		"""Bust every registry built from enabled rows and nudge open tabs. Callers
+		that change a row without ``save`` (db_set) go through here, so a new action
+		type cannot be missed by them."""
+		self._notify_changed()
+
 	def _notify_changed(self):
 		clear_cache()
+		clear_intake_cache()
 		# Best-effort nudge to the actor's own open tabs; other users pick the
 		# change up on list refetch (a broadcast to every jarvis user would be
 		# disproportionate for a settings-style doctype).

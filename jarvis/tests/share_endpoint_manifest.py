@@ -336,6 +336,15 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.chat.filebox",
+	"Document Intake rows are owner-or-manager scoped Jarvis Trigger Activity records; no conversation identifier lookup.",
+	"""
+    list_intake_page
+    retry_intake
+    """,
+)
+
+_unrelated(
 	"jarvis.chat.greeting",
 	"Current-user greeting/workspace readiness; no conversation identifier lookup.",
 	"""
@@ -494,10 +503,13 @@ _unrelated(
     delete_trigger
     delete_triggers_bulk
     get_activity_detail
+    get_intake_field_options
     get_trigger
     get_triggers_caps
     list_activity_page
+    list_intake_folders
     list_triggers_page
+    search_intake_doctypes
     set_trigger_enabled
     test_trigger_condition
     update_trigger

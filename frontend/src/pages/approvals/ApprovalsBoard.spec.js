@@ -126,6 +126,13 @@ function detailStub(kind, cls) {
 vi.mock("./PendingActionDetail.vue", detailStub("held", "held-detail"));
 vi.mock("./PendingChatDetail.vue", detailStub("chat", "chat-detail"));
 vi.mock("./SheetDetail.vue", detailStub("sheet", "sheet-detail"));
+vi.mock("./IntakeReviewDetail.vue", () => ({
+	default: {
+		props: ["approval", "onDecided"],
+		template:
+			'<div class="intake-detail"><span class="who">{{ approval.name }}</span><button class="intake-done" @click="onDecided({ ok: true }, approval.name)">done</button></div>',
+	},
+}));
 
 import { useRoute, useRouter } from "vue-router";
 import * as api from "@/api";
@@ -315,7 +322,7 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(rail(w).classes()).toEqual(
 			expect.arrayContaining([
 				"w-full",
-				"max-h-[35%]",
+				"max-h-[30vh]",
 				"border-b",
 				"lg:w-[360px]",
 				"lg:max-h-none",
@@ -332,6 +339,29 @@ describe("ApprovalsBoard one inbox", () => {
 		expect(w.get('[data-testid="approval-tag-picker"]').classes()).toContain(
 			"max-w-[calc(100vw-2rem)]"
 		);
+	});
+
+	it("opens a Document Intake review in its own form, not the generic decision controls", async () => {
+		state.ar = [ar("AR-1", { source: "Intake" }), ar("AR-2")];
+		approvals.getApproval.mockImplementation(async (name) => ({
+			...ar(name, name === "AR-1" ? { source: "Intake" } : {}),
+			question: "Needed",
+			can_act: 1,
+			intake: { missing: [], read: [], table: null, file: null },
+		}));
+		const w = await board({}, { id: "AR-1" });
+		expect(w.find(".intake-detail .who").text()).toBe("AR-1");
+		const decision = pane(w);
+		expect(button(decision, "Approve")).toBeUndefined();
+		expect(button(decision, "Ignore")).toBeUndefined();
+		expect(
+			decision.find("textarea, input[placeholder='Add a note - optional']").exists()
+		).toBe(false);
+		// Settling it drops that row from the Pending rail and refreshes the badge.
+		await w.find(".intake-done").trigger("click");
+		await flushPromises();
+		expect(shell.refresh).toHaveBeenCalled();
+		expect(arRow(w, "AR-1")).toBeUndefined();
 	});
 
 	it("re-reads both lists when the sidebar badge moves (#616)", async () => {
@@ -532,6 +562,30 @@ describe("ApprovalsBoard one inbox", () => {
 			"Review acknowledged: no posting authorised",
 			1
 		);
+	});
+
+	it("labels an Intake review's rail row Intake, not File Box", async () => {
+		state.ar = [ar("AR-9", { source: "Intake" })];
+		approvals.getApproval.mockImplementation(async (name) => ({
+			...ar(name, { source: "Intake" }),
+			can_act: 0,
+		}));
+		const w = await board();
+		const badges = w.find('[data-testid="approvals-rail"]').findAll(".badge, [class*=badge]");
+		const rail = w.find('[data-testid="approvals-rail"]').text();
+		expect(rail).toContain("Intake");
+		expect(rail).not.toContain("File Box");
+		expect(badges.length).toBeGreaterThan(0);
+	});
+
+	it("names the Refresh icon button and keeps the stacked rail within the viewport", async () => {
+		const w = await board();
+		expect(w.find('button[data-tip="Refresh"]').exists()).toBe(true);
+		const rail = w.find('[data-testid="approvals-rail"]');
+		// vh, not %: a percentage max-height of an auto-height flex parent is ignored, which let
+		// the rail grow over the review form at phone widths.
+		expect(rail.classes()).toContain("max-h-[30vh]");
+		expect(rail.classes()).toContain("lg:max-h-none");
 	});
 
 	it("shows source recovery when a saved File Box decision cannot resume", async () => {

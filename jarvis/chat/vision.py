@@ -57,9 +57,10 @@ def supports_vision(provider: str | None) -> bool:
 	return (provider or "").strip().lower() in _VISION_PROVIDERS
 
 
-def image_part(content: bytes, file_name: str) -> dict | None:
+def image_part(content: bytes, file_name: str, max_bytes: int | None = None) -> dict | None:
 	"""Decode an image, downscale/recompress under the caps, and return a vision
-	part ``{mime, data_b64, file_name}`` - or None if it can't be decoded/encoded."""
+	part ``{mime, data_b64, file_name}`` - or None if it can't be decoded/encoded.
+	``max_bytes`` overrides the per-image byte budget (None keeps the chat default)."""
 	try:
 		from PIL import Image
 
@@ -69,7 +70,7 @@ def image_part(content: bytes, file_name: str) -> dict | None:
 		return None
 	im = _upright(src)
 	try:
-		return _encode_under_caps(im, file_name)
+		return _encode_under_caps(im, file_name, max_bytes)
 	finally:
 		for each in {id(src): src, id(im): im}.values():
 			try:
@@ -91,12 +92,17 @@ def _upright(im):
 
 
 def pdf_parts(
-	content: bytes, file_name: str, first_page: int = 1, max_pages: int | None = None
+	content: bytes,
+	file_name: str,
+	first_page: int = 1,
+	max_pages: int | None = None,
+	max_bytes: int | None = None,
 ) -> tuple[list[dict], int]:
 	"""Rasterize up to _MAX_PDF_PAGES pages to JPEG image parts. Returns
 	``(parts, total_pages)`` so the caller can note truncation; each part
 	carries its 1-based ``page`` number. ``first_page``/``max_pages`` select a
-	window (defaults keep the from-the-start behaviour). Uses pypdfium2
+	window (defaults keep the from-the-start behaviour); ``max_bytes`` overrides the
+	per-page byte budget. Uses pypdfium2
 	(Apache/BSD) - NOT PyMuPDF (AGPL)."""
 	import pypdfium2 as pdfium
 
@@ -119,7 +125,7 @@ def pdf_parts(
 				pil = page.render(scale=scale).to_pil()
 			except Exception:
 				continue
-			part = _encode_under_caps(pil, f"{file_name}-p{i + 1}.jpg")
+			part = _encode_under_caps(pil, f"{file_name}-p{i + 1}.jpg", max_bytes)
 			if part:
 				part["page"] = i + 1
 				parts.append(part)
@@ -128,12 +134,14 @@ def pdf_parts(
 		pdf.close()
 
 
-def _encode_under_caps(im, file_name: str) -> dict | None:
+def _encode_under_caps(im, file_name: str, max_bytes: int | None = None) -> dict | None:
 	"""Convert to RGB and return the first JPEG within the byte budget. Quality drops
 	before pixels do (legibility holds longer at lower quality than at fewer pixels).
 	The full-size photo is cut to the largest step once, so smaller steps copy a
 	~7 MB bitmap rather than a 64 MP one; a step that leaves the size unchanged
-	(an image already that small) is skipped instead of re-encoded."""
+	(an image already that small) is skipped instead of re-encoded.
+	``max_bytes`` None means the module default."""
+	budget = _MAX_IMAGE_BYTES if max_bytes is None else max_bytes
 	try:
 		im = im.convert("RGB")
 		im.thumbnail((_SIDE_STEPS[0], _SIDE_STEPS[0]))  # never upscales
@@ -146,7 +154,7 @@ def _encode_under_caps(im, file_name: str) -> dict | None:
 			tried.add(scaled.size)
 			for quality in _JPEG_QUALITIES:
 				data = _jpeg(scaled, quality)
-				if len(data) <= _MAX_IMAGE_BYTES:
+				if len(data) <= budget:
 					return _part(data, file_name)
 	except Exception:
 		return None

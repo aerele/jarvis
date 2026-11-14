@@ -8,7 +8,8 @@ from jarvis.permissions import NotRenamable
 
 WIKI_SOURCE = "File Box Wiki"
 TICKET_TRIAGE_SOURCE = "Ticket Triage"
-_SERVER_SOURCES = (WIKI_SOURCE, "Agent Review", TICKET_TRIAGE_SOURCE)
+INTAKE_SOURCE = "Intake"
+_SERVER_SOURCES = (WIKI_SOURCE, "Agent Review", TICKET_TRIAGE_SOURCE, INTAKE_SOURCE)
 # Written only by server code that sets ``flags.jarvis_server_write`` (raw-SQL
 # transitions never reach validate). No Administrator / ignore_permissions exemption.
 _SERVER_FIELDS = (
@@ -22,6 +23,10 @@ _SERVER_FIELDS = (
 	"assessment_evidence",
 	"assessment_input_digest",
 	"resume_state",
+	# Document Intake: approving builds a draft from these with no AI check, so a
+	# forged activity link or value must not come in through the ORM.
+	"intake_activity",
+	"intake_missing",
 )
 # A decided review-scoped Chat question's outcome. It is written only by raw-SQL
 # server transitions (decide/dismiss/restore/answer and the chat continuation), so
