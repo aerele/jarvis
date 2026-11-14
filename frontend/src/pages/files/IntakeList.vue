@@ -180,7 +180,9 @@ const SCOPE_OPTIONS = [
 ];
 
 const canManage = ref(false);
-const scope = ref("mine");
+// "Whose files": owned by FilesList so it survives a Dropped round trip (this view is
+// rebuilt on every switch); standalone it falls back to its own state.
+const scope = defineModel("scope", { type: String, default: "mine" });
 
 const {
 	rows,

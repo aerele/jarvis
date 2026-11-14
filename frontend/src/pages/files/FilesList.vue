@@ -6,7 +6,7 @@
 		@dragleave="onDragLeave"
 		@drop.prevent="onDrop"
 	>
-		<IntakeList v-if="view === 'intake'" @switch="view = $event" />
+		<IntakeList v-if="view === 'intake'" v-model:scope="intakeScope" @switch="view = $event" />
 		<ListPage
 			v-else
 			:breadcrumbs="[{ label: 'File Box', route: { name: 'FilesList' } }]"
@@ -289,6 +289,8 @@ const router = useRouter();
 const store = useShellStore();
 // "dropped" (files added by hand, the default) or "intake" (Document Intake files)
 // ?view=intake is the link the intake bells carry.
+// "Whose files" of the Intake view, kept here because that view is rebuilt on each switch
+const intakeScope = ref("mine");
 const view = ref(route.query.view === "intake" ? "intake" : "dropped");
 
 // The switch is rebuilt with the other view, so the clicked button is gone: put focus back

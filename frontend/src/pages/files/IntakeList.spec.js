@@ -271,6 +271,16 @@ describe("IntakeList", () => {
 		expect(intakeListPage.mock.calls.at(-1)[0].scope).toBe("all");
 	});
 
+	it("starts on the scope its parent kept, and reports a new pick", async () => {
+		getTriggersCaps.mockResolvedValue({ can_manage: true });
+		intakeListPage.mockResolvedValue({ rows: [], total: 0, has_more: false });
+		w = mount(IntakeList, { props: { scope: "all" } });
+		await flushPromises();
+		expect(intakeListPage.mock.calls[0][0].scope).toBe("all");
+		await w.find(".scope").setValue("mine");
+		expect(w.emitted("update:scope").at(-1)).toEqual(["mine"]);
+	});
+
 	it("polls every 10 s while a row is Queued or Running, then stops", async () => {
 		w = await mountList([row({ status: "Running", draft_doctype: "", draft_name: "" })]);
 		const calls = intakeListPage.mock.calls.length;

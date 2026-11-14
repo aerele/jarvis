@@ -52,7 +52,12 @@ vi.mock("@/stores/shell", () => ({ useShellStore: () => shell }));
 vi.mock("@/utils/datetime", () => ({ timeAgo: () => "now", exactDate: () => "" }));
 vi.mock("@/branding", () => ({ brand: { agentName: "Jarvis" } }));
 vi.mock("@/pages/files/IntakeList.vue", () => ({
-	default: { template: '<div class="intake-view"/>' },
+	default: {
+		props: ["scope"],
+		emits: ["update:scope", "switch"],
+		template:
+			'<div class="intake-view" :data-scope="scope || \'mine\'"><button class="pick-all" @click="$emit(\'update:scope\', \'all\')"/><button class="go-dropped" @click="$emit(\'switch\', \'dropped\')"/></div>',
+	},
 }));
 vi.mock("@/api", () => ({
 	fileboxListPage: vi.fn(),
@@ -129,6 +134,17 @@ describe("FilesList: the Dropped / Intake switch", () => {
 		await w.find('.tab[data-value="intake"]').trigger("click");
 		expect(w.find(".intake-view").exists()).toBe(true);
 		expect(w.find(".row").exists()).toBe(false);
+		w.unmount();
+	});
+
+	it("keeps the chosen Whose files scope across a Dropped round trip", async () => {
+		const w = await mountList([applying]);
+		await w.find('.tab[data-value="intake"]').trigger("click");
+		expect(w.find(".intake-view").attributes("data-scope")).toBe("mine");
+		await w.find(".pick-all").trigger("click"); // the admin picks All
+		await w.find(".go-dropped").trigger("click");
+		await w.find('.tab[data-value="intake"]').trigger("click");
+		expect(w.find(".intake-view").attributes("data-scope")).toBe("all");
 		w.unmount();
 	});
 
