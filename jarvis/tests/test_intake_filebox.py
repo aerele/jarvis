@@ -267,7 +267,7 @@ class TestIntakeFilebox(FrappeTestCase):
 	def test_unreadable_type_skip_is_permanent_but_limit_skips_retry(self):
 		perm = self._row(UPLOADER, status="Skipped", summary=capture.UNREADABLE_TYPE_SUMMARY)
 		limit = self._row(UPLOADER, status="Skipped", summary="daily limit reached")
-		off = self._row(UPLOADER, status="Skipped", summary="rule turned off")
+		off = self._row(UPLOADER, status="Skipped", summary="This rule is turned off")
 		rows = {r["name"]: r["can_retry"] for r in self._list(UPLOADER)["rows"]}
 		self.assertEqual(rows, {perm: False, limit: True, off: True})
 		frappe.set_user(UPLOADER)
