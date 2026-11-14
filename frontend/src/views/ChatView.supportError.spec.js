@@ -53,6 +53,16 @@ function harness({
 		messages: Vue.ref([m]),
 		errorInfo: (row) => turnErrorInfo(row.error),
 		supportErrorDraft,
+		api: {
+			getErrorReportDetails: vi.fn(async () => ({
+				ok: true,
+				data: {
+					error: "Request timed out (secrets removed)",
+					model: "gpt-5.6-terra",
+					run: "89200d04e322",
+				},
+			})),
+		},
 		router: { push: vi.fn(async () => undefined) },
 		notify: vi.fn(),
 		__: (x) => x,
@@ -145,11 +155,16 @@ describe("Report error in the real ChatView card", () => {
 		h.w.unmount();
 	});
 
-	it("opens selected draft without retry or a backend call", async () => {
+	it("opens a draft carrying the server's scrubbed error and run id, without retry", async () => {
 		const h = harness();
 		await reportButton(h).trigger("click");
 		await flushPromises();
+		expect(h.s.api.getErrorReportDetails).toHaveBeenCalledWith(
+			"conv788fixture",
+			"reply788fixture"
+		);
 		expect(h.s.router.push).toHaveBeenCalledOnce();
+		const query = h.s.router.push.mock.calls[0][0].query;
 		expect(h.s.router.push.mock.calls[0][0]).toEqual({
 			name: "SupportNew",
 			query: supportErrorDraft({
@@ -157,10 +172,23 @@ describe("Report error in the real ChatView card", () => {
 				conversation: "conv788fixture",
 				message: "reply788fixture",
 				at: h.m.modified,
+				details: (await h.s.api.getErrorReportDetails.mock.results[0].value).data,
 			}),
 		});
+		expect(query.body).toContain("Run: 89200d04e322");
+		expect(query.body).toContain("Error text (secrets removed):");
 		expect(h.retry).not.toHaveBeenCalled();
 		expect(h.s.supportStore.getCopyPref).not.toHaveBeenCalled();
+		h.w.unmount();
+	});
+	it("still opens the draft, with references only, when the details cannot be read", async () => {
+		const h = harness();
+		h.s.api.getErrorReportDetails.mockRejectedValueOnce(new Error("offline"));
+		await reportButton(h).trigger("click");
+		await flushPromises();
+		const query = h.s.router.push.mock.calls[0][0].query;
+		expect(query.body).toContain("Message: reply788fixture");
+		expect(query.body).not.toContain("Error text");
 		h.w.unmount();
 	});
 	it.each([

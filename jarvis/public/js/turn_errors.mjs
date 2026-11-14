@@ -188,6 +188,11 @@ function expiredUpstreamFor(code, context, text) {
   return "";
 }
 
+// An admin is told the step they can take; everyone else, who can do it for them.
+function ruleHint(rule, context) {
+  return context?.admin === true && rule.adminHint ? rule.adminHint : rule.hint;
+}
+
 function inferCode(text) {
   return compiled.find((rule) => rule.test.test(text))?.code || "gateway";
 }
@@ -252,7 +257,10 @@ function singleErrorInfo(text, explicitCode, context) {
         },
         connection: {
           headline: `Jarvis could not connect to ${provider[1]}`,
-          hint: "Try again or choose another available model. If this continues, ask your administrator to check the connection.",
+          hint:
+            context?.admin === true
+              ? "Try again or choose another available model. If this continues, report it to support."
+              : "Try again or choose another available model. If this continues, ask your administrator to check the connection.",
         },
       }
     : {};
@@ -260,7 +268,7 @@ function singleErrorInfo(text, explicitCode, context) {
   return {
     code,
     headline: copy.headline,
-    hint: copy.hint,
+    hint: copy === rule ? ruleHint(rule, context) : copy.hint,
     retryable: rule.retryable,
     statusUrl: provider?.[2] || "",
     statusLabel: provider ? `Check ${provider[1]} status` : "",
@@ -461,7 +469,7 @@ export function turnErrorInfo(raw, explicitCode, context = {}) {
       headline: oneCause
         ? models[0].reason
         : "None of your models could answer",
-      hint: oneCause && rule && !signedOut ? rule.hint : "",
+      hint: oneCause && rule && !signedOut ? ruleHint(rule, context) : "",
       retryable: models.some((m) => m.retryable),
       statusUrl: "",
       statusLabel: "",

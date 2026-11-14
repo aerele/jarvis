@@ -296,3 +296,87 @@ class TestAuthenticatedRawErrors(FrappeTestCase):
 			rq.post.return_value = r404
 			with self.assertRaises(AdminValidationError):
 				admin_client._authenticated_raw("/p", {}, timeout_s=10)
+
+
+class TestErrorReportDetails(FrappeTestCase):
+	"""Report error ships the failed reply's error (secrets removed) and run id in the ticket: support
+	works from the ticket alone. Only the caller's own failed reply is ever read."""
+
+	ERROR = (
+		"All models failed (2): openai_compat/jarvis-pool: 429 usage_limit_reached | "
+		"anthropic/claude-opus-5: Failed to authenticate (auth) api_key=sk-live-abcdef1234567890"
+	)
+
+	def setUp(self):
+		self.owner = _user([JARVIS_USER_ROLE])
+		self.other = _user([JARVIS_USER_ROLE])
+		frappe.set_user(self.owner)
+		self.conv = self._conv()
+		self.second_conv = self._conv()
+		seed = self._msg(self.conv, "user", 1)
+		self.reply = self._msg(self.conv, "assistant", 2, error=self.ERROR, model="claude-opus-5")
+		self.fine = self._msg(self.conv, "assistant", 3)
+		self.run_id = frappe.generate_hash(length=12)
+		frappe.get_doc(
+			{
+				"doctype": "Jarvis Chat Turn",
+				"run_id": self.run_id,
+				"conversation": self.conv,
+				"relay_target_id": "test-target",
+				"turn_class": "interactive",
+				"state": "errored",
+				"seed_message": seed,
+				"assistant_message": self.reply,
+			}
+		).insert(ignore_permissions=True)
+		frappe.set_user("Administrator")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _conv(self):
+		return (
+			frappe.get_doc({"doctype": "Jarvis Conversation", "title": "t"})
+			.insert(ignore_permissions=True)
+			.name
+		)
+
+	def _msg(self, conv, role, seq, **extra):
+		doc = {"doctype": "Jarvis Chat Message", "conversation": conv, "seq": seq, "role": role, **extra}
+		return frappe.get_doc(doc).insert(ignore_permissions=True).name
+
+	def _details(self, user, conversation, message):
+		from jarvis.support import api
+
+		frappe.set_user(user)
+		with patch("jarvis.support.api.support_scope", return_value="own"):
+			return api.error_report_details(conversation, message)
+
+	def test_the_owner_gets_the_error_without_secrets_and_the_run_id(self):
+		out = self._details(self.owner, self.conv, self.reply)["data"]
+		self.assertIn("All models failed (2)", out["error"])
+		self.assertNotIn("sk-live-abcdef1234567890", out["error"])
+		self.assertEqual(out["run"], self.run_id)
+		self.assertEqual(out["model"], "claude-opus-5")
+
+	def test_another_users_reply_is_not_found(self):
+		with self.assertRaises(frappe.DoesNotExistError):
+			self._details(self.other, self.conv, self.reply)
+
+	def test_a_reply_from_another_conversation_is_not_found(self):
+		with self.assertRaises(frappe.DoesNotExistError):
+			self._details(self.owner, self.second_conv, self.reply)
+
+	def test_a_reply_without_an_error_is_not_found(self):
+		with self.assertRaises(frappe.DoesNotExistError):
+			self._details(self.owner, self.conv, self.fine)
+
+	def test_no_support_access_is_refused(self):
+		from jarvis.support import api
+
+		frappe.set_user(self.owner)
+		with (
+			patch("jarvis.support.api.support_scope", return_value=None),
+			self.assertRaises(frappe.PermissionError),
+		):
+			api.error_report_details(self.conv, self.reply)

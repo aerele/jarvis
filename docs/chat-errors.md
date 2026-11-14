@@ -60,8 +60,28 @@ Immediate Retry buttons are hidden for known failures requiring input,
 configuration, access, or account changes.
 
 There is no "Details" toggle. A classified failure names its cause in the
-headline. Only `gateway`, `provider` and `internal` (no rule names the cause)
-show the stored error text, as a plain line under the hint.
+headline. Codes whose headline cannot name the cause or the failing thing
+(`gateway`, `provider`, `internal`, `runtime-permission`, `storage`,
+`runtime-setup`, `not-found`, `invalid-request`) show the stored error text as a
+plain line under the hint.
+
+Hints are role-aware. A rule's `hint` is for members and points at their
+workspace admin; its `adminHint` is the step an admin can take (AI models) or
+"report it to support". Every surface passes `admin` (desktop and dashboard:
+`window.is_jarvis_admin || window.is_system_manager`; mobile: `is_jarvis_admin`;
+Desk widget: System Manager or Jarvis Admin). A test sweeps every fixture as an
+admin and fails if a hint says "admin".
+
+Report error (desktop chat and the dashboard chat pane, when support is on)
+opens a ticket draft that carries what support needs, since support cannot open
+the customer's site: the summary, each failed model's cause, the run id (the
+`runId` in the agent's transcript), the conversation and message ids, and the
+stored error text with secrets removed. The text comes from
+`jarvis.support.api.error_report_details`, which reads only the caller's own
+failed reply (message permission hook) and runs it through `scrub_for_share`;
+the browser never sends its own copy. The draft stays editable before sending.
+It does not depend on the "copy my chat" preference, which covers the chat
+transcript only.
 
 ## Failover errors: one line per model
 

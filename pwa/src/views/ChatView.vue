@@ -504,7 +504,11 @@ const view = (m) => {
 // (errorMeta above). Called once per assistant item from `items` below (as
 // `err`), never from the template, for the same reason view() is precomputed.
 function errorNote(m) {
-	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", { provider: m.provider });
+	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", {
+		provider: m.provider,
+		// An admin is told the fix; a member, who can do it for them.
+		admin: !!globalThis.window?.is_jarvis_admin,
+	});
 }
 
 // ── thread assembly ─────────────────────────────────────────────────────────

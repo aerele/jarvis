@@ -991,7 +991,11 @@ const turnErrorMsgId = ref("");
 const turnErrorDetails = computed(() => {
 	const id = turnErrorMsgId.value;
 	const row = id ? messages.value.find((m) => m.name === id) : undefined;
-	return turnErrorInfo(turnError.value, turnErrorCode.value, { provider: row?.provider });
+	return turnErrorInfo(turnError.value, turnErrorCode.value, {
+		provider: row?.provider,
+		// An admin is told the fix; a member, who can do it for them.
+		admin: canOnboard,
+	});
 });
 const turnErrorHeadline = computed(() => turnErrorDetails.value.headline);
 const turnErrorHint = computed(() => turnErrorDetails.value.hint);

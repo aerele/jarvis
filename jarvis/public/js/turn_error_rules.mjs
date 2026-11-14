@@ -14,6 +14,7 @@ export default [
     "pattern": "^unexpected worker error",
     "headline": "Jarvis hit an unexpected error",
     "hint": "Try again. If it happens again, tell your administrator or support.",
+    "adminHint": "Try again. If it happens again, report it to support.",
     "retryable": true,
     "status": false
   },
@@ -124,7 +125,8 @@ export default [
     "code": "models-exhausted",
     "pattern": "all (models|providers|fallbacks) failed",
     "headline": "The models tried could not complete this request",
-    "hint": "Try again. If it happens again, ask your administrator to check AI models.",
+    "hint": "Try again. If it happens again, ask your workspace admin to check AI models.",
+    "adminHint": "Open AI models and check each model, then try again.",
     "retryable": true,
     "status": false
   },
@@ -133,6 +135,7 @@ export default [
     "pattern": "\\b(eperm|eacces|erofs)\\b|operation not permitted|read.only (file system|database)",
     "headline": "Jarvis was blocked from accessing a required file",
     "hint": "A server permission setting needs attention. Ask your administrator or support to fix it.",
+    "adminHint": "A server permission setting needs attention. Report it to support.",
     "retryable": false,
     "status": false
   },
@@ -141,6 +144,7 @@ export default [
     "pattern": "\\b(enospc|edquot|sqlite_full|sqlite_corrupt|sqlite_busy)\\b|no space left on device|database (is locked|disk image is malformed)|disk quota exceeded",
     "headline": "Jarvis could not use its storage",
     "hint": "Ask your administrator or support to check the server’s storage and database.",
+    "adminHint": "Report it to support so they can check the server's storage and database.",
     "retryable": false,
     "status": false
   },
@@ -149,6 +153,7 @@ export default [
     "pattern": "\\benoent\\b|cannot find module|module not found|pairing required|device.{0,80}(pairing|signature).{0,80}invalid|no auth profiles|no api key found|agent_url not set",
     "headline": "The assistant’s setup needs attention",
     "hint": "Ask your administrator to check the assistant’s setup.",
+    "adminHint": "Report it to support so they can check the assistant's setup.",
     "retryable": false,
     "status": false
   },
@@ -165,6 +170,7 @@ export default [
     "pattern": "ws open failed|\\bunreachable\\b|connection timed out",
     "headline": "Jarvis could not reach the assistant",
     "hint": "Try again shortly. If the error returns, ask your administrator to check the assistant’s connection.",
+    "adminHint": "Try again shortly. If it happens again, report it to support.",
     "retryable": true,
     "status": false
   },
@@ -196,7 +202,8 @@ export default [
     "code": "model-unavailable",
     "pattern": "model[_ ]not[_ ]found|unknown model|no such model|model.*(does not exist|not available|not supported|decommissioned|not allowed)",
     "headline": "This model is not available for this connection",
-    "hint": "Choose another available model, or ask your administrator to check the model settings and account access.",
+    "hint": "Choose another available model, or ask your workspace admin to check this model.",
+    "adminHint": "Choose another model, or check this model's settings in AI models.",
     "retryable": false,
     "status": false
   },
@@ -228,7 +235,8 @@ export default [
     "code": "authentication",
     "pattern": "authentication[_ ]error|unauthenticated|unauthori[sz]ed|invalid[_ ]api[_ ]key|incorrect api key|api key.*(invalid|expired|revoked)|token.*(expired|revoked)|invalid_grant|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*401\\b|^401\\b)|auth_permanent|(?:auth|oauth|token)_expired|api_key_invalid|authentication failed|failed to authenticate|invalid x-api-key",
     "headline": "The service could not verify this connection",
-    "hint": "Ask your administrator to reconnect the service or update its access key.",
+    "hint": "Ask your workspace admin to reconnect the service or update its key.",
+    "adminHint": "Reconnect the service or update its key in AI models.",
     "retryable": false,
     "status": false
   },
@@ -237,6 +245,7 @@ export default [
     "pattern": "content[_ ](policy|filter)|safety.*(block|reject)|blocked.*safety|prohibited_content|responsibleaipolicyviolation",
     "headline": "The model declined this request under its safety rules",
     "hint": "Review your message and attachments. If you think this was a mistake, ask your administrator to raise it with the model provider.",
+    "adminHint": "Review the message and attachments. If you think this was a mistake, raise it with the model provider.",
     "retryable": false,
     "status": false
   },
@@ -244,7 +253,8 @@ export default [
     "code": "permission",
     "pattern": "permission[_ ](denied|error)|access denied|forbidden|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*403\\b|^403\\b)",
     "headline": "Access was denied for this request",
-    "hint": "Ask your administrator to check permission to use the affected model, service, or record.",
+    "hint": "Ask your workspace admin to check your access to this model, service, or record.",
+    "adminHint": "Check the roles and permissions for this model, service, or record.",
     "retryable": false,
     "status": false
   },
@@ -253,6 +263,7 @@ export default [
     "pattern": "invalid[_ ]request|bad request|unsupported.*(parameter|format|image|media|file)|invalid.*(parameter|schema)|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*(400|415|422)\\b|^(400|415|422)\\b)",
     "headline": "The service could not accept this request",
     "hint": "Check your message and attachments. If it happens again, tell your administrator.",
+    "adminHint": "Check the message and attachments. If it happens again, report it to support.",
     "retryable": false,
     "status": false
   },
@@ -261,6 +272,7 @@ export default [
     "pattern": "overload|service[_ ]unavailable|temporarily unavailable|high demand|(?:\\b(?:http(?:error)?|status(?:[_ ]code)?|error(?: code)?|code|api|openai|anthropic|claude|gemini|google|groq|mistral|deepseek|openrouter|xai|x\\.ai|together)\\b[\\s\\x22\\x27=:({\\[]*(500|502|503|529)\\b|^(500|502|503|529)\\b)|internal server error|bad gateway|server_error|no endpoints found",
     "headline": "The service could not complete this request",
     "hint": "Wait a little and try again. If it happens again, tell your administrator or support.",
+    "adminHint": "Wait a little and try again. If it happens again, report it to support.",
     "retryable": true,
     "status": true
   },
@@ -277,6 +289,7 @@ export default [
     "pattern": "\\b(econnreset|econnrefused|enotfound|eai_again|etimedout)\\b|failed to fetch|socket hang up|certificate.*(expired|invalid)|tls handshake",
     "headline": "Jarvis could not connect to the service",
     "hint": "Try again. If it happens again, ask your administrator to check the service’s connection.",
+    "adminHint": "Try again. If it happens again, report it to support.",
     "retryable": true,
     "status": true
   },
@@ -317,6 +330,7 @@ export default [
     "pattern": "(?!)",
     "headline": "Jarvis could not complete this request",
     "hint": "Try again. If it happens again, tell your administrator or support.",
+    "adminHint": "Try again. If it happens again, report it to support.",
     "retryable": true,
     "status": false
   }

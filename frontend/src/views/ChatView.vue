@@ -5607,16 +5607,27 @@ async function openErrorSupport(m) {
 	if (openSupportInFlight.value || !canReportError(m)) return;
 	const row = messages.value.find((item) => item.name === m.name);
 	const info = errorInfo(row);
-	const draft = supportErrorDraft({
-		code: info.code,
-		upstream: info.upstream,
-		conversation: currentId.value,
-		message: row.name,
-		at: row.modified || row.creation,
-	});
-	if (!draft) return;
+	const conversation = currentId.value;
 	openSupportInFlight.value = true;
 	try {
+		// Support works from the ticket alone, so it carries the server's scrubbed copy of the error
+		// and the run id. A failed read still opens the ticket, with the references only.
+		let details = null;
+		try {
+			const res = await api.getErrorReportDetails(conversation, row.name);
+			details = res && res.data ? res.data : null;
+		} catch {
+			details = null;
+		}
+		const draft = supportErrorDraft({
+			code: info.code,
+			upstream: info.upstream,
+			conversation,
+			message: row.name,
+			at: row.modified || row.creation,
+			details,
+		});
+		if (!draft) return;
 		await router.push({ name: "SupportNew", query: draft });
 	} catch {
 		notify(__("Could not open Support. Try again."), { type: "error" });
