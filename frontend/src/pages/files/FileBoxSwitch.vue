@@ -1,5 +1,5 @@
 <template>
-	<div data-filebox-switch class="shrink-0">
+	<div data-filebox-switch class="filebox-switch shrink-0">
 		<TabButtons
 			:buttons="VIEWS"
 			:model-value="modelValue"
@@ -20,3 +20,10 @@ const VIEWS = [
 	{ label: "Intake", value: "intake" },
 ];
 </script>
+
+<style scoped>
+/* frappe-ui's inactive option is 3.76:1 on its track: darker ink, this usage only */
+.filebox-switch :deep([role="radio"][aria-checked="false"]) {
+	color: var(--ink-gray-7) !important;
+}
+</style>
