@@ -821,6 +821,13 @@ class TestFallbackLabel(unittest.TestCase):
 		with self._with(_row("gpt-5.6")):
 			self.assertEqual(sh.fallback_label({"ACC_gpt-5.6"}), "")
 
+	def test_a_row_on_its_usage_cap_is_no_fallback(self):
+		# The insider case: Claude signed out, ChatGPT out of allowance. "Auto uses OpenAI" was false.
+		rows = (_row("claude-opus-5", upstream="anthropic", order=1), _row("gpt-5.6-terra", order=2))
+		with self._with(*rows), patch.object(sh, "usage_limits", return_value={"gpt-5.6-terra": 9**9}):
+			self.assertEqual(sh.fallback_label({"ACC_claude-opus-5"}), "")
+			self.assertEqual(sh.fallback_model({"ACC_claude-opus-5"}), "")
+
 	def test_disabled_rows_and_accountless_subscription_rows_never_answer(self):
 		off = _row("claude-sonnet-4-5", upstream="anthropic", order=2)
 		off.enabled = 0

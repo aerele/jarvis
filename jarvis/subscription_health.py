@@ -614,10 +614,21 @@ def _pool_rows(rows: list[_PoolRow] | None = None) -> list[_PoolRow]:
 	return sorted(rows, key=lambda r: _fleet_sort_key(r.model))
 
 
-def _answering(row: _PoolRow, expired_refs: set) -> str:
-	"""The label ``row`` answers under while ``expired_refs`` are dead, or ``""`` if it cannot. A
-	subscription row answers while it has an account that is not expired (its upstream's label); an
-	api-key row answers under its model id."""
+def _capped_models() -> frozenset:
+	"""Bare model ids on their usage cap. Never raises: an unreadable cache caps nothing."""
+	try:
+		return frozenset(usage_limits())
+	except Exception:
+		return frozenset()
+
+
+def _answering(row: _PoolRow, expired_refs: set, capped: frozenset = frozenset()) -> str:
+	"""The label ``row`` answers under while ``expired_refs`` are dead, or ``""`` if it cannot. A row
+	whose model is on its usage cap (``capped``) cannot answer either. A subscription row answers while
+	it has an account that is not expired (its upstream's label); an api-key row answers under its
+	model id."""
+	if row.model_id and _bare(row.model_id) in capped:
+		return ""
 	if row.is_subscription:
 		return LABELS.get(row.upstream, "") if set(row.refs) - set(expired_refs) else ""
 	return row.model_id
@@ -626,8 +637,9 @@ def _answering(row: _PoolRow, expired_refs: set) -> str:
 def fallback_model(expired_refs: set, rows: list[_PoolRow] | None = None) -> str:
 	"""Model id of the row ``fallback_label`` names, or ``""`` when none can answer. The SPA pins a
 	conversation to it ("Switch to ...") because a pinned chat never fails over by itself."""
+	capped = _capped_models()
 	for row in _pool_rows(rows):
-		if _answering(row, expired_refs):
+		if _answering(row, expired_refs, capped):
 			return row.model_id
 	return ""
 
@@ -638,8 +650,9 @@ def fallback_label(expired_refs: set, rows: list[_PoolRow] | None = None) -> str
 	account that is not expired; its label is its upstream's. An api-key row answers; its label is its
 	model id, the row's own label in the UI. Computed once here so the banner, the AI models row and the
 	member notice never disagree. ``rows`` is ``_enabled_rows()``."""
+	capped = _capped_models()
 	for row in _pool_rows(rows):
-		label = _answering(row, expired_refs)
+		label = _answering(row, expired_refs, capped)
 		if label:
 			return label
 	return ""
@@ -650,7 +663,8 @@ def _skipped_refs(expired_refs: set, rows: list[_PoolRow] | None = None) -> set[
 	order, so it was already past those rows: nothing switched when they expired, and the card must
 	not say "Auto uses X". An account's own row is the first enabled subscription row listing it."""
 	ordered = _pool_rows(rows)
-	answering_at = next((i for i, r in enumerate(ordered) if _answering(r, expired_refs)), None)
+	capped = _capped_models()
+	answering_at = next((i for i, r in enumerate(ordered) if _answering(r, expired_refs, capped)), None)
 	if answering_at is None:
 		return set()
 	skipped = set()
