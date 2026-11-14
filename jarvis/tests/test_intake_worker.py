@@ -161,7 +161,7 @@ class TestIntakeWorker(FrappeTestCase):
 		client, _ = self._run(row)
 		client.assert_not_called()
 		got = self._get(row)
-		self.assertEqual((got.status, got.summary), ("Skipped", "rule turned off"))
+		self.assertEqual((got.status, got.summary), ("Skipped", "This rule is turned off"))
 
 	def test_rule_cap_defers(self):
 		rule = self._rule(llm_daily_cap=2)
@@ -383,7 +383,7 @@ class TestIntakeWorker(FrappeTestCase):
 		skipped = self._row(rule, self._file(f"{frappe.generate_hash(length=8)}.png"))
 		frappe.db.set_value(TRIGGER, rule.name, "enabled", 0)
 		self._run(skipped)
-		self.assertEqual(len(self._bell(skipped, "rule turned off")), 1)
+		self.assertEqual(len(self._bell(skipped, "This rule is turned off")), 1)
 
 	def test_old_plugin_maps_to_update_copy(self):
 		rule = self._rule()
@@ -644,14 +644,23 @@ class TestIntakeWorker(FrappeTestCase):
 		fin.assert_not_called()
 		self.assertEqual(self._get(row).status, "Queued")
 
-	def test_zero_per_user_cap_means_no_per_user_limit(self):
-		rule = self._rule()
-		row = self._row(rule)
-		for _i in range(3):
-			llm_action.bump(worker.user_cap_key("Administrator"))
+	def test_zero_per_user_cap_pauses_intake_like_the_site_cap(self):
+		rows = self._three_waiting()
 		with mock.patch.object(worker, "_user_cap", return_value=0):
-			client, _ = self._run(row)
-		client.assert_called_once()
+			client, _ = self._run(rows[0])
+			with mock.patch("frappe.enqueue") as enq:
+				worker.run_job(rows[1].name)
+				worker.pump()
+				worker._enqueue_next("none")
+			enq.assert_not_called()
+		client.assert_not_called()
+		for r in rows:
+			self.assertEqual(self._get(r).status, "Queued")
+		self.assertEqual(self._get(rows[0]).summary, worker.USER_PAUSED_SUMMARY)
+		# Back to the default: the pump starts the oldest rows again.
+		with mock.patch("frappe.enqueue") as enq:
+			worker.pump()
+		self.assertEqual([c.kwargs["activity"] for c in enq.call_args_list], [rows[0].name, rows[1].name])
 
 	def test_unsaved_settings_read_as_defaults_and_zero_is_kept(self):
 		with mock.patch("frappe.qb.from_") as q:
@@ -947,3 +956,85 @@ class TestIntakeWorker(FrappeTestCase):
 			worker.pump()
 		waiting.assert_not_called()
 		recover.assert_called_once()  # a row stuck Running is still rescued
+
+	# ---- errors before the claim: counted per row, retryable after five ------------
+	def _fail_start(self, row, times=1):
+		for _i in range(times):
+			frappe.db.commit()
+			with (
+				mock.patch.object(worker, "_claim_slot", side_effect=ConnectionError("redis down")),
+				mock.patch("frappe.enqueue"),
+			):
+				worker.run_job(row.name)
+
+	def _counter(self, row):
+		cache = frappe.cache()
+		return cint(cache.get(cache.make_key(worker._start_failure_key(row))))
+
+	def test_a_start_error_is_counted_and_attempts_stay_put(self):
+		row = self._row(self._rule())
+		self._fail_start(row, 2)
+		got = self._get(row)
+		self.assertEqual((got.status, got.attempts), ("Queued", 0))
+		self.assertEqual(self._counter(row), 2)
+
+	def test_fifth_start_error_ends_the_row_failed_and_retryable(self):
+		row = self._row(self._rule())
+		self._fail_start(row, worker._MAX_START_FAILURES - 1)
+		self.assertEqual(self._get(row).status, "Queued")
+		with mock.patch("frappe.log_error") as log:
+			self._fail_start(row)
+		got = self._get(row)
+		self.assertEqual((got.status, got.summary), ("Failed", worker.COULD_NOT_START_SUMMARY))
+		self.assertTrue(any("gave up" in str(c) for c in log.call_args_list))
+		self.assertFalse(capture.is_permanent(got.summary))
+		self.assertEqual(self._counter(row), 0)
+
+	def test_a_start_error_moves_the_row_behind_the_others(self):
+		rule = self._rule()
+		bad, good = self._row(rule), self._row(rule, self._file("b.png"))
+		old = add_to_date(now_datetime(), minutes=-10)
+		frappe.db.set_value(ACTIVITY, bad.name, "creation", old, update_modified=False)
+		frappe.db.set_value(
+			ACTIVITY, good.name, "creation", add_to_date(old, seconds=5), update_modified=False
+		)
+		self.assertEqual(worker._waiting_rows(2), [bad.name, good.name])
+		self._fail_start(bad)
+		self.assertEqual(worker._waiting_rows(2), [good.name, bad.name])
+		self.assertEqual(self._get(bad).summary, worker.START_RETRY_SUMMARY)
+
+	def test_a_successful_claim_resets_the_count(self):
+		row = self._row(self._rule())
+		self._fail_start(row, 2)
+		self._run(row)
+		self.assertEqual(self._counter(row), 0)
+
+	# ---- rows of a turned-off rule ---------------------------------------------------
+	def test_pump_ends_queued_rows_of_a_turned_off_rule_and_reading_never_starts(self):
+		off = self._rule()
+		other = self._rule(
+			intake_target_doctype="Note", intake_spec=json.dumps({"fields": ["title"]})
+		)
+		stale = self._row(off)
+		frappe.db.set_value(TRIGGER, off.name, "enabled", 0)
+		engine.clear_cache()
+		capture.clear_intake_cache()
+		# Another rule is on, so the pump runs its normal path.
+		with mock.patch("frappe.enqueue") as enq:
+			worker.pump()
+		got = self._get(stale)
+		self.assertEqual((got.status, got.summary), ("Skipped", worker.RULE_OFF_SUMMARY))
+		self.assertNotIn(stale.name, [c.kwargs.get("activity") for c in enq.call_args_list])
+		# Switching the other rule off and on again reads nothing for the stale row.
+		client, _ = self._run(self._row(other))
+		self.assertEqual(client.call_count, 1)
+		self.assertEqual(self._get(stale).status, "Skipped")
+
+	def test_pump_ends_queued_rows_when_no_rule_is_enabled_at_all(self):
+		rule = self._rule()
+		row = self._row(rule)
+		frappe.db.set_value(TRIGGER, rule.name, "enabled", 0)
+		engine.clear_cache()
+		capture.clear_intake_cache()
+		worker.pump()
+		self.assertEqual(self._get(row).status, "Skipped")
