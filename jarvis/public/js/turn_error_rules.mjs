@@ -1,4 +1,6 @@
 // Keep this literal valid JSON: the Python classifier reads the same data.
+// `support: true` marks a failure only support can fix: the card offers Report error for it.
+// Every other failure is fixed by the user or the workspace admin, so the card shows the step instead.
 // prettier-ignore
 export default [
   {
@@ -16,7 +18,8 @@ export default [
     "hint": "Try again. If it happens again, tell your administrator or support.",
     "adminHint": "Try again. If it happens again, report it to support.",
     "retryable": true,
-    "status": false
+    "status": false,
+    "support": true
   },
   {
     "code": "session-archived",
@@ -48,7 +51,8 @@ export default [
     "headline": "This site is not the one registered for this Jarvis account. Contact support if this is wrong.",
     "hint": "",
     "retryable": false,
-    "status": false
+    "status": false,
+    "support": true
   },
   {
     "code": "gate-unconfirmed",
@@ -64,7 +68,8 @@ export default [
     "headline": "This site needs a Jarvis update before it can use this assistant. Contact support.",
     "hint": "",
     "retryable": false,
-    "status": false
+    "status": false,
+    "support": true
   },
   {
     "code": "gate-site-changed",
@@ -72,7 +77,8 @@ export default [
     "headline": "This site changed since Jarvis last checked it, for example after a restore or a move. A System Manager can open Jarvis and press \"Re-verify this site\" to reconnect. Contact support if this is wrong.",
     "hint": "",
     "retryable": false,
-    "status": false
+    "status": false,
+    "support": true
   },
   {
     "code": "gate-background-run",
@@ -137,7 +143,8 @@ export default [
     "hint": "A server permission setting needs attention. Ask your administrator or support to fix it.",
     "adminHint": "A server permission setting needs attention. Report it to support.",
     "retryable": false,
-    "status": false
+    "status": false,
+    "support": true
   },
   {
     "code": "storage",
@@ -146,7 +153,8 @@ export default [
     "hint": "Ask your administrator or support to check the server’s storage and database.",
     "adminHint": "Report it to support so they can check the server's storage and database.",
     "retryable": false,
-    "status": false
+    "status": false,
+    "support": true
   },
   {
     "code": "runtime-setup",
@@ -155,7 +163,8 @@ export default [
     "hint": "Ask your administrator to check the assistant’s setup.",
     "adminHint": "Report it to support so they can check the assistant's setup.",
     "retryable": false,
-    "status": false
+    "status": false,
+    "support": true
   },
   {
     "code": "session-reset",
@@ -172,7 +181,8 @@ export default [
     "hint": "Try again shortly. If the error returns, ask your administrator to check the assistant’s connection.",
     "adminHint": "Try again shortly. If it happens again, report it to support.",
     "retryable": true,
-    "status": false
+    "status": false,
+    "support": true
   },
   {
     "code": "recovery-expired",
@@ -265,7 +275,8 @@ export default [
     "hint": "Check your message and attachments. If it happens again, tell your administrator.",
     "adminHint": "Check the message and attachments. If it happens again, report it to support.",
     "retryable": false,
-    "status": false
+    "status": false,
+    "support": true
   },
   {
     "code": "service-unavailable",
@@ -274,7 +285,8 @@ export default [
     "hint": "Wait a little and try again. If it happens again, tell your administrator or support.",
     "adminHint": "Wait a little and try again. If it happens again, report it to support.",
     "retryable": true,
-    "status": true
+    "status": true,
+    "support": true
   },
   {
     "code": "timeout",
@@ -291,7 +303,8 @@ export default [
     "hint": "Try again. If it happens again, ask your administrator to check the service’s connection.",
     "adminHint": "Try again. If it happens again, report it to support.",
     "retryable": true,
-    "status": true
+    "status": true,
+    "support": true
   },
   {
     "code": "not-found",
@@ -332,6 +345,7 @@ export default [
     "hint": "Try again. If it happens again, tell your administrator or support.",
     "adminHint": "Try again. If it happens again, report it to support.",
     "retryable": true,
-    "status": false
+    "status": false,
+    "support": true
   }
 ];

@@ -121,7 +121,7 @@
 									@click="retryFailed(m)"
 								/>
 								<Button
-									v-if="supportOn"
+									v-if="supportOn && m.err.support"
 									variant="subtle"
 									size="sm"
 									label="Report error"
