@@ -509,6 +509,7 @@ _unrelated(
     list_activity_page
     list_intake_folders
     list_triggers_page
+    search_intake_doctypes
     set_trigger_enabled
     test_trigger_condition
     update_trigger

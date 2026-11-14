@@ -8,6 +8,7 @@ from jarvis.chat.triggers_api import (
 	get_intake_field_options,
 	get_trigger,
 	list_intake_folders,
+	search_intake_doctypes,
 	set_trigger_enabled,
 )
 from jarvis.intake import spec as intake_spec
@@ -34,6 +35,29 @@ class TestIntakeFormApi(_TriggersApiTestCase):
 		frappe.set_user(PLAIN_USER)
 		self.assertRaises(frappe.PermissionError, list_intake_folders)
 		self.assertRaises(frappe.PermissionError, get_intake_field_options, "ToDo")
+		self.assertRaises(frappe.PermissionError, search_intake_doctypes, "To")
+
+	def test_doctype_picker_leaves_out_refused_doctypes(self):
+		frappe.set_user(ADMIN_USER)
+		for txt, shown, hidden in (
+			("Server", None, "Server Script"),
+			("Custom", None, "Custom Field"),
+			("Cust", "Customer", "Customer Group Item"),
+			("Web Pa", None, "Web Page"),
+			("ToDo", "ToDo", None),
+			("Jarvis Sett", None, "Jarvis Settings"),
+		):
+			names = [r["value"] for r in search_intake_doctypes(txt)]
+			if shown:
+				self.assertIn(shown, names)
+			if hidden:
+				self.assertNotIn(hidden, names)
+		# Singles and child tables never show either.
+		names = [r["value"] for r in search_intake_doctypes("Settings")]
+		self.assertNotIn("System Settings", names)
+		self.assertNotIn(
+			"Sales Invoice Item", [r["value"] for r in search_intake_doctypes("Sales Invoice Item")]
+		)
 
 	def test_folders_listed_sorted_without_home_and_attachments(self):
 		self._folder(_FOLDER)

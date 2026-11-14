@@ -176,8 +176,13 @@ class TestVisionTaskComplete(unittest.TestCase):
 	def test_an_http_error_after_the_send_is_counted(self):
 		body = json.dumps({"ok": False, "error": {"message": "bad gateway"}}).encode()
 		self.assertTrue(client.reached_model(self._route(status=502, body=body)))
-		self.assertTrue(client.reached_model(self._route(status=403)))
 		self.assertTrue(client.reached_model(self._route(status=200, body=b"not json")))
+
+	def test_a_401_or_403_refusal_is_not_counted(self):
+		# The plugin refused the call before the model ran, like a 404.
+		for status in (401, 403):
+			with self.subTest(status=status):
+				self.assertFalse(client.reached_model(self._route(status=status)))
 
 	def test_an_oversized_response_is_counted(self):
 		from jarvis.triggers import llm_task_client as lt

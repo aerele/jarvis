@@ -4,6 +4,7 @@ import { mount, flushPromises } from "@vue/test-utils";
 const apiTr = vi.hoisted(() => ({
 	listIntakeFolders: vi.fn(),
 	getIntakeFieldOptions: vi.fn(),
+	searchIntakeDoctypes: vi.fn(() => Promise.resolve([])),
 }));
 vi.mock("@/api/triggers", () => apiTr);
 vi.mock("@/api", () => ({ searchLink: vi.fn(() => Promise.resolve([])) }));
@@ -258,13 +259,16 @@ describe("IntakeRuleFields", () => {
 					props: { form: formOf({ intake_source: source }) },
 				});
 				await vi.advanceTimersByTimeAsync(400);
-				searchLink.mockResolvedValue([{ value: "ToDo" }]);
+				apiTr.searchIntakeDoctypes.mockResolvedValue([{ value: "ToDo" }]);
 				const picker = w
 					.findAllComponents({ name: "Autocomplete" })
 					.find((p) => p.attributes("data-placeholder") === "Pick a DocType…");
 				picker.vm.$emit("update:query", "ToD");
 				await vi.advanceTimersByTimeAsync(400);
 				expect(picker.props("options")).toEqual([{ label: "ToDo", value: "ToDo" }]);
+				// The server-side filter owns this list: never the generic DocType search.
+				expect(apiTr.searchIntakeDoctypes).toHaveBeenCalledWith("ToD");
+				expect(searchLink).not.toHaveBeenCalledWith("DocType", expect.anything());
 			}
 		} finally {
 			vi.useRealTimers();
@@ -277,10 +281,10 @@ describe("IntakeRuleFields", () => {
 			const w = mount(IntakeRuleFields, { props: { form: formOf() } });
 			await vi.advanceTimersByTimeAsync(400);
 			let release;
-			searchLink.mockImplementationOnce(
+			apiTr.searchIntakeDoctypes.mockImplementationOnce(
 				() => new Promise((res) => (release = () => res([{ value: "Old" }])))
 			);
-			searchLink.mockResolvedValueOnce([{ value: "New" }]);
+			apiTr.searchIntakeDoctypes.mockResolvedValueOnce([{ value: "New" }]);
 			const picker = w
 				.findAllComponents({ name: "Autocomplete" })
 				.find((p) => p.attributes("data-placeholder") === "Pick a DocType…");

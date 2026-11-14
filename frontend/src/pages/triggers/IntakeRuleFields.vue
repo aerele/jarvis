@@ -377,8 +377,8 @@ watch(() => props.readOnly, loadFolders, { immediate: true });
 // what is typed (latest wins), and it says when a search is still running.
 const docMap = (rows) => (rows || []).map((x) => ({ label: x.value, value: x.value }));
 const doctypeSearch = {
-	record: useLinkSearch((q) => searchLink("DocType", q), { mapper: docMap }),
-	target: useLinkSearch((q) => searchLink("DocType", q), { mapper: docMap }),
+	record: useLinkSearch((q) => apiTriggers.searchIntakeDoctypes(q), { mapper: docMap }),
+	target: useLinkSearch((q) => apiTriggers.searchIntakeDoctypes(q), { mapper: docMap }),
 };
 const doctypeOptions = (which) => doctypeSearch[which].options.value;
 const doctypeLoading = (which) => doctypeSearch[which].loading.value;

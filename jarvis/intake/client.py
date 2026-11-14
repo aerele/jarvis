@@ -19,8 +19,8 @@ LLMTaskNotAvailableError = lt.LLMTaskNotAvailableError
 def reached_model(e: Exception) -> bool:
 	"""True when the request may have reached the model, so it is billable. False ONLY for a
 	failure before the request left the site (copy check, no agent configured, a connect
-	failure, a refused request over the limits) and for a 404 (an older plugin without the
-	route). Anything after the request was sent, or whose state is unknown, counts: failing
+	failure, a refused request over the limits) and for a 404 or a 401/403 (an older plugin
+	without the route, or the plugin refusing the call before the model ran). Anything after the request was sent, or whose state is unknown, counts: failing
 	open here would let junk uploads dodge the daily limits."""
 	if isinstance(e, LLMTaskNotAvailableError):
 		return False
@@ -86,7 +86,9 @@ def _run_vision_task(args: dict, timeout: int) -> dict:
 	status, raw = lt._call_route(plugin_routes.VISION_TASK_PATH, {"args": args}, wait)
 
 	if status in (401, 403):
-		raise LLMTaskError("vision task request was refused by the agent plugin")
+		# Refused before the model ran (bad key, a session the plugin will not vouch for):
+		# nothing to bill, like a 404.
+		raise lt.not_sent(LLMTaskError("vision task request was refused by the agent plugin"))
 	# Before parsing: an older plugin answers an unknown route with a non-JSON 404.
 	if status == 404:
 		raise LLMTaskNotAvailableError(lt._gateway_error_message(status, raw))

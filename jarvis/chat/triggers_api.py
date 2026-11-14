@@ -18,6 +18,7 @@ from frappe.utils.safe_exec import is_safe_exec_enabled
 
 from jarvis.chat import list_filters
 from jarvis.chat.macros_api import _bool01, _clamp_page, _lk, _load_filters
+from jarvis.intake import guards as intake_guards
 from jarvis.intake import spec as intake_spec
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
 from jarvis.triggers.engine import (
@@ -503,6 +504,38 @@ def list_intake_folders() -> list[str]:
 	_require_manage()
 	names = frappe.get_list("File", filters={"is_folder": 1}, pluck="name", limit_page_length=0)
 	return sorted(n for n in names if n not in _INTAKE_HIDDEN_FOLDERS)
+
+
+_DOCTYPE_PICK_LIMIT = 20
+_DOCTYPE_PICK_BATCH = 50
+_DOCTYPE_PICK_BATCHES = 6
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def search_intake_doctypes(txt: str = "") -> list[dict]:
+	"""DocTypes the intake pickers may offer (target and Record source), as
+	``[{"value": name}]``: the ones the rule save would accept, so a refused one is never
+	listed to be rejected later. Singles and child tables are left out too."""
+	_require_manage()
+	txt = (txt or "").strip()[:140]
+	filters = {"issingle": 0, "istable": 0}
+	if txt:
+		filters["name"] = ["like", f"%{list_filters.escape_like(txt)}%"]
+	out: list[dict] = []
+	for batch in range(_DOCTYPE_PICK_BATCHES):
+		names = frappe.get_list(
+			"DocType",
+			filters=filters,
+			pluck="name",
+			order_by="name asc",
+			start=batch * _DOCTYPE_PICK_BATCH,
+			limit=_DOCTYPE_PICK_BATCH,
+		)
+		out += [{"value": n} for n in names if not intake_guards.refused_doctype(n)]
+		if len(out) >= _DOCTYPE_PICK_LIMIT or len(names) < _DOCTYPE_PICK_BATCH:
+			break
+	return out[:_DOCTYPE_PICK_LIMIT]
 
 
 def _intake_field_row(df) -> dict:

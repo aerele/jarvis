@@ -61,6 +61,8 @@ export const testTriggerCondition = (target_doctype, condition, docname = "") =>
 // ── intake form (managers only) ───────────────────────────────────────────────
 // -> ["Home/Production Sheets", ...] File folders, sorted, without Home and Attachments
 export const listIntakeFolders = () => call(TR + "list_intake_folders");
+// -> [{value: "Sales Order"}, ...] DocTypes an intake rule may use (refused ones left out)
+export const searchIntakeDoctypes = (txt) => call(TR + "search_intake_doctypes", { txt });
 // -> {fields: [{fieldname, label, fieldtype, options, mandatory}],
 //     tables: [{fieldname, label, child_doctype, mandatory, columns: [same shape as fields]}]}
 export const getIntakeFieldOptions = (doctype) =>
