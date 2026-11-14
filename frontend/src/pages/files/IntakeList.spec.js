@@ -101,6 +101,41 @@ describe("IntakeList", () => {
 		expect(w.findAll(".row")[1].find(".badge").attributes("data-theme")).toBe("red");
 	});
 
+	it("shows waiting and not-allowed rows with their own badge and the summary", async () => {
+		w = await mountList([
+			row({
+				name: "W",
+				status: "Queued",
+				badge: "waiting",
+				draft_name: "",
+				summary: "Waiting: daily limit reached for this rule (resets tomorrow)",
+			}),
+			row({
+				name: "N",
+				status: "Skipped",
+				badge: "not_allowed",
+				draft_name: "",
+				summary: "You can't create Sales Order",
+			}),
+			row({
+				name: "F",
+				status: "Failed",
+				badge: "not_allowed",
+				draft_name: "",
+				summary: "This rule's target is not allowed",
+			}),
+		]);
+		const rows = w.findAll(".row");
+		expect(rows[0].find(".badge").text()).toBe("Waiting");
+		expect(rows[0].find(".badge").attributes("data-theme")).toBe("orange");
+		expect(rows[0].text()).toContain("resets tomorrow");
+		expect(rows[1].find(".badge").text()).toBe("Not allowed");
+		expect(rows[1].find(".badge").attributes("data-theme")).toBe("gray");
+		expect(rows[1].text()).toContain("You can't create Sales Order");
+		expect(rows[2].find(".badge").attributes("data-theme")).toBe("red");
+		expect(w.findAll("button").filter((b) => b.text() === "Retry").length).toBe(0);
+	});
+
 	it("shows a deleted draft as Draft deleted, neutral, with no link", async () => {
 		w = await mountList([row({ draft_name: "", draft_missing: true })]);
 		const first = w.findAll(".row")[0];

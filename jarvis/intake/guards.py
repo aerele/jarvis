@@ -36,6 +36,8 @@ _EXTRA_REFUSED = frozenset(
 # lists nothing else for them). A page cannot fill that table, so a draft cannot grant access.
 _PORTAL_ONLY = frozenset({"Customer", "Supplier"})
 TARGET_REFUSED_SUMMARY = "This rule's target is not allowed"
+# ``create_refusal`` and the draft stage word it "You can't create <doctype>".
+CREATE_REFUSAL_PREFIX = "You can't create"
 
 
 def refused_doctype(doctype: str) -> bool:
@@ -64,8 +66,12 @@ def is_desk_user(user: str) -> bool:
 	return bool(user) and frappe.db.get_value("User", user, "user_type") == "System User"
 
 
+def create_refusal_text(target: str) -> str:
+	return f"{CREATE_REFUSAL_PREFIX} {target}"
+
+
 def create_refusal(user: str, target: str) -> str | None:
 	"""Why ``user`` may not create a draft of ``target``, or None when they may."""
 	if not is_desk_user(user) or not frappe.has_permission(target, "create", user=user):
-		return _("You can't create {0}").format(target)
+		return create_refusal_text(target)
 	return None

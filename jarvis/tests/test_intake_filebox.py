@@ -131,6 +131,7 @@ class TestIntakeFilebox(FrappeTestCase):
 				"draft_name",
 				"draft_missing",
 				"approval_request",
+				"badge",
 				"can_retry",
 				"can_review",
 			},
@@ -266,6 +267,42 @@ class TestIntakeFilebox(FrappeTestCase):
 				filebox.retry_intake(perm)
 			filebox.retry_intake(limit)
 		self.assertEqual(enq.call_count, 1)
+
+	def test_refused_target_and_create_refusal_are_permanent_with_a_badge_hint(self):
+		from jarvis.intake import guards, worker
+
+		target = self._row(UPLOADER, status="Failed", summary=guards.TARGET_REFUSED_SUMMARY)
+		cant = self._row(UPLOADER, status="Skipped", summary=guards.create_refusal_text("Sales Order"))
+		agent = self._row(UPLOADER, status="Failed", summary=worker.NO_AGENT_UPDATE_SUMMARY)
+		waiting = self._row(
+			UPLOADER,
+			status="Queued",
+			summary=f"{worker.WAITING_PREFIX} daily limit reached for this rule (resets tomorrow)",
+		)
+		paused = self._row(UPLOADER, status="Queued", summary=worker.PAUSED_SUMMARY)
+		rows = {r["name"]: r for r in self._list(UPLOADER)["rows"]}
+		self.assertEqual(
+			{n: (rows[n]["can_retry"], rows[n]["badge"]) for n in rows},
+			{
+				target: (False, "not_allowed"),
+				cant: (False, "not_allowed"),
+				agent: (True, ""),
+				waiting: (False, "waiting"),
+				paused: (False, "waiting"),
+			},
+		)
+		frappe.set_user(UPLOADER)
+		with mock.patch("frappe.enqueue") as enq:
+			for name in (target, cant):
+				with self.assertRaises(frappe.ValidationError):
+					filebox.retry_intake(name)
+		enq.assert_not_called()
+
+	def test_whitelisted_endpoints_run_frappe_type_validation(self):
+		# No ``from __future__ import annotations``: it makes Frappe skip the type check.
+		frappe.set_user(UPLOADER)
+		with self.assertRaises(TypeError):  # FrappeTypeError
+			frappe.call(filebox.retry_intake, activity=["not", "a", "name"])
 
 	def test_can_review_only_for_those_who_may_decide(self):
 		own = self._rule()

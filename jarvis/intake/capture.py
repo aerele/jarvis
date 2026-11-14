@@ -25,6 +25,19 @@ DUPLICATE_SUMMARY = "Same file as an earlier upload"
 # Also permanent: the source File was deleted before (or while) the job read it.
 FILE_REMOVED_SUMMARY = "The file was removed"
 PERMANENT_SUMMARIES = (UNREADABLE_TYPE_SUMMARY, FILE_REMOVED_SUMMARY)
+
+
+def is_permanent(summary: str | None) -> bool:
+	"""A row that Retry cannot change: the file cannot be read or is gone, the rule's target
+	is refused, or the uploader may not create the doctype."""
+	text = summary or ""
+	return (
+		text in PERMANENT_SUMMARIES
+		or text == guards.TARGET_REFUSED_SUMMARY
+		or text.startswith(guards.CREATE_REFUSAL_PREFIX)
+	)
+
+
 # Held from the duplicate check until the row commits; the TTL is only the crash backstop.
 _LOCK_TTL_S = 15
 _LOCK_WAIT_S = 5

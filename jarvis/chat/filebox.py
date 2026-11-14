@@ -13,8 +13,6 @@ File Box is just the directed entry point, so streaming, drafts,
 approvals and recovery all behave exactly like a hand-typed turn.
 """
 
-from __future__ import annotations
-
 import json
 import re
 
@@ -22,7 +20,8 @@ import frappe
 from frappe.rate_limiter import rate_limit
 
 from jarvis.chat import filebox_skills
-from jarvis.intake.capture import FILE_REMOVED_SUMMARY, PERMANENT_SUMMARIES, UNREADABLE_TYPE_SUMMARY
+from jarvis.intake import guards
+from jarvis.intake.capture import FILE_REMOVED_SUMMARY, UNREADABLE_TYPE_SUMMARY, is_permanent
 from jarvis.permissions import message_origin, refuse_in_tool_dispatch, require_jarvis_user
 
 # The persona fallback skill (SHARED_CORE_SKILLS, role_profiles.py) - always
@@ -1296,11 +1295,28 @@ def can_review_row(row: dict, me: str, system_manager: bool) -> bool:
 	return system_manager or row.get("rule_owner") == me
 
 
+def row_badge(row: dict) -> str:
+	"""A hint for the badge: ``waiting`` (Queued behind a daily limit or a pause) or
+	``not_allowed`` (the rule's target or the uploader's right to create is refused)."""
+	from jarvis.intake import worker
+
+	summary = row.get("summary") or ""
+	if row.get("status") == "Queued" and (
+		summary.startswith(worker.WAITING_PREFIX) or summary == worker.PAUSED_SUMMARY
+	):
+		return "waiting"
+	if row.get("status") in _INTAKE_RETRYABLE and (
+		summary == guards.TARGET_REFUSED_SUMMARY or summary.startswith(guards.CREATE_REFUSAL_PREFIX)
+	):
+		return "not_allowed"
+	return ""
+
+
 def can_retry_row(row: dict, me: str, manager: bool, live: set[tuple[str, str]]) -> bool:
 	"""Failed or Skipped, no draft yet, not a duplicate, and the caller's to retry."""
 	if row.get("status") not in _INTAKE_RETRYABLE or row.get("duplicate_of"):
 		return False
-	if row.get("summary") in PERMANENT_SUMMARIES:
+	if is_permanent(row.get("summary")):
 		return False
 	# A reviewer's "no" is not undone by the uploader pressing Retry; a manager may
 	# (that puts the file back in front of a reviewer on purpose).
@@ -1429,6 +1445,7 @@ def list_intake_page(
 			"draft_name": "" if r["name"] in missing else (r["draft_name"] or ""),
 			"draft_missing": r["name"] in missing,
 			"approval_request": r["approval_request"] or "",
+			"badge": row_badge(r),
 			"can_retry": can_retry_row(r, me, manager, live),
 			"can_review": can_review_row(r, me, reviewer),
 		}
@@ -1473,6 +1490,8 @@ def retry_intake(activity: str) -> dict:
 		frappe.throw("This file type can't be read for intake, so running it again would not help.")
 	if row.summary == FILE_REMOVED_SUMMARY:
 		frappe.throw("The file was removed, so running it again would not help.")
+	if is_permanent(row.summary):
+		frappe.throw("This file was refused for a reason a new run would not change.")
 	if row.status not in _INTAKE_RETRYABLE:
 		frappe.throw("Only a failed or skipped file can be run again.")
 	if _was_rejected(row.summary) and not _can_manage(me):

@@ -17,6 +17,11 @@ export const INTAKE_STATUS_OPTIONS = [
 export function intakeBadge(row) {
 	// The draft was deleted after the row finished: not "Draft created" any more.
 	if (row && row.draft_missing) return { label: "Draft deleted", theme: "gray" };
+	// ``badge`` comes from the server (filebox.row_badge), which owns the summary wording.
+	if (row && row.badge === "waiting") return { label: "Waiting", theme: "orange" };
+	if (row && row.badge === "not_allowed") {
+		return { label: "Not allowed", theme: row.status === "Failed" ? "red" : "gray" };
+	}
 	return INTAKE_BADGE[row && row.status] || { label: (row && row.status) || "", theme: "gray" };
 }
 

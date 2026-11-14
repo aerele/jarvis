@@ -7,8 +7,6 @@ through the normal ``send_message`` path, so the agent resumes the flow
 in the same chat with full context - no separate notification plumbing.
 """
 
-from __future__ import annotations
-
 import hashlib
 import hmac
 import json

@@ -31,7 +31,7 @@ from frappe.utils.data import duration_to_seconds
 from jarvis._session import impersonate
 from jarvis.chat.filebox import attach_file_to_doc
 from jarvis.chat.list_filters import escape_like
-from jarvis.intake import notify
+from jarvis.intake import guards, notify
 from jarvis.intake import spec as intake_spec
 
 ACTIVITY = "Jarvis Trigger Activity"
@@ -789,9 +789,7 @@ def _insert(
 		doc = frappe.get_doc(payload).insert(ignore_mandatory=allow_missing)
 	except frappe.PermissionError:
 		frappe.db.rollback(save_point=savepoint)
-		_fail(
-			row, trigger, _("You can't create {0}").format(s.target), tell_uploader=tell_uploader, keep=keep
-		)
+		_fail(row, trigger, guards.create_refusal_text(s.target), tell_uploader=tell_uploader, keep=keep)
 	except frappe.ValidationError as e:
 		frappe.db.rollback(save_point=savepoint)
 		_fail(
