@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
+from frappe.utils import strip_html
 
 from jarvis.triggers import engine, llm_action
 from jarvis.triggers.llm_task_client import LLMTaskError, LLMTaskNotAvailableError
@@ -247,6 +248,159 @@ class TestTriggerValidation(_TriggerTestCase):
 					ignore_permissions=True
 				)
 
+	# ---- sandbox-unsafe attribute check (#818) ---- #
+	def test_new_script_with_format_is_refused_with_line_and_hint(self):
+		with patch(CTRL_MOD + ".is_safe_exec_enabled", return_value=True):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				self._draft(action_type="Script", script_body='x = "PO {}".format(doc.name)\n').insert(
+					ignore_permissions=True
+				)
+		text = str(cm.exception)
+		# The SPA toast and the agent read the tag-stripped text.
+		self.assertIn("blocks: line 1", strip_html(text))
+		self.assertIn(".format is blocked", text)
+		self.assertIn("f-string", text)
+
+	def test_unsafe_attribute_throw_joins_lines_with_separator_and_no_entities(self):
+		body = 'a = "x{}".format(1)\nb = 2\nc = "y{}".format(3)\n'
+		with patch(CTRL_MOD + ".is_safe_exec_enabled", return_value=True):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				self._draft(action_type="Script", script_body=body).insert(ignore_permissions=True)
+		text = str(cm.exception)
+		self.assertIn("blocks: <br>line 1", text)
+		self.assertIn("; <br>line 3", text)
+		self.assertIn("; line 3", strip_html(text))
+		self.assertNotIn("&quot;", text)
+		self.assertNotIn("&lt;", text)
+		self.assertNotIn("&amp;", text)
+
+	def test_unsafe_attribute_throw_caps_the_lines(self):
+		body = "".join(f'v{i} = "{{}}".format({i})\n' for i in range(12))
+		with patch(CTRL_MOD + ".is_safe_exec_enabled", return_value=True):
+			with self.assertRaises(frappe.ValidationError) as cm:
+				self._draft(action_type="Script", script_body=body).insert(ignore_permissions=True)
+		text = str(cm.exception)
+		self.assertIn("line 10:", text)
+		self.assertNotIn("line 11:", text)
+		self.assertIn("(+2 more)", text)
+
+	def test_clean_fstring_script_saves(self):
+		trig = self._make_script_trigger(body='x = f"PO {doc.name}"\n')
+		self.assertTrue(frappe.db.exists(TRIGGER, trig.name))
+
+	def test_old_trigger_with_stored_format_stays_editable_but_cannot_be_enabled(self):
+		bad = 'x = "PO {}".format(doc.name)\n'
+		trig = self._make_script_trigger(body="x = 1")
+		# The old, already stored bad body (written outside validate).
+		frappe.db.set_value(TRIGGER, trig.name, "script_body", bad)
+		trig.reload()
+		self.assertEqual(trig.script_body, bad)
+		with patch(CTRL_MOD + ".is_safe_exec_enabled", return_value=True):
+			# A description edit works: neither the body nor the enabled flag changed.
+			trig.description = "edited"
+			trig.save(ignore_permissions=True)
+			# Turning it off works.
+			trig.enabled = 0
+			trig.save(ignore_permissions=True)
+			trig.reload()
+			self.assertEqual(int(trig.enabled), 0)
+			# Turning it back on is refused: the stored body would fail at run time.
+			trig.enabled = 1
+			with self.assertRaises(frappe.ValidationError) as cm:
+				trig.save(ignore_permissions=True)
+		self.assertIn("blocks: line 1", strip_html(str(cm.exception)))
+
+	def test_changed_script_body_that_is_still_bad_is_refused(self):
+		trig = self._make_script_trigger(body="x = 1")
+		frappe.db.set_value(TRIGGER, trig.name, "script_body", 'x = "{}".format(1)\n')
+		trig.reload()
+		with patch(CTRL_MOD + ".is_safe_exec_enabled", return_value=True):
+			trig.script_body = 'y = "{}".format(2)\n'
+			with self.assertRaises(frappe.ValidationError):
+				trig.save(ignore_permissions=True)
+
+	def test_switching_llm_trigger_to_script_checks_the_body(self):
+		trig = self._make_llm_trigger()
+		trig.reload()
+		with patch(CTRL_MOD + ".is_safe_exec_enabled", return_value=True):
+			trig.action_type = "Script"
+			trig.script_body = 'x = "{}".format(1)\n'
+			with self.assertRaises(frappe.ValidationError):
+				trig.save(ignore_permissions=True)
+
+	def test_short_circuit_condition_with_format_is_refused_with_helper_message(self):
+		# `doc.description and ...` short-circuits on the blank doc, so the old
+		# safe_eval-only check let it through and it then failed on every fire.
+		cond = '"{}".format(doc.description) if doc.description else False'
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._draft(condition=cond).insert(ignore_permissions=True)
+		text = str(cm.exception)
+		self.assertIn("Invalid Condition:", text)
+		self.assertIn("line 1", text)
+		self.assertIn(".format is blocked", text)
+		self.assertNotIn("unsafe attribute", text)
+
+	def test_plain_format_condition_is_refused_with_helper_message_not_safe_eval_text(self):
+		# Not short-circuiting: safe_eval would raise its own "unsafe attribute"
+		# error if it ran first. The helper must run before it.
+		with self.assertRaises(frappe.ValidationError) as cm:
+			self._draft(condition='"{}".format(doc.name)').insert(ignore_permissions=True)
+		text = strip_html(str(cm.exception))
+		self.assertIn("Invalid Condition:", text)
+		self.assertIn("line 1", text)
+		self.assertNotIn("unsafe attribute", text)
+
+	def test_old_trigger_with_stored_format_condition_cannot_be_enabled(self):
+		cond = '"{}".format(doc.description) if doc.description else False'
+		trig = self._make_llm_trigger()
+		frappe.db.set_value(TRIGGER, trig.name, "condition", cond)
+		trig.reload()
+		trig.description = "edited"
+		trig.save(ignore_permissions=True)
+		trig.enabled = 0
+		trig.save(ignore_permissions=True)
+		trig.enabled = 1
+		with self.assertRaises(frappe.ValidationError) as cm:
+			trig.save(ignore_permissions=True)
+		self.assertIn("Invalid Condition:", str(cm.exception))
+
+	def test_refusal_logs_one_line_without_the_code(self):
+		body = 'secret_marker = "PO {}".format(doc.name)\n'
+		with patch("frappe.logger") as logger, patch(CTRL_MOD + ".is_safe_exec_enabled", return_value=True):
+			with self.assertRaises(frappe.ValidationError):
+				self._draft(action_type="Script", script_body=body).insert(ignore_permissions=True)
+		logger.assert_any_call("jarvis")
+		calls = [
+			c for c in logger.return_value.info.call_args_list if "unsafe-attr refusal" in str(c.args[:1])
+		]
+		self.assertEqual(len(calls), 1)
+		logged = " ".join(str(a) for a in calls[0].args)
+		self.assertIn("Jarvis Trigger", logged)
+		self.assertIn("script_body", logged)
+		self.assertNotIn("secret_marker", logged)
+
+	def test_refusal_titles_name_the_field(self):
+		with patch(CTRL_MOD + ".is_safe_exec_enabled", return_value=True):
+			with self.assertRaises(frappe.ValidationError):
+				self._draft(action_type="Script", script_body='x = "{}".format(1)\n').insert(
+					ignore_permissions=True
+				)
+		self.assertEqual(frappe.message_log[-1]["title"], "Script cannot run")
+		with self.assertRaises(frappe.ValidationError):
+			self._draft(condition='"{}".format(doc.name)').insert(ignore_permissions=True)
+		self.assertEqual(frappe.message_log[-1]["title"], "Condition cannot run")
+
+	def test_check_unsafe_attributes_rejects_an_unknown_field_name(self):
+		doc = self._draft(action_type="Script", script_body='x = "{}".format(1)\n')
+		with self.assertRaises(ValueError):
+			doc.check_unsafe_attributes(("script",))
+		with self.assertRaises(ValueError):
+			doc.check_unsafe_attributes(("condition", "descripton"))
+
+	def test_check_unsafe_attributes_skips_script_body_of_a_non_script_trigger_quietly(self):
+		doc = self._draft(script_body='x = "{}".format(1)\n')
+		doc.check_unsafe_attributes(("script_body",))  # LLM trigger: leftover body, no raise
+
 	def test_llm_requires_instruction(self):
 		with self.assertRaises(frappe.ValidationError):
 			self._draft(llm_instruction="").insert(ignore_permissions=True)
@@ -390,6 +544,106 @@ class TestDispatch(_TriggerTestCase):
 		rows = self._activities(trig.name)
 		self.assertEqual(len(rows), 1)
 		self.assertEqual(rows[0].status, "Failed")
+
+	# -- T5: Failed-row summaries carry the exception class only ------------- #
+	# The Activity summary is readable and searchable by non-managers; raw
+	# exception text can carry record values (KeyError(<value>)).
+
+	def _plant_script_body(self, trig, body):
+		"""Store ``body`` as the managed script, bypassing the save-time check."""
+		frappe.db.set_value(TRIGGER, trig.name, "script_body", body, update_modified=False)
+		frappe.db.set_value(
+			"Server Script", f"jarvis-trigger-{trig.name}", "script", body, update_modified=False
+		)
+		engine.clear_cache()
+
+	def test_script_error_summary_is_class_only(self):
+		todo = self._make_todo()
+		trig = self._make_script_trigger(body='d = {}\nd["SECRET-123"]', event="on_update")
+		with patch(EXEC_FLAG, return_value=True):
+			engine.dispatch(todo, "on_update")  # must not raise
+		rows = self._activities(trig.name, status="Failed")
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].summary, "script error: KeyError (save not blocked)")
+		self.assertNotIn("SECRET-123", rows[0].summary)
+
+	def test_condition_error_summary_is_class_only(self):
+		trig = self._make_llm_trigger(condition='doc.status == "Open"')
+		todo = self._make_todo(description="SECRET-123")
+		frappe.db.set_value(TRIGGER, trig.name, "condition", "{}[doc.description]", update_modified=False)
+		engine.clear_cache()
+		self._clear_llm_queue()
+		engine.dispatch(todo, "on_update")  # must not raise
+		rows = self._activities(trig.name, status="Failed")
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].summary, "condition error: KeyError (save not blocked)")
+		self.assertNotIn("SECRET-123", rows[0].summary)
+
+	def test_unsafe_attribute_error_summary_has_class_and_fixed_hint(self):
+		todo = self._make_todo()
+		trig = self._make_script_trigger(body="x = 1", event="on_update")
+		self._plant_script_body(trig, 'x = "{}".format(1)\n')
+		with patch(EXEC_FLAG, return_value=True):
+			engine.dispatch(todo, "on_update")  # must not raise
+		rows = self._activities(trig.name, status="Failed")
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(
+			rows[0].summary,
+			"script error: SyntaxError - .format is blocked in the sandbox; "
+			"use an f-string or % formatting (save not blocked)",
+		)
+
+	def test_real_sandbox_error_gets_the_hint(self):
+		# Locks _UNSAFE_ATTR_RE to Frappe's real message, not a copy of it.
+		from frappe.utils.safe_exec import safe_exec
+
+		from jarvis.tests._safe_exec import enable_safe_exec
+
+		with enable_safe_exec():
+			with self.assertRaises(SyntaxError) as cm:
+				safe_exec('x = "a".format(1)', None, {})
+		self.assertEqual(
+			engine._error_summary("script error", cm.exception),
+			"script error: SyntaxError - .format is blocked in the sandbox; "
+			"use an f-string or % formatting (save not blocked)",
+		)
+
+	def test_other_unsafe_attribute_names_get_no_hint(self):
+		self.assertEqual(
+			engine._error_summary("script error", SyntaxError("__class__ is an unsafe attribute")),
+			"script error: SyntaxError (save not blocked)",
+		)
+		self.assertEqual(
+			engine._error_summary("script error", SyntaxError("x format is an unsafe attribute")),
+			"script error: SyntaxError (save not blocked)",
+		)
+		self.assertEqual(
+			engine._error_summary("script error", SyntaxError("format_map is an unsafe attribute")),
+			"script error: SyntaxError - .format_map is blocked in the sandbox; "
+			"use an f-string or % formatting (save not blocked)",
+		)
+
+	def test_nonblockable_validation_error_summary_is_class_only(self):
+		todo = self._make_todo()
+		trig = self._make_script_trigger(body='frappe.throw("SECRET-123 leaked")', event="on_update")
+		with patch(EXEC_FLAG, return_value=True):
+			engine.dispatch(todo, "on_update")  # must not raise
+		rows = self._activities(trig.name, status="Failed")
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].summary, "script error: ValidationError (save not blocked)")
+		self.assertNotIn("SECRET-123", rows[0].summary)
+
+	def test_failed_summaries_stay_within_the_cap(self):
+		long_name = "K" * 500
+		out = engine._error_summary("script error", type(long_name, (Exception,), {})("x"))
+		self.assertLessEqual(len(out), 200)
+		todo = self._make_todo()
+		trig = self._make_script_trigger(body="x = 1", event="on_update")
+		self._plant_script_body(trig, 'x = "{}".format(1)\n')
+		with patch(EXEC_FLAG, return_value=True):
+			engine.dispatch(todo, "on_update")
+		for row in self._activities(trig.name, status="Failed"):
+			self.assertLessEqual(len(row.summary), 200)
 
 	def test_blocked_message_is_prefixed_with_trigger_name(self):
 		# Review P2: the blocked user should be told which automation stopped them.
@@ -621,7 +875,34 @@ class TestRunLLMAction(_TriggerTestCase):
 		rows = self._activities(trig.name)
 		self.assertEqual(len(rows), 1)
 		self.assertEqual(rows[0].status, "Failed")
-		self.assertIn("timed out", rows[0].summary)
+		# Raw error text goes to detail (managers only); the summary is fixed.
+		self.assertEqual(rows[0].summary, llm_action._LLM_FAILED_SUMMARY)
+		self.assertIn("timed out", rows[0].detail)
+
+	def test_llm_task_error_text_never_reaches_the_summary(self):
+		# The summary is readable and LIKE-searchable by non-managers. A malformed
+		# model response can carry record values, so only a fixed text may land there.
+		trig = self._make_llm_trigger()
+		with patch(LLM_TASK_COMPLETE, side_effect=LLMTaskError("malformed response: SECRET-123")):
+			self._run(trig)  # must not raise
+		rows = self._activities(trig.name)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].status, "Failed")
+		self.assertEqual(rows[0].summary, llm_action._LLM_FAILED_SUMMARY)
+		self.assertNotIn("SECRET-123", rows[0].summary)
+		self.assertIn("SECRET-123", rows[0].detail)
+
+	def test_safe_constant_errors_keep_their_own_summary(self):
+		self.assertEqual(
+			llm_action._SAFE_SUMMARIES,
+			frozenset({llm_action._NO_AGENT_UPDATE_MESSAGE, llm_action.lookups.TIMEOUT_MESSAGE}),
+		)
+		trig = self._make_llm_trigger()
+		with patch.object(llm_action, "_complete", return_value=(None, llm_action.lookups.TIMEOUT_MESSAGE)):
+			self._run(trig)
+		rows = self._activities(trig.name)
+		self.assertEqual(rows[0].summary, llm_action.lookups.TIMEOUT_MESSAGE)
+		self.assertEqual(rows[0].detail, llm_action.lookups.TIMEOUT_MESSAGE)
 
 	def test_untyped_client_exception_writes_failed_activity_without_raising(self):
 		# jarvis#1426 review finding: llm_task_complete can raise outside its own
@@ -830,9 +1111,31 @@ class TestRunLLMActionLookups(_TriggerTestCase):
 		rows = self._activities(trig.name)
 		self.assertEqual(len(rows), 1)
 		self.assertEqual(rows[0].status, "Failed")
-		self.assertIn("timed out", rows[0].summary)
+		self.assertEqual(rows[0].summary, llm_action._LLM_FAILED_SUMMARY)
+		self.assertIn("timed out", rows[0].detail)
 		self.assertIn(lookups.LOOKUP_MARKER, rows[0].detail)
 		self.assertIn("list Customer: 1 row", rows[0].detail)
+
+	def test_llm_task_error_after_a_lookup_keeps_the_marker_leading_detail(self):
+		from jarvis.triggers import lookups
+
+		trig = self._make_llm_trigger(lookups=1)
+		owner = self._owned_by_new_user(trig)
+		with (
+			patch(
+				LLM_TASK_COMPLETE,
+				side_effect=[self.LOOKUP, LLMTaskError("malformed response: SECRET-123")],
+			),
+			patch("jarvis.tools.get_list.get_list", return_value=[{"name": "T1"}]),
+		):
+			self._run(trig)  # must not raise
+		rows = self._activities(trig.name)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].status, "Failed")
+		self.assertEqual(rows[0].summary, llm_action._LLM_FAILED_SUMMARY)
+		self.assertNotIn("SECRET-123", rows[0].summary)
+		self.assertTrue(rows[0].detail.startswith(lookups.lookup_marker(owner)))
+		self.assertIn("SECRET-123", rows[0].detail)
 
 	def test_out_of_time_writes_a_failed_row_without_raising(self):
 		from jarvis.triggers import lookups

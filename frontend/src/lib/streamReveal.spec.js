@@ -206,8 +206,13 @@ describe("every terminal in the view snaps the reveal", () => {
 	});
 
 	it("snaps when the tab goes to the background, where rAF does not run", () => {
-		// Window widened for the review-C3 comment onVisibility now carries.
-		expect(src).toMatch(/onVisibility\(\)[\s\S]{0,700}else flushReveal\(\);/);
+		// Window widened for the review-C3 comment onVisibility carries and for the
+		// hand-off countdown pause/resume lines that now open it.
+		const at = src.indexOf("function onVisibility() {");
+		expect(at).not.toBe(-1);
+		expect(src.slice(at, at + 1400)).toMatch(
+			/onVisibility\(\)[\s\S]{0,1200}else flushReveal\(\);/
+		);
 	});
 
 	it("paints far less often than it animates, and pays back the skipped frames", () => {

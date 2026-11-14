@@ -4,6 +4,7 @@ import { boundedDelivery, settledSendResult } from "./lib/sendDelivery.js";
 // stay consistent across surfaces.
 import { call } from "frappe-ui";
 import { fetchToday } from "@jsshared/holiday/store.mjs";
+import { PAYMENT_CALENDAR_PAGE } from "@jsshared/goto_pages.mjs";
 import { firstServerMessage, messageText } from "./lib/errors.js";
 import { listPageArgs as _page } from "./api/listPageArgs";
 import { HISTORY_PAGE_SIZE } from "./lib/historyPaging.js";
@@ -427,6 +428,14 @@ export const listPendingConfirmations = (conversation, source) =>
 		...(source ? { source } : {}),
 	});
 
+// The one handoff capability this client sends: exactly the list
+// [PAYMENT_CALENDAR_PAGE]. That is STRICTER than the server (chat.api.send_message
+// accepts a list that merely contains it and drops everything else), on purpose:
+// the only caller builds exactly that list, and a looser client rule would let a
+// future caller forward a list the server then trims without anyone noticing.
+const isPaymentCalendarHandoff = (pages) =>
+	Array.isArray(pages) && pages.length === 1 && pages[0] === PAYMENT_CALENDAR_PAGE;
+
 export async function sendMessage(
 	conversation,
 	message,
@@ -465,13 +474,16 @@ export async function sendMessage(
 	// Forward context for a viewing-context doc/report, the one-shot "ground on
 	// wiki" flag (which can arrive without a doc), OR a page marker ("triggers" /
 	// "dashboards") that primes the agent for that surface's flow from the main
-	// chat. The backend re-applies the same allow-list (chat.api.send_message).
+	// chat, OR the payment-calendar hand-off capability (context.handoff_pages,
+	// see isPaymentCalendarHandoff). The backend re-applies the same allow-list
+	// (chat.api.send_message).
 	if (
 		context &&
 		(context.doctype ||
 			context.ground_wiki ||
 			context.page === "triggers" ||
-			context.page === "dashboards")
+			context.page === "dashboards" ||
+			isPaymentCalendarHandoff(context.handoff_pages))
 	)
 		args.context = JSON.stringify(context);
 	if (requestId) {
@@ -543,7 +555,9 @@ export const getPresetCatalog = () => call("jarvis.onboarding.get_preset_catalog
 // default_models) for the pool editor + subscription card. Independent of
 // get_chat_ui_settings so it also works in the onboarding wizard, which never
 // calls that. See jarvis.chat.api.get_model_catalog_ui.
-export const getModelCatalogUi = () => call("jarvis.chat.api.get_model_catalog_ui");
+// retry: an explicit Retry click, which skips the server's short failure backoff.
+export const getModelCatalogUi = (retry = false) =>
+	call("jarvis.chat.api.get_model_catalog_ui", retry ? { retry: 1 } : {});
 export const getLlmSyncStatus = () => call("jarvis.onboarding.get_llm_sync_status");
 // jarvis#840: the pre-chat preflight. Answers what readiness cannot -
 // { plugin, persona, usable: {state, detail} } - and never refuses: every
