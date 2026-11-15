@@ -6,8 +6,10 @@ file ``frontend/src/lib/liveDraftCases.json``; this module is the server's reade
 Rows are the conversation's messages in ``seq`` order, ignoring ``hidden`` and ``streaming``
 rows. A draft row is an assistant row whose FIRST closed ``jarvis-action`` fence is broken or
 parses to a non-email action whose verb is missing, ``create`` or ``update``. The live draft
-is the last draft row, unless a later tool row carries a non-empty ``action_outcome`` or more
-than ``MAX_USER_ROWS_AFTER_DRAFT`` user rows come after it.
+is the last draft row, unless a later tool row is a decided write (a non-empty
+``action_outcome``, or a ``create_doc`` / ``update_doc`` call whose ``tool_status`` is
+``completed``), more than ``MAX_USER_ROWS_AFTER_DRAFT`` user rows come after it, or more than
+``MAX_ROWS_AFTER_DRAFT`` rows of any role come after it.
 
 ``pick`` is pure (plain dict rows, no Frappe) so it can be evaluated without a site.
 """
@@ -18,10 +20,12 @@ import json
 import re
 
 MAX_USER_ROWS_AFTER_DRAFT = 5
-# ``find`` reads only the rows newer than the 6th-newest user row (a draft older than that has
-# more than MAX_USER_ROWS_AFTER_DRAFT user rows after it, so it is retired). This caps that
-# slice; when it is hit the answer is "no draft" (retired is the safe direction).
-HARD_LIMIT = 2000
+# Both apps load only the newest page of a chat (80 rows of any role, tool rows included), so
+# a draft further back than this is never live: the server never calls a draft live whose
+# card is not on a loaded page.
+MAX_ROWS_AFTER_DRAFT = 60
+# A receipt written before 2026-07-17 has no action_outcome: its completed call is the write.
+_WRITE_TOOLS = ("create_doc", "update_doc")
 
 # The client's fence grammar (ChatView.vue ``_ACTION_RE``): the FIRST closed block wins.
 ACTION_RE = re.compile(r"```jarvis-action[ \t]*\n([\s\S]*?)```")
@@ -133,83 +137,88 @@ def draft_of(content) -> dict | None:
 	}
 
 
+def _shown(row) -> bool:
+	return _is_object(row) and not row.get("hidden") and not row.get("streaming")
+
+
+def retires_draft(row: dict) -> bool:
+	"""A decided write after a draft retires it: a receipt (a non-empty ``action_outcome``),
+	or a ``create_doc`` / ``update_doc`` call that completed (receipts written before
+	2026-07-17 carry no outcome, so a draft saved on such a build is retired by its call)."""
+	if row.get("role") != "tool":
+		return False
+	outcome = row.get("action_outcome")
+	if isinstance(outcome, str) and _trim(outcome) != "":
+		return True
+	return row.get("tool_name") in _WRITE_TOOLS and row.get("tool_status") == "completed"
+
+
 def pick(rows: list[dict]) -> dict | None:
 	"""The live draft among ``rows`` (messages in ``seq`` order), or None.
 
 	Returns ``{"message": name, "verb": "create"|"update", "doctype": str, "bad": bool}``.
 	The newest draft row is chosen first and only then tested for retirement: an older
-	draft never comes back."""
-	user_rows = 0
+	draft never comes back. Only the newest ``MAX_ROWS_AFTER_DRAFT + 1`` shown rows are
+	ever looked at, which is what lets ``find`` read no more than those."""
+	user_rows = later_rows = 0
 	for row in reversed(rows or []):
-		if not _is_object(row) or row.get("hidden") or row.get("streaming"):
+		if not _shown(row):
 			continue
 		role = row.get("role")
 		draft = draft_of(row.get("content")) if role == "assistant" else None
 		if draft:
-			if user_rows > MAX_USER_ROWS_AFTER_DRAFT:
-				return None
 			return {"message": row.get("name"), **draft}
-		if role == "tool" and str(row.get("action_outcome") or "").strip():
+		if retires_draft(row):
 			return None
 		if role == "user":
 			user_rows += 1
+		later_rows += 1
+		# Every row before this one has too many rows after it to be the live draft.
+		if user_rows > MAX_USER_ROWS_AFTER_DRAFT or later_rows > MAX_ROWS_AFTER_DRAFT:
+			return None
 	return None
 
 
-def _retires(row: dict) -> bool:
-	return (
-		row["role"] == "tool"
-		and not row.get("hidden")
-		and not row.get("streaming")
-		and bool(str(row.get("action_outcome") or "").strip())
+def load_rows(conversation: str) -> list[dict]:
+	"""The rows ``pick`` reads for ``conversation``, oldest first: the newest
+	``MAX_ROWS_AFTER_DRAFT + 1`` shown rows (``pick`` never looks further back), with
+	``content`` only on the assistant rows after the last decided write that mention a block.
+	Two reads, none in a loop.
+
+	``get_all`` is used because every caller (the dismiss endpoint after its owner check, the
+	turn's own prompt assembly) acts on a conversation it already owns."""
+	import frappe
+
+	# The newest shown rows, no content, on the conversation index.
+	rows = frappe.get_all(
+		MSG,
+		filters={"conversation": conversation, "hidden": 0, "streaming": 0},
+		fields=["name", "seq", "role", "action_outcome", "tool_name", "tool_status"],
+		order_by="seq desc",
+		limit=MAX_ROWS_AFTER_DRAFT + 1,
 	)
+	rows.reverse()
+	last_write = max((i for i, r in enumerate(rows) if retires_draft(r)), default=-1)
+	names = [r["name"] for r in rows[last_write + 1 :] if r["role"] == "assistant"]
+	# Content only for the assistant rows that could be the draft, and only if they mention a
+	# block (replies can be long). Primary key.
+	blocks = (
+		{
+			r["name"]: r["content"]
+			for r in frappe.get_all(  # same ownership argument as above
+				MSG,
+				filters={"name": ["in", names], "content": ["like", "%jarvis-action%"]},
+				fields=["name", "content"],
+			)
+		}
+		if names
+		else {}
+	)
+	for row in rows:
+		row["content"] = blocks.get(row["name"])
+	return rows
 
 
 def find(conversation: str) -> dict | None:
-	"""The live draft of ``conversation``, or None. Shaped like the rule: only the rows newer
-	than the 6th-newest user row can hold it, and only the assistant rows newer than the last
-	receipt can be it. Three reads, none in a loop.
-
-	``get_all`` is used because the callers (the dismiss endpoint after its owner check, the
-	turn's own prompt assembly) already act on a conversation this user owns."""
-	import frappe
-
-	# Cutoff. Index role_conv_seq (role, conversation, seq) serves this ordered read.
-	users = frappe.get_all(
-		MSG,
-		filters={"conversation": conversation, "role": "user", "hidden": 0, "streaming": 0},
-		fields=["seq"],
-		order_by="seq desc",
-		limit=MAX_USER_ROWS_AFTER_DRAFT + 1,
-	)
-	cutoff = users[MAX_USER_ROWS_AFTER_DRAFT]["seq"] if len(users) > MAX_USER_ROWS_AFTER_DRAFT else None
-	filters = {"conversation": conversation}
-	if cutoff is not None:
-		filters["seq"] = [">", cutoff]
-	# Light rows (no content). Index on conversation, then the seq range within it.
-	rows = frappe.get_all(
-		MSG,
-		filters=filters,
-		fields=["name", "seq", "role", "action_outcome", "hidden", "streaming"],
-		order_by="seq asc",
-		limit=HARD_LIMIT + 1,
-	)
-	if len(rows) > HARD_LIMIT:
-		return None
-	last_receipt = max((i for i, r in enumerate(rows) if _retires(r)), default=-1)
-	names = [r["name"] for r in rows[last_receipt + 1 :] if r["role"] == "assistant"]
-	if not names:
-		return None
-	# Content only for the assistant rows that could be the draft, and only if they mention a
-	# block (replies can be long). Primary key.
-	blocks = {
-		r["name"]: r["content"]
-		for r in frappe.get_all(  # same ownership argument as above
-			MSG,
-			filters={"name": ["in", names], "content": ["like", "%jarvis-action%"]},
-			fields=["name", "content"],
-		)
-	}
-	for row in rows:
-		row["content"] = blocks.get(row["name"])
-	return pick(rows)
+	"""The live draft of ``conversation``, or None: ``pick`` over ``load_rows``."""
+	return pick(load_rows(conversation))

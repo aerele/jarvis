@@ -689,5 +689,1349 @@
 			}
 		],
 		"live": null
+	},
+	{
+		"id": "sixty-rows-later",
+		"note": "exactly 60 rows of any role after the draft (5 user, 5 assistant, 50 plain tool rows) keep it live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t0_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a1",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t1_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a2",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t2_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u3",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t3_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u4",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a4",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t4_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "sixty-one-rows-later",
+		"note": "61 rows of any role after the draft retire it: it may sit beyond the page a client loaded",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t0_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a1",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t1_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a2",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t2_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u3",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t3_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u4",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a4",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t4_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx10",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "sixty-one-rows-one-hidden",
+		"note": "61 rows after the draft where one is hidden: 60 count, so it stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t0_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a1",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t1_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a2",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t2_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "h0",
+				"role": "user",
+				"content": "hidden",
+				"hidden": 1
+			},
+			{
+				"name": "u3",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t3_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u4",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a4",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t4_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "legacy-create-receipt-without-outcome",
+		"note": "a completed create_doc row with no action_outcome (a receipt from before 2026-07-17) retires the draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> completed",
+				"tool_name": "create_doc",
+				"tool_status": "completed"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "legacy-update-receipt-without-outcome",
+		"note": "a completed update_doc row with no action_outcome retires the draft too",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "update_doc -> completed",
+				"tool_name": "update_doc",
+				"tool_status": "completed"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "completed-read-tool-after-draft",
+		"note": "a completed get_doc row is a read, not a write: the draft stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "get_doc -> completed",
+				"tool_name": "get_doc",
+				"tool_status": "completed"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "pending-create-card-after-draft",
+		"note": "a create_doc row still pending with no outcome is a parked card, not a write: the draft stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "failed-create-call-after-draft",
+		"note": "a create_doc call that ended in an error wrote nothing: the draft stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> error",
+				"tool_name": "create_doc",
+				"tool_status": "error"
+			}
+		],
+		"live": "m1"
 	}
 ]

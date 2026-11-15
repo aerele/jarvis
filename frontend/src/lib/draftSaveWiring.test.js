@@ -86,7 +86,8 @@ test("a click outside the panel closes it only when nothing would be lost", () =
 });
 
 test("the card message is the live draft row, and actionFor stays that row's name", () => {
-	assert.match(src, /liveDraftMessage\(visibleMessages\.value, _lastAssistant\.value\)/);
+	// the rule reads the loaded rows as the server counts them, tool rows included
+	assert.match(src, /liveDraftMessage\(messages\.value, _lastAssistant\.value\)/);
 	assert.match(
 		src,
 		/const actionFor = computed\(\(\) => \(activeAction\.value \? _cardMessage\.value\.name : null\)\);/

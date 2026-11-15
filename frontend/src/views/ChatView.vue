@@ -8013,8 +8013,10 @@ const _lastAssistant = computed(() => {
 });
 // The newest unsaved draft row (lib/liveDraft, the one rule the phone and the server
 // share): kept through later replies until it is saved, cancelled or replaced. Null
-// whenever _lastAssistant is, so nothing shows mid-turn.
-const _liveDraft = computed(() => liveDraftMessage(visibleMessages.value, _lastAssistant.value));
+// whenever _lastAssistant is, so nothing shows mid-turn. It reads the loaded rows as the
+// server counts them (`messages`: every role, every tool row), never visibleMessages,
+// which drops the tool rows that have no receipt chip.
+const _liveDraft = computed(() => liveDraftMessage(messages.value, _lastAssistant.value));
 // The last message's own action block that is not a draft (an email draft, a gated verb's
 // legacy note, an unknown verb's error card). It wins the tail over a kept draft.
 const _tailOwnAction = computed(() => {

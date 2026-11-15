@@ -88,13 +88,14 @@ class TestRuleCases(_Base):
 	def test_find_agrees_with_every_shared_case(self):
 		with open(_CASES, encoding="utf-8") as f:
 			cases = json.load(f)
-		self.assertGreaterEqual(len(cases), 23)
+		self.assertGreaterEqual(len(cases), 36)
 		for case in cases:
 			with self.subTest(case=case["id"]):
 				conv = _make_conv(TEST_USER)
 				names = {}
 				for seq, row in enumerate(case["rows"], start=1):
-					extra = {k: row[k] for k in ("hidden", "streaming", "action_outcome") if k in row}
+					keys = ("hidden", "streaming", "action_outcome", "tool_name", "tool_status")
+					extra = {k: row[k] for k in keys if k in row}
 					names[row["name"]] = _insert(conv, seq, row["role"], row.get("content"), **extra)
 				found = live_draft.find(conv)
 				want = names[case["live"]] if case["live"] else None
@@ -116,6 +117,17 @@ class TestRuleCases(_Base):
 		rows = [{"name": "a", "role": "assistant", "content": _TODO}]
 		self.assertEqual(live_draft.pick(rows)["message"], "a")
 		self.assertIsNone(live_draft.pick([]))
+
+	def test_find_reads_only_the_newest_shown_rows(self):
+		# 70 rows after the draft, only the newest 61 shown ones are read; the draft is past them.
+		conv = _make_conv(TEST_USER)
+		_insert(conv, 1, "assistant", _TODO)
+		for seq in range(2, 72):
+			_insert(conv, seq, "tool", "get_list", tool_name="get_list", tool_status="completed")
+		self.assertIsNone(live_draft.find(conv))
+		rows = live_draft.load_rows(conv)
+		self.assertEqual(len(rows), live_draft.MAX_ROWS_AFTER_DRAFT + 1)
+		self.assertEqual([r["seq"] for r in rows], list(range(11, 72)))
 
 
 class TestDismissDraft(_Base):
@@ -259,6 +271,35 @@ class TestPureRule(unittest.TestCase):
 	@staticmethod
 	def _row(body: str, name: str = "m1") -> list[dict]:
 		return [{"name": name, "role": "assistant", "content": f"```jarvis-action\n{body}\n```"}]
+
+	def test_pick_agrees_with_every_shared_case(self):
+		with open(_CASES, encoding="utf-8") as f:
+			cases = json.load(f)
+		for case in cases:
+			with self.subTest(case=case["id"]):
+				found = live_draft.pick(case["rows"])
+				self.assertEqual(found["message"] if found else None, case["live"])
+
+	def test_the_bounds_match_the_javascript_rule(self):
+		with open(os.path.join(os.path.dirname(_CASES), "liveDraft.js"), encoding="utf-8") as f:
+			src = f.read()
+		self.assertIn(f"MAX_USER_ROWS_AFTER_DRAFT = {live_draft.MAX_USER_ROWS_AFTER_DRAFT};", src)
+		self.assertIn(f"MAX_ROWS_AFTER_DRAFT = {live_draft.MAX_ROWS_AFTER_DRAFT};", src)
+		self.assertEqual((live_draft.MAX_USER_ROWS_AFTER_DRAFT, live_draft.MAX_ROWS_AFTER_DRAFT), (5, 60))
+
+	def test_a_decided_write_retires_a_draft(self):
+		write = live_draft.retires_draft
+		self.assertTrue(write({"role": "tool", "action_outcome": "discarded"}))
+		self.assertTrue(write({"role": "tool", "tool_name": "create_doc", "tool_status": "completed"}))
+		self.assertTrue(write({"role": "tool", "tool_name": "update_doc", "tool_status": "completed"}))
+		for row in (
+			{"role": "tool", "action_outcome": "  "},
+			{"role": "tool", "tool_name": "create_doc", "tool_status": "pending"},
+			{"role": "tool", "tool_name": "create_doc", "tool_status": "error"},
+			{"role": "tool", "tool_name": "get_doc", "tool_status": "completed"},
+			{"role": "assistant", "action_outcome": "confirmed"},
+		):
+			self.assertFalse(write(row), row)
 
 	def test_safe_doctype(self):
 		for ok in ("ToDo", "Sales Order", "Item-Group", "Pagos de Clasificaci\u00f3n", "\u00c9criture"):

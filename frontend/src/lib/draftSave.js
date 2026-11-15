@@ -91,7 +91,8 @@ export function draftIsDirty(model) {
 // saved, cancelled or replaced (lib/liveDraft, the one rule the phone and the server
 // share). `last` is the last assistant message; it is null while a turn runs or the
 // snapshot is not current, and then no card shows. The card is drawn under `last`, but
-// every save and cancel names the row returned here.
-export function liveDraftMessage(visible, last) {
-	return last ? liveDraftRow(visible) : null;
+// every save and cancel names the row returned here. `rows` are the loaded messages as the
+// server counts them: every role and every tool row, not only the ones the thread shows.
+export function liveDraftMessage(rows, last) {
+	return last ? liveDraftRow(rows) : null;
 }
