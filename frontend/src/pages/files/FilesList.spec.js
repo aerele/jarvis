@@ -6,7 +6,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 vi.mock("vue-router", async () => {
 	const { reactive } = await import("vue");
 	const route = reactive({ name: "FilesList", params: {}, query: {} });
-	return { useRoute: () => route, useRouter: () => ({ replace: vi.fn(), push: vi.fn() }) };
+	const router = { replace: vi.fn(), push: vi.fn() };
+	return { useRoute: () => route, useRouter: () => router };
 });
 vi.mock("@vueuse/core", async (importOriginal) => {
 	const actual = await importOriginal();
@@ -182,6 +183,41 @@ describe("FilesList: the Dropped / Intake switch", () => {
 		expect(w.find(".intake-view").exists()).toBe(true);
 		delete useRoute().query.view;
 		w.unmount();
+	});
+
+	it("writes the tab and Whose files into the URL so Back from a detail page returns to them", async () => {
+		const { useRoute, useRouter } = await import("vue-router");
+		const router = useRouter();
+		router.replace.mockClear();
+		const w = await mountList([applying]);
+		try {
+			await w.find('[role="tab"]:nth-of-type(2)').trigger("click");
+			await flushPromises();
+			expect(router.replace).toHaveBeenLastCalledWith({ query: { view: "intake" } });
+			useRoute().query.view = "intake";
+			await w.find(".pick-all").trigger("click");
+			await flushPromises();
+			expect(router.replace).toHaveBeenLastCalledWith({
+				query: { view: "intake", scope: "all" },
+			});
+		} finally {
+			delete useRoute().query.view;
+			w.unmount();
+		}
+	});
+
+	it("opens Intake with Whose files from ?scope=all", async () => {
+		const { useRoute } = await import("vue-router");
+		useRoute().query.view = "intake";
+		useRoute().query.scope = "all";
+		const w = await mountList([applying]);
+		try {
+			expect(w.find(".intake-view").attributes("data-scope")).toBe("all");
+		} finally {
+			delete useRoute().query.view;
+			delete useRoute().query.scope;
+			w.unmount();
+		}
 	});
 
 	it("switches an open File Box when a bell link changes ?view=, keeping the scope", async () => {
