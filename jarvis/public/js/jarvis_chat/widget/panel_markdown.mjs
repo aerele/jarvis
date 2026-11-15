@@ -5,16 +5,26 @@
 // implementation — it is dependency-free and already tuned for these replies,
 // and it escapes HTML before emitting, which is what makes v-html safe here.
 import { renderMarkdown } from "../../../../../frontend/src/markdown.js";
+// The SPA's own goto parser: the chip appears only for a block the SPA itself
+// would accept (allowlisted page, non-empty prompt), never for raw JSON.
+import {
+  GOTO_RE,
+  parseGoto,
+} from "../../../../../frontend/src/lib/chatGoto.js";
+import { DASHBOARDS_PAGE } from "../../shared/goto_pages.mjs";
 
 // Pure interactive control fences: NOT viewable content. The panel surfaces
 // actions / confirmations through its own event handlers (action:pending etc.),
-// not the transcript, so these are removed outright.
+// not the transcript, so these are removed outright. (A valid Dashboards
+// jarvis-goto first becomes a "continue in full chat" chip; any other goto
+// block is removed here.)
 const STRIP_FENCES = [
   "jarvis-action",
   "confirm",
   "jarvis-ask",
   "jarvis-skill",
   "jarvis-macro",
+  "jarvis-goto",
 ];
 
 // Rich CONTENT this text-only mini panel cannot draw: record cards, data charts,
@@ -26,14 +36,25 @@ const M0 = "\uE000";
 const M1 = "\uE001";
 const sentinel = (kind) => `\n\n${M0}${kind}${M1}\n\n`;
 
+// A goto fence still streaming in: no closing fence yet. Matched only after the
+// closed blocks are handled, so it can only be the tail.
+const UNCLOSED_GOTO_RE = /```jarvis-goto(?:[ \t]*\n[\s\S]*)?$/;
+
 export function stripControlBlocks(src) {
   let t = String(src == null ? "" : src);
+  // Only the FIRST goto can chip, and only a Dashboards one: the widget never
+  // opens a page, it hands the conversation to the full chat. The calendar
+  // goto has no chip (the SPA opens it from the full chat).
+  if (parseGoto(t)?.page === DASHBOARDS_PAGE) {
+    t = t.replace(GOTO_RE, () => sentinel("goto"));
+  }
   for (const name of STRIP_FENCES) {
     t = t.replace(
       new RegExp("```" + name + "[ \\t]*\\n[\\s\\S]*?```", "g"),
       ""
     );
   }
+  t = t.replace(UNCLOSED_GOTO_RE, "");
   // Content blocks → "view in full chat" sentinels (kept, not dropped).
   t = t.replace(/```jarvis-cards[ \t]*\n[\s\S]*?```/g, sentinel("cards"));
   t = t.replace(/```jarvis-chart[ \t]*\n[\s\S]*?```/g, sentinel("chart"));
@@ -50,6 +71,11 @@ export function stripControlBlocks(src) {
 // are caught by delegation in Panel.vue (the chip lives inside a v-html bubble,
 // so it cannot bind a Vue handler directly) and emit "open-full".
 const CHIP = {
+  goto: {
+    label: "Continue in full chat",
+    sub: "to open Dashboards",
+    icon: '<path d="M18 20V10M12 20V4M6 20v-6"></path>',
+  },
   diagram: {
     label: "Diagram",
     icon:
@@ -82,7 +108,9 @@ function chip(kind) {
     '<span class="jvp-view-chip-tx"><span class="jvp-view-chip-t">' +
     c.label +
     "</span>" +
-    '<span class="jvp-view-chip-s">Open in full chat</span></span>' +
+    '<span class="jvp-view-chip-s">' +
+    (c.sub || "Open in full chat") +
+    "</span></span>" +
     '<svg class="jvp-view-chip-go" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"></path></svg>' +
     "</button>"
   );

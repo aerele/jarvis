@@ -77,7 +77,12 @@ _GUARD_CALL_SUBSTRS = (
 # design: every current chat endpoint is gated by decorator or an in-body guard.
 # Add an entry ONLY with a reviewer-approved reason (e.g. a deliberately public
 # health probe); the test then permits it and documents why.
-_OWNER_GATED_ALLOWLIST: dict[str, str] = {}
+_OWNER_GATED_ALLOWLIST: dict[str, str] = {
+	# The uploader of an intake file may have no Jarvis role (they only upload), and must
+	# still be able to retry their own failed file. The body allows only the row's owner
+	# or a trigger manager, so it is owner-gated, not open.
+	"filebox.retry_intake": "owner-or-manager check in the body; uploaders have no Jarvis role",
+}
 
 
 def _is_whitelisted(node: ast.FunctionDef) -> bool:

@@ -341,7 +341,7 @@ test("every catalog provider has an explicit status-link expectation", () => {
 		zai_coding: "",
 	};
 	const catalog = readFileSync(
-		new URL("../../../jarvis/_model_catalog.py", import.meta.url),
+		new URL("../../../jarvis/tests/fixtures/model_catalog.py", import.meta.url),
 		"utf8"
 	);
 	const ids = [...catalog.matchAll(/"provider_id": "([^"]+)"/g)].map((match) => match[1]);
@@ -407,6 +407,7 @@ test("retryable is pinned per code", () => {
 		"empty-reply",
 		"empty-reply-tools",
 		"gateway",
+		"gate-unconfirmed",
 	]);
 	for (const { code } of rules) {
 		assert.equal(turnErrorInfo("x", code).retryable, retryable.has(code), code);

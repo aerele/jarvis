@@ -325,6 +325,16 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.chat.filebox",
+	"Document Intake rows are owner-or-manager scoped Jarvis Trigger Activity records; no conversation identifier lookup.",
+	"""
+    get_intake_detail
+    list_intake_page
+    retry_intake
+    """,
+)
+
+_unrelated(
 	"jarvis.chat.greeting",
 	"Current-user greeting/workspace readiness; no conversation identifier lookup.",
 	"""
@@ -482,10 +492,14 @@ _unrelated(
     create_trigger
     delete_trigger
     delete_triggers_bulk
+    get_activity_detail
+    get_intake_field_options
     get_trigger
     get_triggers_caps
     list_activity_page
+    list_intake_folders
     list_triggers_page
+    search_intake_doctypes
     set_trigger_enabled
     test_trigger_condition
     update_trigger
@@ -828,6 +842,11 @@ ENDPOINTS.update(
 		},
 		"jarvis.chat.api.get_conversation": {
 			"arguments": {"conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+		# Report error ticket draft: the owner's own failed reply only (message permission hook).
+		"jarvis.support.api.error_report_details": {
+			"arguments": {"conversation": "$conversation", "message": "$message"},
 			"scope": "chat_scoped",
 		},
 		"jarvis.chat.api.get_conversation_context": {

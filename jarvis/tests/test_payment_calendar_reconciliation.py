@@ -360,7 +360,11 @@ class TestPaymentCalendarReconciliation(TestCase):
 		rows = [r for r in result["rows"] if r["voucher_no"] == invoice]
 		self.assertEqual(len(rows), 1)
 		self.assertEqual(Decimal(rows[0]["remaining"]), 6400)
-		self.assertEqual(rows[0]["allocation_basis"], "invoice")
+		# Before ERPNext v15.125.0 the payment-terms report misstates this advance, so the
+		# calendar repairs the row from the invoice and marks it. From v15.125.0
+		# (set_term_outstanding keeps the settled part of the terms) the upstream row is
+		# already right and needs no repair. The amount and due date are the same either way.
+		self.assertIn(rows[0].get("allocation_basis"), ("invoice", None))
 		self.assertEqual(rows[0]["due_date"], add_days(self.fx.today, 10))
 		self.assertEqual(Decimal(result["canonical_total"]), 6400)
 

@@ -88,7 +88,9 @@ _PROVIDERS_TOKEN = re.compile(r"providers=([a-z]+)", _FLAGS)
 _SIGNAL = re.compile(_SUBSCRIPTION["signal"], _FLAGS)
 _MENTIONS = tuple((upstream, re.compile(p, _FLAGS)) for upstream, p in _SUBSCRIPTION["mentions"].items())
 _IMPLIED_OPENAI = re.compile(r"refresh_token_", _FLAGS)
-_IMPLIED_ANTHROPIC = re.compile(r"/login|\bnot logged in\b", _FLAGS)
+_IMPLIED_ANTHROPIC = re.compile(
+	r"/login|\bnot logged in\b|oauth session expired and could not be refreshed", _FLAGS
+)
 
 
 def _text_of(raw) -> str:
@@ -150,3 +152,60 @@ def headline_for(raw) -> str | None:
 		if headline and pattern.search(text):
 			return _fill_provider(headline, text)
 	return None
+
+
+# "All models failed (2): <provider>/<model>: <reason> | <provider>/<model>: <reason>": the agent
+# runtime's report of a failover run in which every model failed, one cause per model.
+# KEEP IN SYNC with modelFailures in turn_errors.mjs (fixtures/model_failures.json pins both).
+_FAILOVER_HEAD = re.compile(r"\bAll models failed \(\d+\):\s*", _FLAGS)
+_FAILOVER_SPLIT = re.compile(r"\s+\|\s+")
+_FAILOVER_PART = re.compile(r"^([\w.-]+)/([^\s:]+):\s*\S", _FLAGS)
+# A pool proxy answers under its own alias; the model it was asked for is named in the reason.
+_NAMED_MODEL = re.compile(r"\bfor model ([\w.:+-]+)", _FLAGS)
+_RETRY_AFTER = re.compile(r"\bretry-after:\s*(\d+)\s*s", _FLAGS)
+# Older rows were stored cut at 240 characters ("... | anthropic/claude-...").
+_CUT_TAIL = re.compile(r"(?:\.\.\.|\u2026)\s*$")
+
+
+def model_failures(raw) -> list[dict]:
+	"""One entry per failed model of a failover error, ``[]`` for any other text. Each entry:
+	``model`` (the id the customer picked), ``code`` (that part's rule code, ``""`` when the part
+	was cut off before its reason), ``upstream`` (for a dead sign-in) and ``retry_after_s``."""
+	text = _text_of(raw)
+	head = _FAILOVER_HEAD.search(text)
+	if not head:
+		return []
+	out = []
+	segments = _FAILOVER_SPLIT.split(text[head.end() :])
+	for i, segment in enumerate(segments):
+		segment = segment.strip()
+		cut = i == len(segments) - 1 and bool(_CUT_TAIL.search(segment))
+		named = _FAILOVER_PART.match(segment)
+		if not named:
+			out.append({"model": "", "code": "", "upstream": "", "retry_after_s": None})
+			continue
+		code = classify_error_text(segment)
+		if cut and code == "gateway":
+			code = ""  # a reason cut mid-sentence that no rule recognises says nothing
+		retry = _RETRY_AFTER.search(segment)
+		model = _NAMED_MODEL.search(segment)
+		out.append(
+			{
+				"model": model.group(1) if model else named.group(2),
+				"code": code,
+				"upstream": subscription_upstream_from_error(segment)
+				if code == "subscription-expired"
+				else "",
+				"retry_after_s": int(retry.group(1)) if retry else None,
+			}
+		)
+	return out
+
+
+def model_wait(raw) -> tuple[str, int | None]:
+	"""``(model, seconds)`` from a single model's usage-cap text ("... for model gpt-5.6-terra ...
+	Retry-After: 169907 seconds"), ``("", None)`` for what it does not name."""
+	text = _text_of(raw)
+	model = _NAMED_MODEL.search(text)
+	retry = _RETRY_AFTER.search(text)
+	return (model.group(1) if model else "", int(retry.group(1)) if retry else None)

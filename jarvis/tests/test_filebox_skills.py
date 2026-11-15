@@ -1207,6 +1207,7 @@ class TestRerun(_Base):
 E2E_SLUG = "customer-sales-invoice-intake"
 E2E_CO, E2E_ABBR = "zz-fbk Test Co", "ZFBK"
 E2E_SUPPLIER, E2E_ITEM = "zz-fbk Acme Traders", "ZZ-FBK-WIDGET"
+E2E_SUPPLIER_GROUP = "zz-fbk Vendors"  # a supplier needs a leaf group
 
 
 _E2E_ROOTS = (  # tree roots / UOM a fresh site lacks (kept when they already exist)
@@ -1232,7 +1233,11 @@ _E2E_LEDGER = (  # (doctype, values, a tree root) under the E2E company
 )
 _E2E_MASTERS = (
 	("Item Group", {"item_group_name": "zz-fbk Products", "parent_item_group": "All Item Groups"}),
-	("Supplier", {"supplier_name": E2E_SUPPLIER, "supplier_group": "All Supplier Groups"}),
+	(
+		"Supplier Group",
+		{"supplier_group_name": E2E_SUPPLIER_GROUP, "parent_supplier_group": "All Supplier Groups"},
+	),
+	("Supplier", {"supplier_name": E2E_SUPPLIER, "supplier_group": E2E_SUPPLIER_GROUP}),
 	(
 		"Item",
 		{"item_code": E2E_ITEM, "item_group": "zz-fbk Products", "stock_uom": "Nos", "is_stock_item": 0},
@@ -1295,7 +1300,12 @@ def _purge_e2e(roots=()) -> None:
 	frappe.db.rollback()
 	for pi in frappe.get_all(PI, filters={"company": E2E_CO}, pluck="name"):
 		frappe.delete_doc(PI, pi, force=True, ignore_permissions=True)
-	for doctype, name in (("Item", E2E_ITEM), ("Supplier", E2E_SUPPLIER), ("Item Group", "zz-fbk Products")):
+	for doctype, name in (
+		("Item", E2E_ITEM),
+		("Supplier", E2E_SUPPLIER),
+		("Supplier Group", E2E_SUPPLIER_GROUP),
+		("Item Group", "zz-fbk Products"),
+	):
 		if frappe.db.exists(doctype, name):
 			frappe.delete_doc(doctype, name, force=True, ignore_permissions=True)
 	for doctype in ("Account", "Cost Center"):

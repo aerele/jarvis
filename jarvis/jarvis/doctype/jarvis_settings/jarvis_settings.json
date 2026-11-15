@@ -16,6 +16,8 @@
   "budgets_section",
   "agent_run_budget_monthly",
   "macro_step_budget_monthly",
+  "intake_daily_cap",
+  "intake_daily_cap_per_user",
   "activation_module_ceiling",
   "enforce_agent_min_model",
   "branding_section",
@@ -108,6 +110,7 @@
   "enable_customizations_clause",
   "enable_role_profiles",
   "file_box_sheets",
+  "payment_calendar_chat_handoff",
   "sync_tab",
   "last_sync_section",
   "last_sync_at",
@@ -245,6 +248,20 @@
    "fieldname": "macro_step_budget_monthly",
    "fieldtype": "Int",
    "label": "Scheduled Macro Step Budget (monthly, per owner)"
+  },
+  {
+   "default": "300",
+   "description": "Most documents Document Intake reads per day, across the whole site. Leave empty for the default (300). 0 pauses intake.",
+   "fieldname": "intake_daily_cap",
+   "fieldtype": "Int",
+   "label": "Intake daily limit (site)"
+  },
+  {
+   "default": "50",
+   "description": "Most documents Document Intake reads per day for one uploader. Leave empty for the default (50). 0 pauses intake.",
+   "fieldname": "intake_daily_cap_per_user",
+   "fieldtype": "Int",
+   "label": "Intake daily limit (per user)"
   },
   {
    "default": "1",
@@ -861,6 +878,15 @@
    "description": "On: a File Box run lists every missing master and question for a document on ONE approval sheet, applied at once with one resume. Off: each master waits on its own held row. Turning it off stops new sheets; open ones still collect and drain."
   },
   {
+   "fieldname": "payment_calendar_chat_handoff",
+   "fieldtype": "Check",
+   "label": "Payment Calendar: chat hand-off",
+   "default": "0",
+   "hidden": 1,
+   "permlevel": 2,
+   "description": "On: a chat turn from a user who can open the Payment Calendar tells the agent the page exists, so a per-day cash request can be handed to it. Off (default): no hint is sent and the agent behaves as before. Turned on per site by Jarvis support after a check; only an Administrator can change it."
+  },
+  {
    "fieldname": "sync_tab",
    "fieldtype": "Tab Break",
    "label": "Sync & Status"
@@ -1429,5 +1455,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-03 23:30:00.000000"
+ "modified": "2026-11-09 12:00:00.000000"
 }

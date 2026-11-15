@@ -1,3 +1,5 @@
+import { waitPhrase } from "../../../jarvis/public/js/turn_errors.mjs";
+
 // Shared pure pool logic. Consumed by the Vue app (direct import) AND the desk
 // onboarding page (via jarvis_onboarding_llm.bundle.js -> window). No framework imports.
 export function deriveMode(models, preset) {
@@ -93,27 +95,6 @@ export function reorder(list, from, to) {
 	a.splice(to, 0, x);
 	return a;
 }
-// Built-in fallback for chat-subscription model ids per upstream. The catalog is
-// owned by admin now (Jarvis LLM Provider doctype) and arrives via
-// get_chat_ui_settings.subscription_models; this literal is the degraded-mode
-// floor used before the first response lands and when admin is unreachable.
-// Do NOT add models here to make them selectable: add them in the admin desk.
-const FALLBACK_SUB_MODELS = {
-	openai: ["gpt-5.6-terra", "gpt-5.6-sol", "gpt-5.6-luna", "gpt-6-astra", "gpt-5.5"],
-	anthropic: [
-		"claude-opus-5",
-		"claude-sonnet-5",
-		"claude-fable-5-1",
-		"claude-fable-5",
-		"claude-opus-4-8",
-		"claude-opus-4-7",
-		"claude-sonnet-4-6",
-		"claude-opus-4-6",
-	],
-	xai: ["grok-4.3", "grok-build-0.1"],
-	kimi: ["kimi-k2.7-code", "kimi-k2.6"],
-};
-
 // Provider label (as admin stores it) -> the upstream key the pool editor uses.
 const LABEL_TO_UPSTREAM = {
 	OpenAI: "openai",
@@ -122,25 +103,23 @@ const LABEL_TO_UPSTREAM = {
 	"Kimi (Moonshot)": "kimi",
 };
 
-// Map a get_chat_ui_settings.subscription_models payload (keyed by provider
-// LABEL) to the upstream keys this module uses. Falls back when empty.
+// Map a subscription_models payload (keyed by provider LABEL) to the upstream
+// keys this module uses. The admin catalog is the only source of model ids: an
+// empty or missing payload gives {}, and callers keep actions disabled until
+// the catalog has loaded.
 export function subModelSuggestions(apiSubscriptionModels) {
-	const src = apiSubscriptionModels || {};
 	const out = {};
-	for (const [label, models] of Object.entries(src)) {
+	for (const [label, models] of Object.entries(apiSubscriptionModels || {})) {
 		const upstream = LABEL_TO_UPSTREAM[label];
 		if (upstream && Array.isArray(models) && models.length) out[upstream] = models;
 	}
-	return Object.keys(out).length ? out : FALLBACK_SUB_MODELS;
+	return out;
 }
 
-// Default chat-subscription model for an upstream. Synchronous by contract: the
-// onboarding editor calls it before any API response exists, so `catalog` is
-// optional and omitting it yields the built-in fallback.
+// Default chat-subscription model for an upstream: the first model the admin
+// catalog lists for it, or "" when the catalog has none (never a guessed id).
 export function defaultSubscriptionModel(upstream, catalog) {
-	const table = catalog && Object.keys(catalog).length ? catalog : FALLBACK_SUB_MODELS;
-	const models = table[upstream] || FALLBACK_SUB_MODELS[upstream] || FALLBACK_SUB_MODELS.openai;
-	return models[0];
+	return ((catalog || {})[upstream] || [])[0] || "";
 }
 export function validatePool(models, preset) {
 	if (!Array.isArray(models) || models.length === 0)
@@ -289,7 +268,7 @@ export const PROVIDER_LABELS = [
 	// subscription that reports "insufficient balance" (code 1113) on the
 	// pay-as-you-go endpoint even with a perfectly valid key - the two do not
 	// share a balance. A dedicated provider id (rather than a toggle inside the
-	// "zai" option) means the existing PROVIDER_DEFAULTS/NEEDS_BASE_URL/dropdown
+	// "zai" option) means the existing catalog defaults/NEEDS_BASE_URL/dropdown
 	// machinery just works with no new UI - the same shape every other provider
 	// already uses. See apiKeyModelHealth() below for the targeted hint when a
 	// "zai" row hits this exact trap.
@@ -647,12 +626,29 @@ export function subscriptionAccountHealth(
 // never be confused for one another.
 export function dirtyAccountHealth(settled, isDirtyOrPending) {
 	if (!isDirtyOrPending) return settled;
-	if (settled.level === "expired") return settled;
+	// A dead sign-in or a usage cap belongs to the account, not to the unsaved config.
+	if (settled.level === "expired" || settled.limited) return settled;
 	if (settled.level !== "ok") return { level: "neutral" };
 	return {
 		level: "pending",
 		label: "Pending re-check",
 		title: "This account was verified before your latest changes. It will be re-checked once they're applied.",
+	};
+}
+
+// A model on its usage cap (subscriptionNotice.limited: { "<bare model id>": <until epoch s> }, from a
+// failed turn's Retry-After): an amber dot until the reset, or null when the model is not capped.
+export function usageLimitHealth(model, limited, nowMs = Date.now()) {
+	const bare = String(model || "")
+		.split("/")
+		.pop();
+	const until = bare && limited && Object.hasOwn(limited, bare) ? Number(limited[bare]) : 0;
+	if (!until || until * 1000 <= nowMs) return null;
+	return {
+		level: "warn",
+		limited: true,
+		label: "Usage limit reached",
+		title: `Resets in ${waitPhrase((until * 1000 - nowMs) / 1000)}.`,
 	};
 }
 

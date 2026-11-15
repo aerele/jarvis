@@ -254,10 +254,12 @@ class TestHardening(unittest.TestCase):
 		src = _rewrite(
 			self._one(cached=False),
 			{
-				"xl/charts/chart1.xml": lambda d: d.decode()
-				.replace("'Data'!", "'Gone'!")
-				.replace("</f></numRef>", cache + "</numRef>")
-				.encode()
+				"xl/charts/chart1.xml": lambda d: (
+					d.decode()
+					.replace("'Data'!", "'Gone'!")
+					.replace("</f></numRef>", cache + "</numRef>")
+					.encode()
+				)
 			},
 		)
 		(spec,) = extract_charts(src)

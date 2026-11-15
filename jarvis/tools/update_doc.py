@@ -35,6 +35,7 @@ from jarvis.tools._child_rows import merge_child_rows, row_values
 from jarvis.tools._delegate_write_caps import enforce_update
 from jarvis.tools._doc_parts import check_write_fields, refuse_fields_with_batch, write_result
 from jarvis.tools._field_values import cast_numbers, check_values
+from jarvis.tools._sandbox_attrs import check_sandbox_code
 from jarvis.tools.create_doc import refused_field_names
 
 # Fields Frappe maintains itself or that govern DocType identity. An LLM
@@ -111,6 +112,7 @@ def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.documen
 			row.name: row.get(SOURCE_INVOICE) for row in doc.get("taxes") or [] if row.get(SOURCE_INVOICE)
 		}
 	changes = check_values(doctype, changes)
+	check_sandbox_code(doc.doctype, changes, before=doc)
 
 	# Child tables are merged by row name, never wholesale-replaced: a payload
 	# that omits a field (custom fields, so_detail links) must not erase it.

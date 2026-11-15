@@ -27,6 +27,8 @@ const require = createRequire(import.meta.url);
 const {
   nudgeVariant,
   isSuppressedReason,
+  reverifyOutcome,
+  reverifySite,
 } = require("./jarvis_onboarding_banner.bundle.js");
 
 // `hasBeenReady` defaults to `undefined` - an absent jarvis_has_been_ready key
@@ -195,4 +197,101 @@ test("RECONNECT_INTENT_URL: frontend/src/onboarding/readiness.js still exports t
     readinessSrc,
     /RECONNECT_INTENT_URL\s*=\s*"\/jarvis\/onboarding\?reconnect=1"/
   );
+});
+
+// The copy banner (jarvis_pairing_blocked) used to say "Contact support" with nothing to press.
+// A System Manager now gets a Re-verify action that calls site_pin.reverify.
+function setCopy({ systemManager }) {
+  globalThis.frappe = {
+    boot: { jarvis_pairing_blocked: true, jarvis_paired_site: "other.example" },
+    user: { has_role: (role) => systemManager && role === "System Manager" },
+  };
+}
+
+test("nudgeVariant: a copy block offers Re-verify to a System Manager only", () => {
+  setCopy({ systemManager: true });
+  const v = nudgeVariant();
+  assert.equal(v.action, "reverify");
+  assert.equal(v.ctaLabel, "Re-verify this site");
+  assert.match(v.text, /copy of other\.example/);
+  assert.match(v.text, /Contact support/);
+  setCopy({ systemManager: false });
+  assert.equal(nudgeVariant().action, undefined);
+});
+
+test("reverifyOutcome: proved, not reconnected, unreachable and not verified read differently", () => {
+  const proved = reverifyOutcome({ proved: true, blocked: false });
+  assert.equal(proved.cleared, true);
+  assert.equal(proved.indicator, "green");
+  const notReconnected = reverifyOutcome({ proved: true, blocked: true });
+  assert.equal(notReconnected.cleared, false);
+  assert.match(
+    notReconnected.message,
+    /verified, but Jarvis could not reconnect it yet/
+  );
+  const unreachable = reverifyOutcome({ proved: false, error: "unreachable" });
+  assert.equal(unreachable.cleared, false);
+  assert.match(unreachable.message, /Could not reach Jarvis/);
+  for (const res of [
+    { proved: false, error: "not_verified" },
+    { proved: false },
+    null,
+  ]) {
+    const out = reverifyOutcome(res);
+    assert.equal(out.cleared, false);
+    assert.equal(out.indicator, "red");
+    assert.equal(out.message, "Re-verify did not confirm this site.");
+  }
+});
+
+function pressReverify(answer) {
+  setCopy({ systemManager: true });
+  document.getElementById = () => null;
+  const alerts = [];
+  const calls = [];
+  frappe.show_alert = (opts, seconds) => alerts.push({ ...opts, seconds });
+  frappe.call = ({ method, callback, error }) => {
+    calls.push(method);
+    if (method === "jarvis.chat.site_pin.reverify") {
+      if (answer instanceof Error) error();
+      else callback({ message: answer });
+    } else {
+      callback({ message: { ready: true, reason: "" } });
+    }
+  };
+  const btn = { disabled: false, textContent: "Re-verify this site" };
+  reverifySite(btn, "Re-verify this site");
+  return { btn, alerts, calls };
+}
+
+test("reverifySite: a pass says so, drops the block flags and re-reads readiness", () => {
+  const { btn, alerts, calls } = pressReverify({
+    proved: true,
+    blocked: false,
+  });
+  assert.deepEqual(calls, [
+    "jarvis.chat.site_pin.reverify",
+    "jarvis.account.is_ready_for_chat",
+  ]);
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].indicator, "green");
+  assert.equal(frappe.boot.jarvis_pairing_blocked, false);
+  assert.equal(frappe.boot.jarvis_onboarded, true);
+  assert.equal(btn.disabled, true);
+});
+
+test("reverifySite: a refusal or an outage alerts, keeps the block and re-enables the button", () => {
+  for (const answer of [
+    { proved: false, error: "not_verified" },
+    { proved: false, error: "unreachable" },
+    new Error("offline"),
+  ]) {
+    const { btn, alerts, calls } = pressReverify(answer);
+    assert.deepEqual(calls, ["jarvis.chat.site_pin.reverify"]);
+    assert.equal(alerts.length, 1);
+    assert.notEqual(alerts[0].indicator, "green");
+    assert.equal(frappe.boot.jarvis_pairing_blocked, true);
+    assert.equal(btn.disabled, false);
+    assert.equal(btn.textContent, "Re-verify this site");
+  }
 });

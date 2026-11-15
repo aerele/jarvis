@@ -745,6 +745,61 @@ class TestFixField(_Base):
 		self.assertIsNone(held_sheets._fix("Item", frappe.ValidationError("Item Groupings: x"))["field"])
 
 
+class TestSandboxCode(_Base):
+	"""jarvis-admin-v2#818 (T4): a Report script that reads a blocked attribute is the model's to
+	fix, so a sheet refuses it every time and never holds it flagged.
+
+	File Box refuses Core doctypes before the sheet (``held_writes._denied``), so these
+	call ``held_sheets.collect`` directly: the sheet's own dry run is what is under test."""
+
+	BAD = 'x = "PO {}".format(doc.name)\n'
+
+	def setUp(self):
+		super().setUp()
+		ensure_user(OWNER, (*ROLES, "System Manager", "Script Manager"))
+		self.addCleanup(self._drop_role)
+
+	def _drop_role(self):
+		frappe.get_doc("User", OWNER).remove_roles("System Manager", "Script Manager")
+		frappe.db.commit()
+
+	def _item(self, **values):
+		return {
+			"doctype": "Report",
+			"op": "create",
+			"values": {
+				"report_name": "zz-fbs report",
+				"ref_doctype": "ToDo",
+				"report_type": "Script Report",
+				"is_standard": "No",
+				"report_script": self.BAD,
+				**values,
+			},
+		}
+
+	def _collect(self, conv, item):
+		with as_user(OWNER):
+			return held_sheets.collect(conv, [item])
+
+	def test_the_same_bad_script_sent_twice_is_refused_both_times(self):
+		conv = self.conv()
+		for attempt in (1, 2):
+			with self.subTest(attempt=attempt):
+				res = self._collect(conv, self._item())
+				self.assert_refused(res, "InvalidArgumentError")
+				message = res["error"]["message"]
+				self.assertIn("Nothing was added", message)
+				self.assertIn("line 1: .format is blocked", message)
+		self.assertEqual(self.sheets(), [], "no sheet, no card")
+		self.assertFalse(frappe.db.exists("Report", "zz-fbs report"))
+
+	def test_a_clean_script_collects(self):
+		conv = self.conv()
+		res = self._collect(conv, self._item(report_script='x = f"PO {doc.name}"\n'))
+		self.assert_added(res, 1)
+		self.assertEqual(json.loads(self.sheet(conv).needs_fix or "{}"), {})
+
+
 class TestShape(_Base):
 	def test_the_sheet_caps_its_records(self):
 		conv = self.conv()

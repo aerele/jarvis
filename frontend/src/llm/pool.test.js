@@ -16,17 +16,16 @@ import { defaultSubscriptionModel, subModelSuggestions } from "./pool.js";
 import { apiKeyModelHealth, subscriptionAccountHealth, dirtyAccountHealth } from "./pool.js";
 import { LOCAL_PROVIDER_IDS, effectiveApiKey } from "./pool.js";
 
-test("defaultSubscriptionModel: falls back to built-in defaults with no catalog", () => {
-	assert.equal(defaultSubscriptionModel("openai"), "gpt-5.6-terra");
-	assert.equal(defaultSubscriptionModel("unknown"), "gpt-5.6-terra");
-	assert.equal(defaultSubscriptionModel(undefined), "gpt-5.6-terra");
+test("defaultSubscriptionModel: no catalog means no guessed id", () => {
+	assert.equal(defaultSubscriptionModel("openai"), "");
+	assert.equal(defaultSubscriptionModel("openai", {}), "");
+	assert.equal(defaultSubscriptionModel(undefined), "");
 });
 
-test("defaultSubscriptionModel: a catalog overrides the built-in default", () => {
-	const catalog = { openai: ["gpt-9.9", "gpt-5.5"] };
+test("defaultSubscriptionModel: the catalog's first model for the upstream", () => {
+	const catalog = { openai: ["gpt-9.9", "gpt-9.8"] };
 	assert.equal(defaultSubscriptionModel("openai", catalog), "gpt-9.9");
-	// an upstream absent from the catalog still falls back
-	assert.equal(defaultSubscriptionModel("unknown", catalog), "gpt-5.6-terra");
+	assert.equal(defaultSubscriptionModel("unknown", catalog), "");
 });
 
 test("subModelSuggestions: maps an API subscription_models payload to upstream keys", () => {
@@ -42,9 +41,9 @@ test("subModelSuggestions: maps an API subscription_models payload to upstream k
 	});
 });
 
-test("subModelSuggestions: empty or missing payload yields the built-in fallback", () => {
-	assert.equal(subModelSuggestions({}).openai[0], "gpt-5.6-terra");
-	assert.equal(subModelSuggestions(undefined).openai[0], "gpt-5.6-terra");
+test("subModelSuggestions: empty or missing payload yields no suggestions", () => {
+	assert.deepEqual(subModelSuggestions({}), {});
+	assert.deepEqual(subModelSuggestions(undefined), {});
 });
 
 const LADDER = {

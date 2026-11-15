@@ -31,7 +31,8 @@ import { advanceViewGeneration, isViewCurrent } from "../lib/viewGeneration.js";
 import * as api from "../api";
 import { store } from "../store";
 import {
-	countDiagrams,
+	actionBlockState,
+	messageChips,
 	parseAction,
 	parseCards,
 	parseCharts,
@@ -77,7 +78,7 @@ import { recoveryState, sendRecovery } from "../sendRecoveryStore";
 import DecisionCard from "../components/DecisionCard.vue";
 import DecisionSheet from "../components/DecisionSheet.vue";
 import FilePreviewSheet from "../components/FilePreviewSheet.vue";
-import { turnErrorInfo } from "../../../jarvis/public/js/turn_errors.mjs";
+import { turnErrorInfo, showsRawReason } from "../../../jarvis/public/js/turn_errors.mjs";
 import MessageMedia from "../components/MessageMedia.vue";
 import RecordCards from "../components/RecordCards.vue";
 import Sheet from "../components/Sheet.vue";
@@ -119,13 +120,6 @@ const errorBanner = ref("");
 // the failure differently for the SAME event - the exact #702 defect this
 // feature exists to fix, reproduced across two elements on one screen.
 const errorMeta = ref({});
-// Failed messages whose raw error text is expanded ("Details" in the card).
-const rawOpen = ref(new Set());
-function toggleRaw(key) {
-	const next = new Set(rawOpen.value);
-	next.has(key) ? next.delete(key) : next.add(key);
-	rawOpen.value = next;
-}
 const attachments = ref([]);
 const pending = ref([]); // parked writes awaiting approval
 // A typed "confirm 2" binds to the token shown as number 2 here (approval_tokens),
@@ -476,13 +470,17 @@ const view = (m) => {
 	const html = renderMarkdown(stripAgentBlocks(content));
 	const cards = parseCards(content);
 	const charts = parseCharts(content);
+	const action = parseAction(content);
+	const actionBad = !m.streaming && actionBlockState(content) === "bad";
 	return {
 		html,
 		cards,
 		charts,
-		// Mermaid diagrams can't be drawn here; surface a chip to the web chat.
-		diagrams: countDiagrams(content),
-		action: parseAction(content),
+		// Mermaid diagrams and page hand-offs can't be drawn or followed here; each
+		// gets its own chip to the web chat.
+		chips: messageChips(content),
+		action,
+		actionBad,
 		skills: parseSkillsUsed(content),
 		took: spanBetween(m.creation, m.modified),
 		// A turn can end with nothing to show: the runtime aborts a stalled model
@@ -498,7 +496,7 @@ const view = (m) => {
 			!html &&
 			!cards &&
 			!charts.length &&
-			!parseAction(content) &&
+			!action &&
 			!m.error &&
 			!(m.canvas || []).length &&
 			!m.stopped,
@@ -510,7 +508,11 @@ const view = (m) => {
 // (errorMeta above). Called once per assistant item from `items` below (as
 // `err`), never from the template, for the same reason view() is precomputed.
 function errorNote(m) {
-	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", { provider: m.provider });
+	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", {
+		provider: m.provider,
+		// An admin is told the fix; a member, who can do it for them.
+		admin: !!globalThis.window?.is_jarvis_admin,
+	});
 }
 
 // ── thread assembly ─────────────────────────────────────────────────────────
@@ -567,6 +569,17 @@ const lastAssistantKey = computed(() => {
 	const assistants = items.value.filter((i) => i.type === "assistant" && i.msg);
 	return assistants.length ? assistants[assistants.length - 1].key : "";
 });
+
+// The draft card (or its error view) shows only on the newest assistant message
+// and until it is dismissed; every other message falls back to its prose or the
+// "didn't return a reply" line, so a broken block never leaves a blank gap.
+function showsDraftCard(it) {
+	return !!(
+		(it.view.action || it.view.actionBad) &&
+		it.key === lastAssistantKey.value &&
+		!dismissedActions.value.has(it.key)
+	);
+}
 
 // The write leaves a receipt in the conversation (a closed failure, the assistant's
 // explanation), so reload rather than guess.
@@ -1639,7 +1652,7 @@ onUnmounted(() => {
 					<ReportScope :tools="reportToolsByTurn[it.key] || []" />
 					<ExportCard v-if="exportSummary(it.msg)" :summary="exportSummary(it.msg)" />
 					<div v-else-if="it.view.html" class="jv-md" v-html="it.view.html" />
-					<div v-else-if="it.view.empty" class="jv-msg-error">
+					<div v-else-if="it.view.empty && !showsDraftCard(it)" class="jv-msg-error">
 						{{ agentName }} didn't return a reply for this turn. Try asking again.
 					</div>
 					<!-- SIBLING of the chain above, not a v-else-if in it: a partial stop
@@ -1649,11 +1662,7 @@ onUnmounted(() => {
 					     partial and the empty stop. -->
 					<div v-if="it.msg.stopped" class="jv-stopped">You stopped this reply.</div>
 					<ActionCard
-						v-if="
-							it.view.action &&
-							it.key === lastAssistantKey &&
-							!dismissedActions.has(it.key)
-						"
+						v-if="showsDraftCard(it)"
 						:action="it.view.action"
 						:conversation="convId"
 						:parked-note="parkedActions.get(it.key) || parkedByCard(pending, it.key)"
@@ -1666,7 +1675,8 @@ onUnmounted(() => {
 					<RecordCards v-if="it.view.cards" :data="it.view.cards" />
 					<ChartCard v-for="(c, ci) in it.view.charts" :key="ci" :spec="c" />
 					<a
-						v-if="it.view.diagrams"
+						v-for="chip in it.view.chips"
+						:key="chip.kind"
 						class="jv-diagram-chip"
 						:href="webChatUrl"
 						target="_blank"
@@ -1682,14 +1692,19 @@ onUnmounted(() => {
 							stroke-linejoin="round"
 							aria-hidden="true"
 						>
-							<rect x="3" y="3" width="7" height="6" rx="1" />
-							<rect x="14" y="15" width="7" height="6" rx="1" />
-							<path d="M6.5 9v4a2 2 0 0 0 2 2H14" />
+							<template v-if="chip.icon === 'diagram'">
+								<rect x="3" y="3" width="7" height="6" rx="1" />
+								<rect x="14" y="15" width="7" height="6" rx="1" />
+								<path d="M6.5 9v4a2 2 0 0 0 2 2H14" />
+							</template>
+							<template v-else-if="chip.icon === 'calendar'">
+								<rect x="3" y="4" width="18" height="18" rx="2" />
+								<path d="M16 2v4M8 2v4M3 10h18" />
+							</template>
+							<path v-else d="M18 20V10M12 20V4M6 20v-6" />
 						</svg>
 						<span class="jv-diagram-chip-tx">
-							<span class="jv-diagram-chip-t">{{
-								it.view.diagrams > 1 ? it.view.diagrams + " diagrams" : "Diagram"
-							}}</span>
+							<span class="jv-diagram-chip-t">{{ chip.title }}</span>
 							<span class="jv-diagram-chip-s">Open in web chat</span>
 						</span>
 						<svg
@@ -1717,6 +1732,11 @@ onUnmounted(() => {
 					</div>
 					<div v-else-if="it.err" class="jv-msg-error">
 						<strong>{{ it.err.headline }}</strong>
+						<div v-if="it.err.models" class="jv-msg-error-models">
+							<div v-for="(mod, mdi) in it.err.models" :key="mdi">
+								<strong>{{ mod.model }}</strong> {{ mod.reason }}. {{ mod.next }}
+							</div>
+						</div>
 						<p>
 							{{ it.err.hint }}
 							<a
@@ -1728,20 +1748,9 @@ onUnmounted(() => {
 								>{{ it.err.statusLabel }}
 								<span aria-hidden="true">&#8599;</span></a
 							>
-							<span v-if="it.err.hint" aria-hidden="true"> &middot; </span>
-							<button
-								type="button"
-								class="jv-err-link"
-								:aria-expanded="rawOpen.has(it.key) ? 'true' : 'false'"
-								:aria-controls="`jv-err-raw-${it.key}`"
-								@click="toggleRaw(it.key)"
-							>
-								{{ rawOpen.has(it.key) ? "Hide details" : "Details" }}
-							</button>
 						</p>
 						<pre
-							v-if="rawOpen.has(it.key)"
-							:id="`jv-err-raw-${it.key}`"
+							v-if="showsRawReason(it.err) && it.msg.error"
 							class="jv-msg-error-raw"
 							>{{ it.msg.error }}</pre
 						>
@@ -1837,7 +1846,7 @@ onUnmounted(() => {
 		<!-- the turn in flight -->
 		<template v-if="live">
 			<div v-if="live.text" class="jv-msg-agent">
-				<div class="jv-md" v-html="renderMarkdown(stripAgentBlocks(live.text))" />
+				<div class="jv-md" v-html="renderMarkdown(stripAgentBlocks(live.text, true))" />
 			</div>
 		</template>
 
@@ -2095,6 +2104,9 @@ onUnmounted(() => {
 	cursor: pointer;
 	text-decoration: underline;
 	text-underline-offset: 2px;
+}
+.jv-msg-error-models {
+	margin: 4px 0 0;
 }
 .jv-msg-error-raw {
 	margin: 4px 0 0;
