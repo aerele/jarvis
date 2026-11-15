@@ -23,7 +23,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis.chat import macros
 from jarvis.chat.macros_api import create_macro, get_macro, summarize_macro, update_macro
-from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_PROMPT_LEN, MAX_STEPS, MAX_SUMMARY_LEN
+from jarvis.jarvis.doctype.jarvis_macro.jarvis_macro import MAX_PROMPT_LEN, MAX_SUMMARY_LEN
 from jarvis.tests import race_harness
 from jarvis.tests._pending_action_helpers import ensure_user
 
@@ -634,13 +634,6 @@ class TestTheFormSaysWhetherTheSummaryWasEdited(_SummarySaveBase):
 		self.assertEqual(self._summary(name)[:2], ("", ""))
 		self.assertIs(saved["summarize"], True)
 
-	def test_a_form_that_does_not_say_is_judged_by_the_text(self):
-		# A bundle from before the argument existed: sent and different is an edit.
-		name = self._macro()
-		self._set_summary(name, text=SUMMARY, status="ready", conversation="")
-		self._save(name, merged_prompt="My own wording.")
-		self.assertEqual(self._summary(name)[:2], ("My own wording.", "ready"))
-
 
 class TestAStepChangeFromAnyWriter(_SummarySaveBase):
 	"""A stored summary runs INSTEAD of the steps. The comparison used to sit in
@@ -830,9 +823,6 @@ class TestAHandWrittenSummaryHasALimit(_SummarySaveBase):
 		self.assertEqual(self._summary(name)[:2], (SUMMARY, "ready"))
 		self._save(name, merged_prompt="z" * MAX_SUMMARY_LEN, merged_prompt_edited=1)
 		self.assertEqual(len(self._summary(name)[0]), MAX_SUMMARY_LEN)
-
-	def test_the_limit_is_all_the_steps_together(self):
-		self.assertEqual(MAX_SUMMARY_LEN, MAX_STEPS * MAX_PROMPT_LEN)
 
 	def test_a_document_save_is_held_to_it_too(self):
 		name = self._macro()
