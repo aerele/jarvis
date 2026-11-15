@@ -13,7 +13,7 @@
 			:class="
 				modelValue === tab.value
 					? 'text-ink-gray-9'
-					: 'text-ink-gray-5 hover:text-ink-gray-7'
+					: 'text-ink-gray-7 hover:text-ink-gray-9'
 			"
 			@click="$emit('update:modelValue', tab.value)"
 		>
@@ -24,6 +24,7 @@
 				theme="gray"
 				variant="subtle"
 				size="sm"
+				class="!text-ink-gray-8"
 			/>
 			<div
 				v-if="modelValue === tab.value"

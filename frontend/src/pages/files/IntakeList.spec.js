@@ -23,19 +23,13 @@ vi.mock("frappe-ui", () => ({
 			'<button class="btn" :aria-label="label" @click="$emit(\'click\')"><slot>{{ label }}</slot></button>',
 	},
 	FeatherIcon: { template: "<i/>" },
-	Select: {
-		props: ["options", "modelValue"],
-		emits: ["update:modelValue"],
-		template:
-			'<select class="scope" @change="$emit(\'update:modelValue\', $event.target.value)"><option v-for="o in options" :key="o.value" :value="o.value">{{ o.label }}</option></select>',
-	},
-	TabButtons: { template: '<div class="tabs"/>' },
 	toast: { success: vi.fn(), error: vi.fn() },
 }));
 vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
-		props: ["rows", "emptyState", "columns", "rowHeight"],
-		template: `<div :data-cols="columns.map((c) => c.key).join()" :data-row-height="rowHeight"><slot name="banner" /><slot name="right-header" /><div v-if="!rows.length" class="empty">{{ emptyState.description }}</div><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-file" :row="row" /><slot name="cell-source" :row="row" /><slot name="cell-status" :row="row" /><slot name="cell-draft" :row="row" /><slot name="cell-summary" :row="row" /><slot name="cell-_retry" :row="row" /></div></div>`,
+		props: ["rows", "emptyState", "columns", "rowHeight", "quickFilters", "filters"],
+		emits: ["update:filters"],
+		template: `<div :data-cols="columns.map((c) => c.key).join()" :data-row-height="rowHeight"><slot name="banner" /><div class="left"><template v-for="qf in quickFilters" :key="qf.key"><select v-if="qf.key === 'scope'" class="scope" :aria-label="qf.label" :value="filters.scope" @change="$emit('update:filters', { ...filters, scope: $event.target.value })"><option v-for="o in qf.options" :key="o.value" :value="o.value">{{ o.label }}</option></select></template></div><div class="right"><slot name="right-header" /></div><div v-if="!rows.length" class="empty">{{ emptyState.description }}</div><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-file" :row="row" /><slot name="cell-source" :row="row" /><slot name="cell-status" :row="row" /><slot name="cell-draft" :row="row" /><slot name="cell-summary" :row="row" /><slot name="cell-_retry" :row="row" /></div></div>`,
 	},
 }));
 vi.mock("@/api", () => ({
@@ -70,14 +64,51 @@ async function mountList(rows, can_manage = false) {
 	intakeListPage.mockResolvedValue({ rows, total: rows.length, has_more: false });
 	const w = mount(IntakeList, {
 		global: {
-			stubs: { "router-link": { props: ["to"], template: '<a :href="to"><slot /></a>' } },
+			stubs: {
+				"router-link": {
+					props: ["to"],
+					template:
+						"<a :href=\"typeof to === 'string' ? to : JSON.stringify(to)\"><slot /></a>",
+				},
+			},
 		},
 	});
 	await flushPromises();
 	return w;
 }
 
+describe("IntakeList empty state", () => {
+	it("says no files yet when nothing is filtered", async () => {
+		const w = await mountList([]);
+		expect(w.find(".empty").text()).toBe("Files dropped into a watched folder show up here.");
+		w.unmount();
+	});
+
+	it("says no files match when a filter is active", async () => {
+		const w = await mountList([]);
+		w.findComponent({ name: "ListPage" }).vm.$emit("update:filters", { search: "zzz" });
+		await flushPromises();
+		expect(w.find(".empty").text()).toBe("Try a different search or filter.");
+		w.unmount();
+	});
+});
+
 describe("IntakeList", () => {
+	it("has no switch or Whose files select in the header", async () => {
+		const w = await mountList([row()], true);
+		expect(w.find(".right .scope").exists()).toBe(false);
+		expect(w.find(".right [role=radio], .right [data-filebox-switch]").exists()).toBe(false);
+		w.unmount();
+	});
+
+	it("puts Whose files with the filter selects (left group), for managers only", async () => {
+		const w = await mountList([row()], true);
+		const sel = w.find(".left .scope");
+		expect(sel.exists()).toBe(true);
+		expect(sel.attributes("aria-label")).toBe("Whose files");
+		w.unmount();
+	});
+
 	let w;
 	beforeEach(() => {
 		vi.clearAllMocks();
@@ -98,7 +129,9 @@ describe("IntakeList", () => {
 		expect(first.text()).toContain("Folder: Bills");
 		expect(first.find(".badge").text()).toBe("Draft created");
 		expect(first.find(".badge").attributes("data-theme")).toBe("green");
-		expect(first.find("a").attributes("href")).toBe("/app/purchase-invoice/PINV-0001");
+		expect(first.find("a:not([data-testid=intake-open])").attributes("href")).toBe(
+			"/app/purchase-invoice/PINV-0001"
+		);
 		expect(w.findAll(".row")[1].find(".badge").attributes("data-theme")).toBe("red");
 	});
 
@@ -142,7 +175,7 @@ describe("IntakeList", () => {
 		const first = w.findAll(".row")[0];
 		expect(first.find(".badge").text()).toBe("Draft deleted");
 		expect(first.find(".badge").attributes("data-theme")).toBe("gray");
-		expect(first.find("a").exists()).toBe(false);
+		expect(first.find("a:not([data-testid=intake-open])").exists()).toBe(false);
 	});
 
 	it("links a review row without a draft to its approval", async () => {
@@ -155,8 +188,12 @@ describe("IntakeList", () => {
 				can_review: true,
 			}),
 		]);
-		expect(w.find(".row a").attributes("href")).toBe("/approvals/AR-1");
-		expect(w.find(".row a").attributes("aria-label")).toBe("Open review of bill.pdf");
+		expect(w.find(".row a:not([data-testid=intake-open])").attributes("href")).toBe(
+			"/approvals/AR-1"
+		);
+		expect(w.find(".row a:not([data-testid=intake-open])").attributes("aria-label")).toBe(
+			"Open review of bill.pdf"
+		);
 	});
 
 	it("gives an uploader who may not review no link to a review that would refuse them", async () => {
@@ -169,7 +206,7 @@ describe("IntakeList", () => {
 				can_review: false,
 			}),
 		]);
-		expect(w.find(".row a").exists()).toBe(false);
+		expect(w.find(".row a:not([data-testid=intake-open])").exists()).toBe(false);
 	});
 
 	describe("narrow screens", () => {
@@ -300,5 +337,52 @@ describe("IntakeList", () => {
 		await vi.advanceTimersByTimeAsync(30000);
 		expect(intakeListPage.mock.calls.length).toBe(calls);
 		w = null;
+	});
+
+	it("does not repeat the draft in the summary, and keeps what follows it", async () => {
+		w = await mountList([
+			row({ summary: "Draft ready: Purchase Invoice PINV-0001" }),
+			row({ name: "A2", summary: "Draft ready: Purchase Invoice PINV-0001. Answered: yes" }),
+		]);
+		const rows = w.findAll(".row");
+		expect(rows[0].text().match(/PINV-0001/g)).toHaveLength(1);
+		expect(rows[1].text()).toContain("Answered: yes");
+		expect(rows[1].text().match(/PINV-0001/g)).toHaveLength(1);
+	});
+
+	it("lets a long summary wrap to two lines with the full text in the title", async () => {
+		const long = "Jarvis read nothing from this file. Check it and press Retry.";
+		w = await mountList([
+			row({
+				status: "Failed",
+				draft_name: "",
+				draft_doctype: "",
+				summary: long,
+				can_retry: true,
+			}),
+		]);
+		const cell = w.find(".line-clamp-2");
+		expect(cell.exists()).toBe(true);
+		expect(cell.attributes("title")).toBe(long);
+		expect(w.find('button[aria-label="Retry bill.pdf"]').exists()).toBe(true);
+	});
+});
+
+describe("IntakeList row link", () => {
+	it("the file name opens the detail page for that row", async () => {
+		const w = await mountList([row({ name: "A9" })]);
+		const a = w.findAll("a").find((x) => x.text() === "bill.pdf");
+		expect(JSON.parse(a.attributes("href"))).toEqual({
+			name: "IntakeDetail",
+			params: { activity: "A9" },
+		});
+		w.unmount();
+	});
+
+	it("the detail route is registered", async () => {
+		const { readFileSync } = await import("node:fs");
+		const src = readFileSync("src/router/index.js", "utf8");
+		expect(src).toContain('path: "/files/intake/:activity"');
+		expect(src).toContain('name: "IntakeDetail"');
 	});
 });

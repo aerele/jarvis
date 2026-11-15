@@ -302,6 +302,17 @@ class TestIntakeReview(FrappeTestCase):
 		row.reload()
 		self.assertEqual(frappe.db.get_value(PARENT, row.draft_name, "customer"), "ACME")
 
+	def test_approval_refuses_a_target_that_became_refused(self):
+		_rule, row, name = self._pending()
+		# The rule's target joined the deny-list after the request was raised.
+		with mock.patch("jarvis.intake.guards.refused_doctype", return_value=True):
+			res = self._decide(OWNER, name, {"items.2.qty": 3})
+		self.assertEqual(res["status"], "Pending")
+		self.assertIn("not allowed", res["error"])
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value(ACTIVITY, row.name, "status"), "Needs Review")
+		self.assertFalse(frappe.db.count(PARENT))
+
 	def test_cannot_decide_without_being_owner_or_manager(self):
 		_rule, row, name = self._pending()
 		for approve in (1, 0):

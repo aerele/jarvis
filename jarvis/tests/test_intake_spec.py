@@ -267,7 +267,70 @@ class TestIntakeSpec(FrappeTestCase):
 					self.assertTrue(guards.refused_doctype(dt))
 		for dt in ("Customer", "Supplier"):
 			with self.subTest(dt=dt):
+				# Still valid targets; only the portal-users table is off limits (below).
 				self.assertFalse(guards.refused_doctype(dt))
+				plain = intake_spec.IntakeSpec(target=dt, fields=[f"{dt.lower()}_name"], table=None)
+				intake_spec.validate(plain)
+				portal = intake_spec.IntakeSpec(
+					target=dt,
+					fields=[f"{dt.lower()}_name"],
+					table={"fieldname": "portal_users", "columns": ["user"]},
+				)
+				with self.assertRaises(frappe.ValidationError):
+					intake_spec.validate(portal)
+				self.assertEqual(intake_spec.sensitive_picks(portal), ["portal_users"])
+
+	def test_refusal_names_the_field_by_its_label(self):
+		portal = intake_spec.IntakeSpec(
+			target="Customer",
+			fields=["customer_name"],
+			table={"fieldname": "portal_users", "columns": ["user"]},
+		)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			intake_spec.validate(portal)
+		text = str(ctx.exception)
+		self.assertIn("Portal Users can't be filled by intake", text)
+		self.assertNotIn("portal_users", text)
+
+	def test_blank_default_for_a_field_with_a_doctype_default_is_refused(self):
+		# Frappe re-applies the doctype default to a blank value, so "empty" is never kept.
+		bad = intake_spec.IntakeSpec(
+			target="ToDo", fields=["description"], table=None, defaults={"priority": ""}
+		)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			intake_spec.validate(bad)
+		self.assertIn("Priority always starts as Medium; intake can't leave it empty", str(ctx.exception))
+		# A field with no doctype default may still carry a blank (it just covers nothing).
+		ok = intake_spec.IntakeSpec(
+			target="ToDo",
+			fields=["description"],
+			table=None,
+			defaults={"allocated_to": ""},
+			allow_incomplete=True,
+		)
+		intake_spec.validate(ok)
+
+	def test_employee_login_fields_are_refused_by_the_spec(self):
+		for fieldname in ("user_id", "create_user_permission"):
+			with self.subTest(fieldname=fieldname):
+				picked = intake_spec.IntakeSpec(
+					target="Employee", fields=["first_name", fieldname], table=None
+				)
+				with self.assertRaises(frappe.ValidationError):
+					intake_spec.validate(picked)
+
+	def test_a_rule_cannot_save_with_portal_users(self):
+		bad = json.dumps(
+			{"fields": ["customer_name"], "table": {"fieldname": "portal_users", "columns": ["user"]}}
+		)
+		with self.assertRaises(frappe.ValidationError):
+			self._insert(intake_target_doctype="Customer", intake_spec=bad)
+
+	def test_extra_deny_list_doctypes_are_refused(self):
+		for dt in ("Communication", "Email Template", "Assignment Rule", "Blog Post", "Newsletter"):
+			if frappe.db.exists("DocType", dt):
+				with self.subTest(dt=dt):
+					self.assertTrue(guards.refused_doctype(dt))
 
 	def test_a_record_rule_cannot_draft_the_doctype_it_watches(self):
 		with self.assertRaises(frappe.ValidationError):

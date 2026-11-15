@@ -355,6 +355,8 @@ class JarvisTrigger(NotRenamable, Document):
 		by_source = {"Folder": "intake_folder", "Record": "intake_record_doctype"}[self.intake_source]
 		# System context on purpose: rules are site-wide, so a permission-filtered
 		# read would miss another user's duplicate.
+		# The key is the source and the target only: "Run when" is not part of it, because a
+		# "File attached" rule and an "On Submit" rule would read the same file twice.
 		duplicate = frappe.get_all(
 			"Jarvis Trigger",
 			filters={

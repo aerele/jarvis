@@ -18,6 +18,7 @@ import frappe
 from frappe.query_builder.functions import IfNull
 from frappe.utils import add_to_date, cint, get_datetime, now_datetime, nowdate
 from frappe.utils.background_jobs import is_job_enqueued
+from pypika.terms import Case
 
 from jarvis import _redis_lock, compat
 from jarvis._session import impersonate
@@ -34,6 +35,16 @@ _DEFAULT_USER_CAP = 50
 _PUMP_AGE_MINUTES = 2
 _STUCK_MINUTES = 10
 _MAX_ATTEMPTS = 3
+# Consecutive errors before the claim (Redis, a lock, the rule read) after which a row is
+# ended Failed instead of being tried for ever. The count lives in Redis, not in
+# ``attempts``: that one means "runs started" to the stuck-row recovery.
+_MAX_START_FAILURES = 5
+_START_FAILURE_TTL_S = 86400
+_START_COUNT_PREFIX = "Start failures: "
+# Rules turned off or deleted: how many of their Queued rows one pump run ends.
+_ORPHAN_BATCH = 200
+# A rule must have been off this long before its Queued rows end (an off/on toggle is not it).
+_RULE_OFF_GRACE_HOURS = 1
 # Waiting rows looked at beyond the free slots, so rows already in the queue can be skipped.
 _CHAIN_LOOKAHEAD = 10
 
@@ -44,6 +55,10 @@ NO_AGENT_UPDATE_SUMMARY = "Intake needs the latest agent update on this site."
 # once ``modified`` is before today). A paused site keeps its rows Queued and retried.
 WAITING_PREFIX = "Waiting:"
 PAUSED_SUMMARY = "Intake is paused on this site"
+USER_PAUSED_SUMMARY = "Intake uploads are paused for each user on this site"
+RULE_OFF_SUMMARY = "This rule is turned off"
+START_RETRY_SUMMARY = "Could not start yet, trying again"
+COULD_NOT_START_SUMMARY = "Could not start this file. Press Retry."
 # This many failed rows within an hour tell the site's managers once.
 _FAILURE_ALERT_COUNT = 5
 _READ_FAILED_SUMMARY = "Reading the file failed. Managers can see the details in this activity."
@@ -110,7 +125,7 @@ def _site_cap() -> int:
 
 
 def _user_cap() -> int:
-	"""Reads per day for one uploader. 0 means no per-user limit."""
+	"""Reads per day for one uploader. 0 pauses intake for every user (as site 0 does)."""
 	return _setting("intake_daily_cap_per_user", _DEFAULT_USER_CAP)
 
 
@@ -124,23 +139,39 @@ def _used(key: str, **durable_filters) -> int:
 	return frappe.db.count(ACTIVITY, {"action_type": "Intake", "read_on": nowdate(), **durable_filters})
 
 
-def _paused() -> bool:
-	"""A site cap of 0 pauses intake: no job starts, and nothing is enqueued to start one.
-	Rows stay Queued and are picked up by the pump once intake is turned back on."""
-	return _site_cap() <= 0
+def _caps() -> tuple[int, int]:
+	"""(site cap, per-user cap), read once per row and passed along."""
+	return _site_cap(), _user_cap()
 
 
-def _cap_hit(row, trigger_cap: int) -> str:
-	"""Which limit stops this row today: ``paused``, ``rule``, ``site``, ``user`` or ``""``."""
-	site_cap = _site_cap()
+def _pause_summary(caps: tuple[int, int] | None = None) -> str:
+	"""The summary for a paused site ("" when intake runs): a site cap of 0, or a per-user
+	cap of 0 (no user may read anything)."""
+	site_cap, user_cap = caps or _caps()
 	if site_cap <= 0:
+		return PAUSED_SUMMARY
+	if user_cap <= 0:
+		return USER_PAUSED_SUMMARY
+	return ""
+
+
+def _paused() -> bool:
+	"""A site or per-user cap of 0 pauses intake: no job starts, and nothing is enqueued to
+	start one. Rows stay Queued and are picked up by the pump once intake is turned back on."""
+	return bool(_pause_summary())
+
+
+def _cap_hit(row, trigger_cap: int, caps: tuple[int, int] | None = None) -> str:
+	"""Which limit stops this row today: ``paused``, ``rule``, ``site``, ``user`` or ``""``."""
+	caps = caps or _caps()
+	if _pause_summary(caps):
 		return "paused"
+	site_cap, user_cap = caps
 	if _used(llm_action.cap_key(row.trigger), trigger=row.trigger) >= trigger_cap:
 		return "rule"
 	if _used(site_cap_key()) >= site_cap:
 		return "site"
-	user_cap = _user_cap()
-	if user_cap > 0 and _used(user_cap_key(row.event_user), event_user=row.event_user) >= user_cap:
+	if _used(user_cap_key(row.event_user), event_user=row.event_user) >= user_cap:
 		return "user"
 	return ""
 
@@ -160,10 +191,10 @@ def _set(row, quiet: bool = False, **values) -> None:
 		frappe.log_error(title="Jarvis intake: could not publish a status change")
 
 
-def _end(row, status: str, summary: str, detail: str = "", trigger=None) -> None:
+def _end(row, status: str, summary: str, detail: str = "", trigger=None, quiet: bool = False) -> None:
 	"""End the row Failed or Skipped, mark a Record rule's source record the same way, and
 	(for a failure) tell the managers when failures pile up."""
-	_set(row, status=status, summary=summary, detail=detail)
+	_set(row, quiet=quiet, status=status, summary=summary, detail=detail)
 	if trigger is None and row.trigger:
 		trigger = frappe.db.get_value("Jarvis Trigger", row.trigger, spec.TRIGGER_FIELDS, as_dict=True)
 	if trigger:
@@ -248,6 +279,9 @@ def _waiting_rows(limit: int, *, older_than=None, exclude: str | None = None) ->
 		.where(
 			~IfNull(table.summary, "").like(f"{WAITING_PREFIX}%") | (table.modified < get_datetime(nowdate()))
 		)
+		# A row that keeps failing before its claim (see ``_stay_queued``) goes behind the
+		# rows that can run, so two broken rows cannot starve the pump.
+		.orderby(Case().when(table.summary == START_RETRY_SUMMARY, 1).else_(0))
 		.orderby(table.creation)
 		.limit(limit)
 	)
@@ -344,7 +378,7 @@ def _load_rule(row):
 def _may_not_run(row, trigger, needs_ai: bool) -> bool:
 	"""End the row when it must not run at all (and say why); True when it was ended."""
 	if not trigger or not cint(trigger.enabled) or trigger.action_type != "Intake":
-		_end(row, "Skipped", "rule turned off", trigger=trigger)
+		_end(row, "Skipped", RULE_OFF_SUMMARY, trigger=trigger)
 	elif guards.refused_doctype(trigger.intake_target_doctype) or (
 		trigger.intake_source == "Record" and guards.refused_doctype(trigger.intake_record_doctype)
 	):
@@ -367,14 +401,14 @@ def _may_not_run(row, trigger, needs_ai: bool) -> bool:
 	return True
 
 
-def _defer_if_capped(row, trigger) -> bool:
+def _defer_if_capped(row, trigger, caps: tuple[int, int] | None = None) -> bool:
 	"""Leave the row Queued with a summary that names the limit (True), or go on (False)."""
 	trigger_cap = cint(trigger.llm_daily_cap) or llm_action.DEFAULT_DAILY_CAP
-	hit = _cap_hit(row, trigger_cap)
+	hit = _cap_hit(row, trigger_cap, caps)
 	if not hit:
 		return False
 	if hit == "paused":
-		wording = PAUSED_SUMMARY
+		wording = _pause_summary(caps)
 	else:
 		who = {"rule": "for this rule", "site": "for the site", "user": "for your uploads"}[hit]
 		wording = f"{WAITING_PREFIX} daily limit reached {who} (resets tomorrow)"
@@ -400,10 +434,11 @@ def _run_guarded(row):
 	"""Return False when the row did not start (paused, no slot, or an error before the
 	claim): it stays Queued and nothing chains."""
 	try:
-		if _paused():
+		caps = _caps()
+		if paused := _pause_summary(caps):
 			# Chaining here would ping-pong the Queued rows between jobs for nothing.
-			if row.summary != PAUSED_SUMMARY:
-				_set(row, summary=PAUSED_SUMMARY)
+			if row.summary != paused:
+				_set(row, summary=paused)
 			return False
 		trigger = _load_rule(row)
 		needs_ai = not row.reading_json
@@ -412,7 +447,7 @@ def _run_guarded(row):
 	except Exception:
 		return _stay_queued(row)
 	try:
-		if needs_ai and _defer_if_capped(row, trigger):
+		if needs_ai and _defer_if_capped(row, trigger, caps):
 			return True
 		slot = _claim_slot()
 	except Exception:
@@ -426,6 +461,7 @@ def _run_guarded(row):
 			return _stay_queued(row)
 		if not won:
 			return False  # another job owns this row; this one did no work
+		_clear_start_failures(row)
 		row.status, row.attempts = "Running", cint(row.attempts) + 1
 		if needs_ai and _is_duplicate(row, trigger):
 			return True
@@ -435,11 +471,59 @@ def _run_guarded(row):
 	return True
 
 
+def _start_failure_key(row) -> str:
+	return f"jarvis:intake:startfail:{row.name}"
+
+
+def _clear_start_failures(row) -> None:
+	try:
+		cache = frappe.cache()
+		cache.delete(cache.make_key(_start_failure_key(row)))
+	except Exception:
+		pass  # the TTL is the backstop
+
+
+def _count_start_failure(row) -> int:
+	"""Consecutive errors before this row's claim. Redis holds the count; when Redis is the
+	thing that failed, the count rides in the row's own ``detail``, so the ceiling holds."""
+	try:
+		cache = frappe.cache()
+		key = cache.make_key(_start_failure_key(row))
+		count = cint(cache.incr(key))
+		cache.expire(key, _START_FAILURE_TTL_S)
+		return count
+	except Exception:
+		before = frappe.db.get_value(ACTIVITY, row.name, "detail") or ""
+		count = (
+			cint(before.removeprefix(_START_COUNT_PREFIX)) + 1
+			if before.startswith(_START_COUNT_PREFIX)
+			else 1
+		)
+		frappe.db.set_value(
+			ACTIVITY, row.name, "detail", f"{_START_COUNT_PREFIX}{count}", update_modified=False
+		)
+		return count
+
+
 def _stay_queued(row) -> bool:
 	"""A Redis outage or a deadlock before the claim: nothing ran, nothing was charged. The
-	pump tries the row again, so log it (once an hour per class) and leave it alone."""
+	pump tries the row again, so log it (once an hour per class) and leave it alone. A row
+	that keeps failing this way is marked, so the pump's oldest-first pick moves past it,
+	and after ``_MAX_START_FAILURES`` in a row it ends Failed (Retry starts it afresh)."""
 	frappe.db.rollback()
-	_log_class("Jarvis intake: could not start a job", frappe.get_traceback())
+	trace = frappe.get_traceback()
+	_log_class("Jarvis intake: could not start a job", trace)
+	try:
+		if _count_start_failure(row) >= _MAX_START_FAILURES:
+			frappe.log_error(title="Jarvis intake: gave up starting a file", message=f"{row.name}\n\n{trace}")
+			_clear_start_failures(row)
+			_end(row, "Failed", COULD_NOT_START_SUMMARY, "Starting the job failed several times.")
+		else:
+			# Stamps ``modified`` too, and marks the row so ``_waiting_rows`` sorts it last.
+			# No commit: the job returns normally, and Frappe's job runner commits then.
+			frappe.db.set_value(ACTIVITY, row.name, "summary", START_RETRY_SUMMARY)
+	except Exception:
+		frappe.db.rollback()
 	return False
 
 
@@ -525,7 +609,9 @@ def _read(row, trigger) -> bool:
 		return False
 	_count_call(row)  # the model answered, whatever it answered
 	if reading.get("error") == "NO_IMAGE":
-		_end(row, "Failed", NO_IMAGE_SUMMARY, "The model answered NO_IMAGE.", trigger)
+		# vision_available() passed above, so the model can see images: NO_IMAGE here means a
+		# blank or unreadable file. NO_IMAGE_SUMMARY stays for the vision check itself.
+		_end(row, "Failed", READ_NOTHING_SUMMARY, "The model answered NO_IMAGE.", trigger)
 		return False
 	if reader.is_empty_reading(reading, s):
 		# The vision check passed, so an all-null object means a blank or unclear file. A blank
@@ -584,8 +670,51 @@ def pump() -> None:
 		_pump()
 
 
+def _end_orphaned_rows() -> None:
+	"""Queued rows of a rule that is turned off, no longer an Intake rule or deleted end
+	Skipped now. Left alone they would wait until some rule is switched on again, and then
+	be read (and billed) for a rule that was turned off when they were uploaded."""
+	row = frappe.qb.DocType(ACTIVITY)
+	rule = frappe.qb.DocType("Jarvis Trigger")
+	cutoff = add_to_date(now_datetime(), hours=-_RULE_OFF_GRACE_HOURS)
+	names = (
+		frappe.qb.from_(row)
+		.left_join(rule)
+		.on(rule.name == row.trigger)
+		.select(row.name, row.event_user)
+		.where((row.action_type == "Intake") & (row.status == "Queued"))
+		# A rule switched off for a moment (off, then on again) keeps its rows; only one that
+		# has been off for an hour, or is gone, ends them.
+		.where(
+			rule.name.isnull()
+			| (((rule.enabled == 0) | (rule.action_type != "Intake")) & (rule.modified < cutoff))
+		)
+		.limit(_ORPHAN_BATCH)
+		.run()
+	)
+	ended: dict[str, int] = {}
+	for name, user in names:
+		try:
+			# Quiet: one bell per uploader below, not one per row.
+			_end(frappe.get_doc(ACTIVITY, name), "Skipped", RULE_OFF_SUMMARY, quiet=True)
+			ended[user] = ended.get(user, 0) + 1
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(
+				title="Jarvis intake: could not end a row of a turned-off rule",
+				message=f"{name}\n\n{frappe.get_traceback()}",
+			)
+
+	for user, count in ended.items():
+		if user:
+			notify.notify(
+				user, f"{count} {'file was' if count == 1 else 'files were'} not read: the rule is turned off"
+			)
+
+
 def _pump() -> None:
 	_recover_stuck()
+	_end_orphaned_rows()
 	rules = capture.intake_map()
 	if not rules["folder"] and not rules["record"]:
 		return  # no enabled Intake rule: nothing new can be waiting for a read

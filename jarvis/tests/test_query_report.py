@@ -239,9 +239,9 @@ class TestPreparedReportIntegration(unittest.TestCase):
 				patch.object(
 					frappe,
 					"has_permission",
-					side_effect=lambda doctype, *a, **kw: False
-					if doctype == "File"
-					else real_permission(doctype, *a, **kw),
+					side_effect=lambda doctype, *a, **kw: (
+						False if doctype == "File" else real_permission(doctype, *a, **kw)
+					),
 				),
 				patch.object(
 					_file_source, "read_bounded", side_effect=AssertionError("handoff must not read")

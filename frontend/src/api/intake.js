@@ -14,3 +14,7 @@ export const intakeListPage = (p = {}) =>
 
 // Run a Failed or Skipped file again -> {ok, status: "Queued"}.
 export const intakeRetry = (activity) => call("jarvis.chat.filebox.retry_intake", { activity });
+
+// One intake row for the detail page: row, file, spec, reading, draft values, changes.
+export const intakeDetail = (activity) =>
+	call("jarvis.chat.filebox.get_intake_detail", { activity });
