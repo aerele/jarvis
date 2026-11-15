@@ -107,6 +107,26 @@ describe("IntakeDetail", () => {
 		);
 	});
 
+	it("a value the reviewer filled in is the main text with a muted note", async () => {
+		const w = await mountPage(
+			detail({
+				reading: { values: { description: "", priority: "", date: "" }, table_rows: [] },
+				draft: {
+					doctype: "ToDo",
+					name: "T1",
+					values: { description: "no description", priority: "", date: "" },
+				},
+				changes: { description: "Default applied" },
+				reviewer_filled: ["description"],
+			})
+		);
+		const cell = w.find("[data-field=description]");
+		expect(cell.text()).toContain("no description");
+		expect(cell.text()).toContain("Filled in by the reviewer");
+		expect(cell.text()).not.toContain("Not found on the page");
+		expect(cell.find("[data-testid=intake-change]").exists()).toBe(false);
+	});
+
 	it("hides the draft note when the draft cannot be read", async () => {
 		const w = await mountPage(detail({ draft: null, changes: {} }));
 		expect(w.find("[data-testid=intake-change]").exists()).toBe(false);
@@ -139,6 +159,7 @@ describe("IntakeDetail", () => {
 		expect(w.find("[data-testid=intake-state]").text()).toContain("Why it failed");
 		expect(w.find("[data-testid=intake-state]").text()).toContain("Reading the file failed.");
 		expect(labels(w)).not.toContain("Open draft");
+		expect(w.find("[data-testid=intake-state]").text()).not.toContain("Run it again");
 		await w
 			.findAll("button")
 			.find((b) => b.text() === "Retry")

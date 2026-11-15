@@ -44,9 +44,6 @@
 								<p class="break-words text-base text-ink-gray-8">
 									{{ state.line }}
 								</p>
-								<p v-if="state.next" class="text-sm text-ink-gray-6">
-									{{ state.next }}
-								</p>
 							</div>
 							<div class="flex flex-wrap items-center gap-2">
 								<Button
@@ -90,7 +87,16 @@
 										class="min-w-0 break-words text-base text-ink-gray-8"
 										:data-field="r.fieldname"
 									>
-										<span v-if="r.read">{{ r.read }}</span>
+										<template v-if="r.filled">
+											<span>{{ r.draft }}</span>
+											<p
+												class="mt-0.5 text-sm text-ink-gray-6"
+												data-testid="intake-filled"
+											>
+												Filled in by the reviewer
+											</p>
+										</template>
+										<span v-else-if="r.read">{{ r.read }}</span>
 										<span v-else class="text-ink-gray-5"
 											>Not found on the page</span
 										>
@@ -214,7 +220,11 @@ const rows = computed(() => {
 		label: f.label,
 		read: d.reading.values[f.fieldname] || "",
 		draft: d.draft ? d.draft.values[f.fieldname] || "" : "",
-		changed: !!d.draft && f.fieldname in d.changes,
+		filled: !!d.draft && (d.reviewer_filled || []).includes(f.fieldname),
+		changed:
+			!!d.draft &&
+			f.fieldname in d.changes &&
+			!(d.reviewer_filled || []).includes(f.fieldname),
 		why: d.changes[f.fieldname] || "",
 	}));
 });
@@ -236,7 +246,6 @@ const state = computed(() => {
 		return {
 			heading: status === "Failed" ? "Why it failed" : "Why it was skipped",
 			line: d.row.summary,
-			next: d.can_retry ? "Run it again to try once more." : "",
 		};
 	}
 	if (status === "Needs Review") {
