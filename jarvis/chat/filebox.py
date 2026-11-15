@@ -1603,6 +1603,17 @@ def _detail_spec(trigger: dict | None):
 	return s, {"target": s.target, "fields": fields, "table": table}
 
 
+def _reviewer_filled(approval: str | None) -> list[str]:
+	"""Header fields a reviewer supplied: the missing list of an Approved intake request."""
+	if not approval:
+		return []
+	req = frappe.db.get_value("Jarvis Approval Request", approval, ["status", "intake_missing"], as_dict=True)
+	if not req or req.status != "Approved":
+		return []
+	payload = _detail_reading(req.intake_missing)
+	return [m["field"] for m in payload.get("missing") or [] if m.get("row") is None]
+
+
 def _detail_reading(raw: str | None) -> dict:
 	try:
 		data = frappe.parse_json(raw) if raw else {}
@@ -1710,6 +1721,7 @@ def get_intake_detail(activity: str) -> dict:
 			else None
 		),
 		"changes": changes,
+		"reviewer_filled": [f for f in _reviewer_filled(r.approval_request) if f in names],
 		"missing": [f for f in names if _blank(reading.get(f))],
 		"can_retry": can_retry_row(r, me, manager, live),
 		"can_review": can_review_row(rule_row, me, "System Manager" in frappe.get_roles(me)),
