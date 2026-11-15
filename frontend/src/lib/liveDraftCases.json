@@ -1,0 +1,579 @@
+[
+	{
+		"id": "draft-is-last",
+		"note": "the newest assistant row is the draft",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m2",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"live": "m2"
+	},
+	{
+		"id": "draft-then-chat",
+		"note": "plain chat after a draft does not retire it",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m5",
+				"role": "assistant",
+				"content": "Done."
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "draft-then-confirmed-receipt",
+		"note": "a confirmed receipt after the draft retires it",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "confirmed"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "draft-then-discarded-receipt",
+		"note": "a discarded receipt after the draft retires it",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "discarded"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "draft-then-failed-receipt",
+		"note": "a failed receipt after the draft retires it",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "failed"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "draft-then-plain-tool-rows",
+		"note": "tool rows with an empty action_outcome do not retire a draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": ""
+			},
+			{
+				"name": "t2",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "  "
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "two-drafts",
+		"note": "the newer draft replaces the older one",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"Task\",\"title\":\"T2\",\"fields\":[{\"label\":\"subject\",\"value\":\"z\"}]}\n```"
+			}
+		],
+		"live": "m3"
+	},
+	{
+		"id": "good-then-broken",
+		"note": "a newer broken draft is the live one; the good one does not come back",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{not json\n```"
+			}
+		],
+		"live": "m3"
+	},
+	{
+		"id": "draft-then-email-block",
+		"note": "an email block is not a draft row and does not hide the older draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"email\",\"to\":\"a@b.com\",\"subject\":\"Hi\",\"body\":\"Hello\"}\n```"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "draft-then-gated-verb-block",
+		"note": "a gated verb block is not a draft row and does not hide the older draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"submit\",\"doctype\":\"ToDo\",\"name\":\"TD-1\"}\n```"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "six-user-rows-later",
+		"note": "six user rows after the draft retire it",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a1",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a2",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u3",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u4",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a4",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u5",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a5",
+				"role": "assistant",
+				"content": "Sure."
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "five-user-rows-later",
+		"note": "five user rows after the draft keep it live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a1",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a2",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u3",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u4",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a4",
+				"role": "assistant",
+				"content": "Sure."
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "hidden-draft",
+		"note": "a hidden draft row is skipped",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```",
+				"hidden": 1
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "streaming-draft",
+		"note": "a streaming draft row is skipped",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```",
+				"streaming": true
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "no-draft",
+		"note": "a chat with no action block has no live draft",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Hello"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Hi"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "unclosed-fence",
+		"note": "an unclosed fence is not a draft",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\"}"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "update-draft-then-chat",
+		"note": "an update draft stays live through chat",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"update\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"y\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Sure."
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "hidden-later-rows-ignored",
+		"note": "hidden user rows and hidden receipts after the draft are skipped",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "confirmed",
+				"hidden": 1
+			},
+			{
+				"name": "h0",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h1",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h2",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h3",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h4",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h5",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h6",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "unreadable-action-draft",
+		"note": "an unreadable edit action is a draft row (error card)",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"fields\":\"oops\"}\n```"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "missing-verb-draft",
+		"note": "a doc block with no verb is a draft row",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[]}\n```"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "capitalised-verb-draft",
+		"note": "a capitalised verb is read as lower case",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"Create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[]}\n```"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "first-fence-only",
+		"note": "only the first closed fence counts: email first then a create is not a draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"email\",\"to\":\"a@b.com\",\"subject\":\"Hi\",\"body\":\"Hello\"}\n```\n\nDrafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "non-assistant-block",
+		"note": "a block in a user row is not a draft",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"live": null
+	}
+]
