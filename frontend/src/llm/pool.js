@@ -1,3 +1,5 @@
+import { waitPhrase } from "../../../jarvis/public/js/turn_errors.mjs";
+
 // Shared pure pool logic. Consumed by the Vue app (direct import) AND the desk
 // onboarding page (via jarvis_onboarding_llm.bundle.js -> window). No framework imports.
 export function deriveMode(models, preset) {
@@ -624,12 +626,29 @@ export function subscriptionAccountHealth(
 // never be confused for one another.
 export function dirtyAccountHealth(settled, isDirtyOrPending) {
 	if (!isDirtyOrPending) return settled;
-	if (settled.level === "expired") return settled;
+	// A dead sign-in or a usage cap belongs to the account, not to the unsaved config.
+	if (settled.level === "expired" || settled.limited) return settled;
 	if (settled.level !== "ok") return { level: "neutral" };
 	return {
 		level: "pending",
 		label: "Pending re-check",
 		title: "This account was verified before your latest changes. It will be re-checked once they're applied.",
+	};
+}
+
+// A model on its usage cap (subscriptionNotice.limited: { "<bare model id>": <until epoch s> }, from a
+// failed turn's Retry-After): an amber dot until the reset, or null when the model is not capped.
+export function usageLimitHealth(model, limited, nowMs = Date.now()) {
+	const bare = String(model || "")
+		.split("/")
+		.pop();
+	const until = bare && limited && Object.hasOwn(limited, bare) ? Number(limited[bare]) : 0;
+	if (!until || until * 1000 <= nowMs) return null;
+	return {
+		level: "warn",
+		limited: true,
+		label: "Usage limit reached",
+		title: `Resets in ${waitPhrase((until * 1000 - nowMs) / 1000)}.`,
 	};
 }
 
