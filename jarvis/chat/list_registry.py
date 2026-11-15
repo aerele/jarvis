@@ -163,6 +163,17 @@ _VIEWS: tuple[ListView, ...] = (
 		notes="Rows join approvals/messages/File and add a derived status; needs a declared projection schema (plan §4.4). Second client: pwa/src/api.js.",
 	),
 	ListView(
+		view_key="intake_files",
+		label="Document Intake",
+		classification=PROJECTION,
+		projection_root="Jarvis Trigger Activity",
+		endpoints=("jarvis.chat.filebox.list_intake_page",),
+		surface="frontend/src/pages/files/IntakeList.vue",
+		wave=1,
+		curated_filters={"status": None, "trigger": None, "from_date": None, "to_date": None},
+		notes="Intake rows of Jarvis Trigger Activity joined to File and Jarvis Trigger, scoped owner-only (`mine`) or all (manager). Never returns `detail`; a migrated view must keep that withholding.",
+	),
+	ListView(
 		view_key="saved_dashboards",
 		label="Saved dashboards",
 		classification=DOCUMENT_LIST,
@@ -216,11 +227,12 @@ _VIEWS: tuple[ListView, ...] = (
 			"target_doctype": "target_doctype",
 			"doc_event": "doc_event",
 		},
-		excluded_fields=("condition", "script_body", "llm_instruction"),
+		excluded_fields=("condition", "script_body", "llm_instruction", "intake_instructions", "intake_spec"),
 		notes=(
 			"Manager/non-manager row redaction must survive migration: "
 			"triggers_api._trigger_detail blanks condition/script_body/"
-			"llm_instruction for non-managers, so those three are withheld from "
+			"llm_instruction/intake_instructions/intake_spec for non-managers, so "
+			"those five are withheld from "
 			"the filter catalog too — a LIKE oracle would rebuild them. Withheld "
 			"unconditionally (for managers as well): a per-role exclusion needs a "
 			"view-declared predicate, which is deliberately deferred."
@@ -639,6 +651,12 @@ NON_LIST_ENDPOINTS: dict[str, str] = {
 	"jarvis.chat.agents_api.search_users": (
 		"admin Access-editor people picker: a capped type-ahead over enabled users, "
 		"not a browsable document list"
+	),
+	"jarvis.chat.triggers_api.list_intake_folders": (
+		"manager-only folder-path picker for the intake trigger form, not a browsable document list"
+	),
+	"jarvis.chat.triggers_api.search_intake_doctypes": (
+		"manager-only capped DocType type-ahead for the intake rule form, not a browsable document list"
 	),
 	"jarvis.chat.approvals_api.list_approvals": "unpaginated companion of approvals (list_approvals_page)",
 	"jarvis.chat.approvals_api.list_approval_reviewers": (

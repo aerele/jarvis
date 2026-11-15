@@ -200,6 +200,11 @@ const routes = [
 		props: true,
 	},
 	{ path: "/files", name: "FilesList", component: () => import("@/pages/files/FilesList.vue") },
+	{
+		path: "/files/intake/:activity",
+		name: "IntakeDetail",
+		component: () => import("@/pages/files/IntakeDetail.vue"),
+	},
 	// §15.2: both approval routes render the two-pane board (the :id row is
 	// selected in place); names kept so nav highlighting + router.push targets
 	// keep working. The board reads route.params itself — no props.
