@@ -244,8 +244,9 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 			) as blob,
 			patch(
 				"jarvis.admin_client.post_update_llm_creds",
-				side_effect=lambda **kw: calls.append(("creds", kw))
-				or {"action": "restart", "status": "applied"},
+				side_effect=lambda **kw: (
+					calls.append(("creds", kw)) or {"action": "restart", "status": "applied"}
+				),
 			) as creds,
 		):
 			onboarding.save_llm_pool(

@@ -15,8 +15,12 @@
 		</LayoutHeader>
 
 		<!-- toolbar: quick filters | divider | Refresh · Filter · Sort · Columns -->
-		<div class="flex items-center justify-between gap-2 px-5 py-4">
-			<div class="-ml-1 flex h-9 flex-1 items-center overflow-x-auto">
+		<!-- wraps below sm: the quick filters take their own full row, so Search is never
+		     squeezed out and Columns is never clipped at 320 px -->
+		<div class="flex flex-wrap items-center justify-between gap-2 px-5 py-4">
+			<div
+				class="-ml-1 flex min-h-9 min-w-0 basis-full flex-wrap items-center sm:basis-0 sm:flex-1"
+			>
 				<div v-for="qf in quickFilters" :key="qf.key" class="m-1 min-w-36">
 					<!-- A Dropdown, not FormControl select: frappe-ui's Select opens item-aligned,
 					     over its field, so a chosen option moved the list up the page. -->
@@ -56,10 +60,11 @@
 					/>
 				</div>
 			</div>
-			<div class="-ml-2 h-[70%] border-l" />
+			<div class="-ml-2 hidden h-[70%] border-l sm:block" />
 			<div class="flex items-center gap-2">
 				<Button
 					:tooltip="'Refresh'"
+					label="Refresh"
 					icon="refresh-cw"
 					:loading="loading"
 					@click="$emit('refresh')"
@@ -167,7 +172,7 @@
 				selectable,
 				getRowRoute: getRowRoute || null,
 				onRowClick: onRowClick || null,
-				rowHeight: 40,
+				rowHeight,
 				resizeColumn: false,
 				showTooltip: true,
 			}"
@@ -179,9 +184,12 @@
 						v-for="column in visibleColumns"
 						:key="column.key"
 						:item="column"
+						:class="strongHeader ? '!text-ink-gray-7' : ''"
 					/>
 				</ListHeader>
-				<ListRows class="mx-3 sm:mx-5" />
+				<ListRows class="mx-3 sm:mx-5">
+					<PlainRows v-if="plainRows" />
+				</ListRows>
 				<!-- frappe-ui's bar is bg-surface-white, the page colour in dark mode, where its black
 				     shadow does not show; the popover surface and a border keep it raised in both. -->
 				<ListSelectBanner
@@ -227,7 +235,7 @@
 		     toolbar's Refresh, put where the reader is looking. -->
 		<div v-else-if="error" class="relative flex-1">
 			<div
-				class="absolute left-1/2 flex w-4/12 -translate-x-1/2 flex-col items-center gap-3"
+				class="absolute left-1/2 flex w-9/12 -translate-x-1/2 sm:w-4/12 flex-col items-center gap-3"
 				:style="{ top: '35%' }"
 			>
 				<FeatherIcon name="alert-circle" class="size-7.5 text-ink-red-4" />
@@ -244,7 +252,7 @@
 		<!-- empty state (loaded, zero rows) -->
 		<div v-else-if="!loading" class="relative flex-1">
 			<div
-				class="absolute left-1/2 flex w-4/12 -translate-x-1/2 flex-col items-center gap-3"
+				class="absolute left-1/2 flex w-9/12 -translate-x-1/2 sm:w-4/12 flex-col items-center gap-3"
 				:style="{ top: '35%' }"
 			>
 				<FeatherIcon
@@ -252,7 +260,7 @@
 					class="size-7.5 text-ink-gray-5"
 				/>
 				<div class="flex flex-col items-center gap-1">
-					<span class="text-lg font-medium text-ink-gray-8">
+					<span class="text-center text-lg font-medium text-ink-gray-8">
 						{{ (emptyState && emptyState.title) || "No records found" }}
 					</span>
 					<span
@@ -320,12 +328,14 @@ import FilterButton from "@/components/list/FilterButton.vue";
 import FilterGroup from "@/components/list/FilterGroup.vue";
 import SortButton from "@/components/list/SortButton.vue";
 import ColumnsButton from "@/components/list/ColumnsButton.vue";
+import PlainRows from "@/components/list/PlainRows.vue";
 import { focusOpenMenu } from "@/lib/focusOpenMenu";
 
 const props = defineProps({
 	breadcrumbs: { type: Array, default: () => [] }, // [{label, route?}]
 	showHeader: { type: Boolean, default: true }, // false = embedded (host owns the LayoutHeader)
 	columns: { type: Array, default: () => [] }, // frappe-ui ListView columns
+	rowHeight: { type: [Number, String], default: 40 }, // "auto" for a list whose cells stack
 	rows: { type: Array, default: () => [] },
 	rowKey: { type: String, default: "name" },
 	loading: { type: Boolean, default: false },
@@ -343,6 +353,11 @@ const props = defineProps({
 	pageLength: { type: Number, default: 20 },
 	defaultSort: { type: Object, default: () => ({ field: "", dir: "" }) },
 	selectable: { type: Boolean, default: false },
+	// Rows are plain divs, not frappe-ui's row button, for a list whose cells hold their own
+	// links or buttons (no row click, no row route).
+	plainRows: { type: Boolean, default: false },
+	// Column headers in the darker ink (the stock gray-5 is 4.17:1 on white).
+	strongHeader: { type: Boolean, default: false },
 	getRowRoute: { type: Function, default: null },
 	onRowClick: { type: Function, default: null },
 	emptyState: { type: Object, default: () => ({}) }, // {title, description, icon?}

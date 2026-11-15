@@ -2,7 +2,7 @@
 	<div class="flex h-full flex-col overflow-hidden">
 		<LayoutHeader>
 			<template #left-header>
-				<Breadcrumbs :items="breadcrumbs" />
+				<Breadcrumbs class="jv-crumbs" :items="breadcrumbs" />
 			</template>
 			<template #right-header>
 				<slot name="actions" />
@@ -97,3 +97,19 @@ const listRoute = computed(() => {
 	return (root && root.route) || null;
 });
 </script>
+
+<style scoped>
+/* A long title ends in an ellipsis instead of being cut mid-letter on a phone. */
+.jv-crumbs :deep(a:last-of-type > span) {
+	display: block;
+	max-width: 12rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+@media (min-width: 640px) {
+	.jv-crumbs :deep(a:last-of-type > span) {
+		max-width: 28rem;
+	}
+}
+</style>

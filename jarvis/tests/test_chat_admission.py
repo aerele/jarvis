@@ -2022,8 +2022,9 @@ class TestCutoverPreflight(_AdmissionTestCase):
 			patch.object(
 				admission,
 				"accept_or_queue",
-				side_effect=lambda **k: rerouted.append(k["run_id"])
-				or {"ok": True, "dispatched": False, "run_id": k["run_id"]},
+				side_effect=lambda **k: (
+					rerouted.append(k["run_id"]) or {"ok": True, "dispatched": False, "run_id": k["run_id"]}
+				),
 			),
 		):
 			chat_api._dispatch_turn(kwargs, cutover_gate=True)
@@ -2199,8 +2200,10 @@ class TestCutoverDbAuthoritativeMode(FrappeTestCase):
 					patch.object(
 						admission,
 						"accept_or_queue",
-						side_effect=lambda **k: rerouted.append(k["run_id"])
-						or {"ok": True, "dispatched": False, "run_id": k["run_id"]},
+						side_effect=lambda **k: (
+							rerouted.append(k["run_id"])
+							or {"ok": True, "dispatched": False, "run_id": k["run_id"]}
+						),
 					),
 				):
 					chat_api._dispatch_turn(kwargs, cutover_gate=True)

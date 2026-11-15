@@ -19,6 +19,8 @@ const apiTr = vi.hoisted(() => ({
 	setTriggerEnabled: vi.fn(),
 	deleteTrigger: vi.fn(),
 	testTriggerCondition: vi.fn(),
+	listIntakeFolders: vi.fn(),
+	getIntakeFieldOptions: vi.fn(),
 }));
 vi.mock("@/api/triggers", () => apiTr);
 vi.mock("@/api", () => ({ searchLink: vi.fn(() => Promise.resolve([])) }));
@@ -56,7 +58,7 @@ vi.mock("frappe-ui", () => ({
 		name: "FormControl",
 		props: ["modelValue", "type", "label", "options", "disabled"],
 		emits: ["update:modelValue"],
-		template: `<input :aria-label="label" :value="modelValue" :disabled="disabled" @input="$emit('update:modelValue', $event.target.value)" />`,
+		template: `<input :type="type === 'checkbox' ? 'checkbox' : 'text'" :aria-label="label" :value="modelValue" :checked="type === 'checkbox' ? !!modelValue : undefined" :disabled="disabled" @input="type !== 'checkbox' && $emit('update:modelValue', $event.target.value)" @change="type === 'checkbox' && $emit('update:modelValue', $event.target.checked)" />`,
 	},
 	Switch: {
 		name: "Switch",
@@ -224,6 +226,12 @@ describe("TriggerDetail Recent activity: first page", () => {
 			page_length: FIRST_PAGE,
 		});
 		expect(rowEls(wrapper)).toHaveLength(10);
+	});
+
+	it("names the icon-only overflow button so a screen reader can find it", async () => {
+		serverOf(3);
+		await mountDetail();
+		expect(wrapper.find('button[data-label="More actions"]').exists()).toBe(true);
 	});
 
 	it("has no View all link any more", async () => {
@@ -1475,5 +1483,135 @@ describe("TriggerDetail: the form follows the newest init only (PM-8)", () => {
 		await flushPromises();
 		expect(wrapper.findComponent({ name: "DocPage" }).props("error")).toBe("");
 		expect(nameInput(wrapper).element.value).toBe("Big invoice TRG-2");
+	});
+});
+
+// ── Intake kind ──────────────────────────────────────────────────────────────
+const TODO_OPTIONS = {
+	fields: [
+		{
+			fieldname: "description",
+			label: "Description",
+			fieldtype: "Text Editor",
+			options: "",
+			mandatory: true,
+		},
+		{
+			fieldname: "status",
+			label: "Status",
+			fieldtype: "Select",
+			options: "Open\nClosed",
+			mandatory: false,
+		},
+	],
+	tables: [],
+};
+
+function intakeTrigger(over = {}) {
+	return {
+		...trigger("TRG-9"),
+		action_type: "Intake",
+		doc_event: "",
+		target_doctype: "",
+		llm_instruction: "",
+		llm_daily_cap: 100,
+		intake_source: "Folder",
+		intake_folder: "Home/Production Sheets",
+		intake_target_doctype: "ToDo",
+		intake_spec: JSON.stringify({
+			fields: ["description"],
+			table: null,
+			match: [],
+			defaults: {},
+		}),
+		intake_instructions: "",
+		allow_incomplete_drafts: 0,
+		intake_status_field: "",
+		intake_link_field: "",
+		...over,
+	};
+}
+
+async function mountIntake(over = {}, caps = { can_manage: true }) {
+	apiTr.listIntakeFolders.mockResolvedValue(["Home/Production Sheets"]);
+	apiTr.getIntakeFieldOptions.mockResolvedValue(TODO_OPTIONS);
+	apiTr.getTrigger.mockImplementation(async () => intakeTrigger(over));
+	apiTr.getTriggersCaps.mockResolvedValue(caps);
+	wrapper = mount(TriggerDetail, {
+		props: { id: "TRG-9", isNew: false },
+		attachTo: document.body,
+		global: { provide: { $socket: null } },
+	});
+	await flushPromises();
+	await flushPromises();
+	return wrapper;
+}
+const ctl = (w, label) => w.find(`input[aria-label="${label}"]`);
+
+describe("TriggerDetail Intake kind", () => {
+	it("intake kind hides event and condition", async () => {
+		const w = await mountIntake();
+		expect(ctl(w, "Event").exists()).toBe(false);
+		expect(w.text()).not.toContain("Test condition");
+		expect(ctl(w, "Instruction").exists()).toBe(false);
+		expect(ctl(w, "Script").exists()).toBe(false);
+		expect(ctl(w, "Name").exists()).toBe(true);
+	});
+
+	it("mandatory fields pre-checked", async () => {
+		const w = await mountIntake({ intake_spec: "" });
+		expect(ctl(w, "Description (required)").element.checked).toBe(true);
+		expect(ctl(w, "Status").element.checked).toBe(false);
+	});
+
+	it("payload carries intake_spec json without empty defaults", async () => {
+		const w = await mountIntake({
+			intake_spec: JSON.stringify({
+				fields: ["description"],
+				table: null,
+				match: [],
+				defaults: { status: "" },
+			}),
+		});
+		apiTr.updateTrigger.mockResolvedValue(intakeTrigger());
+		await ctl(w, "Status").setValue(true);
+		await w
+			.findAll("button")
+			.find((b) => b.attributes("data-label") === "Save")
+			.trigger("click");
+		await flushPromises();
+		const [name, payload] = apiTr.updateTrigger.mock.calls[0];
+		expect(name).toBe("TRG-9");
+		expect(Object.keys(payload)).toEqual(["intake_spec"]);
+		expect(JSON.parse(payload.intake_spec)).toEqual({
+			fields: ["description", "status"],
+			table: null,
+			match: [],
+			defaults: {},
+		});
+	});
+
+	it("allow incomplete drafts label and default off", async () => {
+		const w = await mountIntake();
+		expect(ctl(w, "Allow incomplete drafts").element.checked).toBe(false);
+		expect(w.text()).toContain(
+			"Create the draft even when a mandatory field could not be read."
+		);
+	});
+
+	it("a non-manager sees the redacted intake rule without a crash or field loads", async () => {
+		const w = await mountIntake(
+			{ intake_spec: null, intake_instructions: null },
+			{ can_manage: false }
+		);
+		expect(apiTr.getIntakeFieldOptions).not.toHaveBeenCalled();
+		expect(w.vm.form.intake_spec).toEqual({
+			fields: [],
+			table: null,
+			match: [],
+			defaults: {},
+		});
+		expect(w.vm.form.intake_instructions).toBe("");
+		expect(w.vm.form.intake_target_doctype).toBe("ToDo");
 	});
 });
