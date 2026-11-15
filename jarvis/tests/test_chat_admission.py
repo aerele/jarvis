@@ -962,7 +962,9 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 		self.assertEqual(waited, [True], "thread 2 waited on the lock thread 1 held")
 		self.assertEqual(sorted(bool(r["ok"]) for r in results), [False, True])
 		refused = next(r for r in results if not r["ok"])
-		self.assertEqual(refused["reason"], "A reply is already in progress. Wait for it to finish.")
+		self.assertEqual(
+			refused["reason"], "A reply is already in progress. Wait for it to finish, then try again."
+		)
 		self.assertEqual(frappe.db.count(TURN, {"seed_message": u}), 2, "the failed turn + one retry")
 
 
@@ -2022,8 +2024,9 @@ class TestCutoverPreflight(_AdmissionTestCase):
 			patch.object(
 				admission,
 				"accept_or_queue",
-				side_effect=lambda **k: rerouted.append(k["run_id"])
-				or {"ok": True, "dispatched": False, "run_id": k["run_id"]},
+				side_effect=lambda **k: (
+					rerouted.append(k["run_id"]) or {"ok": True, "dispatched": False, "run_id": k["run_id"]}
+				),
 			),
 		):
 			chat_api._dispatch_turn(kwargs, cutover_gate=True)
@@ -2199,8 +2202,10 @@ class TestCutoverDbAuthoritativeMode(FrappeTestCase):
 					patch.object(
 						admission,
 						"accept_or_queue",
-						side_effect=lambda **k: rerouted.append(k["run_id"])
-						or {"ok": True, "dispatched": False, "run_id": k["run_id"]},
+						side_effect=lambda **k: (
+							rerouted.append(k["run_id"])
+							or {"ok": True, "dispatched": False, "run_id": k["run_id"]}
+						),
 					),
 				):
 					chat_api._dispatch_turn(kwargs, cutover_gate=True)

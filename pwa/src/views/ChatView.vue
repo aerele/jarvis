@@ -537,7 +537,8 @@ async function reportError(m, err) {
 			message: m.name,
 			at: m.modified || m.creation,
 			fetchDetails: api.getErrorReportDetails,
-			open: (url, target, features) => window.open(url, target, features),
+			openTab: (url, target) => window.open(url, target),
+			navigate: (url) => window.location.assign(url),
 		});
 		if (!opened) errorBanner.value = "Couldn't open Support. Try again.";
 	} catch {

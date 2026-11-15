@@ -1042,7 +1042,8 @@ async function reportError() {
 			message: turnErrorMsgId.value,
 			at: row?.modified || row?.creation,
 			fetchDetails: getErrorReportDetails,
-			open: (url, target, features) => window.open(url, target, features),
+			openTab: (url, target) => window.open(url, target),
+			navigate: (url) => window.location.assign(url),
 		});
 		if (!opened) reportNote.value = "Could not open Support. Try again.";
 	} catch {

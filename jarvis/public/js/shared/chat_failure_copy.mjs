@@ -1,28 +1,51 @@
 // Plain words for a chat action that failed before any model ran (a send, a confirm, a load,
-// an upload, a rename). Shared by the mobile app and the Desk widget, which cannot import
-// frontend/src. Mirrors frontend/src/lib/errors.js (isNetworkFailure, SESSION_EXPIRED_MESSAGE)
-// and sendRejectionCopy.js; keep the sentences in step by hand.
+// an upload, a rename). The single source for the session-expired and offline sentences and for
+// spotting the browser's own network-failure text: the desktop app's frontend/src/lib/errors.js
+// imports them from here, and the mobile app and the Desk widget use this module directly.
+// The send-refusal sentences below mirror frontend/src/lib/sendRejectionCopy.js; a test there
+// fails if the two tables drift.
 
-export const SESSION_EXPIRED = "Your session has expired. Sign in again.";
+export const SESSION_EXPIRED =
+  "Your session has expired. Please sign in again.";
 export const OFFLINE =
   "Jarvis could not reach the server. Check your internet connection and try again.";
 
 const BROWSER_NETWORK_TEXT =
   /^(failed to fetch|networkerror\b|load failed|network request failed)/i;
 
-// "session" | "offline" | "other". Total: any value, including undefined, is safe.
+// The browser's own words for a request that never reached the server.
+export function isBrowserNetworkText(message) {
+  return BROWSER_NETWORK_TEXT.test(String(message || "").trim());
+}
+
+// What the server said on purpose (frappe.throw), as plain text, or "".
+function serverSentence(e) {
+  const first = e && Array.isArray(e.messages) ? e.messages[0] : "";
+  if (typeof first !== "string") return "";
+  return first
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&")
+    .trim()
+    .slice(0, MAX_REASON_CHARS);
+}
+
+// "session" | "refused" | "offline" | "other". Total: any value, including undefined, is safe.
+// A 403 the server explained is a permission refusal ("refused"): its own sentence says what to
+// do, and "sign in again" would send the user through a login into the same refusal. A 401, or
+// a 403 with nothing said, is most likely an expired session (same rule as errors.js).
 export function failureKind(e) {
   if (!e || typeof e !== "object") return "other";
-  if (e.status === 401 || e.status === 403) return "session";
+  if (e.status === 401) return "session";
+  if (e.status === 403) return serverSentence(e) ? "refused" : "session";
   const spoke = Array.isArray(e.messages) && e.messages.length > 0;
   // jQuery (the Desk's frappe.call) reports a dead connection as status 0 / readyState 0;
   // fetch (frappe-ui) throws the browser's own TypeError text.
   if (e.status === 0 && !spoke) return "offline";
-  if (
-    !e.status &&
-    !spoke &&
-    BROWSER_NETWORK_TEXT.test(String(e.message || "").trim())
-  ) {
+  if (!e.status && !spoke && isBrowserNetworkText(e.message)) {
     return "offline";
   }
   return "other";
@@ -32,6 +55,7 @@ export function failureKind(e) {
 export function failureCopy(e, fallback) {
   const kind = failureKind(e);
   if (kind === "session") return SESSION_EXPIRED;
+  if (kind === "refused") return serverSentence(e);
   if (kind === "offline") return OFFLINE;
   return fallback;
 }
@@ -53,7 +77,7 @@ export function refusalCopy(reason, brand, envelope) {
       WINDOW_COPY[envelope && envelope.limit_period] ||
       `You've reached your usage limit. Ask your ${name} admin to raise it.`,
     llm_not_configured:
-      "No AI model is connected. Connect one in Settings, AI models.",
+      "No AI model is connected. Connect one in Settings → AI models.",
     workspace_resetting: `${name} is being reset. Chat will be back in a few minutes.`,
     subscription_suspended:
       "Your subscription has lapsed. Renew it to keep chatting.",
@@ -114,8 +138,17 @@ export function serverReason(body) {
 // (widget panel_api.mjs, mobile api.js); the server's own sentence, such as "File type is not
 // allowed", is already plain and says the fix.
 export function uploadFailureCopy(e, fileName = "") {
+  // A refusal the server explained (no permission for this file) is its own sentence.
+  if (
+    e &&
+    e.status === 403 &&
+    typeof e.serverReason === "string" &&
+    e.serverReason.trim()
+  )
+    return e.serverReason.trim();
   const kind = failureKind(e);
   if (kind === "session") return SESSION_EXPIRED;
+  if (kind === "refused") return serverSentence(e);
   if (kind === "offline") return OFFLINE;
   const what = fileName ? `"${fileName}"` : "That file";
   if (e && e.status === 413)

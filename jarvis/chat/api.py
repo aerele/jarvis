@@ -2256,11 +2256,14 @@ def _confirm_typed_items(conversation, items):
 	else:
 		out = {"ok": not failed}
 		if failed:
+			failed_positions = ", ".join(str(r["position"]) for r in failed)
+			plural = len(failed) != 1
 			out["error"] = {
 				"type": "PartialConfirmation",
 				"message": (
 					f"{len(results) - len(failed)} of {len(results)} actions went through. "
-					f"{len(failed)} could not be completed. Check the cards that failed and try again."
+					f"Card{'s' if plural else ''} {failed_positions} could not be completed. "
+					f"Check {'them' if plural else 'it'} and try again."
 				),
 			}
 		if cont and cont.get("queued"):
@@ -2660,7 +2663,7 @@ def send_message(
 		if _conversation_busy(conversation):
 			return {
 				"ok": False,
-				"reason": _("A reply is already in progress. Wait for it to finish, then try again."),
+				"reason": _in_progress_sentence(),
 			}
 
 	# Apply model override BEFORE enqueueing so the worker sees the new value
@@ -3932,7 +3935,10 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 			"ok": False,
 			"error": {
 				"code": "unknown_model",
-				"message": "That model isn't available for your workspace. Pick another one.",
+				"message": (
+					"That model isn't available for your workspace. Choose one of: "
+					f"{', '.join(sorted(allowed)[:12])}."
+				),
 			},
 		}
 
@@ -4106,7 +4112,8 @@ class _Refusal(NamedTuple):
 
 
 def _in_progress_sentence() -> str:
-	return _("A reply is already in progress. Wait for it to finish.")
+	"""The one sentence for a send or retry refused because a reply is still running."""
+	return _("A reply is already in progress. Wait for it to finish, then try again.")
 
 
 def _retry_log(level: str, line: str, *args, **kwargs) -> None:

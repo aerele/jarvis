@@ -677,7 +677,8 @@ class TestRetryMessage(_ChatTestCase):
 		):
 			result = retry_message(asst_id)
 		self.assertEqual(
-			result, {"ok": False, "reason": "A reply is already in progress. Wait for it to finish."}
+			result,
+			{"ok": False, "reason": "A reply is already in progress. Wait for it to finish, then try again."},
 		)
 		line = logger.return_value.info.call_args.args
 		self.assertEqual(line[0].split()[3], "reason=%s")

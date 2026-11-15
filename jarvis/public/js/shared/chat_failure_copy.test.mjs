@@ -94,3 +94,27 @@ test("serverReason reads Frappe's server message", () => {
   };
   assert.equal(serverReason(body), "Too big");
 });
+
+test("a 403 the server explained shows its own sentence, not 'session expired'", () => {
+  const refused = {
+    status: 403,
+    messages: ["You don&#39;t have permission to open this file."],
+  };
+  assert.equal(failureKind(refused), "refused");
+  assert.equal(
+    failureCopy(refused, "fallback"),
+    "You don't have permission to open this file."
+  );
+  assert.equal(failureCopy({ status: 403 }, "fallback"), SESSION_EXPIRED);
+  assert.equal(
+    failureCopy({ status: 401, messages: ["x y"] }, "fallback"),
+    SESSION_EXPIRED
+  );
+  assert.equal(
+    uploadFailureCopy(
+      { status: 403, serverReason: "File type is not allowed." },
+      "a.exe"
+    ),
+    "File type is not allowed."
+  );
+});

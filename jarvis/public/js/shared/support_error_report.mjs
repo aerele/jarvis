@@ -17,16 +17,22 @@ export function reportErrorUrl(draft) {
 }
 
 // `fetchDetails(conversation, message)` resolves to the endpoint's {ok, data}. A failure there
-// is not fatal: the ticket opens with the diagnostic metadata alone. Returns false when no
-// draft exists (a cancelled turn) or the tab could not open.
+// is not fatal: the ticket opens with the diagnostic metadata alone.
+// `openTab(url, target)` is window.open and `navigate(url)` is location.assign. The tab is opened
+// FIRST, inside the click: a popup blocker allows a new tab only there, before any await. It is
+// opened without "noopener" so we get a handle (window.open returns null with it), and the
+// handle's opener is cleared before it loads the page. A blocked tab falls back to this tab.
+// Returns false when no draft exists (a cancelled turn) or nothing could open.
 export async function openErrorReport({
   info,
   conversation,
   message,
   at,
   fetchDetails,
-  open,
+  openTab,
+  navigate,
 }) {
+  const tab = openTab ? openTab("", "_blank") : null;
   let details = null;
   try {
     const res = await fetchDetails(conversation, message);
@@ -42,7 +48,23 @@ export async function openErrorReport({
     at,
     details,
   });
-  if (!draft) return false;
-  const win = open(reportErrorUrl(draft), "_blank", "noopener");
-  return win !== false;
+  if (!draft) {
+    if (tab) tab.close();
+    return false;
+  }
+  const url = reportErrorUrl(draft);
+  if (tab) {
+    try {
+      tab.opener = null;
+    } catch {
+      /* a cross-origin handle may refuse the write; the page is our own origin */
+    }
+    tab.location.href = url;
+    return true;
+  }
+  if (navigate) {
+    navigate(url);
+    return true;
+  }
+  return false;
 }
