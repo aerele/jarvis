@@ -4691,7 +4691,7 @@ import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
 import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
-import { supportErrorDraft } from "@/lib/supportErrorDraft";
+import { supportErrorDraft } from "../../../jarvis/public/js/shared/support_error_draft.mjs";
 import {
 	supportPillLabel as supportPillLabelFor,
 	supportAwaitingPhrase,

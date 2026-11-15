@@ -437,7 +437,7 @@ import {
 	getErrorReportDetails,
 } from "@/api";
 import { useRouter } from "vue-router";
-import { supportErrorDraft } from "@/lib/supportErrorDraft";
+import { supportErrorDraft } from "../../../../jarvis/public/js/shared/support_error_draft.mjs";
 import { brand } from "@/branding";
 import { errHtml, escapeHtml, turnErrorInfo, showsRawReason } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";

@@ -1,5 +1,6 @@
-import rules from "../../../jarvis/public/js/turn_error_rules.mjs";
-import { turnErrorInfo } from "../../../jarvis/public/js/turn_errors.mjs";
+// Shared by desktop, dashboard, mobile and the Desk widget: the Report error ticket draft.
+import rules from "../turn_error_rules.mjs";
+import { turnErrorInfo } from "../turn_errors.mjs";
 
 const byCode = new Map(rules.map((rule) => [rule.code, rule]));
 const subscriptionLabels = byCode.get("subscription-expired").upstreams.labels;

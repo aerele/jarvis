@@ -62,8 +62,24 @@ export function serverSentMessage(e) {
 	return typeof first === "string" ? first : "";
 }
 
+// A request that never reached the server (offline, DNS, server down) rejects with the
+// browser's own words ("Failed to fetch", "NetworkError when attempting to fetch resource.",
+// "Load failed"). Those are not sentences for a customer: say what happened instead.
+export const OFFLINE_MESSAGE =
+	"Jarvis could not reach the server. Check your internet connection and try again.";
+const BROWSER_NETWORK_TEXT = /^(failed to fetch|networkerror\b|load failed|network request failed)/i;
+export function isNetworkFailure(e) {
+	return (
+		!!e &&
+		!e.status &&
+		!(Array.isArray(e.messages) && e.messages.length) &&
+		BROWSER_NETWORK_TEXT.test(String(e.message || "").trim())
+	);
+}
+
 export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
 	if (isSessionExpired(e)) return SESSION_EXPIRED_MESSAGE;
+	if (isNetworkFailure(e)) return OFFLINE_MESSAGE;
 	// The server's OWN explicit message always wins, even on a 401/403 (round-4
 	// review F1): frappe.throw("You do not have permission to disconnect this
 	// model") is a real, actionable remedy, and burying it under a blanket
