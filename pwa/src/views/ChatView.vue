@@ -25,6 +25,7 @@ import { useRouter } from "vue-router";
 import { renderMarkdown } from "@shared/markdown.js";
 import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
+import { draftAnchor } from "../lib/draftAnchor.js";
 import { isShowCardRequest } from "../lib/showCardRequest.js";
 import { isImeKey } from "../lib/composerEnter.js";
 import { advanceViewGeneration, isViewCurrent } from "../lib/viewGeneration.js";
@@ -568,20 +569,48 @@ const items = computed(() => {
 // Report receipts bound to their answer by tool_call_ids, never by position.
 const reportToolsByTurn = computed(() => reportToolsByAssistant(messages.value));
 
-const lastAssistantKey = computed(() => {
-	const assistants = items.value.filter((i) => i.type === "assistant" && i.msg);
-	return assistants.length ? assistants[assistants.length - 1].key : "";
-});
+// The newest unsaved draft (liveDraft.js) and the item its card is drawn under: the
+// LAST assistant message, so the card is always at the bottom. While a reply streams
+// the tail is about to change, so the card is hidden until the turn settles.
+const rawAnchor = computed(() => draftAnchor(messages.value, items.value));
+const anchor = computed(() => (live.value ? null : rawAnchor.value));
 
-// The draft card (or its error view) shows only on the newest assistant message
-// and until it is dismissed; every other message falls back to its prose or the
-// "didn't return a reply" line, so a broken block never leaves a blank gap.
+// True for the item that carries the card (or its error view) of a live, undismissed
+// draft. The draft's own message is only the anchor when it is the last one.
 function showsDraftCard(it) {
+	const a = anchor.value;
 	return !!(
-		(it.view.action || it.view.actionBad) &&
-		it.key === lastAssistantKey.value &&
-		!dismissedActions.value.has(it.key)
+		a &&
+		(a.action || a.bad) &&
+		it.key === a.anchorKey &&
+		!dismissedActions.value.has(a.draftKey)
 	);
+}
+
+// A broken block that is the live draft shows the error card wherever it is drawn,
+// so its own message must not also say "didn't return a reply".
+function carriesLiveBrokenDraft(it) {
+	const a = rawAnchor.value;
+	return !!(a && a.bad && a.draftKey === it.key && !dismissedActions.value.has(a.draftKey));
+}
+
+// Cancel: record it on the server so it stays gone on reload and on the web app. A
+// second tap while the call is in flight is ignored. If the call fails, fall back to
+// hiding the card for this session only.
+let dismissing = false;
+async function onDraftDismissed() {
+	const a = anchor.value;
+	if (!a || dismissing) return;
+	dismissing = true;
+	try {
+		await api.dismissDraft(convId.value, a.draftKey);
+		await load();
+	} catch (e) {
+		console.error("Jarvis PWA: could not record the cancel", e);
+		dismissedActions.value.add(a.draftKey);
+	} finally {
+		dismissing = false;
+	}
 }
 
 // The write leaves a receipt in the conversation (a closed failure, the assistant's
@@ -873,6 +902,15 @@ async function send() {
 			return;
 		}
 		if (input.value.trim() !== text || attachments.value.length) return;
+		// Nothing new to show, but an unsaved draft is waiting: take the user to its
+		// card instead of sending "I can't see it" to the agent.
+		const a = anchor.value;
+		if (a && (a.action || a.bad) && !dismissedActions.value.has(a.draftKey)) {
+			input.value = "";
+			composer.value?.reset();
+			await scrollToBottom(true, () => isCurrent(cid, generation));
+			return;
+		}
 	}
 	if ((!text && !ready.length) || sending.value) return;
 	errorBanner.value = "";
@@ -1655,7 +1693,12 @@ onUnmounted(() => {
 					<ReportScope :tools="reportToolsByTurn[it.key] || []" />
 					<ExportCard v-if="exportSummary(it.msg)" :summary="exportSummary(it.msg)" />
 					<div v-else-if="it.view.html" class="jv-md" v-html="it.view.html" />
-					<div v-else-if="it.view.empty && !showsDraftCard(it)" class="jv-msg-error">
+					<div
+						v-else-if="
+							it.view.empty && !showsDraftCard(it) && !carriesLiveBrokenDraft(it)
+						"
+						class="jv-msg-error"
+					>
 						{{ agentName }} didn't return a reply for this turn. Try asking again.
 					</div>
 					<!-- SIBLING of the chain above, not a v-else-if in it: a partial stop
@@ -1666,14 +1709,17 @@ onUnmounted(() => {
 					<div v-if="it.msg.stopped" class="jv-stopped">You stopped this reply.</div>
 					<ActionCard
 						v-if="showsDraftCard(it)"
-						:action="it.view.action"
+						:action="anchor.action"
 						:conversation="convId"
-						:parked-note="parkedActions.get(it.key) || parkedByCard(pending, it.key)"
-						:message-key="it.key"
+						:parked-note="
+							parkedActions.get(anchor.draftKey) ||
+							parkedByCard(pending, anchor.draftKey)
+						"
+						:message-key="anchor.draftKey"
 						@applied="onActionApplied"
 						@failed="onActionApplied"
-						@parked="(n) => parkedActions.set(it.key, n)"
-						@dismissed="dismissedActions.add(it.key)"
+						@parked="(n) => parkedActions.set(anchor.draftKey, n)"
+						@dismissed="onDraftDismissed"
 					/>
 					<RecordCards v-if="it.view.cards" :data="it.view.cards" />
 					<ChartCard v-for="(c, ci) in it.view.charts" :key="ci" :spec="c" />

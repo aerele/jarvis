@@ -183,6 +183,10 @@ export const loadDoc = (doctype, name) =>
 	call("jarvis.chat.actions_api.load_doc", { doctype, name });
 export const applyAction = (action) =>
 	call("jarvis.chat.actions_api.apply_action", { action: JSON.stringify(action) });
+// Cancel an unsaved draft for good: the server records it, so a reload (or the web
+// app) no longer shows the card. `message` is the DRAFT row's name.
+export const dismissDraft = (conversation, message) =>
+	call("jarvis.chat.actions_api.dismiss_draft", { conversation, message });
 
 // ── Attachments ────────────────────────────────────────────────────────────
 // Standard Frappe upload, private by default: a chat attachment is the user's
