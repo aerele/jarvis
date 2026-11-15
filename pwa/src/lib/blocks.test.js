@@ -1,9 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { ACTION_FIXTURES } from "../../../frontend/src/lib/actionFixtures.js";
 import {
+	actionBlockState,
 	countDiagrams,
 	gotoChipPage,
 	messageChips,
+	parseAction,
 	parseCards,
 	stripAgentBlocks,
 	toolStatus,
@@ -193,4 +196,49 @@ test("messageChips: no chip for plain text, an invalid goto, or an unclosed goto
 test("messageChips: a chip carries no prompt or JSON from the goto block", () => {
 	const chips = messageChips(goto("dashboards", "SECRET-PROMPT"));
 	assert.ok(!JSON.stringify(chips).includes("SECRET-PROMPT"));
+});
+
+const wrap = (b) => "Drafting.\n\n```jarvis-action\n" + b + "\n```";
+
+test("parseAction normalises object-shaped tables", () => {
+	for (const id of ["tables-object-list", "tables-object-rows"]) {
+		const a = parseAction(wrap(ACTION_FIXTURES.find((f) => f.id === id).block));
+		assert.ok(Array.isArray(a.tables));
+		assert.equal(a.tables[0].fieldname, "time_logs");
+		assert.equal(a.tables[0].rows.length, 3);
+	}
+});
+
+test("parseAction marks an unreadable table instead of dropping it", () => {
+	const a = parseAction(wrap(ACTION_FIXTURES.find((f) => f.id === "tables-string").block));
+	assert.equal(a.unreadable, true);
+	assert.ok(Array.isArray(a.tables));
+});
+
+test("parseAction keeps stringified fields and lower-cases the verb", () => {
+	const a = parseAction(wrap(ACTION_FIXTURES.find((f) => f.id === "verb-capitalised").block));
+	assert.equal(a.verb, "create");
+	assert.deepEqual(a.fields, [{ label: "employee", value: "HR-EMP-1" }]);
+});
+
+test("actionBlockState tells a broken closed block from no block", () => {
+	assert.equal(actionBlockState("plain prose"), "none");
+	assert.equal(actionBlockState(wrap('{"kind":"doc",')), "bad");
+	assert.equal(actionBlockState(wrap("[1,2]")), "bad");
+	assert.equal(actionBlockState('x\n```jarvis-action\n{"kind"'), "none"); // unclosed
+	assert.equal(actionBlockState(wrap('{"kind":"doc","verb":"create","doctype":"Task"}')), "ok");
+});
+
+test("a half-written block is hidden while streaming", () => {
+	assert.equal(
+		stripAgentBlocks('Drafting.\n\n```jarvis-action\n{"kind":"do', true),
+		"Drafting."
+	);
+	assert.equal(stripAgentBlocks("Drafting.\n\n```jarv", true), "Drafting.");
+});
+test("a settled reply keeps today's behaviour", () => {
+	assert.equal(stripAgentBlocks("A\n\n```js\nx\n```"), "A\n\n```js\nx\n```");
+});
+test("streaming still strips non-xychart mermaid and closed blocks", () => {
+	assert.equal(stripAgentBlocks("A\n```mermaid\nflowchart TD\nA-->B\n```\nB", true), "A\n\nB");
 });
