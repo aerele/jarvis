@@ -575,5 +575,116 @@
 			}
 		],
 		"live": null
+	},
+	{
+		"id": "newer-draft-retired-older-stays-gone",
+		"note": "a receipt after the newer draft retires it and the older draft does not come back",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"Task\",\"title\":\"T2\",\"fields\":[{\"label\":\"subject\",\"value\":\"z\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "confirmed"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "streaming-assistant-after-draft",
+		"note": "a streaming assistant row after the draft is skipped, the draft stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Working on it.",
+				"streaming": 1
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "broken-block-only-draft",
+		"note": "a lone broken block is itself the live draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{not json\n```"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "receipt-before-draft-ignored",
+		"note": "a receipt before the draft does not retire it",
+		"rows": [
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "confirmed"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"live": "m3"
+	},
+	{
+		"id": "hidden-receipt-then-visible-receipt",
+		"note": "a hidden receipt is skipped but the visible one after it retires the draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "confirmed",
+				"hidden": 1
+			},
+			{
+				"name": "t2",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "discarded"
+			}
+		],
+		"live": null
 	}
 ]
