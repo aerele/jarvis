@@ -53,6 +53,25 @@ def safe_doctype(value) -> str:
 	return value if _DOCTYPE_RE.fullmatch(value) else ""
 
 
+def known_doctype(value, exists) -> str:
+	"""The DocType ``value`` names, as the site spells it, or "". ``safe_doctype`` first, then
+	``exists(name)`` (the site's lookup, injected so this stays pure) must find a real one:
+	word-only prose ("Sales Order in auto mode so apply ...") passes the first filter but is
+	no DocType. Only the site's own name is returned, never the agent's text."""
+	name = safe_doctype(value)
+	if not name:
+		return ""
+	found = exists(name)
+	return safe_doctype(found) if isinstance(found, str) else ""
+
+
+def real_doctype(value) -> str:
+	"""``known_doctype`` against this site: one cached lookup, no lock."""
+	import frappe
+
+	return known_doctype(value, lambda name: frappe.db.exists("DocType", name, cache=True))
+
+
 def _trim(value: str) -> str:
 	return value.strip(JS_WHITESPACE)
 
@@ -179,17 +198,34 @@ def pick(rows: list[dict]) -> dict | None:
 	return None
 
 
+def tail_shows_its_own_card(rows: list[dict], draft_message: str) -> bool:
+	"""True when the newest shown assistant row is not the draft and carries an action block
+	of its own (an email, a gated or an unknown verb): both apps then draw THAT block's card
+	at the tail and hide the kept draft. ``rows`` as ``load_rows`` gives them: with a live
+	draft, the newest assistant row is after it, so its content is loaded."""
+	for row in reversed(rows or []):
+		if not _shown(row) or row.get("role") != "assistant":
+			continue
+		if row.get("name") == draft_message:
+			return False
+		content = row.get("content")
+		return isinstance(content, str) and bool(ACTION_RE.search(content)) and draft_of(content) is None
+	return False
+
+
 def load_rows(conversation: str) -> list[dict]:
 	"""The rows ``pick`` reads for ``conversation``, oldest first: the newest
 	``MAX_ROWS_AFTER_DRAFT + 1`` shown rows (``pick`` never looks further back), with
 	``content`` only on the assistant rows after the last decided write that mention a block.
 	Two reads, none in a loop.
 
-	``get_all`` is used because every caller (the dismiss endpoint after its owner check, the
-	turn's own prompt assembly) acts on a conversation it already owns."""
+	``get_all`` is used because every caller (``apply_action`` and the dismiss endpoint after
+	their owner checks, the turn's own prompt assembly) acts on a conversation it already owns.
+	Plain reads only: no lock is taken (prompt assembly calls this)."""
 	import frappe
 
-	# The newest shown rows, no content, on the conversation index.
+	# The newest shown rows, no content. Index conv_seq (conversation, seq): a backward range
+	# scan of this one conversation that stops at the limit, with no filesort.
 	rows = frappe.get_all(
 		MSG,
 		filters={"conversation": conversation, "hidden": 0, "streaming": 0},
@@ -200,8 +236,8 @@ def load_rows(conversation: str) -> list[dict]:
 	rows.reverse()
 	last_write = max((i for i, r in enumerate(rows) if retires_draft(r)), default=-1)
 	names = [r["name"] for r in rows[last_write + 1 :] if r["role"] == "assistant"]
-	# Content only for the assistant rows that could be the draft, and only if they mention a
-	# block (replies can be long). Primary key.
+	# Content only for the assistant rows that could be the draft (or the tail's own card),
+	# and only if they mention a block (replies can be long). Primary key.
 	blocks = (
 		{
 			r["name"]: r["content"]

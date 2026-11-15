@@ -47,9 +47,13 @@ def _business_rule(*_args, **_kwargs):
 BUSINESS_RULE = patch("jarvis.tools.create_doc.create_doc", side_effect=_business_rule)
 
 
-def _draft_reply(conversation: str, doctype: str) -> str:
-	"""The assistant reply a draft create is saved from (a save names it, #777)."""
-	block = json.dumps({"kind": "doc", "verb": "create", "doctype": doctype, "fields": []})
+def _draft_reply(conversation: str, doctype: str, verb: str = "create", name: str = "") -> str:
+	"""The assistant reply a draft is saved from (a save names it, #777, and only the live
+	draft may be saved: ``jarvis.chat.live_draft``)."""
+	action = {"kind": "doc", "verb": verb, "doctype": doctype, "fields": []}
+	if name:
+		action["name"] = name
+	block = json.dumps(action)
 	return (
 		frappe.get_doc(
 			{
@@ -99,18 +103,20 @@ class _PanelBase(_Hermetic, PendingActionTestMixin, FrappeTestCase):
 	def apply(
 		self, values: dict, *, message: str = "draft-msg-1", verb="create", doctype="ToDo", **extra
 	) -> dict:
-		if verb == "create" and message:
+		name = extra.pop("name", "")
+		if message:
 			# Each draft key is its own real reply, made (and committed, as a real reply
-			# is long before its draft is saved) on first use.
+			# is long before its draft is saved) on first use. A new key's reply is the
+			# newest draft, so it is the live one.
 			replies = self.__dict__.setdefault("_replies", {})
-			if (message, doctype) not in replies:
-				replies[(message, doctype)] = _draft_reply(self.conv, doctype)
+			if (message, doctype, verb) not in replies:
+				replies[(message, doctype, verb)] = _draft_reply(self.conv, doctype, verb, name)
 				frappe.db.commit()
-			message = replies[(message, doctype)]
+			message = replies[(message, doctype, verb)]
 		action = {
 			"verb": verb,
 			"doctype": doctype,
-			"name": extra.pop("name", ""),
+			"name": name,
 			"values": values,
 			"conversation": self.conv,
 			"message": message,
@@ -318,14 +324,16 @@ class TestPanelNotFixable(_PanelBase):
 		self.assertEqual(self.error_logs(), [])
 
 	def test_says_whether_the_assistant_was_told(self):
+		# Two drafts: the first one's failure ends its card, and only the live draft is saved.
 		with BUSINESS_RULE:
-			r = self.apply({"description": "pa-test told"})
+			r = self.apply({"description": "pa-test told"}, message="draft-told")
 		self.assertIs(r["assistant_told"], True)
 		with (
 			BUSINESS_RULE,
 			patch("jarvis.chat.api.enqueue_continuation", side_effect=RuntimeError("queue down")),
 		):
-			r = self.apply({"description": "pa-test untold"})
+			r = self.apply({"description": "pa-test untold"}, message="draft-untold")
+		self.assertEqual(r["error"]["kind"], "not_fixable", "the write ran and failed, not the draft check")
 		self.assertIs(r["closed"], True)
 		self.assertIs(r["assistant_told"], False)
 
