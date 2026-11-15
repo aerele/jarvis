@@ -609,7 +609,9 @@ def _read(row, trigger) -> bool:
 		return False
 	_count_call(row)  # the model answered, whatever it answered
 	if reading.get("error") == "NO_IMAGE":
-		_end(row, "Failed", NO_IMAGE_SUMMARY, "The model answered NO_IMAGE.", trigger)
+		# vision_available() passed above, so the model can see images: NO_IMAGE here means a
+		# blank or unreadable file. NO_IMAGE_SUMMARY stays for the vision check itself.
+		_end(row, "Failed", READ_NOTHING_SUMMARY, "The model answered NO_IMAGE.", trigger)
 		return False
 	if reader.is_empty_reading(reading, s):
 		# The vision check passed, so an all-null object means a blank or unclear file. A blank
