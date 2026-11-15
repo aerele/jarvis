@@ -7,9 +7,10 @@ Rows are the conversation's messages in ``seq`` order, ignoring ``hidden`` and `
 rows. A draft row is an assistant row whose FIRST closed ``jarvis-action`` fence is broken or
 parses to a non-email action whose verb is missing, ``create`` or ``update``. The live draft
 is the last draft row, unless a later tool row is a decided write (a non-empty
-``action_outcome``, or a ``create_doc`` / ``update_doc`` call whose ``tool_status`` is
-``completed``), more than ``MAX_USER_ROWS_AFTER_DRAFT`` user rows come after it, or more than
-``MAX_ROWS_AFTER_DRAFT`` rows of any role come after it.
+``action_outcome``, or an old receipt: a ``create_doc`` / ``update_doc`` row whose
+``tool_status`` is ``completed`` and whose ``tool_call_id`` is empty), more than
+``MAX_USER_ROWS_AFTER_DRAFT`` user rows come after it, or more than ``MAX_ROWS_AFTER_DRAFT``
+rows of any role come after it.
 
 ``pick`` is pure (plain dict rows, no Frappe) so it can be evaluated without a site.
 """
@@ -24,7 +25,8 @@ MAX_USER_ROWS_AFTER_DRAFT = 5
 # a draft further back than this is never live: the server never calls a draft live whose
 # card is not on a loaded page.
 MAX_ROWS_AFTER_DRAFT = 60
-# A receipt written before 2026-07-17 has no action_outcome: its completed call is the write.
+# A receipt written before 2026-07-17 (``actions_api._append_receipt``) has no action_outcome
+# and no tool_call_id: its completed create / update row is the write.
 _WRITE_TOOLS = ("create_doc", "update_doc")
 
 # The client's fence grammar (ChatView.vue ``_ACTION_RE``): the FIRST closed block wins.
@@ -162,14 +164,21 @@ def _shown(row) -> bool:
 
 def retires_draft(row: dict) -> bool:
 	"""A decided write after a draft retires it: a receipt (a non-empty ``action_outcome``),
-	or a ``create_doc`` / ``update_doc`` call that completed (receipts written before
-	2026-07-17 carry no outcome, so a draft saved on such a build is retired by its call)."""
+	or an old receipt. A draft saved before 2026-07-17 left a completed ``create_doc`` /
+	``update_doc`` row with no outcome AND no ``tool_call_id``. An agent's tool call always
+	carries its call id, and a call that only staged a gated card is still ``completed``
+	(``api._call_tool`` records it): it never retires a draft this way, only through an
+	outcome once the card is decided."""
 	if row.get("role") != "tool":
 		return False
 	outcome = row.get("action_outcome")
 	if isinstance(outcome, str) and _trim(outcome) != "":
 		return True
-	return row.get("tool_name") in _WRITE_TOOLS and row.get("tool_status") == "completed"
+	return (
+		row.get("tool_name") in _WRITE_TOOLS
+		and row.get("tool_status") == "completed"
+		and not row.get("tool_call_id")
+	)
 
 
 def pick(rows: list[dict]) -> dict | None:
@@ -229,7 +238,7 @@ def load_rows(conversation: str) -> list[dict]:
 	rows = frappe.get_all(
 		MSG,
 		filters={"conversation": conversation, "hidden": 0, "streaming": 0},
-		fields=["name", "seq", "role", "action_outcome", "tool_name", "tool_status"],
+		fields=["name", "seq", "role", "action_outcome", "tool_name", "tool_status", "tool_call_id"],
 		order_by="seq desc",
 		limit=MAX_ROWS_AFTER_DRAFT + 1,
 	)

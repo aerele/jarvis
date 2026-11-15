@@ -710,11 +710,14 @@ def _closed_draft_refusal(
 			"DraftClosedError", _("This draft is no longer open. Ask me to draft it again.")
 		)
 	if verb == "update" and _changed_since_draft(doctype, name, source):
+		from jarvis.chat.panel_failure import end_draft_card
+
 		refusal = _draft_refusal(
 			"DraftStaleError",
 			_("This record changed after the draft was made. Ask me to draft the update again."),
 		)
-		_end_stale_draft(conversation, tool, args, refusal, source)
+		# Nothing was written before this; the request's own commit persists the receipt.
+		end_draft_card(conversation, tool, args, refusal, draft=source)
 		return refusal
 	return None
 
@@ -727,23 +730,6 @@ def _changed_since_draft(doctype: str, name: str, source: str) -> bool:
 	modified = frappe.db.get_value(doctype, name, "modified")
 	drafted = frappe.db.get_value(MSG, source, "creation")
 	return bool(modified and drafted) and get_datetime(modified) > get_datetime(drafted)
-
-
-def _end_stale_draft(conversation: str, tool: str, args: dict, envelope: dict, source: str) -> None:
-	"""Best-effort, like ``PanelFailure._end_card`` (same token, so one receipt per draft)."""
-	from jarvis import api
-
-	try:
-		api.persist_tool_receipt(
-			conversation,
-			tool,
-			args,
-			envelope,
-			action_outcome="failed",
-			flip_token=f"draft-failed:{source}",
-		)
-	except Exception:
-		frappe.log_error(title="apply_action stale draft receipt failed", message=frappe.get_traceback())
 
 
 @frappe.whitelist(methods=["POST"])

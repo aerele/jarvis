@@ -1026,3 +1026,22 @@ class TestFailureEndsTheCard(_PanelBase):
 		self.assertEqual(r["error"]["kind"], "fixable")
 		self.assertEqual(self._receipts(), [])
 		self.assertIsNotNone(live_draft.find(self.conv))
+
+	def test_the_receipt_is_written_in_the_request_without_a_commit(self):
+		# Classes that keep their masters uncommitted on purpose (TestPanelOnErpnext) must
+		# never see a commit from the closed path; the request's own commit persists the row.
+		from jarvis.chat.panel_failure import end_draft_card
+
+		envelope = {"ok": False, "error": {"message": "x"}}
+		with patch.object(frappe.db, "commit") as commit:
+			end_draft_card(self.conv, "create_doc", {"doctype": "ToDo"}, envelope, draft="d-1")
+			end_draft_card(self.conv, "create_doc", {"doctype": "ToDo"}, envelope, draft="d-1")
+		commit.assert_not_called()
+		self.assertEqual([x.action_outcome for x in self._receipts()], ["failed"], "one per draft")
+		row = frappe.db.get_value(
+			MSG,
+			{"conversation": self.conv, "tool_call_id": "draft-failed:d-1"},
+			["tool_status", "tool_name", "role"],
+			as_dict=True,
+		)
+		self.assertEqual((row.role, row.tool_name, row.tool_status), ("tool", "create_doc", "error"))

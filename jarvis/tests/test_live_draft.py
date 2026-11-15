@@ -98,7 +98,14 @@ class TestRuleCases(_Base):
 				conv = _make_conv(TEST_USER)
 				names = {}
 				for seq, row in enumerate(case["rows"], start=1):
-					keys = ("hidden", "streaming", "action_outcome", "tool_name", "tool_status")
+					keys = (
+						"hidden",
+						"streaming",
+						"action_outcome",
+						"tool_name",
+						"tool_status",
+						"tool_call_id",
+					)
 					extra = {k: row[k] for k in keys if k in row}
 					names[row["name"]] = _insert(conv, seq, row["role"], row.get("content"), **extra)
 				found = live_draft.find(conv)
@@ -568,11 +575,27 @@ class TestPureRule(unittest.TestCase):
 	def test_a_decided_write_retires_a_draft(self):
 		write = live_draft.retires_draft
 		self.assertTrue(write({"role": "tool", "action_outcome": "discarded"}))
-		self.assertTrue(write({"role": "tool", "tool_name": "create_doc", "tool_status": "completed"}))
-		self.assertTrue(write({"role": "tool", "tool_name": "update_doc", "tool_status": "completed"}))
+		for tool_name in ("create_doc", "update_doc"):
+			for call_id in (None, ""):  # an old receipt (_append_receipt) set no call id
+				row = {
+					"role": "tool",
+					"tool_name": tool_name,
+					"tool_status": "completed",
+					"tool_call_id": call_id,
+				}
+				self.assertTrue(write(row), row)
+		ran = {
+			"role": "tool",
+			"tool_name": "create_doc",
+			"tool_status": "completed",
+			"tool_call_id": "call-1",
+		}
+		self.assertTrue(write({**ran, "action_outcome": "auto_applied"}))
 		for row in (
 			{"role": "tool", "action_outcome": "  "},
 			{"role": "tool", "tool_name": "create_doc", "tool_status": "pending"},
+			ran,  # an agent call that staged a gated card is "completed" too
+			{**ran, "tool_name": "update_doc"},
 			{"role": "tool", "tool_name": "create_doc", "tool_status": "error"},
 			{"role": "tool", "tool_name": "get_doc", "tool_status": "completed"},
 			{"role": "assistant", "action_outcome": "confirmed"},

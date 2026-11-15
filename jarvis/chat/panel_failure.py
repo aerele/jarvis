@@ -29,6 +29,7 @@ from jarvis.chat import api as chat_api
 # open in a working day; a new draft (a new message) has its own key.
 FIXING_KEY = "jarvis:panel_fixing:{conversation}:{draft}"
 FIXING_TTL_S = 12 * 3600
+MSG = "Jarvis Chat Message"
 PARTIAL_HINT = "Part of this may already be saved. Check the record before trying again."
 
 
@@ -99,22 +100,10 @@ class PanelFailure:
 	def _end_card(self) -> None:
 		"""A save that failed for good ends its card: a ``failed`` (or ``partial``) receipt row
 		means the draft is no longer the live one, also after a reload. Only a closed panel
-		gets one (a fixable failure keeps its draft live). One per draft: a repeat dedupes on
-		the token. Best-effort: the reply to the person must not fail."""
-		draft = self.draft.strip() if isinstance(self.draft, str) else ""
-		try:
-			from jarvis import api
-
-			api.persist_tool_receipt(
-				self.conversation,
-				self.tool,
-				self.args,
-				self.envelope,
-				action_outcome=chat_api.OUTCOME_PARTIAL if self.partial else "failed",
-				flip_token=f"draft-failed:{draft}" if draft else None,
-			)
-		except Exception:
-			frappe.log_error(title="apply_action failure receipt failed", message=frappe.get_traceback())
+		gets one (a fixable failure keeps its draft live)."""
+		end_draft_card(
+			self.conversation, self.tool, self.args, self.envelope, draft=self.draft, partial=self.partial
+		)
 
 	def _correcting_hint(self) -> bool:
 		from jarvis import api
@@ -168,6 +157,50 @@ class PanelFailure:
 	def _key(self, draft) -> str:
 		draft = str(draft or "").strip()[:140]
 		return FIXING_KEY.format(conversation=self.conversation, draft=draft) if draft else ""
+
+
+def end_draft_card(
+	conversation: str, tool: str, args: dict, envelope: dict, *, draft, partial: bool = False
+) -> None:
+	"""The receipt that retires a draft whose save failed for good (``failed``, or ``partial``
+	when part of it committed): one tool row with that ``action_outcome``, the rule's retiring
+	signal (``jarvis.chat.live_draft``). One per draft: a row already carrying the draft's
+	token is not written again.
+
+	A plain insert in the request's own transaction, the way ``actions_api._append_receipt``
+	writes its tool row, and no commit of its own. It runs after ``apply_action``'s rollback;
+	the end-of-request commit persists it, or earlier ``chat_api._enqueue_turn``'s commit of
+	the continuation's seed, which that function makes before it dispatches the turn, so the
+	explaining turn always sees the draft settled (and the seed, inserted after, gets the
+	higher seq). Best-effort: the reply to the person must not fail."""
+	draft = draft.strip() if isinstance(draft, str) else ""
+	token = f"draft-failed:{draft}" if draft else None
+	outcome = chat_api.OUTCOME_PARTIAL if partial else "failed"
+	try:
+		if token and frappe.db.exists(MSG, {"conversation": conversation, "tool_call_id": token}):
+			return
+		row = frappe.get_doc(
+			{
+				"doctype": MSG,
+				"conversation": conversation,
+				"seq": chat_api._next_seq(conversation),
+				"role": "tool",
+				"streaming": 0,
+				"tool_name": tool,
+				"tool_args": frappe.as_json(args),
+				"tool_result": frappe.as_json(envelope),
+				# As the shared receipt writer stored them: a partial write is unverified
+				# (no status), a failed one an error.
+				"tool_status": "" if partial else "error",
+				"tool_call_id": token,
+				"action_outcome": outcome,
+				"content": f"{tool} → {outcome}",
+			}
+		)
+		row.flags.jarvis_server_write = True
+		row.insert(ignore_permissions=True)
+	except Exception:
+		frappe.log_error(title="apply_action failure receipt failed", message=frappe.get_traceback())
 
 
 def mark_partial(envelope: dict) -> dict:

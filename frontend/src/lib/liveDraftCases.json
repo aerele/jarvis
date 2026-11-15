@@ -1941,7 +1941,7 @@
 	},
 	{
 		"id": "legacy-create-receipt-without-outcome",
-		"note": "a completed create_doc row with no action_outcome (a receipt from before 2026-07-17) retires the draft",
+		"note": "a completed create_doc row with no action_outcome (a receipt from before 2026-07-17) retires the draft and no tool_call_id",
 		"rows": [
 			{
 				"name": "m1",
@@ -1953,14 +1953,15 @@
 				"role": "tool",
 				"content": "create_doc -> completed",
 				"tool_name": "create_doc",
-				"tool_status": "completed"
+				"tool_status": "completed",
+				"tool_call_id": null
 			}
 		],
 		"live": null
 	},
 	{
 		"id": "legacy-update-receipt-without-outcome",
-		"note": "a completed update_doc row with no action_outcome retires the draft too",
+		"note": "a completed update_doc row with no action_outcome retires the draft too and no tool_call_id",
 		"rows": [
 			{
 				"name": "m1",
@@ -1972,7 +1973,8 @@
 				"role": "tool",
 				"content": "update_doc -> completed",
 				"tool_name": "update_doc",
-				"tool_status": "completed"
+				"tool_status": "completed",
+				"tool_call_id": null
 			}
 		],
 		"live": null
@@ -2033,5 +2035,54 @@
 			}
 		],
 		"live": "m1"
+	},
+	{
+		"id": "staged-gated-card-after-draft",
+		"note": "the agent staged a gated create card after the draft: its pending card row and its own completed call row both carry a tool_call_id, so the draft stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "pa-token-1"
+			},
+			{
+				"name": "t2",
+				"role": "tool",
+				"content": "create_doc -> completed",
+				"tool_name": "create_doc",
+				"tool_status": "completed",
+				"tool_call_id": "call-1"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "agent-write-with-outcome",
+		"note": "an agent write that ran (completed, with a tool_call_id) and carries an outcome retires the draft through its outcome",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> auto_applied",
+				"tool_name": "create_doc",
+				"tool_status": "completed",
+				"tool_call_id": "call-1",
+				"action_outcome": "auto_applied"
+			}
+		],
+		"live": null
 	}
 ]

@@ -37,15 +37,37 @@ describe("isDraftRow", () => {
 });
 
 describe("retiresDraft", () => {
-	it("is a receipt, or a create / update call that completed", () => {
+	it("is a receipt, or an old receipt: a completed create / update with no call id", () => {
 		expect(retiresDraft({ role: "tool", action_outcome: "discarded" })).toBe(true);
 		for (const tool_name of ["create_doc", "update_doc"])
-			expect(retiresDraft({ role: "tool", tool_name, tool_status: "completed" })).toBe(true);
+			for (const tool_call_id of [undefined, null, ""])
+				expect(
+					retiresDraft({
+						role: "tool",
+						tool_name,
+						tool_status: "completed",
+						tool_call_id,
+					})
+				).toBe(true);
+		const ran = { tool_name: "create_doc", tool_status: "completed", tool_call_id: "call-1" };
+		expect(retiresDraft({ role: "tool", ...ran, action_outcome: "auto_applied" })).toBe(true);
 	});
-	it("is not a read, a parked card, a failed call or a padded outcome", () => {
+	it("is not a read, a parked card, a staged call, a failed call or a padded outcome", () => {
 		for (const row of [
 			{ role: "tool", action_outcome: "  " },
 			{ role: "tool", tool_name: "create_doc", tool_status: "pending" },
+			{
+				role: "tool",
+				tool_name: "create_doc",
+				tool_status: "completed",
+				tool_call_id: "c1",
+			},
+			{
+				role: "tool",
+				tool_name: "update_doc",
+				tool_status: "completed",
+				tool_call_id: "c2",
+			},
 			{ role: "tool", tool_name: "create_doc", tool_status: "error" },
 			{ role: "tool", tool_name: "get_doc", tool_status: "completed" },
 			{ role: "assistant", action_outcome: "confirmed" },
