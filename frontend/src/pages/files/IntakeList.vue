@@ -34,9 +34,12 @@
 			<div v-if="narrow" class="flex min-w-0 flex-col gap-1 py-2" data-testid="intake-card">
 				<div class="flex min-w-0 items-center gap-2">
 					<FeatherIcon name="file-text" class="size-4 shrink-0 text-ink-gray-7" />
-					<div class="min-w-0 break-words font-medium text-ink-gray-9">
-						{{ row.file_name }}
-					</div>
+					<router-link
+						:to="detailRoute(row)"
+						data-testid="intake-open"
+						class="min-w-0 break-words font-medium text-ink-gray-9 hover:underline"
+						>{{ row.file_name }}</router-link
+					>
 				</div>
 				<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
 					<Badge
@@ -54,9 +57,13 @@
 			</div>
 			<div v-else class="flex min-w-0 items-center gap-2 overflow-hidden">
 				<FeatherIcon name="file-text" class="size-4 shrink-0 text-ink-gray-7" />
-				<div class="truncate text-base font-medium text-ink-gray-9" :title="row.file_name">
-					{{ row.file_name }}
-				</div>
+				<router-link
+					:to="detailRoute(row)"
+					data-testid="intake-open"
+					class="truncate text-base font-medium text-ink-gray-9 hover:underline"
+					:title="row.file_name"
+					>{{ row.file_name }}</router-link
+				>
 			</div>
 		</template>
 
@@ -126,6 +133,8 @@ import {
 	intakeDraftLink,
 	intakeIsLive,
 } from "@/lib/intakeStatus";
+
+const detailRoute = (row) => ({ name: "IntakeDetail", params: { activity: row.name } });
 
 // The Draft link already names the draft, so "Draft ready: ToDo X" is not said twice;
 // anything after it (an answered question) stays.

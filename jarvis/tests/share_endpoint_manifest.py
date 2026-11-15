@@ -328,6 +328,7 @@ _unrelated(
 	"jarvis.chat.filebox",
 	"Document Intake rows are owner-or-manager scoped Jarvis Trigger Activity records; no conversation identifier lookup.",
 	"""
+    get_intake_detail
     list_intake_page
     retry_intake
     """,
