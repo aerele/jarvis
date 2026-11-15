@@ -1202,7 +1202,9 @@ class TestWhitelistTypeValidation(_TriggersApiTestCase):
 	API = "jarvis.chat.triggers_api."
 
 	def _call(self, method, **kwargs):
-		with patch.object(frappe, "in_test", True):
+		# Frappe 16 gates the type check on ``frappe.in_test``; Frappe 15 on ``frappe.flags.in_test``,
+		# which a test run already sets. ``create=True`` keeps the patch valid on both.
+		with patch.object(frappe, "in_test", True, create=True):
 			return frappe.call(self.API + method, **kwargs)
 
 	def _page_args(self, **extra):

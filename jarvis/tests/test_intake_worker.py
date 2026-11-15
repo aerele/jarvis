@@ -726,6 +726,9 @@ class TestIntakeWorker(FrappeTestCase):
 		self.assertEqual(cint(cache.get_value(f"{worker.user_cap_key('Administrator')}:count")), 3)
 		self.assertEqual(llm_action.daily_count(rule.name), 3)
 		worker._count_call(row)  # an existing counter just moves on by one
+		# Frappe 15 keeps a request-local copy that a set_value with an expiry does not refresh;
+		# a later request reads Redis, so drop the stale copy as that request would.
+		getattr(frappe.local, "cache", {}).clear()
 		self.assertEqual(cint(cache.get_value(f"{worker.site_cap_key()}:count")), 4)
 
 	def test_a_database_error_loading_the_rule_leaves_the_row_queued(self):
