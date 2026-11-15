@@ -10,7 +10,10 @@ is the last draft row, unless a later tool row is a decided write (a non-empty
 ``action_outcome``, or an old receipt: a ``create_doc`` / ``update_doc`` row whose
 ``tool_status`` is ``completed`` and whose ``tool_call_id`` is empty), more than
 ``MAX_USER_ROWS_AFTER_DRAFT`` user rows come after it, or more than ``MAX_ROWS_AFTER_DRAFT``
-rows of any role come after it.
+rows of any role come after it. The tool rows DIRECTLY after the draft row (up to the first
+later row that is not a tool row) are the draft's own turn: the reply row takes its ``seq``
+when the turn starts, so they do not count toward ``MAX_ROWS_AFTER_DRAFT``, though a decided
+write among them still retires it.
 
 ``pick`` is pure (plain dict rows, no Frappe) so it can be evaluated without a site.
 """
@@ -21,9 +24,10 @@ import json
 import re
 
 MAX_USER_ROWS_AFTER_DRAFT = 5
-# Both apps load only the newest page of a chat (80 rows of any role, tool rows included), so
-# a draft further back than this is never live: the server never calls a draft live whose
-# card is not on a loaded page.
+# Both apps load only the newest page of a chat (80 rows of any role, tool rows included,
+# widened back to the start of its oldest turn), so a draft with more later rows than this
+# (its own turn's tool rows aside) is never live: its card is not missing from a loaded page
+# while the server calls it live.
 MAX_ROWS_AFTER_DRAFT = 60
 # A receipt written before 2026-07-17 (``actions_api._append_receipt``) has no action_outcome
 # and no tool_call_id: its completed create / update row is the write.
@@ -186,9 +190,10 @@ def pick(rows: list[dict]) -> dict | None:
 
 	Returns ``{"message": name, "verb": "create"|"update", "doctype": str, "bad": bool}``.
 	The newest draft row is chosen first and only then tested for retirement: an older
-	draft never comes back. Only the newest ``MAX_ROWS_AFTER_DRAFT + 1`` shown rows are
-	ever looked at, which is what lets ``find`` read no more than those."""
-	user_rows = later_rows = 0
+	draft never comes back. ``counted`` holds the rows that count toward
+	``MAX_ROWS_AFTER_DRAFT``; ``tool_run`` the tool rows walked since the last row that was
+	not one, which are the draft's own turn if the draft comes next."""
+	user_rows = counted = tool_run = 0
 	for row in reversed(rows or []):
 		if not _shown(row):
 			continue
@@ -198,11 +203,15 @@ def pick(rows: list[dict]) -> dict | None:
 			return {"message": row.get("name"), **draft}
 		if retires_draft(row):
 			return None
+		if role == "tool":
+			tool_run += 1
+			continue
+		counted += tool_run + 1  # a row that is not a tool row: the run after it counts
+		tool_run = 0
 		if role == "user":
 			user_rows += 1
-		later_rows += 1
 		# Every row before this one has too many rows after it to be the live draft.
-		if user_rows > MAX_USER_ROWS_AFTER_DRAFT or later_rows > MAX_ROWS_AFTER_DRAFT:
+		if user_rows > MAX_USER_ROWS_AFTER_DRAFT or counted > MAX_ROWS_AFTER_DRAFT:
 			return None
 	return None
 
@@ -222,31 +231,42 @@ def tail_shows_its_own_card(rows: list[dict], draft_message: str) -> bool:
 	return False
 
 
+_LIGHT = ["name", "seq", "role", "action_outcome", "tool_name", "tool_status", "tool_call_id"]
+
+
 def load_rows(conversation: str) -> list[dict]:
-	"""The rows ``pick`` reads for ``conversation``, oldest first: the newest
-	``MAX_ROWS_AFTER_DRAFT + 1`` shown rows (``pick`` never looks further back), with
-	``content`` only on the assistant rows after the last decided write that mention a block.
-	Two reads, none in a loop.
+	"""A subset of ``conversation``'s shown rows, oldest first, on which ``pick`` (and
+	``tail_shows_its_own_card``) give the same answer as on all of them. Four reads, none
+	in a loop, every one bounded:
+
+	1. the newest ``MAX_ROWS_AFTER_DRAFT + 1`` shown rows that are not tool rows. Each such
+	   row after a draft counts, so the live draft, if any, is among them;
+	2. the content of those assistant rows that mention a block (primary key). The newest
+	   draft row among them is the only one ``pick`` can return: the candidate;
+	3. the tool rows after the first row that follows the candidate, oldest first, at most
+	   one more than the bound leaves room for (they count: one more means ``pick`` stops at
+	   the bound, and these rows are enough for it to);
+	4. the tool rows of the candidate's own turn (directly after it, before that first row)
+	   that could be a decided write: a set outcome, or a create / update call. Own-turn rows
+	   do not count, so the rest of them change nothing and are not read.
 
 	``get_all`` is used because every caller (``apply_action`` and the dismiss endpoint after
 	their owner checks, the turn's own prompt assembly) acts on a conversation it already owns.
 	Plain reads only: no lock is taken (prompt assembly calls this)."""
 	import frappe
 
-	# The newest shown rows, no content. Index conv_seq (conversation, seq): a backward range
-	# scan of this one conversation that stops at the limit, with no filesort.
+	shown = [["conversation", "=", conversation], ["hidden", "=", 0], ["streaming", "=", 0]]
+	# 1. Index conv_seq (conversation, seq): a backward scan of this chat, stopping at the limit.
 	rows = frappe.get_all(
 		MSG,
-		filters={"conversation": conversation, "hidden": 0, "streaming": 0},
-		fields=["name", "seq", "role", "action_outcome", "tool_name", "tool_status", "tool_call_id"],
+		filters=[*shown, ["role", "!=", "tool"]],
+		fields=_LIGHT,
 		order_by="seq desc",
 		limit=MAX_ROWS_AFTER_DRAFT + 1,
 	)
 	rows.reverse()
-	last_write = max((i for i, r in enumerate(rows) if retires_draft(r)), default=-1)
-	names = [r["name"] for r in rows[last_write + 1 :] if r["role"] == "assistant"]
-	# Content only for the assistant rows that could be the draft (or the tail's own card),
-	# and only if they mention a block (replies can be long). Primary key.
+	names = [r["name"] for r in rows if r["role"] == "assistant"]
+	# 2. Only if they mention a block (replies can be long).
 	blocks = (
 		{
 			r["name"]: r["content"]
@@ -261,7 +281,37 @@ def load_rows(conversation: str) -> list[dict]:
 	)
 	for row in rows:
 		row["content"] = blocks.get(row["name"])
-	return rows
+	at = max(
+		(i for i, r in enumerate(rows) if r["role"] == "assistant" and draft_of(r["content"])), default=-1
+	)
+	if at < 0:
+		return rows
+	draft, later = rows[at], rows[at + 1 :]
+	tools = []
+	if later:
+		# 3. Index conv_seq: a forward range from that row, stopping at the limit.
+		tools += frappe.get_all(  # same ownership argument as above
+			MSG,
+			filters=[*shown, ["role", "=", "tool"], ["seq", ">", later[0]["seq"]]],
+			fields=_LIGHT,
+			order_by="seq asc",
+			limit=MAX_ROWS_AFTER_DRAFT - len(later) + 1,
+		)
+	# 4. Index conv_seq: the draft's own turn only. A superset of ``retires_draft`` (an outcome
+	# that is set, any create / update call), decided in Python.
+	own = [*shown, ["role", "=", "tool"], ["seq", ">", draft["seq"]]]
+	if later:
+		own.append(["seq", "<", later[0]["seq"]])
+	tools += frappe.get_all(  # same ownership argument as above
+		MSG,
+		filters=own,
+		or_filters=[["action_outcome", "is", "set"], ["tool_name", "in", list(_WRITE_TOOLS)]],
+		fields=_LIGHT,
+		order_by="seq asc",
+	)
+	for row in tools:
+		row["content"] = None
+	return sorted(rows + tools, key=lambda r: r["seq"])
 
 
 def find(conversation: str) -> dict | None:

@@ -2084,5 +2084,1746 @@
 			}
 		],
 		"live": null
+	},
+	{
+		"id": "own-turn-tool-rows-do-not-count",
+		"note": "70 tool rows directly after the draft are its own turn (the reply row took its seq at turn start): they do not count, so it stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "o0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o0"
+			},
+			{
+				"name": "o1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o1"
+			},
+			{
+				"name": "o2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o2"
+			},
+			{
+				"name": "o3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o3"
+			},
+			{
+				"name": "o4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o4"
+			},
+			{
+				"name": "o5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o5"
+			},
+			{
+				"name": "o6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o6"
+			},
+			{
+				"name": "o7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o7"
+			},
+			{
+				"name": "o8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o8"
+			},
+			{
+				"name": "o9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o9"
+			},
+			{
+				"name": "o10",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o10"
+			},
+			{
+				"name": "o11",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o11"
+			},
+			{
+				"name": "o12",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o12"
+			},
+			{
+				"name": "o13",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o13"
+			},
+			{
+				"name": "o14",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o14"
+			},
+			{
+				"name": "o15",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o15"
+			},
+			{
+				"name": "o16",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o16"
+			},
+			{
+				"name": "o17",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o17"
+			},
+			{
+				"name": "o18",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o18"
+			},
+			{
+				"name": "o19",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o19"
+			},
+			{
+				"name": "o20",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o20"
+			},
+			{
+				"name": "o21",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o21"
+			},
+			{
+				"name": "o22",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o22"
+			},
+			{
+				"name": "o23",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o23"
+			},
+			{
+				"name": "o24",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o24"
+			},
+			{
+				"name": "o25",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o25"
+			},
+			{
+				"name": "o26",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o26"
+			},
+			{
+				"name": "o27",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o27"
+			},
+			{
+				"name": "o28",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o28"
+			},
+			{
+				"name": "o29",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o29"
+			},
+			{
+				"name": "o30",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o30"
+			},
+			{
+				"name": "o31",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o31"
+			},
+			{
+				"name": "o32",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o32"
+			},
+			{
+				"name": "o33",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o33"
+			},
+			{
+				"name": "o34",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o34"
+			},
+			{
+				"name": "o35",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o35"
+			},
+			{
+				"name": "o36",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o36"
+			},
+			{
+				"name": "o37",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o37"
+			},
+			{
+				"name": "o38",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o38"
+			},
+			{
+				"name": "o39",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o39"
+			},
+			{
+				"name": "o40",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o40"
+			},
+			{
+				"name": "o41",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o41"
+			},
+			{
+				"name": "o42",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o42"
+			},
+			{
+				"name": "o43",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o43"
+			},
+			{
+				"name": "o44",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o44"
+			},
+			{
+				"name": "o45",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o45"
+			},
+			{
+				"name": "o46",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o46"
+			},
+			{
+				"name": "o47",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o47"
+			},
+			{
+				"name": "o48",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o48"
+			},
+			{
+				"name": "o49",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o49"
+			},
+			{
+				"name": "o50",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o50"
+			},
+			{
+				"name": "o51",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o51"
+			},
+			{
+				"name": "o52",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o52"
+			},
+			{
+				"name": "o53",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o53"
+			},
+			{
+				"name": "o54",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o54"
+			},
+			{
+				"name": "o55",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o55"
+			},
+			{
+				"name": "o56",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o56"
+			},
+			{
+				"name": "o57",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o57"
+			},
+			{
+				"name": "o58",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o58"
+			},
+			{
+				"name": "o59",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o59"
+			},
+			{
+				"name": "o60",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o60"
+			},
+			{
+				"name": "o61",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o61"
+			},
+			{
+				"name": "o62",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o62"
+			},
+			{
+				"name": "o63",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o63"
+			},
+			{
+				"name": "o64",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o64"
+			},
+			{
+				"name": "o65",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o65"
+			},
+			{
+				"name": "o66",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o66"
+			},
+			{
+				"name": "o67",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o67"
+			},
+			{
+				"name": "o68",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o68"
+			},
+			{
+				"name": "o69",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o69"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "own-turn-rows-then-60-later-rows",
+		"note": "10 own-turn tool rows, then 60 later rows (a user row, a reply, 58 tool rows): exactly 60 count, so it stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "o0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o0"
+			},
+			{
+				"name": "o1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o1"
+			},
+			{
+				"name": "o2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o2"
+			},
+			{
+				"name": "o3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o3"
+			},
+			{
+				"name": "o4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o4"
+			},
+			{
+				"name": "o5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o5"
+			},
+			{
+				"name": "o6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o6"
+			},
+			{
+				"name": "o7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o7"
+			},
+			{
+				"name": "o8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o8"
+			},
+			{
+				"name": "o9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o9"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Done."
+			},
+			{
+				"name": "l0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l0"
+			},
+			{
+				"name": "l1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l1"
+			},
+			{
+				"name": "l2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l2"
+			},
+			{
+				"name": "l3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l3"
+			},
+			{
+				"name": "l4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l4"
+			},
+			{
+				"name": "l5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l5"
+			},
+			{
+				"name": "l6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l6"
+			},
+			{
+				"name": "l7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l7"
+			},
+			{
+				"name": "l8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l8"
+			},
+			{
+				"name": "l9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l9"
+			},
+			{
+				"name": "l10",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l10"
+			},
+			{
+				"name": "l11",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l11"
+			},
+			{
+				"name": "l12",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l12"
+			},
+			{
+				"name": "l13",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l13"
+			},
+			{
+				"name": "l14",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l14"
+			},
+			{
+				"name": "l15",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l15"
+			},
+			{
+				"name": "l16",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l16"
+			},
+			{
+				"name": "l17",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l17"
+			},
+			{
+				"name": "l18",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l18"
+			},
+			{
+				"name": "l19",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l19"
+			},
+			{
+				"name": "l20",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l20"
+			},
+			{
+				"name": "l21",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l21"
+			},
+			{
+				"name": "l22",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l22"
+			},
+			{
+				"name": "l23",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l23"
+			},
+			{
+				"name": "l24",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l24"
+			},
+			{
+				"name": "l25",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l25"
+			},
+			{
+				"name": "l26",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l26"
+			},
+			{
+				"name": "l27",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l27"
+			},
+			{
+				"name": "l28",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l28"
+			},
+			{
+				"name": "l29",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l29"
+			},
+			{
+				"name": "l30",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l30"
+			},
+			{
+				"name": "l31",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l31"
+			},
+			{
+				"name": "l32",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l32"
+			},
+			{
+				"name": "l33",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l33"
+			},
+			{
+				"name": "l34",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l34"
+			},
+			{
+				"name": "l35",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l35"
+			},
+			{
+				"name": "l36",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l36"
+			},
+			{
+				"name": "l37",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l37"
+			},
+			{
+				"name": "l38",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l38"
+			},
+			{
+				"name": "l39",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l39"
+			},
+			{
+				"name": "l40",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l40"
+			},
+			{
+				"name": "l41",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l41"
+			},
+			{
+				"name": "l42",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l42"
+			},
+			{
+				"name": "l43",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l43"
+			},
+			{
+				"name": "l44",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l44"
+			},
+			{
+				"name": "l45",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l45"
+			},
+			{
+				"name": "l46",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l46"
+			},
+			{
+				"name": "l47",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l47"
+			},
+			{
+				"name": "l48",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l48"
+			},
+			{
+				"name": "l49",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l49"
+			},
+			{
+				"name": "l50",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l50"
+			},
+			{
+				"name": "l51",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l51"
+			},
+			{
+				"name": "l52",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l52"
+			},
+			{
+				"name": "l53",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l53"
+			},
+			{
+				"name": "l54",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l54"
+			},
+			{
+				"name": "l55",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l55"
+			},
+			{
+				"name": "l56",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l56"
+			},
+			{
+				"name": "l57",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l57"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "own-turn-rows-then-61-later-rows",
+		"note": "10 own-turn tool rows, then 61 later rows (a user row, a reply, 59 tool rows): 61 count, so it is retired",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "o0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o0"
+			},
+			{
+				"name": "o1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o1"
+			},
+			{
+				"name": "o2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o2"
+			},
+			{
+				"name": "o3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o3"
+			},
+			{
+				"name": "o4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o4"
+			},
+			{
+				"name": "o5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o5"
+			},
+			{
+				"name": "o6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o6"
+			},
+			{
+				"name": "o7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o7"
+			},
+			{
+				"name": "o8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o8"
+			},
+			{
+				"name": "o9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o9"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Done."
+			},
+			{
+				"name": "l0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l0"
+			},
+			{
+				"name": "l1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l1"
+			},
+			{
+				"name": "l2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l2"
+			},
+			{
+				"name": "l3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l3"
+			},
+			{
+				"name": "l4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l4"
+			},
+			{
+				"name": "l5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l5"
+			},
+			{
+				"name": "l6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l6"
+			},
+			{
+				"name": "l7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l7"
+			},
+			{
+				"name": "l8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l8"
+			},
+			{
+				"name": "l9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l9"
+			},
+			{
+				"name": "l10",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l10"
+			},
+			{
+				"name": "l11",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l11"
+			},
+			{
+				"name": "l12",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l12"
+			},
+			{
+				"name": "l13",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l13"
+			},
+			{
+				"name": "l14",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l14"
+			},
+			{
+				"name": "l15",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l15"
+			},
+			{
+				"name": "l16",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l16"
+			},
+			{
+				"name": "l17",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l17"
+			},
+			{
+				"name": "l18",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l18"
+			},
+			{
+				"name": "l19",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l19"
+			},
+			{
+				"name": "l20",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l20"
+			},
+			{
+				"name": "l21",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l21"
+			},
+			{
+				"name": "l22",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l22"
+			},
+			{
+				"name": "l23",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l23"
+			},
+			{
+				"name": "l24",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l24"
+			},
+			{
+				"name": "l25",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l25"
+			},
+			{
+				"name": "l26",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l26"
+			},
+			{
+				"name": "l27",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l27"
+			},
+			{
+				"name": "l28",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l28"
+			},
+			{
+				"name": "l29",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l29"
+			},
+			{
+				"name": "l30",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l30"
+			},
+			{
+				"name": "l31",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l31"
+			},
+			{
+				"name": "l32",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l32"
+			},
+			{
+				"name": "l33",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l33"
+			},
+			{
+				"name": "l34",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l34"
+			},
+			{
+				"name": "l35",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l35"
+			},
+			{
+				"name": "l36",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l36"
+			},
+			{
+				"name": "l37",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l37"
+			},
+			{
+				"name": "l38",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l38"
+			},
+			{
+				"name": "l39",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l39"
+			},
+			{
+				"name": "l40",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l40"
+			},
+			{
+				"name": "l41",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l41"
+			},
+			{
+				"name": "l42",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l42"
+			},
+			{
+				"name": "l43",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l43"
+			},
+			{
+				"name": "l44",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l44"
+			},
+			{
+				"name": "l45",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l45"
+			},
+			{
+				"name": "l46",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l46"
+			},
+			{
+				"name": "l47",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l47"
+			},
+			{
+				"name": "l48",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l48"
+			},
+			{
+				"name": "l49",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l49"
+			},
+			{
+				"name": "l50",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l50"
+			},
+			{
+				"name": "l51",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l51"
+			},
+			{
+				"name": "l52",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l52"
+			},
+			{
+				"name": "l53",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l53"
+			},
+			{
+				"name": "l54",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l54"
+			},
+			{
+				"name": "l55",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l55"
+			},
+			{
+				"name": "l56",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l56"
+			},
+			{
+				"name": "l57",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l57"
+			},
+			{
+				"name": "l58",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l58"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "own-turn-receipt-still-retires",
+		"note": "a receipt inside the draft's own turn (directly after it) still retires it",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "o0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o0"
+			},
+			{
+				"name": "o1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o1",
+				"action_outcome": "confirmed"
+			}
+		],
+		"live": null
 	}
 ]

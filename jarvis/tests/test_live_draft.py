@@ -20,11 +20,20 @@ from jarvis.chat import live_draft
 from jarvis.chat.actions_api import apply_action, dismiss_draft
 from jarvis.chat.api import _next_seq
 from jarvis.tests._conv_helpers import _ensure_non_admin_user, _make_conv
-from jarvis.tests._pending_action_helpers import OWNER, PendingActionTestMixin, as_user
+from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
+from jarvis.tests._pending_action_helpers import OTHER, OWNER, PendingActionTestMixin, as_user
 from jarvis.tests.test_chat_api import TEST_USER, _ensure_test_user
+from jarvis.tests.test_pending_confirm import _purge_legacy
 
 MSG = "Jarvis Chat Message"
 CONV = "Jarvis Conversation"
+
+
+def setUpModule():
+	# assemble_prompt (TestLiveDraftContext) resolves the runtime profile first; a fresh site
+	# has none, so every class here gets the synthetic one until the module is done.
+	install_synthetic_runtime_profile()
+
 
 _CASES = os.path.join(
 	os.path.dirname(os.path.abspath(frappe.get_app_path("jarvis"))),
@@ -129,16 +138,43 @@ class TestRuleCases(_Base):
 		self.assertEqual(live_draft.pick(rows)["message"], "a")
 		self.assertIsNone(live_draft.pick([]))
 
-	def test_find_reads_only_the_newest_shown_rows(self):
-		# 70 rows after the draft, only the newest 61 shown ones are read; the draft is past them.
+	def _tools(self, conv: str, seqs) -> None:
+		for seq in seqs:
+			_insert(
+				conv,
+				seq,
+				"tool",
+				"get_list",
+				tool_name="get_list",
+				tool_status="completed",
+				tool_call_id=f"c-{seq}",
+			)
+
+	def test_a_long_own_turn_keeps_the_draft_and_is_not_read(self):
+		# 70 tool rows directly after the draft are its own turn: they do not count, and as
+		# none of them could be a decided write, find does not read them at all.
 		conv = _make_conv(TEST_USER)
-		_insert(conv, 1, "assistant", _TODO)
-		for seq in range(2, 72):
-			_insert(conv, seq, "tool", "get_list", tool_name="get_list", tool_status="completed")
+		draft = _insert(conv, 1, "assistant", _TODO)
+		self._tools(conv, range(2, 72))
+		self.assertEqual(live_draft.find(conv)["message"], draft)
+		self.assertEqual([r["name"] for r in live_draft.load_rows(conv)], [draft])
+		# A user row, a reply and 59 tool rows after the own turn: 61 rows count.
+		_insert(conv, 72, "user", "and then?")
+		_insert(conv, 73, "assistant", "Done.")
+		self._tools(conv, range(74, 133))
 		self.assertIsNone(live_draft.find(conv))
 		rows = live_draft.load_rows(conv)
-		self.assertEqual(len(rows), live_draft.MAX_ROWS_AFTER_DRAFT + 1)
-		self.assertEqual([r["seq"] for r in rows], list(range(11, 72)))
+		self.assertEqual(len(rows), 3 + live_draft.MAX_ROWS_AFTER_DRAFT - 2 + 1, "the bound and no more")
+
+	def test_a_decided_write_in_the_own_turn_is_read(self):
+		conv = _make_conv(TEST_USER)
+		_insert(conv, 1, "assistant", _TODO)
+		self._tools(conv, range(2, 40))
+		_insert(
+			conv, 40, "tool", None, tool_name="create_doc", action_outcome="confirmed", tool_call_id="tok-1"
+		)
+		self._tools(conv, range(41, 60))
+		self.assertIsNone(live_draft.find(conv))
 
 
 class TestDismissDraft(_Base):
@@ -389,10 +425,12 @@ class TestOnlyTheLiveDraftApplies(PendingActionTestMixin, FrappeTestCase):
 			stub = patch(target, return_value=None)
 			stub.start()
 			self.addCleanup(stub.stop)
+		_purge_legacy(OWNER)  # as the sibling one-approval suite: no stale Redis-era card
+		self.addCleanup(_purge_legacy, OWNER)
 		self.conv = self.make_conv()
 		self.tag = "pa-test live " + frappe.generate_hash(length=8)
 
-	def row(self, role: str, content: str) -> str:
+	def add_row(self, role: str, content: str) -> str:
 		doc = frappe.get_doc(
 			{
 				"doctype": MSG,
@@ -410,10 +448,12 @@ class TestOnlyTheLiveDraftApplies(PendingActionTestMixin, FrappeTestCase):
 		return doc.name
 
 	def create_draft(self) -> str:
-		return self.row("assistant", _block(kind="doc", verb="create", doctype="ToDo", fields=[]))
+		return self.add_row("assistant", _block(kind="doc", verb="create", doctype="ToDo", fields=[]))
 
 	def update_draft(self, todo: str) -> str:
-		return self.row("assistant", _block(kind="doc", verb="update", doctype="ToDo", name=todo, fields=[]))
+		return self.add_row(
+			"assistant", _block(kind="doc", verb="update", doctype="ToDo", name=todo, fields=[])
+		)
 
 	def apply(self, message: str, verb: str = "create", name: str = "", values: dict | None = None) -> dict:
 		values = values or {"description": self.tag, "allocated_to": OWNER}
@@ -464,7 +504,7 @@ class TestOnlyTheLiveDraftApplies(PendingActionTestMixin, FrappeTestCase):
 
 	def test_an_older_draft_is_refused_once_replaced(self):
 		old = self.create_draft()
-		self.row("user", "make it another one")
+		self.add_row("user", "make it another one")
 		new = self.create_draft()
 		self.assert_closed(
 			self.apply(old), "DraftClosedError", "This draft is no longer open. Ask me to draft it again."
@@ -506,6 +546,21 @@ class TestOnlyTheLiveDraftApplies(PendingActionTestMixin, FrappeTestCase):
 		self.assertEqual(outcomes, ["failed"])
 		self.assertIsNone(live_draft.find(self.conv), "the card is gone on both apps and after a reload")
 		self.assertFalse(frappe.db.get_value(MSG, draft, "draft_saved_as"))
+
+	def test_the_stale_check_reveals_nothing_about_a_record_the_user_cannot_read(self):
+		# Another user's ToDo, changed after the draft: the person cannot read it, so the save
+		# gets the update path's own refusal, never "changed after the draft was made".
+		todo = self.make_todo(owner=OTHER)
+		with as_user(OWNER):
+			self.assertFalse(frappe.has_permission("ToDo", "read", doc=todo), "fixture: not readable")
+		draft = self.update_draft(todo)
+		frappe.db.set_value("ToDo", todo, "description", "pa-test changed by its owner")
+		frappe.db.commit()
+		res = self.apply(draft, verb="update", name=todo, values={"description": self.tag})
+		self.assertFalse(res["ok"], res)
+		self.assertNotEqual(res["error"]["code"], "DraftStaleError")
+		self.assertNotIn("changed after the draft", res["error"]["message"])
+		self.assertEqual(frappe.db.get_value("ToDo", todo, "description"), "pa-test changed by its owner")
 
 
 class TestParkedDraftHasNoClause(PendingActionTestMixin, FrappeTestCase):

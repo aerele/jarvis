@@ -8,7 +8,10 @@
  * update. The live draft is the last draft row, unless a later tool row is a decided
  * write (a non-empty action_outcome, or an old receipt: a completed create_doc /
  * update_doc row with no tool_call_id), more than MAX_USER_ROWS_AFTER_DRAFT user rows
- * follow it, or more than MAX_ROWS_AFTER_DRAFT rows of any role follow it.
+ * follow it, or more than MAX_ROWS_AFTER_DRAFT rows of any role follow it. The tool rows
+ * DIRECTLY after the draft row (up to the first later row that is not a tool row) are
+ * the draft's own turn: the reply row takes its seq when the turn starts, so they do not
+ * count toward MAX_ROWS_AFTER_DRAFT, though a decided write among them still retires it.
  *
  * Pure, relative imports only: the phone app's node tests load it.
  */
@@ -16,8 +19,9 @@ import { actionBlockState, closedActionBody, normaliseAction, GATED_VERBS } from
 
 export const MAX_USER_ROWS_AFTER_DRAFT = 5;
 // Both apps load only the newest page of a chat (80 rows of any role, tool rows
-// included: historyPaging.js). A draft further back than this is never live, so its
-// card can never be missing from a loaded page while the server calls it live.
+// included, widened back to the start of its oldest turn: historyPaging.js). A draft
+// with more later rows than this (its own turn's tool rows aside) is never live, so its
+// card is not missing from a loaded page while the server calls it live.
 export const MAX_ROWS_AFTER_DRAFT = 60;
 
 const skipped = (row) => !row || !!row.hidden || !!row.streaming;
@@ -78,16 +82,24 @@ export function isOwnActionRow(row) {
 export function liveDraftRow(rows) {
 	if (!Array.isArray(rows)) return null;
 	let userRows = 0;
-	let laterRows = 0;
+	// Rows that count toward MAX_ROWS_AFTER_DRAFT, and the run of tool rows walked since
+	// the last row that was not one: that run is the draft's own turn if the draft is next.
+	let counted = 0;
+	let toolRun = 0;
 	for (let i = rows.length - 1; i >= 0; i--) {
 		const row = rows[i];
 		if (skipped(row)) continue;
 		if (isDraftRow(row)) return row;
 		if (retiresDraft(row)) return null;
+		if (row.role === "tool") {
+			toolRun++;
+			continue;
+		}
+		counted += toolRun + 1; // a row that is not a tool row: the run after it counts
+		toolRun = 0;
 		if (row.role === "user") userRows++;
-		laterRows++;
 		// Every row before this one has too many rows after it to be the live draft.
-		if (userRows > MAX_USER_ROWS_AFTER_DRAFT || laterRows > MAX_ROWS_AFTER_DRAFT) return null;
+		if (userRows > MAX_USER_ROWS_AFTER_DRAFT || counted > MAX_ROWS_AFTER_DRAFT) return null;
 	}
 	return null;
 }

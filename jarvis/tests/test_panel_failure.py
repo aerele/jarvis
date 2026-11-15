@@ -1013,10 +1013,16 @@ class TestFailureEndsTheCard(_PanelBase):
 		self.assertEqual([x.action_outcome for x in receipts], ["partial"])
 		self.assertLess(receipts[0].seq, self._continuation_seqs()[0])
 
-	def test_a_repeat_of_the_same_failure_writes_one_receipt(self):
-		for _ in range(2):
-			with BUSINESS_RULE:
-				self.apply({"description": "pa-test end twice"})
+	def test_a_draft_that_failed_for_good_is_never_written_again(self):
+		# Its failed receipt retired it: a second save (a card left open elsewhere) is refused
+		# as closed before the write runs, and leaves no second receipt.
+		with BUSINESS_RULE as create:
+			first = self.apply({"description": "pa-test end twice"})
+			again = self.apply({"description": "pa-test end twice"})
+		self.assertIs(first["closed"], True)
+		self.assertEqual(create.call_count, 1, "the second save never reached the write")
+		self.assertEqual((again["ok"], again.get("closed")), (False, True), again)
+		self.assertEqual(again["error"]["code"], "DraftClosedError")
 		self.assertEqual([x.action_outcome for x in self._receipts()], ["failed"])
 
 	def test_a_fixable_failure_keeps_the_draft_live(self):

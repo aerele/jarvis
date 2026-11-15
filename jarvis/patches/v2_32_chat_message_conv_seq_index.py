@@ -6,6 +6,8 @@ The index is declared in the DocType's ``on_doctype_update``, which a fresh inst
 when it creates the table. An upgraded site's DocType JSON did not change, so migrate never
 re-saves it and the hook never fires there: this patch adds the index on those sites.
 ``add_index`` is idempotent (a no-op when the index exists), so a re-run is safe.
+ADD INDEX runs in place but waits on a metadata lock, so a long open transaction on a large
+``Jarvis Chat Message`` table can stall chat queries during migrate.
 """
 
 import frappe

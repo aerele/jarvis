@@ -237,7 +237,13 @@ describe("the two gates that disagreed stay mirrored", () => {
 		expect(src).toMatch(
 			/function cancelDraft\(\) \{\s*return cancelDraftFor\(actionFor\.value\);/
 		);
-		expect(src).toContain('@click="discardDraft">Discard</button>');
+		// ...and is off while the draft is parked behind its confirmation card
+		expect(src).toMatch(
+			/class="jv-action-discard"\s*:disabled="draftPanel\.applying \|\| !!draftPanel\.parked"\s*@click="discardDraft"\s*>\s*Discard\s*<\/button>/
+		);
+		expect(src).toContain(
+			"if (parkedNoteFor(parkedDrafts.value, key) || parkedByCard(pendingActions.value, key)) return;"
+		);
 		expect(src).not.toContain('send("No, cancel that.");');
 	});
 

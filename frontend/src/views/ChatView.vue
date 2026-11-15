@@ -4574,7 +4574,15 @@
 						>
 							{{ draftPanel.applying ? "Saving…" : draftCta }}
 						</button>
-						<button class="jv-action-discard" @click="discardDraft">Discard</button>
+						<!-- A parked draft already became a confirmation card: Discard would record
+						     "nothing was saved" while that card stays confirmable. -->
+						<button
+							class="jv-action-discard"
+							:disabled="draftPanel.applying || !!draftPanel.parked"
+							@click="discardDraft"
+						>
+							Discard
+						</button>
 					</div>
 				</aside>
 			</div>
@@ -8953,6 +8961,9 @@ function discardDraft() {
 async function cancelDraftFor(key) {
 	if (!key || cancellingDraft.value || cardModel.value?.applying || draftPanel.value?.applying)
 		return;
+	// Parked (its confirmation card waits, perhaps parked from another device while this panel
+	// was open): cancelling the draft would say nothing was saved while that card stays live.
+	if (parkedNoteFor(parkedDrafts.value, key) || parkedByCard(pendingActions.value, key)) return;
 	const view = captureDraftActionView(activeAction.value, key);
 	cancellingDraft.value = true;
 	try {

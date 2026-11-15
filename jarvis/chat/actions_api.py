@@ -724,8 +724,12 @@ def _closed_draft_refusal(
 
 def _changed_since_draft(doctype: str, name: str, source: str) -> bool:
 	"""True when the record was modified after the draft's reply was written. A record that
-	is gone (or a doctype that is not one) is left to the write, which reports it."""
+	is gone, one the person may not read, or a doctype that is not one is left to the write,
+	which reports it as it always has: this check never tells anyone more than that path does
+	(that an unreadable record exists, or changed)."""
 	if not name or not frappe.db.exists("DocType", doctype, cache=True):
+		return False
+	if not frappe.db.exists(doctype, name) or not frappe.has_permission(doctype, "read", doc=name):
 		return False
 	modified = frappe.db.get_value(doctype, name, "modified")
 	drafted = frappe.db.get_value(MSG, source, "creation")
