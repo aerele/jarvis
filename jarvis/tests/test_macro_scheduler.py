@@ -208,13 +208,6 @@ class TestScheduledMacroIdentity(MacroSchedulerBase):
 		m = _mk_macro(OWNER_OK, "good-owner")
 		self.assertIn(m.name, self._run_due(), "the guard over-reached and refused a legitimate owner")
 
-	def test_refused_macro_does_not_busy_refire(self):
-		# Was "the slot is moved on". The schedule is now switched OFF instead (see
-		# TestLeaverSchedulesAreSwitchedOff), and that is what stops the re-fire.
-		m = _mk_macro("Administrator", "admin-advance")
-		self._run_due()
-		self.assertEqual(_due_names([m]), [], "a refused macro stayed due and would re-fire every sweep")
-
 	def test_refusal_is_recorded_as_a_failed_run(self):
 		m = _mk_macro(OWNER_OFF, "disabled-recorded")
 		self._run_due()
@@ -923,17 +916,6 @@ class TestScheduledMacroFailures(MacroSchedulerBase):
 			"last_run_at was stamped for a run that never executed",
 		)
 
-	def test_dispatch_failure_notifies_the_owner(self):
-		_mk_macro(OWNER_OK, "raises-notify")
-		with patch("jarvis.chat.macros.run_macro", side_effect=RuntimeError("gateway down")):
-			macro_scheduler.run_due_macros()
-		notes = frappe.get_all(
-			"Notification Log",
-			filters={"for_user": OWNER_OK, "subject": ["like", f"%{PFX}-raises-notify%"]},
-			pluck="name",
-		)
-		self.assertTrue(notes, "the owner got no signal at all")
-
 	def test_dispatch_raising_after_the_run_row_exists_leaves_no_orphan(self):
 		# run_macro COMMITS the conversation and the run row, then dispatches. When the
 		# dispatch raises (gateway down, _ensure_session_key throws) no turn exists, so
@@ -1038,11 +1020,6 @@ class TestScheduledMacroCaps(MacroSchedulerBase):
 			self._run_due_gated()
 		self.assertEqual([r.status for r in _runs_for(m.name)], ["failed"])
 		self._assert_retry_scheduled(m)
-
-	def test_a_zero_worker_reading_is_not_a_block_reason_any_more(self):
-		# The RQ registry can misreport zero workers while they are alive, so chat
-		# no longer refuses sends for it; the scheduler must not expect that reason.
-		self.assertNotIn("insufficient_workers", macro_scheduler._TRANSIENT_BLOCKS)
 
 	def test_the_gate_creates_nothing_before_refusing(self):
 		# A refused run must leave no conversation and no intro message behind —

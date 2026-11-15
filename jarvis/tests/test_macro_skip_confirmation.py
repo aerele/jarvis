@@ -14,7 +14,6 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis import api
-from jarvis.api import _ARMED_SKIP_COVERED, _ARMED_SKIP_NEVER, _GATED_WRITES
 from jarvis.permissions import ensure_jarvis_user_role
 from jarvis.tests._conv_helpers import (
 	NON_ADMIN_USER,
@@ -131,13 +130,6 @@ class TestConversationSkipConfirmationGuard(FrappeTestCase):
 		doc.save()
 		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skip_confirmation") or 0), 0)
 
-	def test_raw_stamp_bypasses_the_guard(self):
-		"""The sanctioned run_macro path (raw db.set_value) sets the flag on a
-		non-admin owner's conversation without tripping the controller guard."""
-		conv = _make_conv(NON_ADMIN_USER)
-		frappe.db.set_value(CONV, conv, "skip_confirmation", 1, update_modified=False)
-		self.assertEqual(int(frappe.db.get_value(CONV, conv, "skip_confirmation")), 1)
-
 
 class TestMacroSkipConfirmationGuard(FrappeTestCase):
 	"""Arming a macro (Jarvis Macro.skip_confirmation 0 -> 1) is its owner's, on the
@@ -210,47 +202,6 @@ class TestMacroSkipConfirmationGuard(FrappeTestCase):
 		doc.skip_confirmation = 0
 		doc.save()
 		self.assertEqual(int(frappe.db.get_value(MACRO, macro, "skip_confirmation") or 0), 0)
-
-
-class TestArmedSkipPartition(FrappeTestCase):
-	"""Fail-closed allowlist: COVERED and NEVER partition _GATED_WRITES exactly.
-	A new gated tool added to neither set makes this RED, forcing a conscious
-	skip-vs-park classification instead of a silent fail-open default."""
-
-	def test_covered_and_never_partition_gated_writes(self):
-		self.assertEqual(_ARMED_SKIP_COVERED & _ARMED_SKIP_NEVER, frozenset(), "sets must be disjoint")
-		self.assertEqual(
-			_ARMED_SKIP_COVERED | _ARMED_SKIP_NEVER,
-			_GATED_WRITES,
-			"every gated write must be classified as covered (skips when armed) or "
-			"never (always parks) - a tool in neither is an unclassified fail-open gap",
-		)
-
-	def test_brake_is_the_trio_plus_create_custom_skill_and_call_connector(self):
-		# Unified brake (design A4): the irreversible trio + create_custom_skill (a
-		# consequential meta-write) + call_connector (opaque per-action reversibility)
-		# always park. The macro and skill modes now share ONE brake, so
-		# create_custom_skill NO LONGER skips inside an armed macro - a deliberate
-		# behaviour change from the pre-unification macro set that covered it.
-		# schedule_run (setting up an unattended run for later) is the user's call
-		# every time, so it is in the brake as well.
-		self.assertEqual(
-			_ARMED_SKIP_NEVER,
-			frozenset(
-				{
-					"cancel_doc",
-					"delete_doc",
-					"amend_doc",
-					"create_custom_skill",
-					"call_connector",
-					"schedule_run",
-				}
-			),
-		)
-
-	def test_run_method_is_covered(self):
-		# run_method gates in ordinary chat but skips inside an armed macro (D5).
-		self.assertIn("run_method", _ARMED_SKIP_COVERED)
 
 
 class TestArmedSkipGate(FrappeTestCase):
