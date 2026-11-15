@@ -1,10 +1,10 @@
 """Subscription-tier model catalogue.
 
 The source of truth is the `Jarvis LLM Provider` doctype in jarvis_admin_v2,
-fetched via admin_client.get_model_catalog() (guest read, Redis cache, and
-jarvis._model_catalog.BUNDLED_MODEL_CATALOG as the degraded-mode floor). There is
-no second literal list here: get_model_catalog() never returns an empty catalog,
-so the bundled catalog is the only offline source. Add a model in the admin desk.
+read through admin_client.get_model_catalog() (Redis, else this site's
+last-known-good snapshot; see jarvis.catalog_store). There is no model list in
+this app. Add a model in the admin desk. On a site that has never reached the
+admin the mappings are EMPTY: callers treat that as "catalog unavailable".
 
 SUBSCRIPTION_MODELS and DEFAULT_MODEL keep their names and dict-like behaviour
 deliberately (spec 6.3): chat/api.py and oauth/api.py import them at module
@@ -34,7 +34,7 @@ from collections.abc import Mapping
 
 import frappe
 
-# Google Gemini has no subscription entry anywhere: its chat subscription was removed
+# Google Gemini has no subscription tier: its chat subscription was removed
 # 2026-08-19 (Google discontinued consumer login-with-Google for Gemini). Gemini stays
 # available via API key, served from the api_key-tier catalog.
 
@@ -49,13 +49,8 @@ def _subscription_rows() -> dict[str, list[dict]]:
 	if cached is not None:
 		return cached
 	from jarvis import admin_client
-	from jarvis._model_catalog import BUNDLED_MODEL_CATALOG
 
 	out = _rows_from(admin_client.get_model_catalog() or [])
-	if not out:
-		# An admin catalog that carries no subscription tier at all falls back to the
-		# bundled floor, exactly as the removed seed literal used to.
-		out = _rows_from(BUNDLED_MODEL_CATALOG)
 	frappe.local._jarvis_sub_models = out
 	return out
 
@@ -85,7 +80,6 @@ class _LazyModelMap(Mapping):
 		self._builder = builder
 
 	def _data(self):
-		# _subscription_rows() never returns empty: admin, else the bundled catalog.
 		return self._builder(_subscription_rows())
 
 	def __getitem__(self, k):
@@ -111,6 +105,13 @@ def _defaults_from(rows) -> dict[str, str]:
 		flagged = next((m for m in ms if m.get("is_default")), None)
 		out[label] = (flagged or ms[0])["model_id"]
 	return out
+
+
+def mappings_from(catalog: list) -> tuple[dict[str, list[str]], dict[str, str]]:
+	"""(subscription models, defaults) for an explicit catalog, bypassing the
+	request cache: for a caller that already holds a freshly fetched catalog."""
+	rows = _rows_from(catalog)
+	return _models_from(rows), _defaults_from(rows)
 
 
 SUBSCRIPTION_MODELS = _LazyModelMap(_models_from)

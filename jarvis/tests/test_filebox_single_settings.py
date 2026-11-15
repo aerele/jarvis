@@ -389,9 +389,9 @@ class TestFileBoxSingleSettings(_ApplyBase):
 		with patch.object(
 			_write_risk,
 			"risk_of",
-			side_effect=lambda tool, args: "crm_settings_sync"
-			if args.get("doctype") == DT
-			else real_risk(tool, args),
+			side_effect=lambda tool, args: (
+				"crm_settings_sync" if args.get("doctype") == DT else real_risk(tool, args)
+			),
 		):
 			result = self.run_job()
 		self.assertEqual(result.status, "Pending")
@@ -446,9 +446,9 @@ class TestFileBoxSingleSettings(_ApplyBase):
 			patch.object(
 				_write_risk,
 				"risk_of",
-				side_effect=lambda tool, args: "crm_settings_sync"
-				if args.get("doctype") == DT
-				else real_risk(tool, args),
+				side_effect=lambda tool, args: (
+					"crm_settings_sync" if args.get("doctype") == DT else real_risk(tool, args)
+				),
 			),
 		):
 			result = approvals_api.decide_held_action(name, "create")
@@ -526,9 +526,11 @@ class TestFileBoxSingleSettings(_ApplyBase):
 		with patch.object(
 			_write_risk,
 			"risk_of",
-			side_effect=lambda tool, args: "sensitive"
-			if args.get("doctype") == DT and FIELD in args.get("changes", {})
-			else real_risk(tool, args),
+			side_effect=lambda tool, args: (
+				"sensitive"
+				if args.get("doctype") == DT and FIELD in args.get("changes", {})
+				else real_risk(tool, args)
+			),
 		):
 			result = self.apply(row.name)
 		self.assertFalse(result["ok"])

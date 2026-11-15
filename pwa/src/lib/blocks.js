@@ -8,6 +8,13 @@
 //
 // Keep the STRIP list a superset of what we render: an unrendered block must
 // still disappear from the prose rather than leak.
+//
+// A relative import, not the @shared alias, so bare `node --test` can run this file.
+import { actionBlockState, normaliseAction } from "../../../frontend/src/lib/chatAction.js";
+import { stripBlocks } from "../../../frontend/src/lib/chatBlocks.js";
+import { parseGoto } from "../../../frontend/src/lib/chatGoto.js";
+
+export { actionBlockState };
 
 const CARDS_RE = /```jarvis-cards[ \t]*\n([\s\S]*?)```/;
 const SKILL_RE = /```jarvis-skill[ \t]*\n([\s\S]*?)```/;
@@ -21,6 +28,9 @@ const STRIP_RES = [
 	/```jarvis-cards[ \t]*\n[\s\S]*?```/g,
 	/```jarvis-skill[ \t]*\n[\s\S]*?```/g,
 	/```jarvis-macro[ \t]*\n[\s\S]*?```/g,
+	// A hand-off to a page of the web app. The phone cannot follow it; the chip from
+	// gotoChipPage opens the conversation in the web chat instead.
+	/```jarvis-goto[ \t]*\n[\s\S]*?```/g,
 	/```jarvis-chart[ \t]*\n[\s\S]*?```/g,
 	/```mermaid[ \t]*\n[ \t]*xychart-beta[\s\S]*?```/g,
 	// A mermaid block that is NOT xychart-beta is a DIAGRAM (flowchart etc.) the
@@ -32,10 +42,15 @@ const STRIP_RES = [
 // Separate object (not shared with STRIP_RES) so its /g lastIndex can't collide.
 const DIAGRAM_RE = /```mermaid[ \t]*\n(?![ \t]*xychart-beta)[\s\S]*?```/g;
 
-/** The agent's prose, with every control block removed. */
-export function stripAgentBlocks(text) {
+/**
+ * The agent's prose, with every control block removed. While `streaming`, an
+ * unclosed opener and a half-typed fence tag are hidden too (stripBlocks owns
+ * that part); the PWA list above still removes non-xychart mermaid.
+ */
+export function stripAgentBlocks(text, streaming = false) {
 	let t = text || "";
 	for (const re of STRIP_RES) t = t.replace(re, "");
+	if (streaming) t = stripBlocks(t, true);
 	return t.replace(/\n{3,}/g, "\n\n").trim();
 }
 
@@ -44,6 +59,44 @@ export function countDiagrams(text) {
 	if (!text || !text.includes("```mermaid")) return 0;
 	const m = text.match(DIAGRAM_RE);
 	return m ? m.length : 0;
+}
+
+/**
+ * The page a valid ```jarvis-goto``` names (the web chat's parseGoto rules), or
+ * null. Both pages get the "Open in web chat" chip: the phone cannot follow a
+ * hand-off, and a calendar lead-in ("Opening the Payment Calendar for you") with
+ * no way through would dead-end. The phone itself never sends the payment-calendar
+ * capability; the chip only helps when the agent emits one anyway (it opens the
+ * web chat, where the card offers the page). A block for any other page is
+ * stripped with no chip.
+ * @returns {"dashboards"|"payment-calendar"|null}
+ */
+export function gotoChipPage(content) {
+	if (!content || !content.includes("jarvis-goto")) return null;
+	return parseGoto(content)?.page || null;
+}
+
+const GOTO_TITLES = { dashboards: "Dashboards", "payment-calendar": "Payment Calendar" };
+const GOTO_ICONS = { dashboards: "chart", "payment-calendar": "calendar" };
+
+/**
+ * The "Open in web chat" chips a reply earns: one for diagrams (counted), one for
+ * a valid page hand-off. Separate chips, because they are different things.
+ * Reads only the page key of a goto, never its prompt.
+ * @returns {Array<{kind: "diagram"|"goto", title: string, icon: "diagram"|"chart"|"calendar"}>}
+ */
+export function messageChips(content) {
+	const chips = [];
+	const diagrams = countDiagrams(content);
+	if (diagrams)
+		chips.push({
+			kind: "diagram",
+			title: diagrams > 1 ? diagrams + " diagrams" : "Diagram",
+			icon: "diagram",
+		});
+	const page = gotoChipPage(content);
+	if (page) chips.push({ kind: "goto", title: GOTO_TITLES[page], icon: GOTO_ICONS[page] });
+	return chips;
 }
 
 /** ```jarvis-cards``` → {title, cards:[{title, subtitle, doctype, name, fields}]}. */
@@ -97,8 +150,8 @@ export function parseAction(content) {
 	const mt = content.match(ACTION_RE);
 	if (!mt) return null;
 	try {
-		const a = JSON.parse(mt[1].trim());
-		if (!a || typeof a !== "object") return null;
+		const a = normaliseAction(JSON.parse(mt[1].trim()));
+		if (!a) return null;
 		if (Array.isArray(a.fields)) {
 			a.fields = a.fields.map((f) => ({
 				label: String(f.label || ""),

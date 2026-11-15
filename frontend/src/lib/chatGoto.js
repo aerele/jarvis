@@ -7,13 +7,21 @@
 // and the agent redirects here instead of building inline).
 //
 // This is deliberately an ALLOWLIST, not generic navigation: the agent picks
-// a request restatement, not an arbitrary route. Today the only destination
-// is "dashboards"; a block naming anything else is not a valid goto and is
-// left for the raw markdown fallback to show.
+// a page key and a request restatement, never a route. The keys are the ones in
+// jarvis/public/js/shared/goto_pages.mjs (DASHBOARDS_PAGE, PAYMENT_CALENDAR_PAGE);
+// a block naming anything else is not a valid goto and is left for the raw
+// markdown fallback to show.
+
+import {
+	DASHBOARDS_PAGE,
+	GOTO_PAGES,
+	PAYMENT_CALENDAR_PAGE,
+} from "../../../jarvis/public/js/shared/goto_pages.mjs";
+import { __ } from "./i18n.js";
 
 export const GOTO_RE = /```jarvis-goto[ \t]*\n([\s\S]*?)```/;
 
-const ALLOWED_PAGES = new Set(["dashboards"]);
+const ALLOWED_PAGES = new Set(Object.keys(GOTO_PAGES));
 
 /**
  * Parse the first ```jarvis-goto block out of a message.
@@ -54,7 +62,7 @@ const ATTACHMENT_LINE = /^📎 .*$/gm;
 
 /**
  * The user's words a goto answers: up to REQUEST_TURNS_MAX user turns before it,
- * oldest first, stopping at an earlier hand-off. Macro rows and the "📎 file"
+ * oldest first, stopping at an earlier Dashboards hand-off. Macro rows and the "📎 file"
  * marker are not the user's words.
  * @param {Array<{name: string, role: string, content: string}>} messages
  * @param {string} messageId the assistant message carrying the goto block
@@ -67,7 +75,10 @@ export function requestBefore(messages, messageId) {
 	for (let i = at - 1; i >= 0 && turns.length < REQUEST_TURNS_MAX; i--) {
 		const m = list[i];
 		if (!m) continue;
-		if (m.role === "assistant" && parseGoto(m.content)) break;
+		// Stops at an earlier DASHBOARDS hand-off only: those words were already sent
+		// to the builder. A payment-calendar hand-off never reaches the builder, so
+		// the request behind it is still the user's ask if they go on to Dashboards.
+		if (m.role === "assistant" && parseGoto(m.content)?.page === DASHBOARDS_PAGE) break;
 		if (m.role !== "user" || !m.content || m.content.startsWith(MACRO_ROW)) continue;
 		const words = String(m.content).replace(ATTACHMENT_LINE, "").trim();
 		if (words) turns.unshift(words);
@@ -108,8 +119,11 @@ export function builderSeed(prompt, request) {
 // what an old stamp already on disk looks like. Once the conversation is
 // known it becomes JSON ({t, conv}). Both shapes parse.
 
+const GOTO_FIRED_PREFIX = "jarvis:goto-fired:";
+const GOTO_STAMPS_KEPT = 50;
+
 export function gotoFiredKey(messageId) {
-	return "jarvis:goto-fired:" + messageId;
+	return GOTO_FIRED_PREFIX + messageId;
 }
 
 /**
@@ -136,6 +150,236 @@ export function parseFiredStamp(raw) {
  */
 export function encodeFiredStamp(t, conv) {
 	return conv ? JSON.stringify({ t, conv }) : String(t);
+}
+
+/**
+ * Bounded stamp set: the stamps are write-once per redirect and would otherwise
+ * accumulate for the life of the origin. Keeps the newest `keep` (the fired-stamp
+ * check is the real guard; this only defends reloads of RECENT transcripts). An
+ * unreadable stamp sorts oldest.
+ * @param {Storage} storage localStorage, or a stand-in with length/key/getItem/removeItem
+ * @param {number} [keep]
+ */
+export function pruneGotoStamps(storage, keep = GOTO_STAMPS_KEPT) {
+	const stamps = [];
+	for (let i = 0; i < storage.length; i++) {
+		const k = storage.key(i);
+		if (k && k.startsWith(GOTO_FIRED_PREFIX)) {
+			const parsed = parseFiredStamp(storage.getItem(k));
+			stamps.push([k, parsed ? parsed.t : 0]);
+		}
+	}
+	stamps
+		.sort((a, b) => b[1] - a[1])
+		.slice(keep)
+		.forEach(([k]) => storage.removeItem(k));
+}
+
+// ── the page map and the decision ───────────────────────────────────────────
+//
+// One row per allowed page: the display name, the card's button, the morph line, the
+// icon and the fixed SPA route. The route name comes only from GOTO_PAGES; the block
+// never supplies one. Copy goes through __() when asked for (at render time), not when
+// this module loads, so a page translator that arrives later still applies.
+const PAGE_COPY = {
+	[DASHBOARDS_PAGE]: () => ({
+		name: __("Dashboards"),
+		button: __("Open Dashboards"),
+		morph: __("Taking you to the Dashboards builder"),
+		icon: "chart",
+	}),
+	[PAYMENT_CALENDAR_PAGE]: () => ({
+		name: __("Payment Calendar"),
+		button: __("Open Payment Calendar"),
+		morph: __("Taking you to the Payment Calendar"),
+		icon: "calendar",
+	}),
+};
+
+/**
+ * @param {string} page a key of GOTO_PAGES
+ * @returns {{page: string, name: string, icon: "calendar"|"chart", button: string, morph: string, route: {name: string}}|null}
+ */
+export function gotoPageInfo(page) {
+	if (!ALLOWED_PAGES.has(page) || !PAGE_COPY[page]) return null;
+	const { name, button, morph, icon } = PAGE_COPY[page]();
+	return { page, name, icon, button, morph, route: { name: GOTO_PAGES[page] } };
+}
+
+/**
+ * What the card says for a decision: the title and button of the page the button
+ * will OPEN (the decision's action), a subtitle and an icon.
+ *
+ * Dashboards: the subtitle is the agent's restated request, as before.
+ * payment-calendar: FIXED copy, never the prompt. The restatement reads as the
+ * request done ("Per-day payables for May"), and the calendar does not apply it,
+ * so showing it would promise something the page does not do. When the user
+ * cannot open the calendar the card is information only: it says so, with the
+ * info icon and `button: null` (no button, no hand-off to Dashboards).
+ *
+ * @param {{page: string, prompt: string}|null} goto from parseGoto
+ * @param {{card: boolean, action: string|null}|null} decision from gotoDecision
+ * @returns {{title: string, button: string|null, sub: string, icon: "calendar"|"chart"|"info", note: boolean}|null}
+ */
+export function gotoCardCopy(goto, decision) {
+	if (!goto || !decision || !decision.card) return null;
+	const info = gotoPageInfo(decision.action);
+	if (!info) return null;
+	let sub = goto.prompt;
+	// the card title is the page name; the button carries the verb
+	const title = info.name;
+	if (goto.page === PAYMENT_CALENDAR_PAGE) {
+		if (decision.action !== PAYMENT_CALENDAR_PAGE) {
+			// information only: no button, no hand-off to Dashboards
+			return {
+				title: __("You don't have access to the Payment Calendar."),
+				sub: __("Ask your admin for access."),
+				button: null,
+				icon: "info",
+				note: true,
+			};
+		}
+		sub = __("Day-by-day supplier dues, cash and collections, one month at a time.");
+	}
+	return { title, button: info.button, sub, icon: info.icon, note: false };
+}
+
+/**
+ * The words of the hand-off countdown, all through __() at call time. `visible`
+ * is the on-screen row (the paused row while the pointer or focus is in the card);
+ * `srText` sits in the card, not in a live region; `announce` is the one
+ * announceSR line per countdown, instruction first. `openNowLabel` starts with the
+ * visible "Open now" (WCAG 2.5.3 label in name). `opening` is the card's state
+ * between the open and the arrival, `failed` the toast and announcement when the
+ * navigation fails, `staying` the announcement after Stay / Esc / typing / a
+ * refused expiry.
+ *
+ * @param {string} page a key of GOTO_PAGES (the page that will open)
+ * @param {number} secondsLeft whole seconds, at least 1
+ * @param {boolean} [paused]
+ * @returns {{visible: string, srText: string, announce: string, stay: string, openNow: string, openNowLabel: string, opening: string, failed: string, staying: string}|null}
+ */
+export function gotoCountdownCopy(page, secondsLeft, paused = false) {
+	const info = gotoPageInfo(page);
+	if (!info) return null;
+	return {
+		visible: paused
+			? __("Paused \u00b7 opening {0} in {1}\u2026 Move away to continue.", [
+					info.name,
+					secondsLeft,
+			  ])
+			: __("Opening {0} in {1}\u2026", [info.name, secondsLeft]),
+		srText: paused
+			? __("Paused. Opening {0} in a few seconds. Press Escape to stay in chat.", [
+					info.name,
+			  ])
+			: __("Opening {0} in a few seconds. Press Escape to stay in chat.", [info.name]),
+		announce: __("Opening {0}. Press Escape to stay in chat.", [info.name]),
+		stay: __("Stay in chat"),
+		openNow: __("Open now"),
+		openNowLabel: __("Open now: {0}", [info.name]),
+		opening: __("Opening {0}\u2026", [info.name]),
+		failed: __("Couldn't open {0}. Try again.", [info.name]),
+		staying: __("Staying in chat."),
+	};
+}
+
+// An opener is enough: a half-streamed or later-closed block is still a card or a
+// question the user has to answer, and the calendar must not move them away from it.
+const INTERACTIVE_FENCE_RE = /```(?:jarvis-ask|jarvis-action|confirm)[ \t]*(?:\n|$)/;
+
+/**
+ * Whether a message carries a block the user has to answer in the chat itself: a
+ * clarifying question (jarvis-ask), a draft/action card (jarvis-action) or a
+ * confirmation (confirm).
+ * @param {string} content raw assistant message text
+ * @returns {boolean}
+ */
+export function hasInteractiveFence(content) {
+	return INTERACTIVE_FENCE_RE.test(String(content || ""));
+}
+
+const TEXT_INPUT_TYPES = new Set([
+	"",
+	"text",
+	"search",
+	"email",
+	"url",
+	"tel",
+	"password",
+	"number",
+	"date",
+	"datetime-local",
+	"month",
+	"time",
+	"week",
+]);
+
+/**
+ * Whether the user is typing in a field inside the chat view other than the main
+ * composer (its text is the `input` draft check; being focused while EMPTY is the
+ * normal state after a send and must not block). Duck-typed so it is unit-testable
+ * without a DOM.
+ * @param {{tagName?: string, type?: string, isContentEditable?: boolean}|null} active document.activeElement
+ * @param {{contains: function}|null} root the chat view's root element
+ * @param {object|null} composer the main composer's own textarea
+ * @returns {boolean}
+ */
+export function focusInsideField(active, root, composer) {
+	if (!active || !root || active === composer || !root.contains(active)) return false;
+	if (active.isContentEditable) return true;
+	const tag = String(active.tagName || "").toUpperCase();
+	if (tag === "TEXTAREA") return true;
+	return tag === "INPUT" && TEXT_INPUT_TYPES.has(String(active.type || "").toLowerCase());
+}
+
+/**
+ * Whether a modal or dialog is open anywhere on the page (frappe-ui / headless-ui
+ * dialogs render role="dialog" with aria-modal, teleported outside the chat view).
+ * @param {{querySelector: function}|null} doc
+ * @returns {boolean}
+ */
+export function modalIsOpen(doc) {
+	return !!doc?.querySelector?.('[role="dialog"], [aria-modal="true"], dialog[open]');
+}
+
+/**
+ * Pure: what one parsed goto does in this tab right now.
+ *
+ * Dashboards: today's logic, unchanged - the card always, and the automatic
+ * redirect when the turn is live, did not error, was not stopped, and has no
+ * fired stamp. Nothing about the composer, the queue, or the tab matters.
+ *
+ * payment-calendar: the same, and also only when the user can open the page
+ * (canView), this tab sent the turn (ownTurn), nothing is half-typed or open
+ * (draft: composer text, an attachment, a recording, another field being typed
+ * in, or a dialog open), no turn of this tab is queued, and the same message has
+ * no other interactive block for the user to answer (interactive). canView false
+ * means the card's action is Dashboards (with the prompt) and nothing opens by
+ * itself. The calendar keeps no stamp: exactly-once is the ownership token
+ * ChatView consumes when it opens (so a replayed run:end finds none).
+ *
+ * @param {{page: string, prompt: string}|null} goto from parseGoto
+ * @param {{canView?: boolean, ownTurn?: boolean, draft?: boolean, queued?: boolean,
+ *   interactive?: boolean, live?: boolean, error?: boolean, stopped?: boolean,
+ *   stamp?: string|null}} [ctx]
+ * @returns {{card: boolean, autoOpen: boolean, action: "dashboards"|"payment-calendar"|null}}
+ */
+export function gotoDecision(goto, ctx = {}) {
+	if (!goto || !ALLOWED_PAGES.has(goto.page)) {
+		return { card: false, autoOpen: false, action: null };
+	}
+	const { canView, ownTurn, draft, queued, interactive, live, error, stopped, stamp } = ctx;
+	const settled = !!live && !error && !stopped && !stamp;
+	if (goto.page === PAYMENT_CALENDAR_PAGE) {
+		if (canView !== true) return { card: true, autoOpen: false, action: DASHBOARDS_PAGE };
+		return {
+			card: true,
+			autoOpen: settled && !!ownTurn && !draft && !queued && !interactive,
+			action: PAYMENT_CALENDAR_PAGE,
+		};
+	}
+	return { card: true, autoOpen: settled, action: DASHBOARDS_PAGE };
 }
 
 // ── closing the double-click race (jarvis#912 round 2) ──────────────────────

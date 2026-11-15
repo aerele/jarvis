@@ -1,7 +1,7 @@
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.exceptions import InvalidArgumentError
+from jarvis.exceptions import InvalidArgumentError, InvalidFieldValueError
 from jarvis.tools.create_doc import create_doc
 
 
@@ -89,3 +89,21 @@ class TestCreateDocBatch(FrappeTestCase):
 		docs = [{"doctype": "ToDo", "values": {"description": f"jarvis-batch-cap-{i}"}} for i in range(21)]
 		with self.assertRaises(InvalidArgumentError):
 			create_docs(docs)
+
+	def test_batch_with_one_sandbox_blocked_script_rolls_back_the_whole_batch(self):
+		with self.assertRaises(InvalidFieldValueError):
+			create_docs(
+				[
+					{"doctype": "ToDo", "values": {"description": "jarvis-batch-818-ok"}},
+					{
+						"doctype": "Server Script",
+						"values": {
+							"script_type": "DocType Event",
+							"reference_doctype": "ToDo",
+							"doctype_event": "Before Save",
+							"script": 'x = "{}".format(1)\n',
+						},
+					},
+				]
+			)
+		self.assertFalse(frappe.db.exists("ToDo", {"description": "jarvis-batch-818-ok"}))

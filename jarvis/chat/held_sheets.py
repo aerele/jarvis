@@ -41,7 +41,7 @@ from jarvis.chat.pending_actions._store import (
 	reseal_sheet,
 	rowcount,
 )
-from jarvis.exceptions import InvalidFieldValueError, JarvisError
+from jarvis.exceptions import InvalidFieldValueError, JarvisError, SandboxCodeError
 
 SHEET_TOOL = "file_box_sheet"
 SHEET_MAX_RECORDS = 250
@@ -645,6 +645,9 @@ def _try(record: dict, index: int, remap: dict) -> tuple | None:
 		raise
 	except _KNOWN as e:
 		frappe.db.rollback(save_point=sp)
+		# Sandbox code the model wrote (a blocked attribute) is only the model's to fix.
+		if isinstance(e, SandboxCodeError):
+			return "refused", e
 		# A value the field type check rejects (R2-3) is the record's own, like the
 		# ValidationError Frappe raised for it before: it tries once, then joins flagged.
 		if not isinstance(e, InvalidFieldValueError) and (

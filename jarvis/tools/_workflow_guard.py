@@ -76,6 +76,7 @@ from jarvis.exceptions import (
 from jarvis.tools import _custom_field_guard as cfg
 from jarvis.tools import _guarded_structure as gs
 from jarvis.tools._guarded_structure import CleanUp
+from jarvis.tools._sandbox_attrs import unsafe_attribute_errors
 
 WF = "Workflow"
 RISK_NEW = "workflow_new"
@@ -639,7 +640,9 @@ def _compiles(expression: str) -> str | None:
 		)
 	except Exception as e:
 		return strip_html(str(e)).strip() or type(e).__name__
-	return None
+	# A field read the sandbox blocks (``doc.format`` on a form with a ``format`` field)
+	# compiles, then fails for every user who opens the record.
+	return next(iter(unsafe_attribute_errors(code, mode="eval", subject="condition")), None)
 
 
 def _state_field_row(fieldname: str) -> dict:

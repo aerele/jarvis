@@ -381,6 +381,20 @@ class TestRotateRefused(JarvisSettingsSnapshot, FrappeTestCase):
 		post.assert_not_called()
 		self.assertIn("Token rotation is handled by Jarvis support.", str(ctx.exception))
 
+	def test_settings_form_onload_flags_a_stored_callback_key_without_exposing_it(self):
+		# The form hides "Rotate Agent Token" from this flag; the rotation always throws once a key is stored.
+		doc = frappe.get_doc("Jarvis Settings")
+		with patch("jarvis._plugin_auth._callback_key", return_value=KEY):
+			doc.onload()
+		self.assertIs(doc.get_onload("has_callback_key"), True)
+		self.assertNotIn(KEY, json.dumps(doc.get("__onload"), default=str))
+
+	def test_settings_form_onload_flag_is_false_without_a_callback_key(self):
+		doc = frappe.get_doc("Jarvis Settings")
+		with patch("jarvis._plugin_auth._callback_key", return_value=""):
+			doc.onload()
+		self.assertIs(doc.get_onload("has_callback_key"), False)
+
 
 class TestGuards(FrappeTestCase):
 	def test_session_creation_guard_needs_only_the_agent_url(self):

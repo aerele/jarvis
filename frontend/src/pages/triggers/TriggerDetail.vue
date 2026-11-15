@@ -26,7 +26,7 @@
 	>
 		<template #actions>
 			<Dropdown v-if="!isNew && caps.can_manage" :options="overflowOptions">
-				<Button icon="more-horizontal" variant="ghost" />
+				<Button icon="more-horizontal" variant="ghost" label="More actions" />
 			</Dropdown>
 			<Button
 				v-if="caps.can_manage"
@@ -42,7 +42,7 @@
 			<!-- 1. Trigger -->
 			<DocSection label="Trigger">
 				<div class="space-y-4">
-					<div>
+					<div data-testid="trigger-name">
 						<FormControl
 							type="text"
 							label="Name"
@@ -70,7 +70,7 @@
 						description="Off = the trigger stays saved but never fires."
 						:disabled="readOnly || saving"
 					/>
-					<div>
+					<div v-if="!isIntake">
 						<!-- hand-rolled label (Autocomplete has no label prop): mirror
 						     FormLabel's required recipe - red asterisk + sr-only text -->
 						<label class="mb-1.5 block text-xs text-ink-gray-5">
@@ -96,7 +96,7 @@
 						/>
 						<ErrorMessage :message="fieldErrors.target_doctype" class="mt-2" />
 					</div>
-					<div>
+					<div v-if="!isIntake">
 						<FormControl
 							type="select"
 							label="Event"
@@ -118,7 +118,7 @@
 			</DocSection>
 
 			<!-- 2. Condition -->
-			<DocSection label="Condition">
+			<DocSection v-if="!isIntake" label="Condition">
 				<div class="space-y-2">
 					<FormControl
 						type="textarea"
@@ -190,6 +190,14 @@
 						/>
 					</template>
 
+					<IntakeRuleFields
+						v-else-if="isIntake"
+						:form="form"
+						:disabled="readOnly || saving"
+						:read-only="readOnly"
+						@update="applyIntakePatch"
+					/>
+
 					<template v-else>
 						<FormControl
 							type="textarea"
@@ -228,11 +236,13 @@
 
 			<!-- 4. Recent activity (existing triggers only) -->
 			<DocSection v-if="!isNew" label="Recent activity">
-				<div v-if="recentRows.length" class="flex flex-col">
+				<div ref="recentEl" class="flex flex-col" data-testid="recent-block">
 					<button
 						v-for="(r, i) in recentRows"
-						:key="r.name"
-						class="flex w-full items-center gap-3 px-1 py-2 text-left hover:bg-surface-gray-1"
+						:key="r.name || 'row-' + i"
+						data-testid="recent-row"
+						:data-name="r.name"
+						class="flex w-full items-center gap-3 px-1 py-2 text-left hover:bg-surface-gray-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-3"
 						:class="i ? 'border-t' : ''"
 						@click="openActivityRow(r)"
 					>
@@ -251,21 +261,83 @@
 							</span>
 						</Tooltip>
 					</button>
-					<div class="pt-2">
-						<router-link
-							:to="{
-								name: 'TriggersPage',
-								query: { trigger: props.id },
-								hash: '#activity',
-							}"
-							class="text-sm text-ink-blue-link hover:underline"
-						>
-							View all
-						</router-link>
+
+					<!-- No rows yet: "Loading activity..." until the first answer, so a slow
+					     load never reads as "No activity yet". -->
+					<div
+						v-if="!recentRows.length && recentLoading && !recentError"
+						role="status"
+						class="text-sm text-ink-gray-5"
+					>
+						Loading activity...
 					</div>
-				</div>
-				<div v-else class="text-sm text-ink-gray-5">
-					No activity yet - runs appear here when the trigger fires.
+					<div
+						v-else-if="!recentRows.length && recentError"
+						class="flex flex-wrap items-center gap-3"
+					>
+						<!-- keyed on the failure count: a repeated failure is announced again -->
+						<span
+							:key="recentFailures"
+							ref="recentErrorEl"
+							tabindex="-1"
+							class="min-w-0 break-words rounded text-sm text-ink-red-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-outline-gray-3"
+							role="alert"
+							data-testid="recent-error"
+						>
+							{{ recentError }}
+						</span>
+						<Button
+							variant="subtle"
+							label="Try again"
+							:loading="recentLoading"
+							@click="retryRecent"
+						/>
+					</div>
+					<div
+						v-else-if="!recentRows.length && recentLoaded && !recentEnded"
+						ref="recentEmptyEl"
+						tabindex="-1"
+						class="rounded text-sm text-ink-gray-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-outline-gray-3"
+						data-testid="recent-empty"
+					>
+						{{ recentEmptyText }}
+					</div>
+
+					<!-- Always here, so the live region exists before its first text. -->
+					<div
+						class="flex flex-wrap items-center justify-between gap-3"
+						:class="recentRows.length || recentEnded ? 'pt-2' : ''"
+					>
+						<div
+							ref="recentCountEl"
+							tabindex="-1"
+							aria-live="polite"
+							class="min-w-0 rounded text-xs text-ink-gray-5 focus-visible:outline focus-visible:outline-2 focus-visible:outline-outline-gray-3"
+							data-testid="recent-count"
+						>
+							<div v-if="recentRows.length">{{ recentCountText }}</div>
+							<div v-if="recentEnded">Older runs are not listed here.</div>
+						</div>
+						<!-- A next page that failed is said here, where the user is looking. -->
+						<div class="flex min-w-0 items-center gap-3">
+							<span
+								v-if="recentMoreFailed"
+								:key="recentFailures"
+								class="min-w-0 break-words text-sm text-ink-red-4"
+								role="alert"
+							>
+								{{ recentError }}
+							</span>
+							<Button
+								v-if="recentHasMore"
+								class="shrink-0"
+								variant="subtle"
+								:label="recentMoreFailed ? 'Try again' : 'Load more'"
+								:loading="recentLoading"
+								@click="loadMoreRecent"
+							/>
+						</div>
+					</div>
 				</div>
 			</DocSection>
 		</template>
@@ -345,11 +417,11 @@
 // Trigger (name/description/enabled/DocType autocomplete/event select) ·
 // Condition (mono textarea + webhook-style examples + Test-condition dialog
 // via test_trigger_condition) · Action (Script/LLM segmented control; Script
-// gated on caps.scripts_enabled) · Recent activity (last 10 rows for this
-// trigger, dialog detail, View-all deep link that pre-filters #activity).
+// gated on caps.scripts_enabled) · Recent activity (this trigger's runs, the
+// last 10 first and "Load more" for older ones, dialog detail).
 // update_trigger receives ONLY the changed fields; create_trigger the full
 // known set. Non-admins read: every control disabled, no Save/overflow.
-import { ref, reactive, computed, watch, onMounted } from "vue";
+import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useRouter, onBeforeRouteLeave } from "vue-router";
 import {
 	Autocomplete,
@@ -368,9 +440,12 @@ import {
 import DocPage from "@/components/doc/DocPage.vue";
 import DocSection from "@/components/doc/DocSection.vue";
 import ActivityDetailDialog from "./ActivityDetailDialog.vue";
+import IntakeRuleFields from "./IntakeRuleFields.vue";
+import { emptySpec, parseSpec, serializeSpec } from "./intakeSpec";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { searchLink } from "@/api";
 import * as apiTriggers from "@/api/triggers";
+import { focusLost } from "@/composables/useAdminList";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 
 const props = defineProps({
@@ -380,7 +455,10 @@ const props = defineProps({
 
 const router = useRouter();
 
-const ACTION_TYPES = ["Script", "LLM"];
+const ACTION_TYPES = ["Script", "LLM", "Intake"];
+// An intake reads files, not doc events: its default daily limit is higher than an LLM trigger's.
+const INTAKE_DEFAULT_CAP = 100;
+const LLM_DEFAULT_CAP = 25;
 const STATUS_THEME = { Success: "green", Failed: "red", Blocked: "orange", Skipped: "gray" };
 
 // ── caps (deep-linkable page → its own probe) ────────────────────────────────
@@ -415,7 +493,20 @@ const form = reactive({
 	llm_instruction: "",
 	llm_daily_cap: 25,
 	llm_allow_lookups: 0,
+	intake_source: "Folder",
+	intake_folder: "",
+	intake_record_doctype: "",
+	intake_target_doctype: "",
+	intake_spec: emptySpec(),
+	intake_instructions: "",
+	allow_incomplete_drafts: 0,
+	intake_status_field: "",
+	intake_link_field: "",
+	intake_record_event: "File attached",
 });
+const isIntake = computed(() => form.action_type === "Intake");
+// Intake pieces report their edits as one patch ({key: value}).
+const applyIntakePatch = (patch) => Object.assign(form, patch);
 // Saved-state copy for the dirty compare - a ref, per MacroDetail's lesson
 // (the computed must track it while the initial load is in flight).
 const snapshot = ref(null);
@@ -483,8 +574,32 @@ const FIELDS = [
 	"llm_instruction",
 	"llm_daily_cap",
 	"llm_allow_lookups",
+	"intake_source",
+	"intake_folder",
+	"intake_record_doctype",
+	"intake_target_doctype",
+	"intake_spec",
+	"intake_instructions",
+	"allow_incomplete_drafts",
+	"intake_status_field",
+	"intake_link_field",
+	"intake_record_event",
 ];
+// What each kind sends: an intake has no event, condition, script or instruction, and the
+// other kinds have no intake settings (the server rejects nothing, but stray values would
+// look like config).
+const INTAKE_FIELDS = FIELDS.filter(
+	(f) => f.startsWith("intake_") || f === "allow_incomplete_drafts"
+);
+const COMMON_FIELDS = ["trigger_name", "description", "enabled", "action_type", "llm_daily_cap"];
+const KIND_FIELDS = computed(() =>
+	isIntake.value
+		? [...COMMON_FIELDS, ...INTAKE_FIELDS]
+		: FIELDS.filter((f) => !INTAKE_FIELDS.includes(f))
+);
 function normalized(f) {
+	if (f === "intake_spec") return serializeSpec(form.intake_spec);
+	if (f === "allow_incomplete_drafts") return form.allow_incomplete_drafts ? 1 : 0;
 	if (f === "enabled") return form.enabled ? 1 : 0;
 	if (f === "llm_allow_lookups") return form.llm_allow_lookups ? 1 : 0;
 	if (f === "llm_daily_cap") return Number(form.llm_daily_cap) || 0;
@@ -508,6 +623,12 @@ const docEventOptions = computed(() => {
 function setActionType(t) {
 	if (form.action_type === t) return;
 	form.action_type = t;
+	// swap the cap only while it still holds the other kind's untouched default
+	if (t === "Intake" && Number(form.llm_daily_cap) === LLM_DEFAULT_CAP)
+		form.llm_daily_cap = INTAKE_DEFAULT_CAP;
+	if (t !== "Intake" && Number(form.llm_daily_cap) === INTAKE_DEFAULT_CAP)
+		form.llm_daily_cap = LLM_DEFAULT_CAP;
+	if (t === "Intake") return;
 	// an event outside the LLM whitelist can't stay selected under LLM
 	if (form.doc_event && !docEventOptions.value.some((o) => o.value === form.doc_event)) {
 		const first = docEventOptions.value.find((o) => o.value);
@@ -541,6 +662,293 @@ function onDoctypePick(opt) {
 	form.target_doctype = opt && opt.value ? String(opt.value) : "";
 }
 
+// ── recent activity (existing triggers only) ─────────────────────────────────
+// The first page is 10 rows; "Load more" adds 20 at a time. The next page is
+// asked for by CURSOR: where the last answer started plus the rows it held (the
+// server's rows, before duplicates are dropped). Never by the count on screen:
+// runs made meanwhile push rows down, and a page of rows already shown would
+// then be asked for again, forever.
+// useAdminList's guards are copied (latest answer wins, no write after unmount,
+// a failed page keeps the rows, keyboard-only focus moves, the page-wide pointer
+// counter that cancels a focus move) but not its paging: it pages by the shown count.
+const RECENT_FIRST = 10;
+const RECENT_MORE = 20;
+// A Load more page that brings only rows already shown asks for the next page at once,
+// at most this many extra times per click.
+const RECENT_EXTRA_PAGES = 3;
+// A request that has not answered by then fails (a stuck request must not spin forever).
+const RECENT_TIMEOUT_MS = 30000;
+const RECENT_TOO_LONG = "Loading the activity took too long. Try again.";
+const recentRows = ref([]);
+// Flags of a loaded list - at most one of these three is true at a time:
+//   recentHasMore   the server has older runs and the button asks for them;
+//   recentEnded     (approximate list only) the scan limit stopped the list: older runs
+//                   exist but are not listed, and the count line says so;
+//   recentComplete  the server has no more: every run it lets this user see is shown.
+// All three are false before the first answer (loading, or failed: see recentError).
+// recentMoreFailed is true only together with a recentError (a failed Load more).
+const recentNextStart = ref(0);
+const recentHasMore = ref(false);
+const recentTotal = ref(0);
+// The answer is a non-manager's: its total is not known and its scan has a limit.
+const recentApprox = ref(false);
+// An approximate list that the scan limit ended: older runs exist but are not listed.
+const recentEnded = ref(false);
+// The server said it has no more runs after these (has_more false): the list is whole.
+const recentComplete = ref(false);
+const recentLoaded = ref(false);
+const recentLoading = ref(false);
+const recentError = ref("");
+// The failed load was a next page (Load more): its message goes beside that button.
+const recentMoreFailed = ref(false);
+const recentEl = ref(null);
+const recentCountEl = ref(null);
+const recentErrorEl = ref(null);
+const recentEmptyEl = ref(null);
+// Counts failed loads: the alert is keyed on it, so a repeated failure is announced again.
+const recentFailures = ref(0);
+let recentLatest = 0;
+let recentUnmounted = false;
+const recentTimers = new Set();
+
+// "Showing n so far" is the line of an approximate list that may still grow; when the
+// scan limit ends it (recentEnded), the same live region adds "Older runs are not listed here."
+const recentCountText = computed(() => {
+	const n = recentRows.value.length;
+	if (recentComplete.value) return `Showing all ${n}`;
+	if (!recentApprox.value && recentTotal.value > n)
+		return `Showing ${n} of ${recentTotal.value}`;
+	return `Showing ${n} so far`;
+});
+
+// A non-manager's list is approximate: when it is empty and whole, say what is true for
+// them (runs they may not view are not counted), not that the trigger never fired.
+const recentEmptyText = computed(() =>
+	recentApprox.value
+		? "No runs you can view yet."
+		: "No activity yet - runs appear here when the trigger fires."
+);
+
+function resetRecent() {
+	recentLatest++; // an answer still on its way is nobody's now
+	recentRows.value = [];
+	recentNextStart.value = 0;
+	recentHasMore.value = false;
+	recentTotal.value = 0;
+	recentApprox.value = false;
+	recentEnded.value = false;
+	recentComplete.value = false;
+	recentLoaded.value = false;
+	recentLoading.value = false;
+	recentError.value = "";
+	recentMoreFailed.value = false;
+	recentFailures.value = 0;
+}
+
+function recentArgs(start, pageLength) {
+	return {
+		filters: { trigger: props.id },
+		sort_field: "creation",
+		sort_dir: "desc",
+		start,
+		page_length: pageLength,
+	};
+}
+
+// An error whose message is shown as it is (not the server's words).
+const recentFailure = (text) => Object.assign(new Error(text), { recentText: text });
+
+// The answer of `promise`, or a failure after RECENT_TIMEOUT_MS. The race drops a late
+// answer: once the timer won, nobody listens to the request any more.
+function withRecentTimeout(promise) {
+	let timer;
+	const timeout = new Promise((_, reject) => {
+		timer = setTimeout(() => reject(recentFailure(RECENT_TOO_LONG)), RECENT_TIMEOUT_MS);
+		recentTimers.add(timer);
+	});
+	return Promise.race([promise, timeout]).finally(() => {
+		clearTimeout(timer);
+		recentTimers.delete(timer);
+	});
+}
+
+// The paging facts of an answer. `asked`: the page length that was asked for.
+function recentPageFacts(res, sentStart, asked) {
+	const got = (res.rows || []).length;
+	const start = typeof res.start === "number" ? res.start : sentStart;
+	const approx = !!res.approximate;
+	const more = res.has_more === true;
+	// Fewer rows than asked, with more behind them, can only be the scan limit of an
+	// approximate list (an exact one fills every page it has more after): stop here,
+	// so the user never clicks for nothing.
+	const ended = approx && more && got < asked;
+	return {
+		got,
+		nextStart: start + got,
+		total: Number(res.total) || 0,
+		approx,
+		ended,
+		// A page with no rows ends the list even when the server says there is more.
+		hasMore: more && got > 0 && !ended,
+		// Whole when the server says no more. Also whole when an exact list gets an empty
+		// page although it said more: the rows were deleted after the count, and nothing
+		// lies past the cursor. (An approximate list that ended says so in recentEnded.)
+		complete: !more || (got === 0 && !ended),
+	};
+}
+
+function applyRecentFacts(f) {
+	recentNextStart.value = f.nextStart;
+	recentTotal.value = f.total;
+	recentApprox.value = f.approx;
+	if (f.ended) recentEnded.value = true;
+	recentHasMore.value = f.hasMore;
+	recentComplete.value = f.complete;
+	recentError.value = "";
+	recentMoreFailed.value = false;
+	recentLoaded.value = true;
+}
+
+// One load: `merge(rows)` puts a page's rows in the list and returns how many it added;
+// `failText` is the message when the server gave none; `more`: the load is a Load more
+// (its failure is shown beside that button). `extraPages`: how often a page that added
+// nothing (rows already shown, more behind them) is followed at once by the next one.
+// The shown state (count line, flags) changes once, with the last page; the cursor moves
+// with each. Returns the load's number when its answer (or error) was kept, 0 when it was
+// dropped (another trigger, load or the page itself took over).
+async function runRecentLoad(start, asked, merge, failText, more, extraPages = 0) {
+	const mine = ++recentLatest;
+	const id = props.id;
+	const dropped = () => mine !== recentLatest || id !== props.id || recentUnmounted;
+	recentLoading.value = true;
+	let from = start;
+	try {
+		for (let extra = 0; ; extra++) {
+			const res = await withRecentTimeout(
+				apiTriggers.listActivityPage(recentArgs(from, asked))
+			);
+			if (dropped()) return 0;
+			// Nothing, or something that is not an answer: a failed load, never an empty list.
+			if (!res || typeof res !== "object" || Array.isArray(res))
+				throw recentFailure(failText);
+			const added = merge(res.rows || []);
+			const facts = recentPageFacts(res, from, asked);
+			if (facts.got > 0 && added === 0 && facts.hasMore && extra < extraPages) {
+				from = facts.nextStart;
+				recentNextStart.value = from;
+				continue;
+			}
+			applyRecentFacts(facts);
+			return mine;
+		}
+	} catch (e) {
+		if (dropped()) return 0;
+		console.warn("[TriggerDetail] activity load failed", { trigger: id, start: from }, e);
+		recentError.value = (e && e.recentText) || errMsg(e, failText);
+		recentMoreFailed.value = more;
+		recentFailures.value += 1;
+		return mine;
+	} finally {
+		if (mine === recentLatest) recentLoading.value = false;
+	}
+}
+
+const loadRecent = () =>
+	runRecentLoad(
+		0,
+		RECENT_FIRST,
+		(rows) => {
+			recentRows.value = rows;
+			return rows.length;
+		},
+		"Could not load the activity. Try again.",
+		false
+	);
+
+const pageMoreRecent = () =>
+	runRecentLoad(
+		recentNextStart.value,
+		RECENT_MORE,
+		(rows) => {
+			// Runs made meanwhile move rows down: a row seen twice is listed once. Rows
+			// without a name cannot be told apart: all of them are kept.
+			const named = (r) => r.name != null && r.name !== "";
+			const seen = new Set(recentRows.value.filter(named).map((r) => r.name));
+			const added = [];
+			for (const r of rows) {
+				if (named(r)) {
+					if (seen.has(r.name)) continue;
+					seen.add(r.name);
+				}
+				added.push(r);
+			}
+			recentRows.value = [...recentRows.value, ...added];
+			return added.length;
+		},
+		"Could not load more activity. Try again.",
+		true,
+		RECENT_EXTRA_PAGES
+	);
+
+// A button that is loading is disabled and the browser may take focus off it, so a
+// key press that started a load gets its focus put somewhere sensible after it.
+// Only for a key press (`event.detail` 0): a mouse click focuses the button too, and
+// moving focus after one is wrong for a mouse user. A pointer used anywhere on the
+// page while the page loads means the user went elsewhere: no move at all.
+let recentPointerUses = 0;
+const onRecentPointer = () => {
+	recentPointerUses += 1;
+};
+onMounted(() => document.addEventListener("pointerdown", onRecentPointer, true));
+onBeforeUnmount(() => {
+	document.removeEventListener("pointerdown", onRecentPointer, true);
+	recentUnmounted = true;
+	recentLatest++;
+	for (const t of recentTimers) clearTimeout(t);
+	recentTimers.clear();
+});
+
+// Runs `load` (loadRecent or pageMoreRecent) and, for a key press, puts focus where
+// `pick({ at, rows, before })` says once it has answered. `at`: the element that had
+// focus; `rows`: the row elements now; `before`: how many rows there were before the load.
+async function loadWithRecentFocus(event, load, pick) {
+	if (recentLoading.value) return;
+	const at = document.activeElement;
+	const byKey = !!event && typeof event.detail === "number" && event.detail === 0;
+	const mine = byKey && !!recentEl.value && recentEl.value.contains(at);
+	const pointerBefore = recentPointerUses;
+	const before = recentRows.value.length;
+	const kept = await load();
+	// 0: the answer was dropped (another trigger or load took over): nothing here is ours.
+	if (!kept || kept !== recentLatest || !mine || recentUnmounted) return;
+	if (recentPointerUses !== pointerBefore) return;
+	await nextTick();
+	if (kept !== recentLatest || recentUnmounted || !recentEl.value) return;
+	// The user moved focus themselves, or a dialog took it: leave it alone.
+	if ((!focusLost() && document.activeElement !== at) || activityOpen.value) return;
+	const rows = recentEl.value.querySelectorAll('[data-testid="recent-row"]');
+	const target = pick({ at, rows, before });
+	if (target && target.isConnected && !target.disabled) target.focus();
+}
+
+// Load more: the next Tab carries on down the list from the first row the page
+// brought; with none, stay on the button, or on the count line when it went away.
+const loadMoreRecent = (event) =>
+	loadWithRecentFocus(event, pageMoreRecent, ({ at, rows, before }) => {
+		if (rows.length > before) return rows[before];
+		return at && at.isConnected && !at.disabled ? at : recentCountEl.value;
+	});
+
+// Try again after a failed first load: the first row, the error line again, or the
+// line that says there is nothing.
+const retryRecent = (event) =>
+	loadWithRecentFocus(event, loadRecent, ({ at, rows }) => {
+		if (rows.length) return rows[0];
+		if (recentError.value) return recentErrorEl.value;
+		// No runs: the empty-state line, or the count line holding the end message.
+		return recentEmptyEl.value || recentCountEl.value;
+	});
+
 // ── load / seed ───────────────────────────────────────────────────────────────
 function seed(data) {
 	form.trigger_name = data.trigger_name || "";
@@ -549,11 +957,21 @@ function seed(data) {
 	form.target_doctype = data.target_doctype || "";
 	form.doc_event = data.doc_event || "";
 	form.condition = data.condition || "";
-	form.action_type = data.action_type === "Script" ? "Script" : "LLM";
+	form.action_type = ["Script", "Intake"].includes(data.action_type) ? data.action_type : "LLM";
 	form.script_body = data.script_body || "";
 	form.llm_instruction = data.llm_instruction || "";
 	form.llm_daily_cap = data.llm_daily_cap == null ? 25 : data.llm_daily_cap;
 	form.llm_allow_lookups = data.llm_allow_lookups ? 1 : 0;
+	form.intake_source = data.intake_source || "Folder";
+	form.intake_folder = data.intake_folder || "";
+	form.intake_record_doctype = data.intake_record_doctype || "";
+	form.intake_target_doctype = data.intake_target_doctype || "";
+	form.intake_spec = parseSpec(data.intake_spec);
+	form.intake_instructions = data.intake_instructions || "";
+	form.allow_incomplete_drafts = data.allow_incomplete_drafts ? 1 : 0;
+	form.intake_status_field = data.intake_status_field || "";
+	form.intake_link_field = data.intake_link_field || "";
+	form.intake_record_event = data.intake_record_event || "File attached";
 	const snap = {};
 	for (const f of FIELDS) snap[f] = normalized(f);
 	snapshot.value = snap;
@@ -561,23 +979,40 @@ function seed(data) {
 
 let bypassGuard = false;
 
+// Only the newest init may seed the form or clear `loading`: an older one that answers
+// late (the page moved to another trigger, or to New) is nobody's.
+let initSeq = 0;
+
 async function init() {
+	const mine = ++initSeq;
 	bypassGuard = false;
 	loadError.value = "";
+	// Before the first await: the trigger left must not keep its rows on screen
+	// while this one loads (or when it fails to), and its late answers are dropped.
+	resetRecent();
 	if (props.isNew) {
+		loading.value = false; // an older init may still be loading; it will not clear this
 		seed({ enabled: 1, action_type: "LLM", llm_daily_cap: 25 });
 		return;
 	}
-	if (!props.id) return;
+	if (!props.id) {
+		loading.value = false;
+		return;
+	}
 	loading.value = true;
+	const id = props.id;
+	// A newer init took over, or the props moved on before the watcher ran.
+	const stale = () => mine !== initSeq || props.id !== id || props.isNew;
 	try {
-		const full = await apiTriggers.getTrigger(props.id);
+		const full = await apiTriggers.getTrigger(id);
+		if (stale()) return;
 		seed(full || {});
 		loadRecent();
 	} catch (e) {
+		if (stale()) return;
 		loadError.value = errMsg(e);
 	} finally {
-		loading.value = false;
+		if (mine === initSeq) loading.value = false;
 	}
 }
 
@@ -604,8 +1039,9 @@ async function save() {
 	fieldErrors.trigger_name = String(form.trigger_name || "").trim()
 		? ""
 		: "Give the trigger a name.";
-	fieldErrors.target_doctype = form.target_doctype ? "" : "Pick a DocType.";
-	fieldErrors.doc_event = form.doc_event ? "" : "Pick an event.";
+	// an intake has no event DocType or event: its own pickers carry the server's messages
+	fieldErrors.target_doctype = isIntake.value || form.target_doctype ? "" : "Pick a DocType.";
+	fieldErrors.doc_event = isIntake.value || form.doc_event ? "" : "Pick an event.";
 	const missing = [
 		fieldErrors.trigger_name && "Name",
 		fieldErrors.target_doctype && "DocType",
@@ -621,7 +1057,7 @@ async function save() {
 	try {
 		if (props.isNew) {
 			const payload = {};
-			for (const f of FIELDS) payload[f] = normalized(f);
+			for (const f of KIND_FIELDS.value) payload[f] = normalized(f);
 			payload.trigger_name = payload.trigger_name.trim();
 			const full = (await apiTriggers.createTrigger(payload)) || {};
 			toast.success("Trigger created");
@@ -630,7 +1066,7 @@ async function save() {
 			else router.push({ name: "TriggersPage" });
 		} else {
 			const payload = {};
-			for (const f of FIELDS) {
+			for (const f of KIND_FIELDS.value) {
 				const v = normalized(f);
 				if (v !== snapshot.value[f])
 					payload[f] = f === "trigger_name" ? String(v).trim() : v;
@@ -645,6 +1081,11 @@ async function save() {
 		toast.error(errHtml(e));
 	} finally {
 		saving.value = false;
+		// Save is disabled while it runs and after it, so it drops focus: land on the name field
+		// (when focus fell to <body>) instead of leaving a keyboard user at the top of the page.
+		await nextTick();
+		if (!document.activeElement || document.activeElement === document.body)
+			document.querySelector('[data-testid="trigger-name"] input')?.focus();
 	}
 }
 
@@ -705,24 +1146,6 @@ async function runTest() {
 		testResult.value = { valid: false, error: errMsg(e) };
 	} finally {
 		testing.value = false;
-	}
-}
-
-// ── recent activity (existing triggers only) ─────────────────────────────────
-const recentRows = ref([]);
-async function loadRecent() {
-	try {
-		const res =
-			(await apiTriggers.listActivityPage({
-				filters: { trigger: props.id },
-				sort_field: "creation",
-				sort_dir: "desc",
-				start: 0,
-				page_length: 10,
-			})) || {};
-		recentRows.value = res.rows || [];
-	} catch (e) {
-		// best-effort block; the Activity tab is the full surface
 	}
 }
 

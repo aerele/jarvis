@@ -42,8 +42,15 @@ def parse_action(content: str | None) -> dict | None:
 		return None
 	if not isinstance(a, dict) or (a.get("kind") or "doc") != "doc" or not a.get("doctype"):
 		return None
-	if (a.get("verb") or "create") not in ("create", "update"):
+	raw_verb = a.get("verb") or "create"
+	if not isinstance(raw_verb, str):
 		return None
+	# Clients lower-case and trim the verb, so the stored block must agree with them.
+	verb = raw_verb.strip().lower()
+	if verb not in ("create", "update"):
+		return None
+	if "verb" in a:
+		a["verb"] = verb
 	return a
 
 

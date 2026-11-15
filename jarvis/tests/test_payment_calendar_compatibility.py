@@ -34,8 +34,12 @@ class TestPaymentCalendarCompatibility(TestCase):
 			"da22739f601983c4070b44a73bdefb683286145aefc89c2374f684aed32bd0f3",
 			profiles["16"].payment_schedule_hashes,
 		)
+		self.assertIn(
+			"fb85c419791fe15830f0d5794782897914a4946ef75c0c90972c65145ce07a77",
+			profiles["15"].payment_schedule_hashes,
+		)
 		self.assertEqual(len(profiles["16"].payment_schedule_hashes), 2)
-		self.assertEqual(len(profiles["15"].payment_schedule_hashes), 1)
+		self.assertEqual(len(profiles["15"].payment_schedule_hashes), 2)
 
 	def test_matching_supported_framework_pairs_reach_the_allocation_contract(self):
 		for major in ("15", "16"):

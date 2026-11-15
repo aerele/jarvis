@@ -300,12 +300,14 @@ class TestReceivablesReview(FrappeTestCase):
 				patch.object(
 					frappe.db,
 					"get_value",
-					side_effect=lambda doctype, *args, **kwargs: run
-					if doctype == writeback.RUN
-					else {
-						"rule_tokens": json.dumps([review.TOKEN]),
-						"doctypes_required": '["Sales Invoice"]',
-					},
+					side_effect=lambda doctype, *args, **kwargs: (
+						run
+						if doctype == writeback.RUN
+						else {
+							"rule_tokens": json.dumps([review.TOKEN]),
+							"doctypes_required": '["Sales Invoice"]',
+						}
+					),
 				),
 				patch.object(frappe.db, "set_value"),
 				patch.object(
@@ -519,9 +521,11 @@ class TestReceivablesReview(FrappeTestCase):
 			patch.object(
 				frappe.db,
 				"get_value",
-				side_effect=lambda doctype, *args, **kwargs: run
-				if doctype == writeback.RUN
-				else {"rule_tokens": json.dumps([review.TOKEN]), "doctypes_required": '["Sales Invoice"]'},
+				side_effect=lambda doctype, *args, **kwargs: (
+					run
+					if doctype == writeback.RUN
+					else {"rule_tokens": json.dumps([review.TOKEN]), "doctypes_required": '["Sales Invoice"]'}
+				),
 			),
 			patch.object(
 				frappe, "get_doc", side_effect=lambda doctype, name: run if doctype == writeback.RUN else inst

@@ -1,10 +1,8 @@
-"""Bundled fallback for the Aerele LLM preset catalog. Returned only when admin
-is unreachable AND the Redis cache is empty, so onboarding never hard-fails
-(spec L7). Keys/model IDs MUST match the admin seed (Plan 1). NO secrets."""
+"""Test fixture: a copy of the admin preset catalog (see model_catalog.py)."""
 
 from __future__ import annotations
 
-BUNDLED_PRESET_CATALOG: list[dict] = [
+PRESET_CATALOG: list[dict] = [
 	{
 		"key": "openai-resilient",
 		"label": "OpenAI — resilient",

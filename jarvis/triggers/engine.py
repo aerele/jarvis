@@ -26,12 +26,14 @@ no DB query, no imports.
 
 from __future__ import annotations
 
+import re
 import time
 
 import frappe
 from frappe.utils import cint
 
 from jarvis import compat
+from jarvis.tools._sandbox_attrs import runtime_hint
 
 TRIGGER = "Jarvis Trigger"
 ACTIVITY = "Jarvis Trigger Activity"
@@ -106,6 +108,27 @@ _SNAPSHOT_CHAR_CAP = 12000
 _SUMMARY_CHAR_CAP = 200
 _DETAIL_CHAR_CAP = 20000
 
+# Mirrors the message of frappe/utils/safe_exec.py ``_validate_attribute_read``
+# (``f"{name} is an unsafe attribute"``). If Frappe rewords it this must change too;
+# test_real_sandbox_error_gets_the_hint runs the real sandbox to catch that.
+_UNSAFE_ATTR_RE = re.compile(r"(\w+) is an unsafe attribute")
+
+
+def _error_summary(prefix: str, e: BaseException) -> str:
+	"""Activity summary for a Failed row: the exception CLASS only.
+
+	The summary is readable and LIKE-searchable by non-managers who can read the
+	target doc, and raw exception text can carry record values (e.g.
+	``KeyError(<value>)``). The text goes to ``detail`` (managers only). One
+	fixed hint is added for the sandbox's blocked ``.format`` / ``.format_map``
+	(#818); it is built from a constant, never from the exception text."""
+	hint = ""
+	if isinstance(e, SyntaxError):
+		m = _UNSAFE_ATTR_RE.fullmatch(str(e))
+		if m:
+			hint = runtime_hint(m.group(1)) or ""
+	return f"{prefix}: {type(e).__name__}{hint} (save not blocked)"[:_SUMMARY_CHAR_CAP]
+
 
 # The safe ``frappe.utils`` namespace exposed to conditions is a stateless bag
 # of function refs (SAFE_DATA_UTILS); build it once per process rather than
@@ -134,7 +157,8 @@ def _build_triggers_map() -> dict:
 	"""{doctype: {event: [row dicts]}} over all ENABLED Jarvis Trigger rows."""
 	rows = frappe.get_all(
 		TRIGGER,
-		filters={"enabled": 1},
+		# Intake rows run from uploads, never from doc events.
+		filters={"enabled": 1, "action_type": ["!=", "Intake"]},
 		fields=[
 			"name",
 			"trigger_name",
@@ -237,7 +261,7 @@ def dispatch(doc, method: str | None = None) -> None:
 				_record_activity(
 					_base_fields(row, doc, method),
 					status="Failed",
-					summary=f"condition error: {e}",
+					summary=_error_summary("condition error", e),
 					detail=frappe.get_traceback(),
 				)
 				continue
@@ -318,15 +342,15 @@ def _run_script_action(row: dict, doc, method: str, depth: int) -> None:
 		_record_activity(
 			base,
 			status="Failed",
-			summary="script error (save not blocked)",
+			summary=_error_summary("script error", e),
 			detail=frappe.get_traceback(),
 			duration_ms=duration_ms,
 		)
-	except Exception:
+	except Exception as e:
 		_record_activity(
 			base,
 			status="Failed",
-			summary="script error (save not blocked)",
+			summary=_error_summary("script error", e),
 			detail=frappe.get_traceback(),
 			duration_ms=int((time.monotonic() - t0) * 1000),
 		)
@@ -395,9 +419,9 @@ def _llm_cap_reached(row: dict) -> bool:
 	one marker. Also True once today's queue budget (cap + 1 queued, #1563) is
 	used up, so a bulk insert stops paying the snapshot cost. Never raises."""
 	try:
-		from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP, daily_count, queued_count
+		from jarvis.triggers.llm_action import DEFAULT_DAILY_CAP, daily_count, queued_count
 
-		cap = _llm_cap(row, _DEFAULT_DAILY_CAP)
+		cap = _llm_cap(row, DEFAULT_DAILY_CAP)
 		return daily_count(row.get("name")) > cap or queued_count(row.get("name")) > cap
 	except Exception:
 		return False
@@ -410,7 +434,7 @@ def _llm_cap(row: dict, default: int) -> int:
 def _queue_llm_action(row: dict, doc, method: str) -> None:
 	if _llm_cap_reached(row):
 		return
-	from jarvis.triggers.llm_action import _DEFAULT_DAILY_CAP
+	from jarvis.triggers.llm_action import DEFAULT_DAILY_CAP
 
 	if getattr(frappe.local, "_jarvis_trigger_llm_queue", None) is None:
 		frappe.local._jarvis_trigger_llm_queue = []
@@ -424,7 +448,7 @@ def _queue_llm_action(row: dict, doc, method: str) -> None:
 			event=method,
 			snapshot_json=_snapshot_json(doc),
 			fired_by=frappe.session.user,
-			cap=_llm_cap(row, _DEFAULT_DAILY_CAP),
+			cap=_llm_cap(row, DEFAULT_DAILY_CAP),
 		)
 	)
 
