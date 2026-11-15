@@ -2,7 +2,8 @@
 import { computed, ref, watch } from "vue";
 import * as api from "../api";
 import { agentName } from "@/branding";
-import { cardTableRemovals, cardTableSummary, cardTableValues } from "../lib/cardTables";
+import { cardTableRemovals, cardTableValues } from "../lib/cardTables";
+import { actionCardView } from "../lib/actionCardView";
 import { parkedNoteOf } from "@shared/lib/draftParked.js";
 import { draftFailureOf } from "@shared/lib/draftFailure.js";
 
@@ -17,7 +18,8 @@ import { draftFailureOf } from "@shared/lib/draftFailure.js";
 // tell Jarvis, not to hand-edit a form with a thumb — so the card offers Apply,
 // Cancel, and the truth about what it is going to do.
 const props = defineProps({
-	action: { type: Object, required: true },
+	// null when the block could not be read: the card then shows the error view.
+	action: { type: Object, default: null },
 	conversation: { type: String, required: true },
 	// Set when this draft already became a gated confirmation card (sensitive
 	// configuration): it shows as waiting and can't be applied again.
@@ -50,32 +52,13 @@ watch(
 	}
 );
 
-const isEmail = computed(() => props.action.kind === "email");
-const verb = computed(() => String(props.action.verb || "").toLowerCase());
-const isWrite = computed(() => verb.value === "create" || verb.value === "update");
-const heading = computed(
-	() =>
-		props.action.title ||
-		`${verb.value === "create" ? "Create" : "Update"} ${props.action.doctype || "record"}`
-);
-
-// Child tables show as one summary line each (cardTableSummary), and the proposed
-// rows are applied as-is (cardTableValues): the server edits named rows in place and
-// refuses a nameless table on a document that already has rows. An update that
-// would delete saved rows is refused here (cardTableRemovals): the phone cannot
-// show which rows those are, so it never removes them (CR-3).
-const tableLines = computed(() => cardTableSummary(props.action));
-const invalid = computed(() => {
-	if (!isWrite.value) return "";
-	if (Array.isArray(props.action.docs))
-		return `This draft carries a \`docs\` batch, which is a create_doc payload rather than a card. Ask ${agentName} to apply them as a batch.`;
-	if (verb.value === "create" && !(props.action.fields || []).length && !tableLines.value.length)
-		return "This draft has no fields to show.";
-	return "";
-});
+// One view: an email, a write, or an error. Never a throw, so never a blank card.
+const view = computed(() => actionCardView(props.action, agentName));
+const invalid = computed(() => (view.value.kind === "write" ? view.value.invalid : ""));
 
 async function apply() {
-	if (state.value === "busy") return;
+	const v = view.value;
+	if (v.kind !== "write" || state.value === "busy") return;
 	state.value = "busy";
 	error.value = "";
 	try {
@@ -97,11 +80,16 @@ async function apply() {
 
 		const values = {};
 		const unmapped = [];
-		for (const f of props.action.fields || []) {
+		for (const f of v.fields) {
 			const fieldname = byLabel.get(f.label.toLowerCase());
 			if (fieldname) values[fieldname] = f.value;
 			else unmapped.push(f.label);
 		}
+		// Child tables show as one summary line each (view.tableLines), and the proposed
+		// rows are applied as-is (cardTableValues): the server edits named rows in place
+		// and refuses a nameless table on a document that already has rows. An update
+		// that would delete saved rows is refused below (cardTableRemovals): the phone
+		// cannot show which rows those are, so it never removes them (CR-3).
 		try {
 			Object.assign(values, cardTableValues(props.action, meta));
 		} catch (e) {
@@ -109,7 +97,7 @@ async function apply() {
 			state.value = "review";
 			return;
 		}
-		if (verb.value === "update" && (props.action.tables || []).length) {
+		if (v.verb === "update" && (props.action.tables || []).length) {
 			const saved = await api.loadDoc(props.action.doctype, props.action.name || "");
 			const lost = cardTableRemovals(props.action, saved?.tables);
 			if (lost.length) {
@@ -136,7 +124,7 @@ async function apply() {
 		}
 
 		const r = await api.applyAction({
-			verb: verb.value,
+			verb: v.verb,
 			doctype: props.action.doctype,
 			name: props.action.name || "",
 			values,
@@ -186,7 +174,7 @@ async function apply() {
 
 async function copyBody() {
 	try {
-		await navigator.clipboard.writeText(props.action.body || "");
+		await navigator.clipboard.writeText((props.action && props.action.body) || "");
 	} catch {
 		/* clipboard blocked — nothing useful to say about it */
 	}
@@ -196,7 +184,7 @@ async function copyBody() {
 <template>
 	<!-- email drafts are a read-only preview: sending is a gated write and its
 	     confirmation arrives separately as an action:pending card. -->
-	<div v-if="isEmail" class="jv-action">
+	<div v-if="view.kind === 'email'" class="jv-action">
 		<div class="jv-action-head">
 			<svg
 				viewBox="0 0 24 24"
@@ -215,19 +203,23 @@ async function copyBody() {
 		</div>
 		<div class="jv-action-body">
 			<div class="jv-field">
-				<span>To</span><strong>{{ props.action.to }}</strong>
+				<span>To</span><strong>{{ view.to }}</strong>
 			</div>
 			<div class="jv-field">
-				<span>Subject</span><strong>{{ props.action.subject }}</strong>
+				<span>Subject</span><strong>{{ view.subject }}</strong>
 			</div>
-			<pre class="jv-email-body">{{ props.action.body }}</pre>
+			<pre class="jv-email-body">{{ view.body }}</pre>
 		</div>
 		<div class="jv-action-foot">
 			<button class="jv-btn is-ghost" @click="copyBody">Copy</button>
 		</div>
 	</div>
 
-	<div v-else-if="isWrite" class="jv-action" :class="{ 'is-done': state === 'done' }">
+	<div
+		v-else-if="view.kind === 'write'"
+		class="jv-action"
+		:class="{ 'is-done': state === 'done' }"
+	>
 		<div class="jv-action-head">
 			<svg
 				viewBox="0 0 24 24"
@@ -242,16 +234,16 @@ async function copyBody() {
 				<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
 				<path d="M14 2v6h6" />
 			</svg>
-			<span class="jv-action-title">{{ heading }}</span>
-			<span class="jv-action-tag">{{ props.action.doctype }}</span>
+			<span class="jv-action-title">{{ view.heading }}</span>
+			<span class="jv-action-tag">{{ view.doctype }}</span>
 		</div>
 
 		<div class="jv-action-body">
-			<div v-for="(f, i) in props.action.fields" :key="i" class="jv-field">
+			<div v-for="(f, i) in view.fields" :key="i" class="jv-field">
 				<span>{{ f.label }}</span>
 				<strong>{{ f.value || "-" }}</strong>
 			</div>
-			<div v-for="t in tableLines" :key="`t-${t.label}`" class="jv-field">
+			<div v-for="t in view.tableLines" :key="`t-${t.label}`" class="jv-field">
 				<span>{{ t.label }}</span>
 				<strong>{{ t.value }}</strong>
 			</div>
@@ -283,7 +275,8 @@ async function copyBody() {
 			</svg>
 			<template v-if="note">{{ note }}</template>
 			<template v-else>
-				{{ verb === "create" ? "Created" : "Updated" }}{{ applied ? ` ${applied}` : "" }}
+				{{ view.verb === "create" ? "Created" : "Updated"
+				}}{{ applied ? ` ${applied}` : "" }}
 			</template>
 		</div>
 
@@ -301,9 +294,13 @@ async function copyBody() {
 				@click="apply"
 			>
 				<span v-if="state === 'busy'" class="jv-spinner" />
-				<span v-else>{{ verb === "create" ? "Create" : "Save" }}</span>
+				<span v-else>{{ view.verb === "create" ? "Create" : "Save" }}</span>
 			</button>
 		</div>
+	</div>
+
+	<div v-else-if="view.kind === 'error'" class="jv-action">
+		<div class="jv-action-err">{{ view.message }}</div>
 	</div>
 </template>
 

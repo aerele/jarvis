@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
 
-import { normaliseAction } from "./chatAction";
+import { actionBlockState, normaliseAction } from "./chatAction";
 
 /**
  * The regression this module exists for: a jarvis-action block missing `kind`
@@ -76,15 +76,34 @@ describe("normaliseAction", () => {
 		expect(a.tables).toEqual([{ fieldname: "items", rows: [{ item_code: "X", qty: 2 }] }]);
 	});
 
-	it("drops a table whose rows cannot be read as a list rather than guessing", () => {
-		// A half-populated grid the user confirms believing it is the full set is
-		// worse than no grid at all.
+	it("marks a table whose rows cannot be read as a list unreadable, never drops it quietly", () => {
+		// A card that hid the bad table would let the user confirm believing the
+		// grid was the full set. The client shows its error view instead.
 		const a = normaliseAction({
 			verb: "create",
 			doctype: "Purchase Order",
 			tables: { items: { nonsense: true }, taxes: { rows: [{ rate: 18 }] } },
 		});
-		expect(a.tables).toEqual([{ fieldname: "taxes", rows: [{ rate: 18 }] }]);
+		expect(a.unreadable).toBe(true);
+		expect(Array.isArray(a.tables)).toBe(true);
+	});
+
+	it("marks a non-object tables value and non-object fields items unreadable", () => {
+		const t = normaliseAction({ verb: "create", doctype: "X", tables: "items" });
+		expect(t.unreadable).toBe(true);
+		expect(t.tables).toEqual([]);
+		const f = normaliseAction({
+			verb: "create",
+			doctype: "X",
+			fields: [null, { label: "a", value: 1 }],
+		});
+		expect(f.unreadable).toBe(true);
+		expect(f.fields).toEqual([{ label: "a", value: 1 }]);
+	});
+
+	it("lower-cases and trims the verb, and leaves a missing one missing", () => {
+		expect(normaliseAction({ doctype: "X", verb: " Create " }).verb).toBe("create");
+		expect(normaliseAction({ doctype: "X" }).verb).toBeUndefined();
 	});
 
 	it("normalises the second stranded block (Purchase Order, object fields AND tables)", () => {
@@ -144,6 +163,17 @@ describe("normaliseAction", () => {
 	});
 });
 
+describe("actionBlockState", () => {
+	const wrap = (b) => "x\n```jarvis-action\n" + b + "\n```";
+	it("separates none, ok and bad", () => {
+		expect(actionBlockState("prose")).toBe("none");
+		expect(actionBlockState('x\n```jarvis-action\n{"a"')).toBe("none");
+		expect(actionBlockState(wrap('{"a":1}'))).toBe("ok");
+		expect(actionBlockState(wrap("[1]"))).toBe("bad");
+		expect(actionBlockState(wrap('{"a"'))).toBe("bad");
+	});
+});
+
 describe("the two gates that disagreed stay mirrored", () => {
 	const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
 
@@ -157,6 +187,20 @@ describe("the two gates that disagreed stay mirrored", () => {
 		expect(src).not.toContain(
 			'if (!(a && a.kind === "doc" && (a.verb === "create" || a.verb === "update" || !a.verb)))'
 		);
+	});
+
+	it("a draft block error replaces the draft card and never renders beside it", () => {
+		// The live draft is switched off whenever the error text is set ...
+		expect(src).toContain("_cardMessage.value && !draftBlockErrorText.value");
+		// ... the error alert renders on that same text ...
+		expect(src).toMatch(/v-if="\s*draftBlockErrorText &&/);
+		expect(src).toContain("<span>{{ draftBlockErrorText }}</span>");
+		// ... and the summary card is the next link of the SAME chain, so the two
+		// can never both draw.
+		const err = src.indexOf("<span>{{ draftBlockErrorText }}</span>");
+		const head = src.indexOf('<template v-else-if="actionFor === m.name && activeAction">');
+		expect(head).toBeGreaterThan(err);
+		expect(src.slice(err, head)).not.toMatch(/<template v-if=|<div v-if=/);
 	});
 
 	it("never dumps raw dry-run JSON into a confirmation card body", () => {

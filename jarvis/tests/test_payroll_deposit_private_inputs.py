@@ -952,9 +952,9 @@ class TestPayrollDepositWritebackClaim(TestCase):
 				patch.object(
 					frappe,
 					"get_doc",
-					side_effect=lambda doctype, _name: inst
-					if doctype == "Jarvis Agent Installation"
-					else run_doc,
+					side_effect=lambda doctype, _name: (
+						inst if doctype == "Jarvis Agent Installation" else run_doc
+					),
 				),
 				patch("jarvis.chat.agent_runs.record_delegate_run") as persist,
 				self.assertRaises(InvalidArgumentError),
@@ -1020,9 +1020,9 @@ class TestPayrollDepositWritebackClaim(TestCase):
 				patch.object(
 					frappe,
 					"get_doc",
-					side_effect=lambda doctype, _name: inst
-					if doctype == "Jarvis Agent Installation"
-					else run_doc,
+					side_effect=lambda doctype, _name: (
+						inst if doctype == "Jarvis Agent Installation" else run_doc
+					),
 				),
 				patch("jarvis.chat.operator_review.backend", return_value=None),
 				patch("jarvis.chat.agent_runs.record_delegate_run", return_value=final) as persist,

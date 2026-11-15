@@ -247,8 +247,12 @@ describe("IntakeReviewDetail", () => {
 		const w = mountWith([item()]);
 		const photo = w.find('[data-testid="intake-photo"]');
 		expect(photo.classes()).toEqual(
-			expect.arrayContaining(["sticky", "top-0", "lg:self-start"])
+			expect.arrayContaining(["lg:sticky", "lg:top-0", "lg:self-start"])
 		);
+		// below lg the photo is a normal block: no pinned photo over the list rail or the keyboard
+		expect(photo.classes()).not.toContain("sticky");
+		expect(photo.classes()).not.toContain("top-0");
+		expect(photo.classes()).not.toContain("z-10");
 		expect(w.find("[aria-busy]").classes().join(" ")).toContain("lg:grid-cols-");
 		// the values come before "What was read" so the first value sits beside the photo
 		const html = w.html();
@@ -272,6 +276,19 @@ describe("IntakeReviewDetail", () => {
 		expect(link.attributes("href")).toBe("/private/files/a.pdf");
 		expect(link.find("button").exists()).toBe(false);
 		expect(link.text()).toContain("a.pdf");
+	});
+
+	it("truncates a long file name, with the full name in the title", () => {
+		const name = "x".repeat(200) + ".pdf";
+		const w = mountWith([item()], {
+			file: { file_url: "/private/files/a.pdf", file_name: name, is_image: false },
+		});
+		const link = w.find('[data-testid="intake-photo"] a');
+		expect(link.classes()).toEqual(expect.arrayContaining(["min-w-0", "max-w-full"]));
+		expect(link.attributes("title")).toBe(name);
+		const label = link.find("span");
+		expect(label.classes()).toEqual(expect.arrayContaining(["min-w-0", "truncate"]));
+		expect(label.text()).toBe(name);
 	});
 
 	it("shows the server's refusal and stays open", async () => {

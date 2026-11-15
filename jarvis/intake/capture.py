@@ -9,7 +9,7 @@ NEVER raise: a failure here may not break the user's upload.
 """
 
 import frappe
-from frappe.utils import cint
+from frappe.utils import cint, get_datetime
 
 from jarvis import compat
 from jarvis.intake import guards, notify
@@ -47,8 +47,12 @@ _RULE_FIELDS = (
 	"intake_source",
 	"intake_folder",
 	"intake_record_doctype",
+	"intake_record_event",
 	"intake_target_doctype",
+	"creation",
 )
+# A Record rule's "Run when" values. An empty one (a rule saved before the field) is the first.
+EVENT_FILE, EVENT_INSERT, EVENT_SUBMIT = "File attached", "After Insert", "On Submit"
 
 
 def _delete_cache_key() -> None:
@@ -157,25 +161,44 @@ def _capture(doc, event: str, check_changes: bool) -> None:
 			pass
 
 
+def record_event(rule) -> str:
+	"""A Record rule's "Run when" (an empty value, a rule saved before the field, is the first)."""
+	return rule.get("intake_record_event") or EVENT_FILE
+
+
 def on_record_save(doc, method=None) -> None:
 	"""``doc_events "*"`` on_update: a Record rule also captures files that Frappe bound to
 	the record through an Attach or Attach Image field. Those are bound with a plain DB
 	write, so no File save fires; this runs after Frappe's own on_update hook has bound them.
-	Costs one cached-map lookup for a doctype no Record rule watches."""
+	"File attached" rules read what this save bound; "After Insert" rules read what the
+	insert request bound (nothing on a later save). Costs one cached-map lookup for a
+	doctype no Record rule watches."""
+	events = {EVENT_FILE, EVENT_INSERT} if doc.flags.in_insert else {EVENT_FILE}
+	_capture_record(doc, events, "on_update", since_save=True)
+
+
+def on_record_submit(doc, method=None) -> None:
+	"""``doc_events "*"`` on_submit: "On Submit" rules read every attachment of the record
+	that has no row for the rule yet (never at upload or on a later save)."""
+	_capture_record(doc, {EVENT_SUBMIT}, "on_submit", since_save=False)
+
+
+def _capture_record(doc, events: set, event: str, since_save: bool) -> None:
 	try:
 		# A rule's own save must not rebuild the map it just busted.
 		if _skip_context() or doc.doctype in ("File", "Jarvis Trigger"):
 			return
-		rules = intake_map()["record"].get(doc.doctype)
+		rules = [r for r in intake_map()["record"].get(doc.doctype, []) if record_event(r) in events]
 		user = frappe.session.user
 		if not rules or not doc.name or not user or user == "Guest" or not guards.is_desk_user(user):
 			return
-		since = _bound_since(doc)
-		if since is False:
-			return
 		filters = {"attached_to_doctype": doc.doctype, "attached_to_name": doc.name, "is_folder": 0}
-		if since:
-			filters["creation"] = [">=", since]
+		if since_save:
+			since = _bound_since(doc)
+			if since is False:
+				return
+			if since:
+				filters["creation"] = [">=", since]
 		# System context: the uploader is whoever saved the record, checked per rule below.
 		files = frappe.get_all(
 			"File",
@@ -185,6 +208,7 @@ def on_record_save(doc, method=None) -> None:
 				"file_name",
 				"file_url",
 				"content_hash",
+				"creation",
 				"attached_to_doctype",
 				"attached_to_name",
 			],
@@ -194,7 +218,14 @@ def on_record_save(doc, method=None) -> None:
 		if not files:
 			return
 		for rule in rules:
-			_capture_bound(rule, files, user)
+			# "After Insert" and "On Submit" read only files made after the rule existed:
+			# older attachments were never meant for it. "File attached" has its save window.
+			own = (
+				files
+				if record_event(rule) == EVENT_FILE
+				else [f for f in files if get_datetime(f.creation) >= get_datetime(rule["creation"])]
+			)
+			_capture_bound(rule, own, user, event)
 	except Exception:
 		frappe.log_error(title="Jarvis intake: capture failed")
 
@@ -230,7 +261,7 @@ def _intake_copy_urls(doc) -> set:
 	return {r[0] for r in rows if r[0]}
 
 
-def _capture_bound(rule: dict, files: list, user: str) -> None:
+def _capture_bound(rule: dict, files: list, user: str, event: str = "on_update") -> None:
 	"""Queue the files of ``files`` this rule has no row for yet (a row of any status counts,
 	so a Retry stays the uploader's decision and a later save never re-queues)."""
 	done = set(
@@ -243,7 +274,7 @@ def _capture_bound(rule: dict, files: list, user: str) -> None:
 	for f in files:
 		if f.name not in done and f.content_hash:
 			# No bell for an unreadable type here: the user saved a record, not uploaded a file.
-			_queue_one(f, rule, "on_update", user, bell=False)
+			_queue_one(f, rule, event, user, bell=False)
 
 
 def _matching_rules(doc, rules: dict, check_changes: bool) -> list[dict]:
@@ -261,7 +292,9 @@ def _matching_rules(doc, rules: dict, check_changes: bool) -> list[dict]:
 	if attached_to and not attached_to.startswith("new-") and doc.get("attached_to_doctype"):
 		was_empty = check_changes and not before.get("attached_to_name")
 		if not check_changes or was_empty:
-			matched.extend(rules["record"].get(doc.attached_to_doctype, []))
+			matched.extend(
+				r for r in rules["record"].get(doc.attached_to_doctype, []) if record_event(r) == EVENT_FILE
+			)
 	return matched
 
 

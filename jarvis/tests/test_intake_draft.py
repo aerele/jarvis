@@ -6,7 +6,7 @@ from unittest import mock
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.intake import draft, notify, spec
+from jarvis.intake import draft, guards, notify, spec
 from jarvis.intake import spec as intake_spec_module
 
 PARENT = "Intake Test Order"
@@ -484,6 +484,62 @@ class TestIntakeDraft(FrappeTestCase):
 		self.assertEqual(state.status, "Failed")
 		self.assertEqual(state.summary, f"You can't create {PARENT}")
 		self.assertFalse(frappe.db.count(PARENT))
+
+	def _portal_rule(self):
+		"""A Customer rule that names portal_users: saved before the spec refused it (the
+		stored JSON is written around validation)."""
+		rule = self._rule(
+			{"fields": ["customer_name"]},
+			intake_target_doctype="Customer",
+			allow_incomplete_drafts=1,
+		)
+		rule.db_set(
+			"intake_spec",
+			json.dumps(
+				{
+					"fields": ["customer_name"],
+					"table": {"fieldname": "portal_users", "columns": ["user"]},
+				}
+			),
+		)
+		return rule
+
+	def test_stored_spec_with_portal_users_is_refused_at_create(self):
+		rule = self._portal_rule()
+		row = self._row(rule, uploader="Administrator", target_doctype="Customer")
+		reading = {"customer_name": "Acme Portal", "portal_users": [{"user": "Administrator"}]}
+		with self.assertRaises(draft.DraftFailed):
+			draft.create(row, reading, allow_missing=True)
+		state = self._state(row)
+		self.assertEqual(state.status, "Failed")
+		self.assertEqual(state.summary, guards.TARGET_REFUSED_SUMMARY)
+		self.assertFalse(frappe.db.exists("Customer", {"customer_name": "Acme Portal"}))
+
+	def test_review_approval_refuses_a_stored_spec_with_portal_users(self):
+		rule = self._portal_rule()
+		row = self._row(rule, uploader="Administrator", target_doctype="Customer")
+		reading = {"customer_name": "Acme Portal", "portal_users": [{"user": "Administrator"}]}
+		with self.assertRaises(draft.DraftFailed):
+			draft.create(row, reading, allow_missing=False, keep_row=True, tell_uploader=False)
+		# keep_row: the row is untouched so the request stays open
+		self.assertEqual(self._state(row).status, "Running")
+		self.assertFalse(frappe.db.exists("Customer", {"customer_name": "Acme Portal"}))
+
+	def test_create_refuses_a_target_that_became_refused(self):
+		rule = self._rule()
+		row = self._row(rule)
+		with mock.patch.object(guards, "refused_doctype", return_value=True):
+			with self.assertRaises(draft.DraftFailed):
+				draft.create(row, {"title": "T"}, allow_missing=True)
+		self.assertEqual(self._state(row).summary, guards.TARGET_REFUSED_SUMMARY)
+		self.assertFalse(frappe.db.count(PARENT))
+
+	def test_create_rechecks_the_uploader_may_create(self):
+		rule = self._rule()
+		row = self._row(rule, uploader=READER_ONLY)
+		with self.assertRaises(draft.DraftFailed):
+			draft.create(row, {"title": "T"}, allow_missing=True)
+		self.assertEqual(self._state(row).summary, f"You can't create {PARENT}")
 
 	def _insert_raises(self, error):
 		real_insert = frappe.model.document.Document.insert
