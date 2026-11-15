@@ -957,3 +957,64 @@ class TestFirstFailureClaim(FrappeTestCase):
 			frappe.cache, "execute_command", side_effect=redis.exceptions.ConnectionError("down")
 		):
 			self.assertFalse(p._first_failure_of("d3"))
+
+
+class TestFailureEndsTheCard(_PanelBase):
+	"""A save that failed for good leaves a receipt row BEFORE the explaining turn is queued,
+	so the draft is no longer live (``jarvis.chat.live_draft``), also after a reload."""
+
+	def _receipts(self) -> list[frappe._dict]:
+		return frappe.get_all(
+			MSG,
+			filters={"conversation": self.conv, "role": "tool", "action_outcome": ["is", "set"]},
+			fields=["action_outcome", "seq"],
+			order_by="seq asc",
+		)
+
+	def _continuation_seqs(self) -> list[int]:
+		return frappe.get_all(
+			MSG,
+			filters={"conversation": self.conv, "origin": "continuation"},
+			pluck="seq",
+			order_by="seq asc",
+		)
+
+	def test_a_closed_failure_leaves_a_failed_receipt_ahead_of_the_continuation(self):
+		from jarvis.chat import live_draft
+
+		with BUSINESS_RULE:
+			r = self.apply({"description": "pa-test end closed"})
+		self.assertIs(r["closed"], True)
+		receipts = self._receipts()
+		self.assertEqual([x.action_outcome for x in receipts], ["failed"])
+		conts = self._continuation_seqs()
+		self.assertEqual(len(conts), 1)
+		self.assertLess(receipts[0].seq, conts[0])
+		self.assertIsNone(live_draft.find(self.conv))
+
+	def test_a_partial_failure_leaves_a_partial_receipt_ahead_of_the_continuation(self):
+		def _commit_then_fail(doctype, values, **kw):
+			frappe.get_doc({"doctype": "ToDo", "description": "pa-test end partial half"}).insert()
+			frappe.db.sql("commit")
+			raise frappe.ValidationError("the second half failed")
+
+		with patch("jarvis.tools.create_doc.create_doc", side_effect=_commit_then_fail):
+			r = self.apply({"description": "pa-test end partial"})
+		self.assertEqual(r["outcome"], "partial")
+		receipts = self._receipts()
+		self.assertEqual([x.action_outcome for x in receipts], ["partial"])
+		self.assertLess(receipts[0].seq, self._continuation_seqs()[0])
+
+	def test_a_repeat_of_the_same_failure_writes_one_receipt(self):
+		for _ in range(2):
+			with BUSINESS_RULE:
+				self.apply({"description": "pa-test end twice"})
+		self.assertEqual([x.action_outcome for x in self._receipts()], ["failed"])
+
+	def test_a_fixable_failure_keeps_the_draft_live(self):
+		from jarvis.chat import live_draft
+
+		r = self.apply({"priority": "High"})  # a mandatory value is missing: the panel stays open
+		self.assertEqual(r["error"]["kind"], "fixable")
+		self.assertEqual(self._receipts(), [])
+		self.assertIsNotNone(live_draft.find(self.conv))

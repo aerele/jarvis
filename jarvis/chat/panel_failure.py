@@ -55,10 +55,12 @@ class PanelFailure:
 		self.envelope = envelope
 		self.partial = partial
 		self.fixable_here = fixable_here
+		self.draft = None
 
 	def respond(self, *, draft, editable: int) -> dict:
 		"""The panel's reply, after sending the assistant whatever R2-9 says it is told."""
 		kind = self.envelope["error"].get("kind")
+		self.draft = draft
 		if self.partial:
 			mark_partial(self.envelope)
 			return self._close(chat_api.OUTCOME_PARTIAL)
@@ -79,6 +81,9 @@ class PanelFailure:
 		self.envelope["closed"] = True
 		if outcome != chat_api.OUTCOME_PARTIAL and self._correcting_hint():
 			self.envelope["error"].pop("hint", None)
+		# The receipt first: the explaining turn the continuation starts must already see the
+		# draft as settled, and its reply must come after the receipt in the transcript.
+		self._end_card()
 		told, cont = self._continue(outcome)
 		self.envelope["assistant_told"] = told
 		# The panel closed: the continuation's queued chip stands in for it.
@@ -90,6 +95,26 @@ class PanelFailure:
 				message_id=cont.get("message_id"),
 			)
 		return self.envelope
+
+	def _end_card(self) -> None:
+		"""A save that failed for good ends its card: a ``failed`` (or ``partial``) receipt row
+		means the draft is no longer the live one, also after a reload. Only a closed panel
+		gets one (a fixable failure keeps its draft live). One per draft: a repeat dedupes on
+		the token. Best-effort: the reply to the person must not fail."""
+		draft = self.draft.strip() if isinstance(self.draft, str) else ""
+		try:
+			from jarvis import api
+
+			api.persist_tool_receipt(
+				self.conversation,
+				self.tool,
+				self.args,
+				self.envelope,
+				action_outcome=chat_api.OUTCOME_PARTIAL if self.partial else "failed",
+				flip_token=f"draft-failed:{draft}" if draft else None,
+			)
+		except Exception:
+			frappe.log_error(title="apply_action failure receipt failed", message=frappe.get_traceback())
 
 	def _correcting_hint(self) -> bool:
 		from jarvis import api

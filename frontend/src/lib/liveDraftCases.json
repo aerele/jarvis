@@ -173,7 +173,8 @@
 				"content": "Drafting.\n\n```jarvis-action\n{not json\n```"
 			}
 		],
-		"live": "m3"
+		"live": "m3",
+		"bad": true
 	},
 	{
 		"id": "draft-then-email-block",
@@ -526,7 +527,8 @@
 				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"fields\":\"oops\"}\n```"
 			}
 		],
-		"live": "m1"
+		"live": "m1",
+		"bad": true
 	},
 	{
 		"id": "missing-verb-draft",
@@ -637,7 +639,8 @@
 				"content": "Drafting.\n\n```jarvis-action\n{not json\n```"
 			}
 		],
-		"live": "m1"
+		"live": "m1",
+		"bad": true
 	},
 	{
 		"id": "receipt-before-draft-ignored",

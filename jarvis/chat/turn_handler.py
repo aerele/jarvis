@@ -1491,16 +1491,8 @@ def _assemble_prompt(
 		else armed_skill_clause(user_message or "", chat_user, slugs=turn_invoked_slugs)
 	)
 	# An unsaved draft card is on the user's screen (``live_draft``): tell the agent once per
-	# turn, so it reminds the user instead of drafting again. Not for a shared chat, a File Box
-	# chat (its cards never reach a person) or any run that applies changes without a card.
-	live_draft_clause = ""
-	if (
-		binding is None
-		and not conv.get("file_box")
-		and not (armed_run or autorun_run or auto_run or armed_skill_run_clause)
-		and frappe.conf.get("jarvis_live_draft_context", 1)
-	):
-		live_draft_clause = _live_draft_clause(conversation_id)
+	# turn, so it reminds the user instead of drafting again. Decides every skip itself.
+	live_draft_clause = _live_draft_clause(conv, binding)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
 	# agent applies them without depending on agent's undocumented auto-retrieval.
@@ -2902,24 +2894,40 @@ def _escape_untrusted_tag(match: "re.Match[str]") -> str:
 	)
 
 
-def _live_draft_clause(conversation_id: str) -> str:
-	"""The context clause for a waiting draft card, or "" (best-effort: never fails a turn)."""
-	from jarvis.chat import live_draft
+def _live_draft_clause(conv, binding) -> str:
+	"""The context clause for a waiting draft card, or "". Self-contained and best-effort:
+	every skip is decided here from the binding and the conversation's own flags, and any
+	failure (including the import) leaves the clause out rather than failing the turn.
 
+	Skipped for a shared chat, a File Box chat (its cards never reach a person), any run that
+	applies changes without a card (auto mode, an armed macro, an approved skill run), a draft
+	the server turned into a gated confirmation card, and a block that shows an error card."""
 	try:
-		draft = live_draft.find(conversation_id)
+		if binding is not None or not frappe.conf.get("jarvis_live_draft_context", 1):
+			return ""
+		if conv.get("file_box") or conv.get("auto_mode") or conv.get("skip_confirmation"):
+			return ""
+		if conv.get("skill_autorun"):
+			return ""
+		from jarvis.chat import live_draft, pending_confirm
+
+		draft = live_draft.find(conv.name)
+		if not draft or draft["bad"]:
+			return ""  # a broken block shows an error card with no Create or Cancel to choose
+		for item in pending_confirm.list_items_for_owner(conv.owner, conversation=conv.name):
+			preview = item.get("preview") if isinstance(item.get("preview"), dict) else {}
+			card = preview.get("card") if isinstance(preview.get("card"), dict) else {}
+			if draft["message"] in (preview.get("from_draft"), card.get("from_draft")):
+				return ""  # parked behind its own confirmation card: the client shows "waiting"
+		what = f"{draft['verb']} {draft['doctype'] or 'a record'}"
+		return (
+			f"; unsaved draft waiting: {what}, its card with Create and Cancel is on the user's screen: "
+			"remind them in one line to choose, re-emit the block only for a change they ask for, "
+			"never say it is above"
+		)
 	except Exception:
 		frappe.log_error(title="live draft context failed", message=frappe.get_traceback())
 		return ""
-	if not draft or draft["bad"]:
-		return ""  # a broken block shows an error card with no Create or Cancel to choose
-	doctype = _safe_label_name(draft["doctype"])[:80]
-	what = f"{draft['verb']} {doctype}".strip()
-	return (
-		f"; unsaved draft waiting: {what}, its card with Create and Cancel is on the user's screen: "
-		"remind them in one line to choose, re-emit the block only for a change they ask for, "
-		"never say it is above"
-	)
 
 
 def _safe_label_name(name) -> str:
