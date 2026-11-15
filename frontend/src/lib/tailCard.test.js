@@ -4,8 +4,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tailCard } from "./tailCard.js";
 
-const pick = (hasDraft, draftIsTail, tailHasAsk, tailHasConfirm) =>
-	tailCard({ hasDraft, draftIsTail, tailHasAsk, tailHasConfirm });
+const pick = (hasDraft, draftIsTail, tailHasAsk, tailHasConfirm, tailHasOwnAction = false) =>
+	tailCard({ hasDraft, draftIsTail, tailHasAsk, tailHasConfirm, tailHasOwnAction });
 
 test("a draft in the last message wins over its own ask and confirm", () => {
 	assert.equal(pick(true, true, false, false), "draft");
@@ -27,4 +27,14 @@ test("without a draft the ask or confirm shows as before", () => {
 	assert.equal(pick(false, false, true, false), "ask");
 	assert.equal(pick(false, false, false, true), "confirm");
 	assert.equal(pick(false, false, false, false), "none");
+});
+
+test("the last message's own action block (email, gated verb, unknown verb) beats a kept draft", () => {
+	assert.equal(pick(true, false, false, false, true), "own");
+	assert.equal(pick(true, false, true, false, true), "own", "even over its own ask");
+	assert.equal(pick(false, false, false, false, true), "own", "and with no draft at all");
+});
+
+test("a plain last message lets the kept draft show at the tail", () => {
+	assert.equal(pick(true, false, false, false, false), "draft");
 });

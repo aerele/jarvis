@@ -1516,7 +1516,19 @@
 										>
 											{{ activeParkedNote }}
 										</div>
-										<template v-else-if="!summaryState.error">
+										<div v-else-if="summaryState.error" class="jv-action-foot">
+											<button
+												class="jv-action-2nd"
+												:disabled="
+													(cardModel && cardModel.applying) ||
+													cancellingDraft
+												"
+												@click="cancelDraft"
+											>
+												Cancel
+											</button>
+										</div>
+										<template v-else>
 											<div class="jv-action-foot">
 												<button
 													class="jv-action-primary"
@@ -8003,29 +8015,35 @@ const _lastAssistant = computed(() => {
 // share): kept through later replies until it is saved, cancelled or replaced. Null
 // whenever _lastAssistant is, so nothing shows mid-turn.
 const _liveDraft = computed(() => liveDraftMessage(visibleMessages.value, _lastAssistant.value));
-// One card at the tail (lib/tailCard): the last message's own ask or confirm strip hides a
-// KEPT draft card until it is answered. A draft in the last message itself still wins.
+// The last message's own action block that is not a draft (an email draft, a gated verb's
+// legacy note, an unknown verb's error card). It wins the tail over a kept draft.
+const _tailOwnAction = computed(() => {
+	const last = _lastAssistant.value;
+	return last && !isDraftRow(last) && actionOf(last) ? last : null;
+});
+// One card at the tail (lib/tailCard): the last message's own card (action block, ask or
+// confirm strip) hides a KEPT draft card until it is answered. A draft in the last
+// message itself still wins.
 const _tailCard = computed(() => {
 	const last = _lastAssistant.value;
 	return tailCard({
+		tailHasOwnAction: !!_tailOwnAction.value,
 		hasDraft: !!_liveDraft.value,
 		draftIsTail: !!last && !!_liveDraft.value && _liveDraft.value.name === last.name,
 		tailHasAsk: !!last && !!askOf(last),
 		tailHasConfirm: !!last && !!confirmLabel(last),
 	});
 });
-// The message that owns the card: the live draft row, or the last message's own non-draft
-// action (an email draft, or a gated verb's legacy note) as before. Every save and cancel
+// The message that owns the card: the last message when it has its own action block (as
+// before this rule), else the live draft row. Every save and cancel
 // names THIS row; the card is drawn under actionAnchor.
 const _cardMessage = computed(() => {
 	const last = _lastAssistant.value;
 	if (!last) return null;
 	const live = _liveDraft.value;
 	if (live && live.name === last.name) return live;
-	const ownAction = !isDraftRow(last) && actionOf(last);
-	if (ownAction && ownAction.kind === "email") return last;
-	if (_tailCard.value === "draft") return live;
-	return ownAction ? last : null;
+	if (_tailOwnAction.value) return last;
+	return _tailCard.value === "draft" ? live : null;
 });
 // The message the card and the draft error alert are drawn under: always the last
 // assistant message, so the card sits at the bottom of the thread.
@@ -8924,17 +8942,25 @@ async function cancelDraft() {
 	const view = captureDraftActionView(activeAction.value, key);
 	cancellingDraft.value = true;
 	try {
-		await api.dismissDraft(view.conversation, key);
+		try {
+			await api.dismissDraft(view.conversation, key);
+		} catch {
+			if (chatViewIsCurrent(view)) {
+				notify("Couldn't cancel this draft. Try again.", { type: "error" });
+			}
+			return;
+		}
+		// Cancelled for good on the server. A reload that fails now is not a failed cancel.
 		if (!chatViewIsCurrent(view)) return;
 		closeDraftPanel();
 		previewOpen.value = false;
-		await loadConversation(view.conversation);
-		if (!chatViewIsCurrent(view)) return;
-		store.loadConversations();
-	} catch {
-		if (chatViewIsCurrent(view)) {
-			notify("Couldn't cancel this draft. Try again.", { type: "error" });
+		try {
+			await loadConversation(view.conversation);
+		} catch (e) {
+			console.warn("Jarvis: could not reload after cancelling a draft", e);
+			return;
 		}
+		if (chatViewIsCurrent(view)) store.loadConversations();
 	} finally {
 		cancellingDraft.value = false;
 	}

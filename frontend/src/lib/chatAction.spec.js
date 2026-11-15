@@ -215,7 +215,9 @@ describe("the two gates that disagreed stay mirrored", () => {
 		expect(src).not.toContain("actionFor === m.name");
 		// one card at the tail: the helper decides, and a kept draft yields to ask / confirm
 		expect(src).toContain("tailHasAsk: !!last && !!askOf(last)");
-		expect(src).toContain('if (_tailCard.value === "draft") return live;');
+		expect(src).toContain("tailHasOwnAction: !!_tailOwnAction.value");
+		expect(src).toContain("if (_tailOwnAction.value) return last;");
+		expect(src).toContain('return _tailCard.value === "draft" ? live : null;');
 		// Cancel sends the draft row's name
 		expect(src).toContain("api.dismissDraft(view.conversation, key)");
 	});
