@@ -64,7 +64,13 @@ async function mountList(rows, can_manage = false) {
 	intakeListPage.mockResolvedValue({ rows, total: rows.length, has_more: false });
 	const w = mount(IntakeList, {
 		global: {
-			stubs: { "router-link": { props: ["to"], template: '<a :href="to"><slot /></a>' } },
+			stubs: {
+				"router-link": {
+					props: ["to"],
+					template:
+						"<a :href=\"typeof to === 'string' ? to : JSON.stringify(to)\"><slot /></a>",
+				},
+			},
 		},
 	});
 	await flushPromises();
@@ -123,7 +129,9 @@ describe("IntakeList", () => {
 		expect(first.text()).toContain("Folder: Bills");
 		expect(first.find(".badge").text()).toBe("Draft created");
 		expect(first.find(".badge").attributes("data-theme")).toBe("green");
-		expect(first.find("a").attributes("href")).toBe("/app/purchase-invoice/PINV-0001");
+		expect(first.find("a:not([data-testid=intake-open])").attributes("href")).toBe(
+			"/app/purchase-invoice/PINV-0001"
+		);
 		expect(w.findAll(".row")[1].find(".badge").attributes("data-theme")).toBe("red");
 	});
 
@@ -167,7 +175,7 @@ describe("IntakeList", () => {
 		const first = w.findAll(".row")[0];
 		expect(first.find(".badge").text()).toBe("Draft deleted");
 		expect(first.find(".badge").attributes("data-theme")).toBe("gray");
-		expect(first.find("a").exists()).toBe(false);
+		expect(first.find("a:not([data-testid=intake-open])").exists()).toBe(false);
 	});
 
 	it("links a review row without a draft to its approval", async () => {
@@ -180,8 +188,12 @@ describe("IntakeList", () => {
 				can_review: true,
 			}),
 		]);
-		expect(w.find(".row a").attributes("href")).toBe("/approvals/AR-1");
-		expect(w.find(".row a").attributes("aria-label")).toBe("Open review of bill.pdf");
+		expect(w.find(".row a:not([data-testid=intake-open])").attributes("href")).toBe(
+			"/approvals/AR-1"
+		);
+		expect(w.find(".row a:not([data-testid=intake-open])").attributes("aria-label")).toBe(
+			"Open review of bill.pdf"
+		);
 	});
 
 	it("gives an uploader who may not review no link to a review that would refuse them", async () => {
@@ -194,7 +206,7 @@ describe("IntakeList", () => {
 				can_review: false,
 			}),
 		]);
-		expect(w.find(".row a").exists()).toBe(false);
+		expect(w.find(".row a:not([data-testid=intake-open])").exists()).toBe(false);
 	});
 
 	describe("narrow screens", () => {
@@ -353,5 +365,24 @@ describe("IntakeList", () => {
 		expect(cell.exists()).toBe(true);
 		expect(cell.attributes("title")).toBe(long);
 		expect(w.find('button[aria-label="Retry bill.pdf"]').exists()).toBe(true);
+	});
+});
+
+describe("IntakeList row link", () => {
+	it("the file name opens the detail page for that row", async () => {
+		const w = await mountList([row({ name: "A9" })]);
+		const a = w.findAll("a").find((x) => x.text() === "bill.pdf");
+		expect(JSON.parse(a.attributes("href"))).toEqual({
+			name: "IntakeDetail",
+			params: { activity: "A9" },
+		});
+		w.unmount();
+	});
+
+	it("the detail route is registered", async () => {
+		const { readFileSync } = await import("node:fs");
+		const src = readFileSync("src/router/index.js", "utf8");
+		expect(src).toContain('path: "/files/intake/:activity"');
+		expect(src).toContain('name: "IntakeDetail"');
 	});
 });

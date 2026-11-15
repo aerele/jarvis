@@ -10,32 +10,7 @@
 		:aria-busy="busy ? 'true' : 'false'"
 		class="grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]"
 	>
-		<section
-			v-if="file"
-			aria-label="Source file"
-			class="min-w-0 lg:sticky lg:top-0 lg:self-start"
-			data-testid="intake-photo"
-		>
-			<!-- A Button inside the link would nest two controls: style the link itself -->
-			<a
-				v-if="!file.is_image"
-				:href="file.file_url"
-				target="_blank"
-				rel="noopener"
-				:title="file.file_name || undefined"
-				class="inline-flex min-h-7 max-w-full min-w-0 items-center gap-1.5 rounded bg-surface-gray-2 px-2 text-base text-ink-gray-8 hover:bg-surface-gray-3"
-			>
-				<FeatherIcon name="paperclip" class="size-4 shrink-0" aria-hidden="true" />
-				<span class="min-w-0 truncate">{{ file.file_name || "Open file" }}</span>
-			</a>
-			<a v-else :href="file.file_url" target="_blank" rel="noopener">
-				<img
-					:src="file.file_url"
-					:alt="file.file_name || 'Uploaded document'"
-					class="max-h-[30vh] max-w-full rounded border object-contain lg:max-h-[70vh]"
-				/>
-			</a>
-		</section>
+		<IntakeSourcePreview :file="file" />
 
 		<div class="flex min-w-0 flex-col gap-4">
 			<!-- First: the reviewer sees the first value to fill beside the photo -->
@@ -216,8 +191,9 @@
 // source file). `onDecided` is a callback, not an emit: switching rows mid-decision
 // unmounts this form, and Vue drops an unmounted instance's emits.
 import { computed, nextTick, onMounted, reactive, ref } from "vue";
-import { Autocomplete, Button, FeatherIcon, FormControl, toast } from "frappe-ui";
+import { Autocomplete, Button, FormControl, toast } from "frappe-ui";
 import { decideApproval, searchLink as searchLinkApi } from "@/api";
+import IntakeSourcePreview from "@/components/IntakeSourcePreview.vue";
 import { useLinkSearch } from "@/composables/useLinkSearch";
 import { errHtml, errMessage } from "@/lib/errors";
 
