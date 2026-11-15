@@ -439,12 +439,13 @@ import {
 import { useRouter } from "vue-router";
 import { supportErrorDraft } from "../../../../jarvis/public/js/shared/support_error_draft.mjs";
 import { brand } from "@/branding";
-import { errHtml, escapeHtml, turnErrorInfo, showsRawReason } from "@/lib/errors";
+import { escapeHtml, turnErrorInfo, showsRawReason } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { sortPendingCards } from "@/lib/sortPendingCards";
 import { discardedTokens } from "@/lib/typedCardReply";
 import { compactOutcome } from "@/lib/compact";
-import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
+import { rejectionCopy } from "@/lib/sendRejectionCopy";
+import { actionErrorCopy } from "@/lib/chatErrorCopy";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
 
 // get_dashboards_caps payload (creatable_scopes/manageable_roles feed the save
@@ -655,9 +656,11 @@ async function runCompact(hint) {
 		compactHintSeed.value = hint || "";
 		compactDialogOpen.value = false;
 	} catch (e) {
-		// frappe-ui toast renders `message` via v-html: feed it the escaped
-		// errHtml, never the plain-text errMessage (lib/noInlineErrorFormatter guard).
-		if (dashboardViewIsCurrent(view)) toast.error(errHtml(e));
+		// frappe-ui toast renders `message` via v-html: feed it escaped text, never the
+		// plain-text errMessage (lib/noInlineErrorFormatter guard).
+		if (dashboardViewIsCurrent(view)) {
+			toast.error(escapeHtml(actionErrorCopy("Couldn't compact this chat", e)));
+		}
 	} finally {
 		if (dashboardViewIsCurrent(view)) compactSubmitting.value = false;
 	}
@@ -708,15 +711,20 @@ async function selectModel(model) {
 	const previous = modelOverride.value;
 	modelOverride.value = model;
 	if (!view.conversation) return;
+	let refused = "";
 	try {
 		const result = await setConversationModel(view.conversation, model);
 		if (!dashboardViewIsCurrent(view)) return;
-		if (result && result.ok === false)
-			throw new Error(result.reason || "Model change rejected");
-	} catch {
+		if (result && result.ok === false) {
+			refused = rejectionCopy(result, brand.agentName, "").message;
+			throw new Error("rejected");
+		}
+	} catch (e) {
 		if (!dashboardViewIsCurrent(view)) return;
 		modelOverride.value = previous;
-		toast.error("Couldn't change the model for this dashboard chat.");
+		toast.error(
+			escapeHtml(actionErrorCopy("Couldn't change the model for this chat", e, refused))
+		);
 	}
 }
 
@@ -725,15 +733,20 @@ async function selectThinking(level) {
 	const previous = thinkingOverride.value;
 	thinkingOverride.value = level;
 	if (!view.conversation) return;
+	let refused = "";
 	try {
 		const result = await setConversationThinking(view.conversation, level);
 		if (!dashboardViewIsCurrent(view)) return;
-		if (result && result.ok === false)
-			throw new Error(result.reason || "Effort change rejected");
-	} catch {
+		if (result && result.ok === false) {
+			refused = rejectionCopy(result, brand.agentName, "").message;
+			throw new Error("rejected");
+		}
+	} catch (e) {
 		if (!dashboardViewIsCurrent(view)) return;
 		thinkingOverride.value = previous;
-		toast.error("Couldn't change the effort for this dashboard chat.");
+		toast.error(
+			escapeHtml(actionErrorCopy("Couldn't change the effort for this chat", e, refused))
+		);
 	}
 }
 
@@ -1151,7 +1164,7 @@ async function approve(pa) {
 	} catch (e) {
 		if (!dashboardActionIsCurrent(view)) return;
 		keepCard = true;
-		toast.error(errHtml(e));
+		toast.error(escapeHtml(actionErrorCopy("Couldn't confirm that action", e)));
 	} finally {
 		if (dashboardViewIsCurrent(view)) {
 			// The switch fence already cleared the old guard. Do not clear a
@@ -1204,7 +1217,7 @@ async function dismiss(pa) {
 	} catch (e) {
 		if (!dashboardActionIsCurrent(view)) return;
 		keepCard = true;
-		toast.error(errHtml(e));
+		toast.error(escapeHtml(actionErrorCopy("Couldn't discard that action", e)));
 	} finally {
 		if (dashboardViewIsCurrent(view)) {
 			// Keep a new view's busy token intact when this older request settles.
@@ -1396,7 +1409,7 @@ async function send(gotoMessageId = "") {
 		messages.value = messages.value.filter((m) => m.name !== tmpName);
 		if (!draft.value) draft.value = text;
 		forgetGotoClaim(gotoMessageId);
-		toast.error(errHtml(e));
+		toast.error(escapeHtml(actionErrorCopy("Couldn't send your message", e)));
 	} finally {
 		if (dashboardViewIsCurrent(view)) sending.value = false;
 	}
@@ -1418,7 +1431,7 @@ function applyRestoredRun(restored) {
 
 // A refused send or retry. The toast renders HTML, so the whole message is escaped.
 function toastRejection(r, fallback) {
-	const { message, type } = sendRejectionCopy(r.reason, brand.agentName, r, fallback);
+	const { message, type } = rejectionCopy(r, brand.agentName, fallback);
 	(toast[type] || toast.error)(escapeHtml(message));
 }
 
@@ -1480,7 +1493,7 @@ async function retryFailed(m) {
 	} catch (e) {
 		if (disposed || !dashboardViewIsCurrent(view)) return;
 		if (runStarts === starts) endStartedRun();
-		toast.error(errHtml(e, RETRY_FALLBACK));
+		toast.error(escapeHtml(actionErrorCopy("Couldn't retry that", e)));
 	} finally {
 		if (dashboardViewIsCurrent(view)) retrying.value = false;
 	}

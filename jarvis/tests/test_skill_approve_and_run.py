@@ -2622,7 +2622,10 @@ class TestNewMessageClearsAutorun(FrappeTestCase):
 		with patch("jarvis.chat.api.admission.turn_machine_enabled", return_value=False):
 			with patch("jarvis.chat.api._conversation_busy", return_value=True):
 				res = chat_api.send_message(conv, "are you still working on it?")
-		self.assertEqual(res, {"ok": False, "reason": "a reply is already in progress - hang on a moment"})
+		self.assertEqual(
+			res,
+			{"ok": False, "reason": "A reply is already in progress. Wait for it to finish, then try again."},
+		)
 		self.assertEqual(
 			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
 			1,

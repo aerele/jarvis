@@ -324,7 +324,7 @@ class TestTypedConfirmation(FrappeTestCase):
 		# The user-facing count AND which card failed, by its number (card b is 2).
 		self.assertEqual(
 			out["error"]["message"],
-			"1 of 2 actions went through; 1 could not be completed (card 2).",
+			"1 of 2 actions went through. 1 could not be completed. Check the cards that failed and try again.",
 		)
 
 	def test_cards_are_ordered_so_the_numbers_mean_what_the_screen_shows(self):

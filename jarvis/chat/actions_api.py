@@ -268,15 +268,24 @@ def rule_values(doctype: str, table: str, links: str | dict | None = None) -> di
 	user may read are fetched. Display only: the card never sends these values."""
 	doctype = (doctype or "").strip()
 	if not doctype or not frappe.db.exists("DocType", doctype):
-		return {"ok": False, "reason": _("unknown doctype")}
+		return {
+			"ok": False,
+			"reason": _("We don't recognise that record type. Reload the chat and try again."),
+		}
 	if not frappe.has_permission(doctype, "read"):
 		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
 	table_df = frappe.get_meta(doctype).get_field(table or "")
 	if not table_df or table_df.fieldtype != "Table" or not table_df.options:
-		return {"ok": False, "reason": _("unknown table")}
+		return {
+			"ok": False,
+			"reason": _("That table isn't part of this record. Reload the chat and try again."),
+		}
 	links = frappe.parse_json(links) if isinstance(links, str) else links
 	if not isinstance(links, dict):
-		return {"ok": False, "reason": _("links must be an object")}
+		return {
+			"ok": False,
+			"reason": _("We couldn't read the linked values. Reload the chat and try again."),
+		}
 	child = table_df.options
 	# link field -> {rule field: source field on the linked doctype}
 	sources: dict[str, dict[str, str]] = {}
@@ -359,7 +368,10 @@ def get_doctype_form_meta(doctype: str) -> dict:
 	shows (or pre-fills, via ``load_doc``) a value Desk would hide from them."""
 	doctype = (doctype or "").strip()
 	if not doctype or not frappe.db.exists("DocType", doctype):
-		return {"ok": False, "reason": _("unknown doctype")}
+		return {
+			"ok": False,
+			"reason": _("We don't recognise that record type. Reload the chat and try again."),
+		}
 	if not frappe.has_permission(doctype, "read"):
 		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
 	meta = frappe.get_meta(doctype)
@@ -539,7 +551,7 @@ def _require_own_conversation(conversation: str) -> None:
 	if not owner:
 		raise InvalidArgumentError("unknown conversation")
 	if owner != frappe.session.user:
-		frappe.throw(_("Not your conversation."), frappe.PermissionError)
+		frappe.throw(_("This chat belongs to someone else."), frappe.PermissionError)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(conversation)
@@ -1165,7 +1177,7 @@ _ARMED_RUN_CONFIRM_WITHDRAWN = {
 	"ok": False,
 	"error": {
 		"type": "InvalidConfirmation",
-		"message": "This macro run is stopping; that confirmation was withdrawn and nothing ran.",
+		"message": "This automated run is stopping, so that confirmation was withdrawn. Nothing was changed.",
 	},
 }
 
@@ -1174,8 +1186,8 @@ _CONFIRMATION_UNAVAILABLE = {
 	"error": {
 		"type": "ConfirmationUnavailableError",
 		"message": (
-			"Confirmation storage is temporarily unavailable. Nothing was changed "
-			"by this request. Keep this card and try again shortly."
+			"Confirmations are temporarily unavailable. Nothing was changed. "
+			"Keep this card and try again in a moment."
 		),
 	},
 }
@@ -1185,9 +1197,8 @@ _CONFIRMATION_OUTCOME_UNKNOWN = {
 	"error": {
 		"type": "ConfirmationOutcomeUnknownError",
 		"message": (
-			"The confirmation token's storage outcome could not be verified. The "
-			"business action was not run by this request. Refresh the confirmations "
-			"before trying again."
+			"We couldn't confirm whether that went through. Nothing was changed by this "
+			"request. Reload the chat to see the current cards, then try again."
 		),
 	},
 }
@@ -1237,7 +1248,7 @@ _APPROVE_RUN_MACRO_CONVERSATION = {
 	"reason_code": "armed_run",
 	"error": {
 		"type": "InvalidConfirmation",
-		"message": "Approve & run isn't available in an armed macro run. Nothing was changed.",
+		"message": "Approve & run isn't available during an automated run. Nothing was changed.",
 	},
 }
 

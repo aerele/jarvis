@@ -145,3 +145,29 @@ def set_jarvis_boot(bootinfo):
 		bootinfo.jarvis_maintenance = maintenance_notice.boot_payload()
 	except Exception:
 		bootinfo.jarvis_maintenance = {"active": False, "message": ""}
+
+
+def extend_support_bootinfo(bootinfo) -> None:
+	"""``jarvis_can_report_error``: may this user raise a support ticket from the Desk chat widget?
+
+	Same meaning as the SPA's ``window.support_available && window.has_support_access``
+	(jarvis/www/jarvis.py): fleet support is up AND ``support_scope()`` is not None.
+
+	Rides ``extend_bootinfo`` (every Desk load), not ``boot_session`` (cached per user), so a
+	support outage never sticks in the cached blob. It reads only the Redis-cached fleet state
+	that the SPA and mobile page fill: it must never block a Desk load on a control-plane
+	round trip, so a cold cache means "hidden" until the next SPA or mobile load warms it.
+	An exception in an ``extend_bootinfo`` hook fails the whole Desk load, so this never raises."""
+	try:
+		bootinfo.jarvis_can_report_error = False
+		if not bootinfo.get("jarvis_has_access") or frappe.session.user == "Guest":
+			return
+		from jarvis.permissions import support_scope
+		from jarvis.www.jarvis import _SUPPORT_AVAILABLE_CACHE_KEY, SUPPORT_OK
+
+		if support_scope() is None:
+			return
+		state = frappe.cache().get_value(_SUPPORT_AVAILABLE_CACHE_KEY, expires=True)
+		bootinfo.jarvis_can_report_error = state == SUPPORT_OK
+	except Exception:
+		bootinfo.jarvis_can_report_error = False
