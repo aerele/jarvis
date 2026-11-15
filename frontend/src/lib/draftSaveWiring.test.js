@@ -70,7 +70,7 @@ test("a re-sent proposal toasts 'updated' only when the panel was rebuilt", () =
 test("the card's Confirm and Preview read the same model", () => {
 	assert.match(
 		src,
-		/:disabled="\s*!cardModel \|\|\s*cardModel\.applying \|\|\s*convStreaming\s*"/
+		/:disabled="\s*!cardModel \|\|\s*cardModel\.applying \|\|\s*cancellingDraft \|\|\s*convStreaming\s*"/
 	);
 	assert.match(src, /:model="cardModel"/);
 });
@@ -85,23 +85,11 @@ test("a click outside the panel closes it only when nothing would be lost", () =
 	assert.match(body("openDraftPanel"), /markDraftBaseline\(model\);/);
 });
 
-test("a failed panel save keeps its draft's card live, and any other outcome lets go", () => {
-	assert.match(
-		src,
-		/liveDraftMessage\(visibleMessages\.value, _lastAssistant\.value, fixingDraft\.value/
-	);
+test("the card message is the live draft row, and actionFor stays that row's name", () => {
+	assert.match(src, /liveDraftMessage\(visibleMessages\.value, _lastAssistant\.value\)/);
 	assert.match(
 		src,
 		/const actionFor = computed\(\(\) => \(activeAction\.value \? _cardMessage\.value\.name : null\)\);/
 	);
-	const fn = body("applyDraft");
-	assert.match(
-		fn,
-		/outcome\.kind === "keep"\) \{[\s\S]*?if \(p\.editable\) fixingDraft\.value = draftKey;/
-	);
-	assert.equal(
-		(fn.match(/fixingDraft\.value = "";/g) || []).length,
-		3,
-		"closed, parked and saved"
-	);
+	assert.doesNotMatch(src, /fixingDraft/, "the walk-back state is gone");
 });

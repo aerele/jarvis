@@ -193,14 +193,31 @@ describe("the two gates that disagreed stay mirrored", () => {
 		// The live draft is switched off whenever the error text is set ...
 		expect(src).toContain("_cardMessage.value && !draftBlockErrorText.value");
 		// ... the error alert renders on that same text ...
-		expect(src).toMatch(/v-if="\s*draftBlockErrorText &&/);
+		expect(src).toMatch(/v-if="\s*draftBlockErrorText && actionAnchor === m\.name/);
 		expect(src).toContain("<span>{{ draftBlockErrorText }}</span>");
 		// ... and the summary card is the next link of the SAME chain, so the two
 		// can never both draw.
 		const err = src.indexOf("<span>{{ draftBlockErrorText }}</span>");
-		const head = src.indexOf('<template v-else-if="actionFor === m.name && activeAction">');
+		const head = src.indexOf('<template v-else-if="actionAnchor === m.name && activeAction">');
 		expect(head).toBeGreaterThan(err);
 		expect(src.slice(err, head)).not.toMatch(/<template v-if=|<div v-if=/);
+		// the error reads the live draft row, never only the last message
+		expect(src).toMatch(
+			/const draftBlockErrorText = computed\(\(\) => \{\s*const m = _cardMessage\.value;/
+		);
+	});
+
+	it("the card and the error are drawn under the last message, keyed by the draft row", () => {
+		expect(src).toMatch(/const _liveDraft = computed\(\(\) => liveDraftMessage\(/);
+		expect(src).toContain("const actionAnchor = computed(() =>");
+		expect(src).toContain('? _lastAssistant.value.name : ""');
+		// no template gate compares the draft row's own name any more
+		expect(src).not.toContain("actionFor === m.name");
+		// one card at the tail: the helper decides, and a kept draft yields to ask / confirm
+		expect(src).toContain("tailHasAsk: !!last && !!askOf(last)");
+		expect(src).toContain('if (_tailCard.value === "draft") return live;');
+		// Cancel sends the draft row's name
+		expect(src).toContain("api.dismissDraft(view.conversation, key)");
 	});
 
 	it("never dumps raw dry-run JSON into a confirmation card body", () => {

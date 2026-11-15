@@ -13,6 +13,7 @@
 import { draftValues } from "./draftApply.js";
 import { draftFailureOf } from "./draftFailure.js";
 import { parkedNoteOf } from "./draftParked.js";
+import { liveDraftRow } from "./liveDraft.js";
 
 export function stampDraftModel(model, { messageKey, card, editable, actionKey }) {
 	model.messageKey = messageKey || "";
@@ -86,19 +87,11 @@ export function draftIsDirty(model) {
 	return JSON.stringify(draftValues(model)) !== model.baseline;
 }
 
-// The message that owns the live draft card. Normally `last` (the last assistant
-// message). After a save failed on a value the person is fixing in the panel, the
-// assistant only acknowledges ("I'll wait while you fix it"): that reply has no card
-// and must not retire the draft's, or closing the panel would leave no Edit. So when
-// `last` has no action, walk back over assistant replies, and only those, to the draft
-// `fixingKey` names. A user message or a receipt chip in between means it moved on.
-export function liveDraftMessage(visible, last, fixingKey, hasAction) {
-	if (!last || !fixingKey || hasAction(last)) return last;
-	for (let i = visible.indexOf(last) - 1; i >= 0; i--) {
-		const m = visible[i];
-		if (m.role !== "assistant") return last;
-		if (m.name === fixingKey) return hasAction(m) ? m : last;
-		if (hasAction(m)) return last;
-	}
-	return last;
+// The row that owns the live draft card: the newest unsaved draft, kept until it is
+// saved, cancelled or replaced (lib/liveDraft, the one rule the phone and the server
+// share). `last` is the last assistant message; it is null while a turn runs or the
+// snapshot is not current, and then no card shows. The card is drawn under `last`, but
+// every save and cancel names the row returned here.
+export function liveDraftMessage(visible, last) {
+	return last ? liveDraftRow(visible) : null;
 }
