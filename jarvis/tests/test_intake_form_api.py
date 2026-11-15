@@ -1,6 +1,7 @@
 """Intake trigger form helpers: the folder list and the field picker."""
 
 import json
+from unittest.mock import patch
 
 import frappe
 
@@ -127,6 +128,28 @@ class TestIntakeFormApi(_TriggersApiTestCase):
 		self.assertEqual(data["allow_incomplete_drafts"], 1)
 		self.assertIn("description", data["intake_spec"])
 
+	def test_run_when_round_trips_through_create_update_and_get(self):
+		from jarvis.chat.triggers_api import create_trigger, update_trigger
+
+		frappe.set_user(ADMIN_USER)
+		payload = {
+			"trigger_name": f"intake-{frappe.generate_hash(length=8)}",
+			"action_type": "Intake",
+			"intake_source": "Record",
+			"intake_record_doctype": "Note",
+			"intake_record_event": "On Submit",
+			"intake_target_doctype": "ToDo",
+			"intake_spec": frappe.as_json({"fields": ["description"]}),
+		}
+		name = create_trigger(frappe.as_json(payload))["data"]["name"]
+		self._triggers.append(name)
+		self.assertEqual(get_trigger(name)["data"]["intake_record_event"], "On Submit")
+		update_trigger(name, frappe.as_json({"intake_record_event": "After Insert"}))
+		self.assertEqual(get_trigger(name)["data"]["intake_record_event"], "After Insert")
+		# A rule saved before the field existed reads as the default.
+		frappe.db.set_value("Jarvis Trigger", name, "intake_record_event", None)
+		self.assertEqual(get_trigger(name)["data"]["intake_record_event"], "File attached")
+
 	def test_intake_logic_is_redacted_for_non_managers(self):
 		doc = frappe.get_doc(
 			{
@@ -205,3 +228,12 @@ class TestIntakeToggle(_TriggersApiTestCase):
 		self.assertIn(_FOLDER, intake_map()["folder"])
 		set_trigger_enabled(name, 0)
 		self.assertNotIn(_FOLDER, intake_map()["folder"])
+
+	def test_search_does_not_read_each_doctype_again(self):
+		frappe.set_user(ADMIN_USER)
+		with patch("jarvis.intake.guards.refused_doctype") as full:
+			names = [r["value"] for r in search_intake_doctypes("ToDo")]
+		full.assert_not_called()
+		self.assertIn("ToDo", names)
+		# Still the same deny-list: a name that is refused never shows.
+		self.assertNotIn("Server Script", [r["value"] for r in search_intake_doctypes("Server Script")])

@@ -27,9 +27,15 @@ vi.mock("frappe-ui", () => ({
 		props: ["message"],
 		template: `<div v-if="message" class="error-message">{{ message }}</div>`,
 	},
+	Select: {
+		name: "Select",
+		props: ["modelValue", "options", "disabled", "placeholder"],
+		emits: ["update:modelValue"],
+		template: `<select :value="modelValue" :disabled="disabled" @change="$emit('update:modelValue', $event.target.value)"><option v-for="o in options" :key="o.value" :value="o.value">{{ o.label }}</option></select>`,
+	},
 	FormControl: {
 		name: "FormControl",
-		props: ["modelValue", "type", "label", "options", "disabled"],
+		props: ["modelValue", "type", "label", "options", "disabled", "placeholder"],
 		emits: ["update:modelValue"],
 		template: `<input :type="type === 'checkbox' ? 'checkbox' : 'text'" :aria-label="label" :value="modelValue" :checked="type === 'checkbox' ? !!modelValue : undefined" :disabled="disabled" @input="type !== 'checkbox' && $emit('update:modelValue', $event.target.value)" @change="type === 'checkbox' && $emit('update:modelValue', $event.target.checked)" />`,
 	},
@@ -163,8 +169,73 @@ describe("IntakeRuleFields", () => {
 				},
 			})
 		);
-		expect(box(w, "Match: Allocated To").exists()).toBe(true);
-		expect(box(w, "Match: Status").exists()).toBe(false);
+		const grid = w.find('[data-testid="match-grid"]');
+		expect(grid.find('input[aria-label="Allocated To"]').exists()).toBe(true);
+		expect(grid.find('input[aria-label="Status"]').exists()).toBe(false);
+	});
+
+	it("shows every spec default under Fixed values, not only the mandatory ones", async () => {
+		const w = await mountIt(
+			formOf({
+				intake_spec: {
+					fields: ["description"],
+					table: null,
+					match: [],
+					defaults: { status: "Closed" },
+				},
+			})
+		);
+		expect(w.find('[data-testid="default-status"]').exists()).toBe(true);
+		expect(w.text()).toContain("Fixed values");
+		// a field the file already fills gets no fixed value
+		const read = await mountIt(
+			formOf({
+				intake_spec: {
+					fields: ["description", "status"],
+					table: null,
+					match: [],
+					defaults: { status: "Closed" },
+				},
+			})
+		);
+		expect(read.find('[data-testid="default-status"]').exists()).toBe(false);
+	});
+
+	it("styles every intake sub-section heading alike and words the match help plainly", async () => {
+		const w = await mountIt(
+			formOf({
+				intake_source: "Record",
+				intake_record_doctype: "ToDo",
+				intake_spec: {
+					fields: ["description", "allocated_to"],
+					table: null,
+					match: [],
+					defaults: {},
+				},
+			})
+		);
+		const heads = w.findAll("h3").map((h) => [h.text(), h.classes().join(" ")]);
+		const names = heads.map((h) => h[0]);
+		for (const n of [
+			"Record source",
+			"Fields to read",
+			"Match to existing records",
+			"Fixed values",
+		])
+			expect(names).toContain(n);
+		expect(new Set(heads.map((h) => h[1])).size).toBe(1);
+		expect(w.text()).toContain("Only use values that already exist in the site");
+		expect(w.text()).toContain("Files attached to these records are read");
+	});
+
+	it("gives the Table picker the full width", async () => {
+		apiTr.getIntakeFieldOptions.mockResolvedValue({
+			...TODO,
+			tables: [{ fieldname: "items", label: "Items", child_doctype: "Row", columns: [] }],
+		});
+		const w = await mountIt(formOf());
+		const section = w.find('[data-testid="intake-table-section"]');
+		expect(section.find("select").classes()).toContain("w-full");
 	});
 
 	it("shows write-back fields for the Record source only", async () => {
@@ -348,5 +419,107 @@ describe("IntakeRuleFields", () => {
 		expect(document.activeElement).toBe(w.find('[data-pick="target"] button').element);
 		w.unmount();
 		host.remove();
+	});
+
+	it("lays the fields out as one aligned grid with a muted type hint per row", async () => {
+		const w = await mountIt(formOf());
+		const grid = w.find('[data-testid="intake-check-grid"]');
+		expect(grid.classes()).toEqual(
+			expect.arrayContaining(["grid", "grid-cols-1", "sm:grid-cols-2", "xl:grid-cols-3"])
+		);
+		const rows = grid.findAll('[data-testid="intake-check-row"]');
+		expect(rows.length).toBeGreaterThan(0);
+		expect(rows[0].find('[data-testid="type-hint"]').text()).not.toBe("");
+	});
+
+	it("shows the same match-by hint on Link fields", async () => {
+		const w = await mountIt(formOf());
+		expect(w.text()).toContain("Link, match by");
+	});
+
+	it("groups the table under a Table rows section with its columns in the same grid", async () => {
+		apiTr.getIntakeFieldOptions.mockResolvedValue({
+			...TODO,
+			tables: [
+				{
+					fieldname: "items",
+					label: "Items",
+					columns: [
+						{ fieldname: "item", label: "Item", fieldtype: "Link", options: "Item" },
+						{ fieldname: "qty", label: "Qty", fieldtype: "Float", options: "" },
+					],
+				},
+			],
+		});
+		const w = await mountIt(
+			formOf({
+				intake_spec: {
+					fields: ["description"],
+					table: { fieldname: "items", columns: ["qty"] },
+					match: [],
+					defaults: {},
+				},
+			})
+		);
+		const section = w.find('[data-testid="intake-table-section"]');
+		expect(section.text()).toContain("Table rows");
+		const grid = section.find('[data-testid="intake-check-grid"]');
+		expect(grid.findAll('[data-testid="intake-check-row"]')).toHaveLength(2);
+		expect(grid.text()).toContain("Link, match by Item");
+		expect(section.find(".pl-3").exists()).toBe(true);
+	});
+
+	it("the Record source section is one grid: doctype, Run when, status, link; Optional, not None", async () => {
+		const w = await mountIt(
+			formOf({ intake_source: "Record", intake_record_doctype: "ToDo" })
+		);
+		const sec = w.find('[data-testid="writeback"]');
+		expect(sec.text()).toContain("Record source");
+		expect(sec.find(".grid").classes()).toEqual(
+			expect.arrayContaining(["grid-cols-1", "sm:grid-cols-2"])
+		);
+		const labels = sec.findAll("label").map((l) => l.text());
+		expect(labels).toEqual([
+			"Record doctype",
+			"Run when",
+			"Status field on record",
+			"Draft link field on record",
+		]);
+		expect(sec.text()).toContain("Jarvis writes the intake status here");
+		expect(sec.text()).toContain("Jarvis writes the draft's name here");
+		expect(sec.text()).not.toContain("None");
+		const selects = w.findAllComponents({ name: "Select" });
+		const optional = selects.filter(
+			(c) => (c.props("options") || [])[0]?.label === "Optional"
+		);
+		expect(optional).toHaveLength(2);
+		expect(optional.every((c) => c.classes().includes("w-full"))).toBe(true);
+		expect(optional[0].props("options")[0].value).toBe("");
+	});
+
+	it("Run when emits intake_record_event with the stored value", async () => {
+		const w = await mountIt(
+			formOf({ intake_source: "Record", intake_record_doctype: "ToDo" })
+		);
+		const ctrl = w
+			.findAllComponents({ name: "Select" })
+			.find((c) => (c.props("options") || []).some((o) => o.value === "On Submit"));
+		expect(ctrl.props("options").map((o) => o.label)).toEqual([
+			"When a file is attached",
+			"After Insert",
+			"On Submit",
+		]);
+		expect(ctrl.props("modelValue")).toBe("File attached");
+		await ctrl.vm.$emit("update:modelValue", "On Submit");
+		expect(patches(w).at(-1)).toEqual({ intake_record_event: "On Submit" });
+	});
+
+	it("keeps a long field label and its hint on separate lines", async () => {
+		const w = await mountIt(formOf());
+		const row = w.find('[data-testid="intake-check-row"]');
+		expect(row.classes()).toContain("flex-col");
+		const hint = row.find('[data-testid="type-hint"]');
+		expect(hint.classes()).not.toContain("truncate");
+		expect(hint.classes()).toContain("break-words");
 	});
 });

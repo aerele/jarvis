@@ -5,13 +5,13 @@
 		:href="link.href"
 		target="_blank"
 		rel="noopener noreferrer"
-		class="text-ink-blue-4 hover:underline"
+		class="text-ink-blue-3 underline hover:text-ink-blue-4"
 		>{{ link.label }}</a
 	>
 	<router-link
 		v-else-if="link"
 		:to="link.href"
-		class="text-ink-blue-4 hover:underline"
+		class="text-ink-blue-3 underline hover:text-ink-blue-4"
 		:aria-label="`Open review of ${row.file_name || row.name}`"
 		>{{ link.label }}</router-link
 	>

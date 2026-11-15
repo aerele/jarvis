@@ -79,7 +79,7 @@ import { recoveryState, sendRecovery } from "../sendRecoveryStore";
 import DecisionCard from "../components/DecisionCard.vue";
 import DecisionSheet from "../components/DecisionSheet.vue";
 import FilePreviewSheet from "../components/FilePreviewSheet.vue";
-import { turnErrorInfo } from "../../../jarvis/public/js/turn_errors.mjs";
+import { turnErrorInfo, showsRawReason } from "../../../jarvis/public/js/turn_errors.mjs";
 import MessageMedia from "../components/MessageMedia.vue";
 import RecordCards from "../components/RecordCards.vue";
 import Sheet from "../components/Sheet.vue";
@@ -121,13 +121,6 @@ const errorBanner = ref("");
 // the failure differently for the SAME event - the exact #702 defect this
 // feature exists to fix, reproduced across two elements on one screen.
 const errorMeta = ref({});
-// Failed messages whose raw error text is expanded ("Details" in the card).
-const rawOpen = ref(new Set());
-function toggleRaw(key) {
-	const next = new Set(rawOpen.value);
-	next.has(key) ? next.delete(key) : next.add(key);
-	rawOpen.value = next;
-}
 const attachments = ref([]);
 const pending = ref([]); // parked writes awaiting approval
 // A typed "confirm 2" binds to the token shown as number 2 here (approval_tokens),
@@ -516,7 +509,11 @@ const view = (m) => {
 // (errorMeta above). Called once per assistant item from `items` below (as
 // `err`), never from the template, for the same reason view() is precomputed.
 function errorNote(m) {
-	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", { provider: m.provider });
+	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", {
+		provider: m.provider,
+		// An admin is told the fix; a member, who can do it for them.
+		admin: !!globalThis.window?.is_jarvis_admin,
+	});
 }
 
 // ── thread assembly ─────────────────────────────────────────────────────────
@@ -1781,6 +1778,11 @@ onUnmounted(() => {
 					</div>
 					<div v-else-if="it.err" class="jv-msg-error">
 						<strong>{{ it.err.headline }}</strong>
+						<div v-if="it.err.models" class="jv-msg-error-models">
+							<div v-for="(mod, mdi) in it.err.models" :key="mdi">
+								<strong>{{ mod.model }}</strong> {{ mod.reason }}. {{ mod.next }}
+							</div>
+						</div>
 						<p>
 							{{ it.err.hint }}
 							<a
@@ -1792,20 +1794,9 @@ onUnmounted(() => {
 								>{{ it.err.statusLabel }}
 								<span aria-hidden="true">&#8599;</span></a
 							>
-							<span v-if="it.err.hint" aria-hidden="true"> &middot; </span>
-							<button
-								type="button"
-								class="jv-err-link"
-								:aria-expanded="rawOpen.has(it.key) ? 'true' : 'false'"
-								:aria-controls="`jv-err-raw-${it.key}`"
-								@click="toggleRaw(it.key)"
-							>
-								{{ rawOpen.has(it.key) ? "Hide details" : "Details" }}
-							</button>
 						</p>
 						<pre
-							v-if="rawOpen.has(it.key)"
-							:id="`jv-err-raw-${it.key}`"
+							v-if="showsRawReason(it.err) && it.msg.error"
 							class="jv-msg-error-raw"
 							>{{ it.msg.error }}</pre
 						>
@@ -2159,6 +2150,9 @@ onUnmounted(() => {
 	cursor: pointer;
 	text-decoration: underline;
 	text-underline-offset: 2px;
+}
+.jv-msg-error-models {
+	margin: 4px 0 0;
 }
 .jv-msg-error-raw {
 	margin: 4px 0 0;

@@ -18,6 +18,7 @@ from frappe.utils.safe_exec import is_safe_exec_enabled
 
 from jarvis.chat import list_filters
 from jarvis.chat.macros_api import _bool01, _clamp_page, _lk, _load_filters
+from jarvis.intake import capture as intake_capture
 from jarvis.intake import guards as intake_guards
 from jarvis.intake import spec as intake_spec
 from jarvis.permissions import has_jarvis_admin_access, require_jarvis_user
@@ -50,6 +51,7 @@ _ALLOWED_PAYLOAD_FIELDS = {
 	"intake_source",
 	"intake_folder",
 	"intake_record_doctype",
+	"intake_record_event",
 	"intake_target_doctype",
 	"intake_spec",
 	"intake_instructions",
@@ -199,13 +201,13 @@ def get_triggers_caps() -> dict:
 @require_jarvis_user
 @list_filters.filter_errors_to_envelope
 def list_triggers_page(
-	search: str = "",
-	filters: str = "{}",
+	search: str | None = "",
+	filters: str | dict | None = "{}",
 	filters_v2: str | list | None = None,
-	sort_field: str = "modified",
-	sort_dir: str = "desc",
-	start: int = 0,
-	page_length: int = 20,
+	sort_field: str | None = "modified",
+	sort_dir: str | None = "desc",
+	start: int | str | None = 0,
+	page_length: int | str | None = 20,
 ) -> dict:
 	"""Org-wide triggers (read is not row-scoped), server-side search / filter
 	/ sort / paginate, plus per-row activity stats (one grouped query for the
@@ -255,7 +257,8 @@ def list_triggers_page(
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Trigger` WHERE {where}", params)[0][0]
 	rows = list_filters.bounded_sql(
 		f"""SELECT name, trigger_name, enabled, target_doctype, doc_event,
-		action_type, description, modified, owner
+		action_type, description, modified, owner,
+		intake_source, intake_folder, intake_record_doctype, intake_record_event, intake_target_doctype
 		FROM `tabJarvis Trigger`
 		WHERE {where}
 		ORDER BY {order}
@@ -282,6 +285,7 @@ def list_triggers_page(
 		r["last_activity_at"] = str(s["last_activity_at"]) if s and s["last_activity_at"] else ""
 		r["activity_24h"] = cint(s["activity_24h"]) if s else 0
 		r["modified"] = str(r["modified"])
+		_shape_intake_row(r)
 
 	return {
 		"ok": True,
@@ -293,6 +297,22 @@ def list_triggers_page(
 			"page_length": pl,
 		},
 	}
+
+
+def _shape_intake_row(r) -> None:
+	"""An Intake rule has no doctype event: show its target doctype, what it watches and
+	"Run when" in the list's DocType / Event columns. The intake columns are not part of
+	the list's row shape, so they are dropped here."""
+	source, folder = r.pop("intake_source", ""), r.pop("intake_folder", "")
+	record_doctype, event = r.pop("intake_record_doctype", ""), r.pop("intake_record_event", "")
+	target = r.pop("intake_target_doctype", "")
+	if r.get("action_type") != "Intake":
+		return
+	r["target_doctype"] = target or ""
+	if source == "Record":
+		r["doc_event"] = f"{record_doctype or ''}: {event or intake_capture.EVENT_FILE}"
+	else:
+		r["doc_event"] = f"Folder: {folder or ''}"
 
 
 def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
@@ -319,6 +339,7 @@ def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
 		"intake_source": doc.intake_source or "",
 		"intake_folder": doc.intake_folder or "",
 		"intake_record_doctype": doc.intake_record_doctype or "",
+		"intake_record_event": intake_capture.record_event(doc),
 		"intake_target_doctype": doc.intake_target_doctype or "",
 		"allow_incomplete_drafts": cint(doc.allow_incomplete_drafts),
 		"intake_status_field": doc.intake_status_field or "",
@@ -400,7 +421,7 @@ def _with_warning(response: dict, doc) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def create_trigger(payload: str) -> dict:
+def create_trigger(payload: str | dict) -> dict:
 	"""Create a trigger from a whitelisted-fields JSON payload. Validation
 	(denylist, event/action compatibility, condition, script compile, caps)
 	runs in the doctype validate(); the controller materializes the managed
@@ -415,7 +436,7 @@ def create_trigger(payload: str) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def update_trigger(name: str, payload: str) -> dict:
+def update_trigger(name: str, payload: str | dict) -> dict:
 	"""Update whitelisted fields of a trigger (manage-gated)."""
 	_require_manage()
 	fields = _parse_payload(payload)
@@ -428,7 +449,7 @@ def update_trigger(name: str, payload: str) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def set_trigger_enabled(name: str, enabled: int) -> dict:
+def set_trigger_enabled(name: str, enabled: int | bool | str) -> dict:
 	"""Quick enable/disable toggle (manage-gated): raw db_set — no full
 	revalidation of an unchanged trigger — plus the engine-cache bust the
 	controller would have done. Turning a trigger ON re-checks its stored code
@@ -462,7 +483,7 @@ def delete_trigger(name: str) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def delete_triggers_bulk(names: str) -> dict:
+def delete_triggers_bulk(names: str | list) -> dict:
 	"""Bulk delete (manage-gated, cap 50). Per-row try/except so one bad row
 	never aborts the batch; internal errors are logged, never leaked."""
 	_require_manage()
@@ -513,7 +534,7 @@ _DOCTYPE_PICK_BATCHES = 6
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def search_intake_doctypes(txt: str = "") -> list[dict]:
+def search_intake_doctypes(txt: str | None = "") -> list[dict]:
 	"""DocTypes the intake pickers may offer (target and Record source), as
 	``[{"value": name}]``: the ones the rule save would accept, so a refused one is never
 	listed to be rejected later. Singles and child tables are left out too."""
@@ -535,7 +556,9 @@ def search_intake_doctypes(txt: str = "") -> list[dict]:
 			start=batch * _DOCTYPE_PICK_BATCH,
 			limit=_DOCTYPE_PICK_BATCH,
 		)
-		out += [{"value": n} for n in names if not intake_guards.refused_doctype(n)]
+		# The query above already left out Singles and child tables, so the name check
+		# is enough (``refused_doctype`` would read each one's flags again).
+		out += [{"value": n} for n in names if not intake_guards.refused_by_name(n)]
 		if len(out) >= _DOCTYPE_PICK_LIMIT or len(names) < _DOCTYPE_PICK_BATCH:
 			break
 	return out[:_DOCTYPE_PICK_LIMIT]
@@ -566,9 +589,11 @@ def get_intake_field_options(doctype: str) -> dict:
 	_require_manage()
 	frappe.new_doc(TRIGGER)._check_doctype_usable(doctype, intake=True)
 	meta = frappe.get_meta(doctype)
+	# Save refuses these (spec.validate), so the pickers do not offer them.
+	refused = intake_spec.sensitive_fieldnames(doctype)
 	tables = []
 	for df in meta.get_table_fields():
-		if df.read_only:
+		if df.read_only or df.fieldname in refused or intake_guards.refused_child(df.options):
 			continue
 		child = frappe.get_meta(df.options)
 		tables.append(
@@ -581,7 +606,8 @@ def get_intake_field_options(doctype: str) -> dict:
 				"columns": [_intake_field_row(c) for c in _intake_value_fields(child)],
 			}
 		)
-	return {"fields": [_intake_field_row(df) for df in _intake_value_fields(meta)], "tables": tables}
+	fields = [_intake_field_row(df) for df in _intake_value_fields(meta) if df.fieldname not in refused]
+	return {"fields": fields, "tables": tables}
 
 
 # --------------------------------------------------------------------------- #
@@ -646,7 +672,7 @@ def _readonly_eval_doc(doc) -> "_ConditionDoc":
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def test_trigger_condition(target_doctype: str, condition: str = "", docname: str = "") -> dict:
+def test_trigger_condition(target_doctype: str, condition: str | None = "", docname: str | None = "") -> dict:
 	"""READ-ONLY condition tester. Without ``docname``: compile/eval against an
 	empty doc (webhook-style validation). With ``docname`` (caller needs read
 	on that doc): also report whether the trigger WOULD fire. A bad expression
@@ -854,12 +880,12 @@ def _readable_target_doctypes(query) -> list:
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_activity_page(
-	search: str = "",
-	filters: str = "{}",
-	sort_field: str = "creation",
-	sort_dir: str = "desc",
-	start: int = 0,
-	page_length: int = 20,
+	search: str | None = "",
+	filters: str | dict | None = "{}",
+	sort_field: str | None = "creation",
+	sort_dir: str | None = "desc",
+	start: int | str | None = 0,
+	page_length: int | str | None = 20,
 ) -> dict:
 	"""Activity feed. System Manager / Jarvis Admin see everything (exact
 	total). Everyone else sees a row iff they can READ its target doc —
