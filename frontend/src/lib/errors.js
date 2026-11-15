@@ -148,5 +148,6 @@ export function errHtml(e, fallback) {
 // One implementation for desktop, Desk, and mobile; Python uses its rule data.
 export {
 	turnErrorInfo,
+	showsRawReason,
 	subscriptionUpstreamFromError,
 } from "../../../jarvis/public/js/turn_errors.mjs";

@@ -70,6 +70,49 @@ def create_ticket(subject: str, body: str = "") -> dict:
 	}
 
 
+# The stored error is at most 1000 chars (settlement / turn_state); the ticket never needs more.
+_ERROR_DETAIL_MAX = 1000
+
+
+@frappe.whitelist(methods=["POST"])
+def error_report_details(conversation: str, message: str) -> dict:
+	"""The failed reply's error for a Report error ticket, secrets removed.
+
+	Support works from the ticket alone (it cannot open the customer's site), so the draft carries
+	the error text and the run id that finds the agent's own transcript. ``get_list`` applies the
+	message permission hook (only the caller's own conversations), and the pair must match a failed
+	assistant reply, so no other row is ever read."""
+	_scope()
+	rows = frappe.get_list(
+		"Jarvis Chat Message",
+		filters={
+			"name": message,
+			"conversation": conversation,
+			"role": "assistant",
+			"error": ["is", "set"],
+		},
+		fields=["error", "model"],
+		limit=1,
+	)
+	if not rows:
+		frappe.throw("This message has no error to report.", frappe.DoesNotExistError)
+	# Turn rows are readable by admins only, but the query above already proved the caller owns
+	# this reply, and the run id is no secret: it is what support searches the agent transcript for.
+	run = frappe.db.get_value(
+		"Jarvis Chat Turn", {"conversation": conversation, "assistant_message": message}, "run_id"
+	)
+	from jarvis.chat.scrub import scrub_for_share
+
+	return {
+		"ok": True,
+		"data": {
+			"error": scrub_for_share(rows[0].error)[:_ERROR_DETAIL_MAX],
+			"model": rows[0].model or "",
+			"run": run or "",
+		},
+	}
+
+
 @frappe.whitelist(methods=["POST"])
 def get_thread(ticket: str) -> dict:
 	scope = _scope()

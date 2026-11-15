@@ -11,6 +11,8 @@ export const subscriptionNotice = reactive({
 	expired: [],
 	expiredModels: [],
 	upstreams: null,
+	// { "<bare model id>": <until epoch s> } for models on their usage cap.
+	limited: {},
 });
 
 let inflight = null;
@@ -29,6 +31,9 @@ export function loadSubscriptionNotice() {
 			subscriptionNotice.expiredModels = Array.isArray(cards) ? cards : [];
 			subscriptionNotice.upstreams =
 				res && Array.isArray(res.upstreams) ? res.upstreams : null;
+			const limited = res && res.limited;
+			subscriptionNotice.limited =
+				limited && typeof limited === "object" && !Array.isArray(limited) ? limited : {};
 			subscriptionNotice.loaded = true;
 		})
 		.catch(() => {})
