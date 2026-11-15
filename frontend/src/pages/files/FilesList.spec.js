@@ -26,12 +26,6 @@ vi.mock("frappe-ui", () => ({
 	FeatherIcon: { template: "<i/>" },
 	Tooltip: { template: "<span><slot/></span>" },
 	Select: { template: "<select/>" },
-	TabButtons: {
-		props: ["buttons", "modelValue"],
-		emits: ["update:modelValue"],
-		template:
-			'<div class="tabs"><button v-for="b in buttons" :key="b.value" class="tab" :data-value="b.value" @click="$emit(\'update:modelValue\', b.value)">{{ b.label }}</button></div>',
-	},
 	toast: {
 		success: vi.fn(),
 		error: vi.fn(),
@@ -43,7 +37,7 @@ vi.mock("frappe-ui", () => ({
 vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
 		props: ["rows"],
-		template: `<div><div class="left"><slot name="left-extra" /></div><div class="right"><slot name="right-header" /></div><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-status" :row="row" /><slot name="cell-result" :row="row" /><slot name="cell-_rerun" :row="row" /></div></div>`,
+		template: `<div><div class="right"><slot name="right-header" /></div><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-status" :row="row" /><slot name="cell-result" :row="row" /><slot name="cell-_rerun" :row="row" /></div></div>`,
 	},
 }));
 vi.mock("@/components/FilePreview.vue", () => ({ default: { template: "<div/>" } }));
@@ -54,9 +48,9 @@ vi.mock("@/branding", () => ({ brand: { agentName: "Jarvis" } }));
 vi.mock("@/pages/files/IntakeList.vue", () => ({
 	default: {
 		props: ["scope"],
-		emits: ["update:scope", "switch"],
+		emits: ["update:scope"],
 		template:
-			'<div class="intake-view" :data-scope="scope || \'mine\'"><button class="pick-all" @click="$emit(\'update:scope\', \'all\')"/><button class="go-dropped" @click="$emit(\'switch\', \'dropped\')"/></div>',
+			'<div class="intake-view" :data-scope="scope || \'mine\'"><button class="pick-all" @click="$emit(\'update:scope\', \'all\')"/></div>',
 	},
 }));
 vi.mock("@/api", () => ({
@@ -131,7 +125,7 @@ describe("FilesList: the Dropped / Intake switch", () => {
 		const w = await mountList([applying]);
 		expect(w.find(".row").exists()).toBe(true);
 		expect(w.find(".intake-view").exists()).toBe(false);
-		await w.find('.tab[data-value="intake"]').trigger("click");
+		await w.find('[role="tab"]:nth-of-type(2)').trigger("click");
 		expect(w.find(".intake-view").exists()).toBe(true);
 		expect(w.find(".row").exists()).toBe(false);
 		w.unmount();
@@ -139,40 +133,41 @@ describe("FilesList: the Dropped / Intake switch", () => {
 
 	it("keeps the chosen Whose files scope across a Dropped round trip", async () => {
 		const w = await mountList([applying]);
-		await w.find('.tab[data-value="intake"]').trigger("click");
+		await w.find('[role="tab"]:nth-of-type(2)').trigger("click");
 		expect(w.find(".intake-view").attributes("data-scope")).toBe("mine");
 		await w.find(".pick-all").trigger("click"); // the admin picks All
-		await w.find(".go-dropped").trigger("click");
-		await w.find('.tab[data-value="intake"]').trigger("click");
+		await w.find('[role="tab"]:nth-of-type(1)').trigger("click");
+		await w.find('[role="tab"]:nth-of-type(2)').trigger("click");
 		expect(w.find(".intake-view").attributes("data-scope")).toBe("all");
 		w.unmount();
 	});
 
-	it("puts the Dropped/Intake switch in the fixed left slot, not the right-hand buttons", async () => {
+	it("puts Dropped / Intake in a tabs row under the header, not in the header", async () => {
 		const w = await mountList([applying]);
-		expect(w.find(".left .tabs").exists()).toBe(true);
-		expect(w.find(".right .tabs").exists()).toBe(false);
+		const tabs = w.findAll('[role="tab"]');
+		expect(tabs.map((t) => t.text())).toEqual(["Dropped", "Intake"]);
+		expect(w.find('[role="tablist"]').exists()).toBe(true);
+		expect(tabs[0].attributes("aria-selected")).toBe("true");
+		expect(w.find(".right [role=tablist]").exists()).toBe(false);
 		expect(w.find(".right").text()).toContain("Add Files");
+		expect(w.find(".right").text()).not.toContain("Intake");
+		await tabs[1].trigger("click");
+		expect(w.findAll('[role="tab"]')[1].attributes("aria-selected")).toBe("true");
 		w.unmount();
 	});
 
-	it("moves focus to the selected switch button after a switch, waiting for the new header", async () => {
+	it("keeps the tabs (and focus) in place across a switch", async () => {
 		const w = await mountList([applying]);
-		const host = document.createElement("div");
-		host.innerHTML =
-			'<div data-filebox-switch><button role="radio" aria-checked="false">Dropped</button><button role="radio" aria-checked="true" id="on">Intake</button></div>';
-		document.body.appendChild(host);
-		await w.find('.tab[data-value="intake"]').trigger("click");
-		await new Promise((r) => setTimeout(r, 50));
-		expect(document.activeElement && document.activeElement.id).toBe("on");
-		host.remove();
+		const before = w.findAll('[role="tab"]')[1].element;
+		await w.findAll('[role="tab"]')[1].trigger("click");
+		expect(w.findAll('[role="tab"]')[1].element).toBe(before);
 		w.unmount();
 	});
 
 	it("stops polling the Dropped list while the Intake view is shown", async () => {
 		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
 		const w = await mountList([applying]);
-		await w.find('.tab[data-value="intake"]').trigger("click");
+		await w.find('[role="tab"]:nth-of-type(2)').trigger("click");
 		const calls = api.fileboxListPage.mock.calls.length;
 		await vi.advanceTimersByTimeAsync(20000);
 		expect(api.fileboxListPage.mock.calls.length).toBe(calls);

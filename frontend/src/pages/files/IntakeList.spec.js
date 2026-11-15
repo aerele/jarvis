@@ -23,19 +23,13 @@ vi.mock("frappe-ui", () => ({
 			'<button class="btn" :aria-label="label" @click="$emit(\'click\')"><slot>{{ label }}</slot></button>',
 	},
 	FeatherIcon: { template: "<i/>" },
-	Select: {
-		props: ["options", "modelValue"],
-		emits: ["update:modelValue"],
-		template:
-			'<select class="scope" @change="$emit(\'update:modelValue\', $event.target.value)"><option v-for="o in options" :key="o.value" :value="o.value">{{ o.label }}</option></select>',
-	},
-	TabButtons: { template: '<div class="tabs"/>' },
 	toast: { success: vi.fn(), error: vi.fn() },
 }));
 vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
-		props: ["rows", "emptyState", "columns", "rowHeight"],
-		template: `<div :data-cols="columns.map((c) => c.key).join()" :data-row-height="rowHeight"><slot name="banner" /><div class="left"><slot name="left-extra" /></div><div class="right"><slot name="right-header" /></div><div v-if="!rows.length" class="empty">{{ emptyState.description }}</div><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-file" :row="row" /><slot name="cell-source" :row="row" /><slot name="cell-status" :row="row" /><slot name="cell-draft" :row="row" /><slot name="cell-summary" :row="row" /><slot name="cell-_retry" :row="row" /></div></div>`,
+		props: ["rows", "emptyState", "columns", "rowHeight", "quickFilters", "filters"],
+		emits: ["update:filters"],
+		template: `<div :data-cols="columns.map((c) => c.key).join()" :data-row-height="rowHeight"><slot name="banner" /><div class="left"><template v-for="qf in quickFilters" :key="qf.key"><select v-if="qf.key === 'scope'" class="scope" :aria-label="qf.label" :value="filters.scope" @change="$emit('update:filters', { ...filters, scope: $event.target.value })"><option v-for="o in qf.options" :key="o.value" :value="o.value">{{ o.label }}</option></select></template></div><div class="right"><slot name="right-header" /></div><div v-if="!rows.length" class="empty">{{ emptyState.description }}</div><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-file" :row="row" /><slot name="cell-source" :row="row" /><slot name="cell-status" :row="row" /><slot name="cell-draft" :row="row" /><slot name="cell-summary" :row="row" /><slot name="cell-_retry" :row="row" /></div></div>`,
 	},
 }));
 vi.mock("@/api", () => ({
@@ -94,10 +88,18 @@ describe("IntakeList empty state", () => {
 });
 
 describe("IntakeList", () => {
-	it("puts the switch in the same left slot as the Dropped view, whatever the right side holds", async () => {
+	it("has no switch or Whose files select in the header", async () => {
 		const w = await mountList([row()], true);
-		expect(w.find(".left .tabs, .left [data-filebox-switch]").exists()).toBe(true);
-		expect(w.find(".right [data-filebox-switch]").exists()).toBe(false);
+		expect(w.find(".right .scope").exists()).toBe(false);
+		expect(w.find(".right [role=radio], .right [data-filebox-switch]").exists()).toBe(false);
+		w.unmount();
+	});
+
+	it("puts Whose files with the filter selects (left group), for managers only", async () => {
+		const w = await mountList([row()], true);
+		const sel = w.find(".left .scope");
+		expect(sel.exists()).toBe(true);
+		expect(sel.attributes("aria-label")).toBe("Whose files");
 		w.unmount();
 	});
 

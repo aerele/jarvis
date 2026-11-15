@@ -6,7 +6,13 @@
 		@dragleave="onDragLeave"
 		@drop.prevent="onDrop"
 	>
-		<IntakeList v-if="view === 'intake'" v-model:scope="intakeScope" @switch="view = $event" />
+		<TabBar
+			class="shrink-0"
+			:tabs="VIEW_TABS"
+			:model-value="view"
+			@update:model-value="setView"
+		/>
+		<IntakeList v-if="view === 'intake'" v-model:scope="intakeScope" />
 		<ListPage
 			v-else
 			:breadcrumbs="[{ label: 'File Box', route: { name: 'FilesList' } }]"
@@ -37,11 +43,6 @@
 			@load-more="loadMore"
 			@refresh="resetLoad"
 		>
-			<!-- same slot in both views: the switch stays where it was when it is clicked -->
-			<template #left-extra>
-				<FileBoxSwitch v-model="view" />
-			</template>
-
 			<template #right-header>
 				<Button label="Clear Processed" @click="clearProcessed" />
 				<Button
@@ -259,7 +260,7 @@
 // with ?status= deep link, date-range filter, processing/applying poll (5s) +
 // visibilitychange refresh, per-row file preview (FilePreview dialog), bulk
 // delete with skip reasons, Clear Processed.
-import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
 	Button,
@@ -273,7 +274,7 @@ import {
 } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import FilePreview from "@/components/FilePreview.vue";
-import FileBoxSwitch from "./FileBoxSwitch.vue";
+import TabBar from "@/components/list/TabBar.vue";
 import IntakeList from "./IntakeList.vue";
 import { useListPage } from "@/composables/useListPage";
 import { useShellStore } from "@/stores/shell";
@@ -310,17 +311,15 @@ watch(
 	}
 );
 
-// The switch is rebuilt with the other view, so the clicked button is gone: put focus back
-// on the selected view's button instead of letting it fall to <body>. Each page teleports
-// its own header one tick after it mounts, so wait up to a few frames for the new switch.
-const SWITCH_ON = "[data-filebox-switch] [role=radio][aria-checked=true]";
-async function focusSwitch(tries = 10) {
-	await nextTick();
-	const on = document.querySelector(SWITCH_ON);
-	if (on) return on.focus();
-	if (tries > 0) requestAnimationFrame(() => focusSwitch(tries - 1));
+// The Dropped / Intake tabs live in this page, above both views, so they are not rebuilt on a
+// switch and keep focus themselves.
+const VIEW_TABS = [
+	{ label: "Dropped", value: "dropped" },
+	{ label: "Intake", value: "intake" },
+];
+function setView(v) {
+	if (v && v !== view.value) view.value = v;
 }
-watch(view, () => focusSwitch());
 
 // ── list config ──────────────────────────────────────────────────────────────
 // statuses, badges and result links live in @/lib/fileboxStatus (tested).
