@@ -300,7 +300,7 @@ const store = useShellStore();
 // "dropped" (files added by hand, the default) or "intake" (Document Intake files)
 // ?view=intake is the link the intake bells carry.
 // "Whose files" of the Intake view, kept here because that view is rebuilt on each switch
-const intakeScope = ref("mine");
+const intakeScope = ref(route.query.scope === "all" ? "all" : "mine");
 const view = ref(route.query.view === "intake" ? "intake" : "dropped");
 // A bell link to ?view=intake lands while File Box is already open: the route changes, the
 // page is reused, so follow the query. intakeScope stays as the user chose it.
@@ -318,8 +318,21 @@ const VIEW_TABS = [
 	{ label: "Intake", value: "intake" },
 ];
 function setView(v) {
-	if (v && v !== view.value) view.value = v;
+	if (!v || v === view.value) return;
+	view.value = v;
+	syncViewQuery();
 }
+// The tab and "Whose files" live in the URL (replace, not push), so Back from an intake
+// row's detail page lands on the same tab and scope instead of the Dropped default.
+function syncViewQuery() {
+	const q = { ...route.query };
+	if (view.value === "intake") q.view = "intake";
+	else delete q.view;
+	if (view.value === "intake" && intakeScope.value === "all") q.scope = "all";
+	else delete q.scope;
+	router.replace({ query: q });
+}
+watch(intakeScope, syncViewQuery);
 
 // ── list config ──────────────────────────────────────────────────────────────
 // statuses, badges and result links live in @/lib/fileboxStatus (tested).
