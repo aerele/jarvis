@@ -28,6 +28,20 @@ class TestParse(_Base):
 		self.assertIsNone(filebox_cards.parse_action("```jarvis-action\n{broken\n```"))
 		self.assertEqual(filebox_cards.parse_action(_card(doctype="Supplier"))["doctype"], "Supplier")
 
+	def test_a_capitalised_or_padded_verb_reads_as_the_lower_case_one(self):
+		for raw, want in (("Create", "create"), (" create ", "create"), ("UPDATE", "update")):
+			a = filebox_cards.parse_action(_card(doctype="Supplier", verb=raw))
+			self.assertEqual(a["verb"], want, raw)
+
+	def test_an_unknown_or_non_text_verb_is_not_a_card(self):
+		self.assertIsNone(filebox_cards.parse_action(_card(doctype="Supplier", verb="draft")))
+		self.assertIsNone(filebox_cards.parse_action(_card(doctype="Supplier", verb=5)))
+		self.assertIsNone(filebox_cards.parse_action(_card(doctype="Supplier", verb=["create"])))
+
+	def test_a_block_without_a_verb_still_has_none(self):
+		a = filebox_cards.parse_action(_card(doctype="Supplier"))
+		self.assertNotIn("verb", a)
+
 	def test_fields_map_by_fieldname_or_label_and_blanks_drop_on_create(self):
 		tool, args = filebox_cards.tool_call(
 			{
