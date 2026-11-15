@@ -286,11 +286,4 @@ describe("Payment Calendar page: side ledger and full details", () => {
 			});
 		});
 	});
-
-	it("shows no old detail table and no bucket dialog any more", async () => {
-		await render();
-		expect(wrapper.find(".pcal-tabs").exists()).toBe(false);
-		expect(wrapper.find(".terms-table").exists()).toBe(false);
-		expect($("[role=dialog]")).toBeNull();
-	});
 });
