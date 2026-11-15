@@ -366,6 +366,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mariadb-client
+          # ubuntu-latest moved to 26.04, whose mariadb client requires TLS by default; the
+          # throwaway CI database container has none, so `bench new-site` failed with
+          # "ERROR 2026: SSL is required". Local CI service only: connect without TLS.
+          printf '[client]\nskip-ssl\n' > ~/.my.cnf
           sudo npm install -g yarn
           pip install "frappe-bench>=5.29,<6"
 
