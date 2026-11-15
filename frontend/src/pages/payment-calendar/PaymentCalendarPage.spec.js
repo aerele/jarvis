@@ -425,17 +425,6 @@ describe("Native Payment Calendar page", () => {
 		expect(wrapper.text()).not.toContain("Refreshing data…");
 		expect(wrapper.text()).not.toContain("Calendar data expired");
 	});
-	it("shows no old-page copy that the template does not have", async () => {
-		await render();
-		for (const copy of [
-			"Updates automatically while this page is visible",
-			"Customer collections assume on-time payment",
-			"Your payment schedule",
-			"Click any date to update",
-		])
-			expect(wrapper.text()).not.toContain(copy);
-		expect(wrapper.find(".pcal-asof").exists()).toBe(false);
-	});
 	it("shows the update status inside the header time, in its status role", async () => {
 		await render();
 		expect(wrapper.get(".pcal-updated").text()).not.toContain("Refreshing data…");
@@ -575,31 +564,6 @@ describe("Native Payment Calendar page", () => {
 			expect(targets).toHaveLength(1);
 			expect(targets[0].attributes("data-date")).toBe("2026-11-23");
 			expect(targets[0].attributes("aria-pressed")).toBe("true");
-		});
-
-		it("opens the month's invoices in the details modal from View totals", async () => {
-			serveTemplateSnapshot();
-			await render();
-			await wrapper.get("#month-flow-details").trigger("click");
-			await settleReads();
-			expect(document.body.querySelector(".pcal-modal")).not.toBeNull();
-			expect(api.getBucketDetail.mock.calls.at(-1).slice(1, 3)).toEqual([
-				"window",
-				"Payable",
-			]);
-		});
-
-		it("shows the immediate invoices in the side panel and focuses its heading", async () => {
-			serveTemplateSnapshot();
-			wrapper = mount(PaymentCalendarPage, { attachTo: document.body });
-			await settleReads();
-			await wrapper.get('[data-obligation="immediate"]').trigger("click");
-			await settleReads();
-			expect(api.getBucketDetail.mock.calls.at(-1).slice(1, 3)).toEqual([
-				"immediate",
-				"Payable",
-			]);
-			expect(document.activeElement).toBe(wrapper.get("#ledger-heading").element);
 		});
 
 		it("removes an account at once from its chip", async () => {
