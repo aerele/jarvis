@@ -351,7 +351,7 @@ class TestSendMessage(_ChatTestCase):
 	def test_rejects_empty_message(self):
 		result = send_message(self.conv, "   ")
 		self.assertFalse(result["ok"])
-		self.assertIn("empty", result["reason"].lower())
+		self.assertIn("type a message", result["reason"].lower())
 
 	def test_human_send_to_missing_conversation_falls_back(self):
 		# A stale/reaped conversation id from a human send lands in a fresh chat
@@ -586,7 +586,7 @@ class TestRetryMessage(_ChatTestCase):
 		user_id, _asst_id = self._make_turn(self.conv, with_error=True)
 		result = retry_message(user_id)
 		self.assertFalse(result["ok"])
-		self.assertIn("assistant", result["reason"].lower())
+		self.assertIn("replies can be retried", result["reason"].lower())
 
 	def test_rejects_message_without_error(self):
 		_user_id, asst_id = self._make_turn(self.conv, with_error=False)
@@ -610,7 +610,7 @@ class TestRetryMessage(_ChatTestCase):
 		frappe.db.commit()
 		result = retry_message(asst_doc.name)
 		self.assertFalse(result["ok"])
-		self.assertIn("preceding", result["reason"].lower())
+		self.assertIn("find the message to retry", result["reason"].lower())
 
 	def test_picks_immediately_preceding_user_message(self):
 		"""When a conversation has multiple user turns, retry should target the
