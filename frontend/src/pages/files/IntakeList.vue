@@ -10,7 +10,7 @@
 		:has-more="hasMore"
 		:quick-filters="quickFilters"
 		:filter-defs="filterDefs"
-		:filters="filters"
+		:filters="barFilters"
 		plain-rows
 		strong-header
 		:sort-options="[]"
@@ -19,32 +19,13 @@
 		:default-sort="DEFAULT_SORT"
 		storage-key="files-intake"
 		:empty-state="emptyState"
-		@update:filters="setFilters"
+		@update:filters="onFilters"
 		@update:page-length="(v) => (pageLength = v)"
 		@load-more="loadMore"
 		@refresh="resetLoad"
 	>
 		<template #banner>
 			<div ref="statusEl" tabindex="-1" role="status" class="sr-only">{{ statusText }}</div>
-		</template>
-
-		<!-- same slot in both views: the switch stays where it was when it is clicked -->
-		<template #left-extra>
-			<FileBoxSwitch :model-value="'intake'" @update:model-value="$emit('switch', $event)" />
-		</template>
-
-		<template #right-header>
-			<!-- wraps instead of clipping -->
-			<div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
-				<Select
-					v-if="canManage"
-					class="w-28"
-					aria-label="Whose files"
-					:options="SCOPE_OPTIONS"
-					:model-value="scope"
-					@update:model-value="(v) => (scope = v || 'mine')"
-				/>
-			</div>
 		</template>
 
 		<template #cell-file="{ row }">
@@ -130,11 +111,10 @@
 // managers, everyone's), with their status, draft and a Retry for failed ones.
 // Polls every 10 s while a row is Queued or Running.
 import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
-import { Badge, Button, FeatherIcon, Select, toast } from "frappe-ui";
+import { Badge, Button, FeatherIcon, toast } from "frappe-ui";
 import IntakeDraftLink from "./IntakeDraftLink.vue";
 import { useNarrow } from "@/composables/useNarrow";
 import ListPage from "@/components/list/ListPage.vue";
-import FileBoxSwitch from "./FileBoxSwitch.vue";
 import { useListPage } from "@/composables/useListPage";
 import { intakeListPage, intakeRetry } from "@/api/intake";
 import { getTriggersCaps } from "@/api/triggers";
@@ -146,8 +126,6 @@ import {
 	intakeDraftLink,
 	intakeIsLive,
 } from "@/lib/intakeStatus";
-
-defineEmits(["switch"]);
 
 // The Draft link already names the draft, so "Draft ready: ToDo X" is not said twice;
 // anything after it (an answered question) stays.
@@ -172,10 +150,14 @@ const narrow = useNarrow();
 const columns = computed(() =>
 	narrow.value ? ALL_COLUMNS.filter((c) => c.key === "file" || c.key === "_retry") : ALL_COLUMNS
 );
-const quickFilters = [
+// "Whose files" sits with the other filter selects, for managers only (same Dropdown as Status).
+const quickFilters = computed(() => [
 	{ key: "search", label: "Search files", type: "text" },
 	{ key: "status", label: "Status", type: "select", options: INTAKE_STATUS_OPTIONS },
-];
+	...(canManage.value
+		? [{ key: "scope", label: "Whose files", type: "select", options: SCOPE_OPTIONS }]
+		: []),
+]);
 const filterDefs = [
 	{ key: "status", label: "Status", type: "select", options: INTAKE_STATUS_OPTIONS },
 	{ key: "daterange", label: "Added", type: "daterange" },
@@ -221,6 +203,14 @@ const {
 });
 
 watch(scope, () => resetLoad());
+
+// The toolbar reads and writes Whose files through the same filters object as Status.
+const barFilters = computed(() => ({ ...filters, scope: scope.value }));
+function onFilters(next) {
+	const { scope: picked, ...rest } = next || {};
+	if (picked) scope.value = picked;
+	setFilters(rest);
+}
 
 // A search or filter that matches nothing says so, instead of "no files yet".
 const isFiltered = computed(
