@@ -686,6 +686,78 @@ def _note_applied(conversation: str, receipt: str) -> None:
 		frappe.log_error(title="apply_action agent note failed", message=frappe.get_traceback())
 
 
+def _end_card_after_failure(conversation: str, tool: str, args: dict, envelope: dict, draft) -> None:
+	"""A save that failed FOR GOOD ends its card. When the panel is closed (``closed``) or part
+	of the write landed (``outcome == "partial"``) leave a ``failed`` / ``partial`` receipt row,
+	so the draft is no longer the live one and stays gone after a reload. A fixable failure
+	(the panel stays open) gets none: its draft must stay live. Nothing else on this path writes
+	a row with an ``action_outcome``. Best-effort: the reply to the user must not fail."""
+	partial = envelope.get("outcome") == "partial"
+	if not (partial or envelope.get("closed")):
+		return
+	from jarvis import api
+
+	draft = (draft or "").strip() if isinstance(draft, str) else ""
+	try:
+		api.persist_tool_receipt(
+			conversation,
+			tool,
+			args,
+			envelope,
+			action_outcome="partial" if partial else "failed",
+			# One receipt per draft: a repeated failing save of it dedupes on the token.
+			flip_token=f"draft-failed:{draft}" if draft else None,
+		)
+	except Exception:
+		frappe.log_error(title="apply_action failure receipt failed", message=frappe.get_traceback())
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def dismiss_draft(conversation: str, message: str) -> dict:
+	"""Cancel the live draft card for good (the Cancel button), so it stays gone after a reload.
+
+	Owner-checked like ``apply_action``. Acts only when ``message`` is the conversation's live
+	draft (``jarvis.chat.live_draft``): it appends ONE ``discarded`` receipt row and queues a
+	note so the agent learns nothing was saved. Any other message (already saved, cancelled,
+	replaced, unknown) writes nothing and answers ``already``, so a second Cancel is harmless."""
+	refuse_in_tool_dispatch()
+	conversation = (conversation or "").strip()
+	message = (message or "").strip()
+	if not conversation:
+		raise InvalidArgumentError("conversation is required")
+	if not message:
+		raise InvalidArgumentError("message is required")
+	_require_own_conversation(conversation)
+
+	from jarvis import api
+	from jarvis.chat import live_draft
+	from jarvis.chat.turn_handler import _safe_label_name
+
+	live = live_draft.find(conversation)
+	if not live or live["message"] != message:
+		return {"ok": True, "already": True}
+	tool = f"{live['verb']}_doc"
+	# The token makes a double click (two requests at once) write one row: the second dedupes.
+	api.persist_tool_receipt(
+		conversation,
+		tool,
+		{"doctype": live["doctype"]},
+		None,
+		action_outcome="discarded",
+		flip_token=f"draft-cancel:{message}",
+	)
+	label = _safe_label_name(live["doctype"])[:80]
+	subject = f"the {label} draft" if label else "the draft"
+	from jarvis.chat import agent_notes
+
+	try:
+		agent_notes.append(conversation, f"the user cancelled {subject}; nothing was saved")
+	except Exception:
+		frappe.log_error(title="dismiss_draft agent note failed", message=frappe.get_traceback())
+	return {"ok": True}
+
+
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def apply_action(action: dict | str | None = None) -> dict:
@@ -904,7 +976,9 @@ def apply_action(action: dict | str | None = None) -> dict:
 			partial=partial,
 			fixable_here=_panel_can_fix(verb, doctype, name, err_obj, marked),
 		)
-		return panel.respond(draft=a.get("message"), editable=cint(a.get("editable", 1)))
+		reply = panel.respond(draft=a.get("message"), editable=cint(a.get("editable", 1)))
+		_end_card_after_failure(conversation, tool, args, reply, a.get("message"))
+		return reply
 	watch.disarm()
 
 	# Audit as a human-authored write, distinct from a model tool call. The

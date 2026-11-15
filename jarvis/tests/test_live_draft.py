@@ -1,0 +1,252 @@
+"""The live-draft rule on the server (``jarvis.chat.live_draft``), the Cancel that persists
+(``dismiss_draft``), the receipt a save that failed for good leaves, and the per-turn fact.
+
+The rule's cases live in ``frontend/src/lib/liveDraftCases.json``, which the phone and
+desktop tests read too, so the three readers cannot drift."""
+
+from __future__ import annotations
+
+import json
+import os
+from unittest.mock import patch
+
+import frappe
+from frappe.tests.utils import FrappeTestCase
+
+from jarvis.chat import live_draft
+from jarvis.chat.actions_api import _end_card_after_failure, dismiss_draft
+from jarvis.tests._conv_helpers import _ensure_non_admin_user, _make_conv
+from jarvis.tests.test_chat_api import TEST_USER, _ensure_test_user
+
+MSG = "Jarvis Chat Message"
+CONV = "Jarvis Conversation"
+
+_CASES = os.path.join(
+	os.path.dirname(os.path.abspath(frappe.get_app_path("jarvis"))),
+	"frontend",
+	"src",
+	"lib",
+	"liveDraftCases.json",
+)
+
+
+def _block(**action) -> str:
+	return f"Drafting.\n\n```jarvis-action\n{json.dumps(action)}\n```"
+
+
+_TODO = _block(
+	kind="doc", verb="create", doctype="ToDo", title="T", fields=[{"label": "description", "value": "x"}]
+)
+
+
+def _cleanup():
+	for conv in frappe.get_all(CONV, filters={"owner": TEST_USER}, pluck="name"):
+		frappe.db.delete(MSG, {"conversation": conv})
+		frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
+	frappe.db.commit()
+
+
+def _insert(conv: str, seq: int, role: str, content: str | None = None, **fields) -> str:
+	"""One row. ``action_outcome`` is set around the Select validation, so a case row may
+	carry a padded value that a person could never save."""
+	outcome = fields.pop("action_outcome", None)
+	doc = frappe.get_doc(
+		{"doctype": MSG, "conversation": conv, "seq": seq, "role": role, "content": content, **fields}
+	)
+	doc.flags.jarvis_server_write = True
+	doc.insert(ignore_permissions=True)
+	if outcome:
+		frappe.db.set_value(MSG, doc.name, "action_outcome", outcome)
+	return doc.name
+
+
+class _Base(FrappeTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		_ensure_test_user()
+
+	def setUp(self):
+		self._orig = frappe.session.user
+		frappe.set_user(TEST_USER)
+
+	def tearDown(self):
+		frappe.set_user(self._orig)
+		_cleanup()
+
+	def _outcomes(self, conv: str) -> list[str]:
+		return frappe.get_all(
+			MSG,
+			filters={"conversation": conv, "role": "tool", "action_outcome": ["is", "set"]},
+			pluck="action_outcome",
+			order_by="seq asc",
+		)
+
+
+class TestRuleCases(_Base):
+	def test_find_agrees_with_every_shared_case(self):
+		with open(_CASES, encoding="utf-8") as f:
+			cases = json.load(f)
+		self.assertGreaterEqual(len(cases), 23)
+		for case in cases:
+			with self.subTest(case=case["id"]):
+				conv = _make_conv(TEST_USER)
+				names = {}
+				for seq, row in enumerate(case["rows"], start=1):
+					extra = {k: row[k] for k in ("hidden", "streaming", "action_outcome") if k in row}
+					names[row["name"]] = _insert(conv, seq, row["role"], row.get("content"), **extra)
+				found = live_draft.find(conv)
+				want = names[case["live"]] if case["live"] else None
+				self.assertEqual(found["message"] if found else None, want)
+
+	def test_find_reports_verb_doctype_and_a_broken_block(self):
+		conv = _make_conv(TEST_USER)
+		name = _insert(conv, 1, "assistant", _block(kind="doc", verb="update", doctype="ToDo", name="X"))
+		self.assertEqual(
+			live_draft.find(conv), {"message": name, "verb": "update", "doctype": "ToDo", "bad": False}
+		)
+		broken = _insert(conv, 2, "assistant", "```jarvis-action\n{nope\n```")
+		self.assertEqual(live_draft.find(conv)["message"], broken)
+		self.assertTrue(live_draft.find(conv)["bad"])
+
+	def test_pick_needs_no_site_and_takes_plain_rows(self):
+		rows = [{"name": "a", "role": "assistant", "content": _TODO}]
+		self.assertEqual(live_draft.pick(rows)["message"], "a")
+		self.assertIsNone(live_draft.pick([]))
+
+
+class TestDismissDraft(_Base):
+	def _live_conv(self) -> tuple[str, str]:
+		conv = _make_conv(TEST_USER)
+		draft = _insert(conv, 1, "assistant", _TODO)
+		_insert(conv, 2, "user", "why?")
+		_insert(conv, 3, "assistant", "Because.")
+		return conv, draft
+
+	def test_cancel_writes_one_discarded_row_and_a_second_call_is_harmless(self):
+		conv, draft = self._live_conv()
+		self.assertEqual(dismiss_draft(conv, draft), {"ok": True})
+		self.assertEqual(self._outcomes(conv), ["discarded"])
+		self.assertIsNone(live_draft.find(conv))
+		self.assertEqual(dismiss_draft(conv, draft), {"ok": True, "already": True})
+		self.assertEqual(self._outcomes(conv), ["discarded"])
+
+	def test_cancel_queues_one_agent_note(self):
+		conv, draft = self._live_conv()
+		dismiss_draft(conv, draft)
+		notes = frappe.db.get_value(CONV, conv, "pending_agent_notes") or ""
+		self.assertIn("the user cancelled the ToDo draft; nothing was saved", notes)
+
+	def test_a_message_that_is_not_the_live_draft_writes_nothing(self):
+		conv, draft = self._live_conv()
+		other = _insert(conv, 4, "assistant", "Just chat.")
+		for message in (other, "zz-no-message"):
+			self.assertEqual(dismiss_draft(conv, message), {"ok": True, "already": True})
+		self.assertEqual(self._outcomes(conv), [])
+		self.assertEqual(live_draft.find(conv)["message"], draft)
+
+	def test_an_older_draft_is_not_cancelled_once_replaced(self):
+		conv, old = self._live_conv()
+		new = _insert(conv, 4, "assistant", _TODO)
+		self.assertEqual(dismiss_draft(conv, old), {"ok": True, "already": True})
+		self.assertEqual(self._outcomes(conv), [])
+		self.assertEqual(dismiss_draft(conv, new), {"ok": True})
+
+	def test_a_user_who_does_not_own_the_conversation_is_refused(self):
+		conv, draft = self._live_conv()
+		_ensure_non_admin_user()
+		from jarvis.tests._conv_helpers import NON_ADMIN_USER
+
+		frappe.set_user(NON_ADMIN_USER)
+		with self.assertRaises(frappe.PermissionError):
+			dismiss_draft(conv, draft)
+		frappe.set_user(TEST_USER)
+		self.assertEqual(self._outcomes(conv), [])
+
+	def test_an_unknown_conversation_is_refused(self):
+		from jarvis.exceptions import InvalidArgumentError
+
+		with self.assertRaises(InvalidArgumentError):
+			dismiss_draft("zz-no-conversation", "zz-no-message")
+
+
+class TestFailureEndsTheCard(_Base):
+	def _fail(self, conv: str, draft: str, envelope: dict) -> None:
+		_end_card_after_failure(conv, "create_doc", {"doctype": "ToDo", "values": {}}, envelope, draft)
+
+	def test_a_closed_failure_leaves_a_failed_receipt_once(self):
+		conv = _make_conv(TEST_USER)
+		draft = _insert(conv, 1, "assistant", _TODO)
+		envelope = {"ok": False, "closed": True, "error": {"code": "x", "message": "no"}}
+		self._fail(conv, draft, envelope)
+		self._fail(conv, draft, envelope)
+		self.assertEqual(self._outcomes(conv), ["failed"])
+		self.assertIsNone(live_draft.find(conv))
+
+	def test_a_partial_failure_leaves_a_partial_receipt(self):
+		conv = _make_conv(TEST_USER)
+		draft = _insert(conv, 1, "assistant", _TODO)
+		self._fail(conv, draft, {"ok": False, "closed": True, "outcome": "partial", "error": {}})
+		self.assertEqual(self._outcomes(conv), ["partial"])
+
+	def test_a_fixable_failure_keeps_the_draft_live(self):
+		conv = _make_conv(TEST_USER)
+		draft = _insert(conv, 1, "assistant", _TODO)
+		self._fail(conv, draft, {"ok": False, "error": {"code": "x", "message": "fix it"}})
+		self.assertEqual(self._outcomes(conv), [])
+		self.assertEqual(live_draft.find(conv)["message"], draft)
+
+
+class TestLiveDraftContext(_Base):
+	CLAUSE = "; unsaved draft waiting: create ToDo, its card with Create and Cancel is on the user's screen"
+
+	def _assembled(self, conv: str, seq: int, **conv_flags) -> str:
+		from jarvis.chat.turn_handler import assemble_prompt
+
+		doc = frappe.get_doc(CONV, conv)
+		for key, value in conv_flags.items():
+			doc.set(key, value)  # in memory only, like the sibling auto-mode context tests
+		msg = _insert(conv, seq, "user", "hello")
+		frappe.db.commit()
+		ap = assemble_prompt(
+			doc, message_id=msg, conversation_id=conv, context={}, attachments=[], user=TEST_USER
+		)
+		return ap.user_message
+
+	def _waiting(self) -> str:
+		conv = _make_conv(TEST_USER)
+		_insert(conv, 1, "assistant", _TODO)
+		return conv
+
+	def test_the_clause_names_the_waiting_draft(self):
+		out = self._assembled(self._waiting(), 2)
+		self.assertIn(self.CLAUSE, out)
+		self.assertIn("never say it is above", out)
+
+	def test_no_clause_without_a_draft(self):
+		conv = _make_conv(TEST_USER)
+		_insert(conv, 1, "assistant", "Hello.")
+		self.assertNotIn("unsaved draft waiting", self._assembled(conv, 2))
+
+	def test_no_clause_with_the_site_flag_off(self):
+		with patch.dict(frappe.conf, {"jarvis_live_draft_context": 0}):
+			self.assertNotIn("unsaved draft waiting", self._assembled(self._waiting(), 2))
+
+	def test_no_clause_in_auto_mode(self):
+		self.assertNotIn("unsaved draft waiting", self._assembled(self._waiting(), 2, auto_mode=1))
+
+	def test_no_clause_in_an_armed_run(self):
+		self.assertNotIn("unsaved draft waiting", self._assembled(self._waiting(), 2, skip_confirmation=1))
+
+	def test_no_clause_after_a_receipt(self):
+		conv = self._waiting()
+		_insert(conv, 2, "tool", None, tool_name="create_doc", action_outcome="discarded")
+		self.assertNotIn("unsaved draft waiting", self._assembled(conv, 3))
+
+	def test_no_clause_for_a_file_box_chat(self):
+		self.assertNotIn("unsaved draft waiting", self._assembled(self._waiting(), 2, file_box=1))
+
+	def test_no_clause_for_a_broken_block(self):
+		conv = _make_conv(TEST_USER)
+		_insert(conv, 1, "assistant", "```jarvis-action\n{nope\n```")
+		self.assertNotIn("unsaved draft waiting", self._assembled(conv, 2))

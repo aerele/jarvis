@@ -1490,6 +1490,17 @@ def _assemble_prompt(
 		if (binding is not None or conv.skill_autorun or conv.skip_confirmation)
 		else armed_skill_clause(user_message or "", chat_user, slugs=turn_invoked_slugs)
 	)
+	# An unsaved draft card is on the user's screen (``live_draft``): tell the agent once per
+	# turn, so it reminds the user instead of drafting again. Not for a shared chat, a File Box
+	# chat (its cards never reach a person) or any run that applies changes without a card.
+	live_draft_clause = ""
+	if (
+		binding is None
+		and not conv.get("file_box")
+		and not (armed_run or autorun_run or auto_run or armed_skill_run_clause)
+		and frappe.conf.get("jarvis_live_draft_context", 1)
+	):
+		live_draft_clause = _live_draft_clause(conversation_id)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
 	# agent applies them without depending on agent's undocumented auto-retrieval.
@@ -1617,7 +1628,7 @@ def _assemble_prompt(
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
-		f"; conv: {conversation_id}{armed_run}{autorun_run}{auto_run}{armed_skill_run_clause}{skill_clause}{learned_clause}"
+		f"; conv: {conversation_id}{armed_run}{autorun_run}{auto_run}{armed_skill_run_clause}{live_draft_clause}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{payment_calendar_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"
@@ -2888,6 +2899,26 @@ def _escape_untrusted_tag(match: "re.Match[str]") -> str:
 		.replace(">", "&gt;")
 		.replace("＜", "&#65308;")
 		.replace("＞", "&#65310;")
+	)
+
+
+def _live_draft_clause(conversation_id: str) -> str:
+	"""The context clause for a waiting draft card, or "" (best-effort: never fails a turn)."""
+	from jarvis.chat import live_draft
+
+	try:
+		draft = live_draft.find(conversation_id)
+	except Exception:
+		frappe.log_error(title="live draft context failed", message=frappe.get_traceback())
+		return ""
+	if not draft or draft["bad"]:
+		return ""  # a broken block shows an error card with no Create or Cancel to choose
+	doctype = _safe_label_name(draft["doctype"])[:80]
+	what = f"{draft['verb']} {doctype}".strip()
+	return (
+		f"; unsaved draft waiting: {what}, its card with Create and Cancel is on the user's screen: "
+		"remind them in one line to choose, re-emit the block only for a change they ask for, "
+		"never say it is above"
 	)
 
 
