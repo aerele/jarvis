@@ -1572,7 +1572,8 @@ def _detail_file(source_file: str | None) -> dict | None:
 
 def _detail_spec(trigger: dict | None):
 	"""``(IntakeSpec | None, spec payload)``: labelled fields and table columns."""
-	from jarvis.intake import draft, spec as intake_spec
+	from jarvis.intake import draft
+	from jarvis.intake import spec as intake_spec
 
 	if not trigger:
 		return None, {"target": "", "fields": [], "table": None}
