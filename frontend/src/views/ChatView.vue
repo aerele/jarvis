@@ -1198,8 +1198,36 @@
 								</div>
 							</template>
 							<template #below-body>
+								<!-- a draft block we cannot show: the error card INSTEAD of any draft card -->
+								<div
+									v-if="
+										draftBlockErrorText &&
+										_lastAssistant &&
+										_lastAssistant.name === m.name
+									"
+									class="jv-action jv-summary"
+								>
+									<div role="alert" class="jv-summary-body jv-summary-err">
+										<svg
+											width="16"
+											height="16"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="var(--red)"
+											stroke-width="1.9"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path
+												d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+											/>
+											<path d="M12 9v4M12 17h.01" />
+										</svg>
+										<span>{{ draftBlockErrorText }}</span>
+									</div>
+								</div>
 								<!-- rich action card the agent emits (doc confirm / email draft) -->
-								<template v-if="actionFor === m.name && activeAction">
+								<template v-else-if="actionFor === m.name && activeAction">
 									<!-- email draft -->
 									<div v-if="activeAction.kind === 'email'" class="jv-email">
 										<div class="jv-email-head">
@@ -4785,6 +4813,7 @@ import {
 } from "@/lib/chatGoto";
 import { PAYMENT_CALENDAR_PAGE } from "../../../jarvis/public/js/shared/goto_pages.mjs";
 import { normaliseAction } from "@/lib/chatAction";
+import { draftBlockError } from "@/lib/chatAction";
 import { isSilentRun, shouldStopSpinning, streamingRowIsLive } from "@/lib/silentRun";
 import { markMissing, panelField as _panelField } from "@/lib/docFields";
 import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "@/lib/draftLinkFilters";
@@ -7976,8 +8005,16 @@ const _cardMessage = computed(() =>
 // `messages` intentionally stays visible while a different conversation loads.
 // Do not let its old action card remain actionable in that new view. A raw action
 // re-enables itself only when the new view receives its own message snapshot.
+// A draft block we cannot show (broken JSON, unreadable fields or tables, unknown
+// verb) gets ONE red error card and no live draft: _rawActiveAction is null for it,
+// so the summary card, the model build watcher and the edit panel never start.
+const draftBlockErrorText = computed(() => {
+	const m = _lastAssistant.value;
+	if (!m) return "";
+	return draftBlockError(m.content || "", actionOf(m), brand.agentName);
+});
 const _rawActiveAction = computed(() =>
-	_cardMessage.value ? actionOf(_cardMessage.value) : null
+	_cardMessage.value && !draftBlockErrorText.value ? actionOf(_cardMessage.value) : null
 );
 const activeAction = computed(() =>
 	hasCurrentMessageSnapshot.value ? _rawActiveAction.value : null
@@ -8009,7 +8046,10 @@ function draftModelViewIsCurrent(view, model) {
 	);
 }
 const confirmFor = computed(() =>
-	_lastAssistant.value && !activeAction.value && confirmLabel(_lastAssistant.value)
+	_lastAssistant.value &&
+	!activeAction.value &&
+	!draftBlockErrorText.value &&
+	confirmLabel(_lastAssistant.value)
 		? _lastAssistant.value.name
 		: null
 );
@@ -9607,7 +9647,9 @@ async function resyncQueuedTurn(id) {
 
 // --- interactive clarifying questions (card on the last assistant message) ---
 const activeAsk = computed(() =>
-	_lastAssistant.value && !activeAction.value ? askOf(_lastAssistant.value) : null
+	_lastAssistant.value && !activeAction.value && !draftBlockErrorText.value
+		? askOf(_lastAssistant.value)
+		: null
 );
 const askFor = computed(() => (activeAsk.value ? _lastAssistant.value.name : null));
 // The draft state, readiness and answer formatting live in <AskCard> +
