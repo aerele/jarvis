@@ -103,3 +103,42 @@ test("an anchor with no assistant message gives null", () => {
 	const rows = [asst("a1", GOOD)];
 	assert.equal(draftAnchor(rows, [{ type: "user", key: "u1", msg: {} }]), null);
 });
+
+// One card at the tail, as on the desktop: the last message's own block that is not a
+// draft (an email, a gated verb, an unknown verb) is the card there; a kept draft hides.
+const EMAIL = fence(JSON.stringify({ kind: "email", to: "a@x", subject: "S", body: "B" }));
+const SUBMIT = fence(JSON.stringify({ doctype: "ToDo", verb: "submit", name: "T1" }));
+const UNKNOWN = fence(JSON.stringify({ doctype: "ToDo", verb: "frobnicate" }));
+
+test("a tail with its own non-draft block hides the kept draft", () => {
+	for (const [own, check] of [
+		[SUBMIT, (a) => assert.equal(a.verb, "submit")],
+		[EMAIL, (a) => assert.equal(a.kind, "email")],
+		[UNKNOWN, (a) => assert.equal(a.verb, "frobnicate")],
+	]) {
+		const r = run([asst("a1", GOOD), user("u1"), asst("a2", own)]);
+		assert.equal(r.own, true);
+		assert.equal(r.anchorKey, "a2");
+		assert.equal(r.draftKey, "a2", "keyed by its own message, never the kept draft");
+		assert.equal(r.bad, false);
+		check(r.action);
+	}
+});
+
+test("a tail's own email block is its card even with no draft", () => {
+	const r = run([user("u1"), asst("a1", EMAIL)]);
+	assert.equal(r.own, true);
+	assert.equal(r.action.kind, "email");
+});
+
+test("a kept or tail draft is not an own card", () => {
+	assert.equal(run([user("u1"), asst("a1", GOOD)]).own, false);
+	assert.equal(run([asst("a1", GOOD), user("u1"), asst("a2", "plain answer")]).own, false);
+	assert.equal(run([asst("a1", GOOD), user("u1"), asst("a2", BAD)]).own, false);
+});
+
+test("an own block in an older message does not hide the kept draft at the tail", () => {
+	const r = run([asst("a0", EMAIL), user("u0"), asst("a1", GOOD), user("u1"), asst("a2", "ok")]);
+	assert.equal(r.own, false);
+	assert.equal(r.draftKey, "a1");
+});

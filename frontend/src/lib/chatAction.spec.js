@@ -208,7 +208,15 @@ describe("the two gates that disagreed stay mirrored", () => {
 	});
 
 	it("the card and the error are drawn under the last message, keyed by the draft row", () => {
-		expect(src).toMatch(/const _liveDraft = computed\(\(\) => liveDraftMessage\(/);
+		expect(src).toMatch(
+			/const _liveDraft = computed\(\(\) => \{\s*const live = liveDraftMessage\(messages\.value,/
+		);
+		// a draft cancelled here whose card would still show stays hidden for the session
+		expect(src).toContain("return live && !hiddenDrafts.value.has(live.name) ? live : null;");
+		// ...judged by the rule on the loaded rows, so it also holds while a turn runs
+		expect(src).toContain(
+			"if (liveDraftRow(messages.value)?.name === key) hiddenDrafts.value.add(key);"
+		);
 		expect(src).toContain("const actionAnchor = computed(() =>");
 		expect(src).toContain('? _lastAssistant.value.name : ""');
 		// no template gate compares the draft row's own name any more
@@ -220,6 +228,17 @@ describe("the two gates that disagreed stay mirrored", () => {
 		expect(src).toContain('return _tailCard.value === "draft" ? live : null;');
 		// Cancel sends the draft row's name
 		expect(src).toContain("api.dismissDraft(view.conversation, key)");
+	});
+
+	it("the panel's Discard cancels the draft like the card's Cancel, never by a message", () => {
+		expect(src).toMatch(
+			/function discardDraft\(\) \{\s*return cancelDraftFor\(draftPanel\.value\?\.messageKey \|\| actionFor\.value\);/
+		);
+		expect(src).toMatch(
+			/function cancelDraft\(\) \{\s*return cancelDraftFor\(actionFor\.value\);/
+		);
+		expect(src).toContain('@click="discardDraft">Discard</button>');
+		expect(src).not.toContain('send("No, cancel that.");');
 	});
 
 	it("never dumps raw dry-run JSON into a confirmation card body", () => {

@@ -54,6 +54,22 @@ export function retiresDraft(row) {
 }
 
 /**
+ * An assistant row with an action block of its own that is not a draft: an email, a
+ * gated verb, an unknown verb. As the last message, its card is the one at the tail and
+ * a kept draft hides behind it (the server's live_draft.tail_shows_its_own_card).
+ * @param {{role?: string, content?: string}} row
+ * @returns {boolean}
+ */
+export function isOwnActionRow(row) {
+	return (
+		!!row &&
+		row.role === "assistant" &&
+		actionBlockState(row.content) === "ok" &&
+		!isDraftRow(row)
+	);
+}
+
+/**
  * @param {Array<object>|null|undefined} rows messages in order
  * @returns {object|null} the live draft row, or null
  */

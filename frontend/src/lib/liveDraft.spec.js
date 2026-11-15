@@ -4,6 +4,7 @@ import path from "path";
 import {
 	liveDraftRow,
 	isDraftRow,
+	isOwnActionRow,
 	retiresDraft,
 	MAX_USER_ROWS_AFTER_DRAFT,
 	MAX_ROWS_AFTER_DRAFT,
@@ -51,6 +52,27 @@ describe("retiresDraft", () => {
 			null,
 		])
 			expect(retiresDraft(row)).toBe(false);
+	});
+});
+
+describe("isOwnActionRow", () => {
+	const block = (a) => "```jarvis-action\n" + JSON.stringify(a) + "\n```";
+	const asst = (content) => ({ role: "assistant", content });
+	it("is an email, a gated or an unknown verb block", () => {
+		expect(
+			isOwnActionRow(asst(block({ kind: "email", to: "a", subject: "s", body: "b" })))
+		).toBe(true);
+		expect(isOwnActionRow(asst(block({ doctype: "ToDo", verb: "submit", name: "T" })))).toBe(
+			true
+		);
+		expect(isOwnActionRow(asst(block({ doctype: "ToDo", verb: "frobnicate" })))).toBe(true);
+	});
+	it("is never a draft, a broken block, plain text or a user row", () => {
+		expect(isOwnActionRow(asst(block({ doctype: "ToDo", verb: "create" })))).toBe(false);
+		expect(isOwnActionRow(asst("```jarvis-action\n{nope\n```"))).toBe(false);
+		expect(isOwnActionRow(asst("Plain."))).toBe(false);
+		expect(isOwnActionRow({ role: "user", content: block({ kind: "email" }) })).toBe(false);
+		expect(isOwnActionRow(null)).toBe(false);
 	});
 });
 

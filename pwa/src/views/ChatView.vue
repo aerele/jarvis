@@ -569,14 +569,15 @@ const items = computed(() => {
 // Report receipts bound to their answer by tool_call_ids, never by position.
 const reportToolsByTurn = computed(() => reportToolsByAssistant(messages.value));
 
-// The newest unsaved draft (liveDraft.js) and the item its card is drawn under: the
-// LAST assistant message, so the card is always at the bottom. While a reply streams
+// The card at the tail (draftAnchor.js): the last message's own action block when it has
+// one that is not a draft (`own`), else the newest unsaved draft (liveDraft.js), drawn
+// under the LAST assistant message so it is always at the bottom. While a reply streams
 // the tail is about to change, so the card is hidden until the turn settles.
 const rawAnchor = computed(() => draftAnchor(messages.value, items.value));
 const anchor = computed(() => (live.value ? null : rawAnchor.value));
 
-// True for the item that carries the card (or its error view) of a live, undismissed
-// draft. The draft's own message is only the anchor when it is the last one.
+// True for the item that carries the tail's card (or its error view), unless it was
+// dismissed. A draft's own message is only the anchor when it is the last one.
 function showsDraftCard(it) {
 	const a = anchor.value;
 	return !!(
@@ -595,16 +596,20 @@ function carriesLiveBrokenDraft(it) {
 }
 
 // Cancel: record it on the server so it stays gone on reload and on the web app. A
-// second tap while the call is in flight is ignored. If the call fails, fall back to
-// hiding the card for this session only.
+// second tap while the call is in flight is ignored. If the call fails, or the card
+// would still show after it (the server answered `already`, or the reload failed: load()
+// keeps the old rows), hide the card for this session only.
 let dismissing = false;
 async function onDraftDismissed() {
 	const a = anchor.value;
-	if (!a || dismissing) return;
+	if (!a || a.own || dismissing) return;
+	const cid = convId.value;
 	dismissing = true;
 	try {
-		await api.dismissDraft(convId.value, a.draftKey);
+		await api.dismissDraft(cid, a.draftKey);
 		await load();
+		if (convId.value === cid && rawAnchor.value?.draftKey === a.draftKey)
+			dismissedActions.value.add(a.draftKey);
 	} catch (e) {
 		console.error("Jarvis PWA: could not record the cancel", e);
 		dismissedActions.value.add(a.draftKey);
@@ -902,15 +907,10 @@ async function send() {
 			return;
 		}
 		if (input.value.trim() !== text || attachments.value.length) return;
-		// Nothing new to show, but an unsaved draft is waiting: take the user to its
-		// card instead of sending "I can't see it" to the agent.
-		const a = anchor.value;
-		if (a && (a.action || a.bad) && !dismissedActions.value.has(a.draftKey)) {
-			input.value = "";
-			composer.value?.reset();
-			await scrollToBottom(true, () => isCurrent(cid, generation));
-			return;
-		}
+		// Nothing new to show: the words go to the agent, also while a draft card waits at
+		// the tail. This view has no notice to say a message was held back, so it never
+		// holds one: the send below scrolls to the bottom, where the new message lands just
+		// under that card.
 	}
 	if ((!text && !ready.length) || sending.value) return;
 	errorBanner.value = "";

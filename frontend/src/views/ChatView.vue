@@ -4712,7 +4712,7 @@ import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
 import { parseCompactCommand, compactOutcome } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
-import { isDraftRow } from "@/lib/liveDraft";
+import { isDraftRow, liveDraftRow } from "@/lib/liveDraft";
 import { tailCard } from "@/lib/tailCard";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
@@ -8015,8 +8015,14 @@ const _lastAssistant = computed(() => {
 // share): kept through later replies until it is saved, cancelled or replaced. Null
 // whenever _lastAssistant is, so nothing shows mid-turn. It reads the loaded rows as the
 // server counts them (`messages`: every role, every tool row), never visibleMessages,
-// which drops the tool rows that have no receipt chip.
-const _liveDraft = computed(() => liveDraftMessage(messages.value, _lastAssistant.value));
+// which drops the tool rows that have no receipt chip. A draft cancelled here whose card
+// would still show (the server answered `already`, or the reload failed) stays hidden for
+// this session (hiddenDrafts, keyed by the draft row's name).
+const hiddenDrafts = ref(new Set());
+const _liveDraft = computed(() => {
+	const live = liveDraftMessage(messages.value, _lastAssistant.value);
+	return live && !hiddenDrafts.value.has(live.name) ? live : null;
+});
 // The last message's own action block that is not a draft (an email draft, a gated verb's
 // legacy note, an unknown verb's error card). It wins the tail over a kept draft.
 const _tailOwnAction = computed(() => {
@@ -8938,9 +8944,17 @@ function showQueuedContinuation(r) {
 // is gone on both apps and after a reload. Always the DRAFT row's name (actionFor), never
 // the tail's. One click at a time, and not while a save is running.
 const cancellingDraft = ref(false);
-async function cancelDraft() {
-	const key = actionFor.value;
-	if (!key || cancellingDraft.value || cardModel.value?.applying) return;
+function cancelDraft() {
+	return cancelDraftFor(actionFor.value);
+}
+// The edit panel's Discard is the same Cancel. The panel names the draft it was opened on
+// (stamped then), so it still names it while a turn runs.
+function discardDraft() {
+	return cancelDraftFor(draftPanel.value?.messageKey || actionFor.value);
+}
+async function cancelDraftFor(key) {
+	if (!key || cancellingDraft.value || cardModel.value?.applying || draftPanel.value?.applying)
+		return;
 	const view = captureDraftActionView(activeAction.value, key);
 	cancellingDraft.value = true;
 	try {
@@ -8960,17 +8974,27 @@ async function cancelDraft() {
 			await loadConversation(view.conversation);
 		} catch (e) {
 			console.warn("Jarvis: could not reload after cancelling a draft", e);
-			return;
 		}
-		if (chatViewIsCurrent(view)) store.loadConversations();
+		if (!chatViewIsCurrent(view)) return;
+		// Still the live draft (the server answered `already`, or the reload failed): hide
+		// it here for this session, so Cancel never looks dead. The rule itself, on the loaded
+		// rows: _liveDraft is null while a turn runs (a panel Discard mid-turn).
+		if (liveDraftRow(messages.value)?.name === key) hiddenDrafts.value.add(key);
+		store.loadConversations();
 	} finally {
 		cancellingDraft.value = false;
 	}
 }
 
-function discardDraft() {
-	closeDraftPanel();
-	send("No, cancel that.");
+// Drafts a typed "show it" already took the person to: the next one is sent as a message.
+const draftsShownOnRequest = new Set();
+// The draft card, or its error card, is the one `.jv-action.jv-summary` in the thread.
+function scrollDraftCardIntoView() {
+	const el = threadEl.value?.querySelector(".jv-action.jv-summary");
+	if (!el) return scrollBottom(true);
+	const reduced =
+		window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+	el.scrollIntoView?.({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
 }
 
 // --- action:pending confirm card (write-safety gate, issue #186) ---
@@ -12291,12 +12315,16 @@ async function send(textArg, resendAck) {
 			notify("Found a pending confirmation.", { type: "success" });
 			return;
 		}
-		// No pending card, but a draft card is already at the bottom: take them to it
-		// instead of sending the words to the model.
-		if (chatViewIsCurrent(_typedView) && (actionFor.value || draftBlockErrorText.value)) {
+		// No pending card, but the card at the tail is a kept draft's (lib/tailCard): take
+		// them to that card, once per draft, and say so. A card of the last message's own,
+		// or a second "show it" for the same draft, goes to the agent as a normal message.
+		const shownDraft = _tailCard.value === "draft" ? _liveDraft.value?.name : "";
+		if (chatViewIsCurrent(_typedView) && shownDraft && !draftsShownOnRequest.has(shownDraft)) {
+			draftsShownOnRequest.add(shownDraft);
 			input.value = "";
+			notify("Your draft is at the bottom.", { type: "info" });
 			await nextTick();
-			scrollBottom(true);
+			scrollDraftCardIntoView();
 			return;
 		}
 	}
