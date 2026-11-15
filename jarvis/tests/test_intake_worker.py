@@ -444,7 +444,9 @@ class TestIntakeWorker(FrappeTestCase):
 		fin.assert_not_called()
 		got = self._get(row)
 		self.assertEqual(got.status, "Failed")
-		self.assertEqual(got.summary, "This site's AI model can't read images for intake yet.")
+		# The vision check already passed, so NO_IMAGE means a blank or unreadable file, not a
+		# text-only model: blaming the model would send the admin the wrong way.
+		self.assertEqual(got.summary, worker.READ_NOTHING_SUMMARY)
 		self.assertFalse(got.reading_json)
 		# The model was called, so a NO_IMAGE answer counts (R23): junk uploads cannot dodge the caps.
 		self.assertEqual(llm_action.daily_count(rule.name), 1)
