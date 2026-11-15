@@ -3,37 +3,14 @@
 	     read, and one control per value still needed. Approve sends the answers as
 	     JSON; the server builds the draft from the stored reading, no AI call.
 	     Wide: the photo sits in its own sticky column, so it stays on screen while the
-	     reviewer fills the values. Narrow: the photo is pinned above the form. -->
+	     reviewer fills the values. Narrow: the photo is a normal block above the form (never pinned: it would cover
+	     the list rail and crowd the field when the keyboard is open). -->
 	<div
 		ref="root"
 		:aria-busy="busy ? 'true' : 'false'"
 		class="grid gap-4 lg:grid-cols-[minmax(0,5fr)_minmax(0,6fr)]"
 	>
-		<section
-			v-if="file"
-			aria-label="Source file"
-			class="sticky top-0 z-10 min-w-0 bg-surface-white pb-2 lg:self-start lg:pb-0"
-			data-testid="intake-photo"
-		>
-			<!-- A Button inside the link would nest two controls: style the link itself -->
-			<a
-				v-if="!file.is_image"
-				:href="file.file_url"
-				target="_blank"
-				rel="noopener"
-				class="inline-flex min-h-7 items-center gap-1.5 rounded bg-surface-gray-2 px-2 text-base text-ink-gray-8 hover:bg-surface-gray-3"
-			>
-				<FeatherIcon name="paperclip" class="size-4" aria-hidden="true" />
-				{{ file.file_name || "Open file" }}
-			</a>
-			<a v-else :href="file.file_url" target="_blank" rel="noopener">
-				<img
-					:src="file.file_url"
-					:alt="file.file_name || 'Uploaded document'"
-					class="max-h-[30vh] max-w-full rounded border object-contain lg:max-h-[70vh]"
-				/>
-			</a>
-		</section>
+		<IntakeSourcePreview :file="file" />
 
 		<div class="flex min-w-0 flex-col gap-4">
 			<!-- First: the reviewer sees the first value to fill beside the photo -->
@@ -112,7 +89,7 @@
 				ref="errorEl"
 				role="alert"
 				tabindex="-1"
-				class="rounded border border-outline-red-1 bg-surface-red-1 p-2 text-sm text-ink-red-4"
+				class="rounded border border-outline-red-1 bg-surface-red-1 p-2 text-sm text-ink-red-5"
 			>
 				{{ error }}
 			</div>
@@ -142,7 +119,7 @@
 							ref="rejectBtn"
 							variant="outline"
 							theme="red"
-							class="!text-ink-red-4"
+							class="!text-ink-red-5"
 							label="Reject"
 							:disabled="busy !== null"
 							@click="startReject"
@@ -214,8 +191,9 @@
 // source file). `onDecided` is a callback, not an emit: switching rows mid-decision
 // unmounts this form, and Vue drops an unmounted instance's emits.
 import { computed, nextTick, onMounted, reactive, ref } from "vue";
-import { Autocomplete, Button, FeatherIcon, FormControl, toast } from "frappe-ui";
+import { Autocomplete, Button, FormControl, toast } from "frappe-ui";
 import { decideApproval, searchLink as searchLinkApi } from "@/api";
+import IntakeSourcePreview from "@/components/IntakeSourcePreview.vue";
 import { useLinkSearch } from "@/composables/useLinkSearch";
 import { errHtml, errMessage } from "@/lib/errors";
 

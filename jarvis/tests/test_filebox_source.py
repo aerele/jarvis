@@ -77,9 +77,11 @@ class TestFileBoxSource(_Base):
 		msg = self._msg(conv, 1, "user", "Use this readable replacement", canvas=json.dumps([item]))
 		frappe.db.commit()
 		self.addCleanup(
-			lambda: frappe.delete_doc("File", pdf.name, force=True, ignore_permissions=True)
-			if frappe.db.exists("File", pdf.name)
-			else None
+			lambda: (
+				frappe.delete_doc("File", pdf.name, force=True, ignore_permissions=True)
+				if frappe.db.exists("File", pdf.name)
+				else None
+			)
 		)
 		return conv, original, pdf, msg, item
 
@@ -379,9 +381,11 @@ class TestFileBoxSource(_Base):
 				}
 			).insert(ignore_permissions=True)
 		self.addCleanup(
-			lambda: frappe.delete_doc("File", newer.name, force=True, ignore_permissions=True)
-			if frappe.db.exists("File", newer.name)
-			else None
+			lambda: (
+				frappe.delete_doc("File", newer.name, force=True, ignore_permissions=True)
+				if frappe.db.exists("File", newer.name)
+				else None
+			)
 		)
 		# The decision path deliberately keeps its historical newest-attached
 		# fallback when selecting the original clears the explicit override.
@@ -427,9 +431,11 @@ class TestFileBoxSource(_Base):
 				}
 			).insert(ignore_permissions=True)
 		self.addCleanup(
-			lambda: frappe.delete_doc("File", second.name, force=True, ignore_permissions=True)
-			if frappe.db.exists("File", second.name)
-			else None
+			lambda: (
+				frappe.delete_doc("File", second.name, force=True, ignore_permissions=True)
+				if frappe.db.exists("File", second.name)
+				else None
+			)
 		)
 		second_item = {
 			"name": "second",
@@ -640,9 +646,11 @@ class TestFileBoxSource(_Base):
 					{"doctype": "ToDo", "description": "File source test", "allocated_to": USER}
 				).insert(ignore_permissions=True)
 			self.addCleanup(
-				lambda: frappe.delete_doc("ToDo", doc.name, force=True, ignore_permissions=True)
-				if frappe.db.exists("ToDo", doc.name)
-				else None
+				lambda: (
+					frappe.delete_doc("ToDo", doc.name, force=True, ignore_permissions=True)
+					if frappe.db.exists("ToDo", doc.name)
+					else None
+				)
 			)
 			return doc.name
 
@@ -1073,9 +1081,11 @@ class TestFileBoxSource(_Base):
 				}
 			).insert(ignore_permissions=True)
 		self.addCleanup(
-			lambda: frappe.delete_doc("File", other.name, force=True, ignore_permissions=True)
-			if frappe.db.exists("File", other.name)
-			else None
+			lambda: (
+				frappe.delete_doc("File", other.name, force=True, ignore_permissions=True)
+				if frappe.db.exists("File", other.name)
+				else None
+			)
 		)
 		entry = {"name": "second", "file_url": other.file_url, "type": "pdf", "title": other.file_name}
 		other_msg = self._msg(conv, 3, "user", "A new copy", canvas=json.dumps([entry]))
@@ -1128,9 +1138,11 @@ class TestFileBoxSource(_Base):
 			"File", foreign.name, {"owner": OTHER, "attached_to_doctype": None, "attached_to_name": None}
 		)
 		self.addCleanup(
-			lambda: frappe.delete_doc("File", foreign.name, force=True, ignore_permissions=True)
-			if frappe.db.exists("File", foreign.name)
-			else None
+			lambda: (
+				frappe.delete_doc("File", foreign.name, force=True, ignore_permissions=True)
+				if frappe.db.exists("File", foreign.name)
+				else None
+			)
 		)
 		frappe.db.commit()
 		with as_user(USER):

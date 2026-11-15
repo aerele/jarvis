@@ -10,7 +10,7 @@
 		:has-more="hasMore"
 		:quick-filters="quickFilters"
 		:filter-defs="filterDefs"
-		:filters="filters"
+		:filters="barFilters"
 		plain-rows
 		strong-header
 		:sort-options="[]"
@@ -18,12 +18,8 @@
 		:page-length="pageLength"
 		:default-sort="DEFAULT_SORT"
 		storage-key="files-intake"
-		:empty-state="{
-			icon: 'inbox',
-			title: 'No intake files yet',
-			description: 'Files dropped into a watched folder show up here.',
-		}"
-		@update:filters="setFilters"
+		:empty-state="emptyState"
+		@update:filters="onFilters"
 		@update:page-length="(v) => (pageLength = v)"
 		@load-more="loadMore"
 		@refresh="resetLoad"
@@ -32,33 +28,18 @@
 			<div ref="statusEl" tabindex="-1" role="status" class="sr-only">{{ statusText }}</div>
 		</template>
 
-		<template #right-header>
-			<!-- wraps instead of clipping: the switch must stay reachable at 320 px -->
-			<div class="flex min-w-0 flex-wrap items-center justify-end gap-2">
-				<Select
-					v-if="canManage"
-					class="w-28"
-					aria-label="Whose files"
-					:options="SCOPE_OPTIONS"
-					:model-value="scope"
-					@update:model-value="(v) => (scope = v || 'mine')"
-				/>
-				<FileBoxSwitch
-					:model-value="'intake'"
-					@update:model-value="$emit('switch', $event)"
-				/>
-			</div>
-		</template>
-
 		<template #cell-file="{ row }">
 			<!-- Narrow screens: the one visible column is a card with everything the other
 			     columns would show, so nothing is squeezed and nothing scrolls sideways. -->
 			<div v-if="narrow" class="flex min-w-0 flex-col gap-1 py-2" data-testid="intake-card">
 				<div class="flex min-w-0 items-center gap-2">
 					<FeatherIcon name="file-text" class="size-4 shrink-0 text-ink-gray-7" />
-					<div class="min-w-0 break-words font-medium text-ink-gray-9">
-						{{ row.file_name }}
-					</div>
+					<router-link
+						:to="detailRoute(row)"
+						data-testid="intake-open"
+						class="min-w-0 break-words font-medium text-ink-gray-9 hover:underline"
+						>{{ row.file_name }}</router-link
+					>
 				</div>
 				<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
 					<Badge
@@ -69,14 +50,20 @@
 					/>
 					<IntakeDraftLink :row="row" />
 				</div>
-				<div class="break-words text-sm text-ink-gray-7">{{ row.summary }}</div>
+				<div v-if="summaryText(row)" class="break-words text-sm text-ink-gray-7">
+					{{ summaryText(row) }}
+				</div>
 				<div class="break-words text-sm text-ink-gray-7">{{ row.source_label }}</div>
 			</div>
 			<div v-else class="flex min-w-0 items-center gap-2 overflow-hidden">
 				<FeatherIcon name="file-text" class="size-4 shrink-0 text-ink-gray-7" />
-				<div class="truncate text-base font-medium text-ink-gray-9" :title="row.file_name">
-					{{ row.file_name }}
-				</div>
+				<router-link
+					:to="detailRoute(row)"
+					data-testid="intake-open"
+					class="truncate text-base font-medium text-ink-gray-9 hover:underline"
+					:title="row.file_name"
+					>{{ row.file_name }}</router-link
+				>
 			</div>
 		</template>
 
@@ -102,8 +89,8 @@
 		</template>
 
 		<template #cell-summary="{ row }">
-			<div class="truncate text-base text-ink-gray-7" :title="row.summary">
-				{{ row.summary }}
+			<div class="line-clamp-2 break-words text-base text-ink-gray-7" :title="row.summary">
+				{{ summaryText(row) }}
 			</div>
 		</template>
 
@@ -113,7 +100,7 @@
 				     attribute, so the long name rides `label` and the visible text is the slot. -->
 				<Button
 					v-if="row.can_retry"
-					variant="ghost"
+					variant="subtle"
 					size="sm"
 					:label="`Retry ${row.file_name || row.name}`"
 					:loading="retrying === row.name"
@@ -131,11 +118,10 @@
 // managers, everyone's), with their status, draft and a Retry for failed ones.
 // Polls every 10 s while a row is Queued or Running.
 import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
-import { Badge, Button, FeatherIcon, Select, toast } from "frappe-ui";
+import { Badge, Button, FeatherIcon, toast } from "frappe-ui";
 import IntakeDraftLink from "./IntakeDraftLink.vue";
 import { useNarrow } from "@/composables/useNarrow";
 import ListPage from "@/components/list/ListPage.vue";
-import FileBoxSwitch from "./FileBoxSwitch.vue";
 import { useListPage } from "@/composables/useListPage";
 import { intakeListPage, intakeRetry } from "@/api/intake";
 import { getTriggersCaps } from "@/api/triggers";
@@ -148,7 +134,15 @@ import {
 	intakeIsLive,
 } from "@/lib/intakeStatus";
 
-defineEmits(["switch"]);
+const detailRoute = (row) => ({ name: "IntakeDetail", params: { activity: row.name } });
+
+// The Draft link already names the draft, so "Draft ready: ToDo X" is not said twice;
+// anything after it (an answered question) stays.
+function summaryText(row) {
+	const said = `Draft ready: ${row.draft_doctype} ${row.draft_name}`;
+	if (!row.draft_name || !(row.summary || "").startsWith(said)) return row.summary;
+	return row.summary.slice(said.length).replace(/^\.\s*/, "");
+}
 
 const ALL_COLUMNS = [
 	{ label: "File", key: "file", width: 3 },
@@ -165,10 +159,14 @@ const narrow = useNarrow();
 const columns = computed(() =>
 	narrow.value ? ALL_COLUMNS.filter((c) => c.key === "file" || c.key === "_retry") : ALL_COLUMNS
 );
-const quickFilters = [
+// "Whose files" sits with the other filter selects, for managers only (same Dropdown as Status).
+const quickFilters = computed(() => [
 	{ key: "search", label: "Search files", type: "text" },
 	{ key: "status", label: "Status", type: "select", options: INTAKE_STATUS_OPTIONS },
-];
+	...(canManage.value
+		? [{ key: "scope", label: "Whose files", type: "select", options: SCOPE_OPTIONS }]
+		: []),
+]);
 const filterDefs = [
 	{ key: "status", label: "Status", type: "select", options: INTAKE_STATUS_OPTIONS },
 	{ key: "daterange", label: "Added", type: "daterange" },
@@ -197,6 +195,7 @@ const {
 	resetLoad,
 	loadMore,
 	refreshKeep,
+	filterClauses,
 } = useListPage({
 	fetchFn: (p) => {
 		// the backend whitelists filter keys: search rides its own param
@@ -213,6 +212,34 @@ const {
 });
 
 watch(scope, () => resetLoad());
+
+// The toolbar reads and writes Whose files through the same filters object as Status.
+const barFilters = computed(() => ({ ...filters, scope: scope.value }));
+function onFilters(next) {
+	const { scope: picked, ...rest } = next || {};
+	if (picked) scope.value = picked;
+	setFilters(rest);
+}
+
+// A search or filter that matches nothing says so, instead of "no files yet".
+const isFiltered = computed(
+	() =>
+		Object.values(filters).some((v) => v !== "" && v != null) ||
+		(filterClauses.value || []).length > 0
+);
+const emptyState = computed(() =>
+	isFiltered.value
+		? {
+				icon: "search",
+				title: "No files match",
+				description: "Try a different search or filter.",
+		  }
+		: {
+				icon: "inbox",
+				title: "No intake files yet",
+				description: "Files dropped into a watched folder show up here.",
+		  }
+);
 
 const retrying = ref("");
 // A busy frappe-ui Button is disabled, and a disabled control loses focus, so after a

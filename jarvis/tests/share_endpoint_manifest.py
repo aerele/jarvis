@@ -339,6 +339,7 @@ _unrelated(
 	"jarvis.chat.filebox",
 	"Document Intake rows are owner-or-manager scoped Jarvis Trigger Activity records; no conversation identifier lookup.",
 	"""
+    get_intake_detail
     list_intake_page
     retry_intake
     """,
@@ -860,6 +861,11 @@ ENDPOINTS.update(
 		},
 		"jarvis.chat.api.get_conversation": {
 			"arguments": {"conversation": "$conversation"},
+			"scope": "chat_scoped",
+		},
+		# Report error ticket draft: the owner's own failed reply only (message permission hook).
+		"jarvis.support.api.error_report_details": {
+			"arguments": {"conversation": "$conversation", "message": "$message"},
 			"scope": "chat_scoped",
 		},
 		"jarvis.chat.api.get_conversation_context": {

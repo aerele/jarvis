@@ -1153,6 +1153,9 @@ export const supportCreateTicket = (subject, body) =>
 export const supportGetThread = (ticket) => call("jarvis.support.api.get_thread", { ticket });
 export const supportReply = (ticket, body) => call("jarvis.support.api.reply", { ticket, body });
 export const supportCloseTicket = (ticket) => call("jarvis.support.api.close_ticket", { ticket });
+// A failed reply's error (secrets removed), model and run id, for the Report error ticket draft.
+export const getErrorReportDetails = (conversation, message) =>
+	call("jarvis.support.api.error_report_details", { conversation, message });
 export const supportAwaitingCount = () => call("jarvis.support.api.awaiting_count");
 
 // Same-origin GET so <img>/<a> resolve against the bench; session cookie authenticates.

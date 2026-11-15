@@ -1304,7 +1304,8 @@ def row_badge(row: dict) -> str:
 
 	summary = row.get("summary") or ""
 	if row.get("status") == "Queued" and (
-		summary.startswith(worker.WAITING_PREFIX) or summary == worker.PAUSED_SUMMARY
+		summary.startswith(worker.WAITING_PREFIX)
+		or summary in (worker.PAUSED_SUMMARY, worker.USER_PAUSED_SUMMARY)
 	):
 		return "waiting"
 	if row.get("status") in _INTAKE_RETRYABLE and (
@@ -1494,6 +1495,236 @@ def list_intake_page(
 		"has_more": start + len(out) < total,
 		"start": start,
 		"page_length": pl,
+	}
+
+
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+
+def _shown(value) -> str:
+	return "" if value is None else str(value)
+
+
+def _same_value(read, kept) -> bool:
+	"""True when the draft holds what the page said: blanks match, numbers by value,
+	text without case or edge spaces."""
+	from jarvis.intake.draft import _blank
+
+	if _blank(read) or _blank(kept):
+		return _blank(read) and _blank(kept)
+	try:
+		return float(read) == float(kept)
+	except (TypeError, ValueError):
+		return _shown(read).strip().casefold() == _shown(kept).strip().casefold()
+
+
+def _change_reason(df, read, kept, default) -> str:
+	"""A short why for a value that differs between the page and the draft."""
+	from jarvis.intake.draft import _blank
+
+	if _blank(read):
+		return "Default applied" if default not in (None, "") and not _blank(kept) else ""
+	if not _blank(kept):
+		if df.fieldtype == "Link":
+			return f"Matched to {kept}"
+		return "Cleaned to fit the field"
+	return {
+		"Link": f"Not found in {df.options}, left blank",
+		"Date": "Not a valid date, left blank",
+		"Datetime": "Not a valid date, left blank",
+		"Select": "Not one of the options, left blank",
+		"Int": "Not a valid number, left blank",
+		"Float": "Not a valid number, left blank",
+		"Currency": "Not a valid number, left blank",
+		"Percent": "Not a valid number, left blank",
+	}.get(df.fieldtype, "Left blank")
+
+
+def _draft_values(doctype: str, name: str, fieldnames: list[str]) -> dict | None:
+	"""The draft's values for the spec fields, read with the caller's own permission;
+	``None`` when the draft is gone or the caller may not read it."""
+	if not (doctype and name and frappe.db.exists("DocType", doctype)):
+		return None
+	try:
+		if not frappe.has_permission(doctype, "read", doc=name):
+			return None
+		meta = frappe.get_meta(doctype)
+		columns = [f for f in fieldnames if meta.has_field(f) and f not in meta.get_table_fields()]
+		rows = frappe.get_list(doctype, filters={"name": name}, fields=["name", *columns], limit=1)
+	except frappe.PermissionError:
+		return None
+	if not rows:
+		return None
+	return {f: _shown(rows[0].get(f)) for f in columns}
+
+
+def _detail_file(source_file: str | None) -> dict | None:
+	from pathlib import PurePosixPath
+
+	if not source_file:
+		return None
+	f = frappe.db.get_value("File", source_file, ["file_name", "file_url"], as_dict=True)
+	if not f or not f.file_url:
+		return None
+	suffix = PurePosixPath(f.file_name or f.file_url).suffix.lower()
+	return {"url": f.file_url, "is_image": suffix in _IMAGE_SUFFIXES, "is_pdf": suffix == ".pdf"}
+
+
+def _detail_spec(trigger: dict | None):
+	"""``(IntakeSpec | None, spec payload)``: labelled fields and table columns."""
+	from jarvis.intake import draft
+	from jarvis.intake import spec as intake_spec
+
+	if not trigger:
+		return None, {"target": "", "fields": [], "table": None}
+	s = intake_spec.load(trigger)
+	if not s.target or not frappe.db.exists("DocType", s.target):
+		return None, {"target": s.target, "fields": [], "table": None}
+	meta = frappe.get_meta(s.target)
+	fields = [
+		{
+			"fieldname": f,
+			"label": draft._label(meta, f),
+			"fieldtype": df.fieldtype if (df := meta.get_field(f)) else "Data",
+		}
+		for f in s.fields
+	]
+	table = None
+	child = intake_spec._child_doctype(s)
+	if s.table and child:
+		child_meta = frappe.get_meta(child)
+		table = {
+			"fieldname": s.table["fieldname"],
+			"label": draft._label(meta, s.table["fieldname"]),
+			"columns": [
+				{"fieldname": c, "label": draft._label(child_meta, c)} for c in s.table.get("columns") or []
+			],
+		}
+	return s, {"target": s.target, "fields": fields, "table": table}
+
+
+def _reviewer_filled(approval: str | None) -> list[str]:
+	"""Header fields a reviewer supplied: the missing list of an Approved intake request."""
+	if not approval:
+		return []
+	req = frappe.db.get_value("Jarvis Approval Request", approval, ["status", "intake_missing"], as_dict=True)
+	if not req or req.status != "Approved":
+		return []
+	payload = _detail_reading(req.intake_missing)
+	return [m["field"] for m in payload.get("missing") or [] if m.get("row") is None]
+
+
+def _detail_reading(raw: str | None) -> dict:
+	try:
+		data = frappe.parse_json(raw) if raw else {}
+	except Exception:
+		data = {}
+	return data if isinstance(data, dict) else {}
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def get_intake_detail(activity: str) -> dict:
+	"""One intake file for the detail page: the row, the source file, the spec, what was read,
+	the draft's values (only if the caller may read the draft) and the fields not found on the
+	page. Same visibility as ``list_intake_page``: the row's owner or a trigger manager."""
+	from jarvis.chat.triggers_api import _can_manage
+	from jarvis.intake.draft import _blank
+
+	if not isinstance(activity, str) or not activity.strip():
+		frappe.throw("Activity name is required")
+	me = frappe.session.user
+	manager = _can_manage(me)
+	r = frappe.db.get_value(
+		ACTIVITY,
+		{"name": activity, "action_type": "Intake"},
+		[
+			"name",
+			"creation",
+			"owner",
+			"status",
+			"summary",
+			"source_file",
+			"trigger",
+			"target_docname",
+			"draft_doctype",
+			"draft_name",
+			"approval_request",
+			"duplicate_of",
+			"reading_json",
+		],
+		as_dict=True,
+	)
+	if not r or not (r.owner == me or manager):
+		frappe.throw("Not permitted", frappe.PermissionError)
+
+	trigger = frappe.db.get_value(
+		"Jarvis Trigger",
+		r.trigger,
+		[
+			"intake_source",
+			"intake_folder",
+			"intake_record_doctype",
+			"intake_target_doctype",
+			"intake_spec",
+			"owner",
+		],
+		as_dict=True,
+	)
+	s, spec = _detail_spec(trigger)
+	file_name = frappe.db.get_value("File", r.source_file, "file_name") if r.source_file else ""
+	reading = _detail_reading(r.reading_json)
+	names = [f["fieldname"] for f in spec["fields"]]
+	table = spec["table"]
+	table_rows = []
+	if table:
+		cols = [c["fieldname"] for c in table["columns"]]
+		table_rows = [
+			[_shown(row.get(c)) for c in cols]
+			for row in (reading.get(table["fieldname"]) or [])
+			if isinstance(row, dict)
+		]
+	read = {f: _shown(reading.get(f)) for f in names}
+	drafted = _draft_values(r.draft_doctype, r.draft_name, names)
+	changes = {}
+	if drafted is not None:
+		meta = frappe.get_meta(s.target)
+		for f in names:
+			if f in drafted and not _same_value(read[f], drafted[f]):
+				changes[f] = _change_reason(meta.get_field(f), read[f], drafted[f], s.defaults.get(f))
+
+	row = {
+		"name": r.name,
+		"creation": r.creation,
+		"status": r.status,
+		"summary": r.summary or "",
+		"file_name": file_name or "",
+		"source_label": _intake_source_label({**(trigger or {}), "target_docname": r.target_docname}),
+		"draft_doctype": r.draft_doctype or "",
+		"draft_name": r.draft_name or "",
+		"approval_request": r.approval_request or "",
+	}
+	live = live_drafts([r])
+	row["draft_missing"] = bool(r.draft_name) and (r.draft_doctype, r.draft_name) not in live
+	if row["draft_missing"]:
+		row["draft_name"] = ""
+	rule_row = {"rule_owner": (trigger or {}).get("owner"), **r}
+	return {
+		"row": row,
+		"badge": row_badge(r),
+		"file": _detail_file(r.source_file),
+		"spec": spec,
+		"reading": {"values": read, "table_rows": table_rows},
+		"draft": (
+			{"doctype": r.draft_doctype, "name": r.draft_name, "values": drafted}
+			if drafted is not None
+			else None
+		),
+		"changes": changes,
+		"reviewer_filled": [f for f in _reviewer_filled(r.approval_request) if f in names],
+		"missing": [f for f in names if _blank(reading.get(f))],
+		"can_retry": can_retry_row(r, me, manager, live),
+		"can_review": can_review_row(rule_row, me, "System Manager" in frappe.get_roles(me)),
 	}
 
 

@@ -6,7 +6,13 @@
 		@dragleave="onDragLeave"
 		@drop.prevent="onDrop"
 	>
-		<IntakeList v-if="view === 'intake'" v-model:scope="intakeScope" @switch="view = $event" />
+		<TabBar
+			class="shrink-0"
+			:tabs="VIEW_TABS"
+			:model-value="view"
+			@update:model-value="setView"
+		/>
+		<IntakeList v-if="view === 'intake'" v-model:scope="intakeScope" />
 		<ListPage
 			v-else
 			:breadcrumbs="[{ label: 'File Box', route: { name: 'FilesList' } }]"
@@ -38,7 +44,6 @@
 			@refresh="resetLoad"
 		>
 			<template #right-header>
-				<FileBoxSwitch v-model="view" />
 				<Button label="Clear Processed" @click="clearProcessed" />
 				<Button
 					variant="solid"
@@ -54,13 +59,16 @@
 				<div class="mb-3">
 					<!-- optional extra skill, applied ALONGSIDE the system's chosen skill,
 					     to the files dropped next -->
-					<div class="mb-2 flex items-center gap-2">
+					<div
+						class="mb-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:gap-2"
+						title="Automatic: File Box picks the matching skill"
+					>
 						<span class="shrink-0 text-p-sm text-ink-gray-6">Also apply skill</span>
 						<Autocomplete
-							class="w-72"
+							class="w-full sm:w-72"
 							:options="skillOptions"
 							:modelValue="pinnedSkill"
-							placeholder="Automatic (File Box picks the matching skill)"
+							placeholder="Automatic"
 							@update:modelValue="(o) => (pinnedSkill = o ? o.value : '')"
 						/>
 					</div>
@@ -155,6 +163,7 @@
 				<Badge
 					variant="subtle"
 					:theme="statusBadge(row).theme"
+					:class="badgeInkClass(statusBadge(row).theme)"
 					:label="statusBadge(row).label"
 				/>
 			</template>
@@ -251,7 +260,7 @@
 // with ?status= deep link, date-range filter, processing/applying poll (5s) +
 // visibilitychange refresh, per-row file preview (FilePreview dialog), bulk
 // delete with skip reasons, Clear Processed.
-import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
 	Button,
@@ -265,7 +274,7 @@ import {
 } from "frappe-ui";
 import ListPage from "@/components/list/ListPage.vue";
 import FilePreview from "@/components/FilePreview.vue";
-import FileBoxSwitch from "./FileBoxSwitch.vue";
+import TabBar from "@/components/list/TabBar.vue";
 import IntakeList from "./IntakeList.vue";
 import { useListPage } from "@/composables/useListPage";
 import { useShellStore } from "@/stores/shell";
@@ -273,6 +282,7 @@ import { timeAgo, exactDate } from "@/utils/datetime";
 import * as api from "@/api";
 import { brand } from "@/branding";
 import { errMessage as errMsg, errHtml, escapeHtml } from "@/lib/errors";
+import { badgeInkClass } from "@/lib/intakeStatus";
 import { skillOptions as buildSkillOptions, pinnedLabel } from "@/lib/fileboxSkills";
 import {
 	STATUSES,
@@ -290,20 +300,39 @@ const store = useShellStore();
 // "dropped" (files added by hand, the default) or "intake" (Document Intake files)
 // ?view=intake is the link the intake bells carry.
 // "Whose files" of the Intake view, kept here because that view is rebuilt on each switch
-const intakeScope = ref("mine");
+const intakeScope = ref(route.query.scope === "all" ? "all" : "mine");
 const view = ref(route.query.view === "intake" ? "intake" : "dropped");
+// A bell link to ?view=intake lands while File Box is already open: the route changes, the
+// page is reused, so follow the query. intakeScope stays as the user chose it.
+watch(
+	() => route.query.view,
+	(v) => {
+		view.value = v === "intake" ? "intake" : "dropped";
+	}
+);
 
-// The switch is rebuilt with the other view, so the clicked button is gone: put focus back
-// on the selected view's button instead of letting it fall to <body>. Each page teleports
-// its own header one tick after it mounts, so wait up to a few frames for the new switch.
-const SWITCH_ON = "[data-filebox-switch] [role=radio][aria-checked=true]";
-async function focusSwitch(tries = 10) {
-	await nextTick();
-	const on = document.querySelector(SWITCH_ON);
-	if (on) return on.focus();
-	if (tries > 0) requestAnimationFrame(() => focusSwitch(tries - 1));
+// The Dropped / Intake tabs live in this page, above both views, so they are not rebuilt on a
+// switch and keep focus themselves.
+const VIEW_TABS = [
+	{ label: "Dropped", value: "dropped" },
+	{ label: "Intake", value: "intake" },
+];
+function setView(v) {
+	if (!v || v === view.value) return;
+	view.value = v;
+	syncViewQuery();
 }
-watch(view, () => focusSwitch());
+// The tab and "Whose files" live in the URL (replace, not push), so Back from an intake
+// row's detail page lands on the same tab and scope instead of the Dropped default.
+function syncViewQuery() {
+	const q = { ...route.query };
+	if (view.value === "intake") q.view = "intake";
+	else delete q.view;
+	if (view.value === "intake" && intakeScope.value === "all") q.scope = "all";
+	else delete q.scope;
+	router.replace({ query: q });
+}
+watch(intakeScope, syncViewQuery);
 
 // ── list config ──────────────────────────────────────────────────────────────
 // statuses, badges and result links live in @/lib/fileboxStatus (tested).

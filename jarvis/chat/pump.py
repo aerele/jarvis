@@ -4254,10 +4254,10 @@ def _settle_recover_errored(
 		return False
 	ts.insert_required_effects(run_id, _RECOVERY_END_EFFECTS)
 	code = _classify_error(err)
-	if code == "subscription-expired":
-		from jarvis import subscription_health
+	from jarvis import subscription_health
 
-		subscription_health.note_turn_error(err, code)
+	# Records a dead sign-in or a model's usage cap, one failed model at a time. Never raises.
+	subscription_health.note_turn_error(err, code)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- pump owns its transaction
 	_seal_file_box_sheet(conversation, run_id)
 	if assistant_message:

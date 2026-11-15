@@ -19,6 +19,8 @@ from frappe.model import (
 )
 from frappe.utils import cint
 
+from jarvis.intake import guards
+
 MAX_INSTRUCTIONS_LEN = 4000
 # Header fields plus table columns one rule may read. More only bloats the prompt and the schema.
 MAX_PICKED_FIELDS = 60
@@ -158,6 +160,11 @@ def validate(s: IntakeSpec) -> None:
 		frappe.throw(_("Pick at most {0} fields and columns to read.").format(MAX_PICKED_FIELDS))
 
 	meta = frappe.get_meta(s.target)
+	if picks := sensitive_picks(s):
+		labels = [(meta.get_field(f).label if meta.get_field(f) else None) or f for f in picks]
+		frappe.throw(
+			_("{0} can't be filled by intake: it can give someone access.").format(", ".join(labels))
+		)
 	for fieldname in s.fields:
 		_value_field(meta, fieldname, _("Fields"))
 
@@ -180,6 +187,28 @@ def validate(s: IntakeSpec) -> None:
 		_validate_coverage(s, meta)
 
 
+def sensitive_picks(s: IntakeSpec) -> list[str]:
+	"""Fields or the table of this spec that the write-risk list marks as access-granting for
+	the target (Employee ``user_id``, Customer ``portal_users`` ...): saving the draft would
+	make ERPNext create a User or grant a role, so no rule may fill them."""
+	risky = sensitive_fieldnames(s.target)
+	picked = [*s.fields, *s.match, *s.defaults, (s.table or {}).get("fieldname")]
+	return sorted({f for f in picked if f in risky})
+
+
+def sensitive_fieldnames(target: str) -> tuple:
+	"""The fieldnames of ``target`` no rule may fill (the write-risk list, access-granting)."""
+	from jarvis.tools import _write_risk
+
+	return _write_risk._FIELD_SENSITIVE.get(_write_risk.canonical(target), ("", ()))[1]
+
+
+def table_refused(s: IntakeSpec) -> bool:
+	"""True when the chosen child table is a structure, sensitive or role-list doctype."""
+	child = _child_doctype(s)
+	return bool(child and guards.refused_child(child))
+
+
 def _is_blank(value) -> bool:
 	return value is None or (isinstance(value, str) and not value.strip())
 
@@ -192,6 +221,13 @@ def _validate_default(df, value) -> None:
 	if not isinstance(value, str | int | float | bool):
 		frappe.throw(_("Default for '{0}' must be a single text or number value.").format(name))
 	if _is_blank(value):
+		# Frappe re-applies the field's own default to a blank value, so it cannot stay empty.
+		if not _is_blank(df.default):
+			frappe.throw(
+				_(
+					"{0} always starts as {1}; intake can't leave it empty. Remove it from Fixed values or pick a value."
+				).format(df.label or name, df.default)
+			)
 		return
 	if df.fieldtype == "Select":
 		options = select_options(df)
@@ -220,6 +256,8 @@ def _validate_table(s: IntakeSpec, meta) -> None:
 	df = meta.get_field(table.get("fieldname"))
 	if not df or df.fieldtype != "Table":
 		frappe.throw(_("'{0}' is not a table on {1}.").format(table.get("fieldname"), s.target))
+	if guards.refused_child(df.options):
+		frappe.throw(_("The table '{0}' cannot be filled by intake.").format(table.get("fieldname")))
 	columns = table.get("columns") or []
 	child_meta = frappe.get_meta(df.options)
 	for column in columns:

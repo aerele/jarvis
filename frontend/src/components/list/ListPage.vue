@@ -15,8 +15,12 @@
 		</LayoutHeader>
 
 		<!-- toolbar: quick filters | divider | Refresh · Filter · Sort · Columns -->
-		<div class="flex items-center justify-between gap-2 px-5 py-4">
-			<div class="-ml-1 flex h-9 flex-1 items-center overflow-x-auto">
+		<!-- wraps below sm: the quick filters take their own full row, so Search is never
+		     squeezed out and Columns is never clipped at 320 px -->
+		<div class="flex flex-wrap items-center justify-between gap-2 px-5 py-4">
+			<div
+				class="-ml-1 flex min-h-9 min-w-0 basis-full flex-wrap items-center sm:basis-0 sm:flex-1"
+			>
 				<div v-for="qf in quickFilters" :key="qf.key" class="m-1 min-w-36">
 					<!-- A Dropdown, not FormControl select: frappe-ui's Select opens item-aligned,
 					     over its field, so a chosen option moved the list up the page. -->
@@ -56,7 +60,7 @@
 					/>
 				</div>
 			</div>
-			<div class="-ml-2 h-[70%] border-l" />
+			<div class="-ml-2 hidden h-[70%] border-l sm:block" />
 			<div class="flex items-center gap-2">
 				<Button
 					:tooltip="'Refresh'"
@@ -231,7 +235,7 @@
 		     toolbar's Refresh, put where the reader is looking. -->
 		<div v-else-if="error" class="relative flex-1">
 			<div
-				class="absolute left-1/2 flex w-4/12 -translate-x-1/2 flex-col items-center gap-3"
+				class="absolute left-1/2 flex w-9/12 -translate-x-1/2 sm:w-4/12 flex-col items-center gap-3"
 				:style="{ top: '35%' }"
 			>
 				<FeatherIcon name="alert-circle" class="size-7.5 text-ink-red-4" />
@@ -248,7 +252,7 @@
 		<!-- empty state (loaded, zero rows) -->
 		<div v-else-if="!loading" class="relative flex-1">
 			<div
-				class="absolute left-1/2 flex w-4/12 -translate-x-1/2 flex-col items-center gap-3"
+				class="absolute left-1/2 flex w-9/12 -translate-x-1/2 sm:w-4/12 flex-col items-center gap-3"
 				:style="{ top: '35%' }"
 			>
 				<FeatherIcon
@@ -256,7 +260,7 @@
 					class="size-7.5 text-ink-gray-5"
 				/>
 				<div class="flex flex-col items-center gap-1">
-					<span class="text-lg font-medium text-ink-gray-8">
+					<span class="text-center text-lg font-medium text-ink-gray-8">
 						{{ (emptyState && emptyState.title) || "No records found" }}
 					</span>
 					<span
