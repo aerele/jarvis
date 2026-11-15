@@ -173,6 +173,34 @@ class TestIntakeDetail(FrappeTestCase):
 		self.assertEqual(out["spec"]["table"]["columns"], [{"fieldname": "user", "label": "User"}])
 		self.assertEqual(out["reading"]["table_rows"], [["a@example.com"], ["b@example.com"]])
 
+	def test_reviewer_filled_fields_are_marked(self):
+		draft = self._draft(UPLOADER)
+		req = frappe.get_doc(
+			{
+				"doctype": "Jarvis Approval Request",
+				"title": "Review x",
+				"status": "Pending",
+				"source": "Intake",
+				"document_type": "ToDo",
+				"question": "q",
+				"intake_missing": json.dumps({"missing": [{"field": "description", "row": None}]}),
+			}
+		)
+		req.flags.jarvis_server_write = True
+		req.insert(ignore_permissions=True)
+		self._cleanup.append(("Jarvis Approval Request", req.name))
+		a = self._row(
+			UPLOADER,
+			draft_doctype="ToDo",
+			draft_name=draft,
+			reading={"description": "", "priority": "High"},
+			approval_request=req.name,
+		)
+		# still pending: nothing is marked
+		self.assertEqual(self._detail(UPLOADER, a)["reviewer_filled"], [])
+		frappe.db.set_value("Jarvis Approval Request", req.name, "status", "Approved")
+		self.assertEqual(self._detail(UPLOADER, a)["reviewer_filled"], ["description"])
+
 	def test_can_retry_flag(self):
 		a = self._row(UPLOADER, status="Failed", summary="Reading the file failed.")
 		self.assertTrue(self._detail(UPLOADER, a)["can_retry"])
