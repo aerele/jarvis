@@ -55,6 +55,8 @@ function press(button) {
 			<header class="dc-head">
 				<h3 class="dc-title">{{ view.title }}</h3>
 				<span v-if="view.tag" class="dc-tag">{{ view.tag }}</span>
+				<!-- A card in a stack: the number a typed "confirm N" selects it by. -->
+				<span v-if="view.number" class="dc-tag dc-num">{{ view.number }}</span>
 			</header>
 			<p v-if="view.summary" class="dc-summary">{{ view.summary }}</p>
 
@@ -321,6 +323,11 @@ function press(button) {
 	border-radius: 999px;
 	background: var(--dc-bg-soft);
 	color: var(--dc-muted);
+}
+.dc-num {
+	margin-left: auto;
+	font-weight: 600;
+	white-space: nowrap;
 }
 .dc-summary,
 .dc-message {

@@ -7,7 +7,8 @@ import { draftCardView } from "./draftCardView.js";
 import {
 	hasParkedDraft,
 	nextPanelStale,
-	toolDraftHostCtx,
+	receiptReloadNeeded,
+	toolDraftCtxMap,
 	withBusyKind,
 } from "./toolDraftHost.js";
 
@@ -34,58 +35,154 @@ describe("hasParkedDraft: one card always", () => {
 		it(`${name}: ${want}`, () => expect(hasParkedDraft(list)).toBe(want));
 });
 
-describe("toolDraftHostCtx through the card view (the buttons the person gets)", () => {
-	const buttons = (pa, streaming = false) =>
-		draftCardView(card("create-simple"), toolDraftHostCtx({ pa, streaming })).buttons.map(
-			(b) => `${b.id}${b.disabled ? ":off" : ""}${b.loading ? ":spin" : ""}`
-		);
-	const fresh = { token: "a", recent: true };
-	// Break: Preview or Edit is clickable before the panel handles them, Create or Cancel is
-	// disabled on a ready card, busy shows the wrong spinner, or the turn flag is dropped.
+describe("a stack of pending cards: the hint and the number each draft card shows", () => {
+	// Items of the visible stack, in order: [kind, recent]. kind "draft" is a server draft card,
+	// "legacy" an ordinary gated card, "sensitive" a warning card; the last two draw their own
+	// markup (the stack hint is theirs when they are last) but take a number like any card.
+	const GO = 'or type "go ahead"';
+	const ALL3 = 'or type "confirm all", or "confirm 1 and 3"';
+	const ALL2 = 'or type "confirm all", or "confirm 1 and 2"';
+	const MIX2 = 'or type "confirm 1 and 2"';
+	const make = ([kind, recent = true], i) => {
+		const token = `t${i + 1}`;
+		if (kind === "draft") return item("create-simple", { token, recent });
+		if (kind === "sensitive") return item("sensitive", { token, recent });
+		return { token, recent, preview: { card: { kind: "verb", verb: "submit" } } };
+	};
+	// Break: a card in a stack tells the person to type something that confirms other cards, names
+	// the wrong number, repeats the stack hint on every card, or loses its place. Each row:
+	// [name, stack, stack hint, then per DRAFT card [token, hint, number]].
 	const table = [
-		["ready (S1)", fresh, false, "S1", ["create", "preview:off", "edit:off", "cancel"]],
+		["one card alone", [["draft"]], GO, [["t1", GO, ""]]],
 		[
-			"earlier (S2)",
-			{ ...fresh, recent: false },
-			false,
-			"S2",
-			["create", "preview:off", "edit:off", "cancel"],
+			"one Earlier card alone",
+			[["draft", false]],
+			'or type "confirm 1"',
+			[["t1", 'or type "confirm 1"', ""]],
 		],
 		[
-			"create in flight (S4)",
-			{ ...fresh, busy: true, busyKind: "create" },
-			false,
-			"S4",
-			["create:off:spin", "preview:off", "edit:off", "cancel:off"],
+			"draft then legacy: the legacy card shows the stack hint",
+			[["draft"], ["legacy"]],
+			ALL2,
+			[["t1", 'or type "confirm 1"', "1 of 2"]],
 		],
 		[
-			"cancel in flight (S4)",
-			{ ...fresh, busy: true, busyKind: "cancel" },
-			false,
-			"S4",
-			["create:off", "preview:off", "edit:off", "cancel:off:spin"],
+			"legacy then draft: the draft is last and shows the stack hint",
+			[["legacy"], ["draft"]],
+			ALL2,
+			[["t2", ALL2, "2 of 2"]],
 		],
 		[
-			"a turn is running (S13)",
-			fresh,
-			true,
-			"S13",
-			["create:off", "preview:off", "edit:off", "cancel:off"],
+			"Earlier draft then recent draft",
+			[["draft", false], ["draft"]],
+			MIX2,
+			[
+				["t1", 'or type "confirm 1"', "1 of 2"],
+				["t2", MIX2, "2 of 2"],
+			],
+		],
+		[
+			"recent draft then Earlier draft: the Earlier one keeps its own number",
+			[["draft"], ["draft", false]],
+			MIX2,
+			[
+				["t1", 'or type "confirm 1"', "1 of 2"],
+				["t2", 'or type "confirm 2"', "2 of 2"],
+			],
+		],
+		[
+			"draft, legacy, draft",
+			[["draft"], ["legacy"], ["draft"]],
+			ALL3,
+			[
+				["t1", 'or type "confirm 1"', "1 of 3"],
+				["t3", ALL3, "3 of 3"],
+			],
+		],
+		[
+			"a sensitive card takes a place too",
+			[["sensitive"], ["draft"]],
+			ALL2,
+			[["t2", ALL2, "2 of 2"]],
+		],
+		[
+			"a card being created shows its place and no hint",
+			[["draft", true, "busy"], ["draft"]],
+			ALL2,
+			[
+				["t1", "", "1 of 2"],
+				["t2", ALL2, "2 of 2"],
+			],
 		],
 	];
-	for (const [name, pa, streaming, state, want] of table) {
-		it(`${name}`, () => {
-			expect(
-				draftCardView(card("create-simple"), toolDraftHostCtx({ pa, streaming })).state
-			).toBe(state);
-			expect(buttons(pa, streaming)).toEqual(want);
+	for (const [name, stack, stackHint, want] of table) {
+		it(name, () => {
+			const items = stack.map(make);
+			if (stack[0][2]) Object.assign(items[0], { busy: true, busyKind: "create" });
+			const map = toolDraftCtxMap({ items, streaming: false, stackHint });
+			const got = Object.keys(map).map((token) => {
+				const v = draftCardView(card("create-simple"), map[token]);
+				return [token, v.hint, v.number];
+			});
+			expect(got).toEqual(want);
 		});
 	}
 
-	it("always the desktop surface, never editing", () => {
-		const ctx = toolDraftHostCtx({ pa: { token: "a", busyKind: "save" }, streaming: false });
-		expect([ctx.surface, ctx.editing, ctx.readOnly]).toEqual(["desktop", false, true]);
+	// Break: a legacy or sensitive card gets a draft ctx; Preview or Edit is live before the panel
+	// handles them (this commit; the next one enables them and rewrites this test).
+	it("only server draft cards get a ctx, with Preview and Edit still off", () => {
+		const map = toolDraftCtxMap({
+			items: [make(["legacy"], 0), make(["draft"], 1), make(["sensitive"], 2)],
+			streaming: false,
+			stackHint: ALL3,
+		});
+		expect(Object.keys(map)).toEqual(["t2"]);
+		const buttons = draftCardView(card("create-simple"), map.t2).buttons;
+		expect(buttons.filter((b) => b.disabled).map((b) => b.id)).toEqual(["preview", "edit"]);
 	});
+
+	it("not a list gives no ctx", () => {
+		expect(toolDraftCtxMap({ items: null, streaming: false, stackHint: "" })).toEqual({});
+	});
+});
+
+describe("receiptReloadNeeded: after Create, does the chat need a reload to show the receipt?", () => {
+	const base = {
+		token: "t1",
+		conversation: "c1",
+		currentConversation: "c1",
+		items: [],
+		rows: [],
+	};
+	const decided = { role: "tool", tool_call_id: "t1", action_outcome: "confirmed" };
+	// Break: S10 (the card is spent, no receipt loaded) shows nothing, or a normal success reloads twice.
+	const table = [
+		["the card left the list and no receipt row is loaded (S10)", {}, true],
+		[
+			"the card is still pending (a refused Create that keeps it)",
+			{ items: [{ token: "t1" }] },
+			false,
+		],
+		[
+			"a decided row for this token is already loaded (a normal success)",
+			{ rows: [decided] },
+			false,
+		],
+		[
+			"the pending row of the token has no outcome yet",
+			{ rows: [{ role: "tool", tool_call_id: "t1", action_outcome: "" }] },
+			true,
+		],
+		[
+			"another token's receipt does not count",
+			{ rows: [{ ...decided, tool_call_id: "t2" }] },
+			true,
+		],
+		["another chat is on screen now", { currentConversation: "c2" }, false],
+		["no token", { token: "" }, false],
+	];
+	for (const [name, over, want] of table)
+		it(`${name}: ${want}`, () => expect(receiptReloadNeeded({ ...base, ...over })).toBe(want));
 });
 
 describe("withBusyKind: busy transitions around Create and Cancel", () => {

@@ -15,10 +15,13 @@
 // true only for a readable, non-sensitive draft.
 //
 // ctx = { earlier, busy: "create"|"cancel"|"busy"|""|null, editing, streaming, surface: "desktop"|"phone",
-//         readOnly }
+//         readOnly, position, count, stackHint }
 // `readOnly: true` draws Preview and Edit disabled in the ready states (S1, S2), so the layout
 // does not move when a host that cannot open them yet starts to. Every other button and state
 // is unchanged by it.
+// `position` (1-based place in the pending stack), `count` (cards in the stack) and `stackHint`
+// (the hint for the whole stack) tell a card that shares the screen with others where it is.
+// Without them, or with a stack of one, the card is alone and says what it always said.
 // Precedence when several flags are true:
 //   unreadable > sensitive > busy > streaming > editing > earlier > ready
 import { typedApprovalHint } from "./typedCardReply.js";
@@ -316,6 +319,7 @@ const EMPTY = {
 	hint: "",
 	footer: "",
 	tag: "",
+	number: "",
 	message: "",
 	useLegacyCard: false,
 };
@@ -334,6 +338,25 @@ function unreadable(ctx = {}) {
 // No content, no buttons: see ROUTING above.
 function sensitive() {
 	return { ...EMPTY, state: "S11", useLegacyCard: true };
+}
+
+// Where this card sits in a stack of two or more, or null when it is alone (or ctx does not say).
+function stackOf(ctx) {
+	const { position, count } = ctx;
+	const ok = Number.isInteger(position) && Number.isInteger(count);
+	return ok && count > 1 && position >= 1 && position <= count ? { position, count } : null;
+}
+
+// The typed-approval hint of a ready card. Alone: the card's own. In a stack a bare phrase
+// ("go ahead") would approve other cards too, so a card says only the number that selects it
+// ("confirm 2"); the stack-wide hint is drawn once, on the LAST card, whatever kind it is.
+// An Earlier card is only ever bound by its number, so it keeps its own number even when last.
+function hintOf(ctx, state) {
+	const stack = stackOf(ctx);
+	if (!stack) return typedApprovalHint([{ recent: state === "S1" }]);
+	const own = `or type "confirm ${stack.position}"`;
+	if (state === "S2" || stack.position < stack.count) return own;
+	return text(ctx.stackHint) || own;
 }
 
 function stateOf(ctx) {
@@ -366,9 +389,10 @@ function build(card, ctx) {
 		buttons: ready
 			? readyButtons(draft.verb, ctx)
 			: lockedButtons(readyButtons(draft.verb, ctx), ctx, state),
-		hint: ready ? typedApprovalHint([{ recent: state === "S1" }]) : "",
+		hint: ready ? hintOf(ctx, state) : "",
 		footer: state === "S3" ? "Editing" : state === "S13" ? "Jarvis is replying" : "",
 		tag: state === "S2" ? "Earlier" : "",
+		number: stackOf(ctx) ? `${ctx.position} of ${ctx.count}` : "",
 		message: "",
 	};
 }

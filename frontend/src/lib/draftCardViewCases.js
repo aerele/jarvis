@@ -116,6 +116,74 @@ export function draftCardCases(rawView, fixtures) {
 		}
 	}
 
+	// Break: a card in a stack tells the person to type a phrase that confirms OTHER cards (a bare
+	// "go ahead" approves every recent card), names the wrong number, repeats the stack hint on
+	// every card, or loses its place number; or a card with no place in ctx changes its text.
+	const STACK = 'or type "confirm all", or "confirm 1 and 3"';
+	const placed = (o) => {
+		const v = draftCardView(card(fixtures, "create-simple"), { surface: "desktop", ...o });
+		return [v.hint, v.number];
+	};
+	const GO = 'or type "go ahead"';
+	for (const [what, ctx, expected] of [
+		["no place", {}, [GO, ""]],
+		["no place, earlier", { earlier: true }, ['or type "confirm 1"', ""]],
+		["a stack of one", { position: 1, count: 1, stackHint: STACK }, [GO, ""]],
+		[
+			"recent, first of 3",
+			{ position: 1, count: 3, stackHint: STACK },
+			['or type "confirm 1"', "1 of 3"],
+		],
+		[
+			"recent, middle of 3",
+			{ position: 2, count: 3, stackHint: STACK },
+			['or type "confirm 2"', "2 of 3"],
+		],
+		[
+			"recent, last of 3 shows the stack hint",
+			{ position: 3, count: 3, stackHint: STACK },
+			[STACK, "3 of 3"],
+		],
+		[
+			"recent, last, no stack hint",
+			{ position: 3, count: 3 },
+			['or type "confirm 3"', "3 of 3"],
+		],
+		[
+			"earlier, middle",
+			{ earlier: true, position: 2, count: 3, stackHint: STACK },
+			['or type "confirm 2"', "2 of 3"],
+		],
+		[
+			"earlier, last keeps its own number",
+			{ earlier: true, position: 3, count: 3, stackHint: STACK },
+			['or type "confirm 3"', "3 of 3"],
+		],
+		["working: number, no hint", { busy: "create", position: 2, count: 3 }, ["", "2 of 3"]],
+		[
+			"a turn is running: number, no hint",
+			{ streaming: true, position: 1, count: 2 },
+			["", "1 of 2"],
+		],
+		["position 0 is not a place", { position: 0, count: 2, stackHint: STACK }, [GO, ""]],
+		["position beyond the count is not a place", { position: 3, count: 2 }, [GO, ""]],
+		["numbers as text are not a place", { position: "2", count: "3" }, [GO, ""]],
+		["count without a position is not a place", { count: 3, stackHint: STACK }, [GO, ""]],
+	])
+		add(`stack: ${what}`, placed(ctx), expected);
+	// Break: an unreadable card (only Cancel) draws a place number or a hint.
+	add(
+		"stack: unreadable card draws neither",
+		(({ number, hint }) => [number, hint])(
+			draftCardView(card(fixtures, "unreadable"), {
+				position: 2,
+				count: 3,
+				stackHint: STACK,
+			})
+		),
+		["", ""]
+	);
+
 	// Break: a sensitive card gets content or buttons here, so a host could confirm it with less
 	// detail than its PendingCard (whose buttons read Confirm / Discard). It is a routing signal.
 	for (const surface of ["desktop", "phone"]) {

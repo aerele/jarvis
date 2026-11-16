@@ -108,6 +108,12 @@ describe("DraftCard", () => {
 		expect(draw("create-simple", { earlier: true }).find(".dc-tag").text()).toBe("Earlier");
 		expect(draw("create-simple", { editing: true }).text()).toContain("Editing");
 		expect(draw("create-simple", { streaming: true }).text()).toContain("Jarvis is replying");
+		// the place in a stack is drawn next to the Earlier tag, and absent for a card alone
+		const stacked = draw("create-simple", { earlier: true, position: 2, count: 3 });
+		expect(stacked.findAll(".dc-tag").map((t) => t.text())).toEqual(["Earlier", "2 of 3"]);
+		expect(draw("create-simple", { position: 1, count: 1 }).find(".dc-num").exists()).toBe(
+			false
+		);
 		const c = structuredClone(card("create-with-table"));
 		c.tables[0].count = 12;
 		c.tables[0].rows = Array.from({ length: 12 }, (_, i) => ({

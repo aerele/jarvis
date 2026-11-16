@@ -10,10 +10,49 @@ export function hasParkedDraft(items) {
 	return Array.isArray(items) && items.some(isToolDraftItem);
 }
 
-// What DraftCard is told about an item at this commit. Preview and Edit are drawn but
-// disabled (`readOnly`) until the edit panel lands; `editing` is therefore always false.
-export function toolDraftHostCtx({ pa, streaming }) {
-	return { ...toolDraftCtx({ pa, editingToken: "", streaming }), readOnly: true };
+// What DraftCard is told about an item. Preview and Edit are drawn but disabled (`readOnly`)
+// until the edit panel lands; `editing` is therefore always false. `position` / `count` /
+// `stackHint` say where the card sits among the pending cards on screen (see draftCardView).
+export function toolDraftHostCtx({ pa, streaming, position, count, stackHint }) {
+	return {
+		...toolDraftCtx({ pa, editingToken: "", streaming }),
+		readOnly: true,
+		position,
+		count,
+		stackHint,
+	};
+}
+
+// The ctx of every server draft card in the visible stack, keyed by token. `items` is the whole
+// stack (legacy cards included: they take a number too, so a draft card's "2 of 3" is real) and
+// `stackHint` is the stack's own hint. A computed map in the view keeps each ctx object stable
+// between renders; a draft card's view only recomputes when its own inputs change.
+export function toolDraftCtxMap({ items, streaming, stackHint }) {
+	const list = Array.isArray(items) ? items : [];
+	const map = {};
+	list.forEach((pa, i) => {
+		if (isToolDraftItem(pa))
+			map[pa.token] = toolDraftHostCtx({
+				pa,
+				streaming,
+				position: i + 1,
+				count: list.length,
+				stackHint,
+			});
+	});
+	return map;
+}
+
+// After Create: should the chat be reloaded to show the receipt? Yes when the card has left
+// the pending list, this chat is still the one on screen, and no decided row for the token is
+// loaded yet. A refused Create that spends the card (a record that changed after the draft was
+// made, State S10) removes the card without a reload, so "Not saved: ..." would not show.
+export function receiptReloadNeeded({ token, conversation, currentConversation, items, rows }) {
+	if (!token || !conversation || conversation !== currentConversation) return false;
+	if ((items || []).some((x) => x && x.token === token)) return false;
+	return !(rows || []).some(
+		(m) => m && m.role === "tool" && m.tool_call_id === token && !!m.action_outcome
+	);
 }
 
 // Run one card action (Create -> the confirm handler, Cancel -> the discard handler) with

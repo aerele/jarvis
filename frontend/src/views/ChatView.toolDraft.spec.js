@@ -7,7 +7,13 @@ import { describe, expect, it } from "vitest";
 import fs from "fs";
 import path from "path";
 import { computed, nextTick, ref, watch } from "vue";
-import { nextPanelStale } from "../lib/toolDraftHost.js";
+import crypto from "crypto";
+import {
+	nextPanelStale,
+	receiptReloadNeeded,
+	toolDraftCtxMap,
+	withBusyKind,
+} from "../lib/toolDraftHost.js";
 
 const src = fs.readFileSync(path.resolve(__dirname, "ChatView.vue"), "utf8");
 
@@ -67,6 +73,25 @@ describe("the pending block routes on the card", () => {
 		expect(legacy).toContain("Discard </button>");
 	});
 
+	// Break: flag-off parity. Anything the legacy confirmation card draws changes (a class, a
+	// label, a handler, a condition), which the pins above can miss. With no server draft in the
+	// chat, this inner markup, with every whitespace character removed (so prettier's re-wrapping
+	// does not count), is what a pending item draws today. It was proved equal to the markup at
+	// commit 8d0e95fed, before the draft branch existed (4005 characters).
+	// TO CHANGE THE LEGACY CARD ON PURPOSE: edit it, run this spec, copy the new hash from the
+	// failure message into LEGACY_CARD_SHA256 and the new length into LEGACY_CARD_LENGTH.
+	const LEGACY_CARD_SHA256 = "21f60a5df94427facd9e2dabbb8f207cb94bdc96c3bbb94264381b113507c004";
+	const LEGACY_CARD_LENGTH = 4005;
+	it("the legacy card's inner markup is exactly what it was before drafts", () => {
+		const open = '<div v-else class="jv-action jv-pending">';
+		const inner = LEGACY_BRANCH.slice(open.length, LEGACY_BRANCH.lastIndexOf("</template>"));
+		const stripped = inner.slice(0, inner.lastIndexOf("</div>")).replace(/\s+/g, "");
+		expect([
+			stripped.length,
+			crypto.createHash("sha256").update(stripped).digest("hex"),
+		]).toEqual([LEGACY_CARD_LENGTH, LEGACY_CARD_SHA256]);
+	});
+
 	// Break: the draft branch carries a second confirm path, or draws the legacy hint on top of
 	// the card's own, or an old PendingCard.
 	it("the draft branch has no legacy buttons, hint or PendingCard", () => {
@@ -94,7 +119,7 @@ describe("the pending block routes on the card", () => {
 	it("hands DraftCard the card, the ctx, and only Create and Cancel", () => {
 		const mount = squash(slice("<DraftCard", "/>", src.indexOf('v-if="isToolDraftItem(pa)"')));
 		expect(mount).toContain(':card="cardOfItem(pa)"');
-		expect(mount).toContain(':ctx="draftCtxOf(pa)"');
+		expect(mount).toContain(':ctx="draftCtxByToken[pa.token]"');
 		expect(mount).toContain('@create="createToolDraft(pa)"');
 		expect(mount).toContain('@cancel="cancelToolDraft(pa)"');
 		expect(mount).not.toMatch(/@preview|@edit/);
@@ -118,11 +143,133 @@ describe("Create and Cancel use the existing handlers, with a busy kind", () => 
 		expect(fn("cancelToolDraft")).toContain('withBusyKind(pa, "cancel", discardPending)');
 	});
 
-	// Break: the card is told it is never streaming, so Create stays live while Jarvis replies.
-	it("the ctx carries the view's turn-running flag", () => {
-		expect(squash(slice("const draftCtxOf", ";", 0))).toContain(
-			"toolDraftHostCtx({ pa, streaming: convStreaming.value })"
+	// The real computed from ChatView, run with real refs.
+	function ctxMap() {
+		const code =
+			slice("const draftCtxByToken = computed(", "\n);\n") + "\n);\nreturn draftCtxByToken;";
+		const draft = { draft: { verb: "create", values: { a: 1 } } };
+		const visiblePendingActions = ref([
+			{ token: "t1", recent: true, preview: { card: draft } },
+			{ token: "t2", recent: true, preview: { card: { kind: "verb" } } },
+		]);
+		const convStreaming = ref(false);
+		const typedApprovalHint = ref("stack hint");
+		const map = new Function(
+			"computed",
+			"toolDraftCtxMap",
+			"visiblePendingActions",
+			"convStreaming",
+			"typedApprovalHint",
+			code
+		)(computed, toolDraftCtxMap, visiblePendingActions, convStreaming, typedApprovalHint);
+		return { map, visiblePendingActions, convStreaming, typedApprovalHint };
+	}
+
+	// Break: the ctx is built per render (a new object for every streamed token), or one of its
+	// inputs (the turn flag, the visible stack, the stack hint) is not what the view really has.
+	it("builds the ctx once per change of its inputs, from the visible stack, the turn flag and the stack hint", () => {
+		const { map, convStreaming, typedApprovalHint, visiblePendingActions } = ctxMap();
+		const first = map.value.t1;
+		expect(Object.keys(map.value)).toEqual(["t1"]);
+		expect(map.value.t1).toBe(first);
+		expect([first.position, first.count, first.stackHint, first.streaming]).toEqual([
+			1,
+			2,
+			"stack hint",
+			false,
+		]);
+		convStreaming.value = true;
+		expect(map.value.t1.streaming).toBe(true);
+		typedApprovalHint.value = "other hint";
+		expect(map.value.t1.stackHint).toBe("other hint");
+		visiblePendingActions.value[0].busy = true;
+		visiblePendingActions.value[0].busyKind = "create";
+		expect(map.value.t1.busy).toBe("create");
+	});
+});
+
+describe("Create reloads the chat when the card is spent without a receipt (S10)", () => {
+	// createToolDraft, run with the real busy wrapper and the real decision, and a fake confirm.
+	// `confirm` plays what confirmPending does: take the card off the list (and, on success, load
+	// the decided row, which is what a normal Create's own reload does).
+	async function run(confirm, { switchTo = "" } = {}) {
+		const code =
+			slice("async function createToolDraft(pa) {", "\n}\n") +
+			"\n}\nreturn createToolDraft;";
+		const pendingActions = ref([{ token: "t1", conversation: "c1" }]);
+		const messages = ref([{ role: "tool", tool_call_id: "t1", action_outcome: "" }]);
+		const currentId = ref("c1");
+		const loads = [];
+		const confirmPending = async () => {
+			await confirm({ pendingActions, messages });
+			if (switchTo) currentId.value = switchTo;
+		};
+		const createToolDraft = new Function(
+			"withBusyKind",
+			"confirmPending",
+			"receiptReloadNeeded",
+			"currentId",
+			"pendingActions",
+			"messages",
+			"loadConversation",
+			code
+		)(
+			withBusyKind,
+			confirmPending,
+			receiptReloadNeeded,
+			currentId,
+			pendingActions,
+			messages,
+			async (id) => loads.push(id)
 		);
+		await createToolDraft(pendingActions.value[0]);
+		return loads;
+	}
+	const drop = ({ pendingActions }) => (pendingActions.value = []);
+
+	// Break: the stale-record Create removes the card and shows no "Not saved ..." receipt.
+	it("reloads once when the card left the list and no receipt is loaded", async () => {
+		expect(await run(drop)).toEqual(["c1"]);
+	});
+
+	// Break: every normal Create reloads twice.
+	it("does not reload again when the confirm already loaded the receipt", async () => {
+		const loads = await run(({ pendingActions, messages }) => {
+			drop({ pendingActions });
+			messages.value = [{ role: "tool", tool_call_id: "t1", action_outcome: "confirmed" }];
+		});
+		expect(loads).toEqual([]);
+	});
+
+	// Break: a refused Create that keeps the card reloads the chat for nothing.
+	it("does not reload while the card is still pending", async () => {
+		expect(await run(() => {})).toEqual([]);
+	});
+
+	// Break: the reload lands on another chat that was opened during the confirm.
+	it("does not reload a chat the person has left", async () => {
+		expect(await run(drop, { switchTo: "c2" })).toEqual([]);
+	});
+});
+
+describe("the typed Preview closes when a server draft card arrives", () => {
+	// Break: the typed Preview overlay stays up over the new card; its Confirm saves nothing.
+	it("clears previewOpen when a draft becomes parked, and only then", async () => {
+		const code = slice("watch(hasParkedDraft, (parked) => {", "\n});\n") + "\n});";
+		const hasParkedDraft = ref(false);
+		const previewOpen = ref(true);
+		new Function("watch", "hasParkedDraft", "previewOpen", code)(
+			watch,
+			hasParkedDraft,
+			previewOpen
+		);
+		hasParkedDraft.value = true;
+		await nextTick();
+		expect(previewOpen.value).toBe(false);
+		previewOpen.value = true;
+		hasParkedDraft.value = false;
+		await nextTick();
+		expect(previewOpen.value).toBe(true);
 	});
 });
 

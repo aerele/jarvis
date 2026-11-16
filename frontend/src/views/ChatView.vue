@@ -2248,7 +2248,7 @@
 						<div v-if="isToolDraftItem(pa)" class="jv-tool-draft">
 							<DraftCard
 								:card="cardOfItem(pa)"
-								:ctx="draftCtxOf(pa)"
+								:ctx="draftCtxByToken[pa.token]"
 								@create="createToolDraft(pa)"
 								@cancel="cancelToolDraft(pa)"
 							/>
@@ -4537,7 +4537,8 @@ import {
 	DRAFT_STALE_TEXT,
 	hasParkedDraft as itemsHoldParkedDraft,
 	nextPanelStale,
-	toolDraftHostCtx,
+	receiptReloadNeeded,
+	toolDraftCtxMap,
 	withBusyKind,
 } from "@/lib/toolDraftHost";
 import {
@@ -8360,6 +8361,10 @@ async function openDraftForMissing(a, error, capturedView = null) {
 
 // Read-only preview: opens DraftPreview over the current summary's model.
 const previewOpen = ref(false);
+// A server draft card retires the typed draft, and the typed Preview (which holds no edits) with it.
+watch(hasParkedDraft, (parked) => {
+	if (parked) previewOpen.value = false;
+});
 function resetDraftActionState() {
 	// This is called by the synchronous conversation-switch fence. It must not
 	// use closeDraftPanel(), which is for a user action in the current view.
@@ -8649,9 +8654,17 @@ const olderCardsNoteText = computed(() =>
 		? "An earlier action card is still waiting. Use its buttons or the Approval Board."
 		: ""
 );
-// What DraftCard is told about one pending item (Preview and Edit are disabled until the edit
-// panel handles a server draft).
-const draftCtxOf = (pa) => toolDraftHostCtx({ pa, streaming: convStreaming.value });
+// What DraftCard is told about each server draft card on screen, built once per change of its
+// inputs (not once per render, which a streamed token triggers): its state, its place in the
+// stack and the stack's hint (Preview and Edit are disabled until the edit panel handles a
+// server draft).
+const draftCtxByToken = computed(() =>
+	toolDraftCtxMap({
+		items: visiblePendingActions.value,
+		streaming: convStreaming.value,
+		stackHint: typedApprovalHint.value,
+	})
+);
 // A typed edit panel that was open when a server draft card arrived: its Save has no typed
 // draft to act on. The panel stays open, shows DRAFT_STALE_TEXT, and its save buttons are off;
 // the X still closes it, which clears the flag.
@@ -9177,8 +9190,22 @@ async function proposeNext(m, step) {
 // Discard button's, each with the item's busyKind set around it (lib/toolDraftHost.withBusyKind)
 // so the card shows its working state and ignores a second press. Every reply, a refusal, an
 // already-decided card and a thrown error are handled by confirmPending / discardPending.
-function createToolDraft(pa) {
-	return withBusyKind(pa, "create", confirmPending);
+async function createToolDraft(pa) {
+	const started = await withBusyKind(pa, "create", confirmPending);
+	// A Create that spends the card without a receipt (State S10: the record changed after the
+	// draft was made) takes the card off the list and toasts the reason; the decided row, which
+	// carries the "Not saved ..." receipt, is only loaded by a reload. confirmPending stays as it is.
+	if (
+		started &&
+		receiptReloadNeeded({
+			token: pa.token,
+			conversation: pa.conversation,
+			currentConversation: currentId.value,
+			items: pendingActions.value,
+			rows: messages.value,
+		})
+	)
+		await loadConversation(pa.conversation);
 }
 function cancelToolDraft(pa) {
 	return withBusyKind(pa, "cancel", discardPending);
@@ -18138,6 +18165,15 @@ onUnmounted(() => {
    marks a write parked awaiting the owner's Confirm click. */
 .jv-pending {
 	border-color: var(--amber);
+}
+/* A server draft card sits in the thread exactly like the confirmation card above: the card's
+   own 12px margins give way to the wrapper's 12px top margin (the flex gap supplies the rest),
+   so it is 12px + gap above and the gap alone below, as a .jv-action is. */
+.jv-tool-draft {
+	margin-top: 12px;
+}
+.jv-tool-draft :deep(.dc) {
+	margin: 0;
 }
 .jv-safety-update {
 	border-color: var(--border-2);
