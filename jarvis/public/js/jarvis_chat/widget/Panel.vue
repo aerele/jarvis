@@ -486,11 +486,29 @@
 							<pre v-if="turnErrorShowsRaw" class="jvp-turn-err-raw">{{
 								turnError
 							}}</pre>
-							<div v-if="turnErrorDetails.retryable" class="jvp-turn-err-acts">
-								<button class="jvp-btn-subtle" type="button" @click="retryLast">
+							<div
+								v-if="turnErrorDetails.retryable || reportOpen"
+								class="jvp-turn-err-acts"
+							>
+								<button
+									v-if="turnErrorDetails.retryable"
+									class="jvp-btn-subtle"
+									type="button"
+									@click="retryLast"
+								>
 									Retry
 								</button>
+								<button
+									v-if="reportOpen"
+									class="jvp-btn-subtle"
+									type="button"
+									:disabled="reporting"
+									@click="reportError"
+								>
+									Report error
+								</button>
 							</div>
+							<div v-if="reportNote" class="jvp-turn-err-hint">{{ reportNote }}</div>
 						</div>
 					</div>
 				</template>
@@ -827,7 +845,9 @@ import { wornLayerBox } from "./fab_worn.mjs";
 import { tileUnits } from "../../shared/holiday/worn-room.mjs";
 import { prefersReduced, watchReducedMotion } from "./reduced_motion.mjs";
 import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
-import { sendRefusalMessage } from "./panel_send_copy.mjs";
+import { isKnownRefusal, sendRefusalMessage } from "./panel_send_copy.mjs";
+import { failureCopy, failureKind, uploadFailureCopy } from "../../shared/chat_failure_copy.mjs";
+import { openErrorReport, showReportError } from "../../shared/support_error_report.mjs";
 import { advanceViewGeneration, isViewCurrent } from "./view_generation.mjs";
 import { maintenance, foldSend, startPollIfHeld } from "./maintenance_state.mjs";
 import {
@@ -861,6 +881,7 @@ import {
 	listPendingConfirmations,
 	uploadFile,
 	transcribeAudio,
+	getErrorReportDetails,
 	getChatUiSettings,
 	isReadyForChat,
 	resyncLlm,
@@ -1003,10 +1024,39 @@ const turnErrorHint = computed(() => turnErrorDetails.value.hint);
 const turnErrorShowsRaw = computed(
 	() => !!(turnError.value || "").trim() && showsRawReason(turnErrorDetails.value)
 );
+// Report error: only where Aerele support is the one who can fix the failure, and only for a
+// user who can raise a ticket (boot flag jarvis_can_report_error, see jarvis/boot.py).
+const supportOn = !!window.frappe?.boot?.jarvis_can_report_error;
+const reportOpen = computed(() => showReportError(turnErrorDetails.value, supportOn));
+const reporting = ref(false);
+const reportNote = ref("");
+async function reportError() {
+	if (reporting.value || !reportOpen.value) return;
+	reporting.value = true;
+	reportNote.value = "";
+	try {
+		const row = messages.value.find((m) => m.name === turnErrorMsgId.value);
+		const opened = await openErrorReport({
+			info: turnErrorDetails.value,
+			conversation: convId.value,
+			message: turnErrorMsgId.value,
+			at: row?.modified || row?.creation,
+			fetchDetails: getErrorReportDetails,
+			openTab: (url, target) => window.open(url, target),
+			navigate: (url) => window.location.assign(url),
+		});
+		if (!opened) reportNote.value = "Could not open Support. Try again.";
+	} catch {
+		reportNote.value = "Could not open Support. Try again.";
+	} finally {
+		reporting.value = false;
+	}
+}
 function clearTurnError() {
 	turnError.value = "";
 	turnErrorCode.value = "";
 	turnErrorMsgId.value = "";
+	reportNote.value = "";
 }
 const draft = ref("");
 const sending = ref(false);
@@ -1712,7 +1762,10 @@ async function load() {
 			viewGeneration === generation &&
 			(!requestedConversation || convId.value === requestedConversation)
 		)
-			loadError.value = "Could not load your conversation.";
+			loadError.value = failureCopy(
+				e,
+				"Could not load your conversation. Close the chat and open it again."
+			);
 	} finally {
 		if (
 			viewGeneration === generation &&
@@ -1776,8 +1829,7 @@ async function onFilePicked(e) {
 			attachments.value.push(uploaded);
 		}
 	} catch (err) {
-		if (isCurrentView(generation, conversation))
-			loadError.value = err?.serverReason || "That file could not be attached.";
+		if (isCurrentView(generation, conversation)) loadError.value = uploadFailureCopy(err);
 	} finally {
 		if (isCurrentView(generation, conversation)) uploading.value = false;
 	}
@@ -1891,7 +1943,7 @@ async function toggleVoice() {
 		return;
 	}
 	if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-		loadError.value = "Recording is not supported in this browser.";
+		loadError.value = "Recording is not supported in this browser. Type your message instead.";
 		return;
 	}
 	const generation = viewGeneration;
@@ -1931,7 +1983,10 @@ async function toggleVoice() {
 				}
 			} catch (err) {
 				if (isCurrentView(generation, conversation))
-					loadError.value = "Could not transcribe that recording.";
+					loadError.value = failureCopy(
+						err,
+						"Could not transcribe that recording. Try again, or type your message instead."
+					);
 			} finally {
 				if (isCurrentView(generation, conversation)) transcribing.value = false;
 			}
@@ -1940,7 +1995,8 @@ async function toggleVoice() {
 		recording.value = true;
 	} catch (err) {
 		if (isCurrentView(generation, conversation))
-			loadError.value = "Microphone permission was refused.";
+			loadError.value =
+				"Microphone permission was refused. Allow it in your browser settings, then try again.";
 	}
 }
 
@@ -2049,9 +2105,9 @@ async function send() {
 				return;
 			}
 			loadError.value =
-				res.reason === "release_update_required"
-					? sendRefusalMessage(res.reason, brandName)
-					: res.error?.message || sendRefusalMessage(res.reason, brandName);
+				isKnownRefusal(res.reason) || !res.error?.message
+					? sendRefusalMessage(res.reason, brandName, res)
+					: res.error.message;
 			return;
 		}
 		// A go-ahead on the parked card ran the confirmation instead of starting a
@@ -2084,7 +2140,10 @@ async function send() {
 	} catch (e) {
 		if (!isCurrentView(generation, sentConversation)) return;
 		sending.value = false;
-		loadError.value = "Could not send. Your message was not delivered.";
+		loadError.value = failureCopy(
+			e,
+			"Could not send. Your message was not delivered. Try sending it again."
+		);
 	}
 }
 
@@ -2139,7 +2198,10 @@ async function resolvePending(token) {
 		stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
 	} catch (e) {
 		if (!actionIsCurrent()) return;
-		loadError.value = "Could not confirm that action.";
+		loadError.value = failureCopy(
+			e,
+			"Could not confirm that action. Check your connection and try again."
+		);
 	} finally {
 		if (actionIsCurrent() && resolving.value === token) resolving.value = "";
 	}
@@ -2337,6 +2399,8 @@ function startPolling() {
 	stopPolling();
 	const generation = viewGeneration;
 	const before = shownMessages.value.length;
+	// The last poll's failure: if the wait ends with nothing, say why instead of a bare "no reply".
+	let lastPollError = null;
 	pollTimer = window.setInterval(async () => {
 		if (viewGeneration !== generation) return;
 		pollTicks += 1;
@@ -2348,7 +2412,11 @@ function startPolling() {
 			// typing dots and "Jarvis did not reply" at the same time — it claims to
 			// be working on a turn it has just abandoned.
 			settle();
-			if (gaveUp) loadError.value = "Jarvis did not reply. Try again.";
+			if (gaveUp)
+				loadError.value = failureCopy(
+					lastPollError,
+					"Jarvis did not reply in time. Try again in a minute."
+				);
 			return;
 		}
 		const cid = convId.value;
@@ -2369,7 +2437,8 @@ function startPolling() {
 				stickToBottom();
 			}
 		} catch (e) {
-			/* transient - keep polling */
+			// Transient: keep polling, but remember it for the give-up message.
+			lastPollError = failureKind(e) === "other" ? null : e;
 		}
 	}, 2500);
 }

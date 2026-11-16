@@ -757,7 +757,13 @@ class TestTypedBulkEnvelope(FrappeTestCase):
 			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
 		):
 			out = chat_api._confirm_typed_items("conv-j2a", [{"token": "t1", "position": 1}])
-		self.assertEqual(out["error"], {"code": "InternalError", "message": "confirmation failed"})
+		self.assertEqual(
+			out["error"],
+			{
+				"code": "InternalError",
+				"message": "We couldn't complete that confirmation. Reload the chat and try again.",
+			},
+		)
 
 	def test_a_legacy_confirm_never_offers_a_correction(self):
 		# No Pending Action row to stamp, so "once" could not be enforced.
