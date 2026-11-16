@@ -2,9 +2,11 @@
 // relative imports only: the phone imports this file too.
 //
 // A decided card is a tool row of `create_doc` / `update_doc` with a non-empty `action_outcome`.
-// The row no longer carries the card (the server clears `pending_card` when it decides it), so
-// which decided rows were draft cards is told by `isDraftReceiptRow`; every other row keeps the
-// receipt it has always had (actionSummary.receiptView).
+// The row no longer carries the card (the server clears `pending_card` when it decides it), so the
+// server stamps the decided row that WAS a draft card: `draft_receipt: true`, and for a record that
+// changed or went missing after the draft `draft_receipt_reason: "stale" | "target_missing"`
+// (jarvis/chat/draft_card.py decided_mark; only with the site flag on). `isDraftReceiptRow` reads
+// that stamp; every other row keeps the receipt it has always had (actionSummary.receiptView).
 //
 // draftReceipt(row) -> { text, tone: "ok" | "warn" | "error", open?: {doctype, name}, submit?: true,
 //                        reason? } | null
@@ -17,15 +19,10 @@ const DRAFT_TOOLS = new Set(["create_doc", "update_doc"]);
 export const CHANGED_TEXT = "Not saved: this record changed after the draft was made";
 export const CANCELLED_TEXT = "Draft cancelled";
 
-// The reason codes of a record that changed or was deleted after the draft was parked (the
-// server's `stale` and `target_missing`), and the exact sentences the server writes for them.
-const CHANGED_CODES = new Set(["stale", "target_missing"]);
-const CHANGED_MESSAGES = new Set([
-	"The record changed after this action was proposed.",
-	"The record this action targets no longer exists.",
-	"This record changed after the draft was made. Ask me to draft the update again.",
-	"This record no longer exists, so the update was not saved.",
-]);
+// The stamp's reasons for a record that changed or was deleted after the draft was parked. A stale
+// failure stores no message and no code of its own (`{ok: false, error: {reference}}`), so this
+// stamp is the only place the server says why.
+const CHANGED_REASONS = new Set(["stale", "target_missing"]);
 
 const isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 function parse(v) {
@@ -39,12 +36,6 @@ function parse(v) {
 	}
 }
 const text = (v) => (typeof v === "string" ? v.trim() : "");
-
-function changedRecord(result) {
-	const err = isObject(result.error) ? result.error : {};
-	const codes = [result.reason_code, err.reason_code, err.code];
-	return codes.some((c) => CHANGED_CODES.has(c)) || CHANGED_MESSAGES.has(text(err.message));
-}
 
 export function draftReceipt(row) {
 	if (!isObject(row) || row.role !== "tool" || !row.action_outcome) return null;
@@ -73,7 +64,8 @@ export function draftReceipt(row) {
 		case "partial":
 			return { text: "Partly applied", tone: "warn", reason: text(err.message) };
 		case "failed":
-			if (changedRecord(result)) return { text: CHANGED_TEXT, tone: "error" };
+			if (CHANGED_REASONS.has(row.draft_receipt_reason))
+				return { text: CHANGED_TEXT, tone: "error" };
 			return {
 				text: create ? "Not created" : "Not saved",
 				tone: "error",
@@ -84,14 +76,11 @@ export function draftReceipt(row) {
 	}
 }
 
-// Was this decided row a server draft card? The decided row carries no card and no mark of its
-// own, so two things say so: the site stamps `draft_card` (a boolean) on every tool row of a
-// chat when draft cards are on (true only while Pending, so false here), and the chat remembers
-// the tokens of the draft cards it showed (`seenTokens`, a Set: for a row that arrives live
-// without the stamp). With the site flag off a row has neither, and keeps its old receipt.
-export function isDraftReceiptRow(row, seenTokens) {
+// Was this decided row a server draft card? The server says so: `draft_receipt === true` (never
+// guessed from `draft_card`, which is false on every decided row, a sensitive card's included). A
+// row the site did not stamp (flag off, a sensitive card, any other tool) keeps its old receipt.
+export function isDraftReceiptRow(row) {
 	if (!isObject(row) || row.role !== "tool" || !row.action_outcome) return false;
 	if (!DRAFT_TOOLS.has(String(row.tool_name || "").replace(/^jarvis__/, ""))) return false;
-	if (row.draft_card === false) return true;
-	return !!row.tool_call_id && !!seenTokens && seenTokens.has(row.tool_call_id);
+	return row.draft_receipt === true;
 }

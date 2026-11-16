@@ -8757,18 +8757,12 @@ const draftCtxByToken = computed(() =>
 	})
 );
 // The receipt of a decided server draft card says what the State Table says (S6 to S10). A decided
-// row carries no card, so the chat remembers the tokens of the draft cards it showed; the site's own
-// stamp covers a reload (lib/draftReceipt isDraftReceiptRow). Any other row: null, the chip as before.
-const draftTokensSeen = new Set();
-watch(
-	visiblePendingActions,
-	(items) => {
-		for (const pa of items) if (isToolDraftItem(pa)) draftTokensSeen.add(pa.token);
-	},
-	{ immediate: true }
-);
+// row carries no card, so the server stamps it `draft_receipt` (lib/draftReceipt isDraftReceiptRow).
+// A decided row only ever reaches the screen from a reload that carries the stamp (a live tool:result
+// with an outcome is dropped, the chat reloads after every decision), so nothing is remembered here.
+// Any other row: null, the chip as before.
 function draftReceiptFor(m) {
-	return isDraftReceiptRow(m, draftTokensSeen) ? draftReceipt(m) : null;
+	return isDraftReceiptRow(m) ? draftReceipt(m) : null;
 }
 // The stack's hint, drawn under the stack when its last card is a draft card with no line for it.
 const orphanHint = computed(() =>

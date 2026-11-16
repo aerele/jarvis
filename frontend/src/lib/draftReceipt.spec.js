@@ -2,12 +2,16 @@
 import { describe, expect, it } from "vitest";
 import { draftReceipt, isDraftReceiptRow } from "./draftReceipt.js";
 
+// A decided row as get_conversation hands it for a draft card: `draft_card` false (it is true only
+// while Pending), `draft_receipt` true (jarvis/chat/draft_card.py decided_mark).
 const row = (over = {}, result = null, args = { doctype: "Timesheet" }) => ({
 	role: "tool",
 	tool_name: "create_doc",
 	tool_call_id: "tok-1",
 	tool_status: "",
 	pending_card: null,
+	draft_card: false,
+	draft_receipt: true,
 	action_outcome: "confirmed",
 	tool_args: JSON.stringify(args),
 	tool_result: result === null ? null : JSON.stringify(result),
@@ -83,41 +87,45 @@ describe("draftReceipt: the words of S6, S7, S8 and S10", () => {
 			{ text: "Partly applied", tone: "warn", reason: "Second step failed." },
 		],
 		[
-			"S10 the record changed (reason code on the result)",
+			// What the server stores for a stale update: `error` holds only the confirmation's id
+			// (settlement's with_reference over no result), the reason is the row's stamp.
+			"S10 the record changed (as stored: no message, the stamp says why)",
 			row(
-				{ tool_name: "update_doc", action_outcome: "failed" },
-				fail({ message: "x" }, { reason_code: "stale" })
+				{
+					tool_name: "update_doc",
+					action_outcome: "failed",
+					draft_receipt_reason: "stale",
+				},
+				fail({ reference: "PA-0001" })
 			),
 			{ text: "Not saved: this record changed after the draft was made", tone: "error" },
 		],
 		[
-			"S10 the record was deleted (reason code)",
+			"S10 the record was deleted (as stored, from Save in the form too)",
 			row(
-				{ tool_name: "update_doc", action_outcome: "failed" },
-				fail({ message: "x" }, { reason_code: "target_missing" })
+				{
+					tool_name: "update_doc",
+					action_outcome: "failed",
+					draft_receipt_reason: "target_missing",
+				},
+				fail({ reference: "PA-0001" })
 			),
 			{ text: "Not saved: this record changed after the draft was made", tone: "error" },
 		],
 		[
-			"S10 reason code on the error",
-			row({ tool_name: "update_doc", action_outcome: "failed" }, fail({ code: "stale" })),
-			{ text: "Not saved: this record changed after the draft was made", tone: "error" },
-		],
-		[
-			"S10 told only by the server's sentence",
+			"a failure that ran keeps its own message, even if it says the record changed",
 			row(
 				{ tool_name: "update_doc", action_outcome: "failed" },
-				fail({ message: "The record changed after this action was proposed." })
+				fail({
+					message: "The record changed after this action was proposed.",
+					reference: "PA-0001",
+				})
 			),
-			{ text: "Not saved: this record changed after the draft was made", tone: "error" },
-		],
-		[
-			"S10 from Save in the form: the draft's own sentence",
-			row(
-				{ tool_name: "update_doc", action_outcome: "failed" },
-				fail({ message: "This record no longer exists, so the update was not saved." })
-			),
-			{ text: "Not saved: this record changed after the draft was made", tone: "error" },
+			{
+				text: "Not saved",
+				tone: "error",
+				reason: "The record changed after this action was proposed.",
+			},
 		],
 		[
 			"a failure with no message has no reason",
@@ -161,30 +169,32 @@ describe("draftReceipt: rows it leaves alone", () => {
 });
 
 describe("isDraftReceiptRow: which decided rows were draft cards", () => {
-	// Break: a flag-off row (no `draft_card` key) or another tool's row gets the draft wording, or a
-	// draft row loses it after a reload (the site stamps every tool row when draft cards are on).
-	const seen = new Set(["tok-1"]);
+	// Break: the receipt guesses instead of reading the server's stamp: a decided SENSITIVE card (no
+	// stamp, `draft_card` false like every decided row) or a flag-off row gets the draft wording, or
+	// a stamped draft row loses it (after a reload, or because the stamp is read as truthy).
 	const table = [
+		["decided draft row (stamped)", row({}), true],
 		[
-			"the site stamped it (draft cards on, decided: false)",
-			row({ draft_card: false }),
-			new Set(),
-			true,
-		],
-		["flag off: no stamp, not seen", row({}), new Set(), false],
-		["no stamp but the chat showed this card", row({}), seen, true],
-		["a seen token on another row", row({ tool_call_id: "tok-2" }), seen, false],
-		["still pending (stamp true)", row({ draft_card: true, action_outcome: "" }), seen, false],
-		[
-			"another tool, stamped",
-			row({ draft_card: false, tool_name: "submit_doc" }),
-			seen,
+			"decided sensitive create row (the stamp is absent, draft_card false)",
+			row({ draft_receipt: undefined }),
 			false,
 		],
-		["no outcome", row({ draft_card: false, action_outcome: "" }), seen, false],
-		["no seen set", row({}), undefined, false],
-		["not a row", undefined, seen, false],
+		[
+			"flag-off decided row (no draft keys at all)",
+			row({ draft_receipt: undefined, draft_card: undefined }),
+			false,
+		],
+		[
+			"pending row (draft_card true, no outcome)",
+			row({ draft_card: true, draft_receipt: undefined, action_outcome: "" }),
+			false,
+		],
+		["stamped but still without an outcome", row({ action_outcome: "" }), false],
+		["a stamp that is not exactly true", row({ draft_receipt: "yes" }), false],
+		["another tool, stamped", row({ tool_name: "submit_doc" }), false],
+		["not a tool row", row({ role: "assistant" }), false],
+		["not a row", undefined, false],
 	];
-	for (const [name, r, set, want] of table)
-		it(`${name}: ${want}`, () => expect(isDraftReceiptRow(r, set)).toBe(want));
+	for (const [name, r, want] of table)
+		it(`${name}: ${want}`, () => expect(isDraftReceiptRow(r)).toBe(want));
 });

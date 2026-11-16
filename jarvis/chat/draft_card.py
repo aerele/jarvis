@@ -74,6 +74,52 @@ def is_pending_draft_row(row) -> bool:
 	)
 
 
+# A DECIDED draft row loses its card (``persist_tool_receipt`` clears ``pending_card``) and its
+# Pending Action is purged a week after it settles, so the row itself keeps a tiny marker in its
+# stored ``tool_result``: ``{"draft_receipt": {"verb": "create"|"update", "reason"?: ...}}``. It
+# is written at settlement from the card that WAS a draft (``_settle._deliver``), never from the
+# flag, and read back by ``decided_mark``. ``reason`` is only the two causes the receipt words
+# differently: the record changed after the draft, or it is gone.
+RECEIPT_KEY = "draft_receipt"
+_CHANGED_REASONS = ("stale", "target_missing")
+
+
+def with_receipt_mark(result, draft, reason_code: str | None):
+	"""``result`` (the receipt's stored result) with the draft marker on it; unchanged when
+	the settled card was not a draft. A missing result (a discard, a failure that never ran)
+	becomes a result holding only the marker."""
+	if not isinstance(draft, dict):
+		return result
+	mark = {"verb": draft.get("verb") if draft.get("verb") in ("create", "update") else None}
+	if reason_code in _CHANGED_REASONS:
+		mark["reason"] = reason_code
+	return {**(result if isinstance(result, dict) else {}), RECEIPT_KEY: mark}
+
+
+def decided_mark(row) -> dict:
+	"""The stamp a DECIDED tool row gets when it was a draft card, else ``{}``:
+	``{"draft_receipt": True}`` and, for a record that changed or went missing after the
+	draft, ``"draft_receipt_reason": "stale" | "target_missing"``. Reads only the row's own
+	``tool_result`` (a JSON string or dict), so a history read adds no query per row."""
+	raw = row.get("tool_result")
+	if row.get("role") != "tool" or not row.get("action_outcome") or not raw:
+		return {}
+	if isinstance(raw, str):
+		if RECEIPT_KEY not in raw:  # the common receipt: no parse
+			return {}
+		try:
+			raw = json.loads(raw)
+		except ValueError:
+			return {}
+	mark = raw.get(RECEIPT_KEY) if isinstance(raw, dict) else None
+	if not isinstance(mark, dict):
+		return {}
+	out = {RECEIPT_KEY: True}
+	if mark.get("reason") in _CHANGED_REASONS:
+		out["draft_receipt_reason"] = mark["reason"]
+	return out
+
+
 def payload_from(
 	verb: str,
 	doctype: str,

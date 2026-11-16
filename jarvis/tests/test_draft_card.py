@@ -299,6 +299,59 @@ class TestPendingDraftRowPure(unittest.TestCase):
 				self.assertIs(draft_card.is_pending_draft_row(case), want)
 
 
+class TestDecidedDraftMarkPure(unittest.TestCase):
+	# What a stale update draft stores today: `_settle.with_reference(None, token)` (the row
+	# fails before it runs, so it has no result of its own): outcome "failed", no message.
+	STALE_STORED = {"ok": False, "error": {"reference": "PA-0001"}}
+
+	def _row(self, result, outcome="failed", role="tool"):
+		return {"role": role, "action_outcome": outcome, "tool_result": json.dumps(result)}
+
+	def test_a_stored_marker_comes_back_as_the_stamp_with_only_the_two_changed_reasons(self):
+		"""The decided row keeps no card, so this marker is the only thing that tells the apps
+		it was a draft. A stale or deleted target is the one failure the receipt words
+		differently; any other reason must not leak into the stamp."""
+		both = {"draft_receipt": True}
+		cases = [
+			("update", "stale", {**both, "draft_receipt_reason": "stale"}),
+			("update", "target_missing", {**both, "draft_receipt_reason": "target_missing"}),
+			("update", "failed", both),
+			("create", "", both),
+		]
+		for verb, reason, want in cases:
+			with self.subTest(reason=reason):
+				stored = draft_card.with_receipt_mark(self.STALE_STORED, {"verb": verb}, reason)
+				self.assertEqual(stored["error"], self.STALE_STORED["error"], "the result is kept whole")
+				self.assertEqual(draft_card.decided_mark(self._row(stored)), want)
+
+	def test_a_stale_failure_as_stored_today_says_why_only_through_the_marker(self):
+		"""The stale row has no message and no reason on it (STALE_STORED): without the marker
+		the receipt could only guess from a sentence."""
+		self.assertEqual(draft_card.decided_mark(self._row(self.STALE_STORED)), {})
+		stored = draft_card.with_receipt_mark(self.STALE_STORED, {"verb": "update"}, "stale")
+		self.assertEqual(draft_card.decided_mark(self._row(stored))["draft_receipt_reason"], "stale")
+
+	def test_only_a_settled_draft_is_marked_and_only_a_decided_row_is_stamped(self):
+		"""A sensitive card (no `draft`) and a plain receipt get no marker and no stamp; a
+		discard has no result and still keeps the marker; a pending row is never stamped."""
+		self.assertIsNone(draft_card.with_receipt_mark(None, None, "stale"))
+		self.assertEqual(draft_card.with_receipt_mark({"ok": True}, "x", ""), {"ok": True})
+		discarded = draft_card.with_receipt_mark(None, {"verb": "create"}, "discarded")
+		self.assertEqual(discarded, {"draft_receipt": {"verb": "create"}})
+		marked = self._row(discarded, "discarded")
+		self.assertEqual(draft_card.decided_mark(marked), {"draft_receipt": True})
+		for row in (
+			self._row({"ok": True, "data": {"name": "X"}}, "confirmed"),
+			{**marked, "action_outcome": ""},
+			{**marked, "tool_result": None},
+			{**marked, "tool_result": '{"draft_receipt": '},
+			{**marked, "tool_result": '{"draft_receipt": "yes"}'},
+			{**marked, "role": "assistant"},
+		):
+			with self.subTest(row=row):
+				self.assertEqual(draft_card.decided_mark(row), {})
+
+
 class TestRowDiffPure(unittest.TestCase):
 	"""``draft_card.row_diff``: stored rows against the final rows of an update, no site."""
 
@@ -910,6 +963,25 @@ if FrappeTestCase is not None:
 			with fake_dispatch(), as_user(OWNER):
 				actions_api.dismiss_tool(token, conversation=conv)
 			self._assert_decided(conv, token, "discarded")
+
+		def test_a_decided_draft_row_says_it_was_a_draft_and_no_other_row_does(self):
+			"""The decided row has no card, so only settlement's marker tells the apps to word
+			its receipt as a draft's. A decided card that was not a draft (a sensitive one)
+			must read as a plain receipt, and with the flag off no row carries the key at all."""
+			self._on()
+			drafted, plain = self.make_conv(), self.make_conv()
+			draft_token, _card = self._mint(drafted)
+			plain_token, _plain = self._mint(plain, draft=False)
+			with fake_dispatch(), as_user(OWNER):
+				actions_api.dismiss_tool(draft_token, conversation=drafted)
+				actions_api.dismiss_tool(plain_token, conversation=plain)
+			row = self._history_row(drafted, draft_token)
+			self.assertIs(row["draft_receipt"], True)
+			self.assertNotIn("draft_receipt_reason", row)
+			self.assertIs(row["draft_card"], False, "draft_card still means a PENDING draft card")
+			self.assertNotIn("draft_receipt", self._history_row(plain, plain_token))
+			with patch.dict(frappe.conf, {FLAG: 0}):
+				self.assertNotIn("draft_receipt", self._history_row(drafted, draft_token))
 
 		def test_superseding_a_draft_clears_the_card_and_sets_the_outcome(self):
 			"""A newer proposal after the user spoke retires the draft card in park's own
