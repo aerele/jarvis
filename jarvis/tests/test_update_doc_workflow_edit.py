@@ -235,9 +235,7 @@ class _RealWorkflow(FrappeTestCase):
 		return doc.name
 
 	def _row(self, name):
-		return frappe.db.get_value(
-			BT, name, [FIELD, "docstatus", "description", "is_rule_evaluated"], as_dict=True
-		)
+		return frappe.db.get_value(BT, name, [FIELD, "docstatus", "description", "party_type"], as_dict=True)
 
 	@contextmanager
 	def _tool_call(self, user):
@@ -354,14 +352,14 @@ class TestEveryOtherWrite(_RealWorkflow):
 
 		def quiet_save():
 			doc = frappe.get_doc(BT, name)
-			doc.is_rule_evaluated = 1
+			doc.party_type = "Customer"
 			doc.flags.ignore_validate = True  # Frappe then skips before_update_after_submit
 			doc.save()
 
-		for edit in (lambda: self._client_save(name, is_rule_evaluated=1), quiet_save):
+		for edit in (lambda: self._client_save(name, party_type="Customer"), quiet_save):
 			with self.assertRaises(PermissionDeniedError), self._tool_call(APPROVER):
 				edit()
-		self.assertEqual(self._row(name).is_rule_evaluated, 0)
+		self.assertEqual(self._row(name).party_type, None)
 
 	def test_db_set_of_the_state_is_refused_other_fields_pass(self):
 		name = self._make("Pending")
@@ -535,10 +533,10 @@ class TestSubmissionQueue(_RealWorkflow):
 
 	def setUp(self):
 		super().setUp()
-		meta = frappe.get_meta(BT)
-		old = meta.queue_in_background
-		meta.queue_in_background = 1
-		self.addCleanup(setattr, meta, "queue_in_background", old)
+		# On the DocType (rolled back with the test), so every copy of its meta has it.
+		frappe.db.set_value("DocType", BT, "queue_in_background", 1)
+		frappe.clear_cache(doctype=BT)
+		self.assertTrue(frappe.get_meta(BT).queue_in_background)
 		for target in (
 			"frappe.utils.scheduler.is_scheduler_inactive",
 			"frappe.desk.form.save.is_scheduler_inactive",
@@ -639,6 +637,8 @@ class TestReviewRoutes(_RealWorkflow):
 		self.assertEqual((self._row(name).docstatus, self._row(name).description), (1, "before"))
 
 	def test_a_locked_draft_is_not_discarded(self):
+		if not hasattr(frappe.model.document.Document, "discard"):
+			self.skipTest("Discard arrived in Frappe 16")
 		name = self._make("Pending")
 		with self.assertRaises(PermissionDeniedError), self._tool_call(EDITOR):
 			self._run("frappe.desk.form.save.discard", {"doctype": BT, "name": name})
@@ -699,3 +699,235 @@ class TestCancelIsJudgedBeforeItsHooks(_RealWorkflow):
 			run_method("frappe.client.cancel", {"doctype": BT, "name": name})
 		self.assertEqual(ran, [])  # an e-invoice / e-way bill cancel would have run here
 		self.assertEqual(self._row(name).docstatus, 1)
+
+
+class TestThroughTheToolGate(_RealWorkflow):
+	"""The whole Jarvis tool path (``api._run_tool``: parse, gate, card, savepoint,
+	take_refusal, error envelope), and ``confirm_tool`` for a card."""
+
+	def setUp(self):
+		super().setUp()
+		for user in (EDITOR, APPROVER):
+			frappe.get_doc("User", user).add_roles("Jarvis User")
+
+	def _as(self, user, tool, args):
+		from jarvis import api
+
+		frappe.set_user(user)
+		try:
+			return api._run_tool(tool, args)
+		finally:
+			frappe.set_user("Administrator")
+
+	def _confirmed(self, user, tool, args):
+		"""Park ``tool``'s card as ``user`` and confirm it as ``user``."""
+		from jarvis import api
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import confirm_tool
+
+		captured = {}
+		real = pending_confirm.mint
+
+		def spy(**kwargs):
+			captured["token"] = real(**kwargs)
+			return captured["token"]
+
+		frappe.set_user(user)
+		try:
+			with patch("jarvis.chat.pending_confirm.mint", side_effect=spy):
+				parked = api._run_tool(tool, args)
+			if "token" not in captured:
+				return parked  # refused before a card was parked
+			self.assertEqual(parked["data"]["status"], "pending_confirmation", parked)
+			return confirm_tool(captured["token"])
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_refused_edit_comes_back_as_a_permission_error_envelope(self):
+		name = self._make("Pending")
+		res = self._confirmed(
+			EDITOR, "update_doc", {"doctype": BT, "name": name, "changes": {"description": "after"}}
+		)
+		self.assertFalse(res["ok"], res)
+		self.assertEqual(res["error"].get("code") or res["error"].get("type"), "PermissionDeniedError", res)
+		self.assertIn("Pending", res["error"]["message"])
+		self.assertEqual(self._row(name).description, "before")
+
+	def test_approval_through_the_gate(self):
+		name = self._make("Pending")
+		res = self._confirmed(
+			APPROVER, "apply_workflow_action", {"doctype": BT, "name": name, "action": "Approve"}
+		)
+		self.assertTrue(res["ok"], res)
+		self.assertEqual((self._row(name)[FIELD], self._row(name).docstatus), ("Approved", 1))
+
+	def test_bulk_approval_through_the_gate(self):
+		names = [self._make("Pending") for _ in range(3)]
+		res = self._confirmed(
+			APPROVER,
+			"run_method",
+			{
+				"method": "frappe.model.workflow.bulk_workflow_approval",
+				"args": {"docnames": json.dumps(names), "doctype": BT, "action": "Approve"},
+			},
+		)
+		self.assertTrue(res["ok"], res)
+		for name in names:
+			self.assertEqual(self._row(name)[FIELD], "Approved", name)
+
+	def test_run_method_save_is_refused_and_nothing_sticks(self):
+		name = self._make("Pending")
+		doc = json.dumps({**frappe.get_doc(BT, name).as_dict(), "description": "after"}, default=str)
+		res = self._confirmed(EDITOR, "run_method", {"method": "frappe.client.save", "args": {"doc": doc}})
+		self.assertFalse(res["ok"], res)
+		self.assertEqual(res["error"].get("code") or res["error"].get("type"), "PermissionDeniedError", res)
+		self.assertEqual(self._row(name).description, "before")
+
+
+class TestEdgeCases(_RealWorkflow):
+	def test_two_approval_levels_with_different_approvers(self):
+		w = frappe.get_doc("Workflow", WF)
+		_ensure("Workflow State", "Checked", workflow_state_name="Checked")
+		_ensure("Workflow Action Master", "Check", workflow_action_name="Check")
+		w.append("states", {"state": "Checked", "doc_status": "0", "allow_edit": LEAD_ROLE})
+		for t in w.transitions:
+			if t.action == "Approve":
+				t.state = "Checked"
+		w.append(
+			"transitions",
+			{
+				"state": "Pending",
+				"action": "Check",
+				"next_state": "Checked",
+				"allowed": EDITOR_ROLE,
+				"allow_self_approval": 1,
+			},
+		)
+		w.save(ignore_permissions=True)
+		frappe.clear_cache(doctype=BT)
+		name = self._make("Pending")
+		with self._tool_call(EDITOR):
+			fw.run_workflow_transition(frappe.get_doc(BT, name), "Check")
+		with self.assertRaises(PermissionDeniedError), self._tool_call(EDITOR):
+			self._client_save(name, description="after")  # Checked: only the lead edits
+		with self._tool_call(APPROVER):
+			fw.run_workflow_transition(frappe.get_doc(BT, name), "Approve")
+		self.assertEqual((self._row(name)[FIELD], self._row(name).docstatus), ("Approved", 1))
+
+	def test_a_record_from_before_the_workflow_has_an_empty_state(self):
+		name = self._make("Draft")
+		frappe.db.set_value(BT, name, FIELD, None)  # as if made before the workflow existed
+		with self._tool_call(EDITOR):
+			self._client_save(name, description="after")  # empty = Draft, which the editor edits
+		self.assertEqual(self._row(name).description, "after")
+		with self.assertRaises(PermissionDeniedError), self._tool_call(EDITOR):
+			self._client_save(name, **{FIELD: "Approved"})
+
+	def test_the_all_role_lets_every_user_edit(self):
+		w = frappe.get_doc("Workflow", WF)
+		for s in w.states:
+			if s.state == "Pending":
+				s.allow_edit = "All"
+		w.save(ignore_permissions=True)
+		frappe.clear_cache(doctype=BT)
+		name = self._make("Pending")
+		with self._tool_call(APPROVER):
+			self._client_save(name, description="after")
+		self.assertEqual(self._row(name).description, "after")
+
+	def test_an_inactive_workflow_changes_nothing(self):
+		name = self._make("Pending")
+		frappe.db.set_value("Workflow", WF, "is_active", 0)
+		frappe.clear_cache(doctype=BT)
+		self.assertIsNone(fw.get_workflow_name(BT))
+		with self._tool_call(EDITOR):
+			self._client_save(name, description="after")
+			frappe.client.submit(frappe.get_doc(BT, name).as_dict())
+		self.assertEqual((self._row(name).description, self._row(name).docstatus), ("after", 1))
+
+	def test_amend_after_a_cancel_starts_a_new_draft(self):
+		name = self._make("Approved")
+		with self._tool_call(APPROVER):
+			fw.run_workflow_transition(frappe.get_doc(BT, name), "Reject")
+		frappe.set_user(EDITOR)
+		amended = frappe.copy_doc(frappe.get_doc(BT, name))
+		amended.amended_from = name
+		amended.set(FIELD, None)  # as Desk's amend leaves the state to the workflow
+		amended.docstatus = 0  # Frappe 15's copy_doc keeps it; Desk's Amend starts a draft
+		frappe.set_user("Administrator")
+		with self._tool_call(EDITOR):
+			amended.insert()
+		self.made.append(amended.name)
+		self.assertEqual(self._row(amended.name)[FIELD], "Draft")
+		with self._tool_call(EDITOR):
+			self._client_save(amended.name, description="amended")
+			fw.run_workflow_transition(frappe.get_doc(BT, amended.name), "Review")
+		self.assertEqual(self._row(amended.name)[FIELD], "Pending")
+
+	def test_frappe_still_refuses_self_approval(self):
+		name = self._make("Pending")
+		frappe.get_doc("User", EDITOR).add_roles(APPROVER_ROLE)  # the editor made it
+		with self.assertRaises(frappe.ValidationError), self._tool_call(EDITOR):
+			fw.run_workflow_transition(frappe.get_doc(BT, name), "Approve")
+		self.assertEqual(self._row(name)[FIELD], "Pending")
+
+	def test_a_lead_edits_locked_states_including_after_submit(self):
+		lead = "wf2506-lead@example.com"
+		_user(lead, "Accounts Manager", LEAD_ROLE)
+		pending, approved = self._make("Pending"), self._make("Approved")
+		with self._tool_call(lead):
+			update_doc(BT, pending, {"description": "lead"})
+			self._client_save(approved, party_type="Customer")
+		self.assertEqual(self._row(pending).description, "lead")
+		self.assertEqual(self._row(approved).party_type, "Customer")
+
+	def test_a_doctype_without_a_workflow_is_untouched(self):
+		note = frappe.get_doc({"doctype": "Note", "title": "n2506b", "public": 1}).insert(
+			ignore_permissions=True
+		)
+		with self._tool_call(EDITOR):
+			n = frappe.get_doc("Note", note.name)
+			n.content = "x"
+			n.save(ignore_permissions=True)
+			n.db_set("title", "renamed title")
+		self.assertEqual(frappe.db.get_value("Note", note.name, "title"), "renamed title")
+
+	def test_bulk_approval_of_25_goes_through_the_background_job(self):
+		"""25 documents: Frappe enqueues _bulk_workflow_action. The job is caught as
+		Jarvis's guarded queue hands it to rq, then run the way the worker runs it
+		(execute_guarded_job, inside the carried guard scope), in this process."""
+		from frappe.utils import background_jobs
+
+		from jarvis.tools import _write_risk
+		from jarvis.tools.run_method import run_method
+
+		names = [self._make("Pending") for _ in range(25)]
+		jobs = []
+
+		def capture(self_q, func, args=None, kwargs=None, **options):
+			jobs.append((func, args, kwargs))
+
+		import rq
+
+		with patch.object(rq.Queue, "enqueue_call", capture), self._tool_call(APPROVER):
+			run_method(
+				"frappe.model.workflow.bulk_workflow_approval",
+				{"docnames": json.dumps(names), "doctype": BT, "action": "Approve"},
+			)
+		self.assertEqual(self._row(names[0]).docstatus, 0)  # queued, nothing yet
+		[(func, args, kwargs)] = jobs
+		self.assertEqual(func, _write_risk._GUARDED_EXECUTE_JOB)  # the guard rides with the job
+
+		def in_process(site, method, event, job_name, kwargs, user=None, is_async=True, retry=0, **_):
+			frappe.set_user(user or "Administrator")
+			try:
+				method = frappe.get_attr(method) if isinstance(method, str) else method
+				method(**kwargs)
+			finally:
+				frappe.set_user("Administrator")
+
+		with patch.object(background_jobs, "execute_job", in_process):
+			target = frappe.get_attr(func) if isinstance(func, str) else func
+			target(*(args or ()), **(kwargs or {}))
+		for name in names:
+			self.assertEqual((self._row(name)[FIELD], self._row(name).docstatus), ("Approved", 1), name)
