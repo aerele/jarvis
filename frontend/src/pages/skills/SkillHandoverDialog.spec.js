@@ -54,8 +54,9 @@ const FULL = { user: "full@example.test", full_name: "Full User", at_cap: true }
 const BOSS = { user: "boss@example.test", full_name: "Boss Person", at_cap: false };
 const TARGETS = [ASHA, BEN, FULL];
 
-async function open(props = {}) {
+async function open(props = {}, options = {}) {
 	const w = mount(SkillHandoverDialog, {
+		...options,
 		props: {
 			modelValue: true,
 			name: "s1",
@@ -158,6 +159,30 @@ describe("SkillHandoverDialog, the picker", () => {
 		expect(chips(w)).toEqual(["ben@example.test"]);
 		expect(handButton(w).attributes("disabled")).toBeUndefined();
 		expect(summary(w).text()).toContain("Ben Ode");
+	});
+
+	it("a tick empties the search box, brings the full list back and keeps focus there (#829)", async () => {
+		vi.useFakeTimers();
+		const w = await open({}, { attachTo: document.body });
+		api.adminHandoverTargets.mockResolvedValue({ targets: [BEN], more: false });
+		await w.find(".jv-skill-handover-search").setValue("ben");
+		vi.advanceTimersByTime(300);
+		await flushPromises();
+		expect(api.adminHandoverTargets).toHaveBeenLastCalledWith("ben", "s1");
+		api.adminHandoverTargets.mockResolvedValue({ targets: TARGETS, more: false });
+		await pick(w, "ben@example.test");
+		await flushPromises();
+		expect(w.find(".jv-skill-handover-search").element.value).toBe("");
+		expect(api.adminHandoverTargets).toHaveBeenLastCalledWith("", "s1");
+		expect(w.findAll(".jv-skill-handover-user")).toHaveLength(3);
+		expect(chips(w)).toEqual(["ben@example.test"]);
+		expect(document.activeElement).toBe(w.find(".jv-skill-handover-search").element);
+		// with the box already empty, a tick does not search again
+		const calls = api.adminHandoverTargets.mock.calls.length;
+		await pick(w, "asha@example.test");
+		await flushPromises();
+		expect(api.adminHandoverTargets.mock.calls.length).toBe(calls);
+		w.unmount();
 	});
 
 	it("shows that a new search is under way until its answer comes", async () => {
