@@ -294,3 +294,21 @@ class TestNormalizeProfile(FrappeTestCase):
 			result = usage_push._normalize_profile("not-a-role-id!")
 		self.assertEqual(result, "full")
 		mock_logger.return_value.warning.assert_called_once()
+
+
+class TestAdminConfiguredFallback(FrappeTestCase):
+	def test_no_url_set_falls_back_to_the_default_admin_url(self):
+		# Production benches set no jarvis_admin_url and reach admin through the
+		# hardcoded default; the background pushes must not skip there.
+		from jarvis import installed_apps_sync
+
+		was = frappe.db.get_single_value("Jarvis Settings", "jarvis_admin_url")
+		frappe.db.set_single_value("Jarvis Settings", "jarvis_admin_url", "")
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+		try:
+			with patch.dict(frappe.conf, {"jarvis_admin_url": ""}):
+				self.assertTrue(usage_push._admin_configured())
+				self.assertTrue(installed_apps_sync._admin_configured())
+		finally:
+			frappe.db.set_single_value("Jarvis Settings", "jarvis_admin_url", was or "")
+			frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
