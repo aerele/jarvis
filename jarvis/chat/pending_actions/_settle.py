@@ -110,11 +110,23 @@ def _item(row) -> dict:
 		"result_name": row.result_name,
 		"batch_id": row.batch_id,
 		"corrects": row.get("corrects") or "",
+		"draft": _draft_of(row),
 		"late": bool(frappe.flags.get(LATE_SETTLE_FLAG) or row.settle_attempts),
 	}
 	if row.get("collaboration_binding"):
 		item.update(actor=row.actor, collaboration_binding=row.collaboration_binding, run_id=row.run_id)
 	return item
+
+
+def _draft_of(row) -> dict | None:
+	"""The ``draft`` payload of the row's own stored card (a tool-driven draft card), or
+	None. A plain read of the row already in hand: no query, no lock."""
+	try:
+		card = _seal._parsed(row.get("card"))
+	except ValueError:
+		return None
+	draft = card.get("draft") if isinstance(card, dict) else None
+	return draft if isinstance(draft, dict) else None
 
 
 def _delivery_conversation(row) -> str | None:

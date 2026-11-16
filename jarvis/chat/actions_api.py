@@ -2364,6 +2364,26 @@ def _stamp_correction(names: list[str], message: str) -> None:
 		)
 
 
+_DRAFT_SAVED_NOTE = "the user confirmed the draft and it was saved: {receipt}"
+
+
+def _is_final_draft(items: list[dict]) -> bool:
+	"""One confirmed (Executed) tool-driven draft card, not part of a typed batch, that the
+	agent did not mark ``continue``. Every other settle keeps its continuation turn."""
+	from jarvis.chat.pending_actions._store import EXECUTED
+
+	if len(items) != 1:
+		return False
+	item = items[0]
+	draft = item.get("draft")
+	return (
+		item["status"] == EXECUTED
+		and not item.get("batch_id")
+		and isinstance(draft, dict)
+		and draft.get("continue") is not True
+	)
+
+
 def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 	"""``_settle.CONTINUATIONS["chat"]``: tell the agent how its settled card(s) ended,
 	at most once (D5). Executed/Failed: ONE hidden continuation turn carrying every
@@ -2381,6 +2401,16 @@ def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 
 	names = [i["name"] for i in items]
 	decided = [i for i in items if i["status"] in (EXECUTED, FAILED)]
+	if conversation and _is_final_draft(items):
+		# A saved final draft costs no turn: the receipt chip is already written
+		# (``_settle._deliver``), and the agent hears of it on its next turn.
+		lock_conversation(conversation)  # conversation -> pending action lock order
+		if claim_settled(names):
+			from jarvis.chat import agent_notes
+
+			receipt = _settled_plan(decided)["receipt"]
+			agent_notes.append(conversation, _DRAFT_SAVED_NOTE.format(receipt=receipt))  # commits the claim
+		return
 	if conversation and decided:
 		# A cron / operator settle runs as Administrator: the turn is the owner's, and
 		# never runs AS Administrator / Guest / a disabled user on their behalf.
