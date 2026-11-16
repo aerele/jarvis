@@ -340,11 +340,12 @@ describe("fillCalculatedCells: what goes into a blank cell, and what never does"
 	// with the card's formatted text; or thousands separators reach a number input.
 	const kinds = [
 		["a date column is left for the control", "from_time", "", "08-12-2026 09:30:00", ""],
-		["thousands separators go from a number", "hours", "", "1,500.50", "1500.50"],
+		["a thousands comma is ambiguous: blank", "hours", "", "1,500.50", ""],
+		["a bare thousands-looking number is ambiguous: blank", "hours", "", "1,500", ""],
 		["a percent sign is not a number", "hours", "", "50%", ""],
 		["a number is kept as the card wrote it", "hours", "", "1.50", "1.50"],
 		["a whole number", "hours", "", "3", "3"],
-		["a negative with US thousands", "hours", "", "-1,234.50", "-1234.50"],
+		["US thousands with decimals: blank", "hours", "", "1,234.50", ""],
 		["a comma decimal is ambiguous: blank", "hours", "", "1,50", ""],
 		["a dot-thousands comma-decimal is ambiguous: blank", "hours", "", "1.500,00", ""],
 		["a space-thousands comma-decimal is ambiguous: blank", "hours", "", "1 500,00", ""],

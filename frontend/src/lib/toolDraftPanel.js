@@ -121,17 +121,13 @@ const NUMBER_TYPES = new Set(["Int", "Float", "Currency", "Percent", "Rating"]);
 // A typed control cannot show the card's formatted text for these.
 const NOT_FILLED = new Set(["Date", "Datetime", "Time", "Table", "Table MultiSelect"]);
 const isBlank = (v) => v == null || String(v).trim() === "";
-// The card's text for a number, only when it reads one way in every number format: plain digits
-// with a dot decimal ("1.50"), or US thousands ("1,500.50" -> "1500.50"). "1,50" (one and a half,
-// or a hundred and fifty?), "1.500,00" and "1 500,00" are ambiguous without the site's number
-// format, so the cell stays blank: blank is honest, a wrong number is not. A percent sign or a
-// currency symbol is not a number either.
+// The card's text for a number, only when it is plain digits with a dot decimal ("1.50"). Any
+// comma, space, percent sign or symbol is ambiguous without the site's number format ("1,500" is
+// 1.5 in a comma-decimal format), so the cell stays blank: blank is honest, a wrong number is not.
 const PLAIN_NUMBER = /^-?\d+(\.\d+)?$/;
-const US_THOUSANDS = /^-?\d{1,3}(,\d{3})+(\.\d+)?$/;
 const plainNumber = (text) => {
 	const t = String(text).trim();
-	if (PLAIN_NUMBER.test(t)) return t;
-	return US_THOUSANDS.test(t) ? t.replace(/,/g, "") : null;
+	return PLAIN_NUMBER.test(t) ? t : null;
 };
 
 // What to put in a cell of this column for the card's text, or null to leave it blank. `verbatim`
