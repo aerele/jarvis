@@ -224,7 +224,7 @@ class TestDismissDraft(_Base):
 		frappe.set_user(NON_ADMIN_USER)
 		with self.assertRaises(frappe.PermissionError) as raised:
 			dismiss_draft(conv, draft)
-		self.assertIn("Not your conversation", str(raised.exception))
+		self.assertIn("This chat belongs to someone else", str(raised.exception))
 		frappe.set_user(TEST_USER)
 		self.assertEqual(self._outcomes(conv), [])
 
