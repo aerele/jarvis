@@ -129,6 +129,8 @@ function rowsView(card) {
 }
 
 const STATUS_LABEL = { changed: "Changed", new: "New" };
+const HIDDEN_CHANGE_NOTE = "A value not shown here changes.";
+const hiddenChange = (r) => isObject(r) && r.hidden_change === true;
 const countOf = (n) => (Number.isInteger(n) && n >= 0 ? n : null);
 const asList = (v) => (Array.isArray(v) ? v : []);
 const cellsOf = (r) => asList(isObject(r) ? r.cells : null);
@@ -139,7 +141,7 @@ const statusOf = (r) => {
 
 // "1 row changed, 2 rows added, 1 row will be removed, 3 rows unchanged": non-zero parts only.
 // A missing or malformed `counts` is counted from the rows themselves.
-function changeSummary(rc, rows, removed) {
+function changeSummary(rc, rows, removed, reordered) {
 	const given = isObject(rc.counts) ? rc.counts : {};
 	const keys = ["changed", "new", "removed", "kept"];
 	const usable = keys.every((k) => countOf(given[k]) !== null);
@@ -152,14 +154,15 @@ function changeSummary(rc, rows, removed) {
 				removed: removed.length,
 		  };
 	const row = (c) => (c === 1 ? "row" : "rows");
-	return [
+	const parts = [
 		n.changed && `${n.changed} ${row(n.changed)} changed`,
 		n.new && `${n.new} ${row(n.new)} added`,
 		n.removed && `${n.removed} ${row(n.removed)} will be removed`,
 		n.kept && `${n.kept} ${row(n.kept)} unchanged`,
-	]
-		.filter(Boolean)
-		.join(", ");
+		reordered && "row order changes",
+	].filter(Boolean);
+	const sentence = parts.join(", ");
+	return parts.length === 1 && reordered ? "Row order changes" : sentence;
 }
 
 // What an update does to a child table, row by row. Null when there is nothing to draw, so the
@@ -180,25 +183,29 @@ function rowChangesView(rc, surface) {
 	const max = surface === "phone" ? MAX_ROWS_PHONE : MAX_ROWS_DESKTOP;
 	const shownRows = rows.slice(0, max);
 	const shownRemoved = removed.slice(0, max);
+	const reordered = rc.reordered === true;
 	const given = isObject(rc.more) ? rc.more : {};
 	const moreRows = (countOf(given.rows) || 0) + rows.length - shownRows.length;
 	const moreRemoved = (countOf(given.removed) || 0) + removed.length - shownRemoved.length;
 	return {
 		columns: keep.map((i) => text(head[i])),
-		summary: changeSummary(rc, rows, removed),
+		summary: changeSummary(rc, rows, removed, reordered),
+		reordered,
 		rows: shownRows.map((r) => ({
 			status: statusOf(r),
 			statusLabel: STATUS_LABEL[statusOf(r)] || "",
+			note: hiddenChange(r) ? HIDDEN_CHANGE_NOTE : "",
 			cells: keep.map((i) => {
 				const now = text(cellsOf(r)[i]);
-				const old = statusOf(r) === "changed" ? text(was(r)[i]) : "";
+				const old = statusOf(r) === "changed" && !hiddenChange(r) ? text(was(r)[i]) : "";
 				return { text: now, was: old === now ? "" : old };
 			}),
 		})),
 		removed: shownRemoved.map((r) => ({ cells: keep.map((i) => text(cellsOf(r)[i])) })),
 		more: [
 			moreRows && `and ${plural(moreRows, "more row", "more rows")}`,
-			moreRemoved && `and ${plural(moreRemoved, "more removed row", "more removed rows")}`,
+			moreRemoved &&
+				`and ${moreRemoved} more ${moreRemoved === 1 ? "row" : "rows"} will be removed`,
 		]
 			.filter(Boolean)
 			.join(", "),

@@ -79,6 +79,9 @@ function press(button) {
 						<span class="dc-arrow" aria-hidden="true">&rarr;</span>
 						<span class="dc-new">{{ d.new }}</span>
 					</template>
+					<p v-if="d.rowChanges && d.rowChanges.reordered" class="dc-more dc-line">
+						The rows are saved in the order shown.
+					</p>
 					<div v-if="d.rowChanges" class="dc-table dc-diff-table dc-changes">
 						<div class="dc-scroll">
 							<table>
@@ -95,29 +98,41 @@ function press(button) {
 									</tr>
 								</thead>
 								<tbody>
-									<tr
+									<template
 										v-for="(r, ri) in d.rowChanges.rows"
 										:key="'rr' + ri"
-										:class="'dc-row-' + r.status"
 									>
-										<td class="dc-status-col">
-											<span v-if="r.statusLabel" class="dc-status">{{
-												r.statusLabel
-											}}</span>
-										</td>
-										<td v-for="(c, ci) in r.cells" :key="'rd' + ci">
-											<template v-if="c.was">
-												<s class="dc-was"
-													><span class="dc-sr">was </span>{{ c.was }}</s
-												>
-												<span class="dc-now"
-													><span class="dc-sr">now </span
-													>{{ c.text }}</span
-												>
-											</template>
-											<template v-else>{{ c.text }}</template>
-										</td>
-									</tr>
+										<tr
+											:class="[
+												'dc-row-' + r.status,
+												{ 'dc-has-note': r.note },
+											]"
+										>
+											<td class="dc-status-col">
+												<span v-if="r.statusLabel" class="dc-status">{{
+													r.statusLabel
+												}}</span>
+											</td>
+											<td v-for="(c, ci) in r.cells" :key="'rd' + ci">
+												<template v-if="c.was">
+													<s class="dc-was"
+														><span class="dc-sr">was </span
+														>{{ c.was }}</s
+													>
+													<span class="dc-now"
+														><span class="dc-sr">now </span
+														>{{ c.text }}</span
+													>
+												</template>
+												<template v-else>{{ c.text }}</template>
+											</td>
+										</tr>
+										<tr v-if="r.note" class="dc-note-row">
+											<td :colspan="d.rowChanges.columns.length + 1">
+												{{ r.note }}
+											</td>
+										</tr>
+									</template>
 								</tbody>
 							</table>
 						</div>
@@ -399,6 +414,18 @@ function press(button) {
 }
 .dc-row-kept td {
 	color: var(--dc-muted);
+}
+.dc-line {
+	flex: 1 1 100%;
+	margin: 0;
+}
+.dc-has-note td {
+	border-bottom-color: transparent;
+}
+.dc-note-row td {
+	font-size: 12px;
+	color: var(--dc-muted);
+	padding-top: 0;
 }
 .dc-removed {
 	margin-top: 10px;

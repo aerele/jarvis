@@ -169,4 +169,27 @@ describe("DraftCard", () => {
 		const busy = draw("create-simple", { streaming: true });
 		expect(busy.find("[aria-live=polite]").text()).toBe("Jarvis is replying");
 	});
+
+	// Break: a hidden change or a reorder is computed but not drawn.
+	it("draws the hidden-change note and the reorder line", () => {
+		const c = structuredClone(card("update-diff"));
+		c.diff[0] = {
+			label: "Items",
+			from: "2 rows",
+			to: "2 rows",
+			row_changes: {
+				columns: ["Qty"],
+				rows: [
+					{ status: "changed", hidden_change: true, cells: ["5"], was: ["5"] },
+					{ status: "kept", cells: ["1"] },
+				],
+				reordered: true,
+			},
+		};
+		const w = mount(DraftCard, { props: { card: c } });
+		expect(w.find(".dc-note-row").text()).toBe("A value not shown here changes.");
+		expect(w.find(".dc-note-row td").attributes("colspan")).toBe("2");
+		expect(w.text()).toContain("The rows are saved in the order shown.");
+		expect(w.text()).toContain("1 row changed, 1 row unchanged, row order changes");
+	});
 });
