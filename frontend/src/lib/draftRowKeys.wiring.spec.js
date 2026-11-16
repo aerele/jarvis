@@ -82,3 +82,15 @@ describe("ChatView fetches the rule values Desk fetches from a link", () => {
 		);
 	});
 });
+
+describe("ChatView clears the link search where the draft panel goes away", () => {
+	it("closing the panel and the conversation-switch reset both call resetDraftLink", () => {
+		// Catches: either call removed, so an in-flight search reopens its menu over the next draft.
+		expect(between(src, "function closeDraftPanel() {", "\n}\n")).toContain(
+			"resetDraftLink()"
+		);
+		expect(between(src, "function resetDraftActionState() {", "\n}\n")).toContain(
+			"resetDraftLink()"
+		);
+	});
+});

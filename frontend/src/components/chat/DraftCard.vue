@@ -43,7 +43,12 @@ function press(button) {
 </script>
 
 <template>
-	<section class="dc" :data-state="view.state" :aria-label="view.title || undefined">
+	<section
+		class="dc"
+		:class="{ 'dc-phone': ctx.surface === 'phone' }"
+		:data-state="view.state"
+		:aria-label="view.title || undefined"
+	>
 		<p v-if="view.useLegacyCard" class="dc-message">This change needs your confirmation.</p>
 		<p v-else-if="view.message" class="dc-message" role="status">{{ view.message }}</p>
 		<template v-else>
@@ -89,6 +94,7 @@ function press(button) {
 						<div
 							class="dc-scroll"
 							:class="{ 'dc-tall': d.rowChanges.rows.length > 12 }"
+							:role="d.rowChanges.rows.length > 12 ? 'region' : undefined"
 							:tabindex="d.rowChanges.rows.length > 12 ? 0 : undefined"
 							:aria-label="
 								d.rowChanges.rows.length > 12
@@ -587,14 +593,15 @@ function press(button) {
 		grid-template-columns: minmax(0, 1fr);
 		gap: 0;
 	}
-	.dc-primary {
-		font-weight: 600;
-	}
-	.dc-btn {
-		flex: 1 1 auto;
-		height: auto;
-		min-height: 40px;
-		padding: 6px 14px;
-	}
+}
+/* The phone app always gets touch-size buttons, whatever the screen width. */
+.dc-phone .dc-primary {
+	font-weight: 600;
+}
+.dc-phone .dc-btn {
+	flex: 1 1 auto;
+	height: auto;
+	min-height: 40px;
+	padding: 6px 14px;
 }
 </style>

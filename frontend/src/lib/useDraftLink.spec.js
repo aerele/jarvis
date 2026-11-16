@@ -185,7 +185,7 @@ describe("useDraftLink", () => {
 		expect(link.draftLinkError.value).toBe("");
 	});
 
-	it("unmounting drops a pending answer and a pending blur timer", async () => {
+	it("unmounting drops a pending answer", async () => {
 		// Catches: the onBeforeUnmount generation bump removed, so a timer or answer that lands
 		// after the host unmounted still writes to the old state.
 		const pending = deferred();
@@ -217,5 +217,29 @@ describe("useDraftLink", () => {
 		draftPanel.value = { ...draftPanel.value };
 		expect(link.draftLink.value.open).toBe(false);
 		expect(link.draftLink.value.items).toEqual([]);
+	});
+
+	it("a filter changed and changed back still drops the answer fetched before the change", async () => {
+		// Catches: the object-identity guard removed. The watcher replaces the menu object but
+		// does not bump the generation, and the context is equal again by the time the answer
+		// lands, so only `draftLink.value !== search` stops the stale list from reopening.
+		const company = { fieldname: "company", fieldtype: "Data", value: "A" };
+		const filtered = customer({
+			link_filters: [["Customer", "company", "=", "eval:doc.company"]],
+		});
+		const pending = deferred();
+		const { link, draftPanel } = mountComposable({
+			model: model([company, filtered]),
+			searchLink: vi.fn(() => pending.promise),
+		});
+		const running = search(link);
+		company.value = "B";
+		draftPanel.value = { ...draftPanel.value };
+		company.value = "A";
+		draftPanel.value = { ...draftPanel.value };
+		pending.resolve(rows("A"));
+		await running;
+		expect(link.draftLink.value.items).toEqual([]);
+		expect(link.draftLink.value.open).toBe(false);
 	});
 });

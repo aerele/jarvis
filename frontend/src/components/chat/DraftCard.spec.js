@@ -254,5 +254,16 @@ describe("DraftCard", () => {
 		expect(box.classes().includes("dc-tall")).toBe(tall);
 		expect(box.attributes("tabindex")).toBe(tall ? "0" : undefined);
 		expect(box.attributes("aria-label")).toBe(tall ? "Rows this update changes" : undefined);
+		expect(box.attributes("role")).toBe(tall ? "region" : undefined);
+	});
+
+	// Break: the phone app gets the small desktop buttons on a wide phone or a tablet.
+	it.each([
+		["phone", true],
+		["desktop", false],
+		[undefined, false],
+	])("surface %s puts the touch class on the root: %s", (surface, touch) => {
+		const w = draw("update-diff", surface ? { surface } : {});
+		expect(w.classes().includes("dc-phone")).toBe(touch);
 	});
 });
