@@ -3,9 +3,9 @@
 // CSS; Remove stays in the last one. The grid lives in the shared draft edit form
 // (components/chat/DraftEditForm.vue), so this compiles the REAL <table class="jv-grid">
 // markup out of that source and mounts it with stubbed cells and the same helpers the form
-// passes in; a warning (an identifier the markup uses but this harness does not supply) throws. Layout (the 96px cap, wrapping, tap
-// targets, light/dark) is CSS and cannot be measured in jsdom: those are source-level
-// assertions on the rules, and a real browser has not confirmed them.
+// passes in; a warning (an identifier the markup uses but this harness does not supply) throws.
+// Layout (the 96px cap, wrapping, tap targets, light/dark) is CSS and cannot be measured in
+// jsdom: those are source-level assertions on the rules, and a real browser has not confirmed them.
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";

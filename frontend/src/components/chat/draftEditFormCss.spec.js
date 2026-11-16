@@ -25,6 +25,9 @@ const formCss = block(form, "<style scoped>", "</style>", "form style").replace(
 );
 // ChatView's own template is the first block; its style is the last.
 const viewTemplate = block(view, "<template>", "\n</template>\n\n<script setup>", "view template");
+// Everything in ChatView that is not its style block: the template and the script (a class can be
+// built in a string there).
+const viewNonStyle = view.slice(0, view.indexOf("<style scoped>"));
 const viewCss = block(view, "<style scoped>", "</style>", "view style").replace(
 	"<style scoped>",
 	""
@@ -150,6 +153,9 @@ describe("DraftEditForm carries its own styles", () => {
 			"--cta",
 			"--cta-bg",
 			"--cta-bd",
+			// not in this file's rules; DraftRowBlock, DraftRowForm and DraftCell use it, so the phone
+			// bridge must map it (see the B2a map: --cta-fg pairs with --cta, never alone)
+			"--cta-fg",
 			"--amber",
 			"--amber-bg",
 			"--amber-bd",
@@ -161,11 +167,44 @@ describe("DraftEditForm carries its own styles", () => {
 	});
 });
 
+describe("ChatView and the form share some classes: both must keep a rule", () => {
+	// The draft summary card (which stays in ChatView) uses jv-rows-removed, jv-draft-parked, jv-req
+	// and jv-sr too. Moving the form's rules out of ChatView must not strip them from the card.
+	const sharedWithView = [...used].filter((c) => c.startsWith("jv-") && wordIn(viewNonStyle, c));
+
+	it("finds the classes both templates use (so the check below is not vacuous)", () => {
+		for (const c of ["jv-rows-removed", "jv-draft-parked", "jv-req", "jv-sr"])
+			expect(sharedWithView, c).toContain(c);
+	});
+
+	it("ChatView's style still has a rule naming each of them", () => {
+		const styled = new Set(selectors(viewCss).flatMap(classesIn));
+		expect(sharedWithView.filter((c) => !styled.has(c) && !KEPT_IN_VIEW.has(c))).toEqual([]);
+	});
+
+	it("the form's style has a rule for each of them too", () => {
+		const styled = new Set(selectors(formCss).flatMap(classesIn));
+		expect(sharedWithView.filter((c) => !styled.has(c))).toEqual([]);
+	});
+
+	it("keeps the summary card's two base rules byte-for-byte in step with the form's copies", () => {
+		const decl = (css, sel) => {
+			const m = stripComments(css).match(
+				new RegExp(`(?:^|\\})\\s*${sel.replace(".", "\\.")}\\s*\\{([^}]*)\\}`)
+			);
+			expect(m, `${sel} rule`).not.toBeNull();
+			return m[1].replace(/\s+/g, " ").trim();
+		};
+		for (const sel of [".jv-rows-removed", ".jv-draft-parked"])
+			expect(decl(viewCss, sel), sel).toBe(decl(formCss, sel));
+	});
+});
+
 describe("ChatView keeps no rule for what moved", () => {
 	// Classes that exist ONLY in the moved template: not in ChatView's own template. Only the jv-
 	// ones: the bare state classes (missing, invalid, changed) are modifiers other cards reuse.
 	const movedOnly = [...used].filter(
-		(c) => c.startsWith("jv-") && !wordIn(viewTemplate, c) && !KEPT_IN_VIEW.has(c)
+		(c) => c.startsWith("jv-") && !wordIn(viewNonStyle, c) && !KEPT_IN_VIEW.has(c)
 	);
 
 	it("has classes that are really moved-only (so the next check bites)", () => {
@@ -178,7 +217,14 @@ describe("ChatView keeps no rule for what moved", () => {
 		])
 			expect(movedOnly, c).toContain(c);
 		// still used by ChatView (jv-sr) or deliberately kept there (see KEPT_IN_VIEW)
-		for (const c of ["jv-action-input", "jv-sr"]) expect(movedOnly).not.toContain(c);
+		for (const c of [
+			"jv-action-input",
+			"jv-sr",
+			"jv-rows-removed",
+			"jv-draft-parked",
+			"jv-req",
+		])
+			expect(movedOnly).not.toContain(c);
 	});
 
 	it("has no selector naming a class used only by the moved template", () => {

@@ -18443,6 +18443,22 @@ onUnmounted(() => {
 	padding: 3px 9px;
 	margin-left: 8px;
 }
+.jv-rows-removed {
+	padding: 6px 10px;
+	margin-bottom: 6px;
+	border-radius: 6px;
+	border: 1px solid var(--red-bd);
+	background: var(--red-bg);
+	color: var(--red);
+	font-size: 12px;
+}
+.jv-draft-parked {
+	padding: 10px 12px;
+	border: 1px solid var(--border);
+	border-radius: 8px;
+	color: var(--text-2);
+	font-size: 13px;
+}
 .jv-draft-foot {
 	display: flex;
 	gap: 10px;
