@@ -49,12 +49,12 @@ def upload(ticket: str, comm: str | None = None) -> dict:
 	scope = _scope()
 	f = frappe.request.files.get("file") if frappe.request else None
 	if not f:
-		frappe.throw("no file provided")
+		frappe.throw("No file was attached. Choose a file and try again.")
 	content = f.read()
 	if not content:
-		frappe.throw("This file is empty.")
+		frappe.throw("This file is empty. Choose another file and try again.")
 	if len(content) > _MAX_BYTES:
-		frappe.throw("file too large")
+		frappe.throw("This file is too large. Choose a smaller file and try again.")
 	content_b64 = base64.b64encode(content).decode("ascii")
 	return {
 		"ok": True,

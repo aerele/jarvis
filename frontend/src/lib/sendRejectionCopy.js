@@ -38,6 +38,15 @@ export function sendRejectionCopy(reason, agentName, envelope, fallback = FALLBA
 			message: `${agentName} is being updated. Reload the page to continue.`,
 			type: "error",
 		},
+		queue_full: {
+			message: `${agentName} is busy right now. Wait a moment, then send it again.`,
+			type: "warning",
+		},
+		already_claimed: {
+			message:
+				"That message was already sent. Check the conversation before sending it again.",
+			type: "warning",
+		},
 		subscription_suspended: {
 			message: "Your subscription has lapsed. Renew it to keep chatting.",
 			type: "error",
@@ -46,4 +55,17 @@ export function sendRejectionCopy(reason, agentName, envelope, fallback = FALLBA
 	if (reason && known[reason]) return known[reason];
 	const sentence = typeof reason === "string" && reason.includes(" ") ? reason : "";
 	return { message: sentence || fallback, type: "error" };
+}
+
+// A refused send/retry envelope ({ ok: false, reason, message }) to user copy. A known code
+// wins; otherwise the server's own sentence (message, then reason); a bare machine code
+// ("queue_full", "macro_armed") never shows, the plain fallback does.
+export function rejectionCopy(r, agentName, fallback = FALLBACK) {
+	const reason = r && r.reason;
+	if (reason && typeof reason === "string") {
+		const known = sendRejectionCopy(reason, agentName, r, "");
+		if (known.message) return known;
+	}
+	const message = r && typeof r.message === "string" && r.message.includes(" ") ? r.message : "";
+	return { message: message || fallback, type: "error" };
 }

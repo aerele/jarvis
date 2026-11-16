@@ -94,7 +94,10 @@
 						<circle cx="12" cy="12" r="9" />
 						<path d="M12 8v4M12 16h.01" />
 					</svg>
-					<span>{{ a.file_name }} failed</span>
+					<!-- The reason on the chip itself, not only in a hover title: a phone has no hover. -->
+					<span>{{
+						a.error ? `${a.file_name}: ${a.error}` : `${a.file_name} failed`
+					}}</span>
 					<button
 						v-if="a.removable"
 						type="button"
@@ -771,12 +774,11 @@ defineExpose({ el: inputEl, focusInput });
 	border: 1px solid var(--red);
 	border-radius: 8px;
 	background: var(--red-bg, transparent);
-	max-width: 260px;
+	max-width: 360px;
 }
 .jv-att-failed > span {
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
+	white-space: normal;
+	overflow-wrap: anywhere;
 }
 .jv-att-failed-x {
 	border: none;

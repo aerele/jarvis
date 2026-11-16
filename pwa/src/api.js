@@ -8,6 +8,7 @@
 // means the phone bundle can't be grown by a change made for the desktop.
 // Voice is the exception — see transcribeAudio below.
 import { call } from "frappe-ui";
+import { serverReason } from "../../jarvis/public/js/shared/chat_failure_copy.mjs";
 import { HISTORY_PAGE_SIZE } from "@shared/lib/historyPaging.js";
 
 const CHAT = "jarvis.chat.api.";
@@ -197,7 +198,13 @@ export async function uploadFile(file) {
 		body: fd,
 		credentials: "include",
 	});
-	if (!r.ok) throw new Error(`Couldn't upload ${file.name} (${r.status})`);
+	if (!r.ok) {
+		// status and serverReason let uploadFailureCopy say what to do (too large, sign in again).
+		const err = new Error(`Couldn't upload ${file.name} (${r.status})`);
+		err.status = r.status;
+		err.serverReason = serverReason(await r.json().catch(() => null));
+		throw err;
+	}
 	const data = await r.json();
 	const f = data.message || data;
 	return { file_url: f.file_url, file_name: f.file_name || file.name, name: f.name };
@@ -231,3 +238,8 @@ export const activeQueuedTurn = (conversation) =>
 export const queuePosition = (run_id) => call("jarvis.chat.admission.queue_position", { run_id });
 export const cancelQueuedTurn = (run_id) =>
 	call("jarvis.chat.admission.cancel_queued_turn", { run_id });
+
+// The failed reply's error (secrets removed), model and run id, for the Report error ticket
+// draft. Resolves {ok, data}; rejects without support access.
+export const getErrorReportDetails = (conversation, message) =>
+	call("jarvis.support.api.error_report_details", { conversation, message });
