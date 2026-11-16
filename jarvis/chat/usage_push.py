@@ -17,6 +17,7 @@ import frappe
 
 from jarvis.chat import usage
 from jarvis.exceptions import AdminAuthError
+from jarvis.hooks import get_default_admin_url
 
 USER_SETTINGS = usage.USER_SETTINGS
 MODEL_USAGE = usage.MODEL_USAGE
@@ -76,12 +77,13 @@ def _admin_configured() -> bool:
 	"""jarvis_admin_url is set (site config outranks the Settings field). Mirrors
 	installed_apps_sync._admin_configured. Credential *presence* is not checked
 	here - admin_client raises AdminAuthError when unonboarded, which the caller
-	treats as a quiet skip."""
+	treats as a quiet skip. Falls back to the hardcoded default admin URL, as
+	``admin_client`` does, so a bench with no URL set still pushes."""
 	try:
 		if (frappe.conf.get("jarvis_admin_url") or "").strip():
 			return True
 		settings = frappe.get_cached_doc("Jarvis Settings")
-		return bool((settings.get("jarvis_admin_url") or "").strip())
+		return bool((settings.get("jarvis_admin_url") or "").strip() or get_default_admin_url())
 	except Exception:
 		return False
 
