@@ -18,10 +18,10 @@ fences (``confirmation_is_current``). No conversation lock is held, as on Confir
 
 from __future__ import annotations
 
+import copy
+
 import frappe
 from frappe import _
-
-from jarvis.exceptions import InvalidArgumentError
 
 TOOLS = ("create_doc", "update_doc")
 CLOSED, BUSY, STALE, NEEDS_CARD = (
@@ -34,6 +34,7 @@ _CLOSED = "This draft is no longer open. Ask me to draft it again."
 _ALREADY_SAVED = "This draft was already saved from the card."
 _NOT_SAVED = "This draft was not saved. Ask me to draft it again."
 _UNFINISHED = "This draft did not finish saving."
+_UNREADABLE = "This draft could not be read. Close the form and open it again."
 _BUSY = "This draft is being handled. Try again in a moment."
 _STALE = "This record changed after the draft was made. Ask me to draft the update again."
 _NEEDS_CARD = "This change needs a confirmation card and can't be edited here."
@@ -50,21 +51,27 @@ EDITED_REASON = "Saved from the draft card with edited values."
 
 def save(token: str, conversation: str, values, approver: str) -> dict:
 	"""``actions_api.save_draft_card`` after its owner check."""
-	return DraftSave(token, conversation, values_of(values), approver).run()
+	edits = values_of(values)
+	if edits is None:
+		return {
+			"ok": False,
+			"error": {"code": "InvalidArgumentError", "message": _(_UNREADABLE), "fields": []},
+		}
+	return DraftSave(token, conversation, edits, approver).run()
 
 
-def values_of(values) -> dict:
-	"""The form's values as a dict (a JSON string from the client); None is no edits."""
+def values_of(values) -> dict | None:
+	"""The form's values as a dict (a JSON string from the client); None in, no edits out.
+	Anything that is not a map once parsed (malformed JSON, a list, a number, "null") is
+	None: the caller answers with a reply the form shows, never a server error."""
 	if values in (None, ""):
 		return {}
 	if isinstance(values, str):
 		try:
 			values = frappe.parse_json(values)
 		except ValueError:
-			values = None
-	if not isinstance(values, dict):
-		raise InvalidArgumentError(_("values must be a map of fields"))
-	return values
+			return None
+	return values if isinstance(values, dict) else None
 
 
 class DraftSave:
@@ -195,7 +202,9 @@ class DraftSave:
 			if tool == "create_doc" and not edited.get("values"):
 				# Every field left empty: marked as missing, like apply_action.
 				raise frappe.MandatoryError(_("Value missing"))
-			api._run_preview(tool, edited)
+			# A copy: Frappe's row init adds keys (``doctype``) to the dicts it is given, and
+			# the write and the settlement must get ``edited`` exactly as the person sent it.
+			api._run_preview(tool, copy.deepcopy(edited))
 		except api.PreviewSandboxLost:
 			return _fixable("InternalError", _(_UNCHECKED))
 		except (
@@ -288,15 +297,18 @@ class DraftSave:
 
 		if row.status == EXECUTING:
 			return _busy()
+		# The agent is told when the row settles, so a settled row's closed reply says so
+		# (the desktop adds "Jarvis could not be told" only when this is False).
+		told = bool(row.settled)
 		if row.status == EXECUTED:
 			if row.edited and row.decided_by == self.approver:
 				return self._saved(row)  # this person's save already went through
-			return _closed(CLOSED, _(_ALREADY_SAVED))
+			return _closed(CLOSED, _(_ALREADY_SAVED), told=told)
 		if row.status == FAILED:
 			if outcome_for(row.status, row.reason_code, row.tool) in ("partial", "unknown"):
-				return _closed(CLOSED, _(_UNFINISHED), partial=True)
-			return _closed(CLOSED, _(_NOT_SAVED))
-		return _closed(CLOSED, _(_CLOSED))
+				return _closed(CLOSED, _(_UNFINISHED), told=told, partial=True)
+			return _closed(CLOSED, _(_NOT_SAVED), told=told)
+		return _closed(CLOSED, _(_CLOSED), told=told)
 
 	def _saved(self, row) -> dict:
 		"""``apply_action``'s success shape (queued fields when a continuation queued)."""
@@ -336,12 +348,13 @@ class DraftSave:
 
 	def _no_longer_open(self, locked) -> dict:
 		from jarvis.chat.pending_actions import settle
-		from jarvis.chat.pending_actions._store import TERMINAL
+		from jarvis.chat.pending_actions._store import TERMINAL, get_row
 
 		frappe.db.rollback()
 		if locked.status in TERMINAL and not locked.settled:
 			settle(locked.name)
-		return self._decided(locked)
+		# Read again: the settle above is what decides whether the agent was told.
+		return self._decided(get_row(self.token) or locked)
 
 	@staticmethod
 	def _refuse(envelope: dict) -> dict:

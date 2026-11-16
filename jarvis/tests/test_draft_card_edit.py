@@ -152,6 +152,60 @@ class TestDraftValuesPure(unittest.TestCase):
 		cleared = draft_values.edited_call("create_doc", args, {"tags": None}, tables=tables)["values"]
 		self.assertNotIn("tags", cleared)
 
+	def test_only_cells_the_client_sent_empty_are_cleared_from_a_drafted_row(self):
+		"""A drafted cell the client did not send must pass through exactly as drafted, even
+		when it is blank: stripping every blank would silently change what a plain Confirm
+		writes. A cell sent as None or "" is the person clearing it."""
+		args = {"doctype": "T", "values": {"items": [{"a": "", "b": "x"}]}}
+		merge = draft_values.edited_call
+		kept = merge("create_doc", args, {"items": [{"_draft_row": 0, "c": 1}]}, tables={"items"})
+		self.assertEqual(kept["values"]["items"], [{"a": "", "b": "x", "c": 1}])
+		cleared = merge("create_doc", args, {"items": [{"_draft_row": 0, "b": ""}]}, tables={"items"})
+		self.assertEqual(cleared["values"]["items"], [{"a": ""}])
+		new_row = merge("create_doc", args, {"items": [{"b": None, "c": 2}]}, tables={"items"})
+		self.assertEqual(new_row["values"]["items"], [{"c": 2}])
+
+	def test_a_table_sent_as_an_empty_list_clears_every_row_and_a_string_is_refused(self):
+		"""``[]`` is the complete final row list (no rows), so every drafted row must go; a
+		table cleared with "" would be read by one half of the code as blank and refused by
+		the other, so validation must refuse it with a mark on a create and an update."""
+		args = {"doctype": "T", "values": {"items": [{"x": 1}, {"x": 2}]}}
+		edited = draft_values.edited_call("create_doc", args, {"items": []}, tables={"items"})
+		self.assertEqual(edited["values"]["items"], [])
+		rules = _Rules(tables={"items": "Table"})
+		for is_update in (False, True):
+			with self.subTest(is_update=is_update):
+				[mark] = draft_values.errors({"items": ""}, rules, is_update=is_update)
+				self.assertEqual((mark["fieldname"], mark["message"]), ("items", draft_values.NOT_ROWS))
+
+	def test_zero_false_and_zero_point_zero_are_written_not_cleared(self):
+		"""A falsy value is a real answer (a quantity of 0, an unchecked box): treating it as
+		"clear" would drop it from the write and let the default apply instead. Top level and
+		in a row cell, on a create and an update; JSON text tells 0, false and 0.0 apart."""
+		sent = {"qty": 0, "flag": False, "rate": 0.0}
+		args = {"doctype": "T", "values": {"items": [{"x": 1}]}}
+		wrote = draft_values.edited_call(
+			"create_doc", args, {**sent, "items": [{"_draft_row": 0, **sent}]}, tables={"items"}
+		)
+		text = json.dumps(sent)
+		self.assertEqual(json.dumps({k: wrote["values"][k] for k in sent}), text)
+		self.assertEqual(json.dumps({k: wrote["values"]["items"][0][k] for k in sent}), text)
+		update = draft_values.edited_call("update_doc", {"doctype": "T", "name": "N", "changes": {}}, sent)
+		self.assertEqual(json.dumps(update["changes"]), text)
+
+	def test_a_draft_row_that_is_negative_float_or_empty_is_refused(self):
+		"""``-1`` would index from the end of the drafted rows and ``1.0`` is not an index
+		(only a whole int is): either would copy the wrong drafted cells into the record,
+		so each must be a mark on its row."""
+		rules = _Rules(tables={"items": "Table"})
+		base = {"items": [{"x": 1}, {"x": 2}]}
+		rows = [{"_draft_row": -1}, {"_draft_row": 1.0}, {"_draft_row": None}, {"_draft_row": 1}]
+		found = draft_values.errors({"items": rows}, rules, is_update=False, base=base)
+		self.assertEqual(
+			[(f["idx"], f["message"]) for f in found],
+			[(i, draft_values.NOT_A_DRAFTED_ROW) for i in (1, 2, 3)],
+		)
+
 
 try:
 	import frappe
@@ -230,9 +284,11 @@ if FrappeTestCase is not None:
 
 		def website_manager(self):
 			"""OTHER may write Web Forms, for this test only."""
+			# Registered first: a failure between the grant and its commit must not leak the
+			# role. ``remove_roles`` skips a role the user does not have.
+			self.addCleanup(self._revoke)
 			frappe.get_doc("User", OTHER).add_roles("Website Manager")
 			frappe.db.commit()
-			self.addCleanup(self._revoke)
 
 		def _revoke(self):
 			frappe.db.rollback()
@@ -349,6 +405,25 @@ if FrappeTestCase is not None:
 			self.assert_untouched(token, before)
 			self.assertEqual(self.todos("other runner"), [])
 
+		def test_a_stranger_saving_an_executed_draft_gets_the_refusal_never_the_record(self):
+			"""The owner's saved draft answers "saved" with the record's name and link, but only
+			to the owner: a stranger with the token must get the refusal a stranger gets on a
+			Pending card (nothing about the record), with the owner's chat or their own."""
+			conv, token = self.todo_draft()
+			saved = self.save(token, conv, {"description": f"{MARK} owner saved"})
+			self.assertTrue(saved["ok"], saved)
+			own = self.make_conv(owner=OTHER)
+			out = self.save(token, own, {"description": f"{MARK} stranger"}, user=OTHER)
+			self.assert_closed(out, draft_save.CLOSED, draft_save._CLOSED)
+			for leaked in ("name", "doc_url", "verb"):
+				self.assertNotIn(leaked, out)
+			_conv2, pending = self.todo_draft()
+			own2 = self.make_conv(owner=OTHER)
+			self.assertEqual(out, self.save(pending, own2, {}, user=OTHER))
+			with self.assertRaises(frappe.PermissionError):
+				self.save(token, conv, {}, user=OTHER)
+			self.assertEqual(self.todos("stranger"), [])
+
 		def test_the_flag_off_refuses_and_leaves_the_card(self):
 			"""Dark means dark: with ``jarvis_draft_cards`` off the endpoint writes nothing."""
 			conv, token = self.todo_draft()
@@ -397,6 +472,24 @@ if FrappeTestCase is not None:
 			self.assertFalse(decided.pending_card)
 			self.assertIn(f"{MARK} edited", decided.tool_args)
 			self.assertNotIn("original", decided.tool_args)
+
+		def test_the_dry_run_cannot_change_what_is_written_and_stored(self):
+			"""Frappe's row init adds keys to the dicts a dry run is given. The trial gets a
+			copy, so whatever it does to its argument must reach neither the write nor the
+			stored args: here the trial mutates the description it was given."""
+			conv, token = self.todo_draft()
+			real = api._run_preview
+
+			def mutating(tool, args):
+				args["values"]["description"] = f"{MARK} MUTATED"
+				return real(tool, args)
+
+			with patch.object(api, "_run_preview", side_effect=mutating):
+				out = self.save(token, conv, {"description": f"{MARK} as sent"})
+			self.assertTrue(out["ok"], out)
+			self.assertEqual(frappe.db.get_value("ToDo", out["name"], "description"), f"{MARK} as sent")
+			[decided] = self.tool_rows(conv)
+			self.assertNotIn("MUTATED", decided.tool_args)
 
 		def test_a_drafted_value_the_form_cannot_show_is_kept(self):
 			"""DATA LOSS guard: an attachment the model drafted is not on the form, so the form
@@ -521,6 +614,38 @@ if FrappeTestCase is not None:
 			self.assertEqual(self.todos("late"), [])
 			self.assertEqual(len(self.todos("confirmed")), 1)
 
+		def test_a_closed_reply_says_the_agent_was_told_only_when_the_row_settled(self):
+			"""The desktop adds "Jarvis could not be told" when ``assistant_told`` is false, so
+			a second Save on a card the agent was already told about (a plain Confirm that
+			won, a Failed row) must say true, and false for a row not yet settled."""
+			won_conv, won = self.todo_draft(f"{MARK} won")
+			self.assertTrue(self.confirm(won, won_conv)["ok"])
+			lost_conv, lost = self.todo_draft(f"{MARK} lost again")
+			with patch("jarvis.api.dispatch_confirmed", side_effect=_fail):
+				self.assertFalse(self.confirm(lost, lost_conv)["ok"])
+			for token, conv, message in (
+				(won, won_conv, draft_save._ALREADY_SAVED),
+				(lost, lost_conv, draft_save._NOT_SAVED),
+			):
+				for settled in (1, 0):
+					with self.subTest(message=message, settled=settled):
+						self.set_col(token, settled=settled)
+						out = self.save(token, conv, {})
+						self.assert_closed(out, draft_save.CLOSED, message)
+						self.assertIs(out["assistant_told"], bool(settled))
+
+		def test_a_failed_row_that_is_partial_answers_closed_as_partial(self):
+			"""A save that part-way failed may have written something: "was not saved" would be
+			false, so the reply must say it did not finish and carry ``outcome: partial``."""
+			conv, token = self.todo_draft()
+			self.set_col(token, status="Failed", reason_code="partial", settled=1)
+			out = self.save(token, conv, {})
+			self.assert_closed(out, draft_save.CLOSED, draft_save._UNFINISHED)
+			self.assertEqual(out["outcome"], "partial")
+			self.assertIs(out["assistant_told"], True)
+			self.set_col(token, settled=0)
+			self.assertIs(self.save(token, conv, {})["assistant_told"], False)
+
 		def test_a_confirm_that_ran_the_card_while_a_failed_save_rolled_back_wins(self):
 			"""Between the failed write's rollback and the row's end the card is Pending and
 			unlocked: a Confirm landing there runs it. The save must then say the card was
@@ -559,6 +684,33 @@ if FrappeTestCase is not None:
 			self.assertIn("description", [f["fieldname"] for f in out["error"]["fields"]])
 			self.assert_untouched(token, before)
 			self.assertEqual(frappe.db.count("ToDo", {"owner": OWNER}), count)
+
+		def test_values_that_are_not_a_map_are_refused_with_a_reply_the_form_can_show(self):
+			"""Malformed JSON, a list, a number or "null" must not surface as a server error:
+			the form gets the "could not be read" reply and the card is untouched."""
+			conv, token = self.todo_draft()
+			before = self.sealed(token)
+			expected = {
+				"ok": False,
+				"error": {"code": "InvalidArgumentError", "message": draft_save._UNREADABLE, "fields": []},
+			}
+			for raw in ("{not json", "[1]", "5", "null", [1], 5):
+				with self.subTest(raw=raw), as_user(OWNER):
+					self.assertEqual(actions_api.save_draft_card(token, conv, raw), expected)
+			self.assert_untouched(token, before)
+
+		def test_a_missing_value_the_form_cannot_fill_is_closed_and_the_card_stays(self):
+			"""When the missing value cannot be marked in the form, a fixable reply would leave
+			the person stuck: ``draft_save`` must answer closed (``_NOT_HERE``) with the card
+			still Pending. The mark step is made to say "cannot mark"."""
+			conv, token = self.todo_draft()
+			before = self.sealed(token)
+			with patch.object(actions_api, "_mark_fields", return_value=False) as mark:
+				out = self.save(token, conv, {"description": ""})
+			self.assertTrue(mark.called)
+			self.assert_closed(out, "InvalidArgumentError")
+			self.assertTrue(out["error"]["message"].endswith(draft_save._NOT_HERE), out)
+			self.assert_untouched(token, before)
 
 		def test_a_protected_field_is_marked_not_written(self):
 			"""``docstatus`` sent from the form must be a refused mark, never a submit."""

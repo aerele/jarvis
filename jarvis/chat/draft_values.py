@@ -9,7 +9,8 @@ The contract for ``values`` (field-keyed; a child table is a list of row dicts):
   rows: a row carrying ``_draft_row`` (the 0-based index of the drafted row it came
   from) is that drafted row with the sent cells over it, a cell sent as None or ""
   cleared; a row without it is a new row; a drafted row no sent row names is removed.
-  A table left out keeps its drafted rows. ``values == {}`` is exactly the card.
+  A table left out keeps its drafted rows. A table is cleared with ``[]`` or None, never
+  with a string: "" for a table is refused with a mark. ``values == {}`` is exactly the card.
 - Update: the write is the draft's ``changes`` with ``values`` over them; None or ""
   sets the field blank (as update_doc does). A table sent is the table's complete final
   rows (``tools._child_rows.merge_child_rows``): a row's ``name`` says which saved row it
@@ -105,8 +106,15 @@ def _merged_rows(drafted, sent: list) -> list:
 	for row in sent:
 		index = row.get(DRAFT_ROW)
 		was = drafted[index] if _is_index(index, len(drafted)) and isinstance(drafted[index], dict) else {}
-		cells = {**was, **{k: v for k, v in row.items() if k != DRAFT_ROW}}
-		out.append({k: v for k, v in cells.items() if not _blank(v)})
+		cells = dict(was)  # carried over exactly as drafted, blank or not
+		for key, value in row.items():
+			if key == DRAFT_ROW:
+				continue
+			if _blank(value):
+				cells.pop(key, None)  # only a cell the client SENT empty is cleared
+			else:
+				cells[key] = value
+		out.append(cells)
 	return out
 
 
