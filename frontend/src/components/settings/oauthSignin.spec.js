@@ -136,7 +136,7 @@ describe("oauthSignin", () => {
 		expect(api.connectOauth).not.toHaveBeenCalled();
 	});
 
-	it("keeps polling for a grace period after the tab closes, then resolves closed", async () => {
+	it("never resolves closed: a closed-looking tab keeps polling at the normal interval", async () => {
 		api.connectOauth.mockResolvedValue({ ok: true, url: AUTH_URL, started_at: STARTED_AT });
 		api.oauthSigninStatus.mockResolvedValue({ ok: true, connected: false });
 
@@ -145,17 +145,15 @@ describe("oauthSignin", () => {
 		pending.then(() => {
 			settled = true;
 		});
-		tab.closed = true; // the user closed it themselves before any poll ran
+		tab.closed = true; // COOP severs the opener, or the user really closed it
 
 		await vi.advanceTimersByTimeAsync(2000); // first tick notices the closed tab
+		await vi.advanceTimersByTimeAsync(60000); // well past the old 8 s grace
 		expect(settled).toBe(false);
-		await vi.advanceTimersByTimeAsync(4000); // still inside the 8 s grace
-		expect(settled).toBe(false);
-		const callsInGrace = api.oauthSigninStatus.mock.calls.length;
-		expect(callsInGrace).toBeGreaterThan(2);
+		expect(api.oauthSigninStatus.mock.calls.length).toBeGreaterThan(20);
 
-		await vi.advanceTimersByTimeAsync(4000); // grace is over
-		expect(await pending).toEqual({ status: "closed" });
+		pending.cancel();
+		await pending;
 	});
 
 	it("calls onTabClosed once, when the popup is first seen closed", async () => {
@@ -177,13 +175,13 @@ describe("oauthSignin", () => {
 		await pending;
 	});
 
-	it("resolves connected when the sign-in lands during the grace period", async () => {
+	it("resolves connected when the sign-in lands 30 s after the tab looked closed", async () => {
 		api.connectOauth.mockResolvedValue({ ok: true, url: AUTH_URL, started_at: STARTED_AT });
 		api.oauthSigninStatus.mockResolvedValue({ ok: true, connected: false });
 
 		const pending = signIn("row-1", { label: "Vendor" });
 		tab.closed = true;
-		await vi.advanceTimersByTimeAsync(4000);
+		await vi.advanceTimersByTimeAsync(30000);
 
 		api.oauthSigninStatus.mockResolvedValue({
 			ok: true,
@@ -193,6 +191,52 @@ describe("oauthSignin", () => {
 		await vi.advanceTimersByTimeAsync(2000);
 
 		expect(await pending).toEqual({ status: "connected" });
+	});
+
+	it("still ends on a backend error after the tab looked closed", async () => {
+		api.connectOauth.mockResolvedValue({ ok: true, url: AUTH_URL, started_at: STARTED_AT });
+		api.oauthSigninStatus.mockResolvedValue({ ok: true, connected: false });
+
+		const pending = signIn("row-1", { label: "Vendor" });
+		tab.closed = true;
+		await vi.advanceTimersByTimeAsync(20000);
+		api.oauthSigninStatus.mockResolvedValue({ ok: true, error: "Access was denied." });
+		await vi.advanceTimersByTimeAsync(2000);
+
+		expect(await pending).toEqual({ status: "error", message: "Access was denied." });
+	});
+
+	it("still times out after the overall limit, closed-looking tab or not", async () => {
+		api.connectOauth.mockResolvedValue({ ok: true, url: AUTH_URL, started_at: STARTED_AT });
+		api.oauthSigninStatus.mockResolvedValue({ ok: true, connected: false });
+
+		const pending = signIn("row-1", { label: "Vendor" });
+		tab.closed = true;
+		await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 4000);
+
+		expect(await pending).toEqual({ status: "timeout" });
+		const calls = api.oauthSigninStatus.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(10000);
+		expect(api.oauthSigninStatus.mock.calls.length).toBe(calls); // polling stopped
+	});
+
+	it("cancel() after the tab looked closed stops polling and removes the listeners", async () => {
+		api.connectOauth.mockResolvedValue({ ok: true, url: AUTH_URL, started_at: STARTED_AT });
+		api.oauthSigninStatus.mockResolvedValue({ ok: true, connected: false });
+
+		const pending = signIn("row-1", { label: "Vendor" });
+		tab.closed = true;
+		await vi.advanceTimersByTimeAsync(10000);
+
+		pending.cancel();
+		expect(await pending).toEqual({ status: "cancelled" });
+		const calls = api.oauthSigninStatus.mock.calls.length;
+
+		await vi.advanceTimersByTimeAsync(10000);
+		document.dispatchEvent(new Event("visibilitychange"));
+		window.dispatchEvent(new Event("focus"));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(api.oauthSigninStatus.mock.calls.length).toBe(calls);
 	});
 
 	it("re-checks at once when the window becomes visible again", async () => {
