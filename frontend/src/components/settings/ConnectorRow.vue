@@ -74,7 +74,7 @@
 // Buttons) and PromotionStatusChip's Badge+Tooltip status idiom. Key rows and
 // OAuth rows (auth_method "OAuth") share one 5-state model (design:
 // RowStates.dc.html) - see rowState below.
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref } from "vue";
 import { Badge, Button, Switch, Tooltip, confirmDialog, toast } from "frappe-ui";
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 import { signIn } from "@/components/settings/oauthSignin";
@@ -225,6 +225,13 @@ async function doSignIn() {
 		}
 	}
 }
+
+// The poll can run for up to 10 minutes; stop it (and keep its late verdict
+// from toasting or reloading) once the row is gone.
+onBeforeUnmount(() => {
+	signInGen++;
+	if (currentSignIn) currentSignIn.cancel();
+});
 
 function doDisconnect() {
 	confirmDialog({
