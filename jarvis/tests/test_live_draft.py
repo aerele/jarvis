@@ -676,7 +676,13 @@ class TestParkedToolDraft(PendingActionTestMixin, FrappeTestCase):
 		token = self._park_row(conv, 1)
 		plain = {"title": "Submit Sales Order", "fields": [{"label": "Status", "value": "Draft"}]}
 		other = self.make_conv()
-		self.park(other, tool="submit_doc", args={"doctype": "ToDo", "name": self.make_todo()}, card=plain, preview={"would": {}, "card": plain})
+		self.park(
+			other,
+			tool="submit_doc",
+			args={"doctype": "ToDo", "name": self.make_todo()},
+			card=plain,
+			preview={"would": {}, "card": plain},
+		)
 		self.assertEqual([c["token"] for c in live_draft.pending_draft_cards(owner=OWNER, limit=1)], [token])
 		self.assertTrue(live_draft.has_pending_draft(conv))
 		self.assertFalse(live_draft.has_pending_draft(other))
