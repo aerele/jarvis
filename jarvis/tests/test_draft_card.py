@@ -1282,10 +1282,13 @@ if FrappeTestCase is not None:
 
 		case.addCleanup(wipe)
 		labels = ("First", "Second", "Third")
+		# A Web Form rejects a value row whose field the doctype (ToDo) lacks, so the first three
+		# rows use real ToDo fields; the rest (the bound test) are layout rows, which it skips.
+		real = ("description", "status", "priority")
 		rows = [
 			{
-				"fieldname": f"f{i}",
-				"fieldtype": "Data",
+				"fieldname": real[i] if i < len(real) else f"f{i}",
+				"fieldtype": "Data" if i < len(real) else "Section Break",
 				"label": labels[i] if count == 3 else f"Row {i}",
 			}
 			for i in range(count)
@@ -1745,7 +1748,7 @@ if FrappeTestCase is not None:
 					"web_form_fields": [
 						{"name": n1},
 						{"name": n2, "label": "Second changed"},
-						{"fieldname": "extra", "fieldtype": "Data"},
+						{"fieldname": "date", "fieldtype": "Data"},
 					]
 				},
 			}

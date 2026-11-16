@@ -1197,7 +1197,9 @@ if FrappeTestCase is not None:
 
 		def test_every_row_plus_a_new_one_and_a_changed_cell_ends_with_four_rows(self):
 			"""A table sent whole keeps each named row, changes only the cell edited, and
-			adds the row with no name."""
+			adds the row with no name. The draft changed row 1's label, the form showed it and
+			the person did not touch that row: it is saved with the draft's label (what the
+			person saw), not the stored one."""
 			form, (r1, r2, r3) = self.web_form()
 			conv, token = self.draft_of(form, r1)
 			table = [
@@ -1208,17 +1210,18 @@ if FrappeTestCase is not None:
 			]
 			self.assertTrue(self.save(token, conv, {"web_form_fields": table}, user=OTHER)["ok"])
 			rows = self.form_rows(form)
-			self.assertEqual([r.label for r in rows], ["First", "Second changed", "Third", "Fourth"])
+			self.assertEqual([r.label for r in rows], ["First changed", "Second changed", "Third", "Fourth"])
 			self.assertEqual([r.name for r in rows[:3]], [r1, r2, r3])
 
 		def test_a_saved_row_left_out_is_removed_and_the_others_kept(self):
-			"""Removal is by omission: the row the person removed goes, the rest stay as saved."""
+			"""Removal is by omission: the row the person removed goes, the rest stay (a kept
+			row the draft changed keeps the draft's cell, an untouched row is as saved)."""
 			form, (r1, _r2, r3) = self.web_form()
 			conv, token = self.draft_of(form, r1)
 			values = {"web_form_fields": [{"name": r1}, {"name": r3}]}
 			self.assertTrue(self.save(token, conv, values, user=OTHER)["ok"])
 			self.assertEqual(
-				[(r.name, r.label) for r in self.form_rows(form)], [(r1, "First"), (r3, "Third")]
+				[(r.name, r.label) for r in self.form_rows(form)], [(r1, "First changed"), (r3, "Third")]
 			)
 
 		def test_a_row_name_not_on_the_record_is_marked_and_nothing_changes(self):
