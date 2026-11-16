@@ -453,21 +453,30 @@ def row_changes(meta, key: str, call_rows, trial_rows, stored) -> dict | None:
 		fresh = []
 	new_trial = iter(fresh)
 	final = []
+	# True only when every listed row was set against the trial's own row, so every value field
+	# of it was compared (``_row_changed``). Otherwise only the call's keys could differ.
+	exhaustive = True
 	for row in call_rows:
 		name = row.get("name")
 		sent = row_values(row)
 		if name and name not in saved:
+			exhaustive = False
 			continue
 		if name:
 			got = by_name.get(name)
 			row_final = got if got is not None else {**saved[name], **sent}
+			exhaustive = exhaustive and got is not None
 			final.append(
 				(name, row_final, _row_changed(child, saved[name], row_final, sent, columns, got is not None))
 			)
 		else:
 			got = next(new_trial, None)
+			exhaustive = exhaustive and got is not None
 			final.append((None, got if got is not None else sent, False))
 	out = row_diff(list(saved.items()), final, cells)
+	if not exhaustive and not has_row_change({"row_changes": out}):
+		# Nothing visible differs, but we could not compare every field: say so, never "unchanged".
+		out["unverified"] = True
 	return {
 		"columns": [child.get_field(c).label or c for c in columns],
 		"fieldnames": columns,

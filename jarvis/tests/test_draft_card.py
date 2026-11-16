@@ -1384,22 +1384,28 @@ if FrappeTestCase is not None:
 			made.append(todo.name)
 			return todo
 
-		def test_a_table_the_write_leaves_as_it_is_has_no_entry(self):
-			"""Changing only a parent field and echoing the table back unchanged must not draw
-			the table as a block of unchanged rows; the parent field's entry stays."""
+		def test_an_unchanged_table_is_hidden_only_after_a_full_comparison(self):
+			"""Changing only a parent field and echoing the table back: with the trial's rows
+			matched (every field compared, nothing differs) the table is not drawn; with no trial
+			the card cannot know, so it KEEPS the entry, flags it `unverified` and marks no row as
+			a hidden change. No diff entry carries a private `_` key."""
 			form, (n1, n2, n3) = _make_web_form(self)
-			args = {
-				"doctype": "Web Form",
-				"name": form,
-				"changes": {
-					"title": f"{ROWS_MARK} renamed",
-					"web_form_fields": [{"name": n1}, {"name": n2}, {"name": n3}],
-				},
-			}
-			card = _park_card("update_doc", args, None, True)
-			labels = [e["label"] for e in card["diff"]]
+			title = f"{ROWS_MARK} renamed"
+			rows = [{"name": n1}, {"name": n2}, {"name": n3}]
+			args = {"doctype": "Web Form", "name": form, "changes": {"title": title, "web_form_fields": rows}}
+			table = frappe.get_meta("Web Form").get_field("web_form_fields").label
+			saved = [r.as_dict() for r in frappe.get_doc("Web Form", form).web_form_fields]
+			full = _park_card("update_doc", args, {"title": title, "web_form_fields": saved}, True)
+			labels = [e["label"] for e in full["diff"]]
 			self.assertIn(frappe.get_meta("Web Form").get_field("title").label, labels)
-			self.assertNotIn(frappe.get_meta("Web Form").get_field("web_form_fields").label, labels)
+			self.assertNotIn(table, labels)
+			blind = _park_card("update_doc", args, None, True)
+			changes = _row_changes(blind)
+			self.assertIs(changes["unverified"], True)
+			self.assertEqual({r["status"] for r in changes["rows"]}, {"kept"})
+			self.assertTrue(all("hidden_change" not in r for r in changes["rows"]))
+			for card in (full, blind):
+				self.assertEqual([k for e in card["diff"] for k in e if k.startswith("_")], [])
 
 		def test_a_line_break_past_the_clip_is_still_multiline(self):
 			"""`multiline` is read from the raw value: the display text is cut at 200
@@ -1487,6 +1493,32 @@ if FrappeTestCase is not None:
 			same = self._rows(child, stored, [{"name": "r1", "a": "x", "base": 10.0}], sent)
 			self.assertEqual(same["rows"][0]["status"], "kept")
 			self.assertEqual(self._rows(child, stored, None, sent)["rows"][0]["status"], "kept")
+
+		def test_a_comparison_without_the_trial_rows_is_unverified_not_unchanged(self):
+			"""With no usable trial only the call's keys can differ, so "nothing differs" is not
+			known: `unverified`, and no row is called a hidden change. Matched against the trial,
+			the same call is a full comparison and carries no such flag."""
+			child = _stand_in_child(("a", "Data", 1), ("base", "Currency", 0))
+			stored = [{"name": "r1", "a": "x", "base": 10.0}]
+			sent = [{"name": "r1"}]
+			blind = self._rows(child, stored, None, sent)
+			self.assertIs(blind["unverified"], True)
+			self.assertNotIn("hidden_change", blind["rows"][0])
+			wrong_count = self._rows(child, stored, [], sent)  # trial rows that do not pair up
+			self.assertIs(wrong_count["unverified"], True)
+			full = self._rows(child, stored, [{"name": "r1", "a": "x", "base": 10.0}], sent)
+			self.assertNotIn("unverified", full)
+			self.assertFalse(draft_card.has_row_change({"row_changes": full}))
+
+		def test_a_hidden_field_that_differs_in_a_full_comparison_keeps_the_entry(self):
+			"""Exhaustive and one non-shown field differs: `changed` + `hidden_change`, no
+			`unverified`, and `has_row_change` is true so the table is drawn."""
+			child = _stand_in_child(("a", "Data", 1), ("base", "Currency", 0))
+			stored = [{"name": "r1", "a": "x", "base": 10.0}]
+			out = self._rows(child, stored, [{"name": "r1", "a": "x", "base": 12.0}], [{"name": "r1"}])
+			self.assertNotIn("unverified", out)
+			self.assertEqual((out["rows"][0]["status"], out["rows"][0]["hidden_change"]), ("changed", True))
+			self.assertTrue(draft_card.has_row_change({"row_changes": out}))
 
 		def test_a_difference_of_type_only_is_not_a_change(self):
 			"""The call sends text or a bool, the row holds a number or a date: "3" and 3, 1 and

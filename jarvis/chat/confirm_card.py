@@ -780,9 +780,11 @@ def _update_card(args: dict, would, full: bool = False, whole: bool = False, dra
 				to_val,
 				would.get(key) if isinstance(would, dict) else None,
 			)
-			if "row_changes" in entry:
-				# A table the write leaves as it is is not drawn as a block of unchanged rows.
-				if not draft_card.has_row_change(entry):
+			rc = entry.get("row_changes")
+			if rc is not None:
+				# Fail closed: a table is hidden only after a full comparison found nothing
+				# (an ``unverified`` table is kept, and says it could not be compared).
+				if not draft_card.has_row_change(entry) and not rc.get("unverified"):
 					continue
 			elif same:
 				continue
