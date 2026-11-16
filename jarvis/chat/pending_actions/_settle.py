@@ -93,11 +93,14 @@ def _item(row) -> dict:
 		settlement = _seal.unseal_settlement(row) or {}
 	except _seal.SealError:
 		settlement = {}
+	# A draft card saved with edited values ran those, not the card's: its settlement
+	# carries the call that ran (``approvals_api._edit_created`` / ``_edit_failed``).
+	ran = settlement.get("args") if row.get("edited") else None
 	item = {
 		"name": row.name,
 		"kind": row.kind,
 		"tool": row.tool,
-		"args": call.get("args") or {},
+		"args": ran if isinstance(ran, dict) else call.get("args") or {},
 		"result": settlement.get("result"),
 		"status": row.status,
 		"reason_code": row.reason_code or "",
@@ -159,6 +162,7 @@ def _deliver(item: dict) -> None:
 	# A failed chip shows its reference, also for a failure that never dispatched
 	# (seal, stale, interrupted) and so has no stored result.
 	result = with_reference(item["result"], item["name"]) if item["status"] == FAILED else item["result"]
+	result = _with_next_step(item, result)
 	api.persist_tool_receipt(
 		conv,
 		item["tool"] or "",
@@ -172,6 +176,37 @@ def _deliver(item: dict) -> None:
 		from jarvis.chat import admission
 
 		admission.publish_action_confirmed(conv)
+
+
+def _with_next_step(item: dict, result):
+	"""A draft card's create that ran gets its next step (Submit, or a workflow action)
+	on its receipt, the one place the desktop reads it from (``data.suggested_next``).
+	Worked out as the owner: a reconciler settle runs as Administrator. Never for an
+	update, a card that is not a draft, or with the draft flag off; a hint never fails
+	the settle."""
+	data = result.get("data") if isinstance(result, dict) else None
+	if not (
+		item["status"] == EXECUTED
+		and item["tool"] == "create_doc"
+		and isinstance(item.get("draft"), dict)
+		and isinstance(data, dict)
+		and item.get("result_doctype")
+		and item.get("result_name")
+	):
+		return result
+	try:
+		from jarvis._session import impersonate
+		from jarvis.chat import draft_card
+		from jarvis.chat.actions_api import _suggest_next_safe
+
+		if not draft_card.enabled():
+			return result
+		with impersonate(item["owner_user"]):
+			step = _suggest_next_safe(item["result_doctype"], item["result_name"])
+	except Exception:
+		frappe.log_error(title="jarvis.pending_action.next_step_failed", message=frappe.get_traceback())
+		return result
+	return {**result, "data": {**data, "suggested_next": step}} if step else result
 
 
 def _announce(item: dict) -> None:

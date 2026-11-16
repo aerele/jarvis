@@ -1524,6 +1524,10 @@ def persist_tool_receipt(
 	or flipped, False when nothing was (a duplicate, a failed ``only_if``, a lost flip)."""
 	from jarvis.tools import _private_output
 
+	if flip_token and not action_outcome:
+		# A card's own row always ends saying how it ended: flipped (or inserted) with no
+		# outcome it would clear the card and leave a bare activity row in its place.
+		action_outcome = "failed"
 	# Preserve the execution name only long enough to classify a source result.
 	# Deposit metadata uses a fixed label at every durable/realtime boundary, but
 	# source_receipt must see the original name or a future permissive contract

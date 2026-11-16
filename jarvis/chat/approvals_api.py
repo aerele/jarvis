@@ -2567,15 +2567,29 @@ def _claim_lost(name: str, ref: tuple[str, str] = ("", "")) -> None:
 	)
 
 
-def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, str], items=()) -> dict:
+def _edit_created(
+	locked,
+	approver: str,
+	stamp,
+	result: dict,
+	ref: tuple[str, str],
+	items=(),
+	*,
+	reason: str = _EDITED_REASON,
+	edited_args: dict | None = None,
+) -> dict:
 	"""A successful Edit & create, the row re-read under its lock (a mid-dispatch commit
 	or rollback may have moved it): our claim -> Executed; Pending (a rollback dropped
 	the uncommitted claim, the insert went on) -> Failed/``partial`` naming the record,
 	never Pending with a record; decided elsewhere (the reconciler) -> its verdict
-	stands and the outcome is late."""
+	stands and the outcome is late.
+
+	``edited_args`` (a draft card's save): sealed with the settlement, so the receipt
+	and the agent are told the call that ran, not the one the card proposed."""
 	from jarvis.chat import held_parties
 	from jarvis.chat.pending_actions import _seal, settle
 	from jarvis.chat.pending_actions._execute import late_outcome, outcome_of
+	from jarvis.chat.pending_actions._settle import with_reference
 	from jarvis.chat.pending_actions._store import (
 		EXECUTED,
 		EXECUTING,
@@ -2595,12 +2609,15 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 		scope_cols["dedup_keys"] = _seal.canonical(
 			[_seal.open_key(locked.owner_user, held_parties.item_key(i)) for i in items]
 		)
+	ran = {"args": edited_args} if edited_args is not None else {}
 	if _our_claim(fresh, approver, stamp) and _terminal_update(
 		locked.name,
 		[EXECUTING],
 		EXECUTED,
-		reason=_EDITED_REASON,
-		sealed_settlement=_seal.seal_settlement(locked.name, {"result": result, "outcome": "confirmed"}),
+		reason=reason,
+		sealed_settlement=_seal.seal_settlement(
+			locked.name, {"result": result, "outcome": "confirmed", **ran}
+		),
 		**cols,
 		**scope_cols,
 	):
@@ -2613,10 +2630,15 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 			"outcome": "confirmed",
 			"edited": 1,
 		}
+	partial = {}
+	if ran:
+		partial["sealed_settlement"] = _seal.seal_settlement(
+			locked.name, {"result": with_reference(result, locked.name), "outcome": "partial", **ran}
+		)
 	if (
 		fresh
 		and fresh.status == PENDING
-		and _terminal_update(locked.name, [PENDING], FAILED, reason_code="partial", **cols)
+		and _terminal_update(locked.name, [PENDING], FAILED, reason_code="partial", **cols, **partial)
 	):
 		_claim_lost(locked.name, ref)
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
@@ -2636,21 +2658,39 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 	}
 
 
-def _edit_failed(locked, approver: str, stamp, result, interfered: bool) -> dict:
+def _edit_failed(
+	locked, approver: str, stamp, result, interfered: bool, *, edited_args: dict | None = None
+) -> dict:
 	"""A failed Edit & create, after the full rollback. The row ends Failed when it is
 	Pending again or still our claim (committed mid-dispatch); ``partial`` when a
 	mid-dispatch commit or rollback means something may have been saved. The reply
-	carries the row's real status."""
-	from jarvis.chat.pending_actions import settle
+	carries the row's real status.
+
+	``edited_args`` (a draft card's save): the failure, with the call that ran, is
+	sealed as the settlement, so the receipt and the agent see what failed and why."""
+	from jarvis.chat.pending_actions import _seal, settle
 	from jarvis.chat.pending_actions._execute import late_outcome, outcome_of
-	from jarvis.chat.pending_actions._settle import outcome_for
+	from jarvis.chat.pending_actions._settle import outcome_for, with_reference
 	from jarvis.chat.pending_actions._store import FAILED, PENDING, REASON_TEXT, _terminal_update, get_row
 
 	code = "partial" if interfered else "failed"
+	sealed = {}
+	if edited_args is not None:
+		failure = (
+			result if isinstance(result, dict) else {"ok": False, "error": {"message": REASON_TEXT[code]}}
+		)
+		sealed["sealed_settlement"] = _seal.seal_settlement(
+			locked.name,
+			{
+				"result": with_reference(failure, locked.name),
+				"outcome": outcome_for(FAILED, code, locked.tool),
+				"args": edited_args,
+			},
+		)
 	fresh = get_row(locked.name, lock="update")
 	if fresh and (fresh.status == PENDING or _our_claim(fresh, approver, stamp)):
 		done = _terminal_update(
-			locked.name, [fresh.status], FAILED, reason_code=code, decided_by=approver, edited=1
+			locked.name, [fresh.status], FAILED, reason_code=code, decided_by=approver, edited=1, **sealed
 		)
 		if done and interfered and fresh.status == PENDING:
 			_claim_lost(locked.name)

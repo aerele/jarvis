@@ -686,6 +686,10 @@ def _append_receipt(
 	frappe.db.set_value(CONV, conversation, "last_active_at", frappe.utils.now(), update_modified=False)
 
 
+# The agent note for a saved draft, typed (``_note_applied``) or a card (``on_chat_settled``).
+_DRAFT_SAVED_NOTE = "the user confirmed the draft and it was saved: {receipt}"
+
+
 def _note_applied(conversation: str, receipt: str) -> None:
 	"""jarvis#2253: a Confirm without ``continue`` queues no turn, and the agent's own
 	session memory still says the write is pending. Queue the receipt as an agent note
@@ -693,7 +697,7 @@ def _note_applied(conversation: str, receipt: str) -> None:
 	from jarvis.chat import agent_notes
 
 	try:
-		agent_notes.append(conversation, f"the user confirmed the draft and it was saved: {receipt}")
+		agent_notes.append(conversation, _DRAFT_SAVED_NOTE.format(receipt=receipt))
 	except Exception:
 		frappe.log_error(title="apply_action agent note failed", message=frappe.get_traceback())
 
@@ -1460,6 +1464,25 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	"""
 	refuse_in_tool_dispatch()
 	return _confirm_core(token, conversation)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def save_draft_card(token: str, conversation: str, values: dict | str | None = None) -> dict:
+	"""Save a draft card with the values the person edited: their Save confirms THOSE
+	values (``jarvis.chat.draft_save``). Owner-checked like ``apply_action``.
+
+	``values``: a create's whole form (child tables as complete row lists); an update's
+	edited fields only, written over the draft's own ``changes`` (a table sent is its
+	complete final row list: saved rows by ``name``, new rows without one, a row left
+	out is removed). Answers with ``apply_action``'s three shapes: saved, fixable
+	(``error.fields``; the card is still open and unchanged), or ``closed``."""
+	refuse_in_tool_dispatch()
+	_require_own_conversation(conversation)
+	from jarvis._session import authenticated_user
+	from jarvis.chat import draft_save
+
+	return draft_save.save(str(token or "").strip(), conversation, values, authenticated_user())
 
 
 def _approve_run_refusal(record) -> dict | None:
@@ -2362,9 +2385,6 @@ def _stamp_correction(names: list[str], message: str) -> None:
 			"UPDATE `tabJarvis Pending Action` SET correction_message=%(m)s WHERE name IN %(n)s",
 			{"m": message, "n": tuple(names)},
 		)
-
-
-_DRAFT_SAVED_NOTE = "the user confirmed the draft and it was saved: {receipt}"
 
 
 def _is_final_draft(items: list[dict]) -> bool:
