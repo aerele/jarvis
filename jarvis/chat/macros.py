@@ -3805,8 +3805,13 @@ _LIVE_CARD_RE = re.compile(r"```(?:jarvis-action|jarvis-ask|confirm)[ \t]*\n[\s\
 
 def _last_reply_holds_a_card(conversation: str) -> bool:
 	"""Whether the conversation's last message is an assistant reply with a card on
-	it (a draft to apply, a question, a confirm). Tool rows are skipped, as the
-	clients skip them."""
+	it (a draft to apply, a question, a confirm), or a draft card is parked and waiting
+	(the agent's own create / update call: a tool row, which the clients draw as a card).
+	Other tool rows are skipped, as the clients skip them."""
+	from jarvis.chat import live_draft
+
+	if live_draft.pending_draft_cards(conversations=[conversation], limit=1):
+		return True
 	rows = frappe.get_all(
 		MSG,
 		filters={"conversation": conversation, "role": ["!=", "tool"]},

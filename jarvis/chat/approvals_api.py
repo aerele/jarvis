@@ -599,6 +599,13 @@ def _awaiting_reply(me: str) -> list[dict]:
 		{"me": me, "fence": "%```jarvis-ask%", "qmark": "%?%"},
 		as_dict=True,
 	)
+	from jarvis.chat import live_draft
+
+	# One read for the whole page: a chat with a parked draft card draws that card, not the question.
+	drafted = {
+		c["conversation"]
+		for c in live_draft.pending_draft_cards(conversations=[r.conversation for r in rows], owner=me)
+	}
 	return [
 		{
 			"conversation": r.conversation,
@@ -608,7 +615,9 @@ def _awaiting_reply(me: str) -> list[dict]:
 			"last_at": str(r.last_at or ""),
 		}
 		for r in rows
-		if not is_collaborative(r.conversation) and not _shows_a_card(r.content)
+		if not is_collaborative(r.conversation)
+		and not _shows_a_card(r.content)
+		and r.conversation not in drafted
 	]
 
 
@@ -666,10 +675,11 @@ def _open_drafts(me: str) -> list[dict]:
 		{"me": me, "card": _CARD_FENCE},
 		as_dict=True,
 	)
+	parked = _parked_drafts(me)
 	out = []
 	for r in rows:
-		if is_collaborative(r.conversation):
-			continue
+		if is_collaborative(r.conversation) or r.conversation in parked:
+			continue  # a parked draft card is the one card of its chat: listed below
 		a = parse_action(r.content)
 		if not a:
 			continue  # a submit/email card, or one the chat can't draw either
@@ -685,8 +695,48 @@ def _open_drafts(me: str) -> list[dict]:
 				"last_at": str(r.last_at or ""),
 			}
 		)
-		if len(out) == _OPEN_DRAFTS_MAX:
-			break
+	out.extend(parked.values())
+	out.sort(key=lambda d: d["last_at"], reverse=True)
+	return out[:_OPEN_DRAFTS_MAX]
+
+
+def _parked_drafts(me: str) -> dict[str, dict]:
+	"""Draft cards the agent parked (``create_doc`` / ``update_doc``) and that still wait, in chats
+	OWNED by ``me``: one open-drafts row per chat, same shape as a typed draft's. Two plain reads
+	(the cards, then their chats); only ``is_collaborative`` runs per chat, as in the rest of this file."""
+	from jarvis.chat import live_draft
+
+	cards = live_draft.pending_draft_cards(owner=me, limit=50)
+	if not cards:
+		return {}
+	chats = {
+		c.name: c
+		for c in frappe.get_all(
+			"Jarvis Conversation",
+			filters={
+				"name": ["in", [c["conversation"] for c in cards]],
+				"owner": me,
+				"status": ["!=", "Archived"],
+			},
+			fields=["name", "title", "origin_page", "file_box"],
+		)
+	}
+	out: dict[str, dict] = {}
+	for card in cards:  # newest first: a chat keeps its newest
+		chat = chats.get(card["conversation"])
+		if not chat or chat.file_box or not card["doctype"] or card["conversation"] in out:
+			continue
+		if is_collaborative(card["conversation"]):
+			continue
+		out[card["conversation"]] = {
+			"conversation": card["conversation"],
+			"title": chat.title or "",
+			"origin_page": chat.origin_page or "",
+			"verb": card["verb"],
+			"doctype": card["doctype"],
+			"summary": card["title"][:140],
+			"last_at": card["created"],
+		}
 	return out
 
 

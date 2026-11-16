@@ -694,6 +694,18 @@ if FrappeTestCase is not None:
 			self.assertIs(on["draft_card"], False)
 			self.assertNotIn("draft", on["pending_card"])
 
+		def test_flag_off_still_marks_a_leftover_draft_card(self):
+			"""A draft card parked while the flag was on and still Pending after it was turned off
+			must keep reading `draft_card` true, or a typed draft would show beside it; a plain
+			card's row adds no key."""
+			conv = self.make_conv()
+			token, _card = self._mint(conv)
+			other = self.make_conv()  # one waiting card per chat
+			plain, _plain = self._mint(other, draft=False)
+			with patch.dict(frappe.conf, {FLAG: 0}):
+				self.assertIs(self._history_row(conv, token)["draft_card"], True)
+				self.assertNotIn("draft_card", self._history_row(other, plain))
+
 		def _decided_row(self, conv, token):
 			"""The row as stored, and as the app reads it, after the card was decided."""
 			stored = frappe.db.get_value(

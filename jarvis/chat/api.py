@@ -1248,16 +1248,21 @@ def _fence_legacy_pending_cards(
 
 
 def _stamp_draft_cards(rows: list) -> None:
-	"""``draft_card`` on each tool row while the draft cards feature is on: true only for a
-	Pending row whose card carries a ``draft``. Absent with the site flag off, so every row
-	keeps the keys it had."""
+	"""``draft_card`` on tool rows: true only for a Pending row whose card carries a ``draft``.
+
+	With the draft cards feature on, every tool row gets the boolean. With the site flag off,
+	only a row that IS a pending draft card gets it (true: a draft card parked while the flag
+	was on, still waiting, must still retire a typed draft) and every other row keeps exactly
+	the keys it had."""
 	from jarvis.chat import draft_card
 
-	if not draft_card.enabled():
-		return
+	on = draft_card.enabled()
 	for row in rows:
-		if row.get("role") == "tool":
-			row["draft_card"] = draft_card.is_pending_draft_row(row)
+		if row.get("role") != "tool":
+			continue
+		is_draft = draft_card.is_pending_draft_row(row)
+		if on or is_draft:
+			row["draft_card"] = is_draft
 
 
 def _pending_recency(conversation: str, messages: list) -> None:
