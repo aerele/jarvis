@@ -1201,11 +1201,7 @@
 							<template #below-body>
 								<!-- a draft block we cannot show: the error card INSTEAD of any draft card -->
 								<div
-									v-if="
-										draftBlockErrorText &&
-										_lastAssistant &&
-										_lastAssistant.name === m.name
-									"
+									v-if="draftBlockErrorText && actionAnchor === m.name"
 									class="jv-action jv-summary"
 								>
 									<div role="alert" class="jv-summary-body jv-summary-err">
@@ -1228,7 +1224,7 @@
 									</div>
 								</div>
 								<!-- rich action card the agent emits (doc confirm / email draft) -->
-								<template v-else-if="actionFor === m.name && activeAction">
+								<template v-else-if="actionAnchor === m.name && activeAction">
 									<!-- email draft -->
 									<div v-if="activeAction.kind === 'email'" class="jv-email">
 										<div class="jv-email-head">
@@ -1508,13 +1504,26 @@
 										>
 											{{ activeParkedNote }}
 										</div>
-										<template v-else-if="!summaryState.error">
+										<div v-else-if="summaryState.error" class="jv-action-foot">
+											<button
+												class="jv-action-2nd"
+												:disabled="
+													(cardModel && cardModel.applying) ||
+													cancellingDraft
+												"
+												@click="cancelDraft"
+											>
+												Cancel
+											</button>
+										</div>
+										<template v-else>
 											<div class="jv-action-foot">
 												<button
 													class="jv-action-primary"
 													:disabled="
 														!cardModel ||
 														cardModel.applying ||
+														cancellingDraft ||
 														convStreaming
 													"
 													:title="
@@ -1550,6 +1559,16 @@
 													"
 												>
 													Edit
+												</button>
+												<button
+													class="jv-action-2nd"
+													:disabled="
+														(cardModel && cardModel.applying) ||
+														cancellingDraft
+													"
+													@click="cancelDraft"
+												>
+													Cancel
 												</button>
 											</div>
 											<div class="jv-summary-hint">
@@ -4556,7 +4575,15 @@
 						>
 							{{ draftPanel.applying ? "Saving…" : draftCta }}
 						</button>
-						<button class="jv-action-discard" @click="discardDraft">Discard</button>
+						<!-- A parked draft already became a confirmation card: Discard would record
+						     "nothing was saved" while that card stays confirmable. -->
+						<button
+							class="jv-action-discard"
+							:disabled="draftPanel.applying || !!draftPanel.parked"
+							@click="discardDraft"
+						>
+							Discard
+						</button>
 					</div>
 				</aside>
 			</div>
@@ -4681,6 +4708,8 @@ import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
 import { parseCompactCommand, compactOutcome } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
+import { isDraftRow, liveDraftRow } from "@/lib/liveDraft";
+import { tailCard } from "@/lib/tailCard";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
 import { isReceiptEcho } from "@/lib/receiptEcho";
@@ -7993,19 +8022,52 @@ const _lastAssistant = computed(() => {
 	}
 	return last && last.role === "assistant" && !last.streaming ? last : null;
 });
-// The draft whose save failed on a value the person is fixing in the panel (its
-// message name). The assistant's "I'll wait" reply to that failure must not retire the
-// draft's card, or closing the panel would leave no Edit to reopen it.
-const fixingDraft = ref("");
-watch(currentId, () => {
-	fixingDraft.value = "";
+// The newest unsaved draft row (lib/liveDraft, the one rule the phone and the server
+// share): kept through later replies until it is saved, cancelled or replaced. Null
+// whenever _lastAssistant is, so nothing shows mid-turn. It reads the loaded rows as the
+// server counts them (`messages`: every role, every tool row), never visibleMessages,
+// which drops the tool rows that have no receipt chip. A draft cancelled here whose card
+// would still show (the server answered `already`, or the reload failed) stays hidden for
+// this session (hiddenDrafts, keyed by the draft row's name).
+const hiddenDrafts = ref(new Set());
+const _liveDraft = computed(() => {
+	const live = liveDraftMessage(messages.value, _lastAssistant.value);
+	return live && !hiddenDrafts.value.has(live.name) ? live : null;
 });
-// The message that owns the live draft card: the last assistant message, or the draft
-// being fixed when only the assistant's replies follow it (lib/draftSave).
-const _cardMessage = computed(() =>
-	liveDraftMessage(visibleMessages.value, _lastAssistant.value, fixingDraft.value, (m) =>
-		Boolean(actionOf(m))
-	)
+// The last message's own action block that is not a draft (an email draft, a gated verb's
+// legacy note, an unknown verb's error card). It wins the tail over a kept draft.
+const _tailOwnAction = computed(() => {
+	const last = _lastAssistant.value;
+	return last && !isDraftRow(last) && actionOf(last) ? last : null;
+});
+// One card at the tail (lib/tailCard): the last message's own card (action block, ask or
+// confirm strip) hides a KEPT draft card until it is answered. A draft in the last
+// message itself still wins.
+const _tailCard = computed(() => {
+	const last = _lastAssistant.value;
+	return tailCard({
+		tailHasOwnAction: !!_tailOwnAction.value,
+		hasDraft: !!_liveDraft.value,
+		draftIsTail: !!last && !!_liveDraft.value && _liveDraft.value.name === last.name,
+		tailHasAsk: !!last && !!askOf(last),
+		tailHasConfirm: !!last && !!confirmLabel(last),
+	});
+});
+// The message that owns the card: the last message when it has its own action block (as
+// before this rule), else the live draft row. Every save and cancel
+// names THIS row; the card is drawn under actionAnchor.
+const _cardMessage = computed(() => {
+	const last = _lastAssistant.value;
+	if (!last) return null;
+	const live = _liveDraft.value;
+	if (live && live.name === last.name) return live;
+	if (_tailOwnAction.value) return last;
+	return _tailCard.value === "draft" ? live : null;
+});
+// The message the card and the draft error alert are drawn under: always the last
+// assistant message, so the card sits at the bottom of the thread.
+const actionAnchor = computed(() =>
+	_cardMessage.value && _lastAssistant.value ? _lastAssistant.value.name : ""
 );
 // `messages` intentionally stays visible while a different conversation loads.
 // Do not let its old action card remain actionable in that new view. A raw action
@@ -8014,7 +8076,7 @@ const _cardMessage = computed(() =>
 // verb) gets ONE red error card and no live draft: _rawActiveAction is null for it,
 // so the summary card, the model build watcher and the edit panel never start.
 const draftBlockErrorText = computed(() => {
-	const m = _lastAssistant.value;
+	const m = _cardMessage.value;
 	if (!m) return "";
 	return draftBlockError(m.content || "", actionOf(m), brand.agentName);
 });
@@ -8694,7 +8756,13 @@ async function confirmSummary() {
 		model?.messageKey || actionFor.value,
 		model?.actionKey || (a ? draftActionKey(a) : "")
 	);
-	if (!model || model.applying || convStreaming.value || !draftModelViewIsCurrent(view, model))
+	if (
+		!model ||
+		model.applying ||
+		cancellingDraft.value ||
+		convStreaming.value ||
+		!draftModelViewIsCurrent(view, model)
+	)
 		return;
 	// The panel is open on this draft: Confirm saves what the person sees there (their
 	// edits, not the card's copy), and a failure marks the fields in that same panel.
@@ -8736,7 +8804,6 @@ function resetDraftActionState() {
 	draftPanel.value = null;
 	summaryState.value = blankSummaryState();
 	previewOpen.value = false;
-	fixingDraft.value = "";
 	parkedDrafts.value = new Map();
 }
 function previewSummary() {
@@ -8828,7 +8895,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 			// the chat explains (or the note says to ask, when it could not be sent).
 			closeDraftPanel();
 			notify(outcome.note, { type: "error" });
-			fixingDraft.value = "";
 			await loadConversation(view.conversation);
 			if (!chatViewIsCurrent(view)) return;
 			store.loadConversations();
@@ -8840,8 +8906,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 			// detail + hint, and nothing was saved) instead of throwing a raw Frappe
 			// 403/417. Keep the panel open so the values are editable (R2-9: the
 			// assistant is only told the user is fixing it here).
-			// The panel's draft stays live through the assistant's acknowledgement.
-			if (p.editable) fixingDraft.value = draftKey;
 			p.applying = false;
 			p.error = outcome.error;
 			markMissing(p, p.error.fields, (_formMetaCache[p.doctype] || {}).fields);
@@ -8853,7 +8917,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 		// draft so it can't park a second card.
 		if (outcome.kind === "parked") {
 			const parked = outcome.note;
-			fixingDraft.value = "";
 			p.applying = false;
 			p.parked = parked;
 			parkedDrafts.value = markParked(parkedDrafts.value, draftKey, parked);
@@ -8864,7 +8927,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 			await loadConversation(view.conversation);
 			return;
 		}
-		fixingDraft.value = "";
 		closeDraftPanel();
 		await loadConversation(view.conversation);
 		if (!chatViewIsCurrent(view)) return;
@@ -8889,9 +8951,64 @@ function showQueuedContinuation(r) {
 	sending.value = true;
 }
 
+// Cancel on the draft card: the server records it (a "discarded" receipt), so the card
+// is gone on both apps and after a reload. Always the DRAFT row's name (actionFor), never
+// the tail's. One click at a time, and not while a save is running.
+const cancellingDraft = ref(false);
+function cancelDraft() {
+	return cancelDraftFor(actionFor.value);
+}
+// The edit panel's Discard is the same Cancel. The panel names the draft it was opened on
+// (stamped then), so it still names it while a turn runs.
 function discardDraft() {
-	closeDraftPanel();
-	send("No, cancel that.");
+	return cancelDraftFor(draftPanel.value?.messageKey || actionFor.value);
+}
+async function cancelDraftFor(key) {
+	if (!key || cancellingDraft.value || cardModel.value?.applying || draftPanel.value?.applying)
+		return;
+	// Parked (its confirmation card waits, perhaps parked from another device while this panel
+	// was open): cancelling the draft would say nothing was saved while that card stays live.
+	if (parkedNoteFor(parkedDrafts.value, key) || parkedByCard(pendingActions.value, key)) return;
+	const view = captureDraftActionView(activeAction.value, key);
+	cancellingDraft.value = true;
+	try {
+		try {
+			await api.dismissDraft(view.conversation, key);
+		} catch {
+			if (chatViewIsCurrent(view)) {
+				notify("Couldn't cancel this draft. Try again.", { type: "error" });
+			}
+			return;
+		}
+		// Cancelled for good on the server. A reload that fails now is not a failed cancel.
+		if (!chatViewIsCurrent(view)) return;
+		closeDraftPanel();
+		previewOpen.value = false;
+		try {
+			await loadConversation(view.conversation);
+		} catch (e) {
+			console.warn("Jarvis: could not reload after cancelling a draft", e);
+		}
+		if (!chatViewIsCurrent(view)) return;
+		// Still the live draft (the server answered `already`, or the reload failed): hide
+		// it here for this session, so Cancel never looks dead. The rule itself, on the loaded
+		// rows: _liveDraft is null while a turn runs (a panel Discard mid-turn).
+		if (liveDraftRow(messages.value)?.name === key) hiddenDrafts.value.add(key);
+		store.loadConversations();
+	} finally {
+		cancellingDraft.value = false;
+	}
+}
+
+// Drafts a typed "show it" already took the person to: the next one is sent as a message.
+const draftsShownOnRequest = new Set();
+// The draft card, or its error card, is the one `.jv-action.jv-summary` in the thread.
+function scrollDraftCardIntoView() {
+	const el = threadEl.value?.querySelector(".jv-action.jv-summary");
+	if (!el) return scrollBottom(true);
+	const reduced =
+		window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+	el.scrollIntoView?.({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
 }
 
 // --- action:pending confirm card (write-safety gate, issue #186) ---
@@ -12215,6 +12332,18 @@ async function send(textArg, resendAck) {
 		if (chatViewIsCurrent(_typedView) && visiblePendingActions.value.length > before) {
 			input.value = "";
 			notify("Found a pending confirmation.", { type: "success" });
+			return;
+		}
+		// No pending card, but the card at the tail is a kept draft's (lib/tailCard): take
+		// them to that card, once per draft, and say so. A card of the last message's own,
+		// or a second "show it" for the same draft, goes to the agent as a normal message.
+		const shownDraft = _tailCard.value === "draft" ? _liveDraft.value?.name : "";
+		if (chatViewIsCurrent(_typedView) && shownDraft && !draftsShownOnRequest.has(shownDraft)) {
+			draftsShownOnRequest.add(shownDraft);
+			input.value = "";
+			notify("Your draft is at the bottom.", { type: "info" });
+			await nextTick();
+			scrollDraftCardIntoView();
 			return;
 		}
 	}
