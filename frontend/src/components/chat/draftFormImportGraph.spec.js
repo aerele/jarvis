@@ -27,6 +27,13 @@ const ENTRIES = [
 	here("../../lib/toolDraft.js"),
 	here("../../lib/draftCardValues.js"),
 	here("../../lib/draftSave.js"),
+	// The form builder both apps share (every API read is injected), and the host's other libs.
+	here("../../lib/draftModel.js"),
+	here("../../lib/toolDraftHost.js"),
+	here("../../lib/toolDraftPanel.js"),
+	here("../../lib/toolDraftKeys.js"),
+	here("../../lib/draftReceipt.js"),
+	here("../../lib/draftCardView.js"),
 ];
 // The only package a file in the graph may import.
 const ALLOWED_PACKAGES = new Set(["vue"]);

@@ -603,18 +603,6 @@ describe("a server draft card's edit form in the panel", () => {
 		expect(slice("function onToolPreviewConfirm()", "\n}\n")).toContain("createToolDraft(pa)");
 		expect(slice("function onToolPreviewEdit()", "\n}\n")).toContain("openToolDraft(pa)");
 	});
-
-	// Break: the model builder resolves a server draft's key by label (the value lands on a field
-	// whose label looks like it), or a typed action starts honouring a `fieldname` key.
-	it("the model builder is fieldname-first for a card, and unchanged for a typed action", () => {
-		const build = slice("async function buildDraftModel(a) {", "\n// Open the editable panel");
-		expect(squash(build)).toContain(
-			"resolveDraftField( f, meta.fields, (label) => _actField(metaLookup, label), !!a[FROM_CARD] )"
-		);
-		expect(build).not.toContain("_actField(metaLookup, f.label)");
-		// an unloadable record only stops a typed action
-		expect(build).toContain("if ((a.tables || []).length && !a[FROM_CARD]) {");
-	});
 });
 
 describe("the twin row of a Claude-route draft", () => {

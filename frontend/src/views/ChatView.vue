@@ -4554,22 +4554,11 @@ import { PAYMENT_CALENDAR_PAGE } from "../../../jarvis/public/js/shared/goto_pag
 import { normaliseAction } from "@/lib/chatAction";
 import { draftBlockError } from "@/lib/chatAction";
 import { isSilentRun, shouldStopSpinning, streamingRowIsLive } from "@/lib/silentRun";
-import { markMissing, panelField as _panelField } from "@/lib/docFields";
+import { markMissing } from "@/lib/docFields";
+import { makeDraftModelBuilder } from "@/lib/draftModel";
 import { useDraftLink } from "@/lib/useDraftLink";
-import {
-	alignComputedRows,
-	blankComputedColumns,
-	checkToYesNo,
-	draftValues,
-} from "@/lib/draftApply";
-import {
-	applyAutoOpen,
-	applyRuleValues,
-	buildDraftTable,
-	markMissingRows,
-	parentDefaults,
-	ruleFetchLinks,
-} from "@/lib/draftTables";
+import { alignComputedRows, blankComputedColumns, draftValues } from "@/lib/draftApply";
+import { applyAutoOpen, markMissingRows } from "@/lib/draftTables";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { replyBarParts, stampDeltaTime, useClientStamp } from "@/lib/replyBar";
 import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
@@ -4603,13 +4592,7 @@ import {
 	toolPanelNotices,
 	withBusyKind,
 } from "@/lib/toolDraftHost";
-import {
-	FROM_CARD,
-	focusFirstMark,
-	resolveDraftField,
-	settleCalculatedCells,
-	toolPrimaryLabel,
-} from "@/lib/toolDraftPanel";
+import { focusFirstMark, settleCalculatedCells, toolPrimaryLabel } from "@/lib/toolDraftPanel";
 import {
 	firstEditable,
 	openerButton,
@@ -7924,32 +7907,10 @@ function answerAsk(answer, messageId) {
 }
 
 // --- Field-control helpers shared by the confirm card and the record draft
-// panel (chip → side panel; see _formMeta / openDraftPanel below).
+// panel (chip → side panel; see buildDraftModel / openDraftPanel below).
 function _isLongVal(v) {
 	const s = String(v == null ? "" : v);
 	return s.length > 55 || s.includes("\n");
-}
-// "Item Group" / "item_group" / "itemGroup" all → "itemgroup": the agent's
-// action JSON labels fields sometimes by display label, sometimes by fieldname.
-function _normKey(s) {
-	return String(s || "")
-		.toLowerCase()
-		.replace(/[^a-z0-9]/g, "");
-}
-// Resolve one card label to a field: exact normalized match on label/fieldname,
-// else unique containment (e.g. "UOM" → stock_uom when it's the only sensible
-// hit; required fields win ambiguous shorthands).
-function _actField(meta, label) {
-	const k = _normKey(label);
-	if (!k) return null;
-	if (meta.map[k]) return meta.map[k];
-	const hits = meta.fields.filter((f) => f._kl.includes(k) || f._kf.includes(k));
-	if (hits.length === 1) return hits[0];
-	if (hits.length > 1) {
-		const reqd = hits.filter((f) => f.reqd);
-		if (reqd.length === 1) return reqd[0];
-	}
-	return null;
 }
 // --- Record draft panel: the action JSON is the draft; edits are local; apply
 // posts to actions_api (no LLM round-trip). ---
@@ -8041,6 +8002,19 @@ function onOverlayBackdropClick(close) {
 	if (_overlayPressOnBackdrop) close();
 }
 
+// The draft form builder (lib/draftModel.js) with this view's API calls. It is made here, above
+// useDraftLink, because the link menu below is handed fillRuleValues while the view is set up.
+// The form-meta cache it returns lives as long as this view, as the closure's did.
+const {
+	buildDraftModel,
+	fillRuleValues,
+	formMetaCache: _formMetaCache,
+} = makeDraftModelBuilder({
+	getDoctypeFormMeta: (doctype) => api.getDoctypeFormMeta(doctype),
+	loadDocForEdit: (doctype, name) => api.loadDocForEdit(doctype, name),
+	ruleValues: (doctype, table, links) => api.ruleValues(doctype, table, links),
+});
+
 // The form's link-search state and handlers (one shared menu), the same composable the phone calls.
 const { draftLink, draftLinkError, onDraftLink, pickDraftLink, closeDraftLink, resetDraftLink } =
 	useDraftLink({
@@ -8048,170 +8022,6 @@ const { draftLink, draftLinkError, onDraftLink, pickDraftLink, closeDraftLink, r
 		searchLink: (...args) => api.searchLink(...args),
 		fillRuleValues,
 	});
-const _formMetaCache = {};
-
-async function _formMeta(doctype) {
-	if (_formMetaCache[doctype]) return _formMetaCache[doctype];
-	const r = await api.getDoctypeFormMeta(doctype);
-	if (!r || !r.ok) throw new Error("no form meta");
-	for (const f of r.fields) {
-		f._kl = _normKey(f.label);
-		f._kf = _normKey(f.fieldname);
-	}
-	_formMetaCache[doctype] = r;
-	return r;
-}
-
-// Build the draft model from an action + form meta (+ live doc for updates),
-// WITHOUT opening the panel - so the editable panel and later summary/preview
-// surfaces can share one construction path.
-async function buildDraftModel(a) {
-	if (!a || a.kind !== "doc" || !a.doctype) return;
-	const verb = a.verb === "update" ? "update" : "create";
-	// An action block we cannot render must FAIL, not render empty - a blank card
-	// reads as "Jarvis did not try" rather than "Jarvis emitted a shape I cannot
-	// draw". `docs` is a create_doc batch payload, not an action key (AGENTS.md:122
-	// documents fields+tables for ONE record) - throw on it for EITHER verb: a
-	// {"verb":"update","docs":[...]} fusion otherwise builds an empty diff, renders
-	// "No field changes." with Confirm ENABLED, and sends update_doc(dt, "", {}).
-	// A hybrid carrying BOTH fields and docs throws too: rendering the fields and
-	// dropping the docs is a half-card the user confirms believing it is the set.
-	if (Array.isArray(a.docs)) {
-		const err = new Error(
-			"This draft carries a `docs` batch, which is a create_doc payload rather than a card. Ask me to apply them as a batch."
-		);
-		err.jvUserMessage = err.message;
-		throw err;
-	}
-	// Create-only: a fieldless UPDATE block legitimately renders "No field changes.",
-	// and a tables-only create is legal, so neither may throw.
-	if (verb === "create" && !(a.fields || []).length && !(a.tables || []).length) {
-		const err = new Error("This draft has no fields to show.");
-		err.jvUserMessage = err.message;
-		throw err;
-	}
-	let meta;
-	try {
-		meta = await _formMeta(a.doctype);
-	} catch (e) {
-		return;
-	} // no meta → no panel (old card still shows)
-	let base = { values: {}, tables: {} };
-	let storedUnavailable = false;
-	if (verb === "update" && a.name) {
-		try {
-			base = await api.loadDocForEdit(a.doctype, a.name);
-		} catch (e) {
-			// A server draft card's form (a[FROM_CARD], which a typed action cannot carry) shows the
-			// draft's own cells and says so; the card itself already shows what changes.
-			storedUnavailable = !!a[FROM_CARD];
-			// Without the saved rows the card cannot show which rows a proposed table
-			// keeps or removes, so never offer to apply one blind (CR-3).
-			if ((a.tables || []).length && !a[FROM_CARD]) {
-				const err = new Error(
-					"Could not load this record's saved rows, so I can't show what would change. Tell me to try again."
-				);
-				err.jvUserMessage = err.message;
-				throw err;
-			}
-			/* not editable → create-style view */
-		}
-	}
-	// proposed main fields: agent's fields resolved by label-or-fieldname
-	const metaLookup = { fields: meta.fields, map: {} };
-	for (const f of meta.fields) {
-		if (f._kf && !metaLookup.map[f._kf]) metaLookup.map[f._kf] = f;
-		if (f._kl) metaLookup.map[f._kl] = f;
-	}
-	const proposed = {}; // fieldname -> value
-	for (const f of a.fields || []) {
-		// A server draft's key is the field its `fieldname` names, exactly; a typed action's
-		// label is resolved as before (lib/toolDraftPanel resolveDraftField).
-		const m = resolveDraftField(
-			f,
-			meta.fields,
-			(label) => _actField(metaLookup, label),
-			!!a[FROM_CARD]
-		);
-		if (m && m.fieldtype !== "Table") proposed[m.fieldname] = f.value;
-	}
-	const fields = [];
-	const seen = new Set();
-	for (const f of meta.fields) {
-		if (f.fieldtype === "Table") continue;
-		const has = f.fieldname in proposed;
-		const baseV = base.values[f.fieldname];
-		// Show: agent-proposed fields + required fields + (update) filled fields the agent referenced
-		if (!has && !f.reqd) continue;
-		const pf = _panelField(f, has ? proposed[f.fieldname] : baseV);
-		pf.proposed = has; // agent set a value for this field (vs. shown only because reqd)
-		if (verb === "update")
-			pf.orig =
-				baseV == null ? "" : String(pf.control === "check" ? checkToYesNo(baseV) : baseV);
-		pf.changed = verb === "update" && String(pf.value) !== String(pf.orig);
-		fields.push(pf);
-		seen.add(f.fieldname);
-	}
-	// child tables: every meta table that is required, agent-proposed, or (update) non-empty
-	const tables = [];
-	const aTables = {};
-	for (const t of a.tables || []) if (t && t.fieldname) aTables[t.fieldname] = t.rows || [];
-	for (const [tf, spec] of Object.entries(meta.tables || {})) {
-		const metaField = meta.fields.find((f) => f.fieldname === tf) || { reqd: 0 };
-		const table = buildDraftTable({
-			fieldname: tf,
-			spec,
-			required: !!metaField.reqd,
-			proposed: aTables[tf],
-			saved: (base.tables || {})[tf] || [],
-			verb,
-		});
-		if (table) tables.push(table);
-	}
-	// Bounded: the card shows with the defaults rather than wait on a slow answer.
-	await Promise.race([
-		fillRuleValues(a.doctype, tables),
-		new Promise((resolve) => setTimeout(resolve, RULE_VALUES_WAIT_MS)),
-	]);
-	// A Prompt-autonamed DocType (e.g. Server Script) carries its document name as a
-	// proposed "name" field, not a real DocField, so it never lands in `fields`.
-	// Capture it here so applyDraft sends it as `name` (the backend folds it into
-	// the create values). Field/series-named DocTypes have no such field -> "".
-	const proposedCreateName =
-		verb === "update"
-			? ""
-			: String(
-					(
-						(a.fields || []).find(
-							(x) => String(x.label || "").toLowerCase() === "name"
-						) || {}
-					).value ?? ""
-			  );
-	return {
-		verb,
-		doctype: a.doctype,
-		docName: verb === "update" ? a.name || "" : proposedCreateName,
-		title: a.title || "",
-		titleField: meta.title_field || "",
-		submittable: !!meta.is_submittable,
-		// Multi-step plans: the card marks non-final steps "continue": 1; the
-		// bench then dispatches a follow-up agent turn after Apply so the agent
-		// stages the next step without the user typing "continue".
-		cont: a.continue ? 1 : 0,
-		linkContext: { ...base.values, ...proposed },
-		// For child rows' rules: Desk's new-form defaults and the record's docstatus.
-		parentDefaults: verb === "create" ? parentDefaults(meta.fields) : {},
-		docstatus: Number(base.docstatus || 0),
-		fields,
-		tables,
-		tableMeta: meta.tables || {},
-		applying: false,
-		error: "",
-		updatedToast: false,
-		...(storedUnavailable ? { storedUnavailable: true } : {}),
-	};
-}
-
 // Open the editable panel for an action, via the shared buildDraftModel.
 async function openDraftPanel(a, capturedView = null) {
 	// The draft this panel edits, captured before the build: actionFor goes null
@@ -8268,26 +8078,6 @@ function dismissDraftPanel() {
 function closeDraftPanel() {
 	draftPanel.value = null;
 	resetDraftLink();
-}
-
-// The hidden values the rows' rules read that Desk fetches from a link (is_fixed_asset
-// from the Item), one call per table that still needs one, so the card shows and
-// requires what Desk would before the record is saved. A failure keeps the defaults;
-// `isCurrent` drops an answer that lands after its panel was closed or replaced.
-const RULE_VALUES_WAIT_MS = 1500;
-async function fillRuleValues(doctype, tables, isCurrent = () => true) {
-	await Promise.all(
-		(tables || []).map(async (t) => {
-			const links = ruleFetchLinks(t);
-			if (!Object.keys(links).length) return;
-			try {
-				const r = await api.ruleValues(doctype, t.fieldname, links);
-				if (r && r.ok && isCurrent()) applyRuleValues(t, r.values, links);
-			} catch (e) {
-				// the rules read the defaults, as before
-			}
-		})
-	);
 }
 
 const draftCta = computed(() => {

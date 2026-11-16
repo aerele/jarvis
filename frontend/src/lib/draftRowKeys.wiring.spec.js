@@ -68,18 +68,29 @@ describe("ChatView focus for the row form", () => {
 });
 
 describe("ChatView fetches the rule values Desk fetches from a link", () => {
-	it("after building the card's tables, and after a link is picked", () => {
-		expect(between(src, "async function buildDraftModel(", "\nfunction ")).toMatch(
-			/await Promise\.race\(\[\s*fillRuleValues\(a\.doctype, tables\),[\s\S]*RULE_VALUES_WAIT_MS/
+	// The build's own wait and the late-answer rule are executed in draftModel.spec.js and
+	// draftModel.cards.spec.js; here only the view's wiring of the shared builder is pinned.
+	it("the builder is made with this view's calls, before the link menu is handed its fillRuleValues", () => {
+		const made = between(src, "makeDraftModelBuilder({", "});");
+		// Break: a call wired to the wrong api function (a saved-record read answering the form
+		// meta, or the rule values never asked).
+		expect(made).toContain("api.getDoctypeFormMeta(doctype)");
+		expect(made).toContain("api.loadDocForEdit(doctype, name)");
+		expect(made).toContain("api.ruleValues(doctype, table, links)");
+		// Break: the view stops taking the builder's form-meta cache (a failed save then marks no
+		// field the form does not show: markMissing, the Save error path and the tool host's
+		// metaFields all read `_formMetaCache[doctype]?.fields` and tolerate its absence silently).
+		expect(between(src, "const {\n\tbuildDraftModel,", "makeDraftModelBuilder({")).toContain(
+			"formMetaCache: _formMetaCache,\n"
 		);
+		// Break: the builder moved below useDraftLink. fillRuleValues is a const from it now, and
+		// useDraftLink reads it while the view is set up: the view would not mount.
+		expect(src.indexOf("makeDraftModelBuilder({")).toBeLessThan(src.indexOf("useDraftLink({"));
 		// The pick handler lives in the shared composable; the host hands it its fillRuleValues.
 		expect(between(link, "function pickDraftLink(", "\n\tfunction ")).toMatch(
 			/fillRuleValues\(panel\.doctype, panel\.tables, \(\) => draftPanel\.value === panel\)/
 		);
 		expect(between(src, "useDraftLink({", "});")).toMatch(/draftPanel,[\s\S]*fillRuleValues,/);
-		expect(between(src, "async function fillRuleValues(", "\nfunction ")).toMatch(
-			/api\.ruleValues\(doctype, t\.fieldname, links\)[\s\S]*isCurrent\(\)\) applyRuleValues\(t, r\.values, links\)/
-		);
 	});
 });
 
