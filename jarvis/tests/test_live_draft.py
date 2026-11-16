@@ -715,6 +715,102 @@ class TestParkedToolDraft(PendingActionTestMixin, FrappeTestCase):
 		)
 		self.assertEqual(live_draft.find(conv)["message"], typed)
 
+	def test_the_doctype_catalogue_is_read_once_for_all_the_cards(self):
+		"""The board and the export list every waiting card: a DocType lookup per card would
+		grow with them. One read answers for all; the result is what a lookup per card gave
+		(a real doctype keeps its title, a made-up one is named by nothing)."""
+		real = [self.make_conv() for _i in range(3)]
+		for conv in real:
+			self._park_row(conv, 1)
+		fake = self.make_conv()
+		self._park_row(fake, 1, doctype="Not A Real Doctype")
+		catalogue = []
+		original = frappe.get_all
+
+		def spy(doctype, *args, **kwargs):
+			if doctype == "DocType":
+				catalogue.append(kwargs.get("filters"))
+			return original(doctype, *args, **kwargs)
+
+		with patch.object(frappe, "get_all", side_effect=spy):
+			cards = live_draft.pending_draft_cards(owner=OWNER)
+		self.assertEqual(len(catalogue), 1, catalogue)
+		by_conv = {c["conversation"]: (c["doctype"], c["title"]) for c in cards}
+		self.assertEqual({by_conv[c] for c in real}, {("ToDo", "New ToDo")})
+		self.assertEqual(by_conv[fake], ("", ""))
+
+	def _typed_draft(self, seq_conv, text="T"):
+		return _insert(
+			seq_conv,
+			1,
+			"assistant",
+			_block(kind="doc", verb="create", doctype="ToDo", title=text, fields=[]),
+		)
+
+	def test_open_drafts_without_a_parked_card_is_develops_list_and_stops_at_ten(self):
+		"""Typed drafts only: the board answers exactly what it did before cards were parked
+		(newest first, ten at most) and asks `is_collaborative` for the ten it keeps, not for
+		the fifty it reads. Without the early stop every board load pays for the rest."""
+		from jarvis.chat import approvals_api
+
+		convs = [self.make_conv() for _i in range(11)]
+		made = {conv: self._typed_draft(conv, f"T{i}") for i, conv in enumerate(convs)}
+		frappe.db.commit()
+		expected = sorted(
+			(
+				{
+					"conversation": conv,
+					"title": "pa test",
+					"origin_page": "",
+					"verb": "create",
+					"doctype": "ToDo",
+					"summary": f"T{i}",
+					"last_at": str(frappe.db.get_value(MSG, made[conv], "creation")),
+				}
+				for i, conv in enumerate(convs)
+			),
+			key=lambda d: d["last_at"],
+			reverse=True,
+		)[:10]
+		asked = []
+
+		def collaborative(conversation):
+			asked.append(conversation)
+			return False
+
+		with patch.object(approvals_api, "is_collaborative", side_effect=collaborative):
+			listed = approvals_api._open_drafts(OWNER)
+		self.assertEqual(listed, expected)
+		self.assertEqual(len(asked), 10)
+
+	def test_a_parked_card_is_listed_and_replaces_that_chats_typed_draft(self):
+		"""A chat with a waiting draft card shows that card on the board (its title and the
+		doctype it drafts), once, instead of an older typed draft in the same chat; a chat with
+		only a typed draft is listed as before."""
+		from jarvis.chat import approvals_api
+
+		both, typed = self.make_conv(), self.make_conv()
+		self._typed_draft(both, "typed one")
+		token = self._park_row(both, 2)
+		typed_msg = self._typed_draft(typed, "typed two")
+		frappe.db.commit()
+		listed = {d["conversation"]: d for d in approvals_api._open_drafts(OWNER)}
+		self.assertEqual(set(listed), {both, typed})
+		self.assertEqual(
+			listed[both],
+			{
+				"conversation": both,
+				"title": "pa test",
+				"origin_page": "",
+				"verb": "create",
+				"doctype": "ToDo",
+				"summary": "New ToDo",
+				"last_at": str(frappe.db.get_value("Jarvis Pending Action", token, "creation")),
+			},
+		)
+		self.assertEqual(listed[typed]["summary"], "typed two")
+		self.assertEqual(listed[typed]["last_at"], str(frappe.db.get_value(MSG, typed_msg, "creation")))
+
 	def test_load_rows_reads_the_cards_in_one_query(self):
 		"""``load_rows`` runs inside prompt assembly and every apply: a Pending Action read per
 		tool row would grow with the chat."""
@@ -849,6 +945,14 @@ class TestPureRule(unittest.TestCase):
 			with self.subTest(case=case["id"]):
 				found = live_draft.pick(case["rows"], bool(case.get("parked_draft")))
 				self.assertEqual(found["message"] if found else None, case["live"])
+
+	def test_one_rule_says_which_doctypes_name_their_records_by_prompt(self):
+		"""The card's payload and the edit form read `autoname` through this one rule: a
+		difference would let the form ask for a name the card never carried."""
+		for autoname, want in (("Prompt", True), ("prompt", True), ("PROMPT", True), ("Prompt:", True)):
+			self.assertIs(live_draft.prompt_named(autoname), want, autoname)
+		for autoname in ("field:title", "naming_series:", "hash", "", None, 5):
+			self.assertIs(live_draft.prompt_named(autoname), False, autoname)
 
 	def test_the_bounds_match_the_javascript_rule(self):
 		with open(os.path.join(os.path.dirname(_CASES), "liveDraft.js"), encoding="utf-8") as f:

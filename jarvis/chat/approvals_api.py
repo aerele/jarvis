@@ -695,6 +695,10 @@ def _open_drafts(me: str) -> list[dict]:
 				"last_at": str(r.last_at or ""),
 			}
 		)
+		if len(out) == _OPEN_DRAFTS_MAX:
+			break
+	if not parked:
+		return out  # exactly develop's answer
 	out.extend(parked.values())
 	out.sort(key=lambda d: frappe.utils.get_datetime(d["last_at"]), reverse=True)
 	return out[:_OPEN_DRAFTS_MAX]

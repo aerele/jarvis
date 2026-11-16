@@ -83,6 +83,27 @@ class TestDraftValuesPure(unittest.TestCase):
 				self.assertEqual(mark["message"], draft_values.NOT_ROWS)
 		self.assertEqual(draft_values.errors({"items": None}, rules, is_update=True), [])
 
+	def test_an_update_row_named_twice_is_marked_in_plain_words(self):
+		"""The same saved row sent twice would reach the write, which refuses it in its own
+		words: the form gets a mark first, on the second row only."""
+		rules = _Rules(tables={"items": "Table"}, saved={"items": {"r1", "r2"}})
+		rows = [{"name": "r1"}, {"name": "r2"}, {"name": "r1"}, {"label": "new"}, {"label": "new"}]
+		found = draft_values.errors({"items": rows}, rules, is_update=True)
+		self.assertEqual(
+			found, [{"fieldname": "name", "parentfield": "items", "idx": 3, "message": draft_values.TWICE}]
+		)
+
+	def test_a_body_past_the_size_limits_is_too_big_and_one_at_them_is_not(self):
+		"""A form body is checked before anything reads it: more than 500 rows in one table, or
+		more than 200,000 characters of JSON, is refused. Exactly at either limit passes."""
+		at_rows = {"items": [{}] * draft_values.MAX_TABLE_ROWS}
+		self.assertFalse(draft_values.too_big(at_rows))
+		self.assertTrue(draft_values.too_big({"items": [{}] * (draft_values.MAX_TABLE_ROWS + 1)}))
+		self.assertTrue(draft_values.too_big({"other": [], "items": [1] * 501}))
+		wide = {"note": "x" * (draft_values.MAX_VALUES_CHARS - len('{"note": ""}'))}
+		self.assertFalse(draft_values.too_big(wide))
+		self.assertTrue(draft_values.too_big({"note": wide["note"] + "x"}))
+
 	def test_a_draft_row_index_must_name_one_drafted_row_once(self):
 		"""``_draft_row`` says which drafted row a sent row is: an index that is not one,
 		or one two rows both claim, would copy the wrong drafted cells into the record."""
@@ -694,22 +715,53 @@ if FrappeTestCase is not None:
 				"ok": False,
 				"error": {"code": "InvalidArgumentError", "message": draft_save._UNREADABLE, "fields": []},
 			}
+			# Keywords, as the web layer calls it: Frappe checks a whitelisted function's
+			# annotations on a request, so a typed ``values`` would raise FrappeTypeError here
+			# for the list and the number instead of reaching the reply.
 			for raw in ("{not json", "[1]", "5", "null", [1], 5):
 				with self.subTest(raw=raw), as_user(OWNER):
-					self.assertEqual(actions_api.save_draft_card(token, conv, raw), expected)
+					out = actions_api.save_draft_card(token=token, conversation=conv, values=raw)
+					self.assertEqual(out, expected)
 			self.assert_untouched(token, before)
+
+		def test_a_body_that_is_too_big_is_refused_before_it_is_read(self):
+			"""A table of 501 rows is answered with the fixable reply (the form stays open) and
+			the card is untouched; the check comes before the field rules."""
+			conv, token = self.todo_draft()
+			before = self.sealed(token)
+			out = self.save(token, conv, {"description": f"{MARK} big", "items": [{}] * 501})
+			self.assertEqual(
+				out,
+				{
+					"ok": False,
+					"error": {"code": "InvalidArgumentError", "message": draft_save._TOO_BIG, "fields": []},
+				},
+			)
+			self.assert_untouched(token, before)
+
+		def test_a_tool_message_with_internal_words_never_reaches_the_form(self):
+			"""A fixable reply passes the tool's own text to the form: one that names an internal
+			tool or rule is replaced by a plain sentence, the marked fields kept."""
+			fields = [{"fieldname": "description"}]
+			for message in ("update_doc refused it", "Set protected fields later", "get_doc failed"):
+				with self.subTest(message=message):
+					out = draft_save._fixable("InvalidArgumentError", message, fields=fields)
+					self.assertEqual(out["error"]["message"], draft_save._FORM_SAFE)
+					self.assertEqual(out["error"]["fields"], fields)
+			plain = draft_save._fixable("InvalidArgumentError", "Description is required")
+			self.assertEqual(plain["error"]["message"], "Description is required")
 
 		def test_a_missing_value_the_form_cannot_fill_is_closed_and_the_card_stays(self):
 			"""When the missing value cannot be marked in the form, a fixable reply would leave
-			the person stuck: ``draft_save`` must answer closed (``_NOT_HERE``) with the card
-			still Pending. The mark step is made to say "cannot mark"."""
+			the person stuck: ``draft_save`` must answer closed with the card still Pending and
+			still open (``card_open``). The mark step is made to say "cannot mark"."""
 			conv, token = self.todo_draft()
 			before = self.sealed(token)
 			with patch.object(actions_api, "_mark_fields", return_value=False) as mark:
 				out = self.save(token, conv, {"description": ""})
 			self.assertTrue(mark.called)
-			self.assert_closed(out, "InvalidArgumentError")
-			self.assertTrue(out["error"]["message"].endswith(draft_save._NOT_HERE), out)
+			self.assert_closed(out, "InvalidArgumentError", draft_save._NEEDS_CARD)
+			self.assertIs(out.get("card_open"), True)
 			self.assert_untouched(token, before)
 
 		def test_a_protected_field_is_marked_not_written(self):
@@ -762,7 +814,8 @@ if FrappeTestCase is not None:
 			before = self.sealed(token)
 			out = self.save(token, conv, {})
 			self.assertIs(out.get("closed"), True, out)
-			self.assertTrue(out["error"]["message"].endswith(draft_save._NOT_HERE), out)
+			self.assertEqual(out["error"]["message"], draft_save._NO_PERMISSION)
+			self.assertIs(out.get("card_open"), True)
 			self.assert_untouched(token, before)
 
 		def test_a_sensitive_edit_is_refused_closed(self):
@@ -772,22 +825,63 @@ if FrappeTestCase is not None:
 			conv, token = self.form_draft({})
 			before = self.sealed(token)
 			out = self.save(token, conv, {"client_script": "console.log(1)"})
-			self.assert_closed(out, draft_save.NEEDS_CARD)
+			self.assert_closed(out, draft_save.NEEDS_CARD, draft_save._NEEDS_CARD)
+			self.assertIs(out.get("card_open"), True)
 			self.assert_untouched(token, before)
 
-		def test_a_stale_update_target_is_refused_closed_and_the_card_stays(self):
-			"""A record changed after the draft must not be overwritten by it (update_doc
-			checks no ``modified``); the row stays Pending for the agent to redo."""
+		def test_a_stale_update_target_ends_the_card_failed_as_confirm_does(self):
+			"""A record changed after the draft must not be overwritten by it (update_doc checks
+			no ``modified``). The card can never run, so it ends Failed (reason ``stale``, as a
+			plain Confirm ends it) with its one receipt and the agent told, not left looking
+			alive: the person is told to ask for the update again."""
 			conv = self.make_conv()
 			todo = self.make_todo()
 			args = {"doctype": "ToDo", "name": todo, "changes": {"status": "Closed"}}
 			token = self.mint(conv, "update_doc", args)
-			before = self.sealed(token)
 			frappe.db.set_value("ToDo", todo, "priority", "High")
 			frappe.db.commit()
-			self.assert_closed(self.save(token, conv, {}), draft_save.STALE)
-			self.assert_untouched(token, before)
+			out = self.save(token, conv, {})
+			self.assert_closed(out, draft_save.STALE, draft_save._STALE)
+			self.assertNotIn("card_open", out)
+			self.assertIs(out["assistant_told"], True)
+			row = self.row(token)
+			self.assertEqual((row.status, row.reason_code, row.settled), ("Failed", "stale", 1))
+			[decided] = self.tool_rows(conv)
+			self.assertEqual((decided.tool_call_id, decided.action_outcome), (token, "failed"))
+			self.assertFalse(decided.pending_card)
 			self.assertEqual(frappe.db.get_value("ToDo", todo, "status"), "Open")
+			self.assertEqual(len(self.cont.calls), 1)  # the agent is told once
+
+		def test_a_deleted_update_target_ends_the_card_failed_with_its_own_words(self):
+			"""The record is gone: the card ends Failed with ``target_missing`` (Confirm's code)
+			and the person is told the update was not saved, not that it "changed"."""
+			conv = self.make_conv()
+			todo = self.make_todo()
+			args = {"doctype": "ToDo", "name": todo, "changes": {"status": "Closed"}}
+			token = self.mint(conv, "update_doc", args)
+			frappe.db.delete("ToDo", {"name": todo})
+			frappe.db.commit()
+			out = self.save(token, conv, {})
+			self.assert_closed(out, draft_save.MISSING, draft_save._MISSING)
+			row = self.row(token)
+			self.assertEqual((row.status, row.reason_code), ("Failed", "target_missing"))
+			[decided] = self.tool_rows(conv)
+			self.assertEqual((decided.tool_call_id, decided.action_outcome), (token, "failed"))
+
+		def test_a_card_whose_seal_fails_ends_failed_like_confirm(self):
+			"""A card that no longer verifies can never run: it ends Failed with the seal's
+			reason (as Confirm does) and the person is told to ask for the draft again."""
+			conv, token = self.todo_draft()
+			# The card changed under the seal (its draft is still readable, so the card is a
+			# draft card of this person's: only the seal check catches it).
+			card = json.loads(frappe.db.get_value(PA, token, "card"))
+			frappe.db.set_value(PA, token, "card", json.dumps({**card, "title": "tampered"}))
+			frappe.db.commit()
+			out = self.save(token, conv, {})
+			self.assert_closed(out, draft_save.CLOSED, draft_save._CLOSED)
+			row = self.row(token)
+			self.assertEqual(row.status, "Failed")
+			self.assertIn(row.reason_code, ("tampered", "unverifiable"))
 
 		def test_a_row_another_decider_holds_is_busy_and_the_form_stays(self):
 			"""A Confirm, a Discard or a second device holding the row: the save must not wait,
@@ -964,6 +1058,26 @@ if FrappeTestCase is not None:
 			self.assertIn(f"{MARK} tried", decided.tool_args)
 			self.assertEqual(len(self.cont.calls), 1)
 			self.assertEqual(self.todos("tried"), [])
+
+	class TestUpdateFailureAfterTheClaim(_DraftCase):
+		def test_an_update_that_fails_after_the_claim_ends_failed_and_closed_with_one_receipt(self):
+			"""The create case above has an update twin: the same end (Failed, closed, one decided
+			row, the agent told once) with the record left as it was."""
+			conv = self.make_conv()
+			todo = self.make_todo()
+			args = {"doctype": "ToDo", "name": todo, "changes": {"status": "Closed"}}
+			token = self.mint(conv, "update_doc", args)
+			with patch("jarvis.api.dispatch_confirmed", side_effect=_fail):
+				out = self.save(token, conv, {"priority": "High"})
+			self.assertIs(out["closed"], True)
+			self.assertNotIn("card_open", out)
+			self.assertIs(out["assistant_told"], True)
+			row = self.row(token)
+			self.assertEqual((row.status, row.reason_code, row.edited), ("Failed", "failed", 1))
+			[decided] = self.tool_rows(conv)
+			self.assertEqual((decided.tool_call_id, decided.action_outcome), (token, "failed"))
+			self.assertEqual(len(self.cont.calls), 1)
+			self.assertEqual(frappe.db.get_value("ToDo", todo, ["status", "priority"]), ("Open", "Medium"))
 
 	class TestReceiptRow(_DraftCase):
 		def _next_step(self, conv, token):

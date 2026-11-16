@@ -82,6 +82,12 @@ def real_doctype(value) -> str:
 	return known_doctype(value, lambda name: frappe.db.exists("DocType", name, cache=True))
 
 
+def prompt_named(autoname) -> bool:
+	"""Whether a DocType's ``autoname`` makes the person type the name (``Prompt``,
+	whatever the case or suffix). The one rule for the card's payload and the edit form."""
+	return isinstance(autoname, str) and autoname.lower().startswith("prompt")
+
+
 def _trim(value: str) -> str:
 	return value.strip(JS_WHITESPACE)
 
@@ -400,13 +406,17 @@ def pending_draft_cards(*, conversations=None, owner: str | None = None, limit: 
 		order_by="creation desc",
 		limit=limit,
 	)
-	out = []
+	parsed = []
 	for row in rows:
 		card = _card_of(row.get("card"))
 		draft = card.get("draft") if card else None
 		if not isinstance(draft, dict) or draft.get("verb") not in ("create", "update"):
 			continue
-		doctype = real_doctype(draft.get("doctype"))
+		parsed.append((row, draft, safe_doctype(draft.get("doctype"))))
+	known = _existing_doctypes({name for _row, _draft, name in parsed if name})
+	out = []
+	for row, draft, safe in parsed:
+		doctype = known.get(safe, "")
 		name = draft.get("name")
 		out.append(
 			{
@@ -423,6 +433,21 @@ def pending_draft_cards(*, conversations=None, owner: str | None = None, limit: 
 			}
 		)
 	return out
+
+
+def _existing_doctypes(names: set) -> dict:
+	"""``{asked name: the site's own spelling}`` for the names that are real DocTypes, from ONE
+	read (``real_doctype`` is one lookup per name: wrong inside a loop). The lookup is
+	case-insensitive like ``frappe.db.exists``, so the key stays the asked name."""
+	import frappe
+
+	if not names:
+		return {}
+	# System context: the DocType catalogue is read to learn which names exist, not to show
+	# any user a record, so no permission applies (``real_doctype`` is the same lookup).
+	found = frappe.get_all("DocType", filters={"name": ["in", sorted(names)]}, pluck="name")
+	by_lower = {safe_doctype(n).lower(): safe_doctype(n) for n in found}
+	return {n: by_lower[n.lower()] for n in names if n.lower() in by_lower}
 
 
 def _card_of(raw) -> dict | None:

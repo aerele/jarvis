@@ -19,16 +19,20 @@ fences (``confirmation_is_current``). No conversation lock is held, as on Confir
 from __future__ import annotations
 
 import copy
+import re
 
 import frappe
 from frappe import _
 
+from jarvis.chat import draft_values
+
 TOOLS = ("create_doc", "update_doc")
-CLOSED, BUSY, STALE, NEEDS_CARD = (
+CLOSED, BUSY, STALE, NEEDS_CARD, MISSING = (
 	"DraftClosedError",
 	"DraftBusyError",
 	"DraftStaleError",
 	"DraftNeedsCardError",
+	"DraftTargetMissingError",
 )
 _CLOSED = "This draft is no longer open. Ask me to draft it again."
 _ALREADY_SAVED = "This draft was already saved from the card."
@@ -37,11 +41,16 @@ _UNFINISHED = "This draft did not finish saving."
 _UNREADABLE = "This draft could not be read. Close the form and open it again."
 _BUSY = "This draft is being handled. Try again in a moment."
 _STALE = "This record changed after the draft was made. Ask me to draft the update again."
-_NEEDS_CARD = "This change needs a confirmation card and can't be edited here."
-_NOT_HERE = "This can't be fixed in the form. Ask me to change the draft."
-_UNCHECKED = (
-	"These values could not be checked safely, so nothing was saved. Check the record before trying again."
-)
+# Sensitive, structural or not editable in the form: the card is still valid, so only the form closes.
+_NEEDS_CARD = "This change can't be made in the form. Ask me to change the draft."
+_NO_PERMISSION = "You don't have permission to make this change."
+_MISSING = "This record no longer exists, so the update was not saved."
+_UNCHECKED = "Something went wrong and this could not be checked. Nothing was saved. Try again."
+_TOO_BIG = "This draft has too many rows to edit here. Ask me to change it."
+_FORM_SAFE = "This value can't be saved. Check it and try again."
+# A tool's own error text that must never reach the form.
+_INTERNAL = re.compile(r"get_doc|create_doc|update_doc|protected field", re.IGNORECASE)
+
 _CRASHED = "Something went wrong and nothing was saved. Try again."
 _CRASHED_LATE = "Something went wrong while saving. Check the record before trying again."
 _FIX_HINT = "Correct the marked fields, then save again."
@@ -53,10 +62,9 @@ def save(token: str, conversation: str, values, approver: str) -> dict:
 	"""``actions_api.save_draft_card`` after its owner check."""
 	edits = values_of(values)
 	if edits is None:
-		return {
-			"ok": False,
-			"error": {"code": "InvalidArgumentError", "message": _(_UNREADABLE), "fields": []},
-		}
+		return _plain_fixable(_UNREADABLE)
+	if draft_values.too_big(edits):
+		return _plain_fixable(_TOO_BIG)
 	return DraftSave(token, conversation, edits, approver).run()
 
 
@@ -132,28 +140,37 @@ class DraftSave:
 		if locked.status != PENDING:
 			return self._no_longer_open(locked)
 		if not confirmation_is_current(locked, lock=True):
-			return self._refuse(_closed(CLOSED, _(_CLOSED)))
+			return self._refuse(_closed(CLOSED, _(_CLOSED), card_open=True))
 		refused = _preflight(locked, self.approver, None)
 		if refused:
 			return self._refuse(_closed(CLOSED, refused["error"]["message"]))
 		try:
 			call = _seal.unseal_call(locked)
 		except _seal.SealError as e:
-			out = self._refuse(_closed(CLOSED, _(_CLOSED)))
-			frappe.log_error(
-				title=f"jarvis.pending_action.{e.reason_code}",
-				message=f"{locked.name}: failed binding {e.binding}",
-			)
-			return out
+			return self._end_unrun(locked, e.reason_code, _(_CLOSED), e.binding)
 		args = call.get("args") or {}
 		if not self._is_draft_call(locked.tool, args):
 			return self._refuse(_closed(CLOSED, _(_CLOSED)))
-		if locked.tool == "update_doc" and _stale_code(call.get("targets")):
-			return self._refuse(_closed(STALE, _(_STALE)))
+		stale = _stale_code(call.get("targets")) if locked.tool == "update_doc" else None
+		if stale:
+			text, code = (_MISSING, MISSING) if stale == "target_missing" else (_STALE, STALE)
+			return self._end_unrun(locked, stale, _(text), code=code)
 		edited, refused = self._edited(locked.tool, args)
 		if refused:
 			return self._refuse(refused)
 		return self._write(locked, edited)
+
+	def _end_unrun(self, locked, reason: str, message: str, binding: str = "", *, code: str = CLOSED) -> dict:
+		"""The card can never run (its seal fails, or the record changed or is gone): end it
+		Failed exactly as a plain Confirm does (``_fail_unrun``: logs a seal failure, commits,
+		ends an approved skill run, settles), then answer. The row is locked here, so it is
+		still Pending; ``_fail_unrun`` raises nothing if it were not."""
+		from jarvis.chat.pending_actions import _execute
+		from jarvis.chat.pending_actions._store import get_row
+
+		_execute._fail_unrun(locked, self.approver, reason, binding)
+		row = get_row(self.token)
+		return _closed(code, message, told=bool(row and row.settled))
 
 	def _is_draft_call(self, tool: str, args: dict) -> bool:
 		from jarvis.chat import draft_card, live_draft
@@ -164,8 +181,6 @@ class DraftSave:
 	def _edited(self, tool: str, args: dict) -> tuple[dict | None, dict | None]:
 		"""``(edited call, None)``, or ``(None, refusal)``: values the form may not set, a
 		change that needs its own card, or a trial run that fails. Nothing is kept."""
-		from jarvis.chat import draft_values
-
 		update = tool == "update_doc"
 		found = draft_values.validate(
 			self.doctype,
@@ -192,7 +207,7 @@ class DraftSave:
 			risk = _write_risk.check(tool, edited, guarded=True)
 		except api.WriteRefusedError:
 			risk = "refused"
-		return _closed(NEEDS_CARD, _(_NEEDS_CARD)) if risk else None
+		return _closed(NEEDS_CARD, _(_NEEDS_CARD), card_open=True) if risk else None
 
 	def _trial(self, tool: str, edited: dict) -> dict | None:
 		"""The edited call run in a sandbox, as the person: its failure keeps the card open."""
@@ -202,9 +217,12 @@ class DraftSave:
 			if tool == "create_doc" and not edited.get("values"):
 				# Every field left empty: marked as missing, like apply_action.
 				raise frappe.MandatoryError(_("Value missing"))
-			# A copy: Frappe's row init adds keys (``doctype``) to the dicts it is given, and
-			# the write and the settlement must get ``edited`` exactly as the person sent it.
+			# A copy: Frappe's row init adds keys (``doctype``) to the dicts it is given, so the
+			# trial must not change ``edited``. (The real write may still add a ``doctype`` key
+			# to the row dicts of what it stores; the values are what the person sent.)
 			api._run_preview(tool, copy.deepcopy(edited))
+			# A controller message from the trial must not ride out with the real save's reply.
+			frappe.clear_messages()
 		except api.PreviewSandboxLost:
 			return _fixable("InternalError", _(_UNCHECKED))
 		except (
@@ -218,15 +236,18 @@ class DraftSave:
 
 	def _trial_refusal(self, tool: str, edited: dict, e: Exception) -> dict:
 		"""Fixable with the fields marked, except what no value in the form fixes (a missing
-		value it cannot fill, a permission denial): closed, the card still Pending."""
+		value it cannot fill, a permission denial): the form closes, the card stays Pending."""
 		from jarvis import api
 		from jarvis.chat.actions_api import _mark_fields, _value_failure
 		from jarvis.tools._write_risk import REFUSAL_CODES
 
 		err = dict(api._preview_error(e)["error"])
 		frappe.clear_messages()
-		if err.get("code") in REFUSAL_CODES:
-			return _closed(NEEDS_CARD, _(_NEEDS_CARD))
+		code = err.get("code") or "InvalidArgumentError"
+		if code in REFUSAL_CODES:
+			return _closed(NEEDS_CARD, _(_NEEDS_CARD), card_open=True)
+		if code == "PermissionDeniedError":
+			return _closed(code, _(_NO_PERMISSION), card_open=True)
 		update = tool == "update_doc"
 		marked = None
 		if _value_failure(err):
@@ -234,15 +255,13 @@ class DraftSave:
 			verb = "update" if update else "create"
 			marked = _mark_fields(err, verb, self.doctype, edited.get("name") or "", written, e)
 		message = frappe.utils.strip_html(str(err.get("message") or "")) or _("These values can't be saved.")
-		code = err.get("code") or "InvalidArgumentError"
-		if marked is False or code == "PermissionDeniedError":
-			return _closed(code, f"{_sentence(message)} {_(_NOT_HERE)}")
+		if marked is False:
+			return _closed(code, _(_NEEDS_CARD), card_open=True)
 		extra = {"fields": err["fields"], "hint": err.get("hint")} if err.get("fields") else {}
 		return _fixable(code, message, **extra)
 
 	def _write(self, locked, edited: dict) -> dict:
 		"""Claim, run as the person, end the row (one commit with the record), settle."""
-		from jarvis import api
 		from jarvis.chat import approvals_api, turn_message_binding
 		from jarvis.chat.pending_actions import _execute
 		from jarvis.chat.pending_actions._store import claim, get_row
@@ -253,7 +272,9 @@ class DraftSave:
 		result, interfered, crash_tb = _execute._dispatch(
 			locked, edited, user=self.approver, allow_risky=False, savepoint=True
 		)
-		if not crash_tb and api.envelope_ok(locked.tool, result):
+		# Spelled out, not ``api.envelope_ok``: that helper does not exist on the release lines
+		# this is backported to, and for create_doc / update_doc the two are identical.
+		if not crash_tb and bool(isinstance(result, dict) and result.get("ok")):
 			ref = _execute._result_ref(edited, result)
 			res = approvals_api._edit_created(
 				locked, self.approver, stamp, result, ref, reason=EDITED_REASON, edited_args=edited
@@ -364,17 +385,23 @@ class DraftSave:
 		return envelope
 
 
-def _closed(code: str, message: str, *, told: bool = False, partial: bool = False) -> dict:
-	"""A save no retry fixes: both apps drop the card (``draftFailureOf``)."""
+def _closed(
+	code: str, message: str, *, told: bool = False, partial: bool = False, card_open: bool = False
+) -> dict:
+	"""A save no retry fixes: the form closes. Both apps drop the card (``draftFailureOf``)
+	unless ``card_open`` is set: the card is still Pending and valid, so only the form
+	closes and the card stays where it is."""
 	out = {"ok": False, "closed": True, "assistant_told": told, "error": {"code": code, "message": message}}
 	if partial:
 		out["outcome"] = "partial"
+	if card_open:
+		out["card_open"] = True
 	return out
 
 
 def _fixable(code: str, message: str, *, fields=None, hint=None) -> dict:
 	"""The panel stays open with ``error.fields`` marked; the card is untouched."""
-	error = {"code": code, "message": message}
+	error = {"code": code, "message": _form_safe(message)}
 	if fields:
 		error["fields"] = fields
 	if hint:
@@ -382,12 +409,18 @@ def _fixable(code: str, message: str, *, fields=None, hint=None) -> dict:
 	return {"ok": False, "error": error}
 
 
+def _form_safe(message: str) -> str:
+	"""``message`` unless it names an internal tool or field rule (``get_doc``, ``create_doc``,
+	``update_doc``, "protected field"): the form shows a plain sentence instead."""
+	return _(_FORM_SAFE) if _INTERNAL.search(message or "") else message
+
+
+def _plain_fixable(message: str) -> dict:
+	"""The form stays open; no field to mark."""
+	return {"ok": False, "error": {"code": "InvalidArgumentError", "message": _(message), "fields": []}}
+
+
 def _busy() -> dict:
 	"""Another decider holds the card (a Confirm, a second device): the form stays open
 	with the person's edits, and nothing was claimed."""
 	return {"ok": False, "error": {"code": BUSY, "message": _(_BUSY), "fields": []}}
-
-
-def _sentence(text: str) -> str:
-	text = text.strip()
-	return text if text.endswith((".", "!", "?")) else f"{text}."

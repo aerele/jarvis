@@ -183,7 +183,7 @@ def payload(tool: str, args: dict, would) -> dict:
 		)
 	import frappe
 
-	prompt = frappe.get_meta(doctype).autoname == "Prompt"
+	prompt = live_draft.prompt_named(frappe.get_meta(doctype).autoname)
 	name = stored["values"].get("name") if prompt else ""
 	return payload_from(
 		"create",

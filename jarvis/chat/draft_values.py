@@ -30,16 +30,29 @@ a rules object), so their cases run without a site; ``validate`` reads it."""
 
 from __future__ import annotations
 
+import json
+
 TABLE, MULTI = "Table", "Table MultiSelect"
 DRAFT_ROW = "_draft_row"
-NOT_ROWS = "Send this table as a list of rows."
+NOT_ROWS = "This table needs a list of rows."
 NOT_A_ROW = "This row is not on the record. Remove it, or add it as a new row."
 KEEP_A_ROW = "Keep the saved rows you want, or clear the table and save before adding new rows."
 NOT_A_DRAFTED_ROW = "This row does not match a row of the draft."
-TWICE = "Another row is already this row of the draft."
+TWICE = "This row is listed twice."
 CANT_SET = "This field can't be set."
 CANT_EDIT = "This field can't be edited here."
 _SHOWN = 3
+# What the form may send back: rows in one child table, characters of JSON in all.
+MAX_TABLE_ROWS = 500
+MAX_VALUES_CHARS = 200_000
+
+
+def too_big(values: dict) -> bool:
+	"""More rows in one child table, or more JSON, than the form is meant to send: checked
+	before any other validation so a huge body costs nothing more."""
+	if any(isinstance(v, list) and len(v) > MAX_TABLE_ROWS for v in values.values()):
+		return True
+	return len(json.dumps(values, default=str)) > MAX_VALUES_CHARS
 
 
 def edited_call(tool: str, args: dict, values: dict, *, tables=frozenset()) -> dict:
@@ -129,12 +142,17 @@ def _table_errors(table: str, kind: str, rows, rules, *, is_update: bool, drafte
 		named = {r.get("name") for r in drafted if isinstance(r, dict)}
 		known = rules.saved_rows(table) | {n for n in named if isinstance(n, str)}
 	taken: set[int] = set()
+	named_rows: set[str] = set()
 	out = []
 	for idx, row in enumerate(rows, start=1):
 		for key, value in row.items():
 			if is_update and key == "name":
 				# The row's identity, not a value: empty means a new row.
 				message = "" if not value or (isinstance(value, str) and value in known) else NOT_A_ROW
+				if not message and value:
+					# The same saved row twice: the write's own refusal never reaches the form.
+					message = TWICE if value in named_rows else ""
+					named_rows.add(value)
 			elif not is_update and key == DRAFT_ROW:
 				message = _draft_row_error(value, len(drafted), taken)
 			else:
@@ -164,10 +182,12 @@ class _SiteRules:
 	def __init__(self, doctype: str, *, is_update: bool, user: str, name: str):
 		import frappe
 
+		from jarvis.chat import live_draft
+
 		self.meta = frappe.get_meta(doctype)
 		self.doctype, self.name, self.user = doctype, name, user
 		self.is_update = is_update
-		self.prompt = not is_update and (self.meta.autoname or "").lower().startswith("prompt")
+		self.prompt = not is_update and live_draft.prompt_named(self.meta.autoname)
 		# Frappe never resets a value Administrator sets.
 		self.levels = None if user == "Administrator" else self.meta.get_permlevel_access("write", user=user)
 		self._saved: dict[str, frozenset] = {}
