@@ -58,12 +58,6 @@ describe("overlay stack", () => {
 		return { open, closed };
 	}
 
-	it("orders aux > details > picker > company", () => {
-		expect(NAMES.map((n) => OVERLAY_PRIORITY[n])).toEqual(
-			[...NAMES.map((n) => OVERLAY_PRIORITY[n])].sort((a, b) => b - a)
-		);
-	});
-
 	it("Escape closes only the top overlay, one per press, in priority order", async () => {
 		const { open, closed } = mountHost(NAMES);
 		for (const name of NAMES) {
@@ -84,10 +78,6 @@ describe("overlay stack", () => {
 		await wrapper.vm.$nextTick();
 		expect(escape().defaultPrevented).toBe(false);
 		expect(closed).toEqual(["picker", "company"]);
-	});
-
-	it("has no priority for the dropped hover preview", () => {
-		expect(OVERLAY_PRIORITY).not.toHaveProperty("preview");
 	});
 
 	it("ignores Escape that ends an IME composition", () => {

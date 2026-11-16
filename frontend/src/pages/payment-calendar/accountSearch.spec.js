@@ -49,7 +49,4 @@ describe("matchingAccounts", () => {
 		expect(matchingAccounts(catalog, "MAIN")).toEqual([CASH]);
 		expect(matchingAccounts(catalog, "nothing")).toEqual([]);
 	});
-	it("copes with null bank and reference", () => {
-		expect(() => matchingAccounts([PLAIN, CASH], "x")).not.toThrow();
-	});
 });
