@@ -918,6 +918,60 @@ describe("snapshotMatchesCard: is the baseline the card's own", () => {
 		expect(r.why).toContain("logs row at index 2 hours");
 	});
 
+	// A snapshot taken after the person changed the row list reads the new list as the baseline,
+	// so the payload would be {} and the change lost. Counts only in `why`.
+	it("a row added, inserted or removed before the snapshot is not ok, create and update", () => {
+		const rowCount = (r) =>
+			expect(r.why).toMatch(/^table logs: \d+ rows in the form, \d+ in the draft$/);
+		const cases = [
+			[
+				"create: a row added at the end",
+				creating,
+				(m) => logs(m).rows.push(blankRow(logs(m))),
+			],
+			[
+				"create: a row inserted in the middle",
+				creating,
+				(m) => logs(m).rows.splice(1, 0, blankRow(logs(m))),
+			],
+			["create: a row removed", creating, (m) => logs(m).rows.splice(1, 1)],
+			[
+				"create: every row removed (the blank row left is still not three)",
+				creating,
+				(m) => (logs(m).rows = [blankRow(logs(m))]),
+			],
+			["update: a saved row removed", updating, (m) => logs(m).rows.splice(0, 1)],
+			["update: the draft-added row removed", updating, (m) => logs(m).rows.splice(2, 1)],
+			["update: a row added", updating, (m) => logs(m).rows.push(blankRow(logs(m)))],
+		];
+		for (const [name, build, edit] of cases) {
+			const r = late(build, edit);
+			expect([name, r.ok]).toEqual([name, false]);
+			rowCount(r);
+		}
+	});
+
+	it("healthy list shapes stay ok: a drafted blank row, an empty drafted list, an untouched or unlisted table", () => {
+		// a blank row the draft itself lists
+		const blankRow1 = createModel({ logs: [{ activity: "A1" }, {}] });
+		ok(
+			snapshotMatchesCard(
+				snapshotDraftModel(blankRow1.model, blankRow1.card),
+				blankRow1.card
+			)
+		);
+		// `[]`: the builder shows one blank row for it
+		const empty = createModel({ title: "Hello", logs: [] });
+		ok(snapshotMatchesCard(snapshotDraftModel(empty.model, empty.card), empty.card));
+		// a draft that lists no table (an update's stored rows fill the grid)
+		const unlisted = updateModel({ title: "Hello" });
+		ok(snapshotMatchesCard(snapshotDraftModel(unlisted.model, unlisted.card), unlisted.card));
+		// a listed table the form does not hold (not in the form meta): nothing to compare
+		const { model, card } = creating();
+		model.tables = [];
+		ok(snapshotMatchesCard(snapshotDraftModel(model, card), card));
+	});
+
 	it("why names the field or cell and never carries a value (a field may be a secret)", () => {
 		const secret = () => createModel({ ...DRAFT, logs: ROWS() });
 		const a = late(secret, (m) => (field(m, "secret").value = "hunter2-form"));

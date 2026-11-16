@@ -295,6 +295,14 @@ function checkTable(name, tsnap, drafted, verb) {
 	const types = tsnap.types || {};
 	// every row of the grid, a blank one too: a drafted row the person emptied is a mismatch
 	const entries = Object.values(tsnap.rows).filter(isObject);
+	// The builder lays a listed table out as one grid row per drafted entry (create and update:
+	// `table.rows = proposedRows.map(...)`), so a different count means a row was added, removed
+	// or inserted before the snapshot, and the payload would read it as "unchanged". An empty
+	// drafted list is skipped: the builder shows one blank row for it. A table the snapshot does
+	// not hold at all is not checked here: the form builder leaves a table out when it is not in
+	// the DocType's form meta, so that case is legitimate and Save must stay on for it.
+	if (drafted.length && entries.length !== drafted.length)
+		return `table ${name}: ${entries.length} rows in the form, ${drafted.length} in the draft`;
 	// the real rows in the grid's order (the object's own key order is not the grid's)
 	const inOrder = tsnap.keys.map((k) => tsnap.rows[k]).filter(isObject);
 	const differs = (draftedRow, was, where) => {
@@ -341,7 +349,8 @@ function checkTable(name, tsnap, drafted, verb) {
 // normalisation the diff uses); on a create table whose rows lined up with the draft, each
 // row's cells against the drafted row at its origin index; on an update table, that the
 // saved rows the draft also names are in the draft's order and hold every cell the draft
-// set, and so do the rows the draft added (by their index). A field or cell the draft does
+// set, and so do the rows the draft added (by their index); and that a listed table has as many
+// grid rows as drafted entries (a row added or removed before the snapshot). A field or cell the draft does
 // not hold (a default the form filled) is not compared. `why` names the field or the table,
 // row and cell, never a value (a field may be a secret).
 // Never throws: anything unreadable is "not ok".
