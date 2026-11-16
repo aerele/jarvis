@@ -28,6 +28,9 @@ import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
 import { draftAnchor } from "../lib/draftAnchor.js";
 import { makeDraftUi } from "../lib/draftCardUi.js";
+import { receiptLines } from "../lib/draftReceiptLines.js";
+import { hiddenSteps, proposeSubmitStep } from "../lib/draftReceiptHost.js";
+import { makeReceiptUi } from "../lib/receiptUi.js";
 import {
 	cardOfItem,
 	isToolDraftItem,
@@ -87,6 +90,7 @@ import {
 import SendRecoveryCard from "../components/SendRecoveryCard.vue";
 import { recoveryState, sendRecovery } from "../sendRecoveryStore";
 import DecisionCard from "../components/DecisionCard.vue";
+import DraftReceipt from "../components/DraftReceipt.vue";
 import DecisionSheet from "../components/DecisionSheet.vue";
 import FilePreviewSheet from "../components/FilePreviewSheet.vue";
 import { turnErrorInfo, showsRawReason } from "../../../jarvis/public/js/turn_errors.mjs";
@@ -345,6 +349,12 @@ const queuedTurn = computed(() => recoveryState.queued[convId.value]);
 // items, because loadPending replaces the item objects on every read. `draftModel` is what the
 // pending block draws for them: each card's ctx, the stack's typed hint line, the one-card flag.
 const draftUi = makeDraftUi(reactive);
+// The receipt lines of decided draft cards (draftReceiptLines.js): drawn only for a row the server
+// stamped as one; every other tool row draws nothing. Submit's busy state and note are kept by
+// record, outside the rows, because every reload replaces them.
+const receiptUi = makeReceiptUi(reactive);
+const stepsHidden = computed(() => hiddenSteps(messages.value, receiptUi.goneKeys()));
+const receiptsOf = (it) => receiptLines(it.tools, { hiddenSteps: stepsHidden.value });
 const draftModel = computed(() =>
 	phoneDraftModel({
 		items: orderedPending.value,
@@ -1605,6 +1615,19 @@ const onResync = () => {
 	loadPending();
 };
 
+// Submit on a created draft's receipt: parks the ordinary confirmation card for the record's
+// submit (the amber tile) and reloads the pending list so it shows. Nothing runs from the button.
+function submitNext(step) {
+	const cid = convId.value;
+	const generation = viewGeneration;
+	return proposeSubmitStep(step, {
+		ui: receiptUi,
+		propose: (s) => api.proposeNextAction(cid, s),
+		current: () => isCurrent(cid, generation),
+		reloadPending: () => loadPending(),
+	});
+}
+
 // Create / Cancel on an inline draft card. No window.confirm: the card's Cancel asks nothing more
 // than the desktop's does. A final draft starts no agent turn, so after either one the chat and the
 // pending list are reloaded here (runDraftDecision); the receipt line comes from the reloaded rows.
@@ -1653,6 +1676,7 @@ watch(
 		clearDecision();
 		inflightToken.value = null;
 		draftUi.reset();
+		receiptUi.reset();
 		settledTokens.value = new Set(); // a settled token belonged to the previous conversation
 		safetyNoticeTokens.value = new Set();
 		safetyUpdateNotice.value = null;
@@ -1820,6 +1844,14 @@ onUnmounted(() => {
 						@parked="(n) => parkedActions.set(anchor.draftKey, n)"
 						@dismissed="onDraftDismissed"
 					/>
+					<DraftReceipt
+						v-for="line in receiptsOf(it)"
+						:key="line.key"
+						:line="line"
+						:busy="!!line.stepKey && receiptUi.busyKey() === line.stepKey"
+						:note="receiptUi.note(line.stepKey)"
+						@submit="submitNext"
+					/>
 					<RecordCards v-if="it.view.cards" :data="it.view.cards" />
 					<ChartCard v-for="(c, ci) in it.view.charts" :key="ci" :spec="c" />
 					<a
@@ -1933,6 +1965,18 @@ onUnmounted(() => {
 						</svg>
 						{{ it.view.took }}
 					</div>
+				</template>
+				<!-- A tool row with no assistant turn to hang off (a truncated thread) still shows
+				     its draft receipt. -->
+				<template v-else>
+					<DraftReceipt
+						v-for="line in receiptsOf(it)"
+						:key="line.key"
+						:line="line"
+						:busy="!!line.stepKey && receiptUi.busyKey() === line.stepKey"
+						:note="receiptUi.note(line.stepKey)"
+						@submit="submitNext"
+					/>
 				</template>
 			</div>
 		</template>
