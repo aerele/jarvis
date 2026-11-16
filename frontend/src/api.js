@@ -377,6 +377,10 @@ export const ruleValues = (doctype, table, links) =>
 	call(AC + "rule_values", { doctype, table, links: JSON.stringify(links) });
 export const applyAction = (action) =>
 	call(AC + "apply_action", { action: JSON.stringify(action) });
+// Cancel an unsaved draft card for good: the server records a "discarded" receipt for
+// the DRAFT row's message, so the card stays gone after a reload and on the phone.
+export const dismissDraft = (conversation, message) =>
+	call(AC + "dismiss_draft", { conversation, message });
 // Park the confirm card for a create receipt's suggested next step (#621). Same
 // card the assistant's own submit/workflow call gets; nothing runs until Confirm.
 export const proposeNextAction = (conversation, step) =>
@@ -1153,6 +1157,9 @@ export const supportCreateTicket = (subject, body) =>
 export const supportGetThread = (ticket) => call("jarvis.support.api.get_thread", { ticket });
 export const supportReply = (ticket, body) => call("jarvis.support.api.reply", { ticket, body });
 export const supportCloseTicket = (ticket) => call("jarvis.support.api.close_ticket", { ticket });
+// A failed reply's error (secrets removed), model and run id, for the Report error ticket draft.
+export const getErrorReportDetails = (conversation, message) =>
+	call("jarvis.support.api.error_report_details", { conversation, message });
 export const supportAwaitingCount = () => call("jarvis.support.api.awaiting_count");
 
 // Same-origin GET so <img>/<a> resolve against the bench; session cookie authenticates.

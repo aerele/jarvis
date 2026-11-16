@@ -10,7 +10,11 @@
 // still disappear from the prose rather than leak.
 //
 // A relative import, not the @shared alias, so bare `node --test` can run this file.
+import { actionBlockState, normaliseAction } from "../../../frontend/src/lib/chatAction.js";
+import { stripBlocks } from "../../../frontend/src/lib/chatBlocks.js";
 import { parseGoto } from "../../../frontend/src/lib/chatGoto.js";
+
+export { actionBlockState };
 
 const CARDS_RE = /```jarvis-cards[ \t]*\n([\s\S]*?)```/;
 const SKILL_RE = /```jarvis-skill[ \t]*\n([\s\S]*?)```/;
@@ -38,10 +42,15 @@ const STRIP_RES = [
 // Separate object (not shared with STRIP_RES) so its /g lastIndex can't collide.
 const DIAGRAM_RE = /```mermaid[ \t]*\n(?![ \t]*xychart-beta)[\s\S]*?```/g;
 
-/** The agent's prose, with every control block removed. */
-export function stripAgentBlocks(text) {
+/**
+ * The agent's prose, with every control block removed. While `streaming`, an
+ * unclosed opener and a half-typed fence tag are hidden too (stripBlocks owns
+ * that part); the PWA list above still removes non-xychart mermaid.
+ */
+export function stripAgentBlocks(text, streaming = false) {
 	let t = text || "";
 	for (const re of STRIP_RES) t = t.replace(re, "");
+	if (streaming) t = stripBlocks(t, true);
 	return t.replace(/\n{3,}/g, "\n\n").trim();
 }
 
@@ -141,8 +150,8 @@ export function parseAction(content) {
 	const mt = content.match(ACTION_RE);
 	if (!mt) return null;
 	try {
-		const a = JSON.parse(mt[1].trim());
-		if (!a || typeof a !== "object") return null;
+		const a = normaliseAction(JSON.parse(mt[1].trim()));
+		if (!a) return null;
 		if (Array.isArray(a.fields)) {
 			a.fields = a.fields.map((f) => ({
 				label: String(f.label || ""),

@@ -430,5 +430,33 @@
   {
     "error": "This site is not the one registered for this Jarvis account. Contact support if this is wrong. (blocked by jarvis-erp)",
     "code": "gate-wrong-site"
+  },
+  {
+    "error": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    "code": "subscription-expired"
+  },
+  {
+    "error": "All models failed (2): openai_compat/jarvis-pool: 429 All credentials for model gpt-5.6-terra are cooling down (last error: usage_limit_reached: The usage limit has been reached); Retry-After: 169907 seconds (rate_limit) | anthropic/claude-opus-5: Failed to authenticate: OAuth session expired and could not be refreshed (auth).",
+    "code": "subscription-expired"
+  },
+  {
+    "error": "All models failed (2): openai_compat/jarvis-pool: 429 All credentials for model gpt-5.6-terra are cooling down (last error: usage_limit_reached: The usage limit has been reached); Retry-After: 169907 seconds (rate_limit) | anthropic/claude-...",
+    "code": "models-exhausted"
+  },
+  {
+    "error": "429 All credentials for model gpt-5.6-terra are cooling down (last error: usage_limit_reached: The usage limit has been reached); Retry-After: 169907 seconds (rate_limit)",
+    "code": "quota"
+  },
+  {
+    "error": "OAuth token refresh failed for openai-codex: invalid_grant",
+    "code": "subscription-expired"
+  },
+  {
+    "error": "Failed to authenticate: invalid authentication credentials",
+    "code": "authentication"
+  },
+  {
+    "error": "429 Too Many Requests",
+    "code": "rate-limit"
   }
 ]

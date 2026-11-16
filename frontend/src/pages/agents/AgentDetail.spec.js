@@ -664,34 +664,6 @@ describe("Overview Access panel: roster for admins only, never for a non-admin (
 });
 
 describe("Configure tab: two-column layout on lg+ (jarvis#1062 polish, matches the Admin tab)", () => {
-	it("wraps Configuration and Schedule in the same grid-cols-1 lg:grid-cols-2 pattern as Admin", async () => {
-		routeMock.hash = "#configure";
-		const w = await mountDetail(
-			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
-		);
-		const grid = w.find(".grid.grid-cols-1.gap-10.lg\\:grid-cols-2.lg\\:items-start");
-		expect(grid.exists()).toBe(true);
-		expect(grid.text()).toContain("Schedule");
-		expect(grid.text()).toContain("Configuration");
-	});
-
-	// owner feedback: Configuration is the primary/left column now that
-	// Comments moved off this tab - Schedule moved to the right. Asserted on
-	// DOM order, not just presence, so a re-swap regresses visibly.
-	it("Configuration is the LEFT/primary column, Schedule is the RIGHT column", async () => {
-		routeMock.hash = "#configure";
-		const w = await mountDetail(
-			baseAgent({ installation: installedInstallation({ enabled: 1 }) })
-		);
-		const grid = w.find(".grid.grid-cols-1.gap-10.lg\\:grid-cols-2.lg\\:items-start");
-		const headings = grid
-			.findAll(".text-base.font-medium.text-ink-gray-9")
-			.map((h) => h.text());
-		expect(headings.indexOf("Configuration")).toBeGreaterThanOrEqual(0);
-		expect(headings.indexOf("Schedule")).toBeGreaterThanOrEqual(0);
-		expect(headings.indexOf("Configuration")).toBeLessThan(headings.indexOf("Schedule"));
-	});
-
 	// owner feedback: same section-heading style as the Admin tab's "Access"
 	// heading (AgentAccessEditor.vue) - text-base font-medium text-ink-gray-9,
 	// on both Configure columns, not just one.

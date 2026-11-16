@@ -17,9 +17,11 @@
   "budgets_section",
   "agent_run_budget_monthly",
   "activation_module_ceiling",
+  "intake_daily_cap",
   "budgets_col",
   "macro_step_budget_monthly",
   "enforce_agent_min_model",
+  "intake_daily_cap_per_user",
   "branding_section",
   "agent_name",
   "holiday_touches_enabled",
@@ -269,6 +271,13 @@
    "label": "Activation Module Ceiling (live agents, site-wide)"
   },
   {
+   "default": "300",
+   "description": "Most documents Document Intake reads per day, across the whole site. Leave empty for the default (300). 0 pauses intake.",
+   "fieldname": "intake_daily_cap",
+   "fieldtype": "Int",
+   "label": "Intake daily limit (site)"
+  },
+  {
    "fieldname": "budgets_col",
    "fieldtype": "Column Break"
   },
@@ -286,6 +295,13 @@
    "fieldtype": "Check",
    "label": "Enforce Agent Minimum Model",
    "permlevel": 2
+  },
+  {
+   "default": "50",
+   "description": "Most documents Document Intake reads per day for one uploader. Leave empty for the default (50). 0 pauses intake.",
+   "fieldname": "intake_daily_cap_per_user",
+   "fieldtype": "Int",
+   "label": "Intake daily limit (per user)"
   },
   {
    "fieldname": "branding_section",

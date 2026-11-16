@@ -27,9 +27,9 @@ class TestFormMeta(FrappeTestCase):
 		meta.get_field("credit_to").link_filters = configured
 		with patch(
 			"frappe.get_meta",
-			side_effect=lambda dt, *a, **kw: meta
-			if dt == "Purchase Invoice"
-			else real_get_meta(dt, *a, **kw),
+			side_effect=lambda dt, *a, **kw: (
+				meta if dt == "Purchase Invoice" else real_get_meta(dt, *a, **kw)
+			),
 		):
 			result = get_doctype_form_meta("Purchase Invoice")
 		field = next(f for f in result["fields"] if f["fieldname"] == "credit_to")
@@ -1565,9 +1565,9 @@ class TestChildRowForm(_ChildRowFormHelpers, FrappeTestCase):
 		qty.hidden, qty.in_list_view = 1, 1
 		with patch(
 			"frappe.get_meta",
-			side_effect=lambda dt, *a, **kw: meta
-			if dt == "Sales Order Item"
-			else real_get_meta(dt, *a, **kw),
+			side_effect=lambda dt, *a, **kw: (
+				meta if dt == "Sales Order Item" else real_get_meta(dt, *a, **kw)
+			),
 		):
 			items = self._items()
 		self.assertNotIn("qty", {c["fieldname"] for c in items["columns"]})
@@ -1584,9 +1584,9 @@ class TestChildRowForm(_ChildRowFormHelpers, FrappeTestCase):
 		with (
 			patch(
 				"frappe.get_meta",
-				side_effect=lambda dt, *a, **kw: meta
-				if dt == "Sales Order Item"
-				else real_get_meta(dt, *a, **kw),
+				side_effect=lambda dt, *a, **kw: (
+					meta if dt == "Sales Order Item" else real_get_meta(dt, *a, **kw)
+				),
 			),
 			patch("jarvis.chat.actions_api._readable_permlevels", return_value={0}),
 		):

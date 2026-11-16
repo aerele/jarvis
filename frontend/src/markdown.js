@@ -197,7 +197,7 @@ function startsListBlockBoundary(lines, index) {
 	);
 }
 
-function renderListBlock(items) {
+function renderListBlock(items, opts) {
 	let html = "";
 	const stack = []; // [{ indent, tag }], innermost last
 	for (const it of items) {
@@ -207,7 +207,7 @@ function renderListBlock(items) {
 				html += `</li></${stack.pop().tag}>`;
 				closedList = true;
 			}
-			if (it.block) html += renderMarkdown(it.block);
+			if (it.block) html += renderMarkdown(it.block, opts);
 			else
 				html +=
 					(closedList ? "" : it.gap ? "<br><br>" : it.hardBreak ? "<br>" : " ") +
@@ -245,7 +245,18 @@ const DETAILS_CLOSE = /^<\/details\s*>$/i;
 const SUMMARY_LINE = /^<summary\s*>(.*?)<\/summary\s*>(.*)$/i;
 const DETAILS_SUMMARY_LINE = /^<details\s*>\s*(<summary\s*>.*)$/i;
 
-export function renderMarkdown(src) {
+// A copy button for a code block (``opts.copyCode``). The block is
+// markdown-rendered HTML, not a Vue node, so the click is handled by whoever
+// shows it (chat: Message.vue), which copies the <code> text beside the button.
+const CODE_COPY_BUTTON =
+	'<button type="button" class="jv-code-copy" title="Copy" aria-label="Copy code">' +
+	'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" ' +
+	'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/>' +
+	'<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>';
+
+// ``opts.copyCode``: give every fenced code block (not a mermaid diagram) a copy
+// button. Off by default, so a view that does not handle its click shows none.
+export function renderMarkdown(src, opts = {}) {
 	if (!src) return "";
 	const lines = String(src).replace(/\r\n/g, "\n").split("\n");
 	const out = [];
@@ -312,6 +323,12 @@ export function renderMarkdown(src) {
 			const code = body.join("\n");
 			if (lang === "mermaid") {
 				out.push(`<div class="jv-mermaid">${esc(code)}</div>`);
+			} else if (opts.copyCode) {
+				out.push(
+					`<div class="jv-md-codeblock">${CODE_COPY_BUTTON}<pre class="jv-md-pre"><code>${esc(
+						code
+					)}</code></pre></div>`
+				);
 			} else {
 				out.push(`<pre class="jv-md-pre"><code>${esc(code)}</code></pre>`);
 			}
@@ -445,7 +462,7 @@ export function renderMarkdown(src) {
 				i++;
 				continue;
 			}
-			out.push(renderListBlock(items));
+			out.push(renderListBlock(items, opts));
 			continue;
 		}
 		if (!line.trim()) {

@@ -1,4 +1,9 @@
 import { cookieUser } from "./sessionCookie.js";
+import {
+	OFFLINE,
+	SESSION_EXPIRED,
+	isBrowserNetworkText,
+} from "../../../jarvis/public/js/shared/chat_failure_copy.mjs";
 
 // Shared extractor for a user-facing message out of a Frappe API error.
 // Single source for AccountView / OnboardingView / LlmPoolEditor so a change to
@@ -38,7 +43,8 @@ export function isInternalCrash(e) {
 export const GENERIC_ERROR_MESSAGE =
 	"Something went wrong. Try again, and check back if it keeps happening.";
 
-export const SESSION_EXPIRED_MESSAGE = "Your session has expired. Please sign in again.";
+// One sentence on every surface (desktop, dashboard, mobile, Desk widget).
+export const SESSION_EXPIRED_MESSAGE = SESSION_EXPIRED;
 
 // An expired session (#644): Frappe answers 403 "not whitelisted ... Login to
 // access" (a PermissionError) AND clears the cookies, which is why the cookie
@@ -62,8 +68,22 @@ export function serverSentMessage(e) {
 	return typeof first === "string" ? first : "";
 }
 
+// A request that never reached the server (offline, DNS, server down) rejects with the
+// browser's own words ("Failed to fetch", "NetworkError when attempting to fetch resource.",
+// "Load failed"). Those are not sentences for a customer: say what happened instead.
+export const OFFLINE_MESSAGE = OFFLINE;
+export function isNetworkFailure(e) {
+	return (
+		!!e &&
+		!e.status &&
+		!(Array.isArray(e.messages) && e.messages.length) &&
+		isBrowserNetworkText(e.message)
+	);
+}
+
 export function errMessage(e, fallback = GENERIC_ERROR_MESSAGE) {
 	if (isSessionExpired(e)) return SESSION_EXPIRED_MESSAGE;
+	if (isNetworkFailure(e)) return OFFLINE_MESSAGE;
 	// The server's OWN explicit message always wins, even on a 401/403 (round-4
 	// review F1): frappe.throw("You do not have permission to disconnect this
 	// model") is a real, actionable remedy, and burying it under a blanket
@@ -148,5 +168,6 @@ export function errHtml(e, fallback) {
 // One implementation for desktop, Desk, and mobile; Python uses its rule data.
 export {
 	turnErrorInfo,
+	showsRawReason,
 	subscriptionUpstreamFromError,
 } from "../../../jarvis/public/js/turn_errors.mjs";
