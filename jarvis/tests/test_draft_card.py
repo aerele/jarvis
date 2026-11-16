@@ -309,6 +309,39 @@ if FrappeTestCase is not None:
 	PA = "Jarvis Pending Action"
 	FLAG = "jarvis_draft_cards"
 
+	# TEMPORARY DIAGNOSTIC (remove with the fix): CI shard 2 fails two test_flag_matrix watchdog
+	# tests with ``revived: 1`` only when this module is in the shard. The watchdog revives a shard
+	# that holds a nonterminal Jarvis Chat Turn. This pair names every such row before and after
+	# this module, so the next CI run shows whether this module leaves one behind.
+	_TURN_SNAPSHOT_SQL = (
+		"SELECT t.run_id, t.relay_target_id, t.state, t.conversation, t.creation, c.owner AS conv_owner "
+		"FROM `tabJarvis Chat Turn` t LEFT JOIN `tabJarvis Conversation` c ON c.name = t.conversation "
+		"WHERE t.state NOT IN ('done', 'errored', 'cancelled')"
+	)
+	_turns_before: list = []
+
+	def _turn_snapshot() -> list:
+		if not getattr(frappe.local, "site", None):
+			return []  # the pure classes run without a site
+		return [dict(r) for r in frappe.db.sql(_TURN_SNAPSHOT_SQL, as_dict=True)]
+
+	def setUpModule():
+		_turns_before[:] = [r["run_id"] for r in _turn_snapshot()]
+
+	def tearDownModule():
+		rows = _turn_snapshot()
+		if not rows:
+			return
+		pumps = frappe.db.sql(
+			"SELECT relay_target_id, transport_mode, lease_expires_at FROM `tabJarvis Relay Pump`",
+			as_dict=True,
+		)
+		lines = [f"{'old' if r['run_id'] in _turns_before else 'NEW'} {r}" for r in rows]
+		raise AssertionError(
+			"nonterminal Jarvis Chat Turn rows after test_draft_card (NEW = left by this module, "
+			"old = already there before it):\n" + "\n".join(lines) + f"\npump rows: {pumps}"
+		)
+
 	def _park_card(tool, args, would, draft):
 		"""The card the park builds, as ``api._run_tool`` does."""
 		card = confirm_card.build_card(tool, args, {"would": would}, draft)
