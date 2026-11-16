@@ -6,6 +6,9 @@
   It shows on mouseup / keyup (not while a drag is still selecting) and hides when the
   selection collapses, the page scrolls or Escape is pressed. Its buttons take the
   click on mousedown.prevent so pressing one does not clear the selection first.
+  On a touch screen (the PWA passes `below`) it shows once a long-press selection
+  settles, sits BELOW the selection (the phone's own Copy menu is above it), and a tap
+  is taken on touchend so it lands before the tap can clear the selection.
   Rendered in place (position: fixed), not teleported: the theme's colours are set
   on the chat root, so the bar must stay inside it.
 -->
@@ -23,6 +26,8 @@
 			type="button"
 			class="jv-selbar-btn"
 			@mousedown.prevent
+			@touchstart.prevent
+			@touchend.prevent="pick(a.key)"
 			@click="pick(a.key)"
 		>
 			{{ a.label }}
@@ -41,6 +46,8 @@ const props = defineProps({
 	selector: { type: String, required: true },
 	// [{key, label}]
 	actions: { type: Array, required: true },
+	// Place the bar under the selection (touch screens).
+	below: { type: Boolean, default: false },
 });
 const emit = defineEmits(["action"]);
 
@@ -61,9 +68,13 @@ function place() {
 	if (!rect || (!rect.width && !rect.height)) return hide();
 	text = t;
 	const above = rect.top - 44;
+	const under = rect.bottom + (props.below ? 14 : 8);
+	const fitsUnder = under + 44 <= window.innerHeight;
 	const width = 40 + props.actions.length * 90;
 	pos.value = {
-		top: Math.round(above >= 8 ? above : rect.bottom + 8),
+		top: Math.round(
+			props.below ? (fitsUnder ? under : Math.max(8, above)) : above >= 8 ? above : under
+		),
 		left: Math.round(
 			Math.min(
 				Math.max(8, rect.left + rect.width / 2 - width / 2),
@@ -73,15 +84,27 @@ function place() {
 	};
 }
 
-// After the browser has settled the selection for this mouseup / keyup.
-function schedule() {
+// After the browser has settled the selection for this mouseup / keyup / touchend.
+function schedule(delay = 0) {
 	clearTimeout(timer);
-	timer = setTimeout(place, 0);
+	timer = setTimeout(place, delay);
 }
+const onPointerUp = () => schedule(0);
+const onTouchEnd = () => schedule(350);
+
+// A touch selection is made and adjusted with handles, which fire no mouseup: place
+// the bar once the selection has stopped changing.
+let touching = false;
+const onTouchStart = () => (touching = true);
 
 function onSelectionChange() {
 	const sel = window.getSelection && window.getSelection();
-	if (pos.value && (!sel || sel.isCollapsed)) hide();
+	if (!sel || sel.isCollapsed) {
+		clearTimeout(timer);
+		if (pos.value) hide();
+		return;
+	}
+	if (touching) schedule(450);
 }
 
 function onKeydown(e) {
@@ -96,8 +119,10 @@ function pick(key) {
 }
 
 onMounted(() => {
-	document.addEventListener("mouseup", schedule);
-	document.addEventListener("keyup", schedule);
+	document.addEventListener("mouseup", onPointerUp);
+	document.addEventListener("keyup", onPointerUp);
+	document.addEventListener("touchstart", onTouchStart, { passive: true });
+	document.addEventListener("touchend", onTouchEnd, { passive: true });
 	document.addEventListener("selectionchange", onSelectionChange);
 	document.addEventListener("keydown", onKeydown);
 	window.addEventListener("scroll", hide, true);
@@ -105,8 +130,10 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
 	clearTimeout(timer);
-	document.removeEventListener("mouseup", schedule);
-	document.removeEventListener("keyup", schedule);
+	document.removeEventListener("mouseup", onPointerUp);
+	document.removeEventListener("keyup", onPointerUp);
+	document.removeEventListener("touchstart", onTouchStart);
+	document.removeEventListener("touchend", onTouchEnd);
 	document.removeEventListener("selectionchange", onSelectionChange);
 	document.removeEventListener("keydown", onKeydown);
 	window.removeEventListener("scroll", hide, true);
@@ -123,16 +150,17 @@ defineExpose({ hide });
 	display: flex;
 	gap: 2px;
 	padding: 3px;
-	background: var(--surface);
-	border: 1px solid var(--border);
+	background: var(--surface, var(--card));
+	border: 1px solid var(--border, #e8e8ec);
 	border-radius: 9px;
 	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
 }
 .jv-selbar-btn {
 	padding: 5px 10px;
+	-webkit-tap-highlight-color: transparent;
 	font-size: 13px;
 	line-height: 1.2;
-	color: var(--text);
+	color: var(--text, var(--ink9));
 	background: transparent;
 	border: 0;
 	border-radius: 6px;
@@ -141,6 +169,6 @@ defineExpose({ hide });
 }
 .jv-selbar-btn:hover,
 .jv-selbar-btn:focus-visible {
-	background: var(--surface-2);
+	background: var(--surface-2, var(--accent-bg));
 }
 </style>
