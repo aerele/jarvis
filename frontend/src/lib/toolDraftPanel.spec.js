@@ -414,12 +414,12 @@ describe("the form's filled cells follow the person's edits and are never sent",
 	// stale number beside the edit; the other rows change; or an edit sends more than the edit.
 	it("an edit blanks the filled cells of that row only, and sends the edit alone", () => {
 		const { model, rows, send } = open();
-		rows[0].description = "Edited";
+		rows[0].project = "PROJ-0002";
 		settleCalculatedCells(model);
 		expect(hours(rows)).toEqual(["", "1.50", "2"]);
 		expect(send()).toEqual({
 			time_logs: [
-				{ _draft_row: 0, description: "Edited" },
+				{ _draft_row: 0, project: "PROJ-0002" },
 				{ _draft_row: 1 },
 				{ _draft_row: 2 },
 			],
@@ -430,9 +430,9 @@ describe("the form's filled cells follow the person's edits and are never sent",
 	// blank where the draft is again as drafted.
 	it("undoing the edit gives the card's number back", () => {
 		const { model, rows, send } = open();
-		rows[0].description = "Edited";
+		rows[0].project = "PROJ-0002";
 		settleCalculatedCells(model);
-		rows[0].description = "Module build";
+		rows[0].project = "PROJ-0001";
 		settleCalculatedCells(model);
 		expect(hours(rows)).toEqual(["3", "1.50", "2"]);
 		expect(send()).toEqual({});
@@ -444,15 +444,66 @@ describe("the form's filled cells follow the person's edits and are never sent",
 		const { model, rows, send } = open();
 		rows[0].hours = 5;
 		settleCalculatedCells(model);
-		rows[0].description = "Edited";
+		rows[0].project = "PROJ-0002";
 		settleCalculatedCells(model);
 		expect(rows[0].hours).toBe(5);
-		expect(send().time_logs[0]).toEqual({ _draft_row: 0, description: "Edited", hours: 5 });
+		expect(send().time_logs[0]).toEqual({ _draft_row: 0, project: "PROJ-0002", hours: 5 });
+	});
+
+	// Break: a text edit blanks the row's Hrs (it looks like data loss), a feeding edit (a time, a link)
+	// stops blanking, undo stops restoring, or a text edit after a feeding edit un-blanks the row.
+	// `steps` run in order on row 2 with a settle after each; `hrs` is row 2's Hrs after each.
+	const stepsTable = [
+		["description only", [{ description: "Changed" }], ["1.50"]],
+		["a time (from_time)", [{ from_time: "2026-12-08 14:00:00" }], [""]],
+		["a link (activity_type)", [{ activity_type: "Planning" }], [""]],
+		[
+			"a feeding edit undone",
+			[{ activity_type: "Planning" }, { activity_type: "" }],
+			["", "1.50"],
+		],
+		[
+			"a text edit after a feeding edit",
+			[{ activity_type: "Planning" }, { description: "Changed" }],
+			["", ""],
+		],
+		[
+			"the feeding edit undone while a text edit stays",
+			[{ activity_type: "Planning" }, { description: "Changed" }, { activity_type: "" }],
+			["", "", "1.50"],
+		],
+	];
+	for (const [name, steps, want] of stepsTable)
+		it(`row 2 Hrs after: ${name}`, () => {
+			const { model, rows } = open();
+			const seen = steps.map((edit) => {
+				Object.assign(rows[1], edit);
+				settleCalculatedCells(model);
+				return rows[1].hours;
+			});
+			expect(seen).toEqual(want);
+			expect([hours(rows)[0], hours(rows)[2]]).toEqual(["3", "2"]);
+		});
+
+	// Break: a filled cell the person did not type into is sent after a text-only edit (Hrs from the
+	// card goes to the server as if typed), or the snapshot guard rejects the opened form.
+	it("a description-only edit sends the identity and the description, and the form opens clean", () => {
+		const { model, rows, send } = open();
+		rows[1].description = "Changed";
+		settleCalculatedCells(model);
+		expect(send()).toEqual({
+			time_logs: [
+				{ _draft_row: 0 },
+				{ _draft_row: 1, description: "Changed" },
+				{ _draft_row: 2 },
+			],
+		});
+		expect(rows[1].hours).toBe("1.50");
 	});
 
 	it("settling again changes nothing, and a form with nothing filled is left alone", () => {
 		const { model, rows } = open();
-		rows[0].description = "Edited";
+		rows[0].project = "PROJ-0002";
 		expect([settleCalculatedCells(model), settleCalculatedCells(model)]).toEqual([
 			true,
 			false,
@@ -465,10 +516,10 @@ describe("the form's filled cells follow the person's edits and are never sent",
 	it("follows a row by its key when rows are removed or inserted above it", () => {
 		const { model, rows, send } = open();
 		rows.splice(0, 1);
-		rows[0].description = "Edited"; // the former row 2
+		rows[0].project = "PROJ-0002"; // the former row 2
 		settleCalculatedCells(model);
 		expect(hours(rows)).toEqual(["", "2"]);
-		expect(send().time_logs[0]).toEqual({ _draft_row: 1, description: "Edited" });
+		expect(send().time_logs[0]).toEqual({ _draft_row: 1, project: "PROJ-0002" });
 	});
 });
 

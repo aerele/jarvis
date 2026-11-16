@@ -334,7 +334,7 @@ describe("the filled cells follow the person's edits through the real form model
 		const rows = draftPanel.value.tables[0].rows;
 		await nextTick();
 		expect(rows.map((r) => r.hours)).toEqual(["3", "1.50", "2"]);
-		rows[1].description = "Edited";
+		rows[1].project = "PROJ-0002";
 		await nextTick();
 		expect(rows.map((r) => r.hours)).toEqual(["3", "", "2"]);
 		expect(
@@ -342,11 +342,11 @@ describe("the filled cells follow the person's edits through the real form model
 		).toEqual({
 			time_logs: [
 				{ _draft_row: 0 },
-				{ _draft_row: 1, description: "Edited" },
+				{ _draft_row: 1, project: "PROJ-0002" },
 				{ _draft_row: 2 },
 			],
 		});
-		rows[1].description = "Review";
+		rows[1].project = "PROJ-0001";
 		await nextTick();
 		expect(rows.map((r) => r.hours)).toEqual(["3", "1.50", "2"]);
 		expect(draftIsDirty(draftPanel.value)).toBe(false);

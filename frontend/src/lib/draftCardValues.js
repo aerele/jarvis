@@ -261,15 +261,17 @@ export function draftCardValues(model, snapshot, card) {
 }
 
 // Whether the person changed any cell of `row` since the snapshot (the cells in `skip` are
-// not counted). A row the snapshot does not hold counts as changed. The host uses this to
+// not counted; with `only`, just the columns it accepts are). A row the snapshot does not hold
+// counts as changed. The host uses this to
 // tell an untouched row from an edited one; it is a read of the same baseline the payload uses.
-export function rowCellsChanged(table, row, snapshot, skip = new Set()) {
+export function rowCellsChanged(table, row, snapshot, skip = new Set(), only = null) {
 	const tsnap = snapshot && snapshot.tables && snapshot.tables[table && table.fieldname];
 	const was = tsnap && tsnap.rows && tsnap.rows[rowKeyOf(row)];
 	if (!was) return true;
 	return cellColumns(table).some(
 		(c) =>
 			!skip.has(c.fieldname) &&
+			(!only || only(c)) &&
 			norm(c.fieldtype, row[c.fieldname]) !== (was.cells[c.fieldname] ?? "")
 	);
 }

@@ -117,6 +117,18 @@ export function computedFromCard(model, card) {
 // the person types a value of their own into it; clearing it by hand is such a change too (the
 // empty cell is sent), it is not undone.
 
+// A cell of these types never feeds a calculation, so editing one leaves the row's filled cells.
+const TEXT_TYPES = new Set([
+	"Data",
+	"Small Text",
+	"Text",
+	"Long Text",
+	"Text Editor",
+	"Code",
+	"HTML Editor",
+	"Markdown Editor",
+]);
+const feedsCalculation = (column) => !TEXT_TYPES.has(column.fieldtype || "");
 const NUMBER_TYPES = new Set(["Int", "Float", "Currency", "Percent", "Rating"]);
 // A typed control cannot show the card's formatted text for these.
 const NOT_FILLED = new Set(["Date", "Datetime", "Time", "Table", "Table MultiSelect"]);
@@ -177,8 +189,8 @@ export function fillCalculatedCells(model, card, { readOnly = true, verbatim = f
 }
 
 // Keep the filled cells honest while the person edits. A filled cell shows the card's value
-// while its row is as drafted; once any other editable cell of the row has changed, the value
-// may be stale, so it is blank (ERPNext calculates it on save). A cell the person typed into
+// while its row is as drafted; once any other editable cell of the row that can feed a
+// calculation (any type but a pure text one) has changed, the value may be stale, so it is blank (ERPNext calculates it on save). A cell the person typed into
 // themselves (its value is neither what was last put there) is theirs: left alone, sent as an
 // edit. The snapshot cell follows what was last put in, so the blanking is never a change.
 // Idempotent. Returns true when it wrote something.
@@ -197,7 +209,7 @@ export function settleCalculatedCells(model) {
 		const row = table && table.rows.find((r) => String(r.__key) === entries[0].key);
 		if (!row) continue;
 		const filled = new Set(entries.map((e) => e.fieldname));
-		const edited = rowCellsChanged(table, row, model.snapshot, filled);
+		const edited = rowCellsChanged(table, row, model.snapshot, filled, feedsCalculation);
 		for (const e of entries) {
 			if (e.owned) continue;
 			if (normCell(e.fieldtype, row[e.fieldname]) !== normCell(e.fieldtype, e.last)) {
