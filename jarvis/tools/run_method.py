@@ -50,7 +50,7 @@ import frappe
 from frappe.core.doctype.server_script.server_script_utils import get_server_script_map
 
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
-from jarvis.tools import _write_risk
+from jarvis.tools import _workflow_edit, _write_risk
 from jarvis.tools._lcv_tool_writes import reject_generic_lcv_write, tool_scope
 
 # S6: Jarvis's own gate, turn-entry and decision endpoints are never a tool target
@@ -147,6 +147,9 @@ def run_method(
 		if name is not None and not isinstance(name, str | int):
 			raise InvalidArgumentError("name must be a string")
 		_enforce_blocklist(f"{doctype}.{method}")
+		# aerele/jarvis#2506: what the document's workflow refuses, refused before
+		# anything (a doctype's own cancel hooks) runs.
+		_workflow_edit.check_run_method((), args, doctype, name, method)
 		return _run_doc_method(method, doctype, name, args)
 
 	# A site can replace a whitelisted method (the override_whitelisted_methods
@@ -159,6 +162,8 @@ def run_method(
 		# By name too, so a Server Script API cannot shadow a denied endpoint's path.
 		if _is_denied_path(name):
 			raise PermissionDeniedError(f"method {name!r} cannot be called from a tool")
+
+	_workflow_edit.check_run_method(_call_paths(method), args)
 
 	# Classify (not fall back): the server-script map is authoritative for
 	# whether a bare name is a Server Script API method.
