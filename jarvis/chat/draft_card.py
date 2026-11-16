@@ -59,6 +59,21 @@ def wanted(tool: str, args, *, must_card: bool) -> bool:
 	return enabled() and is_draft_call(tool, args, must_card=must_card)
 
 
+def is_pending_draft_row(row) -> bool:
+	"""A tool row that is still awaiting its decision and whose parked card is a draft.
+
+	Reads only the row's own (already parsed) ``pending_card``, so a history read adds no
+	query per row. Once the card is decided the row carries an ``action_outcome`` and no
+	card, and this is False."""
+	card = row.get("pending_card")
+	return (
+		row.get("role") == "tool"
+		and row.get("tool_status") == "pending"
+		and isinstance(card, dict)
+		and isinstance(card.get("draft"), dict)
+	)
+
+
 def payload_from(
 	verb: str,
 	doctype: str,

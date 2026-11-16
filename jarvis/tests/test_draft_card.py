@@ -273,6 +273,25 @@ class TestShortResultPure(unittest.TestCase):
 		self.assertEqual(data["warnings"], [queue_note, draft_card.HOOK_WARNING])
 
 
+class TestPendingDraftRowPure(unittest.TestCase):
+	def test_only_a_pending_tool_row_with_a_draft_on_its_card_is_a_draft_row(self):
+		"""`draft_card` on a history row must go false the moment the row is decided or its
+		card is gone, or the live-draft rule would keep counting a settled draft."""
+		card = {"title": "t", "draft": {"verb": "create"}}
+		row = {"role": "tool", "tool_status": "pending", "pending_card": card}
+		cases = [
+			(row, True),
+			({**row, "tool_status": ""}, False),
+			({**row, "pending_card": None}, False),
+			({**row, "pending_card": {"title": "t"}}, False),
+			({**row, "pending_card": {"draft": "x"}}, False),
+			({**row, "role": "assistant"}, False),
+		]
+		for case, want in cases:
+			with self.subTest(case=case):
+				self.assertIs(draft_card.is_pending_draft_row(case), want)
+
+
 try:
 	import frappe
 	from frappe.tests.utils import FrappeTestCase
@@ -563,3 +582,191 @@ if FrappeTestCase is not None:
 			res = self._run(1, "create_doc", args)
 			self.assertFalse(res["ok"])
 			self.assertNotIn("fields", res["error"])
+
+	from jarvis.chat import actions_api, settlement, turn_message_binding
+	from jarvis.chat import api as chat_api
+	from jarvis.tests._pending_action_helpers import (
+		MSG,
+		OTHER,
+		OWNER,
+		PendingActionTestMixin,
+		as_user,
+		fake_dispatch,
+	)
+	from jarvis.tests._transport_helpers import provision_legacy_site
+	from jarvis.tests.test_pending_confirm import _purge_legacy
+
+	_TODO_ARGS = {"doctype": "ToDo", "values": {"description": "pa-test draft source"}}
+	_PLAIN_PREVIEW = {"would": {"doctype": "ToDo"}, "card": {"title": "Create a ToDo", "fields": []}}
+
+	class TestEverySourceCarriesTheDraft(PendingActionTestMixin, FrappeTestCase):
+		"""A parked draft card read back through each place the apps read a card from.
+
+		History (`get_conversation`) rebuilds the row's card from the sealed record;
+		`list_pending_confirmations`, the `action:pending` push and the `run:end` list all
+		go through `pending_confirm.list_items_for_owner`, which hands the stored preview
+		(with its `card`) over whole. These tests pin that none of them strips `draft`."""
+
+		def setUp(self):
+			super().setUp()
+			provision_legacy_site(self)
+			_purge_legacy(OWNER)
+			self.addCleanup(_purge_legacy, OWNER)
+			turns = patch("jarvis.chat.api._dispatch_turn", return_value=None)
+			turns.start()
+			self.addCleanup(turns.stop)
+			self.bound = []
+			self.addCleanup(self._unbind)
+
+		def _unbind(self):
+			for conv in self.bound:
+				frappe.cache().delete_value(turn_message_binding._key(conv))
+
+		def _mint(self, conv, draft=True):
+			"""Park one ToDo create for OWNER, as `api._run_tool` does; returns (token, card)."""
+			card = _park_card("create_doc", _TODO_ARGS, {"description": "x"}, draft)
+			preview = {"would": {"description": "x"}, "card": card} if draft else dict(_PLAIN_PREVIEW)
+			token = pending_confirm.mint(
+				conversation=conv,
+				owner=OWNER,
+				tool="create_doc",
+				args=json.loads(json.dumps(_TODO_ARGS)),
+				run_id="",
+				preview=preview,
+			)
+			return token, json.loads(json.dumps(preview["card"], default=str))
+
+		def _history_row(self, conv, token, user=OWNER):
+			with as_user(user):
+				body = chat_api.get_conversation(conv)
+			[row] = [m for m in body["messages"] if m.get("tool_call_id") == token]
+			return row
+
+		def _on(self):
+			patcher = patch.dict(frappe.conf, {FLAG: 1})
+			patcher.start()
+			self.addCleanup(patcher.stop)
+
+		def test_all_four_sources_hand_over_the_same_draft_and_call_it_safe(self):
+			"""If any one source rebuilt or whitelisted the card, the apps would draw a bare
+			card for a draft on that path only (a reload, a resync or the run end)."""
+			self._on()
+			conv = self.make_conv()
+			token, card = self._mint(conv)
+			row = self._history_row(conv, token)
+			with as_user(OWNER):
+				resynced = actions_api.list_pending_confirmations(conversation=conv)["data"]["pending"]
+				pushed = pending_confirm.item_for_owner_token(token, OWNER, conv, strict=True)
+				terminal = settlement._extra_with_pending({}, OWNER, conv)["pending"]
+			self.assertEqual(row["pending_card"]["draft"], card["draft"])
+			self.assertIs(row["pending_card_safe"], True)
+			self.assertIs(row["draft_card"], True)
+			for name, items in (("resync", resynced), ("push", [pushed]), ("run:end", terminal)):
+				with self.subTest(source=name):
+					[item] = items
+					self.assertEqual(item["preview"]["card"]["draft"], card["draft"])
+					self.assertIs(item["pending_card_safe"], True)
+
+		def test_an_unsafe_draft_card_is_redacted_whole(self):
+			"""The redaction path must not let a fenced-off draft through `draft_card`: no card,
+			not safe, and the row is not a draft."""
+			self._on()
+			conv = self.make_conv()
+			token, _card = self._mint(conv)
+			with patch.object(pending_confirm, "pending_action_is_safe_to_render", return_value=False):
+				row = self._history_row(conv, token)
+			self.assertIsNone(row["pending_card"])
+			self.assertIs(row["pending_card_safe"], False)
+			self.assertIs(row["draft_card"], False)
+
+		def test_flag_off_is_todays_behaviour(self):
+			"""With the flag off a tool row has no `draft_card` key, so an ordinary card's row
+			has the keys it had; with it on the only new key is `draft_card`, False for a card
+			that is not a draft."""
+			conv = self.make_conv()
+			token, _card = self._mint(conv, draft=False)
+			with patch.dict(frappe.conf, {FLAG: 0}):
+				off = self._history_row(conv, token)
+			with patch.dict(frappe.conf, {FLAG: 1}):
+				on = self._history_row(conv, token)
+			self.assertNotIn("draft_card", off)
+			self.assertEqual(set(on) - set(off), {"draft_card"})
+			self.assertIs(on["draft_card"], False)
+			self.assertNotIn("draft", on["pending_card"])
+
+		def _decided_row(self, conv, token):
+			"""The row as stored, and as the app reads it, after the card was decided."""
+			stored = frappe.db.get_value(
+				MSG,
+				{"conversation": conv, "tool_call_id": token},
+				["pending_card", "action_outcome"],
+				as_dict=True,
+			)
+			return stored, self._history_row(conv, token)
+
+		def _assert_decided(self, conv, token, outcome):
+			stored, row = self._decided_row(conv, token)
+			self.assertFalse(stored.pending_card, "the decided row keeps no card")
+			self.assertEqual(stored.action_outcome, outcome)
+			self.assertEqual(row["action_outcome"], outcome)
+			self.assertIs(row["draft_card"], False)
+
+		def test_confirming_a_draft_clears_the_card_and_sets_the_outcome(self):
+			"""The live-draft rule retires an older typed draft on a non-empty `action_outcome`;
+			a confirm that cleared the card without one would leave two drafts on screen."""
+			self._on()
+			conv = self.make_conv()
+			token, _card = self._mint(conv)
+			with fake_dispatch(), as_user(OWNER):
+				actions_api.confirm_tool(token, conversation=conv)
+			self._assert_decided(conv, token, "confirmed")
+
+		def test_discarding_a_draft_clears_the_card_and_sets_the_outcome(self):
+			"""Same invariant as confirm, for the Discard button."""
+			self._on()
+			conv = self.make_conv()
+			token, _card = self._mint(conv)
+			with fake_dispatch(), as_user(OWNER):
+				actions_api.dismiss_tool(token, conversation=conv)
+			self._assert_decided(conv, token, "discarded")
+
+		def test_superseding_a_draft_clears_the_card_and_sets_the_outcome(self):
+			"""A newer proposal after the user spoke retires the draft card in park's own
+			transaction (`_flip_superseded_chip`); the chip must carry `superseded`."""
+			self._on()
+			conv = self.make_conv()
+			old, _card = self._mint(conv)
+			trigger = frappe.get_doc(
+				{
+					"doctype": MSG,
+					"conversation": conv,
+					"seq": chat_api._next_seq(conv),
+					"role": "user",
+					"content": "make it another one",
+					"origin": "human",
+				}
+			)
+			trigger.flags.jarvis_server_write = True
+			trigger.insert(ignore_permissions=True)
+			frappe.db.commit()
+			turn_message_binding.bind_turn_message(conv, trigger.name)
+			self.bound.append(conv)
+			new, _card = self._mint(conv)
+			self.assertTrue(new)
+			self._assert_decided(conv, old, "superseded")
+
+		def test_a_stranger_gets_no_card_from_any_source_that_takes_a_conversation(self):
+			"""Kept beside the sources test on purpose: reading as a different user must
+			return no draft through history, resync, the push or the run-end list."""
+			self._on()
+			conv = self.make_conv()
+			token, _card = self._mint(conv)
+			with as_user(OTHER):
+				with self.assertRaises(frappe.PermissionError):
+					chat_api.get_conversation(conv)
+				resynced = actions_api.list_pending_confirmations(conversation=conv)["data"]["pending"]
+				pushed = pending_confirm.item_for_owner_token(token, OTHER, conv, strict=True)
+				terminal = settlement._extra_with_pending({}, OTHER, conv)
+			self.assertEqual(resynced, [])
+			self.assertIsNone(pushed)
+			self.assertNotIn("pending", terminal)

@@ -851,6 +851,7 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 				m["pending_card"] = frappe.parse_json(m["pending_card"])
 			except Exception:
 				m["pending_card"] = None
+	_stamp_draft_cards(rows)
 	return {
 		"conversation": {
 			"name": doc.name,
@@ -1244,6 +1245,19 @@ def _fence_legacy_pending_cards(
 			row["pending_card_safe"] = True
 			continue
 		_redact_unsafe_pending_card(row)
+
+
+def _stamp_draft_cards(rows: list) -> None:
+	"""``draft_card`` on each tool row while the draft cards feature is on: true only for a
+	Pending row whose card carries a ``draft``. Absent with the site flag off, so every row
+	keeps the keys it had."""
+	from jarvis.chat import draft_card
+
+	if not draft_card.enabled():
+		return
+	for row in rows:
+		if row.get("role") == "tool":
+			row["draft_card"] = draft_card.is_pending_draft_row(row)
 
 
 def _pending_recency(conversation: str, messages: list) -> None:
