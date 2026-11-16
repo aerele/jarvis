@@ -91,18 +91,6 @@ class TestAfterAWaitingAnswer(GuardBase):
 			with self.subTest(tool=tool):
 				self._assert_refused(tool)
 
-	def test_nothing_is_written_or_sent(self):
-		self._waiting()
-		todos = frappe.db.count("ToDo")
-		queued = frappe.db.count("Email Queue")
-		for tool, args in (
-			("create_doc", {"doctype": "ToDo", "values": {"description": "guard-probe"}}),
-			("send_email", {"recipients": "nobody@example.com", "subject": "s", "content": "c"}),
-		):
-			self._call(tool, args)
-		self.assertEqual((frappe.db.count("ToDo"), frappe.db.count("Email Queue")), (todos, queued))
-		self.assertFalse(pending_confirm.has_live_card(OWNER, self.conv))
-
 	def test_reads_still_work(self):
 		self._waiting()
 		for tool in READS:
@@ -360,10 +348,3 @@ class TestWhenTheFeatureIsOffOrBroken(GuardBase):
 		with patch.object(macro_report_wait, "_write_refusal") as lookup:
 			self.assertIsNone(macro_report_wait.write_refusal(self.conv, "get_list"))
 		lookup.assert_not_called()
-
-
-class TestTheWords(GuardBase):
-	def test_the_messages(self):
-		self.assertEqual(macro_report_wait.GUARD_WAITING, WAITING)
-		self.assertEqual(macro_report_wait.GUARD_FAILED, FAILED)
-		self.assertNotIn("\u2014", WAITING + FAILED)

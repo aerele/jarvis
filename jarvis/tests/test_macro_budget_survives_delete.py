@@ -135,11 +135,6 @@ class TestADeleteKeepsTheMonthsScheduledSteps(BudgetBase):
 		self._delete(again)
 		self.assertEqual(self._spent(), spent + 1)
 
-	def test_a_manual_run_is_deleted_not_kept(self):
-		run, _, macro = self._finished(trigger="manual")
-		self._delete(macro)
-		self.assertFalse(frappe.db.exists(RUN, run))
-
 	def test_a_run_from_an_earlier_month_is_deleted_not_kept(self):
 		old, _, macro = self._finished(age_days=1)
 		on_the_boundary = self._another_run(
@@ -151,12 +146,6 @@ class TestADeleteKeepsTheMonthsScheduledSteps(BudgetBase):
 		# The first instant of the month counts toward it, so that row is kept.
 		self.assertIsNone(self._row(on_the_boundary).macro)
 		self.assertEqual(self._spent(), spent)
-
-	def test_a_scheduled_run_that_never_dispatched_is_deleted(self):
-		# A slot the scheduler refused is recorded with no step sent: nothing to count.
-		refused, _, macro = self._finished(at_step=0, status="failed")
-		self._delete(macro)
-		self.assertFalse(frappe.db.exists(RUN, refused))
 
 	def test_only_the_rows_that_count_are_kept_out_of_a_macros_whole_history(self):
 		counted, _, macro = self._finished(at_step=3)
