@@ -12,6 +12,7 @@ import { describe, expect, it } from "vitest";
 import { applyRuleValues, blankRow, buildDraftTable } from "./draftTables";
 import { panelField } from "./docFields";
 import { draftCardDirty, draftCardValues, snapshotDraftModel } from "./draftCardValues";
+import CONTRACT from "./draftCardContractCases.json";
 
 const F = (fieldname, fieldtype = "Data", extra = {}) => ({
 	fieldname,
@@ -436,7 +437,7 @@ describe("child rows of a create draft (3 drafted rows)", () => {
 	});
 });
 
-describe("child rows of an update draft (identity is the row's name)", () => {
+describe("child rows of an update draft (identity: the row's name, or the index of a row the draft added)", () => {
 	// the draft sets hours on tl-1 and adds a new row of its own
 	const draftRows = () => [
 		{ name: "tl-1", hours: 2 },
@@ -449,14 +450,14 @@ describe("child rows of an update draft (identity is the row's name)", () => {
 	const cases = [
 		["nothing touched: the table is absent", () => {}, {}],
 		[
-			"one cell edited in row 2: names, never _draft_row; the draft's own new row is sent whole",
+			"one cell edited in row 2: saved rows by name, the draft's own new row by its index in the draft",
 			(m) => (logs(m).rows[1].note = "late"),
 			{
 				logs: [
 					{ name: "tl-1" },
 					{ name: "tl-2", note: "late" },
 					{ name: "tl-3" },
-					{ activity: "A9", hours: 9 },
+					{ _draft_row: 3 },
 				],
 			},
 		],
@@ -468,7 +469,7 @@ describe("child rows of an update draft (identity is the row's name)", () => {
 					{ name: "tl-1" },
 					{ name: "tl-2" },
 					{ name: "tl-3", activity: "" },
-					{ activity: "A9", hours: 9 },
+					{ _draft_row: 3 },
 				],
 			},
 		],
@@ -488,7 +489,7 @@ describe("child rows of an update draft (identity is the row's name)", () => {
 					{ name: "tl-1" },
 					{ name: "tl-2" },
 					{ name: "tl-3" },
-					{ activity: "A9", hours: 9 },
+					{ _draft_row: 3 },
 					{ activity: "N" },
 				],
 			},
@@ -496,7 +497,7 @@ describe("child rows of an update draft (identity is the row's name)", () => {
 		[
 			"a saved row removed is simply absent",
 			(m) => logs(m).rows.splice(1, 1),
-			{ logs: [{ name: "tl-1" }, { name: "tl-3" }, { activity: "A9", hours: 9 }] },
+			{ logs: [{ name: "tl-1" }, { name: "tl-3" }, { _draft_row: 3 }] },
 		],
 		[
 			"the draft's own new row removed",
@@ -534,10 +535,178 @@ describe("child rows of an update draft (identity is the row's name)", () => {
 		});
 	});
 
-	it("an update never sends _draft_row", () => {
-		const { values } = run(build, (m) => (logs(m).rows[0].hours = "5"));
+	it("a named row never carries _draft_row, the draft's nameless row never carries name", () => {
+		const { values } = run(build, (m) => {
+			logs(m).rows[0].hours = "5";
+			logs(m).rows[3].note = "x";
+		});
+		expect(values).toEqual({
+			logs: [
+				{ name: "tl-1", hours: 5 },
+				{ name: "tl-2" },
+				{ name: "tl-3" },
+				{ _draft_row: 3, note: "x" },
+			],
+		});
+	});
+});
+
+describe("update rows the draft itself added: identity is their index in the draft's list", () => {
+	// the draft's list counts named rows too: X is index 0 and Y index 2
+	const draftRows = () => [
+		{ activity: "X", hours: 1 },
+		{ name: "tl-1" },
+		{ activity: "Y", hours: 2 },
+		{ name: "tl-2" },
+	];
+	const build = () => updateModel({ logs: draftRows() });
+
+	it("each carries its index in the FULL drafted list, not its place among the new rows", () => {
+		const { values } = run(build, (m) => (logs(m).rows[2].activity = "Z"));
+		expect(values).toEqual({
+			logs: [
+				{ _draft_row: 0 },
+				{ name: "tl-1" },
+				{ _draft_row: 2, activity: "Z" },
+				{ name: "tl-2" },
+			],
+		});
+	});
+
+	it("a row the person adds has no identity; the drafted one keeps its own", () => {
+		const { values } = run(build, (m) => {
+			logs(m).rows.splice(1, 0, Object.assign(blankRow(logs(m)), { activity: "Mine" }));
+		});
+		expect(values.logs).toEqual([
+			{ _draft_row: 0 },
+			{ activity: "Mine" },
+			{ name: "tl-1" },
+			{ _draft_row: 2 },
+			{ name: "tl-2" },
+		]);
+	});
+
+	it("no origin when the new rows at snapshot time are not the draft's (every one is sent whole)", () => {
+		// a person-added row is already in the grid when the snapshot is taken: 3 nameless rows
+		// against the draft's 2, so none can be matched
+		const extra = () => {
+			const built = build();
+			logs(built.model).rows.push(
+				Object.assign(blankRow(logs(built.model)), { activity: "Q" })
+			);
+			return built;
+		};
+		const { values } = run(extra, (m) => (logs(m).rows[1].hours = "8"));
+		expect(values.logs).toEqual([
+			{ activity: "X", hours: 1 },
+			{ name: "tl-1", hours: 8 },
+			{ activity: "Y", hours: 2 },
+			{ name: "tl-2" },
+			{ activity: "Q" },
+		]);
+	});
+
+	it("no origin when the saved rows are not in the draft's order at snapshot time", () => {
+		// same count of new rows, but the grid is not laid out as the draft: do not guess
+		const swapped = () => {
+			const built = build();
+			const rows = logs(built.model).rows;
+			[rows[1], rows[3]] = [rows[3], rows[1]];
+			return built;
+		};
+		const { values } = run(swapped, (m) => (logs(m).rows[0].hours = "5"));
+		expect(values.logs[0]).toEqual({ activity: "X", hours: 5 });
 		expect(JSON.stringify(values)).not.toContain("_draft_row");
 	});
+
+	it("a column called name or _draft_row never overwrites a row's identity", () => {
+		const spec = { ...LOGS, columns: [...LOGS.columns, F("name"), F("_draft_row", "Int")] };
+		const make = (verb) => () => {
+			const rows =
+				verb === "update" ? [{ name: "tl-1" }, { activity: "Y" }] : [{ hours: 1 }];
+			const table = buildDraftTable({
+				fieldname: "logs",
+				spec,
+				required: true,
+				proposed: rows,
+				saved: verb === "update" ? SAVED() : [],
+				verb,
+			});
+			const card = { draft: { verb, doctype: "T", values: { logs: rows } } };
+			return { model: { verb, doctype: "T", fields: [], tables: [table] }, card };
+		};
+		const edit = (m) => {
+			const [r] = logs(m).rows;
+			r.name = "evil";
+			r._draft_row = "9";
+			r.hours = "5";
+		};
+		expect(run(make("update"), edit).values).toEqual({
+			logs: [{ name: "tl-1", hours: 5 }, { _draft_row: 1 }],
+		});
+		expect(run(make("create"), edit).values).toEqual({ logs: [{ _draft_row: 0, hours: 5 }] });
+	});
+});
+
+// The shared cases (draftCardContractCases.json): the server test turns each `values` into its
+// `written`; here the form must produce that same `values` from the same sealed call.
+describe("the shared values contract cases", () => {
+	const COLUMNS = [
+		F("item"),
+		F("qty", "Float"),
+		F("note"),
+		F("so_detail", "Data", { read_only: 1 }),
+	];
+	const SPEC = { label: "Rows", child_doctype: "Row", columns: COLUMNS, extra_columns: [] };
+	function build(c) {
+		const update = c.verb === "update";
+		const fields =
+			"title" in c.sealed
+				? [{ ...panelField(F("title"), c.sealed.title), proposed: true }]
+				: [];
+		const table = buildDraftTable({
+			fieldname: "rows",
+			spec: SPEC,
+			required: !update,
+			proposed: c.sealed.rows,
+			saved: update ? c.savedRows || [] : [],
+			verb: c.verb,
+		});
+		const card = { draft: { verb: c.verb, doctype: "T", values: c.sealed } };
+		return { model: { verb: c.verb, doctype: "T", fields, tables: [table] }, card };
+	}
+	function replay(model, ops) {
+		const t = model.tables[0];
+		for (const o of ops) {
+			if (o.op === "set") t.rows[o.row][o.cell] = o.value;
+			else if (o.op === "remove") t.rows.splice(o.row, 1);
+			else if (o.op === "insert")
+				t.rows.splice(o.row, 0, Object.assign(blankRow(t), o.cells));
+			else if (o.op === "append") t.rows.push(Object.assign(blankRow(t), o.cells));
+			else throw new Error(`unknown op ${o.op}`);
+		}
+	}
+	const both = CONTRACT.cases.filter((c) => c.side !== "server");
+
+	it("covers every verb and the cases that matter, and marks the server-only ones", () => {
+		expect(CONTRACT.cases.map((c) => c.id)).toEqual(
+			expect.arrayContaining([
+				"update-drafted-new-row-one-edited-cell",
+				"update-drafted-new-row-removed",
+				"update-person-added-row",
+			])
+		);
+		expect(both.length).toBeGreaterThanOrEqual(11);
+		for (const c of CONTRACT.cases.filter((c) => c.side)) expect(c.why).toBeTruthy();
+	});
+	for (const c of both) {
+		it(`${c.id}: the form sends the payload the server test writes from`, () => {
+			const { model, card } = build(c);
+			const snap = snapshotDraftModel(model, card);
+			replay(model, c.form);
+			expect(draftCardValues(model, snap, card)).toEqual(c.values);
+		});
+	}
 });
 
 describe("writes that are not the person's edits", () => {

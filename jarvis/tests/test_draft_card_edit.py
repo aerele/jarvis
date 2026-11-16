@@ -9,9 +9,15 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import unittest
 
 from jarvis.chat import draft_values
+
+# The contract cases the desktop form's own spec also runs (draftCardValues.spec.js).
+CONTRACT_CASES = os.path.join(
+	os.path.dirname(__file__), "..", "..", "frontend", "src", "lib", "draftCardContractCases.json"
+)
 
 
 class _Rules:
@@ -108,8 +114,8 @@ class TestDraftValuesPure(unittest.TestCase):
 	def test_a_draft_row_index_must_name_one_drafted_row_once(self):
 		"""``_draft_row`` says which drafted row a sent row is: an index that is not one (out of
 		range, a string, a bool, negative, a float), or one two rows both claim, would
-		copy the wrong drafted cells into the record. Each is a mark on its row, and an
-		update's rows are keyed by name only."""
+		copy the wrong drafted cells into the record. Each is a mark on its row. (An
+		update's twin is the next test.)"""
 		rules = _Rules(tables={"items": "Table"})
 		base = {"items": [{"x": 1}, {"x": 2}]}
 		bad, twice = draft_values.NOT_A_DRAFTED_ROW, draft_values.TWICE
@@ -129,9 +135,91 @@ class TestDraftValuesPure(unittest.TestCase):
 			with self.subTest(rows=rows):
 				found = draft_values.errors({"items": rows}, rules, is_update=False, base=base)
 				self.assertEqual([(f["idx"], f["message"]) for f in found], want)
-		on_update = _Rules(tables={"items": "Table"}, refused={"_draft_row"})
-		[mark] = draft_values.errors({"items": [{"_draft_row": 0}]}, on_update, is_update=True, base=base)
-		self.assertEqual(mark["message"], "refused", "an update's rows are keyed by name only")
+
+	def test_an_update_draft_row_must_point_once_at_a_drafted_row_that_has_no_name(self):
+		"""``_draft_row`` on an update names a row the DRAFT added. Each of these would copy
+		the wrong cells into the record, or let a row take the identity of a saved one, so
+		each is a mark on its row: an index that is no index (out of range, negative, bool,
+		float, string), one that points at a drafted row WITH a name (that row is named by its
+		``name``), one two rows both claim, and a row that sends a ``name`` as well."""
+		rules = _Rules(tables={"items": "Table"}, saved={"items": {"r1"}})
+		base = {"items": [{"name": "r1", "a": 1}, {"b": 2}, {"c": 3}]}  # drafted new rows: 1 and 2
+		bad, twice = draft_values.NOT_A_DRAFTED_ROW, draft_values.TWICE
+		cases = [
+			([{"name": "r1"}, {"_draft_row": 1}, {"_draft_row": 2}], []),
+			([{"name": "r1"}, {"_draft_row": 9}, {"_draft_row": -1}], [(2, bad), (3, bad)]),
+			(
+				[{"name": "r1"}, {"_draft_row": True}, {"_draft_row": 1.0}, {"_draft_row": "1"}],
+				[(2, bad), (3, bad), (4, bad)],
+			),
+			([{"name": "r1"}, {"_draft_row": 0}], [(2, bad)]),
+			([{"name": "r1"}, {"_draft_row": 1}, {"_draft_row": 1}], [(3, twice)]),
+			([{"name": "r1", "_draft_row": 1}], [(1, bad)]),
+			([{"name": "r1"}, {"_draft_row": None, "x": 1}, {"_draft_row": "", "x": 2}], []),
+		]
+		for rows, want in cases:
+			with self.subTest(rows=rows):
+				found = draft_values.errors({"items": rows}, rules, is_update=True, base=base)
+				self.assertEqual([(f["idx"], f["message"]) for f in found], want)
+				self.assertTrue(all(f["fieldname"] == "_draft_row" for f in found), found)
+
+	def test_an_update_row_the_draft_added_keeps_its_unsent_cells_and_loses_the_marker(self):
+		"""DATA LOSS guard: the draft ADDS a row (no ``name``) with a cell the form cannot
+		send (an invoice row's ``so_detail`` link) and the person edits one cell of it. The
+		row must be the drafted row with that cell over it, and ``_draft_row`` must not
+		reach the write, the stored args or the receipt. A drafted new row no sent row points
+		at is not written; a sent blank stays blank in the row (the key is present)."""
+		drafted = [
+			{"name": "r1", "x": "agent"},
+			{"item": "New", "qty": 3, "so_detail": "SO-D1", "note": "keep"},
+			{"item": "Dropped"},
+		]
+		args = {"doctype": "T", "name": "N", "changes": {"items": drafted}}
+		sent = [{"name": "r1"}, {"_draft_row": 1, "qty": 4, "note": ""}, {"item": "Mine"}]
+		edited = draft_values.edited_call("update_doc", args, {"items": sent}, tables={"items"})
+		self.assertEqual(
+			edited["changes"]["items"],
+			[
+				{"name": "r1", "x": "agent"},
+				{"item": "New", "qty": 4, "so_detail": "SO-D1", "note": ""},
+				{"item": "Mine"},
+			],
+		)
+		self.assertNotIn("_draft_row", json.dumps(edited))
+		self.assertEqual(args["changes"]["items"], drafted, "the sealed call is never changed")
+		self.assertEqual(sent[1], {"_draft_row": 1, "qty": 4, "note": ""}, "nor the sent rows")
+
+	def test_a_blank_marker_on_an_update_row_is_dropped_and_names_no_drafted_row(self):
+		"""A client may write "no marker" as null or "": the row is new (no cells borrowed from
+		a drafted row) and the key still never reaches the write."""
+		args = {"doctype": "T", "name": "N", "changes": {"items": [{"a": 1}]}}
+		for marker in (None, ""):
+			with self.subTest(marker=marker):
+				sent = [{"_draft_row": marker, "b": 2}]
+				written = draft_values.edited_call("update_doc", args, {"items": sent}, tables={"items"})
+				self.assertEqual(written["changes"]["items"], [{"b": 2}])
+
+	def test_the_shared_contract_cases_write_what_the_form_spec_expects(self):
+		"""The same cases the desktop form's spec turns into the payload (``values``): the
+		server must turn that payload into ``written``. If either side changes its reading
+		of the contract alone, one of the two suites fails."""
+		with open(CONTRACT_CASES) as f:
+			cases = json.load(f)["cases"]
+		self.assertGreaterEqual(len(cases), 12)
+		for case in cases:
+			with self.subTest(case=case["id"]):
+				update = case["verb"] == "update"
+				key = "changes" if update else "values"
+				args = {"doctype": "T", key: case["sealed"], **({"name": "N"} if update else {})}
+				before = copy.deepcopy(args)
+				call = draft_values.edited_call(
+					"update_doc" if update else "create_doc", args, case["values"], tables={"rows"}
+				)
+				self.assertEqual(call[key], case["written"])
+				self.assertEqual(args, before, "the sealed call is never changed")
+				rules = _Rules(tables={"rows": "Table"}, saved={"rows": {"r1", "r2", "r5"}})
+				found = draft_values.errors(case["values"], rules, is_update=update, base=case["sealed"])
+				self.assertEqual(found, [], "the payload the form sends must pass validation")
 
 	def test_a_draft_row_sent_as_none_or_empty_is_a_new_row(self):
 		"""A client may write "no marker" as ``null`` or ``""``: the row is new, validation
@@ -1167,6 +1255,39 @@ if FrappeTestCase is not None:
 				rows,
 				[(r1, "Person label", "Agent help"), (r2, "Second", None), (r3, "Third", None)],
 			)
+
+		def test_a_row_the_draft_added_keeps_its_other_drafted_cell_when_one_is_edited(self):
+			"""End to end: the agent's update ADDS a row (no ``name``) with two cells set; the
+			form sends that row with ``_draft_row`` and ONE edited cell. The saved new row must
+			hold the person's cell AND the agent's other one (the form rebuilt such a row from
+			its own columns before and the other cell was lost), the saved rows stay, and the
+			marker reaches neither the record nor the stored receipt."""
+			form, (r1, r2, r3) = self.web_form()
+			conv = self.make_conv(owner=OTHER)
+			added = {
+				"fieldname": "date",
+				"fieldtype": "Data",
+				"label": "Agent label",
+				"description": "Agent help",
+			}
+			drafted = [{"name": r1}, {"name": r2}, {"name": r3}, added]
+			args = {"doctype": "Web Form", "name": form, "changes": {"web_form_fields": drafted}}
+			token = self.mint(conv, "update_doc", args, owner=OTHER)
+			table = [{"name": r1}, {"name": r2}, {"name": r3}, {"_draft_row": 3, "label": "Person label"}]
+			out = self.save(token, conv, {"web_form_fields": table}, user=OTHER)
+			self.assertTrue(out["ok"], out)
+			rows = self.form_rows(form)
+			self.assertEqual(
+				[(r.fieldname, r.label, r.description) for r in rows],
+				[
+					("description", "First", None),
+					("status", "Second", None),
+					("priority", "Third", None),
+					("date", "Person label", "Agent help"),
+				],
+			)
+			[decided] = self.tool_rows(conv)
+			self.assertNotIn("_draft_row", decided.tool_args)
 
 		def test_an_update_sends_none_to_set_a_field_blank(self):
 			"""On an update None is "make it blank": update_doc sets it, and the draft's own

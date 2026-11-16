@@ -14,6 +14,11 @@
 // Rows are matched by the form's own row key (`__key`, minted only by newRowKey()), never by
 // position, so an added or inserted row cannot inherit another row's origin.
 //
+// Row identity, as the server reads it (jarvis/chat/draft_values.py): a kept row is `{name}`
+// (an update's saved row), `{_draft_row: i}` (a create row, or an update row the draft ITSELF
+// added: a drafted row with no name), then only the cells the person changed. A row the
+// person added has no identity and all its cells.
+//
 // Pure, relative imports only: the phone shares this file.
 import {
 	allRowFields,
@@ -71,6 +76,9 @@ function norm(fieldtype, v) {
 	return String(v);
 }
 
+// Row identity keys: a cell column called like one must never overwrite it in the payload.
+const IDENTITY = new Set(["name", "_draft_row"]);
+
 const sendable = (f) =>
 	!!f.fieldname &&
 	!String(f.fieldname).startsWith("__") &&
@@ -78,8 +86,11 @@ const sendable = (f) =>
 	!f.read_only;
 
 // The columns of a table whose cells the person can change and the form may send.
-const cellColumns = (table) => allRowFields(table).filter(sendable);
+// A MAIN field called `name` is a real field (a prompt-named create), so only the cells drop it.
+const cellColumns = (table) =>
+	allRowFields(table).filter((c) => sendable(c) && !IDENTITY.has(c.fieldname));
 
+const isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const rowKeyOf = (r) => (r && r.__key != null ? String(r.__key) : null);
 
 // A row the save counts: a saved row (it has its name) or one with any value in it. A blank
@@ -101,16 +112,46 @@ const verbOf = (model, snapshot, card) =>
 	(card && card.draft && card.draft.verb) ||
 	"create";
 
+// An update's model rows with no name that came from the draft: `{[row index]: drafted index}`.
+// buildDraftTable lays an update table out as the draft's own list (proposed rows over the
+// saved ones by name), one model row per drafted row in draft order, so the k-th nameless
+// model row IS the k-th nameless drafted row. That is trusted only when it can be checked:
+// the counts of nameless rows must be equal, and the named rows must be the same names in
+// the same order. Otherwise nothing is assigned and those rows are sent whole (nothing
+// lost, but their unsent drafted cells are).
+function draftedNewRows(rows, drafted) {
+	if (!drafted) return {};
+	const nameOf = (r) => (r && r.__name ? String(r.__name) : "");
+	const draftedName = (d) => (isObject(d) && d.name ? String(d.name) : "");
+	const draftNameless = [];
+	drafted.forEach((d, i) => {
+		if (isObject(d) && !draftedName(d)) draftNameless.push(i);
+	});
+	const modelNameless = [];
+	rows.forEach((r, i) => {
+		if (!nameOf(r)) modelNameless.push(i);
+	});
+	if (modelNameless.length !== draftNameless.length) return {};
+	const named = (list, of) => list.map(of).filter(Boolean);
+	const modelNames = named(rows, nameOf);
+	const draftNames = named(drafted, draftedName);
+	if (modelNames.length !== draftNames.length || modelNames.some((n, i) => n !== draftNames[i]))
+		return {};
+	return Object.fromEntries(modelNameless.map((m, k) => [m, draftNameless[k]]));
+}
+
 function snapshotTable(table, verb, card) {
 	const cols = cellColumns(table);
 	const drafted = draftRowsOf(card, table.fieldname);
+	const modelRows = table.rows || [];
 	// On a create, row i of the form is row i of the draft only while the builder laid the
 	// draft's rows out one for one. If the counts differ nothing can be matched, so every
 	// row is treated as new (its complete cells are sent: nothing is lost).
-	const aligned = verb === "create" && !!drafted && drafted.length === (table.rows || []).length;
+	const aligned = verb === "create" && !!drafted && drafted.length === modelRows.length;
+	const added = verb === "update" ? draftedNewRows(modelRows, drafted) : {};
 	const keys = [];
 	const rows = {};
-	(table.rows || []).forEach((r, i) => {
+	modelRows.forEach((r, i) => {
 		const k = rowKeyOf(r);
 		if (isReal(table, r)) keys.push(k);
 		if (k == null) return;
@@ -118,6 +159,7 @@ function snapshotTable(table, verb, card) {
 		for (const c of cols) cells[c.fieldname] = norm(c.fieldtype, r[c.fieldname]);
 		const origin = verb === "update" ? r.__name || null : aligned ? i : null;
 		rows[k] = { origin, cells };
+		if (i in added) rows[k].draftRow = added[i];
 	});
 	return { keys, rows };
 }
@@ -149,16 +191,25 @@ function tableTouched(table, snap, real, cols) {
 	});
 }
 
+// A kept row's identity key: `_draft_row` (a create row, or an update row the draft itself
+// added) or `name` (an update's saved row); null for a row the person added.
+function identityOf(was, verb) {
+	if (!was) return null;
+	if (verb === "create") return was.origin != null ? { _draft_row: was.origin } : null;
+	if (was.origin != null) return { name: was.origin };
+	return was.draftRow != null ? { _draft_row: was.draftRow } : null;
+}
+
 // The complete final row list of a touched table, in the form's order.
 function tableRows(table, snap, real, cols, verb) {
 	const out = [];
 	for (const r of real) {
 		const was = snap.rows[rowKeyOf(r)];
 		const row = {};
-		if (was && was.origin != null) {
+		const identity = identityOf(was, verb);
+		if (identity) {
 			// A kept row: who it is, then only the cells the person changed.
-			if (verb === "create") row._draft_row = was.origin;
-			else row.name = was.origin;
+			Object.assign(row, identity);
 			for (const c of cols) {
 				if (norm(c.fieldtype, r[c.fieldname]) === (was.cells[c.fieldname] ?? "")) continue;
 				row[c.fieldname] = blank(r[c.fieldname]) ? "" : coerceCell(c, r[c.fieldname]);
@@ -176,8 +227,8 @@ function tableRows(table, snap, real, cols, verb) {
 
 // The `values` of save_draft_card: a main field only when it differs from the snapshot (a
 // cleared one as ""), a table only when touched, then as its complete final list. Never a
-// private key (`__...`), a read-only, layout, attachment or secret field, `_draft_row` on an
-// update, or `name` on a create row. The row identity is read from the snapshot; `card` only
+// private key (`__...`), a read-only, layout, attachment or secret field, or a row cell
+// called `name` or `_draft_row`. The row identity is read from the snapshot; `card` only
 // supplies the verb when the model carries none.
 export function draftCardValues(model, snapshot, card) {
 	const values = {};
