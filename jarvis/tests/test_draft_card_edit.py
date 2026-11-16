@@ -106,7 +106,7 @@ class TestDraftValuesPure(unittest.TestCase):
 
 	def test_a_draft_row_index_must_name_one_drafted_row_once(self):
 		"""``_draft_row`` says which drafted row a sent row is: an index that is not one (out of
-		range, a string, a bool, negative, a float, None), or one two rows both claim, would
+		range, a string, a bool, negative, a float), or one two rows both claim, would
 		copy the wrong drafted cells into the record. Each is a mark on its row, and an
 		update's rows are keyed by name only."""
 		rules = _Rules(tables={"items": "Table"})
@@ -121,7 +121,7 @@ class TestDraftValuesPure(unittest.TestCase):
 			([{"_draft_row": 1}, {"_draft_row": 1}], [(2, twice)]),
 			(
 				[{"_draft_row": -1}, {"_draft_row": 1.0}, {"_draft_row": None}, {"_draft_row": 1}],
-				[(1, bad), (2, bad), (3, bad)],
+				[(1, bad), (2, bad)],
 			),
 		]
 		for rows, want in cases:
@@ -131,6 +131,19 @@ class TestDraftValuesPure(unittest.TestCase):
 		on_update = _Rules(tables={"items": "Table"}, refused={"_draft_row"})
 		[mark] = draft_values.errors({"items": [{"_draft_row": 0}]}, on_update, is_update=True, base=base)
 		self.assertEqual(mark["message"], "refused", "an update's rows are keyed by name only")
+
+	def test_a_draft_row_sent_as_none_or_empty_is_a_new_row(self):
+		"""A client may write "no marker" as ``null`` or ``""``: the row is new, validation
+		accepts it, and the key never reaches the write."""
+		rules = _Rules(tables={"items": "Table"})
+		base = {"items": [{"x": 1}]}
+		args = {"doctype": "T", "values": base}
+		for marker in (None, ""):
+			with self.subTest(marker=marker):
+				sent = {"items": [{"_draft_row": marker, "qty": 2}]}
+				self.assertEqual(draft_values.errors(sent, rules, is_update=False, base=base), [])
+				written = draft_values.edited_call("create_doc", args, sent, tables={"items"})
+				self.assertEqual(written["values"]["items"], [{"qty": 2}])
 
 	def test_an_update_writes_the_edits_over_the_drafts_own_changes(self):
 		"""The form sends only what was edited: the draft's other changes must still be
@@ -440,14 +453,48 @@ if FrappeTestCase is not None:
 			self.assertEqual(self.todos("stranger"), [])
 
 		def test_the_flag_off_refuses_and_leaves_the_card(self):
-			"""Dark means dark: with ``jarvis_draft_cards`` off the endpoint writes nothing."""
+			"""Dark means dark: with ``jarvis_draft_cards`` off the endpoint writes nothing. A card
+			parked while it was on is still usable with its buttons, so the apps keep it
+			(``card_open``); a stranger gets the plain refusal, as with the flag on."""
 			conv, token = self.todo_draft()
 			before = self.sealed(token)
 			with patch.dict(frappe.conf, {FLAG: 0}):
 				out = self.save(token, conv, {"description": f"{MARK} flag off"})
-			self.assert_closed(out, draft_save.CLOSED)
+				self.assert_closed(
+					out, draft_save.CLOSED, "Editing is turned off here. Use the card's buttons."
+				)
+				self.assertIs(out.get("card_open"), True)
+				own = self.make_conv(owner=OTHER)
+				stranger = self.save(token, own, {}, user=OTHER)
+			self.assert_closed(stranger, draft_save.CLOSED, draft_save._CLOSED)
+			self.assertNotIn("card_open", stranger)
 			self.assert_untouched(token, before)
 			self.assertEqual(self.todos("flag off"), [])
+
+		def test_a_failed_close_fence_closes_the_form_and_keeps_the_card(self):
+			"""When the confirmation is no longer current the form closes, but the card is still
+			Pending: the reply says so (``card_open``) and nothing is written."""
+			conv, token = self.todo_draft()
+			before = self.sealed(token)
+			with patch("jarvis.chat.agent_closure.confirmation_is_current", return_value=False):
+				out = self.save(token, conv, {"description": f"{MARK} fenced"})
+			self.assert_closed(out, draft_save.CLOSED, draft_save._CLOSED)
+			self.assertIs(out.get("card_open"), True)
+			self.assert_untouched(token, before)
+			self.assertEqual(self.todos("fenced"), [])
+
+		def test_a_preflight_refusal_closes_the_form_and_keeps_the_card(self):
+			"""A chat that auto-confirms refuses the form's save under the row lock: the row
+			stays Pending and the reply says the card is still open."""
+			conv, token = self.todo_draft()
+			frappe.db.set_value("Jarvis Conversation", conv, "skip_confirmation", 1, update_modified=False)
+			frappe.db.commit()
+			before = self.sealed(token)
+			out = self.save(token, conv, {"description": f"{MARK} armed"})
+			self.assert_closed(out, draft_save.CLOSED)
+			self.assertIs(out.get("card_open"), True)
+			self.assert_untouched(token, before)
+			self.assertEqual(self.todos("armed"), [])
 
 		def test_a_file_box_chat_and_a_collaborative_chat_are_refused(self):
 			"""A File Box chat only drafts (apply_action routes it to its own policy), so it

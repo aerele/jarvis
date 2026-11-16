@@ -798,6 +798,31 @@ class TestParkedToolDraft(PendingActionTestMixin, FrappeTestCase):
 		self.assertEqual(listed[typed]["summary"], "typed two")
 		self.assertEqual(listed[typed]["last_at"], str(frappe.db.get_value(MSG, typed_msg, "creation")))
 
+	def _asking(self, conv, seq):
+		"""The chat's last message is an assistant question (the awaiting-reply lane)."""
+		return _insert(conv, seq, "assistant", "Which one do you want?")
+
+	def test_a_chat_the_board_does_not_list_a_draft_for_still_shows_its_question(self):
+		"""The awaiting-reply lane hides a chat only when open drafts lists its card. A card
+		of a made-up doctype is not listed, so that chat keeps its question; a chat whose card
+		is listed shows once, under open drafts."""
+		from jarvis.chat import approvals_api
+
+		unlisted, listed = self.make_conv(), self.make_conv()
+		self._park_row(unlisted, 1, doctype="Not A Real Doctype")
+		self._asking(unlisted, 2)
+		self._park_row(listed, 1)
+		self._asking(listed, 2)
+		frappe.db.commit()
+		parked = approvals_api._parked_drafts(OWNER)
+		self.assertEqual(set(parked), {listed})
+		awaiting = [r["conversation"] for r in approvals_api._awaiting_reply(OWNER, parked)]
+		drafts = [d["conversation"] for d in approvals_api._open_drafts(OWNER, parked)]
+		self.assertIn(unlisted, awaiting)
+		self.assertNotIn(listed, awaiting)
+		self.assertEqual(drafts.count(listed), 1)
+		self.assertNotIn(unlisted, drafts)
+
 	def test_load_rows_reads_the_cards_in_one_query(self):
 		"""``load_rows`` runs inside prompt assembly and every apply: a Pending Action read per
 		tool row would grow with the chat."""

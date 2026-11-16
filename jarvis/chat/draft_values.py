@@ -154,7 +154,8 @@ def _table_errors(table: str, kind: str, rows, rules, *, is_update: bool, drafte
 					message = TWICE if value in named_rows else ""
 					named_rows.add(value)
 			elif not is_update and key == DRAFT_ROW:
-				message = _draft_row_error(value, len(drafted), taken)
+				# None or "" is a client's way of writing "no marker": a new row.
+				message = "" if _blank(value) else _draft_row_error(value, len(drafted), taken)
 			else:
 				message = rules.cell_error(table, key, value)
 			if message:

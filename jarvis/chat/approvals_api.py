@@ -525,8 +525,9 @@ def list_approvals_page(
 	if start == 0:
 		from jarvis.chat.report_runs import ready_reports
 
-		out["awaiting_reply"] = _awaiting_reply(me)
-		out["open_drafts"] = _open_drafts(me)
+		parked = _parked_drafts(me)  # one read: the two lanes must agree on which chats it lists
+		out["awaiting_reply"] = _awaiting_reply(me, parked)
+		out["open_drafts"] = _open_drafts(me, parked)
 		try:
 			out["ready_reports"] = ready_reports(me)
 		except Exception:
@@ -536,16 +537,21 @@ def list_approvals_page(
 	return out
 
 
-def _awaiting_reply(me: str) -> list[dict]:
+def _awaiting_reply(me: str, parked: dict[str, dict] | None = None) -> list[dict]:
 	"""Conversations OWNED by ``me`` whose ball is in the user's court:
 	the last message is an assistant turn that ENDED cleanly (not
 	streaming/recovering/errored — the filebox.py SQL-ladder semantics)
 	and looks like a question (carries a ```jarvis-ask fence, or a "?" in
 	the last 200 chars), excluding conversations that already have a
 	Pending chat-sourced approval row (those ARE board rows). Newest
-	first, capped at 10. Rows: {conversation, title, question_excerpt,
+	first, capped at 10. ``parked`` is ``_parked_drafts(me)`` (read here when not
+	given): a chat it lists shows its draft under open drafts instead, and only
+	such a chat leaves this lane. Rows: {conversation, title, question_excerpt,
 	last_at}."""
 	from jarvis.chat.chat_asks import question_excerpt
+
+	if parked is None:
+		parked = _parked_drafts(me)
 
 	# A File Box sheet's conversation waits on its sheet, not on a reply.
 	on_sheet = (
@@ -599,13 +605,6 @@ def _awaiting_reply(me: str) -> list[dict]:
 		{"me": me, "fence": "%```jarvis-ask%", "qmark": "%?%"},
 		as_dict=True,
 	)
-	from jarvis.chat import live_draft
-
-	# One read for the whole page: a chat with a parked draft card draws that card, not the question.
-	drafted = {
-		c["conversation"]
-		for c in live_draft.pending_draft_cards(conversations=[r.conversation for r in rows], owner=me)
-	}
 	return [
 		{
 			"conversation": r.conversation,
@@ -617,7 +616,7 @@ def _awaiting_reply(me: str) -> list[dict]:
 		for r in rows
 		if not is_collaborative(r.conversation)
 		and not _shows_a_card(r.content)
-		and r.conversation not in drafted
+		and r.conversation not in parked  # listed under open drafts instead
 	]
 
 
@@ -639,16 +638,18 @@ def _shows_a_card(content: str | None) -> bool:
 
 
 _OPEN_DRAFTS_MAX = 10
+_OPEN_DRAFT_CHATS = 50  # chats the open-drafts read looks at; a parked card read must cover as many
 
 
-def _open_drafts(me: str) -> list[dict]:
+def _open_drafts(me: str, parked: dict[str, dict] | None = None) -> list[dict]:
 	"""Create/update cards still open in chats OWNED by ``me``, newest first, at most
 	10. Read-only: confirming stays in the chat. Open is the chat page's live-card
 	rule: the chat's last turn message (user/assistant, not hidden; tool rows trail a
 	reply) is a finished reply carrying a create/update card. A Confirm's receipt or
 	any reply is a newer turn message, so the card closes. File Box chats are out:
 	their cards are held for the board already. Rows: {conversation, title,
-	origin_page, verb, doctype, summary, last_at}."""
+	origin_page, verb, doctype, summary, last_at}. ``parked`` is ``_parked_drafts(me)``
+	(read here when not given)."""
 	from jarvis.chat.filebox_cards import parse_action
 
 	rows = frappe.db.sql(
@@ -671,11 +672,12 @@ def _open_drafts(me: str) -> list[dict]:
 		AND COALESCE(m.recovering, 0) = 0
 		AND m.content LIKE %(card)s
 		ORDER BY m.creation DESC
-		LIMIT 50""",
-		{"me": me, "card": _CARD_FENCE},
+		LIMIT %(chats)s""",
+		{"me": me, "card": _CARD_FENCE, "chats": _OPEN_DRAFT_CHATS},
 		as_dict=True,
 	)
-	parked = _parked_drafts(me)
+	if parked is None:
+		parked = _parked_drafts(me)
 	out = []
 	for r in rows:
 		if r.conversation in parked or is_collaborative(r.conversation):
@@ -710,7 +712,7 @@ def _parked_drafts(me: str) -> dict[str, dict]:
 	(the cards, then their chats and whether each is collaborative), none in a loop."""
 	from jarvis.chat import live_draft
 
-	cards = live_draft.pending_draft_cards(owner=me, limit=50)
+	cards = live_draft.pending_draft_cards(owner=me, limit=_OPEN_DRAFT_CHATS)
 	if not cards:
 		return {}
 	fields = ["name", "title", "origin_page", "file_box"]

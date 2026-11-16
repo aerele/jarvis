@@ -41,6 +41,7 @@ _UNFINISHED = "This draft did not finish saving."
 _UNREADABLE = "This draft could not be read. Close the form and open it again."
 _BUSY = "This draft is being handled. Try again in a moment."
 _STALE = "This record changed after the draft was made. Ask me to draft the update again."
+_EDITING_OFF = "Editing is turned off here. Use the card's buttons."
 # Sensitive, structural or not editable in the form: the card is still valid, so only the form closes.
 _NEEDS_CARD = "This change can't be made in the form. Ask me to change the draft."
 _NO_PERMISSION = "You don't have permission to make this change."
@@ -94,7 +95,7 @@ class DraftSave:
 		# Checked before the lock too, so a stranger never takes another person's row lock.
 		row = get_row(self.token) if self.token else None
 		if not self._authorized(row):
-			return _closed(CLOSED, _(_CLOSED))
+			return self._unauthorized(row)
 		if row.status != PENDING:
 			return self._decided(row)
 		try:
@@ -104,14 +105,31 @@ class DraftSave:
 			return self._after_crash()
 
 	def _authorized(self, row) -> bool:
+		"""Editing is on, and the row is a draft card the person owns (``_owns_draft``)."""
+		from jarvis.chat import draft_card
+
+		return bool(row and draft_card.enabled() and self._owns_draft(row))
+
+	def _unauthorized(self, row) -> dict:
+		"""The reply for a row ``_authorized`` refused. A card parked while editing was on is
+		still Pending and its buttons still work, so when the switch is the only reason the
+		card stays open. Ownership is judged first: anyone else gets the plain refusal, which
+		does not reveal that the card exists or that editing is off."""
+		from jarvis.chat import draft_card
+		from jarvis.chat.pending_actions._store import PENDING
+
+		if row and row.status == PENDING and not draft_card.enabled() and self._owns_draft(row):
+			return _closed(CLOSED, _(_EDITING_OFF), card_open=True)
+		return _closed(CLOSED, _(_CLOSED))
+
+	def _owns_draft(self, row) -> bool:
 		"""A draft card of this conversation, which the person owns, which runs as them,
 		and which is not a File Box chat's (File Box only drafts, never writes)."""
-		from jarvis.chat import draft_card
 		from jarvis.chat.pending_actions._execute import authorize
 		from jarvis.chat.pending_actions._settle import _draft_of
 		from jarvis.chat.pending_actions._store import CONV
 
-		if not row or not draft_card.enabled():
+		if not row:
 			return False
 		allowed, adopt = authorize(row, self.approver, "chat", self.conversation)
 		return bool(
@@ -136,14 +154,14 @@ class DraftSave:
 		if busy:
 			return _busy()
 		if not self._authorized(locked):
-			return self._refuse(_closed(CLOSED, _(_CLOSED)))
+			return self._refuse(self._unauthorized(locked))
 		if locked.status != PENDING:
 			return self._no_longer_open(locked)
 		if not confirmation_is_current(locked, lock=True):
 			return self._refuse(_closed(CLOSED, _(_CLOSED), card_open=True))
 		refused = _preflight(locked, self.approver, None)
 		if refused:
-			return self._refuse(_closed(CLOSED, refused["error"]["message"]))
+			return self._refuse(_closed(CLOSED, refused["error"]["message"], card_open=True))
 		try:
 			call = _seal.unseal_call(locked)
 		except _seal.SealError as e:
