@@ -2030,6 +2030,48 @@
 												<path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
 											</svg>
 										</button>
+										<!-- read the reply aloud with the device's own voice -->
+										<button
+											v-if="reader.supported && canCopyReply(m)"
+											class="jv-msgbtn"
+											:class="{ 'jv-msgbtn-on': speakingId === m.name }"
+											@click="reader.toggle(m.name, replyBodyText($event))"
+											:title="
+												speakingId === m.name
+													? 'Stop reading'
+													: 'Read aloud'
+											"
+											:aria-label="
+												speakingId === m.name
+													? 'Stop reading'
+													: 'Read aloud'
+											"
+										>
+											<svg
+												v-if="speakingId === m.name"
+												width="14"
+												height="14"
+												viewBox="0 0 24 24"
+												fill="currentColor"
+											>
+												<rect x="6" y="6" width="12" height="12" rx="2" />
+											</svg>
+											<svg
+												v-else
+												width="14"
+												height="14"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.8"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<path d="M11 5 6 9H2v6h4l5 4z" />
+												<path d="M15.5 8.5a5 5 0 0 1 0 7" />
+												<path d="M19 5a10 10 0 0 1 0 14" />
+											</svg>
+										</button>
 										<!-- hidden (not removed) while streaming so the bar keeps its
 										     height; copying half a reply would be wrong -->
 										<button
@@ -4661,6 +4703,18 @@
 			:actions="selectionActions"
 			@action="onSelectionAction"
 		/>
+		<!-- a selection being read has no bar of its own to stop it from -->
+		<button
+			v-if="speakingId === 'selection'"
+			type="button"
+			class="jv-readstop"
+			@click="reader.stop()"
+		>
+			<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+				<rect x="6" y="6" width="12" height="12" rx="2" />
+			</svg>
+			Stop reading
+		</button>
 		<!-- Periodic business-pulse survey: opened by maybeOpenPulseFeedback,
 		     checked once per genuine chat-open event. -->
 		<PulseFeedbackDialog />
@@ -4820,6 +4874,7 @@ import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
 import SelectionActions from "@/components/chat/SelectionActions.vue";
 import { withQuote } from "@jsshared/reply_quote.mjs";
+import { createReader } from "@jsshared/read_aloud.mjs";
 import {
 	newSendRequestId,
 	observeDelivery,
@@ -9996,9 +10051,25 @@ function showCopied(id) {
 // aerele/jarvis#2191: Reply quotes text from an earlier reply at the top of the
 // composer (a Markdown blockquote, so the agent gets the exact text and the history
 // keeps it; the user bubble draws it as a quote). An unsent quote is replaced.
-const selectionActions = [{ key: "reply", label: "Reply" }];
+// Read aloud: the browser's own voice (shared/read_aloud.mjs); no button where the
+// browser has none. One reading at a time; it stops on a chat switch and on leaving.
+const reader = createReader(window);
+const speakingId = ref(null);
+reader.subscribe((id) => (speakingId.value = id));
+watch(currentId, () => reader.stop());
+onBeforeUnmount(() => reader.stop());
+function stopReadingOnEscape(e) {
+	if (e.key === "Escape" && speakingId.value) reader.stop();
+}
+document.addEventListener("keydown", stopReadingOnEscape);
+onBeforeUnmount(() => document.removeEventListener("keydown", stopReadingOnEscape));
+const selectionActions = [
+	{ key: "reply", label: "Reply" },
+	...(reader.supported ? [{ key: "read", label: "Read aloud" }] : []),
+];
 function onSelectionAction(key, text) {
 	if (key === "reply") replyWith(text);
+	else if (key === "read") reader.speak("selection", text);
 }
 // The reply as it reads on screen (tables, lists and links as text, no Markdown).
 function replyBodyText(e) {
@@ -15709,6 +15780,31 @@ onUnmounted(() => {
 	margin-top: 0;
 	font-size: 11px;
 	color: var(--text-3);
+}
+/* aerele/jarvis#2191: the reply being read keeps its bar (and Stop) in view. */
+.jv-msgbtn-on {
+	color: var(--cta) !important;
+}
+:deep(.jv-msgbar:has(.jv-msgbtn-on)) {
+	opacity: 1 !important;
+}
+.jv-readstop {
+	position: fixed;
+	left: 50%;
+	bottom: 132px;
+	transform: translateX(-50%);
+	z-index: 60;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 12px;
+	font-size: 13px;
+	color: var(--text);
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+	cursor: pointer;
 }
 .jv-metabar {
 	display: flex;
