@@ -780,7 +780,11 @@ def _update_card(args: dict, would, full: bool = False, whole: bool = False, dra
 				to_val,
 				would.get(key) if isinstance(would, dict) else None,
 			)
-			if same and not draft_card.has_row_change(entry):
+			if "row_changes" in entry:
+				# A table the write leaves as it is is not drawn as a block of unchanged rows.
+				if not draft_card.has_row_change(entry):
+					continue
+			elif same:
 				continue
 		diff.append(entry)
 		if not full and len(diff) >= _MAX_ROWS:

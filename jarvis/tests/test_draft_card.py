@@ -392,6 +392,34 @@ class TestRowDiffPure(unittest.TestCase):
 		same = draft_card.row_diff(self.STORED, [kept[0], (None, ["New", "1"], False), kept[2]], self._cells)
 		self.assertNotIn("reordered", same)
 
+	def test_a_removal_with_the_rest_in_order_is_not_reordered(self):
+		"""Dropping a row moves no other row: `reordered` is only about the rows that stay."""
+		kept = [(n, r, False) for n, r in self.STORED]
+		out = draft_card.row_diff(self.STORED, [kept[0], kept[2]], self._cells)
+		self.assertNotIn("reordered", out)
+		self.assertEqual(out["counts"]["removed"], 1)
+
+	def test_has_row_change_is_true_for_any_change_add_removal_or_reorder_only(self):
+		"""A table the write leaves as it is must not be drawn: only a changed, new or removed
+		row, or a new order, makes `has_row_change` true."""
+		base = {"changed": 0, "new": 0, "kept": 3, "removed": 0}
+		quiet = {"row_changes": {"counts": base}}
+		self.assertFalse(draft_card.has_row_change(quiet))
+		self.assertFalse(draft_card.has_row_change({}))
+		for key in ("changed", "new", "removed"):
+			with self.subTest(key):
+				self.assertTrue(draft_card.has_row_change({"row_changes": {"counts": {**base, key: 1}}}))
+		self.assertTrue(draft_card.has_row_change({"row_changes": {"counts": base, "reordered": True}}))
+
+	def test_a_table_multiselect_link_listed_twice_is_kept_twice_and_does_not_throw(self):
+		"""A duplicate link in the call is not an error on the card: it reads as the saved link,
+		listed (kept) once per mention."""
+		link = SimpleNamespace(fieldtype="Link", fieldname="role", label="Role")
+		child = SimpleNamespace(fields=[link])
+		out = draft_card._link_changes(child, [{"role": "Sales"}, {"role": "Sales"}], [{"role": "Sales"}])
+		self.assertEqual(out["counts"], {"changed": 0, "new": 0, "kept": 2, "removed": 0})
+		self.assertNotIn("reordered", out)
+
 	def test_a_cell_is_cut_to_eighty_characters(self):
 		"""The sealed card stays small: a long cell ends in "..." at 80 characters; a short one
 		is whole."""
@@ -1341,10 +1369,42 @@ if FrappeTestCase is not None:
 			same = _row_changes(self._update(form, [{"name": n1}, {"name": n2, "label": "S2"}], None))
 			self.assertNotIn("reordered", same)
 
+		def _todo(self, **values):
+			"""A ToDo this test owns; removed (and committed) when the test ends, as the park
+			tests commit."""
+			made = []
+
+			def wipe():
+				frappe.db.rollback()
+				frappe.db.delete("ToDo", {"name": ["in", made]})
+				frappe.db.commit()
+
+			self.addCleanup(wipe)
+			todo = frappe.get_doc({"doctype": "ToDo", **values}).insert()
+			made.append(todo.name)
+			return todo
+
+		def test_a_table_the_write_leaves_as_it_is_has_no_entry(self):
+			"""Changing only a parent field and echoing the table back unchanged must not draw
+			the table as a block of unchanged rows; the parent field's entry stays."""
+			form, (n1, n2, n3) = _make_web_form(self)
+			args = {
+				"doctype": "Web Form",
+				"name": form,
+				"changes": {
+					"title": f"{ROWS_MARK} renamed",
+					"web_form_fields": [{"name": n1}, {"name": n2}, {"name": n3}],
+				},
+			}
+			card = _park_card("update_doc", args, None, True)
+			labels = [e["label"] for e in card["diff"]]
+			self.assertIn(frappe.get_meta("Web Form").get_field("title").label, labels)
+			self.assertNotIn(frappe.get_meta("Web Form").get_field("web_form_fields").label, labels)
+
 		def test_a_line_break_past_the_clip_is_still_multiline(self):
 			"""`multiline` is read from the raw value: the display text is cut at 200
 			characters, so a break after that must still set it."""
-			todo = frappe.get_doc({"doctype": "ToDo", "description": "one line"}).insert()
+			todo = self._todo(description="one line")
 			text = "x" * 250 + "\ny"
 			args = {"doctype": "ToDo", "name": todo.name, "changes": {"description": text}}
 			card = _park_card("update_doc", args, {"description": text}, True)
@@ -1353,7 +1413,7 @@ if FrappeTestCase is not None:
 		def test_a_scalar_update_has_no_row_changes_and_only_a_line_break_is_multiline(self):
 			"""Only a table gets `row_changes`, and `multiline` is only on the entry whose text
 			holds a line break, so the apps keep the break and draw nothing else differently."""
-			todo = frappe.get_doc({"doctype": "ToDo", "description": "one line", "status": "Open"}).insert()
+			todo = self._todo(description="one line", status="Open")
 			args = {
 				"doctype": "ToDo",
 				"name": todo.name,
@@ -1392,6 +1452,68 @@ if FrappeTestCase is not None:
 			self.assertFalse(
 				draft_card._row_changed(child, was, was, {"api_key": "old-key"}, ["api_key", "title"])
 			)
+
+		def _rows(self, child, stored, trial, sent):
+			"""`row_changes` of a stand-in table "t" of ``child``."""
+			meta = SimpleNamespace(get_field=lambda k: SimpleNamespace(fieldtype="Table", options="C"))
+			with patch("frappe.get_meta", return_value=child):
+				return draft_card.row_changes(meta, "t", sent, trial, stored)
+
+		def test_a_password_masked_alike_on_both_sides_is_changed_only_when_the_call_sent_it(self):
+			"""The stored row and the trial's row hold the same mask; only the CALL's new value
+			shows the change: `changed` + `hidden_change`, the cell stays "[hidden]". A call that
+			did not send the key leaves the row `kept`."""
+			child = _stand_in_child(("title", "Data", 1), ("pw", "Password", 0))
+			stored = [{"name": "r1", "title": "T", "pw": "*******"}]
+			trial = [{"name": "r1", "title": "T", "pw": "*******"}]
+			out = self._rows(child, stored, trial, [{"name": "r1", "pw": "newsecret"}])
+			(row,) = out["rows"]
+			self.assertEqual((row["status"], row["hidden_change"]), ("changed", True))
+			self.assertEqual(row["cells"][out["fieldnames"].index("pw")], "[hidden]")
+			self.assertNotIn("newsecret", json.dumps(out))
+			kept = self._rows(child, stored, trial, [{"name": "r1", "title": "T"}])
+			self.assertEqual(kept["rows"][0]["status"], "kept")
+
+		def test_a_field_the_call_did_not_set_and_the_card_does_not_show_still_counts(self):
+			"""Validation recalculates a base amount the call never sent and no column shows: with
+			the trial's own row matched it makes the row `changed` + `hidden_change`; equal, the
+			row is `kept`; with no trial only the call's keys can differ."""
+			child = _stand_in_child(("a", "Data", 1), ("base", "Currency", 0))
+			stored = [{"name": "r1", "a": "x", "base": 10.0}]
+			sent = [{"name": "r1"}]
+			moved = self._rows(child, stored, [{"name": "r1", "a": "x", "base": 12.0}], sent)
+			self.assertEqual(moved["rows"][0]["status"], "changed")
+			self.assertIs(moved["rows"][0]["hidden_change"], True)
+			same = self._rows(child, stored, [{"name": "r1", "a": "x", "base": 10.0}], sent)
+			self.assertEqual(same["rows"][0]["status"], "kept")
+			self.assertEqual(self._rows(child, stored, None, sent)["rows"][0]["status"], "kept")
+
+		def test_a_difference_of_type_only_is_not_a_change(self):
+			"""The call sends text or a bool, the row holds a number or a date: "3" and 3, 1 and
+			True, None and "", a date string and a date, a datetime string and a datetime are the
+			same stored value."""
+			from datetime import date, datetime
+
+			cases = [
+				("Int", "3", 3),
+				("Check", 1, True),
+				("Data", None, ""),
+				("Date", "2026-01-02", date(2026, 1, 2)),
+				("Datetime", "2026-01-02 10:00:00", datetime(2026, 1, 2, 10)),
+			]
+			for fieldtype, a, b in cases:
+				with self.subTest(fieldtype):
+					self.assertFalse(draft_card._differs(a, b, SimpleNamespace(fieldtype=fieldtype)))
+
+		def test_the_stored_order_is_idx_not_list_position(self):
+			"""Saved rows read out of `idx` order: a call in the true (idx) order is not
+			`reordered`, one in the list's order is."""
+			child = _stand_in_child(("a", "Data", 1))
+			stored = [{"name": "b", "idx": 2, "a": "y"}, {"name": "a", "idx": 1, "a": "x"}]
+			straight = self._rows(child, stored, None, [{"name": "a"}, {"name": "b"}])
+			self.assertNotIn("reordered", straight)
+			swapped = self._rows(child, stored, None, [{"name": "b"}, {"name": "a"}])
+			self.assertIs(swapped["reordered"], True)
 
 		def test_a_currency_that_differs_after_the_decimals_is_a_change(self):
 			"""100.001 and 100.004 print alike at 2 places; `same_value` casts without

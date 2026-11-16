@@ -227,7 +227,7 @@ def attach(card: dict, tool: str, args: dict, would) -> bool:
 MAX_CHANGE_ROWS = 50  # rows (and removed rows) a table's ``row_changes`` lists; the rest is counted
 _CELL_CLIP = 80  # a cell on the sealed card is cut to this many characters (ending "...")
 _FALLBACK_COLUMNS = 3  # a child with no list-view field and no key set shows its first data fields
-_LINE_BREAKS = ("\n", "\r", " ")
+_LINE_BREAKS = ("\n", "\r", "\u2028")
 
 
 def _clip_cell(text: str) -> str:
@@ -288,7 +288,8 @@ def row_diff(stored: list, final: list, cells) -> dict:
 	if more["rows"] or more["removed"]:
 		out["more"] = more
 	named = [name for name, _row, _changed in final if name in saved]
-	if named != [name for name, _row in stored if name in set(named)]:
+	called = set(named)
+	if named != [name for name, _row in stored if name in called]:
 		out["reordered"] = True
 	return out
 
@@ -311,16 +312,22 @@ def _differs(a, b, df) -> bool:
 	return not same_value(a, b, df)
 
 
-def _row_changed(child, was: dict, final: dict, sent: dict, columns: list) -> bool:
+def _row_changed(child, was: dict, final: dict, sent: dict, columns: list, matched: bool = False) -> bool:
 	"""Whether the write changes the saved row ``was`` into ``final``, judged on RAW values
-	for every field the call set and every shown column. A secret is judged on the value the
-	call sends (the trial's row holds a mask of the same length, which would hide a new
-	password), by what the write does with it (``secret_word``)."""
+	for every field the call set and every shown column. When the trial's own row is
+	``matched``, every value field of the child is compared too: validation may recalculate a
+	field the call did not set and the card does not show (a base amount). A secret is judged
+	on the value the call sends (the trial's row holds a mask of the same length, which would
+	hide a new password), by what the write does with it (``secret_word``); one the call did not
+	send is not compared. Bookkeeping columns (``idx``, ``modified`` ...) are not fields."""
 	from frappe.model import no_value_fields
 
 	from jarvis.chat._record_summary import is_secret, secret_word
 
-	for key in dict.fromkeys([*sent, *columns]):
+	keys = [*sent, *columns]
+	if matched:
+		keys += [d.fieldname for d in child.fields if d.fieldname]
+	for key in dict.fromkeys(keys):
 		df = child.get_field(key)
 		if df is None or df.fieldtype in no_value_fields:
 			continue
@@ -331,6 +338,8 @@ def _row_changed(child, was: dict, final: dict, sent: dict, columns: list) -> bo
 			):
 				return True
 			continue
+		if key not in final and key not in sent:
+			continue  # nothing is known about it after the write
 		if _differs(was.get(key), final[key] if key in final else sent.get(key), df):
 			return True
 	return False
@@ -412,7 +421,15 @@ def row_changes(meta, key: str, call_rows, trial_rows, stored) -> dict | None:
 	child = frappe.get_meta(df.options)
 	if df.fieldtype == "Table MultiSelect":
 		return _link_changes(child, call_rows, stored)
-	saved = {r["name"]: r for r in stored if isinstance(r, dict) and r.get("name")}
+	# The write's order is ``idx``; the list position is only the tie-break (a stable sort).
+	by_idx = sorted(
+		(r for r in stored if isinstance(r, dict) and r.get("name")),
+		key=lambda r: (
+			not isinstance(r.get("idx"), int),
+			r.get("idx") if isinstance(r.get("idx"), int) else 0,
+		),
+	)
+	saved = {r["name"]: r for r in by_idx}
 	called = {r["name"] for r in call_rows if r.get("name")}
 	columns = _row_columns(child, [row_values(r) for r in call_rows])
 	if not columns:
@@ -444,7 +461,9 @@ def row_changes(meta, key: str, call_rows, trial_rows, stored) -> dict | None:
 		if name:
 			got = by_name.get(name)
 			row_final = got if got is not None else {**saved[name], **sent}
-			final.append((name, row_final, _row_changed(child, saved[name], row_final, sent, columns)))
+			final.append(
+				(name, row_final, _row_changed(child, saved[name], row_final, sent, columns, got is not None))
+			)
 		else:
 			got = next(new_trial, None)
 			final.append((None, got if got is not None else sent, False))
