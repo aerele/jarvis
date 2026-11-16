@@ -199,7 +199,8 @@ class TestShortResultPure(unittest.TestCase):
 
 	def _assert_fits(self, draft, preview=None):
 		data = draft_card.short_result("create_doc", draft, preview)["data"]
-		self.assertLessEqual(len(json.dumps(data)), draft_card.SHORT_LIMIT)
+		bounded = {k: v for k, v in data.items() if k != "warnings"}
+		self.assertLessEqual(len(json.dumps(bounded)), draft_card.SHORT_LIMIT)
 		for key in ("status", "tool", "note"):
 			self.assertIn(key, data)
 		for key in ("verb", "doctype", "name"):
@@ -252,16 +253,24 @@ class TestShortResultPure(unittest.TestCase):
 		)
 		self.assertEqual(cut["data"]["dropped_fields"], ["note"])
 
-	def test_the_trials_two_notes_ride_along_as_warnings_and_fit(self):
-		"""The jobs-a-confirm-starts sentence and the hook-rolled-back caveat reach the model,
-		and even with both the result fits; with neither there is no `warnings` key."""
-		queue_note = "Confirming will also start 2 background jobs, named in will_queue. " * 5
+	def test_the_trials_two_notes_ride_along_whole_and_cost_the_draft_nothing(self):
+		"""A real-sized (524 character) jobs note and the hook caveat arrive byte for byte,
+		and do not squeeze the doctype or the record name (clipping once cut the
+		"read the document back" instruction and turned both into "...")."""
+		queue_note = "Confirming will also start 2 background jobs. " * 11
+		queue_note = queue_note[:524]
+		draft = {
+			"verb": "create",
+			"doctype": "Sales Order",
+			"name": "SO-0001",
+			"ignored": ["colour"],
+			"dropped": [],
+		}
 		preview = {"will_queue_note": queue_note, "hook_rolled_back": True}
-		data = self._assert_fits(_sales_order_draft(), preview)
-		self.assertEqual(len(data["warnings"]), 2)
-		self.assertTrue(data["warnings"][0].startswith("Confirming will also start"))
-		self.assertEqual(data["warnings"][1], draft_card.HOOK_WARNING)
-		self.assertNotIn("warnings", self._assert_fits(_sales_order_draft(), {"would": {}}))
+		data = self._assert_fits(draft, preview)
+		self.assertEqual(data["draft"]["doctype"], "Sales Order")
+		self.assertEqual(data["draft"]["name"], "SO-0001")
+		self.assertEqual(data["warnings"], [queue_note, draft_card.HOOK_WARNING])
 
 
 try:

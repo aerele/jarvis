@@ -243,11 +243,14 @@ def short_result(tool: str, draft: dict, preview=None) -> dict:
 	card left out, the trial's warnings, and a note. No ``preview``: the person reads the
 	card, the model does not need the would-be document.
 
-	At most ``SHORT_LIMIT`` characters of JSON for any input. Each field list is capped at
-	10 names of 40 characters up front (``more_ignored`` / ``more_dropped`` count the rest).
-	If it is still too long, names leave ``dropped_fields`` first, then ``ignored_fields``
-	(the model needs those to correct itself), then the record name, the doctype and
-	last the warnings are shortened. The fixed note is never cut."""
+	The result WITHOUT ``warnings`` is at most ``SHORT_LIMIT`` characters of JSON for any
+	input: ``tool`` and ``verb`` are clipped to 40 and 20 characters, each field list is
+	capped at 10 names of 40 characters up front (``more_ignored`` / ``more_dropped`` count
+	the rest), and if it is still too long names leave ``dropped_fields`` first, then
+	``ignored_fields`` (the model needs those to correct itself), then the record name and
+	the doctype are shortened. The fixed note is never cut. ``warnings`` are added last,
+	whole and outside that budget: a clipped warning loses its instruction."""
+	warnings = _warnings_of(preview)
 	ignored = [str(n)[:_NAME_CHARS] for n in (draft.get("ignored") or [])]
 	dropped = [str(n)[:_NAME_CHARS] for n in (draft.get("dropped") or [])]
 	more = {
@@ -256,15 +259,15 @@ def short_result(tool: str, draft: dict, preview=None) -> dict:
 	}
 	ignored, dropped = ignored[:_MAX_NAMES], dropped[:_MAX_NAMES]
 	name, doctype = str(draft.get("name") or ""), str(draft.get("doctype") or "")
-	warnings = _warnings_of(preview)
-	keep = {"name": len(name), "doctype": len(doctype), "warning": max(map(len, warnings), default=0)}
+	tool, verb = str(tool)[:40], str(draft.get("verb"))[:20]
+	keep = {"name": len(name), "doctype": len(doctype)}
 
 	def build() -> dict:
 		data = {
 			"status": "pending_confirmation",
 			"tool": tool,
 			"draft": {
-				"verb": draft.get("verb"),
+				"verb": verb,
 				"doctype": _clip(doctype, keep["doctype"]),
 				"name": _clip(name, keep["name"]),
 			},
@@ -276,8 +279,6 @@ def short_result(tool: str, draft: dict, preview=None) -> dict:
 			data["dropped_fields"] = dropped
 		if more["more_dropped"]:
 			data["more_dropped"] = more["more_dropped"]
-		if warnings:
-			data["warnings"] = [_clip(w, keep["warning"]) for w in warnings]
 		data["note"] = SHORT_NOTE
 		return data
 
@@ -285,7 +286,7 @@ def short_result(tool: str, draft: dict, preview=None) -> dict:
 		data = build()
 		excess = len(json.dumps(data)) - SHORT_LIMIT
 		if excess <= 0:
-			return {"ok": True, "data": data}
+			break
 		if dropped:
 			dropped.pop()
 			more["more_dropped"] += 1
@@ -295,12 +296,15 @@ def short_result(tool: str, draft: dict, preview=None) -> dict:
 		else:
 			# Each step takes off at least one character and about the excess in bytes.
 			step = max(1, excess // 6)
-			for field, text in (("name", name), ("doctype", doctype), ("warning", "x" * keep["warning"])):
+			for field in ("name", "doctype"):
 				if keep[field] > 0:
 					keep[field] = max(keep[field] - step, 0)
 					break
 			else:
-				return {"ok": True, "data": data}
+				break
+	if warnings:
+		data["warnings"] = warnings
+	return {"ok": True, "data": data}
 
 
 def refusal(exc, tool: str, args: dict) -> list[dict] | None:
