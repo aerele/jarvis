@@ -59,6 +59,10 @@
 					v-html="html"
 					@click="onBodyClick"
 				/>
+				<template v-else-if="quoted.quote">
+					<div class="jv-uquote">{{ quoted.quote }}</div>
+					<span>{{ quoted.rest }}</span>
+				</template>
 				<template v-else>{{ text }}</template>
 			</div>
 			<DeliveryStatus
@@ -280,9 +284,10 @@
 
 <script setup>
 import { computed, useSlots } from "vue";
+import { splitQuote } from "@jsshared/reply_quote.mjs";
 import DeliveryStatus from "./DeliveryStatus.vue";
 
-defineProps({
+const props = defineProps({
 	// 'bubble' (right-aligned chat/support-customer message) | 'row'
 	// (left-aligned assistant/support-agent message with identity + body).
 	variant: { type: String, default: "bubble" },
@@ -324,6 +329,9 @@ defineProps({
 	// customer's photo attachment showing a preview read as a worse "vague"
 	// crop than just naming the file, per feedback.
 	imagesAsChips: { type: Boolean, default: false },
+	// Draw a leading Markdown blockquote of `text` (a Reply to part of an earlier
+	// reply, aerele/jarvis#2191) as a quote block above the question. Chat only.
+	quotes: { type: Boolean, default: false },
 });
 
 const emit = defineEmits([
@@ -390,9 +398,25 @@ async function copyPlain(text) {
 		return false;
 	}
 }
+
+const quoted = computed(() =>
+	props.quotes && !props.html ? splitQuote(props.text) : { quote: "", rest: props.text }
+);
 </script>
 
 <style scoped>
+/* The quoted part of a Reply (aerele/jarvis#2191), above the question. */
+.jv-uquote {
+	margin: 0 0 8px;
+	padding: 2px 0 2px 10px;
+	border-left: 3px solid var(--border-2);
+	color: var(--text-2);
+	font-size: 13px;
+	display: -webkit-box;
+	-webkit-line-clamp: 6;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
 /* per-message Copy/Edit bar — revealed on hover. Shared by BOTH variants:
    the assistant row moved in too, and ChatView's own copies of these rules
    were deleted with it, so this is now the single definition. */
