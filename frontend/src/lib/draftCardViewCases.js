@@ -375,6 +375,9 @@ export function draftCardCases(rawView, fixtures) {
 		removed: [{ cells: ["13:00:00", "0.5"] }],
 		more: "",
 		reordered: false,
+		unverified: false,
+		verifyNote: "",
+		keptLabel: "Unchanged",
 		notShown: "",
 	});
 	add("row changes hide the plain row text", [rcv.old, rcv.new], ["", ""]);
@@ -482,6 +485,9 @@ export function draftCardCases(rawView, fixtures) {
 		removed: [{ cells: [""] }, { cells: [""] }, { cells: [""] }],
 		more: "",
 		reordered: false,
+		unverified: false,
+		verifyNote: "",
+		keptLabel: "Unchanged",
 		notShown: "",
 	});
 	// Break: a column holding only an old value, or only a removed row's value, is dropped.
@@ -659,6 +665,24 @@ export function draftCardCases(rawView, fixtures) {
 			3,
 		]
 	);
+
+	// Break: a table the server could not fully compare is shown as plainly unchanged.
+	const unv = (flag) =>
+		inline({ columns: ["A"], rows: [{ status: "kept", cells: ["a"] }], unverified: flag });
+	const unvShape = (rc) => [rc.unverified, rc.verifyNote, rc.keptLabel, rc.summary];
+	add("unverified true", unvShape(unv(true)), [
+		true,
+		"This table could not be fully compared. Check its rows before you save.",
+		"Not compared",
+		"1 row unchanged",
+	]);
+	for (const flag of [undefined, false, "yes", 1])
+		add(`unverified ${JSON.stringify(flag)} says nothing`, unvShape(unv(flag)), [
+			false,
+			"",
+			"Unchanged",
+			"1 row unchanged",
+		]);
 
 	// Break: the multi-line flag is lost, or set for a plain value.
 	add(

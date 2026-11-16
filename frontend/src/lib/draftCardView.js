@@ -129,6 +129,7 @@ function rowsView(card) {
 }
 
 const STATUS_LABEL = { changed: "Changed", new: "New" };
+const VERIFY_NOTE = "This table could not be fully compared. Check its rows before you save.";
 const HIDDEN_CHANGE_NOTE = "A value not shown here changes.";
 const hiddenChange = (r) => isObject(r) && r.hidden_change === true;
 const countOf = (n) => (Number.isInteger(n) && n >= 0 ? n : null);
@@ -191,6 +192,7 @@ function rowChangesView(rc, surface) {
 	const shown = shownRows(rows, max);
 	const shownRemoved = removed.slice(0, max);
 	const reordered = rc.reordered === true;
+	const unverified = rc.unverified === true;
 	const given = isObject(rc.more) ? rc.more : {};
 	const hiddenKept = rows.length - shown.length;
 	const moreRemoved = removed.length - shownRemoved.length;
@@ -200,6 +202,9 @@ function rowChangesView(rc, surface) {
 		columns: keep.map((i) => text(head[i])),
 		summary: changeSummary(rc, rows, removed, serverRemoved, reordered),
 		reordered,
+		unverified,
+		verifyNote: unverified ? VERIFY_NOTE : "",
+		keptLabel: unverified ? "Not compared" : "Unchanged",
 		rows: shown.map((r) => {
 			const cells = keep.map((i) => {
 				const now = text(cellsOf(r)[i]);

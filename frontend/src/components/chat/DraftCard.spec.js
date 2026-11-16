@@ -215,4 +215,19 @@ describe("DraftCard", () => {
 			expect(draw("create-simple", ctx).find("[aria-live=polite]").exists()).toBe(true);
 		}
 	);
+
+	// Break: the could-not-compare caveat is computed but not drawn as a note.
+	it("draws the unverified note as a note", () => {
+		const c = structuredClone(card("update-diff"));
+		c.diff[0] = {
+			label: "Items",
+			row_changes: { columns: ["A"], rows: [{ cells: ["a"] }], unverified: true },
+		};
+		const w = mount(DraftCard, { props: { card: c } });
+		const note = w.findAll("[role=note]").find((n) => n.text().includes("fully compared"));
+		expect(note.text()).toBe(
+			"This table could not be fully compared. Check its rows before you save."
+		);
+		expect(w.find(".dc-unchanged").text()).toBe("Not compared");
+	});
 });

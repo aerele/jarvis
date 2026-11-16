@@ -79,6 +79,13 @@ function press(button) {
 						<span class="dc-arrow" aria-hidden="true">&rarr;</span>
 						<span class="dc-new">{{ d.new }}</span>
 					</template>
+					<p
+						v-if="d.rowChanges && d.rowChanges.verifyNote"
+						class="dc-line dc-warning"
+						role="note"
+					>
+						{{ d.rowChanges.verifyNote }}
+					</p>
 					<p v-if="d.rowChanges && d.rowChanges.reordered" class="dc-more dc-line">
 						The rows are saved in the order shown.
 					</p>
@@ -115,7 +122,9 @@ function press(button) {
 												<span v-if="r.statusLabel" class="dc-status">{{
 													r.statusLabel
 												}}</span>
-												<span v-else class="dc-unchanged">Unchanged</span>
+												<span v-else class="dc-unchanged">{{
+													d.rowChanges.keptLabel
+												}}</span>
 											</td>
 											<td v-for="(c, ci) in r.cells" :key="'rd' + ci">
 												<template v-if="c.was">
