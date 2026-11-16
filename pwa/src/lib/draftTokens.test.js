@@ -23,13 +23,10 @@ const blockAt = (selector) => {
 // apart (the menu would paint other colours than the form that opened it), or a name is dropped.
 test("index.css .jv-draft-tokens equals the map the link menu's palette comes from", () => {
 	assert.deepEqual(declarations(blockAt(".jv-draft-tokens")), DRAFT_TOKENS);
-});
-
-test("the palette is a fresh copy: a caller cannot change the map", () => {
-	const p = draftPalette();
-	assert.deepEqual(p, DRAFT_TOKENS);
-	p["--surface"] = "red";
-	assert.equal(DRAFT_TOKENS["--surface"], "var(--card)");
+	// the palette is a copy: a caller cannot change the map
+	const palette = draftPalette();
+	assert.deepEqual(palette, DRAFT_TOKENS);
+	assert.notEqual(palette, DRAFT_TOKENS);
 });
 
 // Break: the names move to :root (or another global block). The export card and the document
@@ -118,5 +115,32 @@ test("the amber and red border tints use the alpha the desktop's tints work out 
 			DRAFT_TOKENS[`--${colour}-bd`],
 			new RegExp(`var\\(--${colour}\\) ${DRAFT_ALPHA}%`)
 		);
+	}
+});
+
+// Break: the small hint and label text of the shared form (--text-3) falls under WCAG AA (4.5:1)
+// on the card in light or dark, or stops being weaker than --text-2. Computed from the phone's
+// own token values, so a changed token or a changed mapping fails here.
+test("--text-3 reads at 4.5:1 on the card in light and dark and stays below --text-2", () => {
+	const luminance = (hex) => {
+		const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255);
+		const [r, g, b] = c.map((x) => (x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
+		return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+	};
+	const ratio = (a, b) => {
+		const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+		return (hi + 0.05) / (lo + 0.05);
+	};
+	const themes = {
+		light: declarations(blockAt(":root")),
+		dark: declarations(blockAt(':root[data-theme="dark"]')),
+	};
+	const token = (vars, name) => vars[/var\((--[\w-]+)\)/.exec(DRAFT_TOKENS[name])[1]];
+	for (const [theme, vars] of Object.entries(themes)) {
+		const card = vars["--card"];
+		const t3 = token(vars, "--text-3");
+		const t2 = token(vars, "--text-2");
+		assert.ok(ratio(t3, card) >= 4.5, `${theme}: --text-3 ${t3} on ${card}`);
+		assert.ok(ratio(t2, card) > ratio(t3, card), `${theme}: --text-2 is the stronger text`);
 	}
 });

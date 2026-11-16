@@ -6,6 +6,15 @@
 // components read (--border --amber --amber-bg --red --red-bg --green) already exist on the
 // phone with the phone's meaning and are not redefined.
 //
+// Why the names are scoped to a class and not defined on :root: two shared components the phone
+// already draws read some of them with a fallback of their own (ExportCard.vue, DocumentBlocks.vue),
+// and so does the holiday scene art (jarvis/public/js/shared/holiday/scenes/pongal-art.mjs reads
+// --text-3). A global definition would repaint them.
+//
+// --text-3 is --ink6, not --ink5: the shared form draws hints and labels in it at small sizes, and
+// --ink5 is about 4.2:1 on the card, under WCAG AA. --ink6 is 6.7:1 on white and 5.6:1 on the dark
+// card, and --text-2 (--ink7) stays the stronger of the two in light and in dark.
+//
 // Two places read this map: pwa/src/index.css (`.jv-draft-tokens`, for everything inside a draft
 // sheet or card) and the teleported link menu, which sits on <body> outside that class and takes
 // `draftPalette()` as its `palette` prop. draftTokens.test.js keeps the two equal.
@@ -24,7 +33,7 @@ export const DRAFT_TOKENS = {
 	"--surface-2": "var(--card3)",
 	"--text": "var(--ink9)",
 	"--text-2": "var(--ink7)",
-	"--text-3": "var(--ink5)",
+	"--text-3": "var(--ink6)",
 	"--border-2": "var(--border2)",
 	"--cta": "var(--inv-bg)",
 	"--cta-fg": "var(--inv-ink)",
