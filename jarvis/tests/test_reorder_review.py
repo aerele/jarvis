@@ -517,7 +517,7 @@ class TestNativeReorderJourney(FrappeTestCase):
 			"reserved_qty_for_production_plan",
 		)
 		with patch("erpnext.stock.doctype.bin.bin.RECALCULATED_FIELDS", erpnext_15):
-			self.assertEqual(review.prepare(self.run)["state"], "preview")
+			self.assertEqual(review.prepare(self.run)["state"], "prepared")
 
 	def test_shadow_is_visible_but_cannot_be_approved(self):
 		frappe.db.set_value(review.RUN, self.run.name, "preparation_mode", "shadow")
