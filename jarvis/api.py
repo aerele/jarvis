@@ -3686,7 +3686,13 @@ def _refuse_risky_write(
 
 
 def _build_park_card(
-	tool: str, args: dict, preview: dict, *, sensitive: bool, structural: list | None = None
+	tool: str,
+	args: dict,
+	preview: dict,
+	*,
+	sensitive: bool,
+	structural: list | None = None,
+	draft: bool = False,
 ) -> tuple[dict | None, dict | None]:
 	"""``(card, refusal)`` for a park: the chat gate and the File Box hold share it.
 
@@ -3711,7 +3717,7 @@ def _build_park_card(
 	from jarvis.tools import _write_risk
 
 	if not sensitive and structural is None:
-		return confirm_card.build_card(tool, args, preview), None
+		return confirm_card.build_card(tool, args, preview, draft), None
 	if confirm_card.too_large(None, args):
 		return None, _refuse_unshowable_card(tool, args, too_large=True)
 	if structural is not None:
@@ -5044,16 +5050,24 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			from_draft = frappe.flags.get("jarvis_park_from_draft")
 			if from_draft:
 				preview["from_draft"] = from_draft
+			# Dark behind the site flag: a single create / update parks as a draft card.
+			from jarvis.chat import draft_card
+
+			as_draft = draft_card.wanted(tool, args, must_card=_must_card)
 			card, refusal = _build_park_card(
 				tool,
 				args,
 				preview,
 				sensitive=_risk == "sensitive",
 				structural=_structure_lines,
+				draft=as_draft,
 			)
 			if refusal is not None:
 				frappe.clear_messages()
 				return refusal
+			if as_draft and isinstance(card, dict):
+				# On the card BEFORE it is parked, so the seal's card hash covers it.
+				draft_card.attach(card, tool, args, preview.get("would"))
 			preview["card"] = card
 			if tool == "create_doc" and isinstance(card, dict) and _risk != "sensitive" and not _guarded:
 				# The ORIGINAL proposal's identity: saving a draft card of the very same

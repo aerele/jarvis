@@ -588,6 +588,12 @@ def stored_rows(rows) -> list:
 	return [{k: v for k, v in r.items() if k not in drop} for r in rows if isinstance(r, dict)]
 
 
+def row_bookkeeping_keys() -> frozenset:
+	"""The keys a row or a main form carries that are not DocType fields and are never
+	"unrecognized": ``doctype`` plus Frappe's default and child-table columns."""
+	return frozenset(("doctype", *frappe.model.default_fields, *frappe.model.child_table_fields))
+
+
 def table_rows(meta, fieldname: str, rows: list, full: bool = False, stored: bool = False) -> dict | None:
 	"""A PROPOSED child table as a real table, or None when there is nothing to show.
 
@@ -598,7 +604,9 @@ def table_rows(meta, fieldname: str, rows: list, full: bool = False, stored: boo
 
 	A key that is not a real child field is DROPPED by the save (it fails
 	valid_columns), so it is counted in ``unknown_columns`` rather than rendered as
-	a value that will persist.
+	a value that will persist. Row bookkeeping (``row_bookkeeping_keys``: a row's own
+	``doctype``, ``name``, ``idx``, ...) is neither. The names are returned beside the
+	count as ``unknown_fields``.
 
 	STORED child tables keep "N rows" (fmt's list branch) - a delete card does not
 	need line items to identify the order.
@@ -620,16 +628,17 @@ def table_rows(meta, fieldname: str, rows: list, full: bool = False, stored: boo
 		return None
 
 	proposed: list[str] = []
-	unknown: set[str] = set()  # a SET: an unknown key never enters `proposed`, so a
+	unknown: list[str] = []  # a first-seen list: an unknown key never enters `proposed`, so a
 	# counter would re-increment once per row (20 rows -> unknown_columns=20).
+	skip = row_bookkeeping_keys()
 	for row in rows:
 		if not isinstance(row, dict):
 			continue
 		for key in row:
-			if key in proposed or key in unknown:
+			if key in proposed or key in unknown or key in skip:
 				continue
 			if child.get_field(key) is None:
-				unknown.add(key)
+				unknown.append(key)
 				continue
 			proposed.append(key)
 
@@ -660,6 +669,7 @@ def table_rows(meta, fieldname: str, rows: list, full: bool = False, stored: boo
 		"extra": max(0, len(rows) - len(out_rows)),
 		"extra_columns": max(0, len(columns) - len(shown_cols)),
 		"unknown_columns": len(unknown),
+		"unknown_fields": unknown,
 	}
 	notes = [HIDDEN_BREAK_NOTE] if hidden_break else []
 	if full and len(shown_cols) > _WIDE_TABLE_COLS:

@@ -138,14 +138,16 @@ _CONSEQUENCE = {
 }
 
 
-def build_card(tool: str, args, preview) -> dict | None:
+def build_card(tool: str, args, preview, draft: bool = False) -> dict | None:
 	"""Structured, render-ready confirmation summary, or None to fall back to the
 	SPA's summary + raw-preview rendering. Best-effort: never raises (a card is
-	UX, not correctness), so a failure just yields None."""
+	UX, not correctness), so a failure just yields None. ``draft``: a create card
+	also shows the columns the DocType lists on its child tables, with the trial's
+	computed values (``draft_card``)."""
 	if not isinstance(args, dict):
 		return None
 	try:
-		card = _card_of(tool, args, preview)
+		card = _card_of(tool, args, preview, draft)
 		if isinstance(card, dict):
 			if _is_sensitive(preview):
 				# Names, titles and targets too, not only the values: a record name
@@ -207,7 +209,7 @@ def _add_warning(card: dict, preview) -> None:
 		card["warning"] = {"jobs": jobs, "rolled_back": rolled_back}
 
 
-def _card_of(tool: str, args: dict, preview) -> dict | None:
+def _card_of(tool: str, args: dict, preview, draft: bool = False) -> dict | None:
 	would = preview.get("would") if isinstance(preview, dict) else None
 	full = _is_sensitive(preview)
 	if tool in ("create_doc", "update_doc"):
@@ -217,7 +219,7 @@ def _card_of(tool: str, args: dict, preview) -> dict | None:
 	if tool == "create_doc":
 		if bulk_key == "docs":
 			return _batch_create_card(args, would, full)
-		return _create_card(args, would, full)
+		return _create_card(args, would, full, draft)
 	if tool == "update_doc" and not bulk_key:
 		# A guarded structure card (a Workflow) shows its tables whole even when an
 		# edit leaves them as they are: what is being switched on is the point.
@@ -285,7 +287,7 @@ def _label(meta, fieldname: str) -> str:
 	return fieldname
 
 
-def _create_card(args: dict, would, full: bool = False) -> dict:
+def _create_card(args: dict, would, full: bool = False, draft: bool = False) -> dict:
 	doctype = args.get("doctype")
 	values = args.get("values") if isinstance(args.get("values"), dict) else {}
 	meta = _meta(doctype)
@@ -303,7 +305,12 @@ def _create_card(args: dict, would, full: bool = False) -> dict:
 		if isinstance(would, dict) and key not in would:
 			continue  # perm-dropped from the resolved doc: the save will not write it
 		t = table_rows(
-			meta, key, _resulting_rows(meta, key, value, []) if full else _trial_rows(key, value, would), full
+			meta,
+			key,
+			_resulting_rows(meta, key, value, [])
+			if full
+			else _trial_rows(key, value, would, _list_view_fields(meta, key) if draft else ()),
+			full,
 		)
 		if t:
 			tables.append(t)
@@ -470,7 +477,7 @@ def _stored_args(tool: str, args: dict) -> dict:
 	return out
 
 
-def _trial_rows(key: str, rows: list, would) -> list:
+def _trial_rows(key: str, rows: list, would, extra=()) -> list:
 	"""The rows of child table ``key`` as the trial run left them, for an ordinary
 	create card (the full card builds its rows with ``_resulting_rows``).
 
@@ -484,7 +491,11 @@ def _trial_rows(key: str, rows: list, would) -> list:
 	A cell the resolved row does not carry stays as sent: ``table_rows`` still counts
 	a key that is not a child field as unknown. The call's rows are kept whole when
 	the trial holds no list of the same length for the table (no dry run, as on a
-	held create; a validate that added or removed rows, which position cannot pair)."""
+	held create; a validate that added or removed rows, which position cannot pair).
+
+	``extra``: field names (a draft card passes the child DocType's ``in_list_view``
+	fields) that are added from the resolved row when the call did not set them, so a
+	computed Hrs or Amount shows with the value the trial gave it."""
 	resolved = would.get(key) if isinstance(would, dict) else None
 	if not isinstance(resolved, list) or len(resolved) != len(rows):
 		return rows
@@ -493,8 +504,21 @@ def _trial_rows(key: str, rows: list, would) -> list:
 		if not isinstance(sent, dict) or not isinstance(got, dict):
 			out.append(sent)
 			continue
-		out.append({k: got[k] if k in got else v for k, v in sent.items()})
+		row = {k: got[k] if k in got else v for k, v in sent.items()}
+		row.update({k: got[k] for k in extra if k not in row and k in got})
+		out.append(row)
 	return out
+
+
+def _list_view_fields(meta, key: str) -> tuple:
+	"""The ``in_list_view`` fieldnames of the child DocType of table field ``key``."""
+	df = meta.get_field(key) if meta else None
+	if df is None or not df.options or df.fieldtype not in ("Table", "Table MultiSelect"):
+		return ()
+	try:
+		return tuple(d.fieldname for d in frappe.get_meta(df.options).fields if d.in_list_view)
+	except Exception:
+		return ()
 
 
 def _resulting_rows(meta, key, rows: list, stored, doc=None) -> list:

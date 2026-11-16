@@ -1,0 +1,208 @@
+[
+ {
+  "id": "create-simple",
+  "card": {
+   "kind": "create",
+   "doctype": "Timesheet",
+   "name": null,
+   "rows": [
+    {
+     "label": "Employee",
+     "value": "EMP-1"
+    },
+    {
+     "label": "Note",
+     "value": "Weekly"
+    }
+   ],
+   "tables": [],
+   "draft": {
+    "verb": "create",
+    "doctype": "Timesheet",
+    "name": "",
+    "values": {
+     "employee": "EMP-1",
+     "note": "Weekly"
+    },
+    "ignored": [],
+    "continue": false
+   },
+   "title": "New Timesheet"
+  },
+  "expect": "draft"
+ },
+ {
+  "id": "create-with-table",
+  "card": {
+   "kind": "create",
+   "doctype": "Timesheet",
+   "name": null,
+   "rows": [
+    {
+     "label": "Employee",
+     "value": "EMP-1"
+    }
+   ],
+   "tables": [
+    {
+     "label": "Time Logs",
+     "count": 1,
+     "columns": [
+      "From Time",
+      "Hours"
+     ],
+     "fieldnames": [
+      "from_time",
+      "hours"
+     ],
+     "rows": [
+      {
+       "cells": [
+        "09:00",
+        "1.5"
+       ]
+      }
+     ],
+     "extra": 0,
+     "extra_columns": 0,
+     "unknown_columns": 0,
+     "unknown_fields": []
+    }
+   ],
+   "draft": {
+    "verb": "create",
+    "doctype": "Timesheet",
+    "name": "",
+    "values": {
+     "employee": "EMP-1",
+     "time_logs": [
+      {
+       "doctype": "Timesheet Detail",
+       "from_time": "09:00"
+      }
+     ]
+    },
+    "ignored": [],
+    "continue": false
+   },
+   "title": "New Timesheet"
+  },
+  "expect": "draft"
+ },
+ {
+  "id": "create-ignored-field",
+  "card": {
+   "kind": "create",
+   "doctype": "Timesheet",
+   "name": null,
+   "rows": [
+    {
+     "label": "Employee",
+     "value": "EMP-1"
+    }
+   ],
+   "tables": [],
+   "draft": {
+    "verb": "create",
+    "doctype": "Timesheet",
+    "name": "",
+    "values": {
+     "employee": "EMP-1"
+    },
+    "ignored": [
+     "colour"
+    ],
+    "continue": false
+   },
+   "title": "New Timesheet"
+  },
+  "expect": "draft"
+ },
+ {
+  "id": "update-diff",
+  "card": {
+   "kind": "update",
+   "doctype": "Timesheet",
+   "name": "TS-0001",
+   "diff": [
+    {
+     "label": "Note",
+     "from": "",
+     "to": "Late"
+    }
+   ],
+   "draft": {
+    "verb": "update",
+    "doctype": "Timesheet",
+    "name": "TS-0001",
+    "values": {
+     "note": "Late"
+    },
+    "ignored": [],
+    "continue": false
+   },
+   "title": "Timesheet TS-0001"
+  },
+  "expect": "draft"
+ },
+ {
+  "id": "update-table-rows",
+  "card": {
+   "kind": "update",
+   "doctype": "Timesheet",
+   "name": "TS-0001",
+   "diff": [],
+   "draft": {
+    "verb": "update",
+    "doctype": "Timesheet",
+    "name": "TS-0001",
+    "values": {
+     "time_logs": [
+      {
+       "from_time": "10:00"
+      }
+     ]
+    },
+    "ignored": [
+     "time_logs.hrs_worked"
+    ],
+    "continue": false
+   },
+   "title": "Timesheet TS-0001"
+  },
+  "expect": "draft"
+ },
+ {
+  "id": "sensitive",
+  "expect": "sensitive",
+  "card": {
+   "kind": "update",
+   "doctype": "Server Script",
+   "name": "SS-1",
+   "title": "",
+   "diff": [],
+   "risk": "sensitive",
+   "risk_line": "Changes code that runs on the server."
+  }
+ },
+ {
+  "id": "unreadable",
+  "expect": "unreadable",
+  "card": {
+   "kind": "create",
+   "doctype": "Timesheet",
+   "name": null,
+   "rows": [],
+   "tables": [],
+   "title": "New Timesheet",
+   "draft": {
+    "verb": "create",
+    "doctype": "Timesheet",
+    "name": "",
+    "values": "not an object",
+    "ignored": [],
+    "continue": false
+   }
+  }
+ }
+]
