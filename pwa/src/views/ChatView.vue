@@ -79,6 +79,15 @@ import DecisionCard from "../components/DecisionCard.vue";
 import DecisionSheet from "../components/DecisionSheet.vue";
 import FilePreviewSheet from "../components/FilePreviewSheet.vue";
 import { turnErrorInfo, showsRawReason } from "../../../jarvis/public/js/turn_errors.mjs";
+import {
+	cancelCopy,
+	failureCopy,
+	uploadFailureCopy,
+} from "../../../jarvis/public/js/shared/chat_failure_copy.mjs";
+import {
+	openErrorReport,
+	showReportError,
+} from "../../../jarvis/public/js/shared/support_error_report.mjs";
 import MessageMedia from "../components/MessageMedia.vue";
 import RecordCards from "../components/RecordCards.vue";
 import Sheet from "../components/Sheet.vue";
@@ -515,6 +524,34 @@ function errorNote(m) {
 	});
 }
 
+// Report error: only where Aerele support is the one who can fix the failure, and only for a
+// user who can raise a ticket (page boot flags set by jarvis/www/jarvis_mobile.py).
+const supportOn = !!(window.support_available && window.has_support_access);
+const reportingFor = ref("");
+function canReport(err) {
+	return showReportError(err, supportOn);
+}
+async function reportError(m, err) {
+	if (reportingFor.value || !canReport(err)) return;
+	reportingFor.value = m.name;
+	try {
+		const opened = await openErrorReport({
+			info: err,
+			conversation: convId.value,
+			message: m.name,
+			at: m.modified || m.creation,
+			fetchDetails: api.getErrorReportDetails,
+			openTab: (url, target) => window.open(url, target),
+			navigate: (url) => window.location.assign(url),
+		});
+		if (!opened) errorBanner.value = "Couldn't open Support. Try again.";
+	} catch {
+		errorBanner.value = "Couldn't open Support. Try again.";
+	} finally {
+		reportingFor.value = "";
+	}
+}
+
 // ── thread assembly ─────────────────────────────────────────────────────────
 // Tool rows BELONG to the assistant turn that ran them. The worker creates the
 // assistant placeholder first and appends each tool row after it, so in `seq`
@@ -672,6 +709,11 @@ async function load(force = false, staleRetry = true) {
 		if (page.stale.length && staleRetry) load(false, false);
 	} catch (e) {
 		console.error("Jarvis PWA: failed to load conversation", e);
+		if (current())
+			errorBanner.value = failureCopy(
+				e,
+				"Couldn't load this chat. Check your connection, then reopen it."
+			);
 	} finally {
 		if (current()) {
 			loading.value = false;
@@ -1233,8 +1275,7 @@ async function attach(files) {
 					if (target[index].preview) URL.revokeObjectURL(target[index].preview);
 					target.splice(index, 1);
 				}
-				if (isCurrent(cid, generation))
-					errorBanner.value = e?.message || `Couldn't upload ${a.name}.`;
+				if (isCurrent(cid, generation)) errorBanner.value = uploadFailureCopy(e, a.name);
 			}
 		})
 	);
@@ -1300,7 +1341,10 @@ async function saveRename() {
 		menuOpen.value = false;
 	} catch (e) {
 		if (!isCurrent(cid, generation)) return;
-		menuError.value = e?.message || "Couldn't rename this chat.";
+		menuError.value = failureCopy(
+			e,
+			"Couldn't rename this chat. Check your connection and try again."
+		);
 	}
 }
 
@@ -1339,7 +1383,7 @@ function onEvent(p) {
 		queuedTurn.value.position = p.position;
 	}
 	if (p.kind === "turn:cancelled") {
-		errorBanner.value = p.reason || "The waiting request was cancelled.";
+		errorBanner.value = cancelCopy(p.reason);
 		load();
 	}
 
@@ -1749,6 +1793,15 @@ onUnmounted(() => {
 								<span aria-hidden="true">&#8599;</span></a
 							>
 						</p>
+						<button
+							v-if="canReport(it.err)"
+							class="jv-err-link"
+							type="button"
+							:disabled="!!reportingFor"
+							@click="reportError(it.msg, it.err)"
+						>
+							Report error
+						</button>
 						<pre
 							v-if="showsRawReason(it.err) && it.msg.error"
 							class="jv-msg-error-raw"

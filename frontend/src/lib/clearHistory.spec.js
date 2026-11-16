@@ -345,7 +345,7 @@ describe("ChatView clearAllHistory", () => {
 	it("on a failure says some chats may be gone and reloads the list", () => {
 		const failed = body.slice(body.indexOf("} catch (e) {"), body.indexOf("} finally {"));
 		expect(failed).toContain(
-			'notify(clearHistoryFailedNotice(errMessage(e)), { type: "error" });'
+			'clearHistoryFailedNotice(causeOf(e) || "Couldn\'t delete your history")'
 		);
 		expect(failed).toContain("store.loadConversations();");
 	});

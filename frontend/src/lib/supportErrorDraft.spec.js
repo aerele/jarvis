@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import rules from "../../../jarvis/public/js/turn_error_rules.mjs";
-import { supportErrorDraft } from "./supportErrorDraft";
+import { supportErrorDraft } from "../../../jarvis/public/js/shared/support_error_draft.mjs";
 const context = {
 	code: "timeout",
 	conversation: "conv788fixture",

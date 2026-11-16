@@ -3,7 +3,7 @@ import { compile } from "@vue/compiler-dom";
 import * as Vue from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
-import { supportErrorDraft } from "@/lib/supportErrorDraft";
+import { supportErrorDraft } from "../../../jarvis/public/js/shared/support_error_draft.mjs";
 import { showsRawReason, turnErrorInfo } from "@/lib/errors";
 // Run the actual SFC functions and compiled error-card markup. Chromium covers
 // the full view. Router and Retry are observed boundaries, never real writes.

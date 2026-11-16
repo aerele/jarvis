@@ -251,6 +251,6 @@ class TestGetCanvasFileReadGate(FrappeTestCase):
 		self.assertFalse(frappe.has_permission("File", "read", doc=self.secret.name))
 		# The raised error must be the FILE-read gate, not the ownership gate - assert
 		# on its message so deleting the gate makes this test fail (as it must).
-		with self.assertRaisesRegex(frappe.PermissionError, "no permission to read this file"):
+		with self.assertRaisesRegex(frappe.PermissionError, "permission to open this file"):
 			get_canvas(self.msg.name, name="cvx")
 		frappe.set_user("Administrator")
