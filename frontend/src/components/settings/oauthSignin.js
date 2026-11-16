@@ -35,9 +35,6 @@ const POLL_INTERVAL_MS = 2000;
 // a slow vendor round trip doesn't time out on the client while the backend
 // would still have honoured it.
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
-// How long to keep polling after the vendor tab closes before calling the
-// sign-in abandoned (the callback page closes its own tab once it lands).
-const CLOSED_GRACE_MS = 8000;
 
 // Navigation goes through this one indirection so a test can replace `go`
 // with a spy - jsdom refuses to let a script assign `window.location.href`
@@ -207,16 +204,19 @@ async function checkSignInStatus(name, startedAt) {
 // a `stop()` function the caller can invoke to cancel the loop early without
 // resolving anything itself (signIn()'s own .cancel() does that part).
 //
-// A closed vendor tab is a hint, not a verdict: the callback page closes
-// itself right after the token lands, so the tab can read as closed while the
-// status request is still in flight. After the tab closes the poll carries on
-// for CLOSED_GRACE_MS, and re-checks at once when the user comes back to this
-// window. Only a grace period with no connection reports "closed".
+// A closed vendor tab is a hint, never a verdict. `popup.closed` reads true
+// once the vendor's page severs the opener (Cross-Origin-Opener-Policy), so a
+// tab the user is still working in can look closed, and the callback page
+// closes its own tab right after the token lands. So after the tab looks
+// closed this keeps polling at the normal interval and tells the caller once
+// through `onTabClosed`, so it can offer "try again". Only a backend verdict,
+// the overall timeout or the caller's own stop()/cancel() ends the poll. The
+// poll also re-checks at once when the user comes back to this window.
 function pollUntilDone(name, w, startedAt, resolve, onTabClosed) {
 	const deadline = Date.now() + POLL_TIMEOUT_MS;
 	let stopped = false;
 	let timer = null;
-	let closedAt = null;
+	let tabClosedReported = false;
 
 	function stop() {
 		stopped = true;
@@ -246,15 +246,9 @@ function pollUntilDone(name, w, startedAt, resolve, onTabClosed) {
 			finish(outcome.result);
 			return;
 		}
-		if (w && w.closed) {
-			if (closedAt === null) {
-				closedAt = Date.now();
-				if (onTabClosed) onTabClosed(); // the caller can show "Waiting for ..."
-			}
-			if (Date.now() - closedAt >= CLOSED_GRACE_MS) {
-				finish({ status: "closed" });
-				return;
-			}
+		if (w && w.closed && !tabClosedReported) {
+			tabClosedReported = true;
+			if (onTabClosed) onTabClosed(); // the caller can show "Waiting for ..."
 		}
 		if (Date.now() >= deadline) {
 			// Leave the tab open - the user may still be mid-flow in it.
