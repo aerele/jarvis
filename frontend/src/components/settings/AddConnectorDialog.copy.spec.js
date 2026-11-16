@@ -111,30 +111,56 @@ describe("AddConnectorDialog: sign-in card", () => {
 		);
 	});
 
-	it("says Waiting for the app once the vendor tab has closed, until the result is in", async () => {
+	it("shows a calm Waiting state with Try again once the vendor tab looks closed", async () => {
 		api.addConnector.mockResolvedValue({ name: "row-1", scope: "Personal" });
 		let tabClosed;
-		let settle;
 		signIn.mockImplementation(async (target, opts) => {
 			await target();
 			tabClosed = opts.onTabClosed;
-			return new Promise((resolve) => {
-				settle = resolve;
-			});
+			return new Promise(() => {});
 		});
 		const wrapper = await opened("Sentry");
 		await wrapper.find('button[data-label="Sign in with Sentry"]').trigger("click");
 		await flushPromises();
 		expect(wrapper.text()).toContain("Finish signing in to Sentry in the other tab.");
+		expect(wrapper.find('button[data-label="Try again"]').exists()).toBe(false);
 
 		tabClosed();
 		await flushPromises();
 		expect(wrapper.text()).toContain("Waiting for Sentry…");
+		expect(wrapper.text()).toContain("If you closed the sign-in window, try again.");
 		expect(wrapper.text()).not.toContain("Finish signing in");
+		expect(wrapper.text()).not.toContain("Sign-in window was closed");
+		expect(wrapper.find(".text-ink-red-4").exists()).toBe(false);
+		expect(wrapper.find('button[data-label="Try again"]').exists()).toBe(true);
+		expect(wrapper.find('button[data-label="Cancel"]').exists()).toBe(true);
+	});
 
-		settle({ status: "closed" });
+	it("Try again cancels the current poll and starts a fresh sign-in", async () => {
+		api.addConnector.mockResolvedValue({ name: "row-1", scope: "Personal" });
+		const cancels = [];
+		const tabClosedFns = [];
+		signIn.mockImplementation((target, opts) => {
+			const p = new Promise(() => {});
+			p.cancel = vi.fn();
+			cancels.push(p.cancel);
+			tabClosedFns.push(opts.onTabClosed);
+			if (typeof target === "function") target(); // creates the row on the first press
+			return p;
+		});
+		const wrapper = await opened("Sentry");
+		await wrapper.find('button[data-label="Sign in with Sentry"]').trigger("click");
 		await flushPromises();
-		expect(wrapper.text()).toContain("Sign-in window was closed.");
-		expect(wrapper.text()).not.toContain("Waiting for Sentry");
+		tabClosedFns[0]();
+		await flushPromises();
+
+		await wrapper.find('button[data-label="Try again"]').trigger("click");
+		await flushPromises();
+		expect(cancels[0]).toHaveBeenCalledTimes(1);
+		expect(signIn).toHaveBeenCalledTimes(2);
+		expect(signIn.mock.calls[1][0]).toBe("row-1"); // reuses the row, no second create
+		expect(cancels[1]).not.toHaveBeenCalled();
+		expect(api.addConnector).toHaveBeenCalledTimes(1);
+		expect(wrapper.text()).toContain("Finish signing in to Sentry in the other tab.");
 	});
 });

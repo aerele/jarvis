@@ -108,14 +108,26 @@
 									<p class="text-xs text-ink-gray-5">Setting up…</p>
 								</template>
 								<template v-else>
-									<p v-if="waitingForVendor" class="text-xs text-ink-gray-5">
-										Waiting for {{ signinAppName }}…
-									</p>
+									<template v-if="waitingForVendor">
+										<p class="text-xs text-ink-gray-5">
+											Waiting for {{ signinAppName }}…
+										</p>
+										<p class="text-xs text-ink-gray-5">
+											If you closed the sign-in window, try again.
+										</p>
+									</template>
 									<p v-else class="text-xs text-ink-gray-5">
 										Finish signing in to {{ signinAppName }} in the other tab.
 									</p>
 								</template>
-								<div class="flex justify-end">
+								<div class="flex justify-end gap-2">
+									<Button
+										v-if="waitingForVendor"
+										variant="solid"
+										size="sm"
+										label="Try again"
+										@click="retrySignIn"
+									/>
 									<Button
 										variant="ghost"
 										size="sm"
@@ -765,7 +777,9 @@ const isPlaceholder = computed(() =>
 const scopeLocked = computed(() => !!rowName.value);
 
 const signingIn = ref(false);
-// True while the sign-in poll runs on after the vendor tab closed itself.
+// True once the vendor tab looks closed. The poll keeps running (a tab that
+// only navigated cross-origin reads closed too), so this shows the calm
+// "Waiting for ..." state with Try again, never an error.
 const waitingForVendor = ref(false);
 // Set the moment "Sign in with X" is first pressed this dialog session -
 // onClosed() uses it to decide whether a final status check is worth making
@@ -1114,7 +1128,6 @@ function connectRowPayload(extra) {
 
 // ── sign-in ──────────────────────────────────────────────────────────────
 const SIGNIN_STATUS_MESSAGE = {
-	closed: "Sign-in window was closed.",
 	timeout: "Sign-in took too long.",
 	error: "Could not sign in.",
 };
@@ -1186,6 +1199,12 @@ async function beginSignIn() {
 		}
 		if (currentSignIn === pending) currentSignIn = null;
 	}
+}
+// "Try again" while waiting: drops the current poll and opens a fresh sign-in.
+// Runs inside the click, so the new tab still counts as user-initiated.
+function retrySignIn() {
+	cancelSignIn();
+	beginSignIn();
 }
 function cancelSignIn() {
 	sessionGen++; // the pending signIn() promise, whenever it settles, is now stale
