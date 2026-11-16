@@ -70,6 +70,7 @@ import { exportSummary } from "@shared/lib/exportJobs.js";
 import ReportScope from "../components/ReportScope.vue";
 import Composer from "../components/Composer.vue";
 import { splitQuote, withQuote } from "@jsshared/reply_quote.mjs";
+import SelectionActions from "@shared/components/chat/SelectionActions.vue";
 import { createReader } from "@jsshared/read_aloud.mjs";
 import {
 	boundedDelivery,
@@ -313,9 +314,9 @@ const starred = ref(false);
 const scroller = ref(null);
 const composer = ref(null);
 
-// aerele/jarvis#2191: Reply quotes an earlier reply at the top of the composer (a
-// Markdown blockquote: the agent gets the exact text, the history keeps it, the
-// bubble draws it as a quote). An unsent quote is replaced.
+// aerele/jarvis#2191: Reply, offered on text selected in a reply, quotes it at the top
+// of the composer (a Markdown blockquote: the agent gets the exact text, the history
+// keeps it, the bubble draws it as a quote). An unsent quote is replaced.
 const quoteOf = (content) => splitQuote(content);
 function replyBodyText(e) {
 	const body = e?.currentTarget?.closest?.(".jv-msg-agent")?.querySelector?.(".jv-md");
@@ -1778,31 +1779,13 @@ onUnmounted(() => {
 					     exists to fix. Gated only on `stopped`, it shows for both the
 					     partial and the empty stop. -->
 					<div v-if="it.msg.stopped" class="jv-stopped">You stopped this reply.</div>
-					<!-- aerele/jarvis#2191: a phone's own selection menu owns a selection, so
-					     the PWA quotes the whole reply from here instead of a selection bar. -->
-					<div v-if="it.view.html && !exportSummary(it.msg)" class="jv-msg-acts">
+					<!-- aerele/jarvis#2191: Listen under each finished reply (Reply is offered
+					     on text selected in it, by the selection bar below) -->
+					<div
+						v-if="reader.supported && it.view.html && !exportSummary(it.msg)"
+						class="jv-msg-acts"
+					>
 						<button
-							type="button"
-							class="jv-msg-act"
-							@click="replyWith(replyBodyText($event))"
-						>
-							<svg
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="currentColor"
-								stroke-width="1.8"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-								aria-hidden="true"
-							>
-								<path d="M9 14 4 9l5-5" />
-								<path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
-							</svg>
-							Reply
-						</button>
-						<!-- read the reply aloud with the phone's own voice -->
-						<button
-							v-if="reader.supported"
 							type="button"
 							class="jv-msg-act"
 							:class="{ 'jv-msg-act-on': speakingId === it.key }"
@@ -2099,6 +2082,14 @@ onUnmounted(() => {
 		</button>
 	</div>
 
+	<!-- aerele/jarvis#2191: Reply on text selected in a reply, under the selection -->
+	<SelectionActions
+		:root="scroller"
+		selector=".jv-msg-agent .jv-md"
+		:actions="[{ key: 'reply', label: 'Reply' }]"
+		below
+		@action="(key, text) => key === 'reply' && replyWith(text)"
+	/>
 	<Composer
 		ref="composer"
 		v-model="input"
