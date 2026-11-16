@@ -20,6 +20,8 @@ const ENTRIES = [
 	here("DraftRowBlock.vue"),
 	here("DraftRowForm.vue"),
 	here("../doc/DraftPreview.vue"),
+	// The link-search state the phone sheet will call with its own search function.
+	here("../../lib/useDraftLink.js"),
 ];
 // The only package a file in the graph may import.
 const ALLOWED_PACKAGES = new Set(["vue"]);
@@ -105,6 +107,7 @@ describe("the draft edit form imports nothing the phone cannot resolve", () => {
 			"rowStatusMemo.js",
 			"draftTotals.js",
 			"rowFormFocus.js",
+			"draftLinkFilters.js", // reached from useDraftLink.js
 		]) {
 			expect(names, `${n} was not reached`).toContain(n);
 		}

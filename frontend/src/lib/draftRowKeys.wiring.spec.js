@@ -7,6 +7,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
+const link = fs.readFileSync(path.resolve(__dirname, "./useDraftLink.js"), "utf8");
 const form = fs.readFileSync(
 	path.resolve(__dirname, "../components/chat/DraftEditForm.vue"),
 	"utf8"
@@ -71,9 +72,11 @@ describe("ChatView fetches the rule values Desk fetches from a link", () => {
 		expect(between(src, "async function buildDraftModel(", "\nfunction ")).toMatch(
 			/await Promise\.race\(\[\s*fillRuleValues\(a\.doctype, tables\),[\s\S]*RULE_VALUES_WAIT_MS/
 		);
-		expect(between(src, "function pickDraftLink(", "\nfunction ")).toMatch(
+		// The pick handler lives in the shared composable; the host hands it its fillRuleValues.
+		expect(between(link, "function pickDraftLink(", "\n\tfunction ")).toMatch(
 			/fillRuleValues\(panel\.doctype, panel\.tables, \(\) => draftPanel\.value === panel\)/
 		);
+		expect(between(src, "useDraftLink({", "});")).toMatch(/draftPanel,[\s\S]*fillRuleValues,/);
 		expect(between(src, "async function fillRuleValues(", "\nfunction ")).toMatch(
 			/api\.ruleValues\(doctype, t\.fieldname, links\)[\s\S]*isCurrent\(\)\) applyRuleValues\(t, r\.values, links\)/
 		);
