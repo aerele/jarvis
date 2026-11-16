@@ -7,6 +7,7 @@ every row a test makes is removed."""
 
 from __future__ import annotations
 
+import copy
 import json
 import unittest
 
@@ -160,6 +161,80 @@ class TestDraftValuesPure(unittest.TestCase):
 			draft_values.edited_call("update_doc", args, {"items": rows})["changes"]["items"], rows
 		)
 		self.assertEqual(args["changes"]["items"], [{"name": "r1"}], "the sealed call is never changed")
+
+	def test_an_edited_update_row_keeps_the_other_cells_the_draft_set(self):
+		"""DATA LOSS guard: the agent drafted two cells of saved row r1 and the person edits
+		one of them. The write merges a named row with the SAVED row, so unless the sent row
+		inherits the draft's cells the other drafted cell silently reverts to the saved
+		value. The create twin (``_draft_row``) cannot lose it; this pins the update."""
+		drafted = [{"name": "r1", "description": "agent", "from_time": "09:00"}, {"name": "r2", "x": 1}]
+		args = {"doctype": "T", "name": "N", "changes": {"items": drafted}}
+		sent = [{"name": "r1", "description": "person"}, {"name": "r2"}]
+		edited = draft_values.edited_call("update_doc", args, {"items": sent}, tables={"items"})
+		self.assertEqual(
+			edited["changes"]["items"],
+			[{"name": "r1", "description": "person", "from_time": "09:00"}, {"name": "r2", "x": 1}],
+		)
+
+	def test_an_update_row_the_draft_did_not_name_is_written_as_sent(self):
+		"""A saved row the agent never mentioned (the form listed it, the person kept or
+		edited it) must not gain cells from some other drafted row or the draft's table:
+		it goes on as sent, and the write merges it with the saved row."""
+		args = {"doctype": "T", "name": "N", "changes": {"items": [{"name": "r1", "a": 1}]}}
+		sent = [{"name": "r1"}, {"name": "r5", "b": 2}, {"name": "r6"}]
+		edited = draft_values.edited_call("update_doc", args, {"items": sent}, tables={"items"})
+		self.assertEqual(
+			edited["changes"]["items"], [{"name": "r1", "a": 1}, {"name": "r5", "b": 2}, {"name": "r6"}]
+		)
+
+	def test_an_update_row_cell_sent_blank_overrides_the_drafted_cell_and_stays_blank(self):
+		"""The person emptied a cell the agent had drafted: the blank must reach the write
+		(``merge_child_rows`` sets "" / None on the saved row), so it must override the
+		inherited cell and must not be dropped (which would let the saved value survive).
+		A cell not sent at all keeps the drafted value. Unlike a create row, where a blank
+		is removed so the DocType default applies."""
+		drafted = [{"name": "r1", "a": "agent", "b": "agent", "c": "agent"}]
+		args = {"doctype": "T", "name": "N", "changes": {"items": drafted}}
+		sent = [{"name": "r1", "a": "", "b": None}]
+		[row] = draft_values.edited_call("update_doc", args, {"items": sent}, tables={"items"})["changes"][
+			"items"
+		]
+		self.assertEqual(row, {"name": "r1", "a": "", "b": None, "c": "agent"})
+
+	def test_an_update_with_no_values_is_the_card_and_a_table_not_sent_is_untouched(self):
+		"""``values == {}`` must write exactly the card (an unedited save is a plain
+		Confirm), and a table the form did not send keeps the draft's own rows even when
+		another table is sent."""
+		changes = {"items": [{"name": "r1", "a": 1}], "tags": [{"name": "t1", "tag": "x"}]}
+		args = {"doctype": "T", "name": "N", "changes": changes}
+		tables = {"items", "tags"}
+		self.assertEqual(draft_values.edited_call("update_doc", args, {}, tables=tables), args)
+		edited = draft_values.edited_call("update_doc", args, {"items": [{"name": "r1"}]}, tables=tables)
+		self.assertEqual(edited["changes"]["tags"], [{"name": "t1", "tag": "x"}])
+
+	def test_an_update_table_removes_a_drafted_row_left_out_and_appends_a_new_one(self):
+		"""The sent list is the complete final set: a drafted row it does not name is gone
+		(not re-added from the draft), and a row without ``name`` is appended as sent,
+		never given a drafted row's cells."""
+		drafted = [{"name": "r1", "a": 1}, {"name": "r2", "a": 2}]
+		args = {"doctype": "T", "name": "N", "changes": {"items": drafted}}
+		sent = [{"name": "r2"}, {"a": 9}]
+		edited = draft_values.edited_call("update_doc", args, {"items": sent}, tables={"items"})
+		self.assertEqual(edited["changes"]["items"], [{"name": "r2", "a": 2}, {"a": 9}])
+
+	def test_merging_an_update_row_does_not_change_the_sealed_call_or_the_sent_rows(self):
+		"""The sealed call is the card's record and the sent rows are the caller's: the trial
+		and the write both take the merged result, so merging in place would corrupt the
+		card (or make the two runs differ)."""
+		drafted = [{"name": "r1", "a": 1, "b": 2}]
+		args = {"doctype": "T", "name": "N", "changes": {"items": drafted, "status": "Open"}}
+		sent = [{"name": "r1", "a": 5}]
+		values = {"items": sent, "status": "Closed"}
+		before = copy.deepcopy((args, values))
+		edited = draft_values.edited_call("update_doc", args, values, tables={"items"})
+		self.assertEqual((args, values), before)
+		edited["changes"]["items"][0]["b"] = 99
+		self.assertEqual(args["changes"]["items"][0]["b"], 2, "the merged row is a new dict")
 
 	def test_a_create_keeps_every_drafted_key_the_form_did_not_send(self):
 		"""DATA LOSS guard: a value the form cannot show (an attachment, a hidden field, a
@@ -1072,6 +1147,26 @@ if FrappeTestCase is not None:
 			)
 			self.assert_untouched(token, before)
 			self.assertEqual(len(self.form_rows(form)), 3)
+
+		def test_an_edited_row_keeps_the_other_cells_the_agent_drafted(self):
+			"""End to end: the agent's draft changes two cells of one saved row; the form sends
+			that table with the row carrying ONE edited cell. The record must hold the person's
+			cell AND the agent's other cell (the write merges a named row with the SAVED row, so
+			without the server inheriting the draft's cells the second one reverts), and the
+			rows the form kept as they were stay intact."""
+			form, (r1, r2, r3) = self.web_form()
+			conv = self.make_conv(owner=OTHER)
+			drafted = [{"name": r1, "label": "Agent label", "description": "Agent help"}]
+			args = {"doctype": "Web Form", "name": form, "changes": {"web_form_fields": drafted}}
+			token = self.mint(conv, "update_doc", args, owner=OTHER)
+			table = [{"name": r1, "label": "Person label"}, {"name": r2}, {"name": r3}]
+			out = self.save(token, conv, {"web_form_fields": table}, user=OTHER)
+			self.assertTrue(out["ok"], out)
+			rows = [(r.name, r.label, r.description) for r in self.form_rows(form)]
+			self.assertEqual(
+				rows,
+				[(r1, "Person label", "Agent help"), (r2, "Second", None), (r3, "Third", None)],
+			)
 
 		def test_an_update_sends_none_to_set_a_field_blank(self):
 			"""On an update None is "make it blank": update_doc sets it, and the draft's own

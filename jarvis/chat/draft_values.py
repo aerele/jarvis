@@ -1,22 +1,33 @@
 """The values a person saves from a draft card's edit form: the call they make, and the
 check it passes before anything is claimed (``draft_save``).
 
-The contract for ``values`` (field-keyed; a child table is a list of row dicts):
+The contract for ``values`` (field-keyed; a child table is a list of row dicts). One rule
+for both verbs: send a table's COMPLETE final row list, and in each kept row send only
+the cells the person changed; a kept row is named by ``_draft_row`` (create) or ``name``
+(update).
 
 - Create: the write is the draft's values with ``values`` over them. A key left out
   keeps the drafted value; a key sent as None or "" clears it (it is left out of the
   write, so the default or a blank applies). A table sent is the table's complete final
   rows: a row carrying ``_draft_row`` (the 0-based index of the drafted row it came
   from) is that drafted row with the sent cells over it, a cell sent as None or ""
-  cleared; a row without it is a new row; a drafted row no sent row names is removed.
-  A table left out keeps its drafted rows. A table is cleared with ``[]`` or None, never
-  with a string: "" for a table is refused with a mark. ``values == {}`` is exactly the card.
+  cleared (left out of the row, so the default applies); a row without it is a new row;
+  a drafted row no sent row names is removed. A table left out keeps its drafted rows. A
+  table is cleared with ``[]`` or None, never with a string: "" for a table is refused
+  with a mark. ``values == {}`` is exactly the card.
 - Update: the write is the draft's ``changes`` with ``values`` over them; None or ""
   sets the field blank (as update_doc does). A table sent is the table's complete final
   rows (``tools._child_rows.merge_child_rows``): a row's ``name`` says which saved row it
   is, and must be a row the record has for that table or one the draft named; a row
-  without one is new; a saved row left out is removed. A table left out keeps the
-  draft's own list. ``values == {}`` is exactly the card.
+  without one is new; a saved row left out is removed. A row whose ``name`` the draft's
+  own list for that table also names is that drafted row with the sent cells over it, so
+  a cell the draft set and the person did not touch is still written; a row the draft did
+  not name is written as sent (the write merges it with the saved row). A cell sent as
+  None or "" is the person emptying it: it is kept in the row, overrides the drafted
+  cell, and the write stores it blank (``merge_child_rows`` sets it on the saved row; a
+  cell left out of the row keeps the SAVED value, which is why a cell must be sent to
+  clear it). A table left out keeps the draft's own list. ``values == {}`` is exactly
+  the card.
 
 Only the keys sent are checked: what is carried over from the draft is written as a
 plain Confirm would write it. A key sent is refused, never dropped, when the person may
@@ -57,9 +68,15 @@ def too_big(values: dict) -> bool:
 
 def edited_call(tool: str, args: dict, values: dict, *, tables=frozenset()) -> dict:
 	"""The sealed call with the person's values, by the contract above. ``tables``: the
-	doctype's table fields (a create merges their rows by ``_draft_row``)."""
+	doctype's table fields (their rows are merged with the drafted ones, by ``_draft_row``
+	on a create and by ``name`` on an update). Nothing in ``args`` is changed."""
 	if tool == "update_doc":
-		return {**args, "changes": {**(args.get("changes") or {}), **values}}
+		sealed = args.get("changes") if isinstance(args.get("changes"), dict) else {}
+		changes = dict(sealed)
+		for key, value in values.items():
+			is_rows = key in tables and isinstance(value, list)
+			changes[key] = _kept_update_rows(sealed.get(key), value) if is_rows else value
+		return {**args, "changes": changes}
 	sealed = args.get("values") if isinstance(args.get("values"), dict) else {}
 	out = dict(sealed)
 	for key, value in values.items():
@@ -129,6 +146,23 @@ def _merged_rows(drafted, sent: list) -> list:
 				cells[key] = value
 		out.append(cells)
 	return out
+
+
+def _kept_update_rows(drafted, sent: list) -> list:
+	"""An update's sent rows over the drafted ones of the same ``name``. A sent cell wins
+	whatever it holds (None and "" too: the write blanks it); a row the draft did not name
+	is passed on as sent."""
+	drafted = drafted if isinstance(drafted, list) else []
+	was = {r["name"]: r for r in drafted if isinstance(r, dict) and _row_name(r)}
+	return [
+		{**was[row["name"]], **row} if isinstance(row, dict) and _row_name(row) in was else row
+		for row in sent
+	]
+
+
+def _row_name(row: dict) -> str:
+	name = row.get("name")
+	return name if isinstance(name, str) else ""
 
 
 def _table_errors(table: str, kind: str, rows, rules, *, is_update: bool, drafted) -> list[dict]:
