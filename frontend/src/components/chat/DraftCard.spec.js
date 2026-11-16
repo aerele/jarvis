@@ -133,4 +133,40 @@ describe("DraftCard", () => {
 		await b.trigger("click");
 		expect(w.emitted("cancel")).toBeUndefined();
 	});
+
+	// Break: a removal is computed but not drawn, or an old value is not shown beside the new.
+	it("an update lists the rows it removes and what a changed cell was", () => {
+		const w = draw("update-table-rows");
+		expect(w.find("h4").text()).toBe("Will be removed");
+		const removed = w.find(".dc-removed");
+		expect(removed.findAll("td").map((c) => c.text())).toEqual(["13:00:00", "0.5"]);
+		const changed = w.findAll("tr").find((r) => r.text().includes("11:00:00"));
+		expect(changed.find("s").text()).toContain("10:30:00");
+		expect(changed.find(".dc-now").text()).toContain("11:00:00");
+		expect(changed.find(".dc-status").text()).toBe("Changed");
+		expect(w.text()).toContain("1 row changed, 1 row added, 1 row will be removed");
+		expect(w.text()).not.toContain("3 rows");
+	});
+
+	// Break: model-written cells inside row_changes are parsed as HTML.
+	it("hostile row_changes text is drawn as text", () => {
+		const evil = "<img src=x onerror=alert(1)>";
+		const c = structuredClone(card("update-table-rows"));
+		const rc = c.diff[0].row_changes;
+		rc.rows[1].cells[0] = evil;
+		rc.rows[1].was[0] = evil + "1";
+		rc.removed[0].cells[0] = evil;
+		const w = mount(DraftCard, { props: { card: c } });
+		expect(w.find("img").exists()).toBe(false);
+		expect(w.find(".dc-removed td").text()).toBe(evil);
+	});
+
+	// Break: the status footer is inserted with its text, so a screen reader never announces it.
+	it("the live region is always there and only its text changes", () => {
+		const idle = draw("create-simple");
+		expect(idle.find("[aria-live=polite]").exists()).toBe(true);
+		expect(idle.find("[aria-live=polite]").text()).toBe("");
+		const busy = draw("create-simple", { streaming: true });
+		expect(busy.find("[aria-live=polite]").text()).toBe("Jarvis is replying");
+	});
 });

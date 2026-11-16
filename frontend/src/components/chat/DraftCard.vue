@@ -63,9 +63,94 @@ function press(button) {
 			<ul v-if="view.diff.length" class="dc-diff" aria-label="Changes">
 				<li v-for="(d, i) in view.diff" :key="'d' + i">
 					<span class="dc-diff-label">{{ d.label }}</span>
-					<span class="dc-old">{{ d.old }}</span>
-					<span class="dc-arrow" aria-hidden="true">&rarr;</span>
-					<span class="dc-new">{{ d.new }}</span>
+					<span v-if="d.rowChanges" class="dc-changes-summary">{{
+						d.rowChanges.summary
+					}}</span>
+					<div v-else-if="d.multiline && (d.old || d.new)" class="dc-lines">
+						<p v-if="d.old" class="dc-block dc-block-old">
+							<span class="dc-block-label">Was</span>{{ d.old }}
+						</p>
+						<p v-if="d.new" class="dc-block">
+							<span class="dc-block-label">Now</span>{{ d.new }}
+						</p>
+					</div>
+					<template v-else>
+						<span class="dc-old">{{ d.old }}</span>
+						<span class="dc-arrow" aria-hidden="true">&rarr;</span>
+						<span class="dc-new">{{ d.new }}</span>
+					</template>
+					<div v-if="d.rowChanges" class="dc-table dc-diff-table dc-changes">
+						<div class="dc-scroll">
+							<table>
+								<thead>
+									<tr>
+										<th scope="col" class="dc-status-col">Status</th>
+										<th
+											v-for="(c, ci) in d.rowChanges.columns"
+											:key="'rc' + ci"
+											scope="col"
+										>
+											{{ c }}
+										</th>
+									</tr>
+								</thead>
+								<tbody>
+									<tr
+										v-for="(r, ri) in d.rowChanges.rows"
+										:key="'rr' + ri"
+										:class="'dc-row-' + r.status"
+									>
+										<td class="dc-status-col">
+											<span v-if="r.statusLabel" class="dc-status">{{
+												r.statusLabel
+											}}</span>
+										</td>
+										<td v-for="(c, ci) in r.cells" :key="'rd' + ci">
+											<template v-if="c.was">
+												<s class="dc-was"
+													><span class="dc-sr">was </span>{{ c.was }}</s
+												>
+												<span class="dc-now"
+													><span class="dc-sr">now </span
+													>{{ c.text }}</span
+												>
+											</template>
+											<template v-else>{{ c.text }}</template>
+										</td>
+									</tr>
+								</tbody>
+							</table>
+						</div>
+						<div v-if="d.rowChanges.removed.length" class="dc-removed">
+							<h4 class="dc-removed-title">Will be removed</h4>
+							<div class="dc-scroll">
+								<table>
+									<thead class="dc-sr">
+										<tr>
+											<th
+												v-for="(c, ci) in d.rowChanges.columns"
+												:key="'xc' + ci"
+												scope="col"
+											>
+												{{ c }}
+											</th>
+										</tr>
+									</thead>
+									<tbody>
+										<tr
+											v-for="(r, ri) in d.rowChanges.removed"
+											:key="'xr' + ri"
+										>
+											<td v-for="(c, ci) in r.cells" :key="'xd' + ci">
+												{{ c }}
+											</td>
+										</tr>
+									</tbody>
+								</table>
+							</div>
+						</div>
+						<p v-if="d.rowChanges.more" class="dc-more">{{ d.rowChanges.more }}</p>
+					</div>
 					<div v-if="d.table" class="dc-table dc-diff-table">
 						<div class="dc-scroll">
 							<table>
@@ -141,10 +226,11 @@ function press(button) {
 				<span class="dc-label">{{ b.label }}</span>
 			</button>
 		</div>
-		<!-- Always one line tall, so the card does not change height between states. -->
+		<!-- Always one line tall, so the card does not change height between states. The live
+		     region is always in the DOM; only its text changes, so it is announced. -->
 		<p v-if="!view.useLegacyCard" class="dc-foot">
-			<span v-if="view.footer" aria-live="polite">{{ view.footer }}</span>
-			<template v-else>{{ view.hint || "\u00a0" }}</template>
+			<span aria-live="polite">{{ view.footer }}</span>
+			<template v-if="!view.footer">{{ view.hint || "\u00a0" }}</template>
 		</p>
 	</section>
 </template>
@@ -249,6 +335,81 @@ function press(button) {
 }
 .dc-table {
 	margin-top: 12px;
+}
+/* A table inside a diff entry fills its own line and may shrink, so a long unbroken cell
+   scrolls inside the card instead of widening it. */
+.dc-diff-table,
+.dc-removed {
+	flex: 1 1 100%;
+	min-width: 0;
+}
+.dc-sr {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+.dc-changes-summary {
+	color: var(--dc-text);
+}
+.dc-lines {
+	flex: 1 1 100%;
+	min-width: 0;
+	display: grid;
+	gap: 4px;
+}
+.dc-block {
+	margin: 0;
+	white-space: pre-line;
+	display: grid;
+	gap: 0;
+}
+.dc-block-old {
+	color: var(--dc-muted);
+}
+.dc-block-label {
+	font-size: 11.5px;
+	color: var(--dc-muted);
+	display: block;
+}
+.dc-status-col {
+	width: 1%;
+	min-width: 0;
+}
+.dc th.dc-status-col,
+.dc td.dc-status-col {
+	padding-right: 4px;
+}
+.dc-status {
+	display: inline-block;
+	white-space: nowrap;
+	font-size: 11.5px;
+	padding: 0 8px;
+	border: 1px solid var(--dc-border);
+	border-radius: 999px;
+	background: var(--dc-bg-soft);
+	color: var(--dc-text);
+}
+.dc-was {
+	display: block;
+	color: var(--dc-muted);
+}
+.dc-row-kept td {
+	color: var(--dc-muted);
+}
+.dc-removed {
+	margin-top: 10px;
+	padding-left: 10px;
+	border-left: 3px solid var(--dc-warn);
+}
+.dc-removed-title {
+	margin: 0 0 2px;
+	font-size: 12.5px;
+	font-weight: 600;
+	color: color-mix(in srgb, var(--dc-warn) 70%, var(--dc-text));
 }
 .dc-scroll {
 	overflow-x: auto;

@@ -333,9 +333,173 @@ export function draftCardCases(rawView, fixtures) {
 	];
 	add("empty values are skipped", draftCardView(holes, {}).rows, [{ label: "D", value: "x" }]);
 
+	// Break: an update of a child table shows "3 rows -> 3 rows" or hides a removal.
+	const tableDiff = (rc, extra = {}) => {
+		const c = card(fixtures, "update-table-rows");
+		c.diff[0] = { ...c.diff[0], ...extra, row_changes: rc };
+		return draftCardView(c, { surface: "desktop" }).diff[0];
+	};
+	const rcv = draftCardView(card(fixtures, "update-table-rows"), { surface: "desktop" }).diff[0];
+	add("update-table-rows row changes", rcv.rowChanges, {
+		columns: ["From Time", "Hrs"],
+		summary: "1 row changed, 1 row added, 1 row will be removed, 1 row unchanged",
+		rows: [
+			{
+				status: "kept",
+				statusLabel: "",
+				cells: [
+					{ text: "09:00:00", was: "" },
+					{ text: "1.5", was: "" },
+				],
+			},
+			{
+				status: "changed",
+				statusLabel: "Changed",
+				cells: [
+					{ text: "11:00:00", was: "10:30:00" },
+					{ text: "2.0", was: "" },
+				],
+			},
+			{
+				status: "new",
+				statusLabel: "New",
+				cells: [
+					{ text: "14:00:00", was: "" },
+					{ text: "2.0", was: "" },
+				],
+			},
+		],
+		removed: [{ cells: ["13:00:00", "0.5"] }],
+		more: "",
+	});
+	add("row changes hide the plain row text", [rcv.old, rcv.new], ["", ""]);
+
+	// Break: a summary part has the wrong wording, order or plural, or a zero part appears.
+	const word = (counts) => tableDiff({ rows: [{ cells: ["a"] }], counts }).rowChanges.summary;
+	for (const [counts, expected] of [
+		[{ changed: 1, new: 0, kept: 0, removed: 0 }, "1 row changed"],
+		[{ changed: 3, new: 0, kept: 0, removed: 0 }, "3 rows changed"],
+		[{ changed: 0, new: 1, kept: 0, removed: 0 }, "1 row added"],
+		[{ changed: 0, new: 2, kept: 0, removed: 0 }, "2 rows added"],
+		[{ changed: 0, new: 0, kept: 0, removed: 1 }, "1 row will be removed"],
+		[{ changed: 0, new: 0, kept: 0, removed: 4 }, "4 rows will be removed"],
+		[{ changed: 0, new: 0, kept: 1, removed: 0 }, "1 row unchanged"],
+		[{ changed: 0, new: 0, kept: 3, removed: 0 }, "3 rows unchanged"],
+		[
+			{ changed: 2, new: 2, kept: 2, removed: 2 },
+			"2 rows changed, 2 rows added, 2 rows will be removed, 2 rows unchanged",
+		],
+	])
+		add(`summary ${JSON.stringify(counts)}`, word(counts), expected);
+	// Break: a bad `counts` throws or reads 0 rows.
+	const mixed = {
+		rows: [{ status: "new", cells: ["a"] }, { status: "new", cells: ["b"] }, { cells: ["c"] }],
+		removed: [{ cells: ["d"] }],
+	};
+	for (const counts of [undefined, null, 5, { changed: "x" }, { changed: -1, new: 1 }])
+		add(
+			`summary counted from rows when counts is ${JSON.stringify(counts)}`,
+			tableDiff({ ...mixed, counts }).rowChanges.summary,
+			"2 rows added, 1 row will be removed, 1 row unchanged"
+		);
+
+	// Break: the "more" line is worded wrong, or the bounded rows are not counted into it.
+	const many = (n) => Array.from({ length: n }, (_, i) => ({ cells: [String(i)] }));
+	for (const [more, rows, removed, expected] of [
+		[{ rows: 3 }, 1, 1, "and 3 more rows"],
+		[{ removed: 1 }, 1, 1, "and 1 more removed row"],
+		[{ rows: 2, removed: 5 }, 1, 1, "and 2 more rows, and 5 more removed rows"],
+		[undefined, 1, 1, ""],
+		[undefined, 10, 9, "and 2 more rows, and 1 more removed row"],
+		[{ rows: 1 }, 10, 1, "and 3 more rows"],
+	]) {
+		const rc = tableDiff({ rows: many(rows), removed: many(removed), more }).rowChanges;
+		add(`more ${JSON.stringify([more, rows, removed])}`, rc.more, expected);
+	}
+	const phone = (() => {
+		const c = card(fixtures, "update-table-rows");
+		c.diff[0].row_changes = { rows: many(7), removed: many(7) };
+		return draftCardView(c, { surface: "phone" }).diff[0].rowChanges;
+	})();
+	add(
+		"rows and removed are capped separately on a phone",
+		[phone.rows.length, phone.removed.length, phone.more],
+		[5, 5, "and 2 more rows, and 2 more removed rows"]
+	);
+
+	// Break: odd row_changes throws, or hides the old text when there is nothing to draw instead.
+	for (const rc of [5, "x", [], null, {}, { rows: null }, { rows: [], removed: [] }]) {
+		const d = tableDiff(rc);
+		add(
+			`row_changes ${JSON.stringify(rc)} is null and the text stays`,
+			[d.rowChanges, d.old, d.new],
+			[null, "3 rows", "3 rows"]
+		);
+	}
+	const oddRc = tableDiff({
+		columns: ["A", "B", "C"],
+		rows: [
+			{ status: "weird", cells: ["x", { o: 1 }, null] },
+			{ status: "changed", cells: ["y"], was: "nope" },
+			{},
+			7,
+		],
+		removed: [{}, { cells: "no" }, null],
+		counts: 9,
+	}).rowChanges;
+	add("odd rows draw safely", oddRc, {
+		columns: ["A"],
+		summary: "1 row changed, 3 rows will be removed, 3 rows unchanged",
+		rows: [
+			{ status: "kept", statusLabel: "", cells: [{ text: "x", was: "" }] },
+			{ status: "changed", statusLabel: "Changed", cells: [{ text: "y", was: "" }] },
+			{ status: "kept", statusLabel: "", cells: [{ text: "", was: "" }] },
+			{ status: "kept", statusLabel: "", cells: [{ text: "", was: "" }] },
+		],
+		removed: [{ cells: [""] }, { cells: [""] }, { cells: [""] }],
+		more: "",
+	});
+	// Break: a column holding only an old value, or only a removed row's value, is dropped.
+	const keepCols = tableDiff({
+		columns: ["Old", "Gone", "Empty"],
+		rows: [{ status: "changed", cells: ["", "", ""], was: ["a", "", ""] }],
+		removed: [{ cells: ["", "z", ""] }],
+	}).rowChanges;
+	add("a column is dropped only when empty everywhere", keepCols.columns, ["Old", "Gone"]);
+
+	// Break: the multi-line flag is lost, or set for a plain value.
+	add(
+		"multiline flag passes through",
+		[
+			tableDiff(null, { multiline: true }).multiline,
+			tableDiff(null, { multiline: "yes" }).multiline,
+			tableDiff(null).multiline,
+		],
+		[true, false, false]
+	);
+	// Break: a card without row_changes changed shape (to_table and plain text still hold).
+	const plain = card(fixtures, "update-table-rows");
+	delete plain.diff[0].row_changes;
+	plain.diff[0].to_table = { count: 1, columns: ["N"], rows: [{ cells: ["1"] }] };
+	const pv = draftCardView(plain, {}).diff[0];
+	add(
+		"without row_changes the old text and to_table stay",
+		[pv.rowChanges, pv.old, pv.new, pv.table.label, pv.table.rows],
+		[null, "3 rows", "3 rows", "New rows", [["1"]]]
+	);
+
 	// Break: an update draws no diff or the wrong primary; a create draws a diff.
 	const up = draftCardView(card(fixtures, "update-diff"), {});
-	add("update diff", up.diff, [{ label: "Status", old: "Open", new: "Closed", table: null }]);
+	add("update diff", up.diff, [
+		{
+			label: "Status",
+			old: "Open",
+			new: "Closed",
+			multiline: false,
+			rowChanges: null,
+			table: null,
+		},
+	]);
 	add("update primary", up.buttons[0].label, "Save changes");
 	add("create has no diff", draftCardView(card(fixtures, "create-simple"), {}).diff, []);
 

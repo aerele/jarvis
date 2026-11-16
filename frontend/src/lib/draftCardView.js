@@ -128,17 +128,100 @@ function rowsView(card) {
 		.filter((r) => r.value !== "" && r.value !== "-" && r.value !== "null" && r.label !== "");
 }
 
+const STATUS_LABEL = { changed: "Changed", new: "New" };
+const countOf = (n) => (Number.isInteger(n) && n >= 0 ? n : null);
+const asList = (v) => (Array.isArray(v) ? v : []);
+const cellsOf = (r) => asList(isObject(r) ? r.cells : null);
+const statusOf = (r) => {
+	const s = isObject(r) ? r.status : "";
+	return s === "changed" || s === "new" ? s : "kept";
+};
+
+// "1 row changed, 2 rows added, 1 row will be removed, 3 rows unchanged": non-zero parts only.
+// A missing or malformed `counts` is counted from the rows themselves.
+function changeSummary(rc, rows, removed) {
+	const given = isObject(rc.counts) ? rc.counts : {};
+	const keys = ["changed", "new", "removed", "kept"];
+	const usable = keys.every((k) => countOf(given[k]) !== null);
+	const n = usable
+		? given
+		: {
+				changed: rows.filter((r) => statusOf(r) === "changed").length,
+				new: rows.filter((r) => statusOf(r) === "new").length,
+				kept: rows.filter((r) => statusOf(r) === "kept").length,
+				removed: removed.length,
+		  };
+	const row = (c) => (c === 1 ? "row" : "rows");
+	return [
+		n.changed && `${n.changed} ${row(n.changed)} changed`,
+		n.new && `${n.new} ${row(n.new)} added`,
+		n.removed && `${n.removed} ${row(n.removed)} will be removed`,
+		n.kept && `${n.kept} ${row(n.kept)} unchanged`,
+	]
+		.filter(Boolean)
+		.join(", ");
+}
+
+// What an update does to a child table, row by row. Null when there is nothing to draw, so the
+// plain "3 rows -> 3 rows" text stays. A column goes only when it is empty in every row, every
+// old value and every removed row. Rows shown are capped per surface, rows and removed apart.
+function rowChangesView(rc, surface) {
+	if (!isObject(rc)) return null;
+	const rows = asList(rc.rows);
+	const removed = asList(rc.removed);
+	if (!rows.length && !removed.length) return null;
+	const was = (r) => (statusOf(r) === "changed" ? asList(r.was) : []);
+	const grids = [...rows.map(cellsOf), ...rows.map(was), ...removed.map(cellsOf)];
+	const head = asList(rc.columns);
+	const width = Math.max(head.length, ...grids.map((g) => g.length));
+	const keep = [];
+	for (let i = 0; i < width; i++) if (!grids.every((g) => text(g[i]) === "")) keep.push(i);
+	if (!keep.length) keep.push(0);
+	const max = surface === "phone" ? MAX_ROWS_PHONE : MAX_ROWS_DESKTOP;
+	const shownRows = rows.slice(0, max);
+	const shownRemoved = removed.slice(0, max);
+	const given = isObject(rc.more) ? rc.more : {};
+	const moreRows = (countOf(given.rows) || 0) + rows.length - shownRows.length;
+	const moreRemoved = (countOf(given.removed) || 0) + removed.length - shownRemoved.length;
+	return {
+		columns: keep.map((i) => text(head[i])),
+		summary: changeSummary(rc, rows, removed),
+		rows: shownRows.map((r) => ({
+			status: statusOf(r),
+			statusLabel: STATUS_LABEL[statusOf(r)] || "",
+			cells: keep.map((i) => {
+				const now = text(cellsOf(r)[i]);
+				const old = statusOf(r) === "changed" ? text(was(r)[i]) : "";
+				return { text: now, was: old === now ? "" : old };
+			}),
+		})),
+		removed: shownRemoved.map((r) => ({ cells: keep.map((i) => text(cellsOf(r)[i])) })),
+		more: [
+			moreRows && `and ${plural(moreRows, "more row", "more rows")}`,
+			moreRemoved && `and ${plural(moreRemoved, "more removed row", "more removed rows")}`,
+		]
+			.filter(Boolean)
+			.join(", "),
+	};
+}
+
 // A diff entry may carry `to_table` (rows the draft adds); only those new rows are drawn, under
 // the label "New rows". `from_table` and `lines` are not drawn on a normal draft card.
+// `row_changes` (an update of a child table) replaces the entry's "3 rows -> 3 rows" text.
 function diffView(card, surface) {
-	return (Array.isArray(card.diff) ? card.diff : []).filter(isObject).map((d) => ({
-		label: text(d.label),
-		old: text(d.from),
-		new: text(d.to),
-		table: isObject(d.to_table)
-			? tableView({ ...d.to_table, label: "New rows" }, surface)
-			: null,
-	}));
+	return (Array.isArray(card.diff) ? card.diff : []).filter(isObject).map((d) => {
+		const rowChanges = rowChangesView(d.row_changes, surface);
+		return {
+			label: text(d.label),
+			old: rowChanges ? "" : text(d.from),
+			new: rowChanges ? "" : text(d.to),
+			multiline: d.multiline === true,
+			rowChanges,
+			table: isObject(d.to_table)
+				? tableView({ ...d.to_table, label: "New rows" }, surface)
+				: null,
+		};
+	});
 }
 
 function labels(list) {
