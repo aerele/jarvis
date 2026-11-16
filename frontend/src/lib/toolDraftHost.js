@@ -4,14 +4,17 @@
 import { markMissing } from "./docFields.js";
 import { draftCardValues } from "./draftCardValues.js";
 import { draftFromCard } from "./draftFromCard.js";
-import { draftSaveOutcome } from "./draftSave.js";
+import { draftCardView } from "./draftCardView.js";
+import { draftIsDirty, draftSaveOutcome } from "./draftSave.js";
 import { markMissingRows } from "./draftTables.js";
 import { cardOfItem, isToolDraftItem, toolDraftCtx } from "./toolDraft.js";
 import {
 	CANT_EDIT_TEXT,
 	STORED_UNAVAILABLE_TEXT,
 	FROM_CARD,
+	cardDatesIntoPreview,
 	computedFromCard,
+	firstServerMark,
 	prepareToolModel,
 } from "./toolDraftPanel.js";
 
@@ -23,7 +26,9 @@ export function hasParkedDraft(items) {
 }
 
 // What DraftCard is told about an item. `editingToken`: the token whose edit form is open (the
-// card then shows "Editing"); `building`: this card's form or preview is being built.
+// card then shows "Editing"); `building`: a form or preview of ANY card is being built, so every
+// draft card is locked until it opens (a second click on another card would be ignored, and a
+// card that ignores a click must not look pressable).
 // `position` / `count` / `stackHint` say where the card sits among the pending cards on screen
 // (see draftCardView).
 export function toolDraftHostCtx({
@@ -65,10 +70,26 @@ export function toolDraftCtxMap({
 				count: list.length,
 				stackHint,
 				editingToken,
-				building: !!buildingToken && buildingToken === pa.token,
+				building: !!buildingToken,
 			});
 	});
 	return map;
+}
+
+// The stack's own typed-approval hint is drawn once. The legacy card draws it when it is last; a
+// draft card draws it when it is last and ready (S1) or Earlier (S2). A last draft card in a state
+// with no hint line (S3 editing, S4 working, S12 unreadable, S13 turn running: its footer or
+// message takes the line) leaves it undrawn, so the view draws it as its own line under the
+// stack. Returns the text to draw, or "" when the last card already carries it, or there is
+// no stack, or the last card is a legacy card (its own hint).
+export function orphanStackHint({ items, ctxMap, stackHint }) {
+	const list = Array.isArray(items) ? items : [];
+	const hint = typeof stackHint === "string" ? stackHint : "";
+	if (list.length < 2 || !hint) return "";
+	const last = list[list.length - 1];
+	if (!isToolDraftItem(last)) return "";
+	const view = draftCardView(cardOfItem(last), (ctxMap && ctxMap[last.token]) || {});
+	return view.hint === hint ? "" : hint;
 }
 
 // After Create: should the chat be reloaded to show the receipt? Yes when the card has left
@@ -131,7 +152,8 @@ export function nextPanelStale(state, { panelOpen, panelChanged, parked }) {
 //   d.reload(conversation), d.refreshChats(), d.showQueued(reply)
 //   d.save(token, conversation, values) -> reply;  d.agent() -> the assistant's name
 //   d.thrown(error, fallback) -> {message};  d.metaFields(doctype) -> form meta fields
-//   d.afterMarks() -> after the DOM caught up, scroll to and focus the first mark
+//   d.afterMarks(mark) -> after the DOM caught up, scroll to and focus the server's first mark
+//     (firstServerMark's answer, or null: then the error banner is scrolled into view)
 //   d.create(item) -> Create on the card (the confirm handler under busyKind create)
 //   d.discard(item) -> Cancel on the card (the discard handler under busyKind cancel), true if started
 
@@ -160,9 +182,10 @@ export function toolPanelNotices(panel, dead) {
 }
 
 // Build the model of a card's draft for the form or the preview. null when it cannot be shown
-// (the person is told why). Order: the model is built (form meta, stored record, rule values),
-// then snapshotted and guarded at once (prepareToolModel), before anything can be shown.
-async function buildFor(pa, d) {
+// (the person is told why). Order: the model is built (form meta, stored record, rule values), the
+// cells the card shows and the draft left blank are filled in (`fill`: see fillCalculatedCells),
+// then it is snapshotted and guarded at once (prepareToolModel), before anything can be shown.
+async function buildFor(pa, d, fill) {
 	const card = cardOfItem(pa);
 	const action = draftFromCard(card, pa.token);
 	if (!action) {
@@ -193,7 +216,12 @@ async function buildFor(pa, d) {
 			return null;
 		}
 		return {
-			...prepareToolModel(model, { token: pa.token, conversation: pa.conversation, card }),
+			...prepareToolModel(model, {
+				token: pa.token,
+				conversation: pa.conversation,
+				card,
+				fill,
+			}),
 			card,
 		};
 	} finally {
@@ -205,7 +233,7 @@ async function buildFor(pa, d) {
 export async function openToolDraftPanel(pa, d) {
 	const open = d.panel();
 	if (open && open.tool && open.token === pa.token) return "ignored";
-	const built = await buildFor(pa, d);
+	const built = await buildFor(pa, d, { readOnly: true });
 	if (!built) return "failed";
 	// an unreadable-by-the-guard form still opens, read-only in effect: Save is blocked
 	if (!built.guard.ok)
@@ -220,11 +248,14 @@ export async function openToolDraftPanel(pa, d) {
 	return "opened";
 }
 
-// Preview: build the same model, fill its calculated cells from the CARD's own rows, then show it.
+// Preview: build the same model, then show the CARD's own numbers and dates: its calculated
+// cells (a read-only column through `model.computed`, any other blank cell filled in) and its date
+// text in place of the control's ISO value.
 export async function openToolPreview(pa, d) {
-	const built = await buildFor(pa, d);
+	const built = await buildFor(pa, d, { readOnly: false });
 	if (!built) return "failed";
 	built.model.computed = computedFromCard(built.model, built.card);
+	cardDatesIntoPreview(built.model, built.card);
 	d.setPreview({ token: pa.token, model: built.model });
 	return "opened";
 }
@@ -236,6 +267,12 @@ async function settleSave(p, view, r, outcome, d) {
 		if (d.panel() === p) d.closePanel();
 	};
 	if (outcome.kind === "keep") {
+		// The person closed the form (the X) while the save was in flight: there is no form to
+		// mark, so the reason is told in a toast.
+		if (d.panel() !== p) {
+			d.notify(outcome.error.message, { type: "error" });
+			return "keep-closed";
+		}
 		// fixable: the form stays, marked; busy and "could not be read" have no fields
 		p.error = outcome.error;
 		// A mark on a TABLE (the server's "keep a saved row" refusal names the table) has no field of
@@ -243,7 +280,7 @@ async function settleSave(p, view, r, outcome, d) {
 		const mainFields = (d.metaFields(p.doctype) || []).filter((f) => f.fieldtype !== "Table");
 		markMissing(p, p.error.fields, mainFields);
 		markMissingRows(p, p.error.fields);
-		d.afterMarks();
+		d.afterMarks(firstServerMark(p, p.error.fields));
 		return "keep";
 	}
 	if (outcome.kind === "closed" && outcome.cardOpen) {
@@ -252,13 +289,18 @@ async function settleSave(p, view, r, outcome, d) {
 		d.notify(outcome.note, { type: "error" });
 		return "closed-open";
 	}
-	closeForm();
+	// A draft that is no longer open (the card is gone) while the form holds edits: the form stays,
+	// with its edits, and shows the dead-draft banner once the card has left the list (the person
+	// closes it); a clean form closes as it always did.
+	const keepForm = outcome.kind === "closed" && d.panel() === p && draftIsDirty(p);
+	if (!keepForm) closeForm();
 	if (outcome.kind === "closed") d.notify(outcome.note, { type: "error" });
 	d.removePending(p.token);
 	await d.reload(view.conversation);
 	if (!d.chatCurrent(view)) return "stale";
 	d.refreshChats();
 	d.showQueued(r);
+	if (keepForm) return "closed-dead";
 	return outcome.kind === "closed" ? "closed" : "saved";
 }
 
@@ -309,7 +351,13 @@ export async function saveToolDraft(p, d) {
 	try {
 		const r = await d.save(p.token, view.conversation, values);
 		if (!d.pendingCurrent(view)) return "stale";
-		return await settleSave(p, view, r, draftSaveOutcome(r, d.agent()), d);
+		return await settleSave(
+			p,
+			view,
+			r,
+			draftSaveOutcome(r, d.agent(), { strictTold: true }),
+			d
+		);
 	} catch (e) {
 		if (!d.pendingCurrent(view)) return "stale";
 		p.error = d.thrown(e, "Could not save your changes.");

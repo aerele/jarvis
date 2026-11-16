@@ -260,6 +260,31 @@ export function draftCardValues(model, snapshot, card) {
 	return values;
 }
 
+// Whether the person changed any cell of `row` since the snapshot (the cells in `skip` are
+// not counted). A row the snapshot does not hold counts as changed. The host uses this to
+// tell an untouched row from an edited one; it is a read of the same baseline the payload uses.
+export function rowCellsChanged(table, row, snapshot, skip = new Set()) {
+	const tsnap = snapshot && snapshot.tables && snapshot.tables[table && table.fieldname];
+	const was = tsnap && tsnap.rows && tsnap.rows[rowKeyOf(row)];
+	if (!was) return true;
+	return cellColumns(table).some(
+		(c) =>
+			!skip.has(c.fieldname) &&
+			norm(c.fieldtype, row[c.fieldname]) !== (was.cells[c.fieldname] ?? "")
+	);
+}
+
+// One cell value as the diff compares it ("3" and 3 are the same, a blank is "").
+export const normCell = (fieldtype, value) => norm(fieldtype, value);
+
+// Set one cell of the snapshot (so the diff reads `value` as the unchanged baseline). Does
+// nothing when the snapshot holds no such cell (a read-only column is never compared).
+export function setSnapshotCell(snapshot, tableFieldname, row, fieldname, fieldtype, value) {
+	const was = snapshot?.tables?.[tableFieldname]?.rows?.[rowKeyOf(row)];
+	if (was && Object.prototype.hasOwnProperty.call(was.cells, fieldname))
+		was.cells[fieldname] = norm(fieldtype, value);
+}
+
 // Whether closing the form would lose the person's work: the save would send something.
 export function draftCardDirty(model, snapshot, card) {
 	return Object.keys(draftCardValues(model, snapshot, card)).length > 0;

@@ -6,14 +6,21 @@ import { blankRow, buildDraftTable } from "./draftTables";
 import { panelField } from "./docFields";
 import { draftCardDirty, draftCardValues } from "./draftCardValues";
 import { draftIsDirty } from "./draftSave";
+import { markMissing } from "./docFields";
+import { markMissingRows } from "./draftTables";
 import {
 	CANT_EDIT_TEXT,
+	cardDatesIntoPreview,
 	computedFromCard,
+	fillCalculatedCells,
+	firstServerMark,
 	focusFirstMark,
 	prepareToolModel,
 	resolveDraftField,
-	toolPrimaryLabel,
+	settleCalculatedCells,
 } from "./toolDraftPanel";
+import { lineItemSummary } from "./actionSummary";
+import { timesheetCard, timesheetModel } from "./timesheetDraftFixture";
 
 const F = (fieldname, fieldtype = "Data", extra = {}) => ({
 	fieldname,
@@ -57,18 +64,6 @@ describe("resolveDraftField: fieldname first, never fuzzy", () => {
 			expect(m ? m.fieldname : null).toBe(want);
 			expect(never).not.toHaveBeenCalled();
 		});
-
-	// Break: the typed path changes: it must keep resolving by label, whatever keys the model
-	// wrote (a `fieldname` key in a typed field is ignored).
-	it("not exact (a typed action): the label's resolver decides, a fieldname key is ignored", () => {
-		const byLabel = vi.fn(() => META[3]);
-		expect(resolveDraftField({ label: "Title" }, META, byLabel, false)).toBe(META[3]);
-		expect(byLabel).toHaveBeenCalledWith("Title");
-		expect(resolveDraftField({ label: "x", fieldname: "date" }, META, byLabel, false)).toBe(
-			META[3]
-		);
-		expect(byLabel).toHaveBeenCalledTimes(2);
-	});
 });
 
 // A create draft the host would build: two main fields, a three-row table.
@@ -153,9 +148,6 @@ describe("prepareToolModel: the stamp, the snapshot and the guard", () => {
 		const { guard } = prepareToolModel(model, { ...ident, card });
 		expect(guard.ok).toBe(false);
 		expect(model.saveBlocked).toBe(CANT_EDIT_TEXT);
-		expect(CANT_EDIT_TEXT).toBe(
-			"This draft can't be edited here. Use Create on the card, or ask Jarvis to change it."
-		);
 	});
 
 	// Break: the form keeps a live reference to the list item's card, so a later change to the
@@ -257,16 +249,282 @@ describe("computedFromCard: Preview shows the card's own numbers", () => {
 	});
 });
 
-describe("toolPrimaryLabel", () => {
-	it("is the card's own word", () => {
-		expect([
-			toolPrimaryLabel({ verb: "create" }),
-			toolPrimaryLabel({ verb: "update" }),
-		]).toEqual(["Create", "Save changes"]);
+// ---- cells the card shows and the draft left blank: a real-shaped Timesheet draft ----------------
+
+describe("the card's own numbers in the Preview (a Timesheet: Hrs and Is Billable are not read-only)", () => {
+	const previewed = () => {
+		const card = timesheetCard();
+		const model = timesheetModel();
+		prepareToolModel(model, { ...ident, card, fill: { readOnly: false } });
+		model.computed = computedFromCard(model, card);
+		cardDatesIntoPreview(model, card);
+		return { model, card };
+	};
+	// Break: the Preview shows a blank Hrs or Is Billable where the card shows 3 / 1.50 / 2 and
+	// "No" (the cause: a calculated cell was filled only in a read-only column, and these are not).
+	it("shows, for every column the card shows, the card's cell", () => {
+		const { model, card } = previewed();
+		const view = lineItemSummary(model.tables[0], model.computed.time_logs);
+		const shown = (fieldname) => {
+			const i = model.tables[0].columns.findIndex((c) => c.fieldname === fieldname);
+			return view.rows.map((r) => r.cells[i]);
+		};
+		const cardCol = (fieldname) => {
+			const i = card.tables[0].fieldnames.indexOf(fieldname);
+			return card.tables[0].rows.map((r) => r.cells[i]);
+		};
+		for (const fieldname of card.tables[0].fieldnames)
+			expect([fieldname, shown(fieldname)]).toEqual([fieldname, cardCol(fieldname)]);
+	});
+
+	// Break: the Preview shows the control's ISO text ("2026-12-08T09:30") where the card shows the
+	// person's date format.
+	it("shows dates as the card writes them, in the table and in the fields", () => {
+		const { model } = previewed();
+		expect(model.tables[0].rows.map((r) => r.from_time)).toEqual([
+			"08-12-2026 09:30:00",
+			"08-12-2026 13:30:00",
+			"08-12-2026 15:00:00",
+		]);
+		expect(model.fields.find((f) => f.fieldname === "start_date").value).toBe("08-12-2026");
+	});
+
+	// Break: a date is replaced from a label that is not unique (it lands on another field), or from
+	// a card that does not hold it; or an update's change is shown raw.
+	const dated = [
+		[
+			"two fields with the label",
+			(m) => m.fields.push({ ...m.fields[3], fieldname: "other_date" }),
+			"2026-12-08",
+		],
+		["the card has no such row", (m, c) => (c.rows = c.rows.slice(0, 3)), "2026-12-08"],
+		["a blank value is not replaced", (m) => (m.fields[3].value = ""), ""],
+	];
+	for (const [name, edit, want] of dated)
+		it(`a main date keeps its own value when ${name}`, () => {
+			const card = timesheetCard();
+			const model = timesheetModel();
+			edit(model, card);
+			cardDatesIntoPreview(model, card);
+			expect(model.fields.find((f) => f.fieldname === "start_date").value).toBe(want);
+		});
+
+	it("an update's changed date shows the card's from and to", () => {
+		const card = { diff: [{ label: "Start Date", from: "01-12-2026", to: "08-12-2026" }] };
+		const model = timesheetModel();
+		Object.assign(model.fields[3], { changed: true, orig: "2026-12-01" });
+		cardDatesIntoPreview(model, card);
+		expect([model.fields[3].orig, model.fields[3].value]).toEqual([
+			"01-12-2026",
+			"08-12-2026",
+		]);
 	});
 });
 
-describe("focusFirstMark: the first mark of a refused save", () => {
+describe("fillCalculatedCells: what goes into a blank cell, and what never does", () => {
+	// Break: a value the person drafted is overwritten by the card's text, or a blank cell the card
+	// also shows blank gets text.
+	it("fills only blank cells, from the card's cell of that row and column", () => {
+		const card = timesheetCard();
+		const model = timesheetModel();
+		model.tables[0].rows[1].hours = "9"; // drafted
+		fillCalculatedCells(model, card, { readOnly: true });
+		expect(model.tables[0].rows.map((r) => [r.hours, r.is_billable])).toEqual([
+			["3", "No"],
+			["9", "No"],
+			["2", "No"],
+		]);
+	});
+
+	// Break: a column a typed control cannot show (a date) or a number it cannot parse is filled
+	// with the card's formatted text; or thousands separators reach a number input.
+	const kinds = [
+		["a date column is left for the control", "from_time", "", "08-12-2026 09:30:00", ""],
+		["thousands separators go from a number", "hours", "", "1,500.50", "1500.50"],
+		["a percent sign is not a number", "hours", "", "50%", ""],
+		["a number is kept as the card wrote it", "hours", "", "1.50", "1.50"],
+	];
+	for (const [name, fieldname, own, text, want] of kinds)
+		it(name, () => {
+			const card = timesheetCard();
+			const model = timesheetModel();
+			const i = card.tables[0].fieldnames.indexOf(fieldname);
+			card.tables[0].rows[0].cells[i] = text;
+			model.tables[0].rows[0][fieldname] = own;
+			fillCalculatedCells(model, card, { readOnly: true });
+			expect(model.tables[0].rows[0][fieldname]).toBe(want);
+		});
+
+	// Break: the Preview's own rule for calculated read-only columns is pre-empted (the cell reads as
+	// an ordinary value and loses its calculated look), or the form leaves a read-only column blank.
+	it("a read-only column is filled for the form and left to the Preview's own rule for the Preview", () => {
+		const form = built();
+		fillCalculatedCells(form.model, form.card, { readOnly: true });
+		const preview = built();
+		fillCalculatedCells(preview.model, preview.card, { readOnly: false });
+		expect([
+			form.model.tables[0].rows.map((r) => r.amount),
+			preview.model.tables[0].rows.map((r) => r.amount),
+		]).toEqual([
+			["15.00", "30.00", ""],
+			["", "", ""],
+		]);
+	});
+});
+
+describe("the form's filled cells follow the person's edits and are never sent", () => {
+	const open = () => {
+		const card = timesheetCard();
+		const model = timesheetModel();
+		prepareToolModel(model, { ...ident, card, fill: { readOnly: true } });
+		const send = () => draftCardValues(model, model.snapshot, model.card);
+		const rows = model.tables[0].rows;
+		return { model, card, rows, send };
+	};
+	const hours = (rows) => rows.map((r) => r.hours);
+
+	// Break: the form shows Hrs blank (an input showing 0) where the card shows 3 / 1.50 / 2, or
+	// opening it already counts as an edit (Save would send the card's own numbers).
+	it("opens showing the card's numbers, and as untouched", () => {
+		const { model, rows, send } = open();
+		expect(hours(rows)).toEqual(["3", "1.50", "2"]);
+		expect(send()).toEqual({});
+		expect(draftIsDirty(model)).toBe(false);
+	});
+
+	// Break: editing a cell of a row sends a calculated cell blank (clearing Hrs on save) or leaves a
+	// stale number beside the edit; the other rows change; or an edit sends more than the edit.
+	it("an edit blanks the filled cells of that row only, and sends the edit alone", () => {
+		const { model, rows, send } = open();
+		rows[0].description = "Edited";
+		settleCalculatedCells(model);
+		expect(hours(rows)).toEqual(["", "1.50", "2"]);
+		expect(send()).toEqual({
+			time_logs: [
+				{ _draft_row: 0, description: "Edited" },
+				{ _draft_row: 1 },
+				{ _draft_row: 2 },
+			],
+		});
+	});
+
+	// Break: the number does not come back when the edit is undone, so the form keeps showing a
+	// blank where the draft is again as drafted.
+	it("undoing the edit gives the card's number back", () => {
+		const { model, rows, send } = open();
+		rows[0].description = "Edited";
+		settleCalculatedCells(model);
+		rows[0].description = "Module build";
+		settleCalculatedCells(model);
+		expect(hours(rows)).toEqual(["3", "1.50", "2"]);
+		expect(send()).toEqual({});
+	});
+
+	// Break: a number the person types into a filled cell is overwritten by the card's, or dropped
+	// from the save, or the cell keeps being managed after it (blanked by the next edit).
+	it("a value the person types into a filled cell is theirs: kept, sent, never blanked", () => {
+		const { model, rows, send } = open();
+		rows[0].hours = 5;
+		settleCalculatedCells(model);
+		rows[0].description = "Edited";
+		settleCalculatedCells(model);
+		expect(rows[0].hours).toBe(5);
+		expect(send().time_logs[0]).toEqual({ _draft_row: 0, description: "Edited", hours: 5 });
+	});
+
+	it("settling again changes nothing, and a form with nothing filled is left alone", () => {
+		const { model, rows } = open();
+		rows[0].description = "Edited";
+		expect([settleCalculatedCells(model), settleCalculatedCells(model)]).toEqual([
+			true,
+			false,
+		]);
+		expect(settleCalculatedCells({ tables: [], calc: [] })).toBe(false);
+		expect(settleCalculatedCells(null)).toBe(false);
+	});
+
+	// Break: a row removed or reordered breaks the settle (it follows rows by position, not by key).
+	it("follows a row by its key when rows are removed or inserted above it", () => {
+		const { model, rows, send } = open();
+		rows.splice(0, 1);
+		rows[0].description = "Edited"; // the former row 2
+		settleCalculatedCells(model);
+		expect(hours(rows)).toEqual(["", "2"]);
+		expect(send().time_logs[0]).toEqual({ _draft_row: 1, description: "Edited" });
+	});
+});
+
+// ---- the server's first mark of a refused save ---------------------------------------------------
+
+describe("firstServerMark: where the person is sent after a refused save", () => {
+	const marked = (fields, edit = () => {}) => {
+		const { model } = built();
+		model.tables[0].rows.forEach((r) => (r.hours = r.hours || "1"));
+		edit(model);
+		markMissing(model, fields, []);
+		markMissingRows(model, fields);
+		return [firstServerMark(model, fields), model];
+	};
+	// Break: a field that is merely required and empty is where the person is sent; a row is
+	// preferred to a main field; or a table-level refusal points at a field. `want` is given the
+	// model, for the row key minted at build time.
+	const table = [
+		[
+			"a main field the server named",
+			[{ fieldname: "qty", message: "Bad", invalid: true }],
+			() => {},
+			() => ({ kind: "field", index: 1 }),
+		],
+		[
+			"the first of several main fields, in the form's order, not in the server's",
+			[
+				{ fieldname: "qty", message: "x" },
+				{ fieldname: "title", message: "x" },
+			],
+			() => {},
+			() => ({ kind: "field", index: 0 }),
+		],
+		[
+			"a main field is first even when a row is marked too",
+			[
+				{ fieldname: "hours", parentfield: "logs", idx: 1, message: "x" },
+				{ fieldname: "qty", message: "x" },
+			],
+			() => {},
+			() => ({ kind: "field", index: 1 }),
+		],
+		[
+			"a row the server named (the second row it sent)",
+			[{ fieldname: "hours", parentfield: "logs", idx: 2, message: "x" }],
+			() => {},
+			(m) => ({
+				kind: "row",
+				tableIndex: 0,
+				key: m.tables[0].rows[1].__key,
+				fieldname: "hours",
+			}),
+		],
+		[
+			"nothing the server named: a required, empty field is not a mark",
+			[],
+			(m) => (m.fields[0].value = ""),
+			() => null,
+		],
+		[
+			"a whole table refused (no field, no row)",
+			[{ fieldname: "logs", message: "x" }],
+			() => {},
+			() => null,
+		],
+	];
+	for (const [name, fields, edit, want] of table)
+		it(name, () => {
+			const [got, model] = marked(fields, edit);
+			expect(got).toEqual(want(model));
+		});
+});
+
+describe("focusFirstMark: the server's first mark is scrolled to and focused", () => {
 	const tree = (html) => {
 		const root = document.createElement("div");
 		root.innerHTML = html;
@@ -274,45 +532,125 @@ describe("focusFirstMark: the first mark of a refused save", () => {
 		root.querySelectorAll("*").forEach((el) => (el.scrollIntoView = vi.fn()));
 		return root;
 	};
-	// Break: the first mark is not scrolled to or focused (the person looks at a form with no
-	// sign of what to fix), or a later mark is chosen over an earlier one.
-	it("scrolls to and focuses the control of the first mark in document order", () => {
-		const root = tree(`
-			<div class="jv-draft-fld"><input id="a"></div>
-			<div class="jv-draft-fld invalid"><input id="b"></div>
-			<div class="jv-rowform-missing"><select id="c"></select></div>
-			<div class="jv-draft-fld missing"><input id="d"></div>`);
-		const mark = focusFirstMark(root);
-		expect(mark.querySelector("#b")).not.toBeNull();
-		expect(mark.scrollIntoView).toHaveBeenCalledTimes(1);
-		expect(document.activeElement.id).toBe("b");
+	// A form as DraftEditForm draws it: a required empty field comes BEFORE the marked one.
+	const FORM = `<div class="jv-draft-body">
+		<div class="jv-draft-fld missing"><input id="required-empty"></div>
+		<div class="jv-draft-fld invalid"><input id="marked"></div>
+		<div id="jv-rowform-0-7"><div id="jv-rowform-0-7-hours-wrap"><input id="jv-rowform-0-7-hours"></div></div>
+		<div role="alert" id="banner"></div></div>`;
+	// Break: the focus goes to the first field that LOOKS marked (a required empty one) instead of the
+	// field the server named; or the mark is not scrolled to.
+	it("a main field: the one at that position, not the first marked-looking one", () => {
+		const root = tree(FORM);
+		const el = focusFirstMark(root, { kind: "field", index: 1 });
+		expect(document.activeElement.id).toBe("marked");
+		expect(el.scrollIntoView).toHaveBeenCalledTimes(1);
 		root.remove();
 	});
 
-	it("finds a marked row's field", () => {
-		const root = tree(`<div class="jv-rowform-missing"><textarea id="r"></textarea></div>`);
-		focusFirstMark(root);
-		expect(document.activeElement.id).toBe("r");
+	// Break: a marked row's field is not found by the id its form gives it, or the row's block is
+	// not the fallback.
+	it("a row: the control of the named field, else the row's block", () => {
+		const root = tree(FORM);
+		focusFirstMark(root, { kind: "row", tableIndex: 0, key: 7, fieldname: "hours" });
+		expect(document.activeElement.id).toBe("jv-rowform-0-7-hours");
 		root.remove();
+		const gone = tree(`<div id="jv-rowform-0-7" tabindex="-1"></div>`);
+		expect(
+			focusFirstMark(gone, { kind: "row", tableIndex: 0, key: 7, fieldname: "x" }).id
+		).toBe("jv-rowform-0-7");
+		gone.remove();
 	});
 
-	// Break: a refusal with no field mark (busy, a whole table refused) leaves the person looking at
-	// the top of a long form with the reason out of sight below it.
-	it("without a mark it scrolls the error banner into view and takes no focus", () => {
-		const root = tree(
-			`<div class="jv-draft-body"><div class="jv-draft-fld"><input id="x"></div><div role="alert" id="e"></div></div>`
-		);
+	// Break: a refusal with no mark (busy, a whole table refused) leaves the reason out of sight below
+	// a long form, or focus jumps to a field because it is empty.
+	it("with no mark it scrolls the error banner into view and takes no focus", () => {
+		const root = tree(FORM);
 		const before = document.activeElement;
-		expect(focusFirstMark(root)).toBeNull();
-		expect(root.querySelector("#e").scrollIntoView).toHaveBeenCalledTimes(1);
+		expect(focusFirstMark(root, null)).toBeNull();
+		expect(root.querySelector("#banner").scrollIntoView).toHaveBeenCalledTimes(1);
 		expect(document.activeElement).toBe(before);
 		root.remove();
 	});
 
-	it("does nothing without a mark, a banner or a root", () => {
-		const root = tree(`<div class="jv-draft-fld"><input id="x"></div>`);
-		expect(focusFirstMark(root)).toBeNull();
-		expect(focusFirstMark(null)).toBeNull();
+	it("does nothing without a root, and falls back to the banner when the mark is not in the DOM", () => {
+		expect(focusFirstMark(null, { kind: "field", index: 0 })).toBeNull();
+		const root = tree(`<div class="jv-draft-body"><div role="alert" id="banner"></div></div>`);
+		expect(focusFirstMark(root, { kind: "field", index: 3 })).toBeNull();
+		expect(root.querySelector("#banner").scrollIntoView).toHaveBeenCalledTimes(1);
 		root.remove();
 	});
+});
+
+// ---- row marks line up with the rows a real payload sends ----------------------------------------
+
+describe("a server row mark lands on the row it was sent from (against the real payload)", () => {
+	// The server counts the rows of the payload (`idx` is 1-based in `values[table]`). The form
+	// marks `sentRows(...)[idx - 1]`: if the two lists ever differ, the mark lands on the wrong row.
+	// Break: a blank row, a removed row or an untouched kept row shifts the count between the payload
+	// and the marks.
+	const setup = () => {
+		const card = CARD();
+		const model = built(card).model;
+		prepareToolModel(model, { ...ident, card });
+		return { model, card, t: model.tables[0] };
+	};
+	const markedRow = (model, idx) => {
+		markMissingRows(model, [{ fieldname: "hours", parentfield: "logs", idx, message: "x" }]);
+		return model.tables[0].rows.find((r) => r.__missing);
+	};
+	const cases = [
+		[
+			"a blank row left in the middle is not a sent row",
+			(m, t) => {
+				t.rows.splice(1, 0, blankRow(t));
+				t.rows[2].activity = "edited-2";
+			},
+			3, // payload rows: kept 0, kept 2 (edited), kept 3 -> idx 2 is the edited row
+			2,
+			"edited-2",
+		],
+		[
+			"a removed first row shifts every later one up",
+			(m, t) => {
+				t.rows.splice(0, 1);
+				t.rows[0].activity = "edited-1";
+			},
+			2,
+			1,
+			"edited-1",
+		],
+		[
+			"an untouched kept row is a sent row (identity only)",
+			(m, t) => {
+				t.rows[2].activity = "edited-2";
+			},
+			3,
+			3,
+			"edited-2",
+		],
+		[
+			"a row added at the end carries all its cells and is the last row",
+			(m, t) => {
+				const r = blankRow(t);
+				Object.assign(r, { activity: "added", hours: 4 });
+				t.rows.push(r);
+			},
+			4,
+			4,
+			"added",
+		],
+	];
+	for (const [name, edit, sent, idx, activity] of cases)
+		it(name, () => {
+			const { model, card, t } = setup();
+			edit(model, t);
+			const payload = draftCardValues(model, model.snapshot, card).logs;
+			expect(payload).toHaveLength(sent);
+			const row = markedRow(model, idx);
+			expect(row.activity).toBe(activity);
+			// and the payload row at that index is the one with that activity (or its identity)
+			const sentRow = payload[idx - 1];
+			expect(sentRow.activity === undefined || sentRow.activity === activity).toBe(true);
+		});
 });

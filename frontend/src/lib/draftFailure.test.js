@@ -144,3 +144,29 @@ test("without card_open the old notes are unchanged and cardOpen is false", () =
 		false
 	);
 });
+
+// Break: the typed panel and the phone (no option) stop promising the chat's reply for a reply that
+// carries no `assistant_told`, or a server draft card's save (strictTold) promises it without being
+// told so, or says "could not be told" about a reply that says nothing.
+for (const [flag, plain, strict] of [
+	[undefined, "reply", "none"],
+	[true, "reply", "reply"],
+	[false, "untold", "untold"],
+]) {
+	test(`closed, assistant_told ${flag}: typed ${plain}, server draft ${strict}`, () => {
+		const r = {
+			ok: false,
+			closed: true,
+			...(flag === undefined ? {} : { assistant_told: flag }),
+			error: { message: "Gone." },
+		};
+		const said = (note) =>
+			note.includes("The reply in the chat explains what to do.")
+				? "reply"
+				: note.includes("could not be told")
+				? "untold"
+				: "none";
+		assert.equal(said(draftFailureOf(r).note), plain);
+		assert.equal(said(draftFailureOf(r, "Jarvis", { strictTold: true }).note), strict);
+	});
+}

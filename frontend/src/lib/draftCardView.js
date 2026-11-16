@@ -345,13 +345,16 @@ function stackOf(ctx) {
 
 // The typed-approval hint of a ready card. Alone: the card's own. In a stack a bare phrase
 // ("go ahead") would approve other cards too, so a card says only the number that selects it
-// ("confirm 2"); the stack-wide hint is drawn once, on the LAST card, whatever kind it is.
-// An Earlier card is only ever bound by its number, so it keeps its own number even when last.
+// ("confirm 2"); the stack-wide hint is drawn once, on the LAST card, whatever kind it is, so a
+// last card that is Earlier (S2) draws it too: it names that card's number among the others (an
+// Earlier card is in a stack that is not all recent, and its hint is then "confirm 1 and N").
+// A last card in a state with no hint line (S3, S4, S12, S13) draws none: the host puts the
+// stack hint under the stack then (toolDraftHost orphanStackHint).
 function hintOf(ctx, state) {
 	const stack = stackOf(ctx);
 	if (!stack) return typedApprovalHint([{ recent: state === "S1" }]);
 	const own = `or type "confirm ${stack.position}"`;
-	if (state === "S2" || stack.position < stack.count) return own;
+	if (stack.position < stack.count) return own;
 	return text(ctx.stackHint) || own;
 }
 

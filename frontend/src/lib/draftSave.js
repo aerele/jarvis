@@ -66,8 +66,8 @@ export function applyActionPayload(model, { values, submit, conversation, fallba
 // closed (close the panel, toast `note`; `cardOpen: true`, present only then, means the card is
 // still pending, so keep it), keep (keep the panel or card open with
 // `error`), parked (a confirmation card now waits, `note`) or saved.
-export function draftSaveOutcome(r, agent) {
-	const failed = draftFailureOf(r, agent);
+export function draftSaveOutcome(r, agent, opts) {
+	const failed = draftFailureOf(r, agent, opts);
 	if (failed && failed.closed) {
 		return {
 			kind: "closed",

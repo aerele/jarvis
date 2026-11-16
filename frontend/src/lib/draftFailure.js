@@ -15,8 +15,11 @@ import { personError } from "./actionSummary.js";
 export const FAILURE_FALLBACK = "Could not save. Check the values.";
 
 // { closed, partial, told, cardOpen, error, note } for a failed apply, else null. `agent` is
-// the assistant's (whitelabel) name.
-export function draftFailureOf(r, agent = "Jarvis") {
+// the assistant's (whitelabel) name. With `strictTold` (a server draft card's save) the chat is
+// promised only when the reply says the assistant was told (`assistant_told: true`) and a "could
+// not be told" is said only when it says it was not: a reply with no flag says neither. Without
+// it (the typed panel, the phone) an absent flag still reads as told, as it always has.
+export function draftFailureOf(r, agent = "Jarvis", { strictTold = false } = {}) {
 	if (!r || r.ok !== false) return null;
 	const err = personError(r.error || {});
 	const message = (typeof err.message === "string" && err.message.trim()) || FAILURE_FALLBACK;
@@ -24,7 +27,8 @@ export function draftFailureOf(r, agent = "Jarvis") {
 	const sentence = /[.!?]$/.test(message) ? message : `${message}.`;
 	const closed = !!r.closed;
 	const partial = r.outcome === "partial";
-	const told = r.assistant_told !== false;
+	const told = strictTold ? r.assistant_told === true : r.assistant_told !== false;
+	const untold = strictTold ? r.assistant_told === false : !told;
 	const cardOpen = closed && r.card_open === true;
 	let note = "";
 	if (partial) {
@@ -33,7 +37,7 @@ export function draftFailureOf(r, agent = "Jarvis") {
 		note = `Couldn't save this: ${sentence}`;
 		if (told && !cardOpen) note += " The reply in the chat explains what to do.";
 	}
-	if (closed && !told && !cardOpen)
+	if (closed && untold && !cardOpen)
 		note += ` ${agent} could not be told about it, so ask in the chat.`;
 	return { closed, partial, told, cardOpen, error: { ...err, message }, note };
 }

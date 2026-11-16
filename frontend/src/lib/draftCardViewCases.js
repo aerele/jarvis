@@ -132,9 +132,16 @@ export function draftCardCases(rawView, fixtures) {
 			{ earlier: true, position: 2, count: 3, stackHint: STACK },
 			['or type "confirm 2"', "2 of 3"],
 		],
+		// The stack hint is drawn once, on the last card whatever its state: an Earlier last card
+		// is where a stack of [legacy recent, draft earlier] would otherwise lose it.
 		[
-			"earlier, last keeps its own number",
+			"earlier, last shows the stack hint",
 			{ earlier: true, position: 3, count: 3, stackHint: STACK },
+			[STACK, "3 of 3"],
+		],
+		[
+			"earlier, last, no stack hint keeps its own number",
+			{ earlier: true, position: 3, count: 3 },
 			['or type "confirm 3"', "3 of 3"],
 		],
 		["working: number, no hint", { busy: "create", position: 2, count: 3 }, ["", "2 of 3"]],

@@ -2247,6 +2247,7 @@
 					     own typed-approval hint, so the hint further down is not drawn for it. -->
 						<div v-if="isToolDraftItem(pa)" class="jv-tool-draft">
 							<DraftCard
+								:data-draft-token="pa.token"
 								:card="cardOfItem(pa)"
 								:ctx="draftCtxByToken[pa.token]"
 								@create="createToolDraft(pa)"
@@ -2254,7 +2255,7 @@
 								@edit="openToolDraft(pa)"
 								@cancel="cancelToolDraft(pa)"
 							/>
-							<div v-if="pa.error" style="margin: 0 0 12px">
+							<div v-if="pa.error" style="margin: 8px 0 12px">
 								<ActionError
 									:error="pa.error"
 									:can-report="!!supportOn"
@@ -2435,6 +2436,9 @@
 							</div>
 						</div>
 					</template>
+					<!-- The stack's hint, when the last card is a draft card that has no line for it
+					     (editing, working, unreadable, turn running). -->
+					<div v-if="orphanHint" class="jv-stack-hint">{{ orphanHint }}</div>
 					<!-- A typed yes/no that bound no card went to Jarvis as a normal
 					     message; say so without blocking anything (decision 13). The
 					     live region stays mounted and only its text toggles, so the
@@ -4294,6 +4298,7 @@
 		     card's Create. -->
 		<DraftPreview
 			v-if="toolPreview"
+			ref="toolPreviewRef"
 			:model="toolPreview.model"
 			:confirm-label="toolPrimaryLabel(toolPreview.model)"
 			:disabled="convStreaming || !!(toolPreviewItem && toolPreviewItem.busy)"
@@ -4588,6 +4593,7 @@ import {
 	nextPanelStale,
 	openToolDraftPanel,
 	openToolPreview,
+	orphanStackHint,
 	receiptReloadNeeded,
 	saveToolDraft as saveToolPanel,
 	toolDraftCtxMap,
@@ -4599,8 +4605,15 @@ import {
 	FROM_CARD,
 	focusFirstMark,
 	resolveDraftField,
+	settleCalculatedCells,
 	toolPrimaryLabel,
 } from "@/lib/toolDraftPanel";
+import {
+	firstEditable,
+	openerButton,
+	tabWrapTarget,
+	toolPanelKeyAction,
+} from "@/lib/toolDraftKeys";
 import {
 	chatRefusalMessage,
 	chatSettledReason,
@@ -8741,6 +8754,14 @@ const draftCtxByToken = computed(() =>
 		buildingToken: toolDraftBuilding.value,
 	})
 );
+// The stack's hint, drawn under the stack when its last card is a draft card with no line for it.
+const orphanHint = computed(() =>
+	orphanStackHint({
+		items: visiblePendingActions.value,
+		ctxMap: draftCtxByToken.value,
+		stackHint: typedApprovalHint.value,
+	})
+);
 // A typed edit panel that was open when a server draft card arrived: its Save has no typed
 // draft to act on. The panel stays open, shows DRAFT_STALE_TEXT, and its save buttons are off;
 // the X still closes it, which clears the flag.
@@ -9342,7 +9363,7 @@ const toolDeps = {
 	agent: () => brand.agentName,
 	thrown: (e, fallback) => thrownActionError(e, fallback),
 	metaFields: (doctype) => (_formMetaCache[doctype] || {}).fields,
-	afterMarks: () => nextTick(() => focusFirstMark(draftPanelEl.value)),
+	afterMarks: (mark) => nextTick(() => focusFirstMark(draftPanelEl.value, mark)),
 	create: (pa) => createToolDraft(pa),
 	discard: (pa) => withBusyKind(pa, "cancel", discardPending),
 };
@@ -9350,9 +9371,11 @@ function cancelToolDraft(pa) {
 	return cancelToolItem(pa, toolDeps);
 }
 function openToolDraft(pa) {
+	rememberToolOpener(pa, "Edit");
 	return openToolDraftPanel(pa, toolDeps);
 }
 function previewToolDraft(pa) {
+	rememberToolOpener(pa, "Preview");
 	return openToolPreview(pa, toolDeps);
 }
 function saveToolDraft(panel = draftPanel.value) {
@@ -9371,6 +9394,124 @@ function onToolPreviewEdit() {
 	toolPreview.value = null;
 	if (pa) openToolDraft(pa);
 }
+
+// ---- the keyboard, focus and upkeep of the panels of a server draft card -------------------
+// (lib/toolDraftKeys; the typed edit panel and the typed Preview are not touched.)
+const toolPreviewRef = ref(null);
+const toolPreviewPanel = () =>
+	(toolPreviewRef.value && toolPreviewRef.value.$el && toolPreviewRef.value.$el.querySelector
+		? toolPreviewRef.value.$el.querySelector(".dp-panel")
+		: null) || document.querySelector(".dp-panel");
+const toolFormOpen = computed(() => !!draftPanel.value && !!draftPanel.value.tool);
+
+// Escape closes the Preview and a clean form; a form with edits stays (as a click on the
+// backdrop does) and takes focus back. Tab stays inside the open panel. A key something inside
+// the panel already took (a link menu, a row form) or an open dialog is left alone.
+function onToolPanelKey(e) {
+	if (!toolPreview.value && !toolFormOpen.value) return;
+	if (e.key === "Tab") {
+		if (e.defaultPrevented || e.isComposing || store.settingsOpen || modalIsOpen(document))
+			return;
+		const root = toolPreview.value ? toolPreviewPanel() : draftPanelEl.value;
+		const to = tabWrapTarget(root, document.activeElement, e.shiftKey);
+		if (to) {
+			e.preventDefault();
+			to.focus();
+		}
+		return;
+	}
+	const action = toolPanelKeyAction({
+		key: e.key,
+		defaultPrevented: e.defaultPrevented,
+		composing: e.isComposing || e.keyCode === 229,
+		dialogOpen: !!store.settingsOpen || modalIsOpen(document),
+		preview: !!toolPreview.value,
+		form: toolFormOpen.value,
+		dirty: toolFormOpen.value && draftIsDirty(draftPanel.value),
+	});
+	if (!action) return;
+	e.preventDefault();
+	if (action === "close-preview") toolPreview.value = null;
+	else if (action === "close-form") closeDraftPanel();
+	else if (draftPanelEl.value) draftPanelEl.value.focus();
+}
+onMounted(() => window.addEventListener("keydown", onToolPanelKey));
+onBeforeUnmount(() => window.removeEventListener("keydown", onToolPanelKey));
+
+// Focus goes into a panel when it opens (the form: its first editable field; the Preview: its first
+// control) and back to the card button that opened it when it closes, or to the composer when
+// the card is gone or its button cannot take focus.
+let toolOpener = null;
+function rememberToolOpener(pa, label) {
+	toolOpener = { token: pa.token, conversation: pa.conversation, label };
+}
+watch(
+	() => (toolFormOpen.value ? draftPanel.value.token : ""),
+	async (token) => {
+		if (!token) return;
+		await nextTick();
+		const el = firstEditable(draftPanelEl.value);
+		if (el && typeof el.focus === "function") el.focus({ preventScroll: true });
+	}
+);
+watch(
+	() => (toolPreview.value ? toolPreview.value.token : ""),
+	async (token) => {
+		if (!token) return;
+		await nextTick();
+		const el = tabWrapTarget(toolPreviewPanel(), null, false);
+		if (el) el.focus({ preventScroll: true });
+	}
+);
+watch(
+	[toolFormOpen, () => !!toolPreview.value],
+	async ([form, preview], [wasForm, wasPreview]) => {
+		if (!((wasForm && !form) || (wasPreview && !preview))) return;
+		// the panel that closed is about to be replaced by another (Preview, then its Edit): leave focus to it
+		if (form || preview || toolDraftBuilding.value) return;
+		const opener = toolOpener;
+		await nextTick();
+		if (toolFormOpen.value || toolPreview.value) return;
+		if (!opener || opener.conversation !== currentId.value) return;
+		const button = openerButton(document, opener.token, opener.label);
+		if (button) button.focus();
+		else composerRef.value?.focusInput?.();
+	}
+);
+
+// While the form is open its card can be replaced, confirmed or cancelled elsewhere: the pending
+// list is re-read every few seconds, so the dead-draft banner shows without waiting for a focus
+// event. Nothing is polled while no form is open.
+const TOOL_FORM_POLL_MS = 5000;
+let _toolFormPoll = null;
+function stopToolFormPoll() {
+	if (_toolFormPoll) clearInterval(_toolFormPoll);
+	_toolFormPoll = null;
+}
+watch(
+	() => (toolFormOpen.value ? draftPanel.value.token : ""),
+	(token) => {
+		stopToolFormPoll();
+		if (!token) return;
+		_toolFormPoll = setInterval(() => {
+			if (currentId.value) resyncPendingConfirmations(currentId.value, "auto");
+		}, TOOL_FORM_POLL_MS);
+	}
+);
+onBeforeUnmount(stopToolFormPoll);
+
+// The cells the card shows and the draft left blank (Hrs on a Timesheet) follow the person's edits:
+// blank while their row is edited, the card's number while it is as drafted (see settleCalculatedCells).
+watch(
+	() => {
+		const p = draftPanel.value;
+		return p && p.tool && Array.isArray(p.calc) && p.calc.length ? p.tables : null;
+	},
+	(tables) => {
+		if (tables) settleCalculatedCells(draftPanel.value);
+	},
+	{ deep: true }
+);
 
 // Resync (R3 fix for #3): re-fetch the current conversation's live parked
 // confirmations so a reload / reconnect re-surfaces the cards that a realtime
@@ -18332,6 +18473,13 @@ onUnmounted(() => {
    so it is 12px + gap above and the gap alone below, as a .jv-action is. */
 .jv-tool-draft {
 	margin-top: 12px;
+}
+/* The stack's typed-approval hint, when its last card is a draft card with no line for it. The look of
+   .jv-pending-older-note. */
+.jv-stack-hint {
+	margin: 4px 14px 8px;
+	font-size: 12px;
+	color: var(--text-3);
 }
 .jv-tool-draft :deep(.dc) {
 	margin: 0;

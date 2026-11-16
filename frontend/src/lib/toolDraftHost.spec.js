@@ -5,13 +5,13 @@ import fs from "fs";
 import path from "path";
 import { draftCardView } from "./draftCardView.js";
 import {
-	DRAFT_STALE_TEXT,
 	cancelToolItem,
 	discardFromForm,
 	hasParkedDraft,
 	nextPanelStale,
 	openToolDraftPanel,
 	openToolPreview,
+	orphanStackHint,
 	receiptReloadNeeded,
 	saveToolDraft,
 	toolDraftCtxMap,
@@ -21,7 +21,10 @@ import {
 } from "./toolDraftHost.js";
 import { blankRow, buildDraftTable } from "./draftTables.js";
 import { panelField } from "./docFields.js";
-import { CANT_EDIT_TEXT, STORED_UNAVAILABLE_TEXT } from "./toolDraftPanel.js";
+import { reconcilePending } from "./pendingResync.js";
+import { CANT_EDIT_TEXT } from "./toolDraftPanel.js";
+import { timesheetCard, timesheetModel } from "./timesheetDraftFixture.js";
+import { lineItemSummary } from "./actionSummary.js";
 
 const FIXTURES = JSON.parse(
 	fs.readFileSync(path.resolve(__dirname, "draftCardFixtures.json"), "utf8")
@@ -92,14 +95,22 @@ describe("a stack of pending cards: the hint and the number each draft card show
 				["t2", MIX2, "2 of 2"],
 			],
 		],
+		// the stack hint is drawn once, on the last card, so a last card that is Earlier draws it:
+		// this is also where [legacy recent, draft Earlier] keeps its hint
 		[
-			"recent draft then Earlier draft: the Earlier one keeps its own number",
+			"recent draft then Earlier draft: the last card, Earlier, shows the stack hint",
 			[["draft"], ["draft", false]],
 			MIX2,
 			[
 				["t1", 'or type "confirm 1"', "1 of 2"],
-				["t2", 'or type "confirm 2"', "2 of 2"],
+				["t2", MIX2, "2 of 2"],
 			],
+		],
+		[
+			"legacy then Earlier draft: the stack hint is not lost",
+			[["legacy"], ["draft", false]],
+			MIX2,
+			[["t2", MIX2, "2 of 2"]],
 		],
 		[
 			"draft, legacy, draft",
@@ -140,15 +151,15 @@ describe("a stack of pending cards: the hint and the number each draft card show
 	}
 
 	// Break: a legacy or sensitive card gets a draft ctx, Preview or Edit stays disabled, the open
-	// form's card does not read "Editing", or a card being built can be pressed again.
-	it("only server draft cards get a ctx; Preview and Edit are live; editing and building show", () => {
+	// form's card does not read "Editing", or a card can be pressed while a form is being built
+	// (the press would be ignored: the buttons must look disabled).
+	it("only server draft cards get a ctx; Preview and Edit are live; editing shows", () => {
 		const items = [make(["legacy"], 0), make(["draft"], 1), make(["draft"], 2)];
 		const map = toolDraftCtxMap({
 			items,
 			streaming: false,
 			stackHint: ALL3,
 			editingToken: "t2",
-			buildingToken: "t3",
 		});
 		expect(Object.keys(map)).toEqual(["t2", "t3"]);
 		const seen = (ctx) => {
@@ -156,12 +167,29 @@ describe("a stack of pending cards: the hint and the number each draft card show
 			return [v.state, v.buttons.map((b) => `${b.id}${b.disabled ? ":off" : ""}`)];
 		};
 		expect(seen(map.t2)).toEqual(["S3", ["create:off", "preview:off", "edit:off", "cancel"]]);
-		expect(seen(map.t3)).toEqual([
-			"S4",
-			["create:off", "preview:off", "edit:off", "cancel:off"],
-		]);
+		expect(seen(map.t3)).toEqual(["S1", ["create", "preview", "edit", "cancel"]]);
 		const idle = toolDraftCtxMap({ items, streaming: false, stackHint: ALL3 });
 		expect(seen(idle.t2)).toEqual(["S1", ["create", "preview", "edit", "cancel"]]);
+	});
+
+	// Break: while the form of card A is being built, card B's Edit and Preview look pressable but
+	// do nothing.
+	it("while any form is being built every draft card is locked, the one pressed and the others", () => {
+		const items = [make(["draft"], 0), make(["draft"], 1)];
+		const map = toolDraftCtxMap({
+			items,
+			streaming: false,
+			stackHint: ALL2,
+			buildingToken: "t1",
+		});
+		const state = (t) => {
+			const v = draftCardView(card("create-simple"), map[t]);
+			return [v.state, v.buttons.map((b) => b.disabled)];
+		};
+		expect([state("t1"), state("t2")]).toEqual([
+			["S4", [true, true, true, true]],
+			["S4", [true, true, true, true]],
+		]);
 	});
 
 	it("not a list gives no ctx", () => {
@@ -366,14 +394,121 @@ describe("toolPanelNotices: the lines above a server draft's form", () => {
 				text: "The saved values of this record could not be loaded, so the form shows only what Jarvis drafted.",
 			},
 		]);
-		expect(DRAFT_STALE_TEXT).toBe(
-			"This draft changed while you were editing. Your edits were not saved."
-		);
-		expect(STORED_UNAVAILABLE_TEXT).toContain("could not be loaded");
 	});
 	it("says nothing for a typed draft's panel or no panel", () => {
 		expect(toolPanelNotices({ saveBlocked: "x" }, true)).toEqual([]);
 		expect(toolPanelNotices(null, true)).toEqual([]);
+	});
+});
+
+describe("orphanStackHint: the stack's hint when its last draft card has no line for it", () => {
+	const ALL2 = 'or type "confirm all", or "confirm 1 and 2"';
+	const draft = (token, extra = {}) => item("create-simple", { token, recent: true, ...extra });
+	const legacy = (token) => ({
+		token,
+		recent: true,
+		preview: { card: { kind: "verb", verb: "submit" } },
+	});
+	const hintFor = (items, over = {}) => {
+		const stackHint = ALL2;
+		const ctxMap = toolDraftCtxMap({ items, streaming: false, stackHint, ...over });
+		return orphanStackHint({ items, ctxMap, stackHint });
+	};
+	// Break: the stack hint is lost (a last card in S3, S4, S12 or S13 draws no hint line), is
+	// drawn twice (the last card already carries it), or appears for one card or a legacy last card.
+	const table = [
+		["last draft card ready (it carries the hint)", [legacy("a"), draft("b")], {}, ""],
+		[
+			"last draft card Earlier (it carries the hint)",
+			[legacy("a"), draft("b", { recent: false })],
+			{},
+			"",
+		],
+		[
+			"last draft card being edited (S3)",
+			[legacy("a"), draft("b")],
+			{ editingToken: "b" },
+			ALL2,
+		],
+		[
+			"last draft card working (S4)",
+			[legacy("a"), draft("b", { busy: true, busyKind: "create" })],
+			{},
+			ALL2,
+		],
+		[
+			"last draft card while a turn runs (S13)",
+			[legacy("a"), draft("b")],
+			{ streaming: true },
+			ALL2,
+		],
+		["last draft card being built", [draft("a"), draft("b")], { buildingToken: "a" }, ALL2],
+		[
+			"last draft card unreadable (S12)",
+			[legacy("a"), item("unreadable", { token: "b" })],
+			{},
+			ALL2,
+		],
+		[
+			"last card is legacy (its own hint)",
+			[draft("a"), legacy("b")],
+			{ editingToken: "a" },
+			"",
+		],
+		["one card: no stack", [draft("a")], { editingToken: "a" }, ""],
+		["no cards", [], {}, ""],
+	];
+	for (const [name, items, over, want] of table)
+		it(`${name}: ${want ? "drawn under the stack" : "nothing extra"}`, () =>
+			expect(hintFor(items, over)).toBe(want));
+	it("no stack hint, nothing to draw", () =>
+		expect(
+			orphanStackHint({ items: [draft("a"), draft("b")], ctxMap: {}, stackHint: "" })
+		).toBe(""));
+});
+
+describe("the dead-draft fence against the pending list the view really keeps (reconcilePending)", () => {
+	const panel = { tool: true, token: "t1", conversation: "c1" };
+	const serverItem = (token) => ({ token, conversation: "c1", pending_card_safe: true });
+	const queue = (token, extra = {}) => ({ token, conversation: "c1", ...extra });
+	// what the view does with a resync: keep `kept`, add `toAdd` as new items
+	const resync = (existing, serverTokens, inflight = new Set()) => {
+		const { kept, toAdd } = reconcilePending(
+			existing,
+			"c1",
+			serverTokens.map(serverItem),
+			inflight
+		);
+		return [...kept, ...toAdd.map((it) => queue(it.token))];
+	};
+	// Break: the banner never shows when the server stops listing the draft, or does not go away when
+	// the same token is listed again, or shows during the form's own save that a resync races.
+	it("drop and re-add of the same token: dead while it is gone, live again when listed", () => {
+		let list = [queue("t1")];
+		list = resync(list, ["t1"]);
+		expect(toolPanelDead(panel, list)).toBe(false);
+		list = resync(list, ["t2"]); // the server no longer lists t1
+		expect(toolPanelDead(panel, list)).toBe(true);
+		list = resync(list, ["t1", "t2"]); // and lists it again
+		expect(toolPanelDead(panel, list)).toBe(false);
+	});
+
+	it("its own save racing a resync: the busy item is kept, so the form is never dead", () => {
+		const list = resync([queue("t1", { busy: true, busyKind: "save" })], [], new Set(["t1"]));
+		expect(toolPanelDead(panel, list)).toBe(false);
+	});
+
+	it("the card removed by its own save: the form is applying, so not dead until the save is over", () => {
+		const list = resync([queue("t1")], []);
+		expect([
+			toolPanelDead({ ...panel, applying: true }, list),
+			toolPanelDead({ ...panel, applying: false }, list),
+		]).toEqual([false, true]);
+	});
+
+	it("a token listed for another chat does not keep this form alive", () => {
+		const list = resync([queue("t1")], []);
+		expect(toolPanelDead(panel, [...list, { token: "t1", conversation: "c2" }])).toBe(true);
 	});
 });
 
@@ -502,7 +637,10 @@ function host(over = {}) {
 		agent: () => "Jarvis",
 		thrown: (e, fallback) => ({ message: `${fallback} (${e.message})` }),
 		metaFields: () => [],
-		afterMarks: () => log("afterMarks"),
+		afterMarks: (mark) => {
+			log("afterMarks");
+			state.mark = mark;
+		},
 		create: async (pa) => {
 			log("create");
 			await state.createEffect?.(pa);
@@ -633,6 +771,40 @@ describe("openToolPreview: the card's own numbers, no form", () => {
 	});
 });
 
+describe("the form and the Preview of a Timesheet draft show the card's numbers", () => {
+	const tsHost = () => {
+		const h = host({ build: async () => timesheetModel() });
+		h.state.items[0].preview.card = timesheetCard();
+		return h;
+	};
+	// Break: the form opens with Hrs blank (the card shows 3 / 1.50 / 2), or the host does not ask
+	// for the card's cells before the snapshot.
+	it("the form opens with the card's Hrs, untouched", async () => {
+		const h = tsHost();
+		await openToolDraftPanel(h.state.items[0], h.d);
+		const p = h.state.panel;
+		expect(p.tables[0].rows.map((r) => r.hours)).toEqual(["3", "1.50", "2"]);
+		expect(p.saveBlocked).toBe("");
+	});
+
+	// Break: the Preview shows the control's ISO dates and a blank Hrs / Is Billable.
+	it("the Preview reads as the card: Hrs, Is Billable and dates", async () => {
+		const h = tsHost();
+		await openToolPreview(h.state.items[0], h.d);
+		const model = h.state.preview.model;
+		const view = lineItemSummary(model.tables[0], model.computed.time_logs);
+		const col = (name) => model.tables[0].columns.findIndex((c) => c.fieldname === name);
+		expect([
+			view.rows.map((r) => r.cells[col("hours")]),
+			view.rows.map((r) => r.cells[col("is_billable")]),
+			view.rows.map((r) => r.cells[col("from_time")]),
+		]).toEqual([
+			["3", "1.50", "2"],
+			["No", "No", "No"],
+			["08-12-2026 09:30:00", "08-12-2026 13:30:00", "08-12-2026 15:00:00"],
+		]);
+	});
+});
 describe("saveToolDraft: the replies of the edit form's Save", () => {
 	const fixable = (fields = []) => ({
 		ok: false,
@@ -699,6 +871,8 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 		expect(p.fields[0].serverInvalid).toBe(true);
 		expect(p.tables[0].rows[1].__missing).toEqual(["hours"]);
 		expect(h.state.log).toContain("afterMarks");
+		// the server's first mark: the main field, not the row
+		expect(h.state.mark).toEqual({ kind: "field", index: 0 });
 		expect([
 			p.applying,
 			h.state.items[0].busy,
@@ -727,7 +901,9 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 		const before = p.fields.length;
 		expect(await saveToolDraft(p, h.d)).toBe("keep");
 		expect(p.fields).toHaveLength(before);
+		// nothing of the form is marked: the banner is what gets scrolled to
 		expect(h.state.log).toContain("afterMarks");
+		expect(h.state.mark).toBeNull();
 	});
 
 	// Break: the busy reply (no fields) is treated as closed, or marks nothing and hides the banner.
@@ -769,8 +945,9 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 		expect(h.state.log).not.toContain("reload");
 	});
 
-	// Break: a closed reply leaves the card on screen, or no receipt is loaded.
-	it("closed: the form closes, the card goes, the chat reloads", async () => {
+	// Break: a closed reply (the draft is no longer open) closes a form that holds edits (they are
+	// lost), or leaves the card on screen, or loads no receipt.
+	it("closed with edits in the form: the form stays, the card goes, the chat reloads, the form reads dead", async () => {
 		const h = host();
 		const p = await openForm(h);
 		edit(p);
@@ -780,17 +957,89 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 			assistant_told: true,
 			error: { code: "X", message: "This record changed after the draft was made" },
 		};
-		expect(await saveToolDraft(p, h.d)).toBe("closed");
+		expect(await saveToolDraft(p, h.d)).toBe("closed-dead");
+		expect(h.state.panel).toBe(p);
+		expect(p.fields[0].value).toBe("Edited");
 		expect(h.state.items).toHaveLength(0);
 		expect(h.state.log).toEqual([
 			'save:{"title":"Edited"}',
-			"closePanel",
 			expect.stringMatching(/^notify:Couldn't save this: This record changed/),
 			"removePending",
 			"reload",
 			"refreshChats",
 			"showQueued:no",
 		]);
+		// not dead during its own save, dead once the save is over
+		expect(h.state.deadAt).toEqual([false, false]);
+		expect(toolPanelDead(p, h.state.items)).toBe(true);
+	});
+
+	// Break: a clean form is kept open for no reason (nothing to lose), or the dirty check is
+	// taken before the save instead of after it.
+	it("closed with no edits left in the form: the form closes", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = {
+			ok: false,
+			closed: true,
+			assistant_told: true,
+			error: { code: "X", message: "Gone" },
+		};
+		const inner = h.d.save;
+		h.d.save = async (...a) => {
+			p.fields[0].value = "Hello"; // the person put it back while the save ran
+			return inner(...a);
+		};
+		expect(await saveToolDraft(p, h.d)).toBe("closed");
+		expect(h.state.panel).toBeNull();
+	});
+
+	// Break: the note promises a reply in the chat the server did not say was sent, or says
+	// the assistant could not be told when the reply says nothing.
+	const closedNote = async (reply) => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = {
+			ok: false,
+			closed: true,
+			error: { code: "X", message: "Gone" },
+			...reply,
+		};
+		await saveToolDraft(p, h.d);
+		return h.state.log.find((l) => l.startsWith("notify:"));
+	};
+	for (const [name, reply, want] of [
+		[
+			"told: the reply in the chat is promised",
+			{ assistant_told: true },
+			"notify:Couldn't save this: Gone. The reply in the chat explains what to do.",
+		],
+		[
+			"not told: the person is asked to say it in the chat",
+			{ assistant_told: false },
+			"notify:Couldn't save this: Gone. Jarvis could not be told about it, so ask in the chat.",
+		],
+		["no flag: neither is said", {}, "notify:Couldn't save this: Gone."],
+	])
+		it(`closed note, ${name}`, async () => expect(await closedNote(reply)).toBe(want));
+
+	// Break: the person pressed X while the save ran; the refusal marks a form nobody sees and says nothing.
+	it("fixable reply after the form was closed with the X: a toast with the server's message", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = fixable([{ fieldname: "title", label: "title", message: "Bad" }]);
+		const inner = h.d.save;
+		h.d.save = async (...a) => {
+			h.d.closePanel();
+			return inner(...a);
+		};
+		expect(await saveToolDraft(p, h.d)).toBe("keep-closed");
+		expect(h.state.log).toContain("notify:Hours must be set.");
+		expect(h.state.log).not.toContain("afterMarks");
+		expect(p.fields[0].serverMissing).toBeUndefined();
 	});
 
 	// Break: a thrown error closes the form or leaves it saving for good.

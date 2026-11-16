@@ -382,7 +382,9 @@ export const applyAction = (action) =>
 export const dismissDraft = (conversation, message) =>
 	call(AC + "dismiss_draft", { conversation, message });
 // Save an edited SERVER draft card: `values` is only what the person changed (lib/draftCardValues.js).
-// The card stays pending; confirm_tool then runs the edited call. Same envelopes as applyAction.
+// The server claims the card and runs the edited call itself (the stored card and arguments are
+// never rewritten): the card ends as the decided row, or stays Pending when the reply says
+// `card_open`. Same envelopes as applyAction.
 export const saveDraftCard = (token, conversation, values) =>
 	call(AC + "save_draft_card", {
 		token,
