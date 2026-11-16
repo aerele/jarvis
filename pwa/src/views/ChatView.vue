@@ -8,6 +8,7 @@ import {
 	nextTick,
 	onMounted,
 	onUnmounted,
+	reactive,
 	ref,
 	watch,
 } from "vue";
@@ -26,6 +27,14 @@ import { renderMarkdown } from "@shared/markdown.js";
 import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
 import { draftAnchor } from "../lib/draftAnchor.js";
+import { makeDraftUi } from "../lib/draftCardUi.js";
+import {
+	cardOfItem,
+	isToolDraftItem,
+	keepBusyItems,
+	phoneDraftModel,
+	runDraftDecision,
+} from "../lib/draftCardHost.js";
 import { isShowCardRequest } from "../lib/showCardRequest.js";
 import { isImeKey } from "../lib/composerEnter.js";
 import { advanceViewGeneration, isViewCurrent } from "../lib/viewGeneration.js";
@@ -65,6 +74,7 @@ import {
 } from "../lib/typedCardReply.js";
 import ActionCard from "../components/ActionCard.vue";
 import ChartCard from "../components/ChartCard.vue";
+import DraftCard from "@shared/components/chat/DraftCard.vue";
 import ExportCard from "@shared/components/chat/ExportCard.vue";
 import { exportSummary } from "@shared/lib/exportJobs.js";
 import ReportScope from "../components/ReportScope.vue";
@@ -331,6 +341,18 @@ const sending = computed(
 		localRequests.value.some((r) => r.state === "sending")
 );
 const queuedTurn = computed(() => recoveryState.queued[convId.value]);
+// Server draft cards (the tool path): busy kind and error line are kept BY TOKEN here, not on the
+// items, because loadPending replaces the item objects on every read. `draftModel` is what the
+// pending block draws for them: each card's ctx, the stack's typed hint line, the one-card flag.
+const draftUi = makeDraftUi(reactive);
+const draftModel = computed(() =>
+	phoneDraftModel({
+		items: orderedPending.value,
+		streaming: sending.value,
+		stackHint: typedApprovalHint.value,
+		ui: draftUi,
+	})
+);
 const savedDrafts = computed(() =>
 	recoveryState.parkedDrafts.filter((d) => d.conversation === convId.value)
 );
@@ -607,7 +629,10 @@ const reportToolsByTurn = computed(() => reportToolsByAssistant(messages.value))
 // one that is not a draft (`own`), else the newest unsaved draft (liveDraft.js), drawn
 // under the LAST assistant message so it is always at the bottom. While a reply streams
 // the tail is about to change, so the card is hidden until the turn settles.
-const rawAnchor = computed(() => draftAnchor(messages.value, items.value));
+// A parked draft card is the one card: no typed draft is live while one is pending.
+const rawAnchor = computed(() =>
+	draftAnchor(messages.value, items.value, { parkedDraft: draftModel.value.parked })
+);
 const anchor = computed(() => (live.value ? null : rawAnchor.value));
 
 // True for the item that carries the tail's card (or its error view), unless it was
@@ -863,7 +888,12 @@ async function loadPending(source) {
 		settledTokens.value,
 		inflightToken.value ? [inflightToken.value] : []
 	);
-	const next = mergePendingSources(base, [fromRows, fromBackstop || []], inflight);
+	// A draft card whose Create or Cancel is in flight stays, whatever this read says.
+	const next = keepBusyItems(
+		mergePendingSources(base, [fromRows, fromBackstop || []], inflight),
+		pending.value,
+		draftUi.busyTokens()
+	);
 	const removedByCleanResync =
 		fromBackstop !== null &&
 		pending.value.some(
@@ -1575,6 +1605,33 @@ const onResync = () => {
 	loadPending();
 };
 
+// Create / Cancel on an inline draft card. No window.confirm: the card's Cancel asks nothing more
+// than the desktop's does. A final draft starts no agent turn, so after either one the chat and the
+// pending list are reloaded here (runDraftDecision); the receipt line comes from the reloaded rows.
+function decideDraft(kind, pa) {
+	const cid = convId.value;
+	const generation = viewGeneration;
+	return runDraftDecision(kind, pa, {
+		ui: draftUi,
+		agent: agentName,
+		confirm: api.confirmTool,
+		dismiss: api.dismissTool,
+		streaming: () => sending.value,
+		current: () => isCurrent(cid, generation),
+		removePending: (token) => {
+			pending.value = pending.value.filter((p) => p.token !== token);
+		},
+		settle: (token) => {
+			settledTokens.value = withExcluded(settledTokens.value, [token]);
+		},
+		say: (text) => {
+			errorBanner.value = text;
+		},
+		reload: () => load(),
+		reloadPending: () => loadPending(),
+	});
+}
+
 watch(
 	() => props.id,
 	(id) => {
@@ -1595,6 +1652,7 @@ watch(
 		pending.value = [];
 		clearDecision();
 		inflightToken.value = null;
+		draftUi.reset();
 		settledTokens.value = new Set(); // a settled token belonged to the previous conversation
 		safetyNoticeTokens.value = new Set();
 		safetyUpdateNotice.value = null;
@@ -1965,23 +2023,38 @@ onUnmounted(() => {
 					Done
 				</button>
 			</section>
-			<DecisionCard
-				v-for="(p, pi) in orderedPending"
-				:key="p.token"
-				:summary="
-					(orderedPending.length > 1 ? `${pi + 1} of ${orderedPending.length}: ` : '') +
-					(p.summary || p.tool || `${agentName} needs your approval`)
-				"
-				:earlier="!isRecentCard(p)"
-				:proposed="proposedLabel(p.created_at, cardClock)"
-				@open="openDecision(p)"
-			/>
+			<template v-for="(p, pi) in orderedPending" :key="p.token">
+				<!-- A server draft card is drawn inline; every other pending item keeps the amber tile
+				     and its sheet. The wrapper class gives the shared card the phone's colours. -->
+				<div v-if="isToolDraftItem(p)" class="jv-tool-draft jv-draft-tokens">
+					<DraftCard
+						:card="cardOfItem(p)"
+						:ctx="draftModel.ctxMap[p.token]"
+						@create="decideDraft('create', p)"
+						@cancel="decideDraft('cancel', p)"
+					/>
+					<p v-if="draftUi.error(p.token)" class="jv-msg-error" role="alert">
+						{{ draftUi.error(p.token) }}
+					</p>
+				</div>
+				<DecisionCard
+					v-else
+					:summary="
+						(orderedPending.length > 1
+							? `${pi + 1} of ${orderedPending.length}: `
+							: '') + (p.summary || p.tool || `${agentName} needs your approval`)
+					"
+					:earlier="!isRecentCard(p)"
+					:proposed="proposedLabel(p.created_at, cardClock)"
+					@open="openDecision(p)"
+				/>
+			</template>
 			<p v-if="showOlderCardsNote" class="jv-typehint">
 				An earlier action card is still waiting. Tap it to approve or discard.
 			</p>
 		</div>
 		<!-- Both ways to approve, shown once under the stack. -->
-		<p v-if="typedApprovalHint" class="jv-typehint">{{ typedApprovalHint }}</p>
+		<p v-if="draftModel.hintLine" class="jv-typehint">{{ draftModel.hintLine }}</p>
 	</div>
 
 	<div v-if="errorBanner" class="jv-banner">
@@ -2372,6 +2445,14 @@ onUnmounted(() => {
 	border-radius: 4px;
 }
 
+/* The shared card keeps its own 12px vertical margin; here the thread's gap spaces it, as it
+   does the amber tile. min-width 0 lets the card's table scroll inside it, not the page. */
+.jv-tool-draft {
+	min-width: 0;
+}
+.jv-tool-draft :deep(.dc) {
+	margin: 0;
+}
 .jv-typehint {
 	margin: 6px 4px 2px;
 	font-size: 12px;

@@ -24,24 +24,39 @@ export function isToolDraftItem(pa) {
 // both "create" (every button disabled, the spinner on the primary one). An item marked busy
 // with no kind is still busy but nobody knows which button was pressed: "busy" locks every
 // button and puts the spinner on none (draftCardView spins only "create" and "cancel").
-function busyOf(pa) {
-	const kind = pa.busyKind || "";
+// `state` is where the busy flag lives: the item itself (the desktop keeps `busy` / `busyKind` on
+// the pending item) or whatever the host reads it from (the phone keeps them by token, because
+// its pending list replaces the item objects on every read).
+function busyOf(state) {
+	const kind = state.busyKind || "";
 	if (kind === "cancel") return "cancel";
 	if (kind === "create" || kind === "save") return "create";
-	return pa.busy ? "busy" : "";
+	return state.busy ? "busy" : "";
 }
 
 // The `ctx` of draftCardView for one pending item. `building`: the edit form or the preview of
 // THIS item is being built (a click that has not opened anything yet): every button is locked,
 // none spins, so a second click cannot start a second build. `surface` is "desktop" (default) or
-// "phone" (the card shows fewer table rows); any other value is the desktop.
-export function toolDraftCtx({ pa, editingToken, streaming, building, surface = "desktop" }) {
+// "phone" (the card shows fewer table rows); any other value is the desktop. `busyState`
+// ({busy, busyKind}) replaces the item's own flags when the host keeps them elsewhere. `readOnly`
+// draws Preview and Edit disabled (a host that cannot open them yet); it is in the ctx only when
+// true, so every other host's ctx is exactly what it was.
+export function toolDraftCtx({
+	pa,
+	editingToken,
+	streaming,
+	building,
+	surface = "desktop",
+	busyState,
+	readOnly = false,
+}) {
 	const item = isObject(pa) ? pa : {};
 	return {
 		earlier: item.recent === false,
-		busy: busyOf(item) || (building ? "busy" : ""),
+		busy: busyOf(busyState || item) || (building ? "busy" : ""),
 		editing: !!editingToken && editingToken === item.token,
 		streaming: !!streaming,
 		surface: surface === "phone" ? "phone" : "desktop",
+		...(readOnly === true ? { readOnly: true } : {}),
 	};
 }

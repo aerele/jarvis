@@ -124,3 +124,27 @@ describe("toolDraftCtx surface", () => {
 		});
 	}
 });
+
+describe("toolDraftCtx: where the busy flags are read, and readOnly", () => {
+	const base = { editingToken: null, streaming: false };
+	// Break: the default stops reading the item's own flags (the desktop's card would lose its
+	// spinner), or an injected state is ignored (the phone, which keeps the flags by token).
+	it("reads the item by default and the injected state when given", () => {
+		const pa = { token: "a", busyKind: "cancel" };
+		expect(toolDraftCtx({ pa, ...base }).busy).toBe("cancel");
+		expect(toolDraftCtx({ pa, ...base, busyState: { busyKind: "create" } }).busy).toBe(
+			"create"
+		);
+		expect(toolDraftCtx({ pa, ...base, busyState: { busy: false, busyKind: "" } }).busy).toBe(
+			""
+		);
+	});
+
+	// Break: `readOnly` is always in the ctx (every host's ctx changes), or true does not reach it.
+	it("carries readOnly only when it is true", () => {
+		const pa = { token: "a" };
+		expect("readOnly" in toolDraftCtx({ pa, ...base })).toBe(false);
+		expect("readOnly" in toolDraftCtx({ pa, ...base, readOnly: false })).toBe(false);
+		expect(toolDraftCtx({ pa, ...base, readOnly: true }).readOnly).toBe(true);
+	});
+});

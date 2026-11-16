@@ -322,6 +322,30 @@ describe("withBusyKind: busy transitions around Create and Cancel", () => {
 	});
 });
 
+describe("withBusyKind with an injected accessor", () => {
+	// Break: the accessor is ignored and the flag lands on the item again (the phone's next read
+	// gives the card back with no spinner), or the default accessor stops reading `busy`.
+	it("reads and writes the accessor, never the item", async () => {
+		const pa = { token: "a", busy: false, busyKind: "" };
+		const store = { a: "" };
+		const where = {
+			read: (x) => ({ busy: false, busyKind: store[x.token] }),
+			setKind: (x, kind) => (store[x.token] = kind),
+		};
+		let during;
+		await withBusyKind(
+			pa,
+			"create",
+			async () => {
+				during = store.a;
+				expect(await withBusyKind(pa, "cancel", async () => {}, where)).toBe(false);
+			},
+			where
+		);
+		expect([during, store.a, pa.busyKind]).toEqual(["create", "", ""]);
+	});
+});
+
 describe("nextPanelStale: the typed edit panel when a server draft arrives", () => {
 	const closed = { panelOpen: false, panelChanged: false, parked: false };
 	// Break: the banner never shows, shows on a closed panel, or lingers into the next panel.

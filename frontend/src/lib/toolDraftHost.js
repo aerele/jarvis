@@ -30,7 +30,8 @@ export function hasParkedDraft(items) {
 // draft card is locked until it opens (a second click on another card would be ignored, and a
 // card that ignores a click must not look pressable).
 // `position` / `count` / `stackHint` say where the card sits among the pending cards on screen
-// (see draftCardView). `surface` is "desktop" (default) or "phone" (see toolDraftCtx).
+// (see draftCardView). `surface` is "desktop" (default) or "phone" (see toolDraftCtx);
+// `busyState` and `readOnly` are explained there too.
 export function toolDraftHostCtx({
 	pa,
 	streaming,
@@ -40,9 +41,11 @@ export function toolDraftHostCtx({
 	editingToken = "",
 	building = false,
 	surface = "desktop",
+	busyState,
+	readOnly = false,
 }) {
 	return {
-		...toolDraftCtx({ pa, editingToken, streaming, building, surface }),
+		...toolDraftCtx({ pa, editingToken, streaming, building, surface, busyState, readOnly }),
 		position,
 		count,
 		stackHint,
@@ -53,6 +56,8 @@ export function toolDraftHostCtx({
 // stack (legacy cards included: they take a number too, so a draft card's "2 of 3" is real) and
 // `stackHint` is the stack's own hint. A computed map in the view keeps each ctx object stable
 // between renders; a draft card's view only recomputes when its own inputs change.
+// `readBusy(pa) -> {busy, busyKind}` says where a card's busy flags are kept; without it they
+// are read off the item (the desktop). `readOnly` is passed to every card (see toolDraftCtx).
 export function toolDraftCtxMap({
 	items,
 	streaming,
@@ -60,6 +65,8 @@ export function toolDraftCtxMap({
 	editingToken = "",
 	buildingToken = "",
 	surface = "desktop",
+	readBusy,
+	readOnly = false,
 }) {
 	const list = Array.isArray(items) ? items : [];
 	const map = {};
@@ -74,6 +81,8 @@ export function toolDraftCtxMap({
 				editingToken,
 				building: !!buildingToken,
 				surface,
+				busyState: readBusy ? readBusy(pa) : undefined,
+				readOnly,
 			});
 	});
 	return map;
@@ -107,20 +116,34 @@ export function receiptReloadNeeded({ token, conversation, currentConversation, 
 	);
 }
 
+// Where the busy flags of a pending item live. The default is the item itself, which is what
+// the desktop has always done. The phone passes an accessor over a store keyed by token, because
+// its pending list replaces the item objects on every read and a flag kept on one would be lost.
+//   read(pa) -> {busy, busyKind};  setKind(pa, kind) writes the kind ("" clears it)
+export const BUSY_ON_ITEM = {
+	read: (pa) => ({ busy: pa.busy, busyKind: pa.busyKind }),
+	setKind: (pa, kind) => {
+		pa.busyKind = kind;
+	},
+};
+
 // Run one card action (Create -> the confirm handler, Cancel -> the discard handler) with
 // the item's `busyKind` set, so the card shows the working state with the spinner on the
 // pressed button, and a second press on the same card does nothing while one is in flight.
 // The kind is cleared in a `finally`: a refused, failed or thrown action leaves the card
 // usable again; a successful one has already taken the item off the list. Resolves to true
 // when `run` was started. The handlers keep their own `busy` / `inflightTokens` guards.
-export async function withBusyKind(pa, kind, run) {
-	if (!pa || pa.busy || pa.busyKind) return false;
-	pa.busyKind = kind;
+// `where` is the accessor above; the default is today's behaviour on the item.
+export async function withBusyKind(pa, kind, run, where = BUSY_ON_ITEM) {
+	if (!pa) return false;
+	const now = where.read(pa);
+	if (now.busy || now.busyKind) return false;
+	where.setKind(pa, kind);
 	try {
 		await run(pa);
 		return true;
 	} finally {
-		pa.busyKind = "";
+		where.setKind(pa, "");
 	}
 }
 
