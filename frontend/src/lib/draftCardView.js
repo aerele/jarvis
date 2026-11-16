@@ -14,7 +14,11 @@
 // and mount their PendingCard, whose buttons read Confirm / Discard. `isDraftCard(card)` is
 // true only for a readable, non-sensitive draft.
 //
-// ctx = { earlier, busy: "create"|"cancel"|""|null, editing, streaming, surface: "desktop"|"phone" }
+// ctx = { earlier, busy: "create"|"cancel"|"busy"|""|null, editing, streaming, surface: "desktop"|"phone",
+//         readOnly }
+// `readOnly: true` draws Preview and Edit disabled in the ready states (S1, S2), so the layout
+// does not move when a host that cannot open them yet starts to. Every other button and state
+// is unchanged by it.
 // Precedence when several flags are true:
 //   unreadable > sensitive > busy > streaming > editing > earlier > ready
 import { typedApprovalHint } from "./typedCardReply.js";
@@ -57,7 +61,8 @@ function pressed(id, label, opts = {}) {
 }
 
 // The buttons of a ready card, in tab order: the one primary first.
-function readyButtons(verb) {
+function readyButtons(verb, ctx = {}) {
+	const readOnly = ctx.readOnly === true;
 	return [
 		pressed(
 			verb === "update" ? "save" : "create",
@@ -66,8 +71,8 @@ function readyButtons(verb) {
 				primary: true,
 			}
 		),
-		pressed("preview", "Preview"),
-		pressed("edit", "Edit"),
+		pressed("preview", "Preview", { disabled: readOnly }),
+		pressed("edit", "Edit", { disabled: readOnly }),
 		pressed("cancel", "Cancel"),
 	];
 }
@@ -81,9 +86,11 @@ function lockedButtons(buttons, ctx, state) {
 	}));
 }
 
-// The pressed button spins: Cancel for busy "cancel", the primary for anything else.
+// The pressed button spins: Cancel for busy "cancel", the primary for busy "create". Any other
+// truthy busy ("busy": in flight, button unknown) locks every button and spins none.
 function isPressed(b, ctx) {
-	return !!ctx.busy && (ctx.busy === "cancel" ? b.id === "cancel" : b.primary);
+	if (ctx.busy === "cancel") return b.id === "cancel";
+	return ctx.busy === "create" && b.primary;
 }
 
 // A column is dropped only when every cell is empty. "No", "0" and false are real values the
@@ -357,8 +364,8 @@ function build(card, ctx) {
 		warning: cardWarningOf(card),
 		ignoredNote: noteFor(draft),
 		buttons: ready
-			? readyButtons(draft.verb)
-			: lockedButtons(readyButtons(draft.verb), ctx, state),
+			? readyButtons(draft.verb, ctx)
+			: lockedButtons(readyButtons(draft.verb, ctx), ctx, state),
 		hint: ready ? typedApprovalHint([{ recent: state === "S1" }]) : "",
 		footer: state === "S3" ? "Editing" : state === "S13" ? "Jarvis is replying" : "",
 		tag: state === "S2" ? "Earlier" : "",

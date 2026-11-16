@@ -2240,111 +2240,169 @@
 							</button>
 						</div>
 					</div>
-					<div
-						v-for="(pa, pi) in visiblePendingActions"
-						:key="pa.token"
-						class="jv-action jv-pending"
-					>
-						<div class="jv-action-head">
-							<svg
-								width="16"
-								height="16"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="var(--amber)"
-								stroke-width="1.8"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							>
-								<path
-									d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+					<template v-for="(pa, pi) in visiblePendingActions" :key="pa.token">
+						<!-- A server draft card (a card with a draft and no risk) is the shared
+					     DraftCard; every other pending item keeps the card below. Create is
+					     the confirm button, Cancel the discard button, and the card draws its
+					     own typed-approval hint, so the hint further down is not drawn for it. -->
+						<div v-if="isToolDraftItem(pa)" class="jv-tool-draft">
+							<DraftCard
+								:card="cardOfItem(pa)"
+								:ctx="draftCtxOf(pa)"
+								@create="createToolDraft(pa)"
+								@cancel="cancelToolDraft(pa)"
+							/>
+							<div v-if="pa.error" style="margin: 0 0 12px">
+								<ActionError
+									:error="pa.error"
+									:can-report="!!supportOn"
+									@report="openActionErrorSupport"
 								/>
-								<path d="M12 9v4M12 17h.01" />
-							</svg>
-							<span class="jv-action-title">Confirm before this runs</span>
-							<!-- Parked before the user's latest message: a bare "yes"/"no"
-							     no longer binds it, only its number or its buttons. -->
-							<span v-if="!isRecentCard(pa)" class="jv-pending-earlier"
-								>Earlier</span
-							>
-							<!-- Cards never expire: one that has waited over an hour says so. -->
-							<span v-if="pendingAgeOf(pa)" class="jv-pending-age">{{
-								pendingAgeOf(pa)
-							}}</span>
-							<!-- The number is what a typed "confirm 1 and 3" selects by, so it
-							     only appears when there is actually a choice to make. -->
-							<span v-if="visiblePendingActions.length > 1" class="jv-pending-num">
-								{{ pi + 1 }} of {{ visiblePendingActions.length }}
-							</span>
+							</div>
 						</div>
-						<div class="jv-pending-body">
-							<div v-if="pendingSummaryOf(pa)" class="jv-pending-summary">
-								{{ pendingSummaryOf(pa) }}
+						<div v-else class="jv-action jv-pending">
+							<div class="jv-action-head">
+								<svg
+									width="16"
+									height="16"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="var(--amber)"
+									stroke-width="1.8"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path
+										d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+									/>
+									<path d="M12 9v4M12 17h.01" />
+								</svg>
+								<span class="jv-action-title">Confirm before this runs</span>
+								<!-- Parked before the user's latest message: a bare "yes"/"no"
+							     no longer binds it, only its number or its buttons. -->
+								<span v-if="!isRecentCard(pa)" class="jv-pending-earlier"
+									>Earlier</span
+								>
+								<!-- Cards never expire: one that has waited over an hour says so. -->
+								<span v-if="pendingAgeOf(pa)" class="jv-pending-age">{{
+									pendingAgeOf(pa)
+								}}</span>
+								<!-- The number is what a typed "confirm 1 and 3" selects by, so it
+							     only appears when there is actually a choice to make. -->
+								<span
+									v-if="visiblePendingActions.length > 1"
+									class="jv-pending-num"
+								>
+									{{ pi + 1 }} of {{ visiblePendingActions.length }}
+								</span>
 							</div>
-							<div v-if="pendingExpiredOf(pa)" class="jv-pending-expired">
-								This confirmation expired. Tell me the action again to retry it.
-							</div>
-							<template v-else>
-								<!-- F9: the server-built "what will change" card (raw preview behind Details) -->
-								<PendingCard
-									v-if="pendingCardOf(pa)"
-									:card="pendingCardOf(pa)"
-									:details="pendingDetailsOf(pa)"
-								/>
+							<div class="jv-pending-body">
+								<div v-if="pendingSummaryOf(pa)" class="jv-pending-summary">
+									{{ pendingSummaryOf(pa) }}
+								</div>
+								<div v-if="pendingExpiredOf(pa)" class="jv-pending-expired">
+									This confirmation expired. Tell me the action again to retry
+									it.
+								</div>
 								<template v-else>
-									<div v-if="pendingNoteOf(pa)" class="jv-pending-note">
-										{{ pendingNoteOf(pa) }}
-									</div>
-									<ul v-if="pendingBatchOf(pa)" class="jv-pending-batch">
-										<li
-											v-for="(a, i) in pendingBatchOf(pa).actions"
-											:key="'a' + i"
-										>
-											Create <b>{{ a.doctype }}</b> "{{ a.name }}"
-										</li>
-									</ul>
-									<!-- Raw dry-run JSON belongs BEHIND an expander, exactly as
+									<!-- F9: the server-built "what will change" card (raw preview behind Details) -->
+									<PendingCard
+										v-if="pendingCardOf(pa)"
+										:card="pendingCardOf(pa)"
+										:details="pendingDetailsOf(pa)"
+									/>
+									<template v-else>
+										<div v-if="pendingNoteOf(pa)" class="jv-pending-note">
+											{{ pendingNoteOf(pa) }}
+										</div>
+										<ul v-if="pendingBatchOf(pa)" class="jv-pending-batch">
+											<li
+												v-for="(a, i) in pendingBatchOf(pa).actions"
+												:key="'a' + i"
+											>
+												Create <b>{{ a.doctype }}</b> "{{ a.name }}"
+											</li>
+										</ul>
+										<!-- Raw dry-run JSON belongs BEHIND an expander, exactly as
 									     PendingCard puts it behind its own "Details". This branch
 									     is the fallback for when the server built no structured
 									     card, and it used to dump the JSON straight into the card
 									     body - so a confirmation whose preview did not summarise
 									     landed as a wall of JSON above the Confirm button. Same
 									     information, same click to reach it, no dump. -->
-									<details
-										v-else-if="pendingPreviewOf(pa)"
-										class="jv-pending-details"
-									>
-										<summary>Details</summary>
-										<pre class="jv-pending-preview">{{
-											pendingPreviewOf(pa)
-										}}</pre>
-									</details>
+										<details
+											v-else-if="pendingPreviewOf(pa)"
+											class="jv-pending-details"
+										>
+											<summary>Details</summary>
+											<pre class="jv-pending-preview">{{
+												pendingPreviewOf(pa)
+											}}</pre>
+										</details>
+									</template>
 								</template>
-							</template>
-						</div>
-						<div v-if="pa.error" style="margin: 0 14px 10px">
-							<ActionError
-								:error="pa.error"
-								:can-report="!!supportOn"
-								@report="openActionErrorSupport"
-							/>
-						</div>
-						<!-- What the amber button covers, as text: a title is invisible on
+							</div>
+							<div v-if="pa.error" style="margin: 0 14px 10px">
+								<ActionError
+									:error="pa.error"
+									:can-report="!!supportOn"
+									@report="openActionErrorSupport"
+								/>
+							</div>
+							<!-- What the amber button covers, as text: a title is invisible on
 						     touch and to anyone who does not hover. -->
-						<p
-							v-if="pendingCardOf(pa)?.approve_run"
-							:id="'jv-runnote-' + pa.token"
-							class="jv-action-runnote"
-						>
-							Approve &amp; run runs the rest of this request without asking. Delete,
-							cancel and amend still ask.
-						</p>
-						<div class="jv-action-foot">
-							<template v-if="pendingCardOf(pa)?.approve_run">
-								<!-- Step-by-step stays THIS card's plain confirm - the
+							<p
+								v-if="pendingCardOf(pa)?.approve_run"
+								:id="'jv-runnote-' + pa.token"
+								class="jv-action-runnote"
+							>
+								Approve &amp; run runs the rest of this request without asking.
+								Delete, cancel and amend still ask.
+							</p>
+							<div class="jv-action-foot">
+								<template v-if="pendingCardOf(pa)?.approve_run">
+									<!-- Step-by-step stays THIS card's plain confirm - the
 								     low-friction default, first in tab order, so a plain
 								     click/Enter takes the safe per-card path (D-TRIGGER). -->
+									<button
+										class="jv-action-primary"
+										:disabled="
+											pa.busy || convStreaming || pendingExpiredOf(pa)
+										"
+										:title="
+											convStreaming
+												? 'Waiting for the current reply to finish'
+												: ''
+										"
+										@click="confirmPending(pa)"
+									>
+										<span v-if="pa.busy && approveRunBusyToken !== pa.token"
+											>Confirming…</span
+										><span v-else>Step-by-step</span>
+									</button>
+									<!-- Approve & run opens an open-ended run (D-RUN): the
+								     deliberate choice, so it gets its own noticeable-but-not-
+								     alarming amber affordance, never the primary/first slot. -->
+									<button
+										class="jv-action-runall"
+										:disabled="
+											pa.busy || convStreaming || pendingExpiredOf(pa)
+										"
+										:aria-describedby="'jv-runnote-' + pa.token"
+										:title="
+											convStreaming
+												? 'Waiting for the current reply to finish'
+												: ''
+										"
+										@click="approveAndRunPending(pa)"
+									>
+										<span v-if="pa.busy && approveRunBusyToken === pa.token"
+											>Running…</span
+										><span v-else>▶ Approve &amp; run</span>
+									</button>
+								</template>
 								<button
+									v-else
 									class="jv-action-primary"
 									:disabled="pa.busy || convStreaming || pendingExpiredOf(pa)"
 									:title="
@@ -2354,58 +2412,27 @@
 									"
 									@click="confirmPending(pa)"
 								>
-									<span v-if="pa.busy && approveRunBusyToken !== pa.token"
-										>Confirming…</span
-									><span v-else>Step-by-step</span>
+									<span v-if="pa.busy">Confirming…</span
+									><span v-else>✓ Confirm</span>
 								</button>
-								<!-- Approve & run opens an open-ended run (D-RUN): the
-								     deliberate choice, so it gets its own noticeable-but-not-
-								     alarming amber affordance, never the primary/first slot. -->
-								<button
-									class="jv-action-runall"
-									:disabled="pa.busy || convStreaming || pendingExpiredOf(pa)"
-									:aria-describedby="'jv-runnote-' + pa.token"
-									:title="
-										convStreaming
-											? 'Waiting for the current reply to finish'
-											: ''
-									"
-									@click="approveAndRunPending(pa)"
-								>
-									<span v-if="pa.busy && approveRunBusyToken === pa.token"
-										>Running…</span
-									><span v-else>▶ Approve &amp; run</span>
-								</button>
-							</template>
-							<button
-								v-else
-								class="jv-action-primary"
-								:disabled="pa.busy || convStreaming || pendingExpiredOf(pa)"
-								:title="
-									convStreaming ? 'Waiting for the current reply to finish' : ''
-								"
-								@click="confirmPending(pa)"
-							>
-								<span v-if="pa.busy">Confirming…</span
-								><span v-else>✓ Confirm</span>
-							</button>
-							<!-- Two equal ways to approve. Shown once per stack, on the last
+								<!-- Two equal ways to approve. Shown once per stack, on the last
 							     card, so a queue of five does not repeat it five times. -->
-							<span
-								v-if="pi === visiblePendingActions.length - 1"
-								class="jv-action-typehint"
-							>
-								{{ typedApprovalHint }}
-							</span>
-							<button
-								class="jv-action-discard"
-								:disabled="pa.busy"
-								@click="discardPending(pa)"
-							>
-								Discard
-							</button>
+								<span
+									v-if="pi === visiblePendingActions.length - 1"
+									class="jv-action-typehint"
+								>
+									{{ typedApprovalHint }}
+								</span>
+								<button
+									class="jv-action-discard"
+									:disabled="pa.busy"
+									@click="discardPending(pa)"
+								>
+									Discard
+								</button>
+							</div>
 						</div>
-					</div>
+					</template>
 					<!-- A typed yes/no that bound no card went to Jarvis as a normal
 					     message; say so without blocking anything (decision 13). The
 					     live region stays mounted and only its text toggles, so the
@@ -4163,6 +4190,9 @@
 							</svg>
 						</button>
 					</div>
+					<div v-if="draftPanelStale" role="alert" style="margin: 10px 14px 0">
+						<Banner type="error" :message="DRAFT_STALE_TEXT" />
+					</div>
 					<DraftEditForm
 						ref="draftFormEl"
 						:model="draftPanel"
@@ -4186,14 +4216,18 @@
 						<button
 							v-if="draftPanel.submittable && draftPanel.verb === 'create'"
 							class="jv-action-2nd"
-							:disabled="draftPanel.applying || !!draftPanel.parked"
+							:disabled="
+								draftPanel.applying || !!draftPanel.parked || draftPanelStale
+							"
 							@click="applyDraft(1)"
 						>
 							Create &amp; Submit
 						</button>
 						<button
 							class="jv-action-primary"
-							:disabled="draftPanel.applying || !!draftPanel.parked"
+							:disabled="
+								draftPanel.applying || !!draftPanel.parked || draftPanelStale
+							"
 							@click="applyDraft(0)"
 						>
 							{{ draftPanel.applying ? "Saving…" : draftCta }}
@@ -4398,6 +4432,7 @@ import DraftPreview from "@/components/doc/DraftPreview.vue";
 import ActionError from "@/components/ActionError.vue";
 import Banner from "@/components/Banner.vue";
 import PendingCard from "@/components/PendingCard.vue";
+import DraftCard from "@/components/chat/DraftCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
 import {
@@ -4497,6 +4532,14 @@ import {
 	typedApprovalHint as hintFor,
 } from "@/lib/typedCardReply";
 import { proposedLabel } from "@/lib/cardAge";
+import { cardOfItem, isToolDraftItem } from "@/lib/toolDraft";
+import {
+	DRAFT_STALE_TEXT,
+	hasParkedDraft as itemsHoldParkedDraft,
+	nextPanelStale,
+	toolDraftHostCtx,
+	withBusyKind,
+} from "@/lib/toolDraftHost";
 import {
 	chatRefusalMessage,
 	chatSettledReason,
@@ -7658,6 +7701,35 @@ const _lastAssistant = computed(() => {
 	}
 	return last && last.role === "assistant" && !last.streaming ? last : null;
 });
+// The queue of parked confirmations (action:pending cards) and what of it this screen draws.
+// Declared here, ahead of _liveDraft, because the typed draft's gate (hasParkedDraft) reads
+// them when the first watcher below sets up. The write-safety notes stay at the
+// "action:pending confirm card" section further down.
+const pendingActions = ref([]);
+// A close migration can settle a card while it is cached on this page. Keep
+// its token locally after the terminal receipt arrives, so a late socket frame
+// cannot restore a Confirm card before the next durable resync completes.
+const safetySettledTokens = ref(new Set());
+// Only the cards belonging to the conversation on screen render (a parked write
+// from another chat must not show here). The queue is already pruned to the
+// current conversation on load, but filter defensively for the template v-for.
+// Sorted in mint order (created_at, the token breaking a same-second tie;
+// expires_at is only the fallback for a pre-P0c record with no created_at), so the
+// numbers never shuffle: a typed "confirm 1 and 3" binds to the tokens THIS screen
+// numbered (approval_tokens), and a resync merges cards in whatever order the store
+// returned them.
+const visiblePendingActions = computed(() =>
+	// Ordered by the shared, unit-tested comparator (sortPendingCards): stable
+	// numbers for a typed "confirm N". See lib/sortPendingCards.js.
+	sortPendingCards(
+		pendingActions.value.filter(
+			(pa) => pa.conversation === currentId.value && !safetySettledTokens.value.has(pa.token)
+		)
+	)
+);
+// This chat has a server draft card on screen (lib/toolDraftHost): then no typed draft is live
+// (_liveDraft), and a typed edit panel that is open turns stale (draftPanelStale).
+const hasParkedDraft = computed(() => itemsHoldParkedDraft(visiblePendingActions.value));
 // The newest unsaved draft row (lib/liveDraft, the one rule the phone and the server
 // share): kept through later replies until it is saved, cancelled or replaced. Null
 // whenever _lastAssistant is, so nothing shows mid-turn. It reads the loaded rows as the
@@ -7668,6 +7740,9 @@ const _lastAssistant = computed(() => {
 const hiddenDrafts = ref(new Set());
 const _liveDraft = computed(() => {
 	const live = liveDraftMessage(messages.value, _lastAssistant.value);
+	// One card always: a server draft card on screen retires every typed draft (the rows of a
+	// realtime push carry no draft_card flag, so the pending list is what tells us).
+	if (hasParkedDraft.value) return null;
 	return live && !hiddenDrafts.value.has(live.name) ? live : null;
 });
 // The last message's own action block that is not a draft (an email draft, a gated verb's
@@ -8509,11 +8584,6 @@ function scrollDraftCardIntoView() {
 // a single turn can park more than one gated write, and each keeps its OWN
 // confirmable card + busy/error state. Each item:
 // { conversation, token, tool, summary, preview, run_id, busy, error }.
-const pendingActions = ref([]);
-// A close migration can settle a card while it is cached on this page. Keep
-// its token locally after the terminal receipt arrives, so a late socket frame
-// cannot restore a Confirm card before the next durable resync completes.
-const safetySettledTokens = ref(new Set());
 const safetyUpdateNotice = ref(null);
 const safetyUpdateQueue = ref([]);
 const SAFETY_UPDATE_COPY =
@@ -8559,14 +8629,6 @@ function dismissSafetyUpdateNotice() {
 // approve-and-run).
 const approveRunBusyToken = ref(null);
 
-// Only the cards belonging to the conversation on screen render (a parked write
-// from another chat must not show here). The queue is already pruned to the
-// current conversation on load, but filter defensively for the template v-for.
-// Sorted in mint order (created_at, the token breaking a same-second tie;
-// expires_at is only the fallback for a pre-P0c record with no created_at), so the
-// numbers never shuffle: a typed "confirm 1 and 3" binds to the tokens THIS screen
-// numbered (approval_tokens), and a resync merges cards in whatever order the store
-// returned them.
 // What the hint offers depends on how many cards are stacked: with one there
 // is nothing to select, with several the useful thing to teach is that both
 // all-at-once and pick-a-few work.
@@ -8587,15 +8649,20 @@ const olderCardsNoteText = computed(() =>
 		? "An earlier action card is still waiting. Use its buttons or the Approval Board."
 		: ""
 );
-const visiblePendingActions = computed(() =>
-	// Ordered by the shared, unit-tested comparator (sortPendingCards): stable
-	// numbers for a typed "confirm N". See lib/sortPendingCards.js.
-	sortPendingCards(
-		pendingActions.value.filter(
-			(pa) => pa.conversation === currentId.value && !safetySettledTokens.value.has(pa.token)
-		)
-	)
-);
+// What DraftCard is told about one pending item (Preview and Edit are disabled until the edit
+// panel handles a server draft).
+const draftCtxOf = (pa) => toolDraftHostCtx({ pa, streaming: convStreaming.value });
+// A typed edit panel that was open when a server draft card arrived: its Save has no typed
+// draft to act on. The panel stays open, shows DRAFT_STALE_TEXT, and its save buttons are off;
+// the X still closes it, which clears the flag.
+const draftPanelStale = ref(false);
+watch([hasParkedDraft, draftPanel], ([parked, panel], [, previous]) => {
+	draftPanelStale.value = nextPanelStale(draftPanelStale.value, {
+		panelOpen: !!panel,
+		panelChanged: panel !== previous,
+		parked,
+	});
+});
 
 // A legacy container (persona v0.39, pre write-safety) may still emit a
 // jarvis-action card for a gated write verb / an email whose own action button
@@ -9104,6 +9171,17 @@ async function proposeNext(m, step) {
 		if (messageActionIsCurrent(view) && nextBusyKey.value === view.token)
 			nextBusyKey.value = "";
 	}
+}
+
+// The two buttons of a server draft card. Create is the Confirm button's handler and Cancel the
+// Discard button's, each with the item's busyKind set around it (lib/toolDraftHost.withBusyKind)
+// so the card shows its working state and ignores a second press. Every reply, a refusal, an
+// already-decided card and a thrown error are handled by confirmPending / discardPending.
+function createToolDraft(pa) {
+	return withBusyKind(pa, "create", confirmPending);
+}
+function cancelToolDraft(pa) {
+	return withBusyKind(pa, "cancel", discardPending);
 }
 
 // Resync (R3 fix for #3): re-fetch the current conversation's live parked

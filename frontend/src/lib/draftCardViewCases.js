@@ -28,6 +28,8 @@ export const STATE_BUTTONS = [
 	["S3", { editing: true }, (v) => locked(v, { keep: "cancel" })],
 	["S4", { busy: "create" }, (v) => locked(v, { spin: v === "update" ? "save" : "create" })],
 	["S4", { busy: "cancel" }, (v) => locked(v, { spin: "cancel" })],
+	// in flight but nobody knows which button: every button locked, no spinner anywhere
+	["S4", { busy: "busy" }, (v) => locked(v, {})],
 	["S13", { streaming: true }, (v) => locked(v, {})],
 ];
 
@@ -87,6 +89,28 @@ export function draftCardCases(rawView, fixtures) {
 					`${state} ${JSON.stringify(ctx)} ${verb} on ${surface}: buttons`,
 					shape(view),
 					expected(verb)
+				);
+			}
+		}
+	}
+
+	// Break: `readOnly` leaves Preview or Edit live in S1/S2, disables Create or Cancel, changes the
+	// state, or leaks into the states that already lock their buttons.
+	const offPreviewEdit = (list) =>
+		list.map((b) =>
+			b[0] === "preview" || b[0] === "edit" ? [b[0], b[1], b[2], true, b[4]] : b
+		);
+	for (const verb of ["create", "update"]) {
+		const fx =
+			verb === "update" ? card(fixtures, "update-diff") : card(fixtures, "create-simple");
+		for (const surface of ["desktop", "phone"]) {
+			for (const [state, ctx, expected] of STATE_BUTTONS) {
+				const view = draftCardView(fx, { ...ctx, readOnly: true, surface });
+				const open = state === "S1" || state === "S2";
+				add(
+					`readOnly ${state} ${JSON.stringify(ctx)} ${verb} on ${surface}`,
+					[view.state, shape(view)],
+					[state, open ? offPreviewEdit(expected(verb)) : expected(verb)]
 				);
 			}
 		}
