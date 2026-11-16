@@ -284,6 +284,22 @@ class TestRuntimeProfileStorage(unittest.TestCase):
 			rp.ingest_current(data)
 			persist.assert_not_called()
 
+	def test_moved_container_with_same_values_rewrites_the_receipt(self):
+		# A container move raises the generation but keeps the five route values. If the
+		# receipt keeps the old generation, every chat fails and no sync can repair it.
+		old_receipt = json.dumps(self.record())
+		self.db.get_value.return_value = frappe._dict(parent=rp.PARENT, defkey=rp.KEY, defvalue=old_receipt)
+		self.anchor["tenant_authority_generation"] = 5
+		moved = envelope()
+		moved["runtime_binding"]["generation"] = 5
+		rp.persist(moved, self.settings)
+		self.db.set_value.assert_called_once()
+		written = self.db.set_value.call_args.args[3]
+		self.assertEqual(json.loads(written)["anchor"]["tenant_authority_generation"], 5)
+		rp._forget_snapshot()
+		self.db.get_value.return_value = written
+		self.assertEqual(rp.get_profile(), TEST_PROFILE)
+
 	def test_explicit_unsupported_runtime_blocks_without_erasing_last_good(self):
 		self.db.get_value.return_value = frappe._dict(
 			parent=rp.PARENT, defkey=rp.KEY, defvalue=json.dumps(self.record())

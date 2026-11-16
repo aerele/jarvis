@@ -143,13 +143,18 @@ def _stored_receipt():
 	return frappe.db.get_value("DefaultValue", ROW, ["parent", "defkey", "defvalue"], as_dict=True)
 
 
-def _matches_stored(row, unavailable: bool, profile) -> bool:
+def _matches_stored(row, unavailable: bool, profile, anchor) -> bool:
 	"""True when ``row`` already reflects this poll's outcome, so nothing needs to
 	change. v1 is immutable once accepted (the check inside ``_persist_locked``
 	below), so "the same validated profile" is the only shape a repeated poll for
 	an unchanged assignment ever produces - comparing the freshly
 	``fetched_at``-stamped blob byte for byte would never match, and would defeat
-	the entire point of comparing before taking any lock."""
+	the entire point of comparing before taking any lock.
+
+	The stored row must also pass the same check ``get_profile`` applies, for THIS
+	``anchor``. A moved container keeps the five route values but gets a new
+	generation; comparing the values alone kept the old anchor, so every later chat
+	failed and no sync could repair the row."""
 	if row is None or not row.defvalue or row.parent != PARENT or row.defkey != KEY:
 		return False
 	try:
@@ -158,10 +163,8 @@ def _matches_stored(row, unavailable: bool, profile) -> bool:
 		return False
 	if unavailable:
 		return bool(stored.get("unavailable"))
-	if stored.get("unavailable"):
-		return False
 	try:
-		stored_profile = validate(stored.get("profile"))
+		stored_profile = _checked_record(stored, anchor)
 	except RuntimeProfileError:
 		return False
 	return stored_profile == profile
@@ -187,7 +190,7 @@ def persist(raw, settings, *, unavailable=False):
 	to the caller, which owns the transaction."""
 	anchor = _anchor(settings)
 	profile = None if unavailable else validate(raw, anchor)
-	if _matches_stored(_stored_receipt(), unavailable, profile):
+	if _matches_stored(_stored_receipt(), unavailable, profile, anchor):
 		setattr(frappe.local, _MEMO, (anchor, profile))
 		return
 
