@@ -162,6 +162,8 @@ function changeSummary(rc, rows, removed, moreRemoved, reordered) {
 		reordered && "row order changes",
 	].filter(Boolean);
 	const sentence = parts.join(", ");
+	// Defensive: the row-order part is lowercase in a list, so a lone one is capitalised.
+	// Kept in case a server ever sends a reorder with all counts zero.
 	return parts.length === 1 && reordered ? "Row order changes" : sentence;
 }
 
@@ -246,6 +248,11 @@ function diffView(card, surface) {
 			new: rowChanges ? "" : text(d.to),
 			multiline: d.multiline === true,
 			rowChanges,
+			// The note under the entry: the row-changes table's own, or the server's flag on
+			// the entry itself (a child table it could not compare at all; strict `=== true`).
+			verifyNote:
+				(rowChanges && rowChanges.verifyNote) ||
+				(d.unverified === true ? VERIFY_NOTE : ""),
 			table: isObject(d.to_table)
 				? tableView({ ...d.to_table, label: "New rows" }, surface)
 				: null,

@@ -230,4 +230,29 @@ describe("DraftCard", () => {
 		);
 		expect(w.find(".dc-unchanged").text()).toBe("Not compared");
 	});
+
+	// Break: an entry the server could not compare at all draws no caveat under its text.
+	it("draws the note for an entry flagged unverified, with its plain rows text", () => {
+		const c = structuredClone(card("update-diff"));
+		c.diff[0] = { label: "Items", from: "3 rows", to: "3 rows", unverified: true };
+		const w = mount(DraftCard, { props: { card: c } });
+		expect(w.find("[role=note]").text()).toBe(
+			"This table could not be fully compared. Check its rows before you save."
+		);
+		expect(w.find(".dc-old").text()).toBe("3 rows");
+	});
+
+	// Break: the long scroll box cannot be reached or named by keyboard and screen reader users.
+	it.each([
+		[13, true],
+		[12, false],
+	])("a box of %i shown rows is focusable: %s", (n, tall) => {
+		const c = structuredClone(card("update-diff"));
+		const rows = Array.from({ length: n }, (_, i) => ({ status: "new", cells: ["r" + i] }));
+		c.diff[0] = { label: "Items", row_changes: { columns: ["A"], rows } };
+		const box = mount(DraftCard, { props: { card: c } }).find(".dc-changes .dc-scroll");
+		expect(box.classes().includes("dc-tall")).toBe(tall);
+		expect(box.attributes("tabindex")).toBe(tall ? "0" : undefined);
+		expect(box.attributes("aria-label")).toBe(tall ? "Rows this update changes" : undefined);
+	});
 });

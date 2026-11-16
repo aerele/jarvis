@@ -714,9 +714,26 @@ export function draftCardCases(rawView, fixtures) {
 			new: "Closed",
 			multiline: false,
 			rowChanges: null,
+			verifyNote: "",
 			table: null,
 		},
 	]);
+	// Break: a table the server could not compare at all (flag on the entry, no row_changes)
+	// shows no caveat, or the flag counts when it is not exactly true.
+	const entryNote = (flag) => {
+		const c = card(fixtures, "update-diff");
+		c.diff[0] = { label: "Items", from: "3 rows", to: "3 rows", unverified: flag };
+		const e = draftCardView(c, {}).diff[0];
+		return [e.old, e.new, e.rowChanges, e.verifyNote];
+	};
+	add("an entry flagged unverified keeps its text and gets the note", entryNote(true), [
+		"3 rows",
+		"3 rows",
+		null,
+		"This table could not be fully compared. Check its rows before you save.",
+	]);
+	for (const flag of [undefined, false, "yes", 1])
+		add(`an entry unverified ${JSON.stringify(flag)} says nothing`, entryNote(flag)[3], "");
 	add("update primary", up.buttons[0].label, "Save changes");
 	add("create has no diff", draftCardView(card(fixtures, "create-simple"), {}).diff, []);
 

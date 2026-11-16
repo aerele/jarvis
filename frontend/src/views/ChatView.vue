@@ -17938,6 +17938,7 @@ onUnmounted(() => {
 }
 .jv-action-foot {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	gap: 8px;
 	padding: 11px 14px;
@@ -17949,9 +17950,14 @@ onUnmounted(() => {
 	align-items: center;
 	gap: 7px;
 	font-family: inherit;
+	height: 28px;
+	padding: 0 10px;
+	justify-content: center;
 	font-size: 13px;
-	font-weight: 600;
-	padding: 8px 14px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	flex: 0 0 auto;
 	border-radius: 8px;
 	cursor: pointer;
 	background: var(--cta);
@@ -17973,9 +17979,14 @@ onUnmounted(() => {
 	align-items: center;
 	gap: 7px;
 	font-family: inherit;
+	height: 28px;
+	padding: 0 10px;
+	justify-content: center;
 	font-size: 13px;
-	font-weight: 550;
-	padding: 8px 13px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	flex: 0 0 auto;
 	border-radius: 8px;
 	cursor: pointer;
 	background: var(--amber-bg);
@@ -17992,9 +18003,14 @@ onUnmounted(() => {
 	align-items: center;
 	gap: 7px;
 	font-family: inherit;
+	height: 28px;
+	padding: 0 10px;
+	justify-content: center;
 	font-size: 13px;
-	font-weight: 550;
-	padding: 8px 13px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	flex: 0 0 auto;
 	border-radius: 8px;
 	cursor: pointer;
 	background: var(--surface);
@@ -18101,9 +18117,14 @@ onUnmounted(() => {
 	align-items: center;
 	gap: 6px;
 	font-family: inherit;
-	font-size: 12.5px;
-	font-weight: 600;
-	padding: 8px 13px;
+	height: 28px;
+	padding: 0 10px;
+	justify-content: center;
+	font-size: 13px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	flex: 0 0 auto;
 	border-radius: 8px;
 	border: 1px solid var(--red-bd);
 	background: var(--red-bg);
@@ -18461,7 +18482,8 @@ onUnmounted(() => {
 }
 .jv-draft-foot {
 	display: flex;
-	gap: 10px;
+	flex-wrap: wrap;
+	gap: 8px;
 	align-items: center;
 	padding: 12px 16px;
 	border-top: 1px solid var(--border);

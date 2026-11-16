@@ -545,6 +545,7 @@ onBeforeUnmount(() => {
 }
 .dp-foot {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	gap: 8px;
 	padding: 11px 14px;
@@ -553,10 +554,17 @@ onBeforeUnmount(() => {
 	flex: none;
 }
 .dp-btn {
-	padding: 8px 14px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	height: 28px;
+	padding: 0 10px;
+	line-height: 1;
+	white-space: nowrap;
+	flex: 0 0 auto;
 	border-radius: 8px;
 	font-size: 13px;
-	font-weight: 600;
+	font-weight: 500;
 	border: 1px solid var(--border);
 	background: var(--surface);
 	color: var(--text);

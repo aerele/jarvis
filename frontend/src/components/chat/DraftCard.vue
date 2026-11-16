@@ -79,12 +79,8 @@ function press(button) {
 						<span class="dc-arrow" aria-hidden="true">&rarr;</span>
 						<span class="dc-new">{{ d.new }}</span>
 					</template>
-					<p
-						v-if="d.rowChanges && d.rowChanges.verifyNote"
-						class="dc-line dc-warning"
-						role="note"
-					>
-						{{ d.rowChanges.verifyNote }}
+					<p v-if="d.verifyNote" class="dc-line dc-warning" role="note">
+						{{ d.verifyNote }}
 					</p>
 					<p v-if="d.rowChanges && d.rowChanges.reordered" class="dc-more dc-line">
 						The rows are saved in the order shown.
@@ -93,6 +89,12 @@ function press(button) {
 						<div
 							class="dc-scroll"
 							:class="{ 'dc-tall': d.rowChanges.rows.length > 12 }"
+							:tabindex="d.rowChanges.rows.length > 12 ? 0 : undefined"
+							:aria-label="
+								d.rowChanges.rows.length > 12
+									? 'Rows this update changes'
+									: undefined
+							"
 						>
 							<table>
 								<thead>
@@ -516,8 +518,11 @@ function press(button) {
 	align-items: center;
 	justify-content: center;
 	gap: 6px;
-	min-height: 34px;
-	padding: 6px 14px;
+	height: 28px;
+	padding: 0 10px;
+	line-height: 1;
+	white-space: nowrap;
+	flex: 0 0 auto;
 	border-radius: 8px;
 	border: 1px solid var(--dc-border);
 	background: var(--dc-bg-soft);
@@ -529,7 +534,7 @@ function press(button) {
 	background: var(--dc-primary-bg);
 	color: var(--dc-primary-fg);
 	border-color: var(--dc-primary-bg);
-	font-weight: 600;
+	font-weight: 500;
 }
 .dc-btn:hover:not(:disabled) {
 	background: color-mix(in srgb, var(--dc-text) 8%, var(--dc-bg-soft));
@@ -582,9 +587,14 @@ function press(button) {
 		grid-template-columns: minmax(0, 1fr);
 		gap: 0;
 	}
+	.dc-primary {
+		font-weight: 600;
+	}
 	.dc-btn {
 		flex: 1 1 auto;
+		height: auto;
 		min-height: 40px;
+		padding: 6px 14px;
 	}
 }
 </style>
