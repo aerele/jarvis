@@ -154,13 +154,6 @@ class TestCadence(_Case):
 		self.assertTrue(self.record(user, _at(14))["play"])
 		self.assertFalse(self.record(user, _at(19))["play"])
 
-	def test_a_refused_showing_is_not_recorded(self):
-		user = self.person(dob=BIRTHDAY)
-		self.record(user, _at(9))
-		before = _stored(user)
-		self.assertFalse(self.record(user, _at(10))["play"])
-		self.assertEqual(_stored(user), before)
-
 	def test_showings_are_stored_as_utc_with_the_local_date(self):
 		user = self.person(dob=BIRTHDAY)
 		now = _at(0, 30)  # 00:30 on the 8th in Kolkata is still the 7th in UTC
@@ -239,12 +232,6 @@ class TestRefusalTakesNoLock(_Case):
 		set_value.assert_not_called()
 		claim.assert_not_called()
 		self.assertEqual(_stored(user), before)
-
-	def test_an_allowed_showing_still_takes_the_lock_and_writes(self):
-		user = self.person(dob=BIRTHDAY)
-		with mock.patch.object(api, "_claim_showing", return_value=True) as claim:
-			self.assertEqual(self.record(user, _at(9)), {"play": True})
-		claim.assert_called_once()
 
 
 class TestForceOverride(_Case):

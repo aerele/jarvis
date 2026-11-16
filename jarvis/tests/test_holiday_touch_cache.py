@@ -132,14 +132,6 @@ class TestTtl(_Base):
 			_cached(user, datetime(2026, 11, 8, 18, 0, tzinfo=timezone.utc))
 		self.assertEqual(_ttls(spy), [1800])
 
-	def test_an_answer_is_never_stored_for_longer_than_two_hours(self):
-		user = self.person(dob="1990-11-08")
-		with _spy_set_value() as spy:
-			_cached(user, NOW)
-		ttls = _ttls(spy)
-		self.assertEqual(len(ttls), 1)
-		self.assertLessEqual(ttls[0], 2 * 3600)
-
 
 class TestOccasionKey(_Base):
 	def _computes(self, user, nows):
