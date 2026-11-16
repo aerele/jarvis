@@ -49,6 +49,12 @@ GLYPH_RATIO = 0.55
 PNG_SIZES = [16, 32, 64, 128, 256, 512, 1024]
 SUPERSAMPLE = 4
 
+# Variants the running app serves, keyed by path relative to brand/. A browser
+# can only load files under jarvis/public/ (served at /assets/jarvis/...), so
+# the logo that hooks.py and desktop_icon/jarvis.json point at is emitted there
+# as a second copy of the master in svg/.
+PUBLISHED_SVGS = {"../jarvis/public/images/jarvis-logo.svg": "jarvis-mark-tile"}
+
 ROOT = Path(__file__).resolve().parent
 
 
@@ -79,8 +85,12 @@ def build_assets() -> dict[str, bytes]:
 	png = PngRenderer()
 	assets: dict[str, bytes] = {}
 
-	for name, markup in svg.all_variants().items():
+	variants = svg.all_variants()
+	for name, markup in variants.items():
 		assets[f"svg/{name}.svg"] = markup.encode()
+
+	for relative_path, name in PUBLISHED_SVGS.items():
+		assets[relative_path] = variants[name].encode()
 
 	for name in png.builders():
 		for size in PNG_SIZES:
