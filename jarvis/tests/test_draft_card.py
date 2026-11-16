@@ -411,13 +411,17 @@ class TestRowDiffPure(unittest.TestCase):
 				self.assertTrue(draft_card.has_row_change({"row_changes": {"counts": {**base, key: 1}}}))
 		self.assertTrue(draft_card.has_row_change({"row_changes": {"counts": base, "reordered": True}}))
 
-	def test_a_table_multiselect_link_listed_twice_is_kept_twice_and_does_not_throw(self):
-		"""A duplicate link in the call is not an error on the card: it reads as the saved link,
-		listed (kept) once per mention."""
+	def test_a_table_multiselect_link_listed_twice_adds_one_and_listed_once_removes_one(self):
+		"""Links are counted: saved `[Sales]` and called `[Sales, Sales]` ADDS a row (kept 1 +
+		new 1), so the card cannot read as no change; saved twice and called once removes one."""
 		link = SimpleNamespace(fieldtype="Link", fieldname="role", label="Role")
 		child = SimpleNamespace(fields=[link])
-		out = draft_card._link_changes(child, [{"role": "Sales"}, {"role": "Sales"}], [{"role": "Sales"}])
-		self.assertEqual(out["counts"], {"changed": 0, "new": 0, "kept": 2, "removed": 0})
+		sales = {"role": "Sales"}
+		out = draft_card._link_changes(child, [sales, sales], [sales])
+		self.assertEqual(out["counts"], {"changed": 0, "new": 1, "kept": 1, "removed": 0})
+		self.assertEqual([r["status"] for r in out["rows"]], ["kept", "new"])
+		back = draft_card._link_changes(child, [sales], [sales, sales])
+		self.assertEqual(back["counts"], {"changed": 0, "new": 0, "kept": 1, "removed": 1})
 		self.assertNotIn("reordered", out)
 
 	def test_a_cell_is_cut_to_eighty_characters(self):
@@ -1407,6 +1411,31 @@ if FrappeTestCase is not None:
 			for card in (full, blind):
 				self.assertEqual([k for e in card["diff"] for k in e if k.startswith("_")], [])
 
+		def test_a_table_with_no_comparison_is_kept_and_unverified_and_a_scalar_is_still_skipped(self):
+			"""A listed table whose `row_changes` raised or came back empty must not be dropped on
+			"the trial rows read the same": the entry stays, marked `unverified` at entry level. A
+			scalar field that does not change is still skipped, on a draft or a plain card."""
+			form, (n1, n2, n3) = _make_web_form(self)
+			saved = [r.as_dict() for r in frappe.get_doc("Web Form", form).web_form_fields]
+			rows = [{"name": n1}, {"name": n2}, {"name": n3}]
+			args = {"doctype": "Web Form", "name": form, "changes": {"web_form_fields": rows}}
+			would = {"web_form_fields": saved}
+			for how, patched in (
+				("raises", {"side_effect": RuntimeError("boom")}),
+				("nothing", {"return_value": None}),
+			):
+				with self.subTest(how), patch.object(draft_card, "row_changes", **patched):
+					card = _park_card("update_doc", args, would, True)
+				(entry,) = card["diff"]
+				self.assertIs(entry["unverified"], True)
+				self.assertNotIn("row_changes", entry)
+			todo = self._todo(description="same", status="Open")
+			same = {"doctype": "ToDo", "name": todo.name, "changes": {"status": "Open"}}
+			for draft in (True, False):
+				with self.subTest(draft=draft):
+					card = _park_card("update_doc", same, {"status": "Open"}, draft)
+					self.assertEqual(card["diff"], [])
+
 		def test_a_line_break_past_the_clip_is_still_multiline(self):
 			"""`multiline` is read from the raw value: the display text is cut at 200
 			characters, so a break after that must still set it."""
@@ -1519,6 +1548,22 @@ if FrappeTestCase is not None:
 			self.assertNotIn("unverified", out)
 			self.assertEqual((out["rows"][0]["status"], out["rows"][0]["hidden_change"]), ("changed", True))
 			self.assertTrue(draft_card.has_row_change({"row_changes": out}))
+
+		def test_a_trial_row_that_lacks_a_stored_field_is_unverified(self):
+			"""A trial row of only `name` says nothing about the stored `a`: that field cannot be
+			compared, so the comparison is not exhaustive: `unverified`, the entry is kept."""
+			child = _stand_in_child(("a", "Data", 1))
+			out = self._rows(child, [{"name": "r1", "a": "x"}], [{"name": "r1"}], [{"name": "r1"}])
+			self.assertIs(out["unverified"], True)
+			self.assertEqual(out["rows"][0]["status"], "kept")
+
+		def test_a_stored_row_with_no_name_is_unverified(self):
+			"""A saved row without a name cannot be matched or counted as removed, so nothing can
+			be called unchanged: `unverified`."""
+			child = _stand_in_child(("a", "Data", 1))
+			stored = [{"name": "r1", "a": "x"}, {"a": "nameless"}]
+			out = self._rows(child, stored, [{"name": "r1", "a": "x"}, {"a": "nameless"}], [{"name": "r1"}])
+			self.assertIs(out["unverified"], True)
 
 		def test_a_difference_of_type_only_is_not_a_change(self):
 			"""The call sends text or a bool, the row holds a number or a date: "3" and 3, 1 and

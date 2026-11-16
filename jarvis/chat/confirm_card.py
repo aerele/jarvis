@@ -786,6 +786,10 @@ def _update_card(args: dict, would, full: bool = False, whole: bool = False, dra
 				# (an ``unverified`` table is kept, and says it could not be compared).
 				if not draft_card.has_row_change(entry) and not rc.get("unverified"):
 					continue
+			elif listed_table:
+				# No comparison could be made (it failed or had nothing to compare): never drop a
+				# table on "reads the same"; the plain "N rows" entry stays, marked ``unverified``.
+				entry["unverified"] = True
 			elif same:
 				continue
 		diff.append(entry)

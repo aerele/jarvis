@@ -312,14 +312,17 @@ def _differs(a, b, df) -> bool:
 	return not same_value(a, b, df)
 
 
-def _row_changed(child, was: dict, final: dict, sent: dict, columns: list, matched: bool = False) -> bool:
+def _row_changed(
+	child, was: dict, final: dict, sent: dict, columns: list, matched: bool = False, gaps: list | None = None
+) -> bool:
 	"""Whether the write changes the saved row ``was`` into ``final``, judged on RAW values
 	for every field the call set and every shown column. When the trial's own row is
 	``matched``, every value field of the child is compared too: validation may recalculate a
 	field the call did not set and the card does not show (a base amount). A secret is judged
 	on the value the call sends (the trial's row holds a mask of the same length, which would
 	hide a new password), by what the write does with it (``secret_word``); one the call did not
-	send is not compared. Bookkeeping columns (``idx``, ``modified`` ...) are not fields."""
+	send is not compared. A stored field the trial row lacks and the call did not send is added to
+	``gaps`` (the caller then calls the comparison not exhaustive). Bookkeeping columns (``idx``, ``modified`` ...) are not fields."""
 	from frappe.model import no_value_fields
 
 	from jarvis.chat._record_summary import is_secret, secret_word
@@ -339,7 +342,10 @@ def _row_changed(child, was: dict, final: dict, sent: dict, columns: list, match
 				return True
 			continue
 		if key not in final and key not in sent:
-			continue  # nothing is known about it after the write
+			# Nothing is known about it after the write: the comparison is not exhaustive.
+			if gaps is not None and key in was:
+				gaps.append(key)
+			continue
 		if _differs(was.get(key), final[key] if key in final else sent.get(key), df):
 			return True
 	return False
@@ -380,11 +386,16 @@ def _link_changes(child, call_rows: list, stored: list) -> dict | None:
 		return None
 	before = [r.get(link.fieldname) for r in stored if isinstance(r, dict) and r.get(link.fieldname)]
 	now = [r.get(link.fieldname) for r in call_rows if r.get(link.fieldname)]
-	out = row_diff(
-		[(v, v) for v in before],
-		[(v if v in before else None, v, False) for v in now],
-		lambda v: [_clip_cell(str(v))],
-	)
+	# Count occurrences: of each link, as many as are saved are kept, the extra ones called are
+	# new, the saved ones not called are removed. Each occurrence is its own "row".
+	saved_n = {v: before.count(v) for v in before}
+	seen: dict = {}
+	final = []
+	for v in now:
+		i = seen[v] = seen.get(v, -1) + 1
+		final.append(((v, i) if i < saved_n.get(v, 0) else None, v, False))
+	stored_rows = [((v, i), v) for v in saved_n for i in range(saved_n[v])]
+	out = row_diff(stored_rows, final, lambda v: [_clip_cell(str(v))])
 	out.pop("reordered", None)  # a set has no order
 	return {"columns": [link.label or link.fieldname], "fieldnames": [link.fieldname], **out}
 
@@ -455,7 +466,8 @@ def row_changes(meta, key: str, call_rows, trial_rows, stored) -> dict | None:
 	final = []
 	# True only when every listed row was set against the trial's own row, so every value field
 	# of it was compared (``_row_changed``). Otherwise only the call's keys could differ.
-	exhaustive = True
+	# A saved row with no name cannot be matched or counted as removed.
+	exhaustive = all(isinstance(r, dict) and r.get("name") for r in stored)
 	for row in call_rows:
 		name = row.get("name")
 		sent = row_values(row)
@@ -466,9 +478,10 @@ def row_changes(meta, key: str, call_rows, trial_rows, stored) -> dict | None:
 			got = by_name.get(name)
 			row_final = got if got is not None else {**saved[name], **sent}
 			exhaustive = exhaustive and got is not None
-			final.append(
-				(name, row_final, _row_changed(child, saved[name], row_final, sent, columns, got is not None))
-			)
+			gaps: list = []
+			changed = _row_changed(child, saved[name], row_final, sent, columns, got is not None, gaps)
+			exhaustive = exhaustive and not gaps
+			final.append((name, row_final, changed))
 		else:
 			got = next(new_trial, None)
 			exhaustive = exhaustive and got is not None
