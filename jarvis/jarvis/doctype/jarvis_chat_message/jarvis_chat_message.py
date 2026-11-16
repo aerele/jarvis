@@ -84,3 +84,14 @@ class JarvisChatMessage(NotRenamable, Document):
 				_("You can only post messages to your own conversations."),
 				frappe.PermissionError,
 			)
+
+
+# (conversation, seq): a chat's newest rows in seq order (``jarvis.chat.live_draft``) come
+# from a backward range scan of that one chat, with no filesort.
+CONV_SEQ_INDEX = "conv_seq"
+
+
+def on_doctype_update():
+	"""Fresh installs get the index here (installing marks every patch done without running
+	it); upgraded sites get it from ``jarvis.patches.v2_32_chat_message_conv_seq_index``."""
+	frappe.db.add_index("Jarvis Chat Message", ["conversation", "seq"], index_name=CONV_SEQ_INDEX)
