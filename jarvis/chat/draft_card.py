@@ -224,6 +224,161 @@ def attach(card: dict, tool: str, args: dict, would) -> bool:
 	return True
 
 
+MAX_CHANGE_ROWS = 50  # rows (and removed rows) a table's ``row_changes`` lists; the rest is counted
+
+
+def row_diff(stored: list, final: list) -> dict:
+	"""The rows an update leaves, set against the rows stored, from plain inputs.
+
+	``stored``: ``[(name, cells)]`` of the saved rows. ``final``: ``[(name or None, cells)]``
+	of the rows the call lists, in its order (``update_doc`` takes a table list as the COMPLETE
+	final set, ``tools._child_rows.merge_child_rows``). ``cells`` are already formatted text,
+	one per column, the same columns on every row.
+
+	A row whose name is saved is ``changed`` when a cell differs from the saved one (it then
+	carries ``was``, the saved cells), else ``kept``. A row with no name is ``new``. A saved
+	row the call leaves out is ``removed``. A name that is not saved is skipped: the trial
+	refuses such a call before a card is built, and no status is invented for it.
+
+	``counts`` always cover every row. ``rows`` and ``removed`` hold at most
+	``MAX_CHANGE_ROWS`` each, in order; when a list is over, the rows that change something
+	win over the kept ones, and ``more`` says how many were left out."""
+	saved = {name: cells for name, cells in stored if name}
+	listed = {name for name, _cells in final if name}
+	rows: list[dict] = []
+	for name, cells in final:
+		if not name:
+			rows.append({"status": "new", "cells": cells})
+		elif name in saved:
+			was = saved[name]
+			if was == cells:
+				rows.append({"status": "kept", "cells": cells})
+			else:
+				rows.append({"status": "changed", "cells": cells, "was": was})
+	removed = [{"cells": cells} for name, cells in stored if name and name not in listed]
+	counts = {status: sum(1 for r in rows if r["status"] == status) for status in ("changed", "new", "kept")}
+	counts["removed"] = len(removed)
+	out = {"rows": rows, "removed": removed[:MAX_CHANGE_ROWS], "counts": counts}
+	if len(rows) > MAX_CHANGE_ROWS:
+		# Changes first: a change must not be what the bound hides.
+		order = sorted(range(len(rows)), key=lambda i: (rows[i]["status"] == "kept", i))
+		out["rows"] = [rows[i] for i in sorted(order[:MAX_CHANGE_ROWS])]
+	more = {"rows": max(len(rows) - MAX_CHANGE_ROWS, 0), "removed": max(len(removed) - MAX_CHANGE_ROWS, 0)}
+	if more["rows"] or more["removed"]:
+		out["more"] = more
+	return out
+
+
+def _row_columns(child, call_rows: list) -> list[str]:
+	"""The child DocType's list-view fields, then the other fields the call set, in the order
+	``_record_summary.table_rows`` uses for a create card (capped at its column limit)."""
+	from jarvis.chat._record_summary import _MAX_COLS
+
+	set_keys: list[str] = []
+	for row in call_rows:
+		for key in row:
+			df = child.get_field(key)
+			if key in set_keys or df is None or df.fieldtype in _TABLE_TYPES:
+				continue
+			set_keys.append(key)
+	listed = [d.fieldname for d in child.fields if d.in_list_view and d.fieldtype not in _TABLE_TYPES]
+	return (listed + [k for k in set_keys if k not in listed])[:_MAX_COLS]
+
+
+def row_changes(meta, key: str, call_rows, trial_rows, stored) -> dict | None:
+	"""``row_changes`` of table field ``key`` of an update draft card, or None for nothing to show.
+
+	``call_rows``: the list the call sent. ``trial_rows``: the trial's would-be rows of the
+	table (or None). ``stored``: the saved rows, which ``confirm_card._update_card`` has
+	already read (the permission-checked, field-filtered record), so this makes NO query.
+
+	A final row is the trial's row (it carries computed cells such as hours): a named row is
+	found in the trial by its name, a new one by its position among the trial rows the call
+	does not name. Without a usable trial (no dry run, other row count, an unsaved name) a
+	named row is the saved row with the call's cells over it (the merge ``update_doc`` makes)
+	and a new row is the call's cells alone; a cell it does not carry is empty. A cell that
+	differs from the saved one only in type (a time as text, a float as text) is not a change:
+	``same_value`` decides, and the saved text is shown."""
+	import frappe
+
+	from jarvis.chat._record_summary import same_value, value_row
+	from jarvis.tools._child_rows import row_values
+
+	df = meta.get_field(key) if meta else None
+	if df is None or df.fieldtype != "Table" or not df.options:
+		return None
+	if not isinstance(call_rows, list) or not isinstance(stored, list):
+		return None
+	if not all(isinstance(r, dict) for r in call_rows):
+		return None
+	child = frappe.get_meta(df.options)
+	saved = {r["name"]: r for r in stored if isinstance(r, dict) and r.get("name")}
+	called = {r["name"] for r in call_rows if r.get("name")}
+	columns = _row_columns(child, [row_values(r) for r in call_rows])
+	if not columns:
+		return None
+
+	def cells(row: dict) -> list[str]:
+		return [
+			value_row(child, c, "", row[c], child.get_field(c))["value"] if c in row else "" for c in columns
+		]
+
+	usable = (
+		isinstance(trial_rows, list)
+		and len(trial_rows) == len(call_rows)
+		and all(isinstance(r, dict) for r in trial_rows)
+		and called <= set(saved)
+	)
+	by_name = {r.get("name"): r for r in trial_rows} if usable else {}
+	fresh = [r for r in trial_rows if r.get("name") not in called] if usable else []
+	if len(fresh) != sum(1 for r in call_rows if not r.get("name")):
+		fresh = []
+	new_trial = iter(fresh)
+	final = []
+	for row in call_rows:
+		name = row.get("name")
+		if name and name not in saved:
+			continue
+		if name:
+			got = by_name.get(name)
+			values = got if got is not None else {**saved[name], **row_values(row)}
+			text = cells(values)
+			was = cells(saved[name])
+			# A difference of type only (a time sent as text) is no change.
+			for i, c in enumerate(columns):
+				if text[i] != was[i] and same_value(saved[name].get(c), values.get(c), child.get_field(c)):
+					text[i] = was[i]
+			final.append((name, text))
+		else:
+			got = next(new_trial, None)
+			final.append((None, cells(got if got is not None else row_values(row))))
+	out = row_diff([(n, cells(r)) for n, r in saved.items()], final)
+	return {
+		"columns": [child.get_field(c).label or c for c in columns],
+		"fieldnames": columns,
+		**out,
+	}
+
+
+def decorate_update_entry(entry: dict, meta, key: str, call_value, trial_value, stored) -> None:
+	"""Add what only a DRAFT update card carries to the diff ``entry`` of field ``key``:
+	``multiline`` when its text holds a line break, ``row_changes`` for a child table the
+	call lists. Added before the card is sealed. A failure leaves the entry as it was."""
+	import frappe
+
+	if "\n" in str(entry.get("to", "")) or "\n" in str(entry.get("from", "")):
+		entry["multiline"] = True
+	if not isinstance(call_value, list):
+		return
+	try:
+		changes = row_changes(meta, key, call_value, trial_value, stored)
+	except Exception:
+		frappe.log_error(title="draft row changes failed", message=frappe.get_traceback())
+		return
+	if changes:
+		entry["row_changes"] = changes
+
+
 SHORT_NOTE = "A review card is on the user's screen. Write one short line and stop. Nothing is saved until they choose."
 # The model's result for a parked draft stays this small (``len(json.dumps(data))``, where
 # a non-ASCII character costs 6): it is the whole point of not sending the would-be

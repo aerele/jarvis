@@ -53,7 +53,13 @@ HAND_CALLS = {
 	"update-table-rows": (
 		"update",
 		"TS-0001",
-		{"time_logs": [{"from_time": "10:00", "hrs_worked": 2}, {"from_time": "11:00"}]},
+		{
+			"time_logs": [
+				{"name": "tl-1", "from_time": "09:00"},
+				{"name": "tl-2", "from_time": "11:00"},
+				{"from_time": "14:00", "hrs_worked": 2},
+			]
+		},
 	),
 }
 
@@ -290,6 +296,72 @@ class TestPendingDraftRowPure(unittest.TestCase):
 		for case, want in cases:
 			with self.subTest(case=case):
 				self.assertIs(draft_card.is_pending_draft_row(case), want)
+
+
+class TestRowDiffPure(unittest.TestCase):
+	"""``draft_card.row_diff``: stored rows against the final rows of an update, no site."""
+
+	STORED = [("a", ["Design", "1.5"]), ("b", ["Review", "2"]), ("c", ["Admin", "0.5"])]
+
+	def test_changed_kept_new_and_removed_rows(self):
+		"""A row that changes a cell, one that stays, a new one and a row the call leaves out
+		are four different things on the card; the last one is DELETED by the save, so it
+		must be listed. `was` is only on a changed row."""
+		final = [("a", ["Design", "1.5"]), ("b", ["Review", "3"]), (None, ["Call", "1"])]
+		out = draft_card.row_diff(self.STORED, final)
+		self.assertEqual(
+			out["rows"],
+			[
+				{"status": "kept", "cells": ["Design", "1.5"]},
+				{"status": "changed", "cells": ["Review", "3"], "was": ["Review", "2"]},
+				{"status": "new", "cells": ["Call", "1"]},
+			],
+		)
+		self.assertEqual(out["removed"], [{"cells": ["Admin", "0.5"]}])
+		self.assertEqual(out["counts"], {"changed": 1, "new": 1, "kept": 1, "removed": 1})
+		self.assertNotIn("more", out)
+
+	def test_a_row_name_that_is_not_saved_is_never_listed_as_new(self):
+		"""A name the record does not have is neither new nor changed: it is skipped, and the
+		saved rows it does not name are still reported as removed."""
+		out = draft_card.row_diff(self.STORED, [("a", ["Design", "1.5"]), ("zzz", ["Ghost", "9"])])
+		self.assertEqual([r["status"] for r in out["rows"]], ["kept"])
+		self.assertEqual(out["counts"], {"changed": 0, "new": 0, "kept": 1, "removed": 2})
+
+	def test_clearing_the_table_removes_every_saved_row_and_an_empty_table_adds_nothing_removed(self):
+		"""`[]` is the way to clear a table (`merge_child_rows`): all saved rows are removed;
+		with no saved rows nothing can be removed."""
+		self.assertEqual(draft_card.row_diff(self.STORED, [])["counts"]["removed"], 3)
+		out = draft_card.row_diff([], [(None, ["x", "1"])])
+		self.assertEqual((out["counts"]["removed"], out["counts"]["new"]), (0, 1))
+
+	def test_over_fifty_rows_keeps_the_changes_and_counts_the_rest(self):
+		"""The card is sealed, so each list stops at 50; a change at row 59 must not be what
+		the bound hides, and `more` / `counts` say what was left out."""
+		stored = [(f"r{i}", [f"v{i}"]) for i in range(60)]
+		final = [(f"r{i}", [f"v{i}"] if i != 58 else ["edited"]) for i in range(60)]
+		out = draft_card.row_diff(stored, final)
+		self.assertEqual(len(out["rows"]), draft_card.MAX_CHANGE_ROWS)
+		self.assertIn("changed", [r["status"] for r in out["rows"]])
+		self.assertEqual([r["cells"] for r in out["rows"] if r["status"] == "kept"][0], ["v0"])
+		self.assertEqual(out["counts"], {"changed": 1, "new": 0, "kept": 59, "removed": 0})
+		self.assertEqual(out["more"], {"rows": 10, "removed": 0})
+		gone = draft_card.row_diff(stored, [])
+		self.assertEqual((len(gone["removed"]), gone["more"]), (50, {"rows": 0, "removed": 10}))
+
+	def test_the_update_table_rows_fixture_is_what_row_diff_gives(self):
+		"""The hand-written `update-table-rows` fixture is coherent: its row_changes is the
+		pure diff of the saved rows and the final rows it implies, so the apps draw a shape
+		the server can send."""
+		with open(FIXTURES) as f:
+			card = {i["id"]: i for i in json.load(f)}["update-table-rows"]["card"]
+		entry = card["diff"][0]["row_changes"]
+		stored = [("tl-1", ["09:00:00", "1.5"]), ("tl-2", ["10:30:00", "2.0"]), ("tl-3", ["13:00:00", "0.5"])]
+		final = [("tl-1", ["09:00:00", "1.5"]), ("tl-2", ["11:00:00", "2.0"]), (None, ["14:00:00", "2.0"])]
+		got = draft_card.row_diff(stored, final)
+		self.assertEqual({k: entry[k] for k in got}, got)
+		self.assertEqual(len(entry["columns"]), len(entry["fieldnames"]))
+		self.assertEqual([r["name"] for r in card["draft"]["values"]["time_logs"][:2]], ["tl-1", "tl-2"])
 
 
 try:
@@ -1018,3 +1090,227 @@ if FrappeTestCase is not None:
 			out = self._markdown(conv, self._park(conv, 0))
 			self.assertIn("Awaiting confirmation", out)
 			self.assertNotIn("Draft:", out)
+
+	ROWS_MARK = "dc-rows-test"  # every Web Form these tests make; the cleanup removes it
+
+	def _make_web_form(case, count=3):
+		"""A real Web Form with ``count`` field rows; ``(name, [row names])``. The cleanup is
+		registered first, so a failure after the insert cannot leak the form."""
+
+		def wipe():
+			frappe.db.rollback()
+			forms = frappe.get_all("Web Form", filters={"title": ["like", f"{ROWS_MARK}%"]}, pluck="name")
+			if forms:
+				frappe.db.delete("Web Form Field", {"parent": ["in", forms]})
+				frappe.db.delete("Web Form", {"name": ["in", forms]})
+			frappe.db.commit()
+
+		case.addCleanup(wipe)
+		labels = ("First", "Second", "Third")
+		rows = [
+			{
+				"fieldname": f"f{i}",
+				"fieldtype": "Data",
+				"label": labels[i] if count == 3 else f"Row {i}",
+			}
+			for i in range(count)
+		]
+		doc = frappe.get_doc(
+			{
+				"doctype": "Web Form",
+				"title": f"{ROWS_MARK} {frappe.generate_hash(length=8)}",
+				"doc_type": "ToDo",
+				"web_form_fields": rows,
+			}
+		).insert(ignore_permissions=True)
+		return doc.name, [r.name for r in doc.web_form_fields]
+
+	def _entry(card):
+		"""The diff entry of the Web Form's `web_form_fields` table (found by its label)."""
+		label = frappe.get_meta("Web Form").get_field("web_form_fields").label
+		(entry,) = [e for e in card["diff"] if e["label"] == label]
+		return entry
+
+	def _row_changes(card):
+		return _entry(card)["row_changes"]
+
+	class TestUpdateRowChangesOnSite(FrappeTestCase):
+		"""An update draft card lists the rows it changes, adds and removes (`row_changes`),
+		built from the real card builder on a real Web Form with `web_form_fields` rows."""
+
+		def _update(self, form, rows, would=None, draft=True):
+			args = {"doctype": "Web Form", "name": form, "changes": {"web_form_fields": rows}}
+			return (
+				_park_card("update_doc", args, would, draft)
+				if draft
+				else (confirm_card.build_card("update_doc", args, {"would": would}))
+			)
+
+		def test_one_changed_one_kept_one_new_one_removed_with_the_trial_rows(self):
+			"""The card hides a DELETED row behind "3 rows -> 3 rows" without this: the four
+			counts, `was` differing only in the edited cell, the removed row's stored cells and
+			the child DocType's own column labels must all be on the card."""
+			form, (n1, n2, n3) = _make_web_form(self)
+			stored = {r.name: r.as_dict() for r in frappe.get_doc("Web Form", form).web_form_fields}
+			final_trial = [
+				stored[n1],
+				{**stored[n2], "label": "Second changed"},
+				{"fieldname": "extra", "fieldtype": "Data", "label": "Extra"},
+			]
+			rows = [{"name": n1}, {"name": n2, "label": "Second changed"}, {"fieldname": "extra"}]
+			card = self._update(form, rows, {"web_form_fields": final_trial})
+			changes = _row_changes(card)
+			self.assertEqual(changes["counts"], {"changed": 1, "new": 1, "kept": 1, "removed": 1})
+			self.assertEqual([r["status"] for r in changes["rows"]], ["kept", "changed", "new"])
+			col = changes["fieldnames"].index("label")
+			changed = changes["rows"][1]
+			self.assertEqual(changed["cells"][col], "Second changed")
+			self.assertEqual(changed["was"][col], "Second")
+			same = [
+				i for i, (a, b) in enumerate(zip(changed["cells"], changed["was"], strict=True)) if a == b
+			]
+			self.assertEqual(len(same), len(changes["fieldnames"]) - 1)
+			self.assertEqual(changes["removed"][0]["cells"][col], "Third")
+			child = frappe.get_meta("Web Form Field")
+			self.assertEqual(changes["columns"], [child.get_field(c).label for c in changes["fieldnames"]])
+			self.assertEqual(changes["rows"][2]["cells"][col], "Extra")
+			self.assertEqual(
+				_entry(card)["from"], _entry(card)["to"]
+			)  # today's "3 rows" text stays for older readers
+			self.assertEqual(card["draft"]["values"]["web_form_fields"], rows)
+			self.assertNotIn(n3, json.dumps(changes))
+
+		def test_without_a_trial_a_named_row_is_the_saved_row_under_the_call(self):
+			"""With no dry run the final row is the saved row with the call's cells laid over it
+			(what `merge_child_rows` stores): a row sent by its name alone is `kept`, not blank
+			and not changed, and a new row's cells the call did not send stay empty."""
+			form, (n1, n2, _n3) = _make_web_form(self)
+			rows = [{"name": n1}, {"name": n2, "label": "Second changed"}, {"fieldname": "extra"}]
+			changes = _row_changes(self._update(form, rows, None))
+			self.assertEqual([r["status"] for r in changes["rows"]], ["kept", "changed", "new"])
+			col = changes["fieldnames"].index("label")
+			self.assertEqual(changes["rows"][0]["cells"][col], "First")
+			self.assertEqual(changes["rows"][2]["cells"][col], "")
+
+		def test_a_row_name_that_is_not_on_the_record_is_never_new(self):
+			"""The trial refuses such a call before any card exists (`merge_child_rows`); if a
+			card is still built, the unknown name must not turn into an invented `new` row."""
+			form, (n1, _n2, _n3) = _make_web_form(self)
+			rows = [{"name": n1}, {"name": "not-a-row", "label": "Ghost"}]
+			changes = _row_changes(self._update(form, rows, None))
+			self.assertEqual(changes["counts"], {"changed": 0, "new": 0, "kept": 1, "removed": 2})
+			self.assertNotIn("Ghost", json.dumps(changes))
+
+		def test_more_than_fifty_rows_is_bounded_and_the_change_is_kept(self):
+			"""55 saved rows all listed, the last one edited: 50 are drawn, the edit among
+			them, and `more` and `counts` say what the sealed card left out."""
+			form, names = _make_web_form(self, count=55)
+			rows = [{"name": n} for n in names]
+			rows[54]["label"] = "Edited last"
+			changes = _row_changes(self._update(form, rows, None))
+			self.assertEqual(len(changes["rows"]), draft_card.MAX_CHANGE_ROWS)
+			self.assertEqual(changes["more"], {"rows": 5, "removed": 0})
+			self.assertEqual(changes["counts"], {"changed": 1, "new": 0, "kept": 54, "removed": 0})
+			self.assertEqual([r["status"] for r in changes["rows"]].count("changed"), 1)
+
+		def test_the_row_changes_add_no_read_of_the_child_table(self):
+			"""ONE read of the table: the card builder loads the record once and the row
+			changes reuse those rows. Reading them again per table (or per row) would show up
+			as more queries on `tabWeb Form Field` than the same card without a draft."""
+			form, (n1, n2, _n3) = _make_web_form(self)
+			rows = [{"name": n1}, {"name": n2, "label": "Second changed"}]
+
+			def child_reads(draft):
+				with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as spy:
+					self._update(form, rows, None, draft=draft)
+				return [
+					c for c in spy.call_args_list if "tabWeb Form Field" in str(c.args[0] if c.args else "")
+				]
+
+			self.assertEqual(len(child_reads(True)), len(child_reads(False)))
+			self.assertTrue(child_reads(True))
+
+		def test_a_scalar_update_has_no_row_changes_and_only_a_line_break_is_multiline(self):
+			"""Only a table gets `row_changes`, and `multiline` is only on the entry whose text
+			holds a line break, so the apps keep the break and draw nothing else differently."""
+			todo = frappe.get_doc({"doctype": "ToDo", "description": "one line", "status": "Open"}).insert()
+			args = {
+				"doctype": "ToDo",
+				"name": todo.name,
+				"changes": {"description": "first\nsecond", "status": "Closed"},
+			}
+			card = _park_card("update_doc", args, {"description": "first\nsecond", "status": "Closed"}, True)
+			by_label = {e["label"]: e for e in card["diff"]}
+			self.assertIs(by_label["Description"]["multiline"], True)
+			self.assertNotIn("multiline", by_label["Status"])
+			self.assertTrue(all("row_changes" not in e for e in card["diff"]))
+
+	class TestParkedUpdateRowChanges(FrappeTestCase):
+		"""The real park (`api._run_tool`) of an update on a Web Form with 3 rows."""
+
+		def setUp(self):
+			super().setUp()
+			self.owner = frappe.session.user
+			frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
+			self.conv = (
+				frappe.get_doc({"doctype": "Jarvis Conversation", "title": "draft rows test"})
+				.insert(ignore_permissions=True)
+				.name
+			)
+			self.addCleanup(self._cleanup)
+
+		def _cleanup(self):
+			frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
+			frappe.db.sql(f"DELETE FROM `tab{PA}` WHERE conversation=%(c)s", {"c": self.conv})
+			frappe.db.delete(MSG, {"conversation": self.conv})
+			frappe.delete_doc("Jarvis Conversation", self.conv, force=True, ignore_permissions=True)
+			# The park commits mid-test, so the class rollback keeps these rows: commit the deletes.
+			frappe.db.commit()
+
+		def _park(self, flag):
+			form, (n1, n2, _n3) = _make_web_form(self)
+			args = {
+				"doctype": "Web Form",
+				"name": form,
+				"changes": {
+					"web_form_fields": [
+						{"name": n1},
+						{"name": n2, "label": "Second changed"},
+						{"fieldname": "extra", "fieldtype": "Data"},
+					]
+				},
+			}
+			with patch.dict(frappe.conf, {FLAG: flag}):
+				res = api._run_tool("update_doc", json.loads(json.dumps(args)), conversation=self.conv)
+			self.assertEqual(res["data"]["status"], "pending_confirmation", res)
+			[name] = frappe.get_all(PA, filters={"conversation": self.conv}, pluck="name")
+			fields = [*_seal.BOUND_FIELDS, "card", "preview", "summary", "sealed_call"]
+			return args, frappe.db.get_value(PA, name, fields, as_dict=True)
+
+		def test_flag_on_parks_the_rows_from_the_real_trial_and_the_seal_covers_them(self):
+			"""Through the real trial: one changed, one kept, one new, one removed; the stored
+			card verifies against its seal, and taking `row_changes` off breaks the hash."""
+			_args, row = self._park(1)
+			card = json.loads(row.card)
+			changes = _row_changes(card)
+			self.assertEqual([r["status"] for r in changes["rows"]], ["kept", "changed", "new"])
+			self.assertEqual(changes["counts"]["removed"], 1)
+			sealed = _seal.unseal_call(row)
+			bare = json.loads(row.card)
+			_entry(bare).pop("row_changes")
+			self.assertNotEqual(_seal.card_sha256({**row, "card": json.dumps(bare)}), sealed["card_sha256"])
+
+		def test_flag_off_is_todays_behaviour(self):
+			"""With the flag off the parked update card has no draft, no `row_changes`, no
+			`multiline`, and equals what the builder returns without the draft path for the
+			stored trial."""
+			args, row = self._park(0)
+			card = json.loads(row.card)
+			preview = {k: v for k, v in json.loads(row.preview).items() if k != "card"}
+			expected = json.loads(
+				json.dumps(confirm_card.build_card("update_doc", args, preview), default=str)
+			)
+			self.assertEqual(card, expected)
+			self.assertNotIn("draft", card)
+			self.assertTrue(all("row_changes" not in e and "multiline" not in e for e in card["diff"]))
+			_seal.unseal_call(row)

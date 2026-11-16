@@ -74,6 +74,7 @@ import secrets
 
 import frappe
 
+from jarvis.chat import draft_card
 from jarvis.chat._record_summary import (
 	_MAX_BODY,
 	_MAX_BULK_BODY,
@@ -224,7 +225,7 @@ def _card_of(tool: str, args: dict, preview, draft: bool = False) -> dict | None
 		# A guarded structure card (a Workflow) shows its tables whole even when an
 		# edit leaves them as they are: what is being switched on is the point.
 		whole = isinstance(preview, dict) and preview.get("structural") is True
-		return _update_card(args, would, full, whole)
+		return _update_card(args, would, full, whole, draft)
 	if tool == "update_doc" and bulk_key == "updates":
 		return _bulk_update_card(args, bulk_items, full)
 	if tool in _VERB:
@@ -711,7 +712,7 @@ def _crlf_as_lf(text: str) -> str:
 	return text.replace("\r\n", "\n")
 
 
-def _update_card(args: dict, would, full: bool = False, whole: bool = False) -> dict:
+def _update_card(args: dict, would, full: bool = False, whole: bool = False, draft: bool = False) -> dict:
 	doctype = args.get("doctype")
 	name = args.get("name")
 	changes = args.get("changes") if isinstance(args.get("changes"), dict) else {}
@@ -756,7 +757,19 @@ def _update_card(args: dict, would, full: bool = False, whole: bool = False) -> 
 		if same_value(from_val, to_val, df):
 			continue  # the save would not change the stored value
 		# Never a password / secret value (_diff_row masks it).
-		diff.append(_diff_row(meta, key, from_val, to_val, doc, full))
+		entry = _diff_row(meta, key, from_val, to_val, doc, full)
+		if draft and not full and not whole:
+			# A draft card shows a table's row changes. ``from_val`` is the stored rows read
+			# (permission-checked) above: no second read. The trial's rows give the computed cells.
+			draft_card.decorate_update_entry(
+				entry,
+				meta,
+				key,
+				changes.get(key),
+				would.get(key) if isinstance(would, dict) else None,
+				from_val,
+			)
+		diff.append(entry)
 		if not full and len(diff) >= _MAX_ROWS:
 			break
 	if full:

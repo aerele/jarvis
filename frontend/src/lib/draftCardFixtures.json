@@ -170,8 +170,59 @@
    "diff": [
     {
      "label": "Time Logs",
-     "from": "0 rows",
-     "to": "2 rows"
+     "from": "3 rows",
+     "to": "3 rows",
+     "row_changes": {
+      "columns": [
+       "From Time",
+       "Hrs"
+      ],
+      "fieldnames": [
+       "from_time",
+       "hours"
+      ],
+      "rows": [
+       {
+        "status": "kept",
+        "cells": [
+         "09:00:00",
+         "1.5"
+        ]
+       },
+       {
+        "status": "changed",
+        "cells": [
+         "11:00:00",
+         "2.0"
+        ],
+        "was": [
+         "10:30:00",
+         "2.0"
+        ]
+       },
+       {
+        "status": "new",
+        "cells": [
+         "14:00:00",
+         "2.0"
+        ]
+       }
+      ],
+      "removed": [
+       {
+        "cells": [
+         "13:00:00",
+         "0.5"
+        ]
+       }
+      ],
+      "counts": {
+       "changed": 1,
+       "new": 1,
+       "kept": 1,
+       "removed": 1
+      }
+     }
     }
    ],
    "draft": {
@@ -182,10 +233,15 @@
     "values": {
      "time_logs": [
       {
-       "from_time": "10:00"
+       "name": "tl-1",
+       "from_time": "09:00"
       },
       {
+       "name": "tl-2",
        "from_time": "11:00"
+      },
+      {
+       "from_time": "14:00"
       }
      ]
     },
