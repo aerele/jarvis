@@ -23,8 +23,9 @@ function copyOf(row) {
 	}
 }
 
-// draft.values[table] row `i` is the row `_draft_row: i` names on a create, so every entry
-// keeps its place: an entry that is not a row becomes an empty row, never a gap.
+// draft.values[table] row `i` is the row `_draft_row: i` names (a create's row, or an update's
+// row the draft added), so every entry keeps its place: an entry that is not a row becomes an
+// empty row, never a gap.
 const rowOf = (r) => (isObject(r) ? copyOf(r) : {});
 
 // A field's value as the form shows it: a JSON field arrives as an object, shown as JSON

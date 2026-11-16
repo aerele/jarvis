@@ -894,6 +894,41 @@ describe("snapshotMatchesCard: is the baseline the card's own", () => {
 		expect(early.why).toContain("logs");
 	});
 
+	it("a drafted create row the person emptied before the snapshot is not ok", () => {
+		// the row is blank (not "real") but still in the grid, at its drafted index
+		const r = late(creating, (m) => {
+			for (const c of ["activity", "hours", "from_time", "billable", "note"])
+				logs(m).rows[1][c] = "";
+		});
+		expect(r.ok).toBe(false);
+		expect(r.why).toContain("logs row 2");
+	});
+
+	it("a table-only draft snapshotted while its one row was still blank is not ok", () => {
+		const { card } = createModel({ logs: [{ activity: "A1", hours: 1 }] });
+		const early = createModel({ logs: [{}] }).model; // the form before the draft was applied
+		const r = snapshotMatchesCard(snapshotDraftModel(early, card), card);
+		expect(r.ok).toBe(false);
+		expect(r.why).toContain("logs row 1");
+	});
+
+	it("after an edit to a row the draft itself added it is not ok", () => {
+		const r = late(updating, (m) => (logs(m).rows[2].hours = "1"));
+		expect(r.ok).toBe(false);
+		expect(r.why).toContain("logs row at index 2 hours");
+	});
+
+	it("why names the field or cell and never carries a value (a field may be a secret)", () => {
+		const secret = () => createModel({ ...DRAFT, logs: ROWS() });
+		const a = late(secret, (m) => (field(m, "secret").value = "hunter2-form"));
+		const b = late(secret, (m) => (logs(m).rows[1].note = "hunter2-cell"));
+		for (const r of [a, b]) {
+			expect(r.ok).toBe(false);
+			expect(r.why).not.toMatch(/hunter2|pw/);
+		}
+		expect(a.why).toContain("secret");
+	});
+
 	it("a default the form filled for a field or cell the draft does not hold is not a failure", () => {
 		const { model, card } = creating();
 		model.fields.push(panelField(F("priority"), "Medium"));

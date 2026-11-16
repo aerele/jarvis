@@ -278,34 +278,35 @@ export function draftCardDirty(model, snapshot, card) {
 const asText = (v) => (v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 
-// The first cell of `drafted` the snapshot holds that differs from what the draft says, as
-// `{cell, form, draft}`, or null. Only cells the snapshot compares (writable columns) count.
+// The first cell of `drafted` the snapshot holds that differs from what the draft says, or
+// null. Only cells the snapshot compares (writable columns) count.
 function firstCellDiff(drafted, cells, types, skip = []) {
 	for (const [cell, v] of Object.entries(drafted)) {
 		if (skip.includes(cell) || !own(cells, cell)) continue;
-		const want = norm(types[cell] || "", asText(v));
-		if (cells[cell] !== want) return { cell, form: cells[cell], draft: want };
+		if (cells[cell] !== norm(types[cell] || "", asText(v))) return cell;
 	}
 	return null;
 }
 
-const clip = (v) => JSON.stringify(String(v).slice(0, 30));
-
-function mismatchOf(cell, where) {
-	return `${where}: form ${clip(cell.form)} but draft ${clip(cell.draft)}`;
-}
-
+// Names only, never values: `why` goes to logs and a field may be a secret.
 function checkTable(name, tsnap, drafted, verb) {
 	if (!tsnap || !isObject(tsnap.rows) || !Array.isArray(tsnap.keys))
 		return `table ${name}: unreadable snapshot`;
 	const types = tsnap.types || {};
-	const entries = tsnap.keys.map((k) => tsnap.rows[k]).filter(Boolean);
+	// every row of the grid, a blank one too: a drafted row the person emptied is a mismatch
+	const entries = Object.values(tsnap.rows).filter(isObject);
+	// the real rows in the grid's order (the object's own key order is not the grid's)
+	const inOrder = tsnap.keys.map((k) => tsnap.rows[k]).filter(isObject);
+	const differs = (draftedRow, was, where) => {
+		const cell = firstCellDiff(draftedRow, was.cells || {}, types, ["name"]);
+		return cell ? `table ${name} ${where} ${cell}: form differs from the draft` : "";
+	};
 	if (verb === "create") {
 		// Rows line up with the draft only when the snapshot gave them an origin.
 		for (const was of entries) {
 			if (was.origin == null || !isObject(drafted[was.origin])) continue;
-			const diff = firstCellDiff(drafted[was.origin], was.cells, types);
-			if (diff) return mismatchOf(diff, `table ${name} row ${was.origin + 1} ${diff.cell}`);
+			const why = differs(drafted[was.origin], was, `row ${was.origin + 1}`);
+			if (why) return why;
 		}
 		return "";
 	}
@@ -317,14 +318,20 @@ function checkTable(name, tsnap, drafted, verb) {
 			order.push(d.name);
 		}
 	}
-	const named = entries.filter((w) => typeof w.origin === "string" && draftRows.has(w.origin));
+	const named = inOrder.filter((w) => typeof w.origin === "string" && draftRows.has(w.origin));
 	const seen = named.map((w) => w.origin);
 	const expected = order.filter((n) => seen.includes(n));
 	if (seen.length !== expected.length || seen.some((n, i) => n !== expected[i]))
 		return `table ${name}: rows are not in the draft's order`;
 	for (const was of named) {
-		const diff = firstCellDiff(draftRows.get(was.origin), was.cells, types, ["name"]);
-		if (diff) return mismatchOf(diff, `table ${name} row ${was.origin} ${diff.cell}`);
+		const why = differs(draftRows.get(was.origin), was, `row ${was.origin}`);
+		if (why) return why;
+	}
+	// the rows the draft itself added, matched by their index in the draft's list
+	for (const was of entries) {
+		if (was.draftRow == null || !isObject(drafted[was.draftRow])) continue;
+		const why = differs(drafted[was.draftRow], was, `row at index ${was.draftRow}`);
+		if (why) return why;
 	}
 	return "";
 }
@@ -334,7 +341,9 @@ function checkTable(name, tsnap, drafted, verb) {
 // normalisation the diff uses); on a create table whose rows lined up with the draft, each
 // row's cells against the drafted row at its origin index; on an update table, that the
 // saved rows the draft also names are in the draft's order and hold every cell the draft
-// set. A field or cell the draft does not hold (a default the form filled) is not compared.
+// set, and so do the rows the draft added (by their index). A field or cell the draft does
+// not hold (a default the form filled) is not compared. `why` names the field or the table,
+// row and cell, never a value (a field may be a secret).
 // Never throws: anything unreadable is "not ok".
 export function snapshotMatchesCard(snapshot, card) {
 	try {
@@ -346,12 +355,8 @@ export function snapshotMatchesCard(snapshot, card) {
 		for (const [fieldname, was] of Object.entries(snapshot.fields)) {
 			if (!own(values, fieldname) || Array.isArray(values[fieldname])) continue;
 			const want = norm(types[fieldname] || "", asText(values[fieldname]));
-			if (was !== want) {
-				return {
-					ok: false,
-					why: mismatchOf({ form: was, draft: want }, `field ${fieldname}`),
-				};
-			}
+			if (was !== want)
+				return { ok: false, why: `field ${fieldname}: form differs from the draft` };
 		}
 		const verb = snapshot.verb === "update" ? "update" : "create";
 		for (const [name, tsnap] of Object.entries(snapshot.tables)) {
