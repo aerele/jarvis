@@ -829,15 +829,28 @@ _merge_doc_event(_star_doc_events, "on_submit", "jarvis.intake.capture.on_record
 # before_change is what db_set fires. Merged like the trigger dispatcher above.
 # The brake (an uncarded write may not delete, cancel or discard a root document)
 # is merged last so it runs first.
-# The workflow edit lock (aerele/jarvis#2506): a root save in a tool call of a
-# document in a Workflow state the user may not edit is refused, as Desk shows it
-# read-only. before_update_after_submit too: Frappe runs no before_validate for an
-# edit of a submitted document's allow-on-submit fields.
+# The workflow lock (aerele/jarvis#2506): in a tool call, a root write of a workflow
+# document is judged as Desk would allow it (edit only in a state the user may edit,
+# no state move, submit or modelled cancel outside a transition). before_validate
+# covers save and submit; Frappe runs none for an edit after submit or a cancel, and
+# skips their before_* events under flags.ignore_validate, hence the on_* backstops;
+# before_change is db_set (the state field only); on_trash judges a child row only.
 _WRITE_GUARD = "jarvis.tools._write_risk.guard_doc_event"
 _WRITE_BRAKE = "jarvis.tools._write_risk.brake_doc_event"
 _WORKFLOW_LOCK = "jarvis.tools._workflow_edit.guard_doc_event"
 for _guard_handler, _guard_events in (
-	(_WORKFLOW_LOCK, ("before_validate", "before_update_after_submit")),
+	(
+		_WORKFLOW_LOCK,
+		(
+			"before_validate",
+			"before_update_after_submit",
+			"on_update_after_submit",
+			"before_cancel",
+			"on_cancel",
+			"before_change",
+			"on_trash",
+		),
+	),
 	(_WRITE_GUARD, ("before_validate", "before_change", "before_rename", "on_trash")),
 	(_WRITE_BRAKE, ("before_cancel", "before_discard", "before_change", "on_trash")),
 ):
