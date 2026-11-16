@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { ref } from "vue";
-vi.mock("vue-router", () => ({ useRouter: () => ({ replace: vi.fn(), push: vi.fn() }) }));
+vi.mock("vue-router", () => ({
+	useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
+	// the chat registers the phone's back-button guard (the draft sheet); nothing leaves here
+	onBeforeRouteLeave: vi.fn(),
+}));
 // PWA components import agentName from "@/branding". In this frontend runner "@" is
 // frontend/src, whose branding has no agentName, so give them the PWA's values.
 vi.mock("@/branding", () => ({ agentName: "Jarvis", brandLogoUrl: "" }));

@@ -19,9 +19,18 @@ export { cardOfItem, isToolDraftItem };
 //   items       the pending list in the order it is shown (the numbers follow this order)
 //   stackHint   the phone's hint for the whole stack (typedCardReply.typedApprovalHint)
 //   ui          the token-keyed store (draftCardUi.makeDraftUi)
-// Preview and Edit are drawn disabled (`readOnly`) until their sheets exist; this is the one
-// place that stops passing it.
-export function phoneDraftModel({ items, streaming, stackHint, ui }) {
+//   editingToken  the card whose edit sheet is open (it shows "Editing")
+//   buildingToken the card whose sheet is being built (every draft card is locked meanwhile)
+// Preview is drawn disabled (`readOnly: "preview"`) until its sheet exists; this is the one place
+// that stops passing it.
+export function phoneDraftModel({
+	items,
+	streaming,
+	stackHint,
+	ui,
+	editingToken = "",
+	buildingToken = "",
+}) {
 	const list = Array.isArray(items) ? items : [];
 	const ctxMap = toolDraftCtxMap({
 		items: list,
@@ -29,7 +38,9 @@ export function phoneDraftModel({ items, streaming, stackHint, ui }) {
 		stackHint,
 		surface: "phone",
 		readBusy: ui.where.read,
-		readOnly: true,
+		editingToken,
+		buildingToken,
+		readOnly: "preview",
 	});
 	const last = list[list.length - 1];
 	// The legacy tiles have no hint of their own here: the phone draws the stack hint under the

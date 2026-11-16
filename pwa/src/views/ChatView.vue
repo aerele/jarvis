@@ -20,7 +20,7 @@ import {
 	recheck as recheckMaintenance,
 } from "../maintenanceGate";
 import { agentName } from "@/branding";
-import { useRouter } from "vue-router";
+import { onBeforeRouteLeave, useRouter } from "vue-router";
 // The desktop SPA's renderer — dependency-free, and sharing it means an agent
 // reply reads identically on both surfaces.
 import { renderMarkdown } from "@shared/markdown.js";
@@ -28,6 +28,7 @@ import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
 import { draftAnchor } from "../lib/draftAnchor.js";
 import { makeDraftUi } from "../lib/draftCardUi.js";
+import { makeDraftSheet } from "../lib/draftSheetHost.js";
 import { receiptLines } from "../lib/draftReceiptLines.js";
 import { hiddenSteps, proposeSubmitStep } from "../lib/draftReceiptHost.js";
 import { makeReceiptUi } from "../lib/receiptUi.js";
@@ -91,6 +92,7 @@ import SendRecoveryCard from "../components/SendRecoveryCard.vue";
 import { recoveryState, sendRecovery } from "../sendRecoveryStore";
 import DecisionCard from "../components/DecisionCard.vue";
 import DraftReceipt from "../components/DraftReceipt.vue";
+import DraftSheet from "../components/DraftSheet.vue";
 import DecisionSheet from "../components/DecisionSheet.vue";
 import FilePreviewSheet from "../components/FilePreviewSheet.vue";
 import { turnErrorInfo, showsRawReason } from "../../../jarvis/public/js/turn_errors.mjs";
@@ -354,12 +356,47 @@ const draftUi = makeDraftUi(reactive);
 // record, outside the rows, because every reload replaces them.
 const receiptUi = makeReceiptUi(reactive);
 const stepsHidden = computed(() => hiddenSteps(messages.value, receiptUi.goneKeys()));
+// The edit sheet of a draft card (lib/draftSheetHost.js): its state, and the shared doors that open,
+// save and discard. It reads the pending list as drawn and reloads the chat and the list itself
+// after a Save (a final draft starts no agent turn). Created here, in setup, because it owns a link
+// search that belongs to this component.
+const draftSheet = makeDraftSheet({
+	ui: draftUi,
+	api,
+	items: () => orderedPending.value,
+	conversation: () => convId.value,
+	generation: () => viewGeneration,
+	isCurrent: (cid, generation) => isCurrent(cid, generation),
+	streaming: () => sending.value,
+	agent: () => agentName,
+	removePending: (token) => {
+		pending.value = pending.value.filter((p) => p.token !== token);
+		settledTokens.value = withExcluded(settledTokens.value, [token]);
+	},
+	loadChat: () => load(),
+	loadPending: (source) => loadPending(source),
+	refreshChats: () => store.loadConversations(),
+	say: (text) => {
+		errorBanner.value = text;
+	},
+	receiptShown: (token) =>
+		messages.value.some(
+			(m) => m.role === "tool" && m.tool_call_id === token && !!m.action_outcome
+		),
+	create: (pa) => decideDraft("create", pa),
+	discard: (pa) => decideDraft("cancel", pa),
+});
+// The phone's back button: while a sheet is open it closes the sheet (or asks about unsaved edits)
+// and the chat stays.
+onBeforeRouteLeave(() => draftSheet.guardLeave());
 const draftModel = computed(() =>
 	phoneDraftModel({
 		items: orderedPending.value,
 		streaming: sending.value,
 		stackHint: typedApprovalHint.value,
 		ui: draftUi,
+		editingToken: draftSheet.editingToken.value,
+		buildingToken: draftSheet.building.value,
 	})
 );
 const savedDrafts = computed(() =>
@@ -1689,6 +1726,7 @@ watch(
 		pending.value = [];
 		clearDecision();
 		inflightToken.value = null;
+		draftSheet.reset();
 		draftUi.reset();
 		receiptUi.reset();
 		settledTokens.value = new Set(); // a settled token belonged to the previous conversation
@@ -1741,6 +1779,7 @@ onUnmounted(() => {
 	window.removeEventListener("focus", wakePending);
 	document.removeEventListener("visibilitychange", onVisible);
 	stopPendingPoll();
+	draftSheet.reset();
 	clearInterval(_cardClockTick);
 	clearInterval(queuePoll);
 	// Draft attachments remain in tab memory for a later return to this chat.
@@ -2089,6 +2128,7 @@ onUnmounted(() => {
 						:card="cardOfItem(p)"
 						:ctx="draftModel.ctxMap[p.token]"
 						@create="decideDraft('create', p)"
+						@edit="draftSheet.openEdit(p)"
 						@cancel="decideDraft('cancel', p)"
 					/>
 					<p v-if="draftUi.error(p.token)" class="jv-msg-error" role="alert">
@@ -2242,6 +2282,7 @@ onUnmounted(() => {
 		</div>
 	</Sheet>
 
+	<DraftSheet :host="draftSheet" />
 	<DecisionSheet
 		:key="`${decisionContext?.generation ?? viewGeneration}:${
 			decisionContext?.conversation ?? ''

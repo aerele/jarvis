@@ -76,8 +76,9 @@ describe("phoneDraftModel: what the chat draws for its pending list", () => {
 	])("parked: %s", (_, items, parked) => expect(model(items).parked).toBe(parked));
 
 	// Break: the phone card is drawn on the desktop surface (8 table rows, 28px buttons), or Preview
-	// and Edit are live before their sheets exist (they would emit events nothing handles).
-	it("draws on the phone surface with Preview and Edit disabled", () => {
+	// is live before its sheet exists (it would emit an event nothing handles), or Edit stays off
+	// now that the edit sheet opens.
+	it("draws on the phone surface with Edit live and Preview disabled", () => {
 		const items = [item("t1", cardOf("create-with-table"))];
 		const ctx = model(items).ctxMap.t1;
 		const w = mount(DraftCard, { props: { card: cardOf("create-with-table"), ctx } });
@@ -85,7 +86,7 @@ describe("phoneDraftModel: what the chat draws for its pending list", () => {
 		const states = Object.fromEntries(
 			w.findAll("button").map((b) => [b.text(), b.attributes("disabled") !== undefined])
 		);
-		expect(states).toEqual({ Create: false, Preview: true, Edit: true, Cancel: false });
+		expect(states).toEqual({ Create: false, Preview: true, Edit: false, Cancel: false });
 	});
 
 	// Break (P5): the typed hint is wrong for where the card sits. The stack hint is drawn ONCE, on

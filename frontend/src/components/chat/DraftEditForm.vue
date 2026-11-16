@@ -1,5 +1,6 @@
 <template>
-	<div class="jv-draft-body">
+	<div ref="root" class="jv-draft-body" :class="{ 'jv-surface-phone': surface === 'phone' }">
+		<slot name="top" />
 		<p v-if="linkError" class="jv-draft-toast" role="alert">
 			{{ linkError }}
 		</p>
@@ -350,13 +351,14 @@
 // is a state machine the host owns: it is driven through the `link-*` events (the same
 // signatures DraftCell and DraftRowBlock emit) and shown from the read-only `draftLink`.
 // Relative imports only (see draftFormImportGraph.spec.js): the phone resolves `@/` elsewhere.
-import { computed, ref } from "vue";
+import { computed, onMounted, onUpdated, provide, ref, toRef } from "vue";
 import DraftCell from "./DraftCell.vue";
 import DraftLinkMenu from "./DraftLinkMenu.vue";
 import DraftRowBlock from "./DraftRowBlock.vue";
 import { isFieldMissing, readonlyDisplay, removedSavedRows } from "../../lib/draftApply";
 import { blankRow, openChangedRows, toggleLabel, toggleParts } from "../../lib/draftTables";
 import { draftTotals as totalsOf } from "../../lib/draftTotals";
+import { DRAFT_SURFACE } from "../../lib/draftSurface";
 import { createRowStatusMemo } from "../../lib/rowStatusMemo";
 import {
 	closeRowForm,
@@ -375,7 +377,13 @@ const props = defineProps({
 	palette: { type: Object, default: () => ({}) },
 	// A link-search failure the host wants shown above the fields.
 	linkError: { type: String, default: "" },
+	// "desktop" (the default: exactly what the desktop panel has always drawn) or "phone" (16px
+	// inputs, 40px targets, one column, table rows as stacked cards; see the end of the style).
+	surface: { type: String, default: "desktop" },
 });
+// Slot `top` (the phone's host: its notices, at the top of the scrolling body) draws nothing when
+// empty. The link menu is teleported to <body>, so it cannot see this component's classes: it asks.
+provide(DRAFT_SURFACE, toRef(props, "surface"));
 const emit = defineEmits(["link-search", "link-blur", "link-pick", "link-close"]);
 // The host answers these; the arguments pass through unchanged.
 const onDraftLink = (...a) => emit("link-search", ...a);
@@ -414,6 +422,27 @@ function insertDraftRowBelow(ti, ri) {
 	t.rows.splice(ri + 1, 0, blankRow(t));
 	showRowForm(ti, t.rows[ri + 1]);
 }
+
+// On the phone a table row is a card and each cell sits under its column's name. The name is the
+// cell's `data-label` (the stylesheet prints it); it is put on the cells here, after each render,
+// and not in the grid's template, so the desktop's markup is exactly what it was.
+const root = ref(null);
+function labelPhoneCells() {
+	if (props.surface !== "phone" || !root.value) return;
+	const grids = root.value.querySelectorAll(".jv-grid");
+	(props.model.tables || []).forEach((t, ti) => {
+		const body = grids[ti] && grids[ti].tBodies[0];
+		for (const tr of body ? body.rows : []) {
+			// the first cell is the row's number and toggle, the last its remove button
+			if (tr.classList.contains("jv-grid-openrow")) continue;
+			(t.columns || []).forEach((c, i) => {
+				if (tr.cells[i + 1]) tr.cells[i + 1].setAttribute("data-label", c.label);
+			});
+		}
+	});
+}
+onMounted(labelPhoneCells);
+onUpdated(labelPhoneCells);
 
 // Always-present status region (focused by the host after a save is parked as a confirmation).
 const parkedRegion = ref(null);
@@ -794,5 +823,126 @@ defineExpose({ parkedRegion });
 	.jv-draft-fields {
 		grid-template-columns: 1fr;
 	}
+}
+/* ---- surface="phone" -------------------------------------------------------------------
+   Appended after every desktop rule (draftSurface.spec.js holds the old text as a prefix) and all
+   behind `.jv-surface-phone`, so the desktop cannot change. Inputs are 16px (iOS zooms the page
+   on focus below that) and every control and row button is at least 40px tall. Fields are one
+   column. A table is not a scrolling grid: each row is a card, every cell under its column name
+   (the cell's `data-label`), the row's edit toggle (the existing stacked row editor,
+   DraftRowBlock) beside the row number and its remove button in the corner. The body scrolls
+   inside the sheet and never sideways. */
+.jv-surface-phone {
+	overflow-x: hidden;
+	overscroll-behavior: contain;
+	-webkit-overflow-scrolling: touch;
+	padding-bottom: 28px;
+}
+.jv-surface-phone .jv-action-input,
+.jv-surface-phone :deep(.jv-action-input) {
+	font-size: 16px;
+	line-height: 1.35;
+	min-height: 40px;
+	padding: 8px 10px;
+}
+.jv-surface-phone .jv-draft-fields {
+	grid-template-columns: 1fr;
+}
+.jv-surface-phone .jv-draft-fld label,
+.jv-surface-phone .jv-draft-total-fld label {
+	font-size: 11.5px;
+}
+.jv-surface-phone .jv-draft-ro {
+	font-size: 15px;
+	padding: 8px 0;
+}
+.jv-surface-phone .jv-draft-table-title {
+	font-size: 13px;
+}
+.jv-surface-phone .jv-draft-gridwrap {
+	border: 0;
+	border-radius: 0;
+}
+.jv-surface-phone .jv-grid,
+.jv-surface-phone .jv-grid tbody,
+.jv-surface-phone .jv-grid tr,
+.jv-surface-phone .jv-grid td {
+	display: block;
+	width: auto;
+	box-sizing: border-box;
+}
+.jv-surface-phone .jv-grid thead {
+	display: none;
+}
+.jv-surface-phone .jv-grid tr {
+	position: relative;
+	margin-bottom: 10px;
+	padding: 8px 10px 10px;
+	border: 1px solid var(--border);
+	border-radius: 10px;
+	background: var(--surface);
+}
+.jv-surface-phone .jv-grid tr.jv-grid-openrow {
+	padding: 0;
+	border: 0;
+	background: none;
+}
+.jv-surface-phone .jv-grid td {
+	min-width: 0;
+	padding: 6px 0 0;
+	border: 0;
+}
+.jv-surface-phone .jv-grid td[data-label]::before {
+	content: attr(data-label);
+	display: block;
+	margin-bottom: 3px;
+	font-size: 11.5px;
+	font-weight: 650;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--text-3);
+}
+.jv-surface-phone .jv-grid td.jv-grid-opencell {
+	padding: 0;
+}
+.jv-surface-phone .jv-grid td.jv-grid-lead {
+	width: auto;
+	max-width: none;
+	padding: 0 48px 4px 0;
+}
+.jv-surface-phone .jv-grid td.jv-grid-x {
+	position: absolute;
+	top: 4px;
+	right: 4px;
+	width: auto;
+	padding: 0;
+}
+.jv-surface-phone .jv-grid-more,
+.jv-surface-phone .jv-grid-del {
+	min-width: 40px;
+	min-height: 40px;
+}
+.jv-surface-phone .jv-grid-num {
+	font-size: 14px;
+	font-weight: 650;
+}
+.jv-surface-phone .jv-rows-changed-open,
+.jv-surface-phone .jv-draft-addrow {
+	min-height: 40px;
+}
+.jv-surface-phone .jv-draft-addrow {
+	padding: 8px 4px;
+	font-size: 14px;
+}
+.jv-surface-phone :deep(.jv-rowform-btn),
+.jv-surface-phone :deep(.jv-rowform-close) {
+	min-height: 40px;
+	font-size: 14px;
+}
+.jv-surface-phone :deep(.jv-rowform-cols) {
+	grid-template-columns: 1fr;
+}
+.jv-surface-phone :deep(.jv-rowform-label) {
+	font-size: 11.5px;
 }
 </style>

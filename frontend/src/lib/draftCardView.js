@@ -17,7 +17,8 @@
 // ctx = { earlier, busy: "create"|"cancel"|"busy"|""|null, editing, streaming, surface: "desktop"|"phone",
 //         position, count, stackHint, readOnly }
 // `readOnly: true` draws Preview and Edit disabled in the ready states (S1, S2), so the layout
-// does not move when a host that cannot open them yet starts to. Every other button and state
+// does not move when a host that cannot open them yet starts to; `readOnly: "preview"` draws only
+// Preview disabled (a host that can open Edit but not yet Preview). Every other button and state
 // is unchanged by it. Only the phone host passes it, until its sheets exist.
 // `position` (1-based place in the pending stack), `count` (cards in the stack) and `stackHint`
 // (the hint for the whole stack) tell a card that shares the screen with others where it is.
@@ -66,6 +67,7 @@ function pressed(id, label, opts = {}) {
 // The buttons of a ready card, in tab order: the one primary first.
 function readyButtons(verb, ctx = {}) {
 	const readOnly = ctx.readOnly === true;
+	const previewOff = readOnly || ctx.readOnly === "preview";
 	return [
 		pressed(
 			verb === "update" ? "save" : "create",
@@ -74,7 +76,7 @@ function readyButtons(verb, ctx = {}) {
 				primary: true,
 			}
 		),
-		pressed("preview", "Preview", { disabled: readOnly }),
+		pressed("preview", "Preview", { disabled: previewOff }),
 		pressed("edit", "Edit", { disabled: readOnly }),
 		pressed("cancel", "Cancel"),
 	];
