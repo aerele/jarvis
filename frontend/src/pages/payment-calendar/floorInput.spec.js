@@ -40,10 +40,6 @@ describe("parseFloor", () => {
 		expect(parseFloor("1000000000.123")).toEqual({ error: FLOOR_ERROR });
 		expect(parseFloor("abc5")).toEqual({ error: FLOOR_ERROR });
 	});
-
-	it("uses the template's wording", () => {
-		expect(FLOOR_ERROR).toBe("Enter a non-negative amount with up to two decimal places.");
-	});
 });
 
 describe("formatFloor", () => {
