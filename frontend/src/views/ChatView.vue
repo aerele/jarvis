@@ -9380,9 +9380,11 @@ const toolDeps = {
 function cancelToolDraft(pa) {
 	return cancelToolItem(pa, toolDeps);
 }
-function openToolDraft(pa) {
+async function openToolDraft(pa) {
 	rememberToolOpener(pa, "Edit");
-	return openToolDraftPanel(pa, toolDeps);
+	const result = await openToolDraftPanel(pa, toolDeps);
+	if (result === "failed") focusAfterFailedOpen();
+	return result;
 }
 function previewToolDraft(pa) {
 	rememberToolOpener(pa, "Preview");
@@ -9414,7 +9416,7 @@ const toolPreviewPanel = () =>
 		: null) || document.querySelector(".dp-panel");
 const toolFormOpen = computed(() => !!draftPanel.value && !!draftPanel.value.tool);
 
-// Escape closes the Preview and a clean form; a form with edits stays (as a click on the
+// Escape closes an open Link menu first, then the Preview and a clean form; a form with edits stays (as a click on the
 // backdrop does) and takes focus back. Tab stays inside the open panel. A key something inside
 // the panel already took (a link menu, a row form) or an open dialog is left alone.
 function onToolPanelKey(e) {
@@ -9438,10 +9440,14 @@ function onToolPanelKey(e) {
 		preview: !!toolPreview.value,
 		form: toolFormOpen.value,
 		dirty: toolFormOpen.value && draftIsDirty(draftPanel.value),
+		linkMenu: !toolPreview.value && draftLink.value.open && draftLink.value.items.length > 0,
 	});
 	if (!action) return;
 	e.preventDefault();
-	if (action === "close-preview") toolPreview.value = null;
+	// closeDraftLink is the blur handler (it keeps the menu while its input has focus), so the menu
+	// is closed the way the panel's own @link-close does
+	if (action === "close-menu") draftLink.value = { ...draftLink.value, open: false };
+	else if (action === "close-preview") toolPreview.value = null;
 	else if (action === "close-form") closeDraftPanel();
 	else if (draftPanelEl.value) draftPanelEl.value.focus();
 }
@@ -9481,13 +9487,23 @@ watch(
 		if (form || preview || toolDraftBuilding.value) return;
 		const opener = toolOpener;
 		await nextTick();
-		if (toolFormOpen.value || toolPreview.value) return;
-		if (!opener || opener.conversation !== currentId.value) return;
-		const button = openerButton(document, opener.token, opener.label);
-		if (button) button.focus();
-		else composerRef.value?.focusInput?.();
+		returnToolFocus(opener);
 	}
 );
+// Back to the card button that opened a panel, else the composer. Nothing moves while another
+// panel is open or building.
+function returnToolFocus(opener) {
+	if (toolFormOpen.value || toolPreview.value || toolDraftBuilding.value) return;
+	if (!opener || opener.conversation !== currentId.value) return;
+	const button = openerButton(document, opener.token, opener.label);
+	if (button) button.focus();
+	else composerRef.value?.focusInput?.();
+}
+// The form could not be built (a Preview that led to Edit has already closed): the focus watcher
+// skipped its return while the build ran, so it goes back here.
+function focusAfterFailedOpen() {
+	return returnToolFocus(toolOpener);
+}
 
 // While the form is open its card can be replaced, confirmed or cancelled elsewhere: the pending
 // list is re-read every few seconds, so the dead-draft banner shows without waiting for a focus

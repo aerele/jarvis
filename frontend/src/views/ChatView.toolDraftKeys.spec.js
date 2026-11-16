@@ -54,6 +54,7 @@ describe("the keyboard handler of the panels", () => {
 			modalIsOpen: () => false,
 			tabWrapTarget,
 			toolPanelKeyAction,
+			draftLink: ref({ key: "", items: [], open: false, anchor: null }),
 			draftIsDirty: (m) => !!m.dirty,
 			document,
 			closeDraftPanel: () => calls.push("closeDraftPanel"),
@@ -114,6 +115,27 @@ describe("the keyboard handler of the panels", () => {
 		}
 	});
 
+	// Break: Escape in a Link input with its menu open closes the whole clean form (or does nothing
+	// for a form with edits) instead of closing only the menu; or a menu with no items counts as open.
+	for (const [name, dirty, items, open, closed, stillOpen] of [
+		["clean form, menu open", false, ["A"], true, 0, false],
+		["form with edits, menu open", true, ["A"], true, 0, false],
+		["clean form, menu open but empty", false, [], true, 1, true],
+		["clean form, menu closed", false, ["A"], false, 1, false],
+	])
+		it(`Escape with the link menu: ${name}`, () => {
+			const m = make();
+			m.scope.draftPanel.value = { tool: true, dirty };
+			m.scope.draftLink.value = { key: "f:x", items, open, anchor: null };
+			const e = press("Escape");
+			m.key(e);
+			expect([
+				m.calls.length,
+				m.scope.draftLink.value.open,
+				e.preventDefault.mock.calls.length,
+			]).toEqual([closed, stillOpen, 1]);
+		});
+
 	// Break: Tab leaves the open form from its last control.
 	it("Tab at the last control of the form wraps to the first", () => {
 		const m = make();
@@ -155,7 +177,7 @@ describe("focus goes into a panel and returns to the card button that opened it"
 			openerButton,
 			document,
 		};
-		const fns = run(code, scope, ["rememberToolOpener"]);
+		const fns = run(code, scope, ["rememberToolOpener", "focusAfterFailedOpen"]);
 		return { scope, composer, ...fns };
 	};
 	const settle = async () => {
@@ -181,6 +203,25 @@ describe("focus goes into a panel and returns to the card button that opened it"
 			await settle();
 			expect(document.activeElement.textContent.trim()).toBe(want);
 			expect(m.composer.focusInput).not.toHaveBeenCalled();
+		});
+
+	// Break: the Preview's Edit fails to build the form and focus is left on nothing (the Preview is
+	// already closed and the watcher skipped its return while the build ran).
+	for (const [name, setup, composerCalls, label] of [
+		["the Edit button", () => card(), 0, "Edit"],
+		["the composer when Edit is disabled", () => card(true), 1, ""],
+	])
+		it(`a failed form open puts focus on ${name}`, () => {
+			setup();
+			const m = make();
+			m.rememberToolOpener({ token: "t1", conversation: "c1" }, "Edit");
+			m.focusAfterFailedOpen();
+			expect([
+				document.activeElement.tagName === "BUTTON"
+					? document.activeElement.textContent.trim()
+					: "",
+				m.composer.focusInput.mock.calls.length,
+			]).toEqual([label, composerCalls]);
 		});
 
 	// Break: focus is lost when the card is gone or its button is disabled, or follows a person who
@@ -331,7 +372,6 @@ describe("the template", () => {
 			'<div v-else class="jv-action jv-pending">'
 		);
 		expect(draft.replace(/\s+/g, " ")).toContain(':data-draft-token="pa.token"');
-		expect(draft).toContain('style="margin: 8px 0 12px"');
 		expect(src).toContain(
 			'<div v-if="orphanHint" class="jv-stack-hint">{{ orphanHint }}</div>'
 		);

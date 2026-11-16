@@ -32,6 +32,16 @@ describe("toolPanelKeyAction: what Escape does", () => {
 			{ preview: true, form: true },
 			"close-preview",
 		],
+		[
+			"a link menu is open: only the menu closes",
+			{ form: true, linkMenu: true },
+			"close-menu",
+		],
+		[
+			"a link menu is open over edits: still only the menu",
+			{ form: true, dirty: true, linkMenu: true },
+			"close-menu",
+		],
 		["already handled inside the panel", { form: true, defaultPrevented: true }, null],
 		["an IME composition", { form: true, composing: true }, null],
 		["a dialog is open", { preview: true, dialogOpen: true }, null],

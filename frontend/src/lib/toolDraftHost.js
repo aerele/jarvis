@@ -252,7 +252,7 @@ export async function openToolDraftPanel(pa, d) {
 // cells (a read-only column through `model.computed`, any other blank cell filled in) and its date
 // text in place of the control's ISO value.
 export async function openToolPreview(pa, d) {
-	const built = await buildFor(pa, d, { readOnly: false });
+	const built = await buildFor(pa, d, { readOnly: false, verbatim: true });
 	if (!built) return "failed";
 	built.model.computed = computedFromCard(built.model, built.card);
 	cardDatesIntoPreview(built.model, built.card);
@@ -292,7 +292,10 @@ async function settleSave(p, view, r, outcome, d) {
 	// A draft that is no longer open (the card is gone) while the form holds edits: the form stays,
 	// with its edits, and shows the dead-draft banner once the card has left the list (the person
 	// closes it); a clean form closes as it always did.
-	const keepForm = outcome.kind === "closed" && d.panel() === p && draftIsDirty(p);
+	// A partial reply is never kept: part of the edits may already be saved, so "your edits were not
+	// saved" would be untrue. It closes, refreshes and shows the partial message.
+	const keepForm =
+		outcome.kind === "closed" && r.outcome !== "partial" && d.panel() === p && draftIsDirty(p);
 	if (!keepForm) closeForm();
 	if (outcome.kind === "closed") d.notify(outcome.note, { type: "error" });
 	d.removePending(p.token);

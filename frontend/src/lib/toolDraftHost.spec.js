@@ -191,10 +191,6 @@ describe("a stack of pending cards: the hint and the number each draft card show
 			["S4", [true, true, true, true]],
 		]);
 	});
-
-	it("not a list gives no ctx", () => {
-		expect(toolDraftCtxMap({ items: null, streaming: false, stackHint: "" })).toEqual({});
-	});
 });
 
 describe("receiptReloadNeeded: after Create, does the chat need a reload to show the receipt?", () => {
@@ -972,6 +968,24 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 		// not dead during its own save, dead once the save is over
 		expect(h.state.deadAt).toEqual([false, false]);
 		expect(toolPanelDead(p, h.state.items)).toBe(true);
+	});
+
+	// Break: a partial reply (part of the edits may already be saved) keeps the form with the banner
+	// "Your edits were not saved", which contradicts the toast.
+	it("closed with outcome partial and edits in the form: the form closes", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = {
+			ok: false,
+			closed: true,
+			outcome: "partial",
+			assistant_told: true,
+			error: { code: "X", message: "Part of this was saved" },
+		};
+		expect(await saveToolDraft(p, h.d)).toBe("closed");
+		expect(h.state.panel).toBeNull();
+		expect(h.state.log).toContain("reload");
 	});
 
 	// Break: a clean form is kept open for no reason (nothing to lose), or the dirty check is

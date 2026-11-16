@@ -343,6 +343,13 @@ describe("fillCalculatedCells: what goes into a blank cell, and what never does"
 		["thousands separators go from a number", "hours", "", "1,500.50", "1500.50"],
 		["a percent sign is not a number", "hours", "", "50%", ""],
 		["a number is kept as the card wrote it", "hours", "", "1.50", "1.50"],
+		["a whole number", "hours", "", "3", "3"],
+		["a negative with US thousands", "hours", "", "-1,234.50", "-1234.50"],
+		["a comma decimal is ambiguous: blank", "hours", "", "1,50", ""],
+		["a dot-thousands comma-decimal is ambiguous: blank", "hours", "", "1.500,00", ""],
+		["a space-thousands comma-decimal is ambiguous: blank", "hours", "", "1 500,00", ""],
+		["text that is not a number: blank", "hours", "", "abc", ""],
+		["an empty card cell: blank", "hours", "", "", ""],
 	];
 	for (const [name, fieldname, own, text, want] of kinds)
 		it(name, () => {
@@ -354,6 +361,16 @@ describe("fillCalculatedCells: what goes into a blank cell, and what never does"
 			fillCalculatedCells(model, card, { readOnly: true });
 			expect(model.tables[0].rows[0][fieldname]).toBe(want);
 		});
+
+	// Break: the Preview shows a number the card does not (a comma-decimal "1,50" read as 150, or
+	// left blank) because it was filled for the editable form with the form's strict parse.
+	it("verbatim (the Preview) puts the card's own number text in a number cell", () => {
+		const card = timesheetCard();
+		const model = timesheetModel();
+		card.tables[0].rows[0].cells[card.tables[0].fieldnames.indexOf("hours")] = "1.500,00";
+		fillCalculatedCells(model, card, { readOnly: false, verbatim: true });
+		expect(model.tables[0].rows[0].hours).toBe("1.500,00");
+	});
 
 	// Break: the Preview's own rule for calculated read-only columns is pre-empted (the cell reads as
 	// an ordinary value and loses its calculated look), or the form leaves a read-only column blank.

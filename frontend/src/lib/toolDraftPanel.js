@@ -114,33 +114,43 @@ export function computedFromCard(model, card) {
 // A cell filled here is display: it is put in the row before the snapshot, so it is the baseline
 // and is not a change; `settleCalculatedCells` blanks it while the person has edited its row (its
 // value would be stale) and gives it back when the row is as drafted again. It is sent only if
-// the person types a value of their own into it.
+// the person types a value of their own into it; clearing it by hand is such a change too (the
+// empty cell is sent), it is not undone.
 
 const NUMBER_TYPES = new Set(["Int", "Float", "Currency", "Percent", "Rating"]);
 // A typed control cannot show the card's formatted text for these.
 const NOT_FILLED = new Set(["Date", "Datetime", "Time", "Table", "Table MultiSelect"]);
 const isBlank = (v) => v == null || String(v).trim() === "";
-// The card's text for a number: its thousands separators go ("1,500.00" -> "1500.00"); anything
-// else a number input cannot hold (a percent sign, a currency symbol) is left unfilled.
+// The card's text for a number, only when it reads one way in every number format: plain digits
+// with a dot decimal ("1.50"), or US thousands ("1,500.50" -> "1500.50"). "1,50" (one and a half,
+// or a hundred and fifty?), "1.500,00" and "1 500,00" are ambiguous without the site's number
+// format, so the cell stays blank: blank is honest, a wrong number is not. A percent sign or a
+// currency symbol is not a number either.
+const PLAIN_NUMBER = /^-?\d+(\.\d+)?$/;
+const US_THOUSANDS = /^-?\d{1,3}(,\d{3})+(\.\d+)?$/;
 const plainNumber = (text) => {
-	const t = String(text).trim().replace(/,/g, "");
-	return /^-?\d+(\.\d+)?$/.test(t) ? t : null;
+	const t = String(text).trim();
+	if (PLAIN_NUMBER.test(t)) return t;
+	return US_THOUSANDS.test(t) ? t.replace(/,/g, "") : null;
 };
 
-// What to put in a cell of this column for the card's text, or null to leave it blank.
-function cellFor(column, text) {
+// What to put in a cell of this column for the card's text, or null to leave it blank. `verbatim`
+// (the Preview, which only displays) puts the card's own text in a number cell, so Preview reads
+// exactly as the card does in every number format.
+function cellFor(column, text, verbatim) {
 	const type = column.fieldtype || "";
 	if (column.read_only) return String(text);
 	if (NOT_FILLED.has(type)) return null;
-	if (NUMBER_TYPES.has(type)) return plainNumber(text);
+	if (NUMBER_TYPES.has(type)) return verbatim ? String(text) : plainNumber(text);
 	return String(text);
 }
 
 // Fill the cells of `model`'s tables that are blank in the model and shown by the card, matching
 // rows and columns the way `computedFromCard` does (unique label, equal row count, column
 // fieldnames). `readOnly: false` leaves the read-only columns to the Preview's own calculated-cell
-// rule. Records what it filled in `model.calc`, for `settleCalculatedCells`. Returns the list.
-export function fillCalculatedCells(model, card, { readOnly = true } = {}) {
+// rule; `verbatim: true` (the Preview) fills a number cell with the card's text as shown. Records
+// what it filled in `model.calc`, for `settleCalculatedCells`. Returns the list.
+export function fillCalculatedCells(model, card, { readOnly = true, verbatim = false } = {}) {
 	const calc = [];
 	const cells = computedFromCard(model, card);
 	for (const t of (model && model.tables) || []) {
@@ -152,7 +162,7 @@ export function fillCalculatedCells(model, card, { readOnly = true } = {}) {
 			for (const c of t.columns || []) {
 				if (!(c.fieldname in shown) || !isBlank(row[c.fieldname])) continue;
 				if (c.read_only && !readOnly) continue;
-				const value = cellFor(c, shown[c.fieldname]);
+				const value = cellFor(c, shown[c.fieldname], verbatim);
 				if (value == null) continue;
 				row[c.fieldname] = value;
 				calc.push({

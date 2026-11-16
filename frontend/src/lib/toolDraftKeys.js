@@ -57,8 +57,9 @@ export function firstEditable(panel) {
 }
 
 // What a key press does while a panel of a server draft card is open:
-//   "close-preview", "close-form", "refocus-form" (a form with edits stays open, as a click on the
-//   backdrop does), or null (not ours). `key` is the event's; a key already handled by something
+//   "close-menu" (a Link input's suggestions are open: Escape closes only them), "close-preview",
+//   "close-form", "refocus-form" (a form with edits stays open, as a click on the backdrop does),
+//   or null (not ours). `key` is the event's; a key already handled by something
 //   inside the panel (a link menu, a row form), an IME composition, or an open dialog is not ours.
 export function toolPanelKeyAction({
 	key,
@@ -68,8 +69,10 @@ export function toolPanelKeyAction({
 	preview = false,
 	form = false,
 	dirty = false,
+	linkMenu = false,
 }) {
 	if (key !== "Escape" || defaultPrevented || composing || dialogOpen) return null;
+	if (form && linkMenu) return "close-menu";
 	if (preview) return "close-preview";
 	if (form) return dirty ? "refocus-form" : "close-form";
 	return null;
