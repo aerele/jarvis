@@ -116,16 +116,24 @@ export function receiptReloadNeeded({ token, conversation, currentConversation, 
 	);
 }
 
-// Where the busy flags of a pending item live. The default is the item itself, which is what
-// the desktop has always done. The phone passes an accessor over a store keyed by token, because
-// its pending list replaces the item objects on every read and a flag kept on one would be lost.
-//   read(pa) -> {busy, busyKind};  setKind(pa, kind) writes the kind ("" clears it)
+// Where the UI state of a pending item lives (its busy flags and its error line). The default is
+// the item itself, which is what the desktop has always done. The phone passes an accessor over a
+// store keyed by token, because its pending list replaces the item objects on every read and a
+// flag kept on one would be lost.
+//   read(pa) -> {busy, busyKind, error};  setKind(pa, kind) writes the kind ("" clears it);
+//   setBusy(pa, busy) writes the busy flag
+// `withBusyKind` takes it as its fourth argument; the form's Save, Create and Cancel (below) take
+// it as `d.where`.
 export const BUSY_ON_ITEM = {
-	read: (pa) => ({ busy: pa.busy, busyKind: pa.busyKind }),
+	read: (pa) => ({ busy: pa.busy, busyKind: pa.busyKind, error: pa.error }),
 	setKind: (pa, kind) => {
 		pa.busyKind = kind;
 	},
+	setBusy: (pa, busy) => {
+		pa.busy = busy;
+	},
 };
+const whereOf = (d) => d.where || BUSY_ON_ITEM;
 
 // Run one card action (Create -> the confirm handler, Cancel -> the discard handler) with
 // the item's `busyKind` set, so the card shows the working state with the spinner on the
@@ -180,6 +188,7 @@ export function nextPanelStale(state, { panelOpen, panelChanged, parked }) {
 //   d.thrown(error, fallback) -> {message};  d.metaFields(doctype) -> form meta fields
 //   d.afterMarks(mark) -> after the DOM caught up, scroll to and focus the server's first mark
 //     (firstServerMark's answer, or null: then the error banner is scrolled into view)
+//   d.where -> where the item's busy flags and error line live (BUSY_ON_ITEM when absent)
 //   d.create(item) -> Create on the card (the confirm handler under busyKind create)
 //   d.discard(item) -> Cancel on the card (the discard handler under busyKind cancel), true if started
 
@@ -350,7 +359,7 @@ async function createFromForm(p, pa, view, d) {
 		d.closePanel();
 		return "created";
 	}
-	p.error = still.error || null;
+	p.error = whereOf(d).read(still).error || null;
 	return "kept";
 }
 
@@ -360,7 +369,9 @@ async function createFromForm(p, pa, view, d) {
 // "ignored" | "stale" | "created" | "kept" | "saved" | "keep" | "closed-open" | "closed" | "error".
 export async function saveToolDraft(p, d) {
 	const pa = p && p.tool ? d.find(p.token, p.conversation) : undefined;
-	if (!pa || p.applying || p.saveBlocked || pa.busy || pa.busyKind || d.streaming())
+	const where = whereOf(d);
+	const now = pa ? where.read(pa) : {};
+	if (!pa || p.applying || p.saveBlocked || now.busy || now.busyKind || d.streaming())
 		return "ignored";
 	const view = d.capture(p.token);
 	if (pa.conversation !== view.conversation || !d.pendingCurrent(view)) return "ignored";
@@ -374,8 +385,8 @@ export async function saveToolDraft(p, d) {
 	if (!Object.keys(values).length) return createFromForm(p, pa, view, d);
 	p.applying = true;
 	p.error = null;
-	pa.busy = true;
-	pa.busyKind = "save";
+	where.setBusy(pa, true);
+	where.setKind(pa, "save");
 	d.inflight.add(p.token);
 	try {
 		const r = await d.save(p.token, view.conversation, values);
@@ -395,8 +406,8 @@ export async function saveToolDraft(p, d) {
 		if (d.chatCurrent(view)) {
 			const item = d.find(p.token, view.conversation);
 			if (item) {
-				item.busy = false;
-				item.busyKind = "";
+				where.setBusy(item, false);
+				where.setKind(item, "");
 			}
 			d.inflight.delete(p.token);
 		}
@@ -430,7 +441,7 @@ export async function cancelToolItem(pa, d) {
 		d.closePanel();
 		return "cancelled";
 	}
-	p.error = still.error || null;
+	p.error = whereOf(d).read(still).error || null;
 	return "kept";
 }
 

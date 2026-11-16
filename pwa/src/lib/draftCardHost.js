@@ -59,7 +59,8 @@ export function keepBusyItems(next, previous, busyTokens) {
 //   d     { ui, confirm(token, conversation), dismiss(token, conversation), streaming() -> bool,
 //           current() -> bool (this chat is still the one on screen), removePending(token),
 //           settle(token) (keep a stale read from putting the card back), say(text) (the chat's
-//           banner), reload() (the conversation), reloadPending(), agent }
+//           banner), reload() (the conversation), reloadPending(), receiptShown(token) (the
+//           reloaded rows hold a decided row for the card), agent }
 // Resolves to "ignored" (a second press, the turn is running, no token), "stale" (the person left
 // the chat), "kept" (the card stays, usable again, with an error line) or "gone" (the card is
 // spent, both lists were reloaded). The busy kind is held for the whole call and cleared at the
@@ -98,7 +99,6 @@ export async function runDraftDecision(kind, pa, d) {
 			d.removePending(token);
 			d.settle(token);
 			d.ui.forget(token);
-			if (outcome.say) d.say(outcome.say);
 			// The decision is final and starts no agent turn, so nothing else will bring the receipt:
 			// reload the chat, then the pending list (it reads the reloaded rows).
 			try {
@@ -107,6 +107,10 @@ export async function runDraftDecision(kind, pa, d) {
 			} catch {
 				/* the write already happened; a failed read must not turn it into an error line */
 			}
+			// A card spent with no receipt of its own to say why (it was handled elsewhere, its token was
+			// used) gets one line in the chat's banner. When the reload brought its receipt, the receipt
+			// is the line (State Table: receipt only), so the banner would say it twice.
+			if (d.current() && outcome.say && !d.receiptShown(token)) d.say(outcome.say);
 			result = d.current() ? "gone" : "stale";
 		},
 		d.ui.where

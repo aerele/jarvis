@@ -10,7 +10,11 @@ test("busy kind and error are found by token, whatever object the item is now", 
 	ui.where.setKind(before, "create");
 	ui.setError("t1", "Try again");
 	const after = { token: "t1", conversation: "c", preview: {} }; // a later read's new object
-	assert.deepEqual(ui.where.read(after), { busy: false, busyKind: "create" });
+	assert.deepEqual(ui.where.read(after), {
+		busy: false,
+		busyKind: "create",
+		error: "Try again",
+	});
 	assert.equal(ui.error("t1"), "Try again");
 	assert.deepEqual(ui.busyTokens(), ["t1"]);
 	assert.equal(ui.busyKind("t2"), "", "another card is untouched");

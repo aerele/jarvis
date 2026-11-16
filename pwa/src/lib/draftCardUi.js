@@ -39,11 +39,20 @@ export function makeDraftUi(reactive = (x) => x) {
 			for (const token of Object.keys(state)) delete state[token];
 		},
 	};
-	// The accessor for toolDraftHost's withBusyKind (`where`) and toolDraftCtxMap (`readBusy`).
-	// `busy` is always false here: the phone's draft cards have no other busy flag than the kind.
+	// The accessor for toolDraftHost: withBusyKind's `where`, `d.where` of the form's Save / Create /
+	// Cancel, and toolDraftCtxMap's `readBusy`. `busy` is always false here: the phone's draft
+	// cards have no other busy flag than the kind (a Save sets the kind "save", which locks the card).
 	ui.where = {
-		read: (pa) => ({ busy: false, busyKind: ui.busyKind(pa && pa.token) }),
+		read: (pa) => {
+			const token = pa && pa.token;
+			return {
+				busy: false,
+				busyKind: ui.busyKind(token),
+				error: ui.error(token) || undefined,
+			};
+		},
 		setKind: (pa, kind) => ui.setKind(pa && pa.token, kind),
+		setBusy: () => {},
 	};
 	return ui;
 }

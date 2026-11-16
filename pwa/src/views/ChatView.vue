@@ -354,7 +354,6 @@ const draftUi = makeDraftUi(reactive);
 // record, outside the rows, because every reload replaces them.
 const receiptUi = makeReceiptUi(reactive);
 const stepsHidden = computed(() => hiddenSteps(messages.value, receiptUi.goneKeys()));
-const receiptsOf = (it) => receiptLines(it.tools, { hiddenSteps: stepsHidden.value });
 const draftModel = computed(() =>
 	phoneDraftModel({
 		items: orderedPending.value,
@@ -629,6 +628,15 @@ const items = computed(() => {
 			out.push(current);
 		}
 	}
+	return out;
+});
+
+// The draft receipt lines of each item, by item key: computed once per change, not per render.
+const receiptsByItem = computed(() => {
+	const out = {};
+	for (const it of items.value)
+		if (it.tools?.length)
+			out[it.key] = receiptLines(it.tools, { hiddenSteps: stepsHidden.value });
 	return out;
 });
 
@@ -1624,6 +1632,7 @@ function submitNext(step) {
 		ui: receiptUi,
 		propose: (s) => api.proposeNextAction(cid, s),
 		current: () => isCurrent(cid, generation),
+		reload: () => load(),
 		reloadPending: () => loadPending(),
 	});
 }
@@ -1652,6 +1661,11 @@ function decideDraft(kind, pa) {
 		},
 		reload: () => load(),
 		reloadPending: () => loadPending(),
+		// a decided row for the token is loaded: the receipt line says what happened
+		receiptShown: (token) =>
+			messages.value.some(
+				(m) => m.role === "tool" && m.tool_call_id === token && !!m.action_outcome
+			),
 	});
 }
 
@@ -1845,7 +1859,7 @@ onUnmounted(() => {
 						@dismissed="onDraftDismissed"
 					/>
 					<DraftReceipt
-						v-for="line in receiptsOf(it)"
+						v-for="line in receiptsByItem[it.key]"
 						:key="line.key"
 						:line="line"
 						:busy="!!line.stepKey && receiptUi.busyKey() === line.stepKey"
@@ -1970,7 +1984,7 @@ onUnmounted(() => {
 				     its draft receipt. -->
 				<template v-else>
 					<DraftReceipt
-						v-for="line in receiptsOf(it)"
+						v-for="line in receiptsByItem[it.key]"
 						:key="line.key"
 						:line="line"
 						:busy="!!line.stepKey && receiptUi.busyKey() === line.stepKey"

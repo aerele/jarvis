@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { receiptLines } from "./draftReceiptLines.js";
+import { mergeNewestPage, refreshNames } from "../../../frontend/src/lib/historyPaging.js";
 
 // A decided tool row as get_conversation hands it, stamped as a draft card's.
 const row = (over = {}, result = null, args = { doctype: "Timesheet" }) => ({
@@ -191,4 +192,44 @@ test("ChatView draws the lines after the typed card, before the record cards, an
 	const orphan = view.indexOf("<template v-else>\n\t\t\t\t\t<DraftReceipt");
 	assert.ok(orphan > records, "the orphan branch draws them too");
 	assert.equal(view.split("<DraftReceipt").length - 1, 2);
+});
+
+// Break: the receipt never reaches the thread because a non-forced load() keeps the held PENDING
+// copy of the row. load() names every held pending tool row (`refresh`), the server answers with
+// them fresh in `refreshed` (jarvis/chat/api.py stamps messages, older_pending and refreshed alike),
+// and mergeNewestPage swaps each in place. This is the path a Create takes: the phone calls load()
+// after the decision, and the row it parked before is older than the newest page.
+test("a held pending row is replaced by its stamped decided row on a plain load", () => {
+	const pendingRow = row({
+		name: "t1",
+		seq: 2,
+		action_outcome: "",
+		tool_status: "pending",
+		draft_card: true,
+		draft_receipt: undefined,
+		pending_card: { draft: {} },
+	});
+	const held = [
+		{ name: "a", seq: 1, role: "assistant", content: "Drafted." },
+		pendingRow,
+		{ name: "b", seq: 3, role: "assistant", content: "..." },
+		{ name: "c", seq: 4, role: "user", content: "..." },
+		{ name: "d", seq: 5, role: "assistant", content: "..." },
+	];
+	const asked = refreshNames(held);
+	assert.deepEqual(asked, ["t1"]);
+	const decided = row({ name: "t1", seq: 2 }, ok());
+	const reply = {
+		messages: [
+			{ name: "d", seq: 5, role: "assistant", content: "..." },
+			{ name: "e", seq: 6, role: "user", content: "..." },
+		],
+		paging: { has_more: true, before: 5, start: 5 },
+		refreshed: [decided],
+	};
+	const merged = mergeNewestPage(held, { hasMore: true, before: 1, newest: 5 }, reply, asked);
+	const tools = merged.messages.filter((m) => m.role === "tool");
+	assert.deepEqual(tools, [decided]);
+	assert.equal(receiptLines(tools)[0].text, "Created Timesheet TS-0001");
+	assert.deepEqual(receiptLines([pendingRow]), [], "the pending copy drew nothing");
 });

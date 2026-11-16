@@ -1187,6 +1187,42 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 		]);
 	});
 
+	// Break (the phone): Save, plain Create and Cancel read or write the busy flags and the error on
+	// the ITEM instead of through the host's accessor, so a pending read that replaces the item
+	// objects loses them mid-call. With `d.where` the item is never touched.
+	it("with an injected accessor the item's own flags and error are never read or written", async () => {
+		const h = host();
+		const flags = { busy: false, busyKind: "", error: undefined };
+		const calls = [];
+		h.d.where = {
+			read: () => ({ ...flags }),
+			setKind: (_, k) => (calls.push(["kind", k]), (flags.busyKind = k)),
+			setBusy: (_, b) => (calls.push(["busy", b]), (flags.busy = b)),
+		};
+		const p = await openForm(h);
+		const item = h.state.items[0];
+		edit(p);
+		h.state.reply = { ok: true, verb: "create", name: "TS-1" };
+		expect(await saveToolDraft(p, h.d)).toBe("saved");
+		// (the saved card left the list, so there is nothing to clear afterwards)
+		expect(calls).toEqual([
+			["busy", true],
+			["kind", "save"],
+		]);
+		expect([item.busy, item.busyKind]).toEqual([false, ""]);
+		// a refused plain Create: the error comes from the accessor, not from the item
+		const h2 = host();
+		h2.d.where = {
+			read: () => ({ busy: false, busyKind: "", error: { message: "From the store" } }),
+			setKind() {},
+			setBusy() {},
+		};
+		const p2 = await openForm(h2);
+		h2.state.items[0].error = { message: "On the item" };
+		expect(await saveToolDraft(p2, h2.d)).toBe("kept");
+		expect(p2.error.message).toBe("From the store");
+	});
+
 	// Break: the late answer of a chat the person left closes or marks the NEW chat's form.
 	it("a reply that lands after the chat changed touches nothing", async () => {
 		const h = host();

@@ -191,6 +191,7 @@ function deps(ui, over = {}) {
 		say: (t) => calls.push(["say", t]),
 		reload: vi.fn(async () => calls.push(["reload"])),
 		reloadPending: vi.fn(async () => calls.push(["reloadPending"])),
+		receiptShown: () => false,
 		...over,
 	};
 	return d;
@@ -202,43 +203,40 @@ describe("runDraftDecision: what each reply does on screen", () => {
 	// Break: a spent card stays (pressable twice), a pending card is taken away, a failure is silent,
 	// or the receipt is never reloaded (a final draft starts no agent turn, so nothing else will).
 	const stale = "This record changed after the draft was made. Nothing was saved.";
+	// One row per outcome class; the table checks effects and their order, the pure fate of every
+	// reply is in pwa/src/lib/draftCardDecision.test.js.
+	// [name, kind, how the call answers, result, card gone, error line, banner line, receipt loaded]
 	const ROWS = [
-		["Create ok", "create", { ok: true }, "gone", true, "", ""],
+		["Create ok", "create", { ok: true }, "gone", true, "", "", false],
 		[
-			"Create busy",
+			"Create busy (card stays)",
 			"create",
 			{ ok: false, reason_code: "busy" },
 			"kept",
 			false,
 			"This action is being handled right now. Try again in a moment.",
 			"",
+			false,
 		],
 		[
-			"Create record changed",
+			"Create record changed, receipt loaded: the receipt is the line",
+			"create",
+			{ ok: false, reason_code: "stale", pa_status: "Failed", error: INVALID },
+			"gone",
+			true,
+			"",
+			"",
+			true,
+		],
+		[
+			"Create record changed, no receipt loaded: one banner line",
 			"create",
 			{ ok: false, reason_code: "stale", pa_status: "Failed", error: INVALID },
 			"gone",
 			true,
 			"",
 			stale,
-		],
-		[
-			"Create token already used",
-			"create",
-			{ ok: false, error: INVALID },
-			"gone",
-			true,
-			"",
-			"Couldn't confirm. It may have been handled elsewhere. Refresh, or ask Jarvis to try again.",
-		],
-		[
-			"Create tool failed (receipt)",
-			"create",
-			{ ok: false, reason_code: "failed", pa_status: "Failed" },
-			"gone",
-			true,
-			"",
-			"",
+			false,
 		],
 		[
 			"Create thrown",
@@ -248,17 +246,9 @@ describe("runDraftDecision: what each reply does on screen", () => {
 			false,
 			"Failed to fetch",
 			"",
+			false,
 		],
-		["Cancel ok", "cancel", { ok: true }, "gone", true, "", ""],
-		[
-			"Cancel already handled",
-			"cancel",
-			{ ok: true, status: "already_handled" },
-			"gone",
-			true,
-			"",
-			"",
-		],
+		["Cancel ok", "cancel", { ok: true }, "gone", true, "", "", false],
 		[
 			"Cancel refused",
 			"cancel",
@@ -267,24 +257,27 @@ describe("runDraftDecision: what each reply does on screen", () => {
 			false,
 			"Storage is down",
 			"",
+			false,
 		],
-		["Cancel thrown", "cancel", new Error("offline"), "kept", false, "offline", ""],
 	];
-	it.each(ROWS)("%s", async (_, kind, answer, result, gone, error, say) => {
+	it.each(ROWS)("%s", async (_, kind, answer, result, gone, error, say, receipt) => {
 		const ui = makeDraftUi(reactive);
 		const pa = item("t1", cardOf("create-simple"));
 		const reply = vi.fn(async () => {
 			if (answer instanceof Error) throw answer;
 			return answer;
 		});
-		const d = deps(ui, kind === "create" ? { confirm: reply } : { dismiss: reply });
+		const d = deps(ui, {
+			...(kind === "create" ? { confirm: reply } : { dismiss: reply }),
+			receiptShown: () => receipt,
+		});
 		expect(await runDraftDecision(kind, pa, d)).toBe(result);
 		expect(reply.mock.calls).toEqual([["t1", "C1"]]);
 		expect(kind === "create" ? d.dismiss : d.confirm).not.toHaveBeenCalled();
 		// the card is gone with both reloads (in that order, after it left the list), or it stays
 		// with an error line and the buttons usable again
 		expect(d.calls.map((c) => c[0])).toEqual(
-			gone ? ["remove", "settle", ...(say ? ["say"] : []), "reload", "reloadPending"] : []
+			gone ? ["remove", "settle", "reload", "reloadPending", ...(say ? ["say"] : [])] : []
 		);
 		if (say) expect(d.calls.find((c) => c[0] === "say")[1]).toBe(say);
 		expect(ui.error("t1")).toBe(error);

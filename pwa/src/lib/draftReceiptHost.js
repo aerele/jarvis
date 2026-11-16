@@ -18,9 +18,10 @@ export function hiddenSteps(rows, goneKeys) {
 }
 
 // Resolves to "ignored" (one step is already in flight, or the chat was left), "refused" (a note is
-// shown; the button stays only for a temporary refusal), "proposed" (the card was parked and the
-// pending list reloaded, so it shows) or "failed" (the call threw: nothing ran, the button stays).
-//   d = { ui (receiptUi), propose(step) -> reply, current() -> bool, reloadPending() }
+// shown; the button stays only for a temporary refusal), "proposed" (the card was parked; the chat
+// and the pending list were reloaded, so it shows) or "failed" (the call threw: nothing ran, the
+// button stays).
+//   d = { ui (receiptUi), propose(step) -> reply, current() -> bool, reload(), reloadPending() }
 export async function proposeSubmitStep(step, d) {
 	if (!step || d.ui.busyKey() || !d.current()) return "ignored";
 	d.ui.setBusy(step.key);
@@ -34,7 +35,8 @@ export async function proposeSubmitStep(step, d) {
 			if (shouldHideNextStep(refusal)) d.ui.hide(step.key);
 			return "refused";
 		}
-		await d.reloadPending();
+		await d.reload();
+		if (d.current()) await d.reloadPending();
 		return "proposed";
 	} catch (e) {
 		if (!d.current()) return "ignored";

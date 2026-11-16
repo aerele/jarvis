@@ -22,6 +22,7 @@ const deps = (over = {}) => {
 		ui,
 		propose: vi.fn(async () => ({ ok: true })),
 		current: () => true,
+		reload: vi.fn(async () => {}),
 		reloadPending: vi.fn(async () => {}),
 		...over,
 	};
@@ -62,7 +63,10 @@ describe("proposeSubmitStep", () => {
 		expect(d.propose).toHaveBeenCalledWith(STEP);
 		expect(d.ui.note(STEP.key)).toBe(note);
 		expect(d.ui.goneKeys()).toEqual(gone ? [STEP.key] : []);
-		expect(d.reloadPending).toHaveBeenCalledTimes(reloaded ? 1 : 0);
+		// the parked card shows only after the thread and the pending list are both read
+		expect([d.reload, d.reloadPending].map((f) => f.mock.calls.length)).toEqual(
+			reloaded ? [1, 1] : [0, 0]
+		);
 		expect(d.ui.busyKey()).toBe("");
 	});
 
