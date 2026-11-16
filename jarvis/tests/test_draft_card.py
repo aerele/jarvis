@@ -414,6 +414,8 @@ if FrappeTestCase is not None:
 				except Exception:
 					pass
 			frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
+			frappe.db.sql(f"DELETE FROM `tab{PA}` WHERE conversation=%(c)s", {"c": self.conv})
+			frappe.db.delete(MSG, {"conversation": self.conv})
 			frappe.delete_doc("Jarvis Conversation", self.conv, force=True, ignore_permissions=True)
 
 		def _park(self, flag):
@@ -522,6 +524,8 @@ if FrappeTestCase is not None:
 				except Exception:
 					pass
 			frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
+			frappe.db.sql(f"DELETE FROM `tab{PA}` WHERE conversation=%(c)s", {"c": self.conv})
+			frappe.db.delete(MSG, {"conversation": self.conv})
 			frappe.delete_doc("Jarvis Conversation", self.conv, force=True, ignore_permissions=True)
 
 		def _run(self, flag, tool, args):
@@ -615,6 +619,7 @@ if FrappeTestCase is not None:
 			turns = patch("jarvis.chat.api._dispatch_turn", return_value=None)
 			turns.start()
 			self.addCleanup(turns.stop)
+			_record_continuations(self)
 			self.bound = []
 			self.addCleanup(self._unbind)
 
@@ -785,6 +790,24 @@ if FrappeTestCase is not None:
 
 	from jarvis.chat import agent_notes
 
+	class _ContinuationRecorder:
+		"""Stands in for `actions_api.enqueue_continuation`: records the call and queues
+		nothing, so no turn, relay target or hidden user row outlives the test."""
+
+		def __init__(self):
+			self.calls = []
+
+		def __call__(self, conversation, receipt, **kwargs):
+			self.calls.append((conversation, receipt, kwargs))
+			return {}
+
+	def _record_continuations(case):
+		rec = _ContinuationRecorder()
+		patcher = patch.object(actions_api, "enqueue_continuation", rec)
+		patcher.start()
+		case.addCleanup(patcher.stop)
+		return rec
+
 	_NOTE_PREFIX = "the user confirmed the draft and it was saved: "
 
 	def _notes(conv) -> list[str]:
@@ -802,9 +825,7 @@ if FrappeTestCase is not None:
 		def setUp(self):
 			super().setUp()
 			provision_legacy_site(self)
-			turns = patch("jarvis.chat.api._dispatch_turn", return_value=None)
-			turns.start()
-			self.addCleanup(turns.stop)
+			self.cont = _record_continuations(self)
 
 		def _park_draft(self, conv, args=None, flag=1):
 			args = args or json.loads(json.dumps(_TODO_ARGS))
@@ -815,18 +836,9 @@ if FrappeTestCase is not None:
 			)
 
 		def _confirm(self, token, conv, dispatch=None):
-			with (
-				patch.object(
-					actions_api, "enqueue_continuation", wraps=actions_api.enqueue_continuation
-				) as cont,
-				fake_dispatch(dispatch),
-				as_user(OWNER),
-			):
+			with fake_dispatch(dispatch), as_user(OWNER):
 				res = actions_api.confirm_tool(token, conversation=conv)
-			return res, cont
-
-		def _user_rows(self, conv):
-			return frappe.get_all(MSG, filters={"conversation": conv, "role": "user"}, pluck="name")
+			return res, self.cont.calls
 
 		def test_final_draft_confirm_starts_no_turn_and_queues_one_note(self):
 			"""Without this a saved final draft still wakes the model for a turn nobody needs:
@@ -836,8 +848,7 @@ if FrappeTestCase is not None:
 			token = self._park_draft(conv)
 			res, cont = self._confirm(token, conv)
 			self.assertTrue(res["ok"], res)
-			self.assertEqual(cont.call_count, 0)
-			self.assertEqual(self._user_rows(conv), [])
+			self.assertEqual(cont, [])
 			[note] = _notes(conv)
 			self.assertTrue(note.startswith(_NOTE_PREFIX), note)
 			self.assertTrue(note[len(_NOTE_PREFIX) :].strip(), "the note carries the receipt text")
@@ -855,7 +866,7 @@ if FrappeTestCase is not None:
 			token = self._park_draft(conv, args)
 			res, cont = self._confirm(token, conv)
 			self.assertTrue(res["ok"], res)
-			self.assertEqual(cont.call_count, 1)
+			self.assertEqual(len(cont), 1)
 			self.assertEqual(_notes(conv), [])
 
 		def test_a_draft_whose_write_fails_still_gets_the_failure_continuation(self):
@@ -869,18 +880,19 @@ if FrappeTestCase is not None:
 			token = self._park_draft(conv)
 			res, cont = self._confirm(token, conv, fail)
 			self.assertFalse(res["ok"], res)
-			self.assertEqual(cont.call_count, 1)
-			self.assertTrue(cont.call_args.kwargs["outcome"].startswith("failed"), cont.call_args)
+			self.assertEqual(len(cont), 1)
+			self.assertTrue(cont[0][2]["outcome"].startswith("failed"), cont)
 			self.assertEqual(_notes(conv), [])
 
 		def test_a_non_draft_submit_confirm_is_unchanged(self):
 			"""A card with no `draft` (here a submit) keeps its continuation turn: the final-draft
 			shortcut must not reach any other tool."""
 			conv = self.make_conv()
-			token = self.park(conv, tool="submit_doc", args={"doctype": "ToDo", "name": "pa-test-x"})
+			target = self.make_todo()  # a real, committed record: Confirm checks the target still exists
+			token = self.park(conv, tool="submit_doc", args={"doctype": "ToDo", "name": target})
 			res, cont = self._confirm(token, conv)
 			self.assertTrue(res["ok"], res)
-			self.assertEqual(cont.call_count, 1)
+			self.assertEqual(len(cont), 1)
 			self.assertEqual(_notes(conv), [])
 
 		def test_flag_off_is_todays_behaviour(self):
@@ -891,7 +903,7 @@ if FrappeTestCase is not None:
 			self.assertNotIn("draft", json.loads(frappe.db.get_value(PA, token, "card")))
 			res, cont = self._confirm(token, conv)
 			self.assertTrue(res["ok"], res)
-			self.assertEqual(cont.call_count, 1)
+			self.assertEqual(len(cont), 1)
 			self.assertEqual(_notes(conv), [])
 
 	class TestContinueNeverReachesTheWrite(FrappeTestCase):
@@ -906,9 +918,7 @@ if FrappeTestCase is not None:
 				.insert(ignore_permissions=True)
 				.name
 			)
-			turns = patch("jarvis.chat.api._dispatch_turn", return_value=None)
-			turns.start()
-			self.addCleanup(turns.stop)
+			self.cont = _record_continuations(self)
 			self.addCleanup(self._cleanup)
 
 		def _cleanup(self):
@@ -934,3 +944,4 @@ if FrappeTestCase is not None:
 			out = actions_api.confirm_tool(token, conversation=self.conv)
 			self.assertTrue(out["ok"], out)
 			self.assertTrue(frappe.db.exists("ToDo", {"description": "draft-continue-xyz"}))
+			self.assertEqual(len(self.cont.calls), 1)  # continue: true wakes the agent
