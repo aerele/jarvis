@@ -587,3 +587,115 @@ class TestSubmissionQueue(_RealWorkflow):
 			)
 		self.assertEqual(frappe.db.get_value("Submission Queue", entry_name, "status"), "Finished")
 		self.assertEqual((self._row(name)[FIELD], self._row(name).docstatus), ("Approved", 1))
+
+
+class TestReviewRoutes(_RealWorkflow):
+	"""Routes from the adversarial review of #2657, through run_method as a tool would."""
+
+	cancel_step = False  # cancel allowed as in Desk: only the state and the payload are judged
+
+	def _run(self, method, args=None, **kw):
+		from jarvis.tools.run_method import run_method
+
+		return run_method(method, args, **kw)
+
+	def test_desk_cancel_cannot_set_another_state(self):
+		name = self._make("Approved")
+		with self.assertRaises(PermissionDeniedError), self._tool_call(APPROVER):
+			self._run(
+				"frappe.desk.form.save.cancel",
+				{"doctype": BT, "name": name, "workflow_state_fieldname": FIELD, "workflow_state": "Draft"},
+			)
+		self.assertEqual((self._row(name)[FIELD], self._row(name).docstatus), ("Approved", 1))
+		# Without run_method's pre-check, the document handler refuses it too.
+		with self.assertRaises(PermissionDeniedError), self._tool_call(APPROVER):
+			from frappe.desk.form.save import cancel
+
+			cancel(BT, name, FIELD, "Draft")
+		self.assertEqual(self._row(name).docstatus, 1)
+		# What Desk sends (the current state) passes.
+		with self._tool_call(APPROVER):
+			self._run(
+				"frappe.desk.form.save.cancel",
+				{
+					"doctype": BT,
+					"name": name,
+					"workflow_state_fieldname": FIELD,
+					"workflow_state": "Approved",
+				},
+			)
+		self.assertEqual(self._row(name).docstatus, 2)
+
+	def test_a_cancel_cannot_carry_edits(self):
+		name = self._make("Approved")
+		payload = {**frappe.get_doc(BT, name).as_dict(), "docstatus": 2, "description": "after"}
+		for method, args in (
+			("frappe.client.save", {"doc": json.dumps(payload, default=str)}),
+			("frappe.handler.run_doc_method", {"method": "cancel", "docs": json.dumps(payload, default=str)}),
+		):
+			with self.assertRaises(PermissionDeniedError) as cm, self._tool_call(APPROVER):
+				self._run(method, args)
+			self.assertIn("cannot also change description", str(cm.exception))
+		self.assertEqual((self._row(name).docstatus, self._row(name).description), (1, "before"))
+
+	def test_a_locked_draft_is_not_discarded(self):
+		name = self._make("Pending")
+		with self.assertRaises(PermissionDeniedError), self._tool_call(EDITOR):
+			self._run("frappe.desk.form.save.discard", {"doctype": BT, "name": name})
+		with self.assertRaises(PermissionDeniedError), self._tool_call(EDITOR):
+			frappe.get_doc(BT, name).discard()
+		self.assertEqual(self._row(name).docstatus, 0)
+
+	def test_a_locked_document_is_not_renamed(self):
+		name = self._make("Pending")
+		with self.assertRaises(PermissionDeniedError), self._tool_call(EDITOR):
+			self._run("frappe.client.rename_doc", {"doctype": BT, "old_name": name, "new_name": name + "-x"})
+		with self.assertRaises(PermissionDeniedError), self._tool_call(EDITOR):
+			frappe.get_doc(BT, name).run_method("before_rename", name, name + "-x", False)
+		self.assertTrue(frappe.db.exists(BT, name))
+
+	def test_a_stale_currently_saving_entry_does_not_skip_the_check(self):
+		name = self._make("Pending")
+		frappe.flags.currently_saving.append((BT, name))  # left by a save that failed
+		self.addCleanup(
+			lambda: (BT, name) in frappe.flags.currently_saving
+			and frappe.flags.currently_saving.remove((BT, name))
+		)
+		with self.assertRaises(PermissionDeniedError), self._tool_call(EDITOR):
+			frappe.get_doc(BT, name).db_set(FIELD, "Approved")
+		self.assertEqual(self._row(name)[FIELD], "Pending")
+
+	def test_payload_edits_of_a_locked_document_are_refused_before_the_call(self):
+		name = self._make("Pending")
+		doc = {**frappe.get_doc(BT, name).as_dict(), "description": "after"}
+		for method, args in (
+			("frappe.client.save", {"doc": json.dumps(doc, default=str)}),
+			(
+				"frappe.client.set_value",
+				{"doctype": BT, "name": name, "fieldname": "description", "value": "after"},
+			),
+			("frappe.handler.run_doc_method", {"method": "validate", "docs": json.dumps(doc, default=str)}),
+		):
+			with self.assertRaises(PermissionDeniedError), self._tool_call(EDITOR):
+				self._run(method, args)
+		self.assertEqual(self._row(name).description, "before")
+
+
+class TestCancelIsJudgedBeforeItsHooks(_RealWorkflow):
+	cancel_step = True
+
+	def test_no_cancel_hook_runs_before_the_refusal(self):
+		from erpnext.accounts.doctype.bank_transaction.bank_transaction import BankTransaction
+
+		from jarvis.tools.run_method import run_method
+
+		name = self._make("Approved")
+		ran = []
+		with (
+			patch.object(BankTransaction, "before_cancel", lambda self: ran.append(self.name), create=True),
+			self.assertRaises(PermissionDeniedError),
+			self._tool_call(APPROVER),
+		):
+			run_method("frappe.client.cancel", {"doctype": BT, "name": name})
+		self.assertEqual(ran, [])  # an e-invoice / e-way bill cancel would have run here
+		self.assertEqual(self._row(name).docstatus, 1)
