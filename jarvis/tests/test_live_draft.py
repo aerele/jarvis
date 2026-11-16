@@ -687,19 +687,6 @@ class TestParkedToolDraft(PendingActionTestMixin, FrappeTestCase):
 		self.assertTrue(live_draft.has_pending_draft(conv))
 		self.assertFalse(live_draft.has_pending_draft(other))
 
-	def test_the_clause_words_differ_for_a_parked_and_a_typed_draft(self):
-		"""A parked card is the agent's own tool call: telling it to re-emit a block would make it
-		type a second card. The typed draft's wording must stay as it was."""
-		parked = self.make_conv()
-		self._park_row(parked, 1)
-		out = self._clause(parked)
-		self.assertIn("call the tool again only for a change they ask for", out)
-		self.assertNotIn("re-emit the block", out)
-		typed = self.make_conv()
-		_insert(typed, 1, "assistant", _TODO)
-		self.assertIn("re-emit the block only for a change they ask for", self._clause(typed))
-		self.assertNotIn("call the tool again", self._clause(typed))
-
 	def test_a_decided_card_is_not_a_draft_card(self):
 		"""A confirmed or discarded card is no longer Pending, so its row must read
 		``draft_card`` false: otherwise the old typed draft could never be live again after a
@@ -837,9 +824,11 @@ class TestParkedToolDraft(PendingActionTestMixin, FrappeTestCase):
 			live_draft.load_rows(conv)
 		self.assertEqual(len([q for q in seen if "Pending Action" in q]), 1, seen)
 
-	def test_the_clause_fires_for_a_parked_create_and_update(self):
-		"""The agent forgets a draft it parked unless each turn says it waits: the button word
-		must be the card's own (``Create`` / ``Save changes``)."""
+	def test_the_parked_clause_has_its_own_words_and_the_typed_clause_keeps_its_own(self):
+		"""The agent forgets a draft it parked unless each turn says it waits, and the button
+		word must be the card's own (`Create` / `Save changes`). A parked card is the agent's
+		own tool call: telling it to re-emit a block would make it type a second card, and the
+		typed draft's wording must stay as it was."""
 		conv = self.make_conv()
 		self._park_row(conv, 1)
 		out = self._clause(conv)
@@ -848,12 +837,18 @@ class TestParkedToolDraft(PendingActionTestMixin, FrappeTestCase):
 			out,
 		)
 		self.assertIn("never say it is above", out)
+		self.assertIn("call the tool again only for a change they ask for", out)
+		self.assertNotIn("re-emit the block", out)
 		conv = self.make_conv()
 		self._park_row(conv, 1, verb="update", rname=self.make_todo())
 		self.assertIn(
 			"; unsaved draft waiting: update ToDo, its card with Save changes and Cancel is on the user's screen",
 			self._clause(conv),
 		)
+		typed = self.make_conv()
+		_insert(typed, 1, "assistant", _TODO)
+		self.assertIn("re-emit the block only for a change they ask for", self._clause(typed))
+		self.assertNotIn("call the tool again", self._clause(typed))
 
 	def test_the_clause_stops_when_the_card_is_decided(self):
 		"""A confirmed or discarded card must not be reminded: the agent would nag about a

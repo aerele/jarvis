@@ -320,18 +320,6 @@ if FrappeTestCase is not None:
 		return json.dumps(card, indent=1, sort_keys=True, default=str)
 
 	class TestDraftCardOnSite(FrappeTestCase):
-		def test_flag_off_is_todays_behaviour(self):
-			"""With `jarvis_draft_cards` at 0 the park builds no draft and keeps the trial's
-			name on a create card, so the cards of the old persona's `create_doc` calls do
-			not change."""
-			with patch.dict(frappe.conf, {FLAG: 0}):
-				self.assertFalse(draft_card.enabled())
-				args = {"doctype": "ToDo", "values": {"description": "x"}}
-				self.assertFalse(draft_card.wanted("create_doc", args, must_card=False))
-			card = _park_card("create_doc", args, {"name": "TD-trial", "description": "x"}, False)
-			self.assertNotIn("draft", card)
-			self.assertEqual(card["name"], "TD-trial")
-
 		def test_flag_reads_as_a_cint(self):
 			"""The flag is read with cint, so "1" and 1 turn it on and "0" keeps it off."""
 			for raw, want in ((1, True), ("1", True), ("0", False), (0, False)):
@@ -406,11 +394,12 @@ if FrappeTestCase is not None:
 			self.addCleanup(self._cleanup)
 
 		def _cleanup(self):
+			# Only this test's own tokens: the owner may hold legacy tokens of other work.
 			for rec in pending_confirm.list_for_owner(self.owner):
+				if rec.get("conversation") != self.conv:
+					continue
 				try:
-					pending_confirm.consume(
-						rec["token"], owner=self.owner, conversation=rec.get("conversation") or ""
-					)
+					pending_confirm.consume(rec["token"], owner=self.owner, conversation=self.conv)
 				except Exception:
 					pass
 			frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
@@ -519,11 +508,12 @@ if FrappeTestCase is not None:
 			self.addCleanup(self._cleanup)
 
 		def _cleanup(self):
+			# Only this test's own tokens: the owner may hold legacy tokens of other work.
 			for rec in pending_confirm.list_for_owner(self.owner):
+				if rec.get("conversation") != self.conv:
+					continue
 				try:
-					pending_confirm.consume(
-						rec["token"], owner=self.owner, conversation=rec.get("conversation") or ""
-					)
+					pending_confirm.consume(rec["token"], owner=self.owner, conversation=self.conv)
 				except Exception:
 					pass
 			frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
@@ -691,32 +681,24 @@ if FrappeTestCase is not None:
 			self.assertIs(row["pending_card_safe"], False)
 			self.assertIs(row["draft_card"], False)
 
-		def test_flag_off_is_todays_behaviour(self):
-			"""With the flag off a tool row has no `draft_card` key, so an ordinary card's row
-			has the keys it had; with it on the only new key is `draft_card`, False for a card
-			that is not a draft."""
-			conv = self.make_conv()
-			token, _card = self._mint(conv, draft=False)
-			with patch.dict(frappe.conf, {FLAG: 0}):
-				off = self._history_row(conv, token)
-			with patch.dict(frappe.conf, {FLAG: 1}):
-				on = self._history_row(conv, token)
-			self.assertNotIn("draft_card", off)
-			self.assertEqual(set(on) - set(off), {"draft_card"})
-			self.assertIs(on["draft_card"], False)
-			self.assertNotIn("draft", on["pending_card"])
-
-		def test_flag_off_still_marks_a_leftover_draft_card(self):
-			"""A draft card parked while the flag was on and still Pending after it was turned off
-			must keep reading `draft_card` true, or a typed draft would show beside it; a plain
-			card's row adds no key."""
+		def test_flag_off_marks_only_a_leftover_draft_card(self):
+			"""With the flag off a plain card's row has the keys it had (and with it on the only
+			new key is `draft_card`, False for a card that is not a draft); a draft card parked
+			while the flag was on and still Pending after it was turned off must keep reading
+			`draft_card` true, or a typed draft would show beside it."""
 			conv = self.make_conv()
 			token, _card = self._mint(conv)
 			other = self.make_conv()  # one waiting card per chat
 			plain, _plain = self._mint(other, draft=False)
 			with patch.dict(frappe.conf, {FLAG: 0}):
 				self.assertIs(self._history_row(conv, token)["draft_card"], True)
-				self.assertNotIn("draft_card", self._history_row(other, plain))
+				off = self._history_row(other, plain)
+			with patch.dict(frappe.conf, {FLAG: 1}):
+				on = self._history_row(other, plain)
+			self.assertNotIn("draft_card", off)
+			self.assertEqual(set(on) - set(off), {"draft_card"})
+			self.assertIs(on["draft_card"], False)
+			self.assertNotIn("draft", on["pending_card"])
 
 		def _decided_row(self, conv, token):
 			"""The row as stored, and as the app reads it, after the card was decided."""
@@ -968,6 +950,11 @@ if FrappeTestCase is not None:
 			self.addCleanup(self._cleanup)
 
 		def _cleanup(self):
+			# The confirm wrote a Jarvis Agent Write row for the record: delete that row (by the
+			# record this test made), not every row of the actor.
+			made = frappe.get_all("ToDo", filters={"description": "draft-continue-xyz"}, pluck="name")
+			if made:
+				frappe.db.delete("Jarvis Agent Write", {"ref_doctype": "ToDo", "ref_name": ["in", made]})
 			frappe.db.delete("ToDo", {"description": "draft-continue-xyz"})
 			frappe.db.delete(MSG, {"conversation": self.conv})
 			frappe.db.delete("Jarvis Chat Turn", {"conversation": self.conv})

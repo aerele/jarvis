@@ -105,22 +105,29 @@ class TestDraftValuesPure(unittest.TestCase):
 		self.assertTrue(draft_values.too_big({"note": wide["note"] + "x"}))
 
 	def test_a_draft_row_index_must_name_one_drafted_row_once(self):
-		"""``_draft_row`` says which drafted row a sent row is: an index that is not one,
-		or one two rows both claim, would copy the wrong drafted cells into the record."""
+		"""``_draft_row`` says which drafted row a sent row is: an index that is not one (out of
+		range, a string, a bool, negative, a float, None), or one two rows both claim, would
+		copy the wrong drafted cells into the record. Each is a mark on its row, and an
+		update's rows are keyed by name only."""
 		rules = _Rules(tables={"items": "Table"})
 		base = {"items": [{"x": 1}, {"x": 2}]}
-		rows = [{"_draft_row": 0}, {"_draft_row": 5}, {"_draft_row": "1"}, {"_draft_row": True}]
-		rows += [{"_draft_row": 1}, {"_draft_row": 1}]
-		found = draft_values.errors({"items": rows}, rules, is_update=False, base=base)
-		self.assertEqual(
-			[(f["idx"], f["message"]) for f in found],
-			[
-				(2, draft_values.NOT_A_DRAFTED_ROW),
-				(3, draft_values.NOT_A_DRAFTED_ROW),
-				(4, draft_values.NOT_A_DRAFTED_ROW),
-				(6, draft_values.TWICE),
-			],
-		)
+		bad, twice = draft_values.NOT_A_DRAFTED_ROW, draft_values.TWICE
+		cases = [
+			# (sent rows, [(idx, message)] expected)
+			(
+				[{"_draft_row": 0}, {"_draft_row": 5}, {"_draft_row": "1"}, {"_draft_row": True}],
+				[(2, bad), (3, bad), (4, bad)],
+			),
+			([{"_draft_row": 1}, {"_draft_row": 1}], [(2, twice)]),
+			(
+				[{"_draft_row": -1}, {"_draft_row": 1.0}, {"_draft_row": None}, {"_draft_row": 1}],
+				[(1, bad), (2, bad), (3, bad)],
+			),
+		]
+		for rows, want in cases:
+			with self.subTest(rows=rows):
+				found = draft_values.errors({"items": rows}, rules, is_update=False, base=base)
+				self.assertEqual([(f["idx"], f["message"]) for f in found], want)
 		on_update = _Rules(tables={"items": "Table"}, refused={"_draft_row"})
 		[mark] = draft_values.errors({"items": [{"_draft_row": 0}]}, on_update, is_update=True, base=base)
 		self.assertEqual(mark["message"], "refused", "an update's rows are keyed by name only")
@@ -213,19 +220,6 @@ class TestDraftValuesPure(unittest.TestCase):
 		self.assertEqual(json.dumps({k: wrote["values"]["items"][0][k] for k in sent}), text)
 		update = draft_values.edited_call("update_doc", {"doctype": "T", "name": "N", "changes": {}}, sent)
 		self.assertEqual(json.dumps(update["changes"]), text)
-
-	def test_a_draft_row_that_is_negative_float_or_empty_is_refused(self):
-		"""``-1`` would index from the end of the drafted rows and ``1.0`` is not an index
-		(only a whole int is): either would copy the wrong drafted cells into the record,
-		so each must be a mark on its row."""
-		rules = _Rules(tables={"items": "Table"})
-		base = {"items": [{"x": 1}, {"x": 2}]}
-		rows = [{"_draft_row": -1}, {"_draft_row": 1.0}, {"_draft_row": None}, {"_draft_row": 1}]
-		found = draft_values.errors({"items": rows}, rules, is_update=False, base=base)
-		self.assertEqual(
-			[(f["idx"], f["message"]) for f in found],
-			[(i, draft_values.NOT_A_DRAFTED_ROW) for i in (1, 2, 3)],
-		)
 
 
 try:
@@ -764,23 +758,26 @@ if FrappeTestCase is not None:
 			self.assertIs(out.get("card_open"), True)
 			self.assert_untouched(token, before)
 
-		def test_a_protected_field_is_marked_not_written(self):
-			"""``docstatus`` sent from the form must be a refused mark, never a submit."""
+		def test_a_key_the_form_may_not_set_is_marked_in_plain_words_not_written(self):
+			"""``docstatus`` would submit, ``amended_from`` and ``_``-names are refused by
+			create_doc in a message meant for the model: each must be a refused mark in plain
+			words first, and nothing is written."""
 			conv, token = self.todo_draft()
 			before = self.sealed(token)
-			out = self.save(token, conv, {"description": f"{MARK} protected", "docstatus": 1})
-			[mark] = out["error"]["fields"]
-			self.assertEqual((mark["fieldname"], mark["invalid"]), ("docstatus", 1))
+			sent = {
+				"description": f"{MARK} protected",
+				"docstatus": 1,
+				"amended_from": "TD-1",
+				"_assign": "[]",
+			}
+			out = self.save(token, conv, sent)
+			marks = {f["fieldname"]: f for f in out["error"]["fields"]}
+			self.assertEqual(set(marks), {"docstatus", "amended_from", "_assign"})
+			self.assertEqual(marks["docstatus"]["invalid"], 1)
+			for key in ("amended_from", "_assign"):
+				self.assertEqual(marks[key]["message"], draft_values.CANT_SET)
 			self.assert_untouched(token, before)
 			self.assertEqual(self.todos("protected"), [])
-
-		def test_a_key_the_write_tool_refuses_is_marked_in_plain_words(self):
-			"""``amended_from`` and ``_``-names are refused by create_doc in a message meant for
-			the model; the form must get a plain mark first."""
-			conv, token = self.todo_draft()
-			out = self.save(token, conv, {"amended_from": "TD-1", "_assign": "[]"})
-			marks = {f["fieldname"]: f["message"] for f in out["error"]["fields"]}
-			self.assertEqual(marks, {"amended_from": draft_values.CANT_SET, "_assign": draft_values.CANT_SET})
 
 		def test_a_field_the_form_cannot_edit_is_refused_in_plain_words(self):
 			"""An attachment is a real field the form cannot edit: sending it, set or emptied,
