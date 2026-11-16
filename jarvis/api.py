@@ -5008,7 +5008,15 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				frappe.DuplicateEntryError,
 			) as e:
 				frappe.clear_messages()
-				return _preview_error(e)
+				refused = _preview_error(e)
+				from jarvis.chat import draft_card
+
+				if draft_card.wanted(tool, args, must_card=_must_card):
+					# A draft the trial refused for a missing value names the fields.
+					fields = draft_card.refusal(e, tool, args)
+					if fields and isinstance(refused.get("error"), dict):
+						refused["error"]["fields"] = fields
+				return refused
 		else:
 			try:
 				preview = _pending_preview(tool, args)
@@ -5044,6 +5052,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			if tool in _SKILL_AUTORUN_COVERED and not _guarded and not shared_permit
 			else (None, None)
 		)
+		draft_for_model = None
 		if isinstance(preview, dict):
 			# A draft-panel write turned into this card (actions_api._park_sensitive):
 			# the clients read it to keep that draft "waiting" across a reload.
@@ -5067,7 +5076,8 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				return refusal
 			if as_draft and isinstance(card, dict):
 				# On the card BEFORE it is parked, so the seal's card hash covers it.
-				draft_card.attach(card, tool, args, preview.get("would"))
+				if draft_card.attach(card, tool, args, preview.get("would")):
+					draft_for_model = card["draft"]
 			preview["card"] = card
 			if tool == "create_doc" and isinstance(card, dict) and _risk != "sensitive" and not _guarded:
 				# The ORIGINAL proposal's identity: saving a draft card of the very same
@@ -5177,6 +5187,9 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		model_preview = (
 			{k: v for k, v in preview.items() if k != "card"} if isinstance(preview, dict) else preview
 		)
+		if draft_for_model is not None:
+			# A parked draft: the person reads the card, the model gets a short result.
+			return draft_card.short_result(tool, draft_for_model)
 		return {
 			"ok": True,
 			"data": {

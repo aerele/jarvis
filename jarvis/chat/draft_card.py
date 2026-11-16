@@ -14,6 +14,8 @@ in), so their cases run without a site; ``payload`` and ``attach`` read the site
 
 from __future__ import annotations
 
+import json
+
 from jarvis.chat import live_draft
 
 _TOOLS = ("create_doc", "update_doc")
@@ -205,3 +207,73 @@ def attach(card: dict, tool: str, args: dict, would) -> bool:
 	if draft["verb"] == "create":
 		card["name"] = draft["name"] or None
 	return True
+
+
+SHORT_NOTE = "A review card is on the user's screen. Write one short line and stop. Nothing is saved until they choose."
+# The model's result for a parked draft stays this small (the JSON of ``data``): it is
+# the whole point of not sending the would-be document back.
+SHORT_LIMIT = 600
+
+
+def short_result(tool: str, draft: dict) -> dict:
+	"""What the MODEL gets back for a parked draft: the call's identity, the fields the
+	card left out, and a note. No ``preview``: the person reads the card, the model does
+	not need the would-be document. Field lists too long for ``SHORT_LIMIT`` are cut
+	(``ignored_fields`` last) and ``more_fields`` counts the names left out."""
+	ignored = list(draft.get("ignored") or [])
+	dropped = list(draft.get("dropped") or [])
+	left_out = 0
+	while True:
+		data = {
+			"status": "pending_confirmation",
+			"tool": tool,
+			"draft": {k: draft.get(k) for k in ("verb", "doctype", "name")},
+			"ignored_fields": ignored,
+		}
+		if dropped:
+			data["dropped_fields"] = dropped
+		if left_out:
+			data["more_fields"] = left_out
+		data["note"] = SHORT_NOTE
+		if len(json.dumps(data)) <= SHORT_LIMIT or not (ignored or dropped):
+			return {"ok": True, "data": data}
+		left_out += 1
+		(ignored if ignored else dropped).pop()
+
+
+def refusal(exc, tool: str, args: dict) -> list[dict] | None:
+	"""The fields a refused draft call needs, as ``[{fieldname, label, where, parentfield?,
+	idx?}]`` with ``where`` "main" or "row": the edit panel's own mandatory marks
+	(``panel_fields.missing_marks``) for a trial that failed with ``MandatoryError``.
+	None for any other failure, for a call that is not a draft call, and when the marks
+	are empty or ones the form cannot fill: the refusal then keeps today's shape."""
+	import frappe
+
+	if not isinstance(exc, frappe.MandatoryError):
+		return None
+	from jarvis.chat.panel_fields import missing_marks
+
+	doctype = live_draft.real_doctype(args.get("doctype"))
+	if not doctype:
+		return None
+	update = tool == "update_doc"
+	try:
+		marks = missing_marks(
+			"update" if update else "create",
+			doctype,
+			args["name"] if update else "",
+			(args["changes"] if update else args["values"]) or {},
+		)
+	except Exception:
+		return None
+	if not marks:
+		return None
+	out = []
+	for mark in marks:
+		entry = {"fieldname": mark["fieldname"], "label": mark["label"]}
+		if mark.get("parentfield"):
+			entry.update(where="row", parentfield=mark["parentfield"], idx=mark.get("idx"))
+		else:
+			entry["where"] = "main"
+		out.append(entry)
+	return out

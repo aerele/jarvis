@@ -154,6 +154,76 @@ class TestDraftCallPure(unittest.TestCase):
 		self.assertIsInstance(items["unreadable"]["card"]["draft"]["values"], str)
 
 
+def _sales_order_draft():
+	"""A Sales Order draft with a table, as the builder gives it (stand-in field list)."""
+	main = {"customer", "delivery_date", "items"}
+	row = {"item_code", "qty", "rate"}
+	return draft_card.payload_from(
+		"create",
+		"Sales Order",
+		"",
+		{
+			"customer": "Acme",
+			"delivery_date": "2026-12-01",
+			"items": [{"item_code": "A", "qty": 1, "rate": 10, "colour": "red"}] * 5,
+		},
+		None,
+		has_field=lambda k: k in main,
+		child_has=lambda k: (lambda r: r in row) if k == "items" else None,
+		skip=SKIP,
+	)
+
+
+class TestShortResultPure(unittest.TestCase):
+	def test_shape_has_identity_and_ignored_fields_and_no_preview(self):
+		"""A parked draft's model result is the short envelope: identity from the card's
+		draft, the ignored names, the fixed note, and none of the would-be document."""
+		res = draft_card.short_result("create_doc", _build("create", "", {"employee": "E", "colour": "r"}))
+		self.assertEqual(
+			res,
+			{
+				"ok": True,
+				"data": {
+					"status": "pending_confirmation",
+					"tool": "create_doc",
+					"draft": {"verb": "create", "doctype": "Timesheet", "name": ""},
+					"ignored_fields": ["colour"],
+					"note": draft_card.SHORT_NOTE,
+				},
+			},
+		)
+
+	def test_dropped_fields_only_when_the_trial_dropped_some(self):
+		"""`dropped_fields` names what a permission filter removed, and is absent otherwise."""
+		bare = draft_card.short_result("create_doc", _build("create", "", {"employee": "E"}))
+		self.assertNotIn("dropped_fields", bare["data"])
+		cut = draft_card.short_result(
+			"create_doc", _build("create", "", {"employee": "E", "note": "n"}, {"employee": "E"})
+		)
+		self.assertEqual(cut["data"]["dropped_fields"], ["note"])
+
+	def test_every_fixture_and_sales_order_draft_stays_under_600_characters(self):
+		"""The model-facing result of any real draft shape (the fixtures' Timesheet, ToDo, Web
+		Form drafts and a Sales Order with table rows) stays within the bound."""
+		with open(FIXTURES) as f:
+			drafts = [i["card"]["draft"] for i in json.load(f) if isinstance(i["card"].get("draft"), dict)]
+		for draft in [*drafts, _sales_order_draft()]:
+			with self.subTest(draft["title"]):
+				res = draft_card.short_result("create_doc", draft)
+				self.assertLessEqual(len(json.dumps(res["data"])), draft_card.SHORT_LIMIT)
+
+	def test_a_very_long_field_list_is_cut_and_counted(self):
+		"""A call with hundreds of unknown keys still fits the bound: the lists are cut and
+		`more_fields` says how many names were left out, so the model is never told the list
+		is complete when it is not."""
+		draft = _build("create", "", {f"made_up_field_{i}": 1 for i in range(200)})
+		self.assertEqual(len(draft["ignored"]), 200)
+		data = draft_card.short_result("create_doc", draft)["data"]
+		self.assertLessEqual(len(json.dumps(data)), draft_card.SHORT_LIMIT)
+		self.assertGreater(data["more_fields"], 0)
+		self.assertEqual(len(data["ignored_fields"]) + data["more_fields"], 200)
+
+
 try:
 	import frappe
 	from frappe.tests.utils import FrappeTestCase
@@ -360,3 +430,87 @@ if FrappeTestCase is not None:
 			card = _park_card("update_doc", args, {"status": "Closed"}, True)
 			card = json.loads(json.dumps(card, default=str).replace(todo.name, "TD-0001"))
 			self._same("update-diff", card)
+
+	class TestModelResultOnSite(FrappeTestCase):
+		"""What `api._run_tool` returns to the model for a gated write."""
+
+		def setUp(self):
+			super().setUp()
+			self.owner = frappe.session.user
+			frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
+			self.conv = (
+				frappe.get_doc({"doctype": "Jarvis Conversation", "title": "draft result test"})
+				.insert(ignore_permissions=True)
+				.name
+			)
+			self.addCleanup(self._cleanup)
+
+		def _cleanup(self):
+			for rec in pending_confirm.list_for_owner(self.owner):
+				try:
+					pending_confirm.consume(
+						rec["token"], owner=self.owner, conversation=rec.get("conversation") or ""
+					)
+				except Exception:
+					pass
+			frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
+			frappe.delete_doc("Jarvis Conversation", self.conv, force=True, ignore_permissions=True)
+
+		def _run(self, flag, tool, args):
+			with patch.dict(frappe.conf, {FLAG: flag}):
+				return api._run_tool(tool, json.loads(json.dumps(args)), conversation=self.conv)
+
+		def test_flag_on_returns_the_short_result_with_ignored_fields(self):
+			"""A real parked create returns the short envelope (no `preview`, under the bound)
+			and names the key the form does not have."""
+			res = self._run(
+				1, "create_doc", {"doctype": "ToDo", "values": {"description": "short-res", "bogus": 1}}
+			)
+			data = res["data"]
+			self.assertEqual(data["status"], "pending_confirmation")
+			self.assertNotIn("preview", data)
+			self.assertEqual(data["draft"], {"verb": "create", "doctype": "ToDo", "name": ""})
+			self.assertEqual(data["ignored_fields"], ["bogus"])
+			self.assertLessEqual(len(json.dumps(data)), draft_card.SHORT_LIMIT)
+
+		def test_flag_off_is_todays_behaviour(self):
+			"""With the flag off the model still gets the whole trial under `preview` (and no
+			card), exactly the keys it got before the short result existed."""
+			res = self._run(0, "create_doc", {"doctype": "ToDo", "values": {"description": "old-res"}})
+			self.assertEqual(set(res), {"ok", "data"})
+			self.assertEqual(set(res["data"]), {"status", "preview", "tool"})
+			self.assertEqual(res["data"]["tool"], "create_doc")
+			self.assertEqual(res["data"]["preview"]["would"]["description"], "old-res")
+			self.assertNotIn("card", res["data"]["preview"])
+
+		def test_batch_create_is_not_shortened_with_the_flag_on(self):
+			"""A batch `create_doc(docs=...)` is not a draft call: with the flag on it still
+			returns the full `preview`, so only single-record drafts change shape."""
+			docs = [{"doctype": "ToDo", "values": {"description": "batch-a"}}]
+			res = self._run(1, "create_doc", {"docs": docs})
+			self.assertEqual(res["data"]["status"], "pending_confirmation", res)
+			self.assertIn("preview", res["data"])
+			self.assertNotIn("draft", res["data"])
+
+		def test_a_missing_mandatory_value_names_the_field_only_for_a_draft(self):
+			"""A ToDo create without its `description` is refused with `error.fields` naming it
+			when the flag is on; with the flag off the same refusal keeps today's shape."""
+			args = {"doctype": "ToDo", "values": {"priority": "High"}}
+			on = self._run(1, "create_doc", args)
+			self.assertFalse(on["ok"])
+			self.assertEqual(on["error"]["code"], "InvalidArgumentError")
+			self.assertEqual(
+				on["error"]["fields"],
+				[{"fieldname": "description", "label": "Description", "where": "main"}],
+			)
+			off = self._run(0, "create_doc", args)
+			self.assertFalse(off["ok"])
+			self.assertNotIn("fields", off["error"])
+
+		def test_another_refusal_keeps_its_shape_with_the_flag_on(self):
+			"""A refusal that is not a missing value (a field value the DocType rejects) has no
+			`fields`: only MandatoryError turns into named fields."""
+			args = {"doctype": "ToDo", "values": {"description": "x", "status": "Not A Status"}}
+			res = self._run(1, "create_doc", args)
+			self.assertFalse(res["ok"])
+			self.assertNotIn("fields", res["error"])
