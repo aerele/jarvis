@@ -1,0 +1,19 @@
+{
+ "app": "jarvis",
+ "creation": "2026-11-16 12:00:00.000000",
+ "docstatus": 0,
+ "doctype": "Desktop Icon",
+ "hidden": 0,
+ "icon_type": "App",
+ "idx": 1,
+ "label": "Jarvis",
+ "link": "/jarvis",
+ "link_type": "External",
+ "logo_url": "/assets/jarvis/images/jarvis-logo.svg",
+ "modified": "2026-11-16 12:00:00.000000",
+ "modified_by": "Administrator",
+ "name": "Jarvis",
+ "owner": "Administrator",
+ "roles": [],
+ "standard": 1
+}
