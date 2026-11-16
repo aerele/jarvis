@@ -11,6 +11,5 @@ const FIXTURES = JSON.parse(
 
 describe("draftCardView shared cases", () => {
 	const cases = draftCardCases(draftCardView, FIXTURES);
-	it("has cases", () => expect(cases.length).toBeGreaterThan(40));
 	for (const c of cases) it(c.name, () => expect(c.actual).toEqual(c.expected));
 });

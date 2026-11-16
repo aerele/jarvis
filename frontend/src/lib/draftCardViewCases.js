@@ -2,6 +2,8 @@
 // both run these, so the two runners cannot drift. Each case is {name, actual, expected}
 // and the runner only compares them with a deep equal.
 //
+import { isDraftCard, isSensitiveCard } from "./draftCardView.js";
+
 // Each case names the break it catches that no other case catches.
 
 const card = (fixtures, id) => structuredClone(fixtures.find((f) => f.id === id).card);
@@ -52,8 +54,15 @@ export const TIMESHEET_TABLE = {
 	extra: 0,
 };
 
-export function draftCardCases(draftCardView, fixtures) {
+export function draftCardCases(rawView, fixtures) {
 	const cases = [];
+	const seen = new Set();
+	// Records every state a case reaches, so the last case can prove the table is covered.
+	const draftCardView = (c, x) => {
+		const v = rawView(c, x);
+		seen.add(v.state);
+		return v;
+	};
 	const add = (name, actual, expected) => cases.push({ name, actual, expected });
 
 	// Break: a fixture is classed as the wrong state (a sensitive card drawn as a draft, a bad one as ready).
@@ -83,16 +92,33 @@ export function draftCardCases(draftCardView, fixtures) {
 		}
 	}
 
-	// Break: Confirm / Discard changes, or Edit / Preview sneak into a sensitive card, on a surface.
+	// Break: a sensitive card gets content or buttons here, so a host could confirm it with less
+	// detail than its PendingCard (whose buttons read Confirm / Discard). It is a routing signal.
 	for (const surface of ["desktop", "phone"]) {
 		const s = draftCardView(card(fixtures, "sensitive"), { surface });
-		add(`S11 buttons on ${surface}`, shape(s), [
-			btn("create", "Confirm", { primary: true }),
-			btn("cancel", "Discard"),
-		]);
+		add(
+			`S11 is a routing signal on ${surface}`,
+			[s.state, s.useLegacyCard, shape(s), s.rows, s.tables, s.diff],
+			["S11", true, [], [], [], []]
+		);
 		const u = draftCardView(card(fixtures, "unreadable"), { surface });
 		add(`S12 buttons on ${surface}`, shape(u), [btn("cancel", "Cancel")]);
 	}
+	// Break: a host cannot tell which card to mount.
+	add(
+		"routing helpers",
+		fixtures.map((f) => [f.id, isDraftCard(f.card), isSensitiveCard(f.card)]),
+		fixtures.map((f) => [f.id, f.expect === "draft", f.expect === "sensitive"])
+	);
+
+	// Break: the unreadable card cannot be dismissed, or is pressed twice.
+	const bust = card(fixtures, "unreadable");
+	add("S12 under busy cancel", shape(draftCardView(bust, { busy: "cancel" })), [
+		btn("cancel", "Cancel", { disabled: true, loading: true }),
+	]);
+	add("S12 stays dismissable while streaming", shape(draftCardView(bust, { streaming: true })), [
+		btn("cancel", "Cancel"),
+	]);
 
 	// Break: the unreadable sentence changes or the card shows fields.
 	const bad = draftCardView(card(fixtures, "unreadable"), {});
@@ -136,13 +162,6 @@ export function draftCardCases(draftCardView, fixtures) {
 		draftCardView(card(fixtures, "sensitive"), { busy: "create", editing: true }).state,
 		"S11"
 	);
-	add(
-		"a busy sensitive card cannot be pressed twice",
-		draftCardView(card(fixtures, "sensitive"), { busy: "create" }).buttons.map(
-			(b) => b.disabled
-		),
-		[true, true]
-	);
 
 	// Break: the hint wording, or a hint outside S1 and S2.
 	add(
@@ -179,47 +198,103 @@ export function draftCardCases(draftCardView, fixtures) {
 	);
 	add("no note when nothing was left out", draftCardView(ok, {}).ignoredNote, "");
 
-	// Break: an empty column (Activity Type) or an unset flag (Is Billable "No") is drawn, or a real
-	// zero / non-default value is dropped.
+	// Break: an all-empty column is drawn, or a deliberate "No" / "0" is hidden from the person.
 	const ts = card(fixtures, "create-simple");
 	ts.tables = [TIMESHEET_TABLE];
 	const t = draftCardView(ts, {}).tables[0];
 	add(
-		"empty and all-No columns are dropped",
+		"an all-empty column is dropped, an all-No column is kept",
 		[t.columns, t.rows],
 		[
-			["From Time", "Hrs"],
+			["From Time", "Hrs", "Is Billable"],
 			[
-				["10:00", "3"],
-				["11:00", "1.50"],
+				["10:00", "3", "No"],
+				["11:00", "1.50", "No"],
 			],
 		]
 	);
-	const mixed = structuredClone(TIMESHEET_TABLE);
-	mixed.rows[1].cells[3] = "Yes";
-	ts.tables = [mixed];
-	add(
-		"a column with one non-default cell keeps its No cells",
-		draftCardView(ts, {}).tables[0].rows.map((r) => r[2]),
-		["No", "Yes"]
-	);
 	const zero = structuredClone(TIMESHEET_TABLE);
 	zero.rows.forEach((r) => (r.cells[2] = "0"));
+	zero.rows[0].cells.push(0, false);
+	zero.columns.push("N", "F");
+	zero.rows[1].cells.push(0, false);
 	ts.tables = [zero];
-	add("zero is kept", draftCardView(ts, {}).tables[0].columns, ["From Time", "Hrs"]);
+	add("zero and false cells are kept", draftCardView(ts, {}).tables[0].rows[0], [
+		"10:00",
+		"0",
+		"No",
+		"0",
+		"false",
+	]);
 	add(
-		"a table of only empty or No columns keeps its first column",
+		"a table of only empty columns keeps its first column",
 		draftCardView(
 			{
 				...ts,
-				tables: [
-					{ ...TIMESHEET_TABLE, columns: ["A", "B"], rows: [{ cells: ["", "No"] }] },
-				],
+				tables: [{ ...TIMESHEET_TABLE, columns: ["A", "B"], rows: [{ cells: ["", ""] }] }],
 			},
 			{}
 		).tables[0].columns,
 		["A"]
 	);
+	// Break: a row wider than the header silently loses cells; a bad count shows "-3 more"; a table
+	// with no label draws an empty caption.
+	const odd = draftCardView(
+		{
+			...ts,
+			tables: [
+				{ columns: ["A"], rows: [{ cells: ["x", "y"] }], count: -3, extra_columns: 2 },
+			],
+		},
+		{}
+	).tables[0];
+	add(
+		"odd table parts",
+		[odd.columns, odd.rows, odd.count, odd.more, odd.moreColumns, odd.label],
+		[["A", ""], [["x", "y"]], 1, 0, 2, ""]
+	);
+	// Break: objects print as [object Object]; "null" / "undefined" strings print.
+	add(
+		"unprintable values are empty",
+		draftCardView(
+			{
+				...ts,
+				rows: [
+					{ label: "A", value: {} },
+					{ label: "B", value: "undefined" },
+					{ label: "C", value: [1] },
+				],
+			},
+			{}
+		).rows,
+		[]
+	);
+	// Break: the trial warning is lost on the new card, or says something other than today's card.
+	const warned = { ...card(fixtures, "create-simple"), warning: { jobs: 2 } };
+	add(
+		"warning sentence",
+		draftCardView(warned, {}).warning,
+		"This will also start 2 background jobs."
+	);
+	add("no warning when none", draftCardView(card(fixtures, "create-simple"), {}).warning, "");
+	// Break: new rows of an update are not shown under their diff entry.
+	const withRows = card(fixtures, "update-table-rows");
+	withRows.diff[0].to_table = {
+		columns: ["From"],
+		rows: [{ cells: ["10:00"] }, { cells: ["11:00"] }],
+	};
+	const dt = draftCardView(withRows, {}).diff[0].table;
+	add(
+		"diff to_table",
+		[dt.label, dt.columns, dt.rows],
+		["New rows", ["From"], [["10:00"], ["11:00"]]]
+	);
+	add(
+		"diff without to_table has none",
+		draftCardView(card(fixtures, "update-diff"), {}).diff[0].table,
+		null
+	);
+
 	// Break: odd rows / tables / diff parts on a readable draft throw or hide the card.
 	const junk = { draft: { verb: "create", values: {} }, tables: "nope", rows: 7, diff: {} };
 	add(
@@ -260,7 +335,7 @@ export function draftCardCases(draftCardView, fixtures) {
 
 	// Break: an update draws no diff or the wrong primary; a create draws a diff.
 	const up = draftCardView(card(fixtures, "update-diff"), {});
-	add("update diff", up.diff, [{ label: "Status", old: "Open", new: "Closed" }]);
+	add("update diff", up.diff, [{ label: "Status", old: "Open", new: "Closed", table: null }]);
 	add("update primary", up.buttons[0].label, "Save changes");
 	add("create has no diff", draftCardView(card(fixtures, "create-simple"), {}).diff, []);
 
@@ -274,11 +349,16 @@ export function draftCardCases(draftCardView, fixtures) {
 	);
 	add("a tool name never becomes the title", draftCardView(named, {}).title, "ToDo TD-0001");
 	add("create title", draftCardView(ok, {}).title, "New ToDo");
-	add(
-		"no fixture view contains a tool name",
-		fixtures.some((f) => /_doc\b/.test(JSON.stringify(draftCardView(f.card, {})))),
-		false
-	);
+	// Break: a State Table state is never exercised, so its look is undefined.
+	add("every card state is covered", [...seen].sort(), [
+		"S1",
+		"S11",
+		"S12",
+		"S13",
+		"S2",
+		"S3",
+		"S4",
+	]);
 
 	return cases;
 }

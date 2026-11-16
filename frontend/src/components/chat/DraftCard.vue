@@ -1,10 +1,15 @@
 <script setup>
 // The one card both apps draw for a draft the server has stored. It only draws
 // draftCardView(card, ctx): no API calls, no router, no store. The host maps the four events.
-// Plain elements and its own --dc-* tokens, so it needs nothing from either app's stylesheet
-// (the desktop and the phone name their colours differently). frappe-ui is not imported on
-// purpose: a file under frontend/ would resolve it from frontend/node_modules even in the phone
-// build, which can load a second copy; ExportCard, the other shared card, does the same.
+//
+// ROUTING: hosts must check `view.state === "S11"` (or `useLegacyCard`, or isSensitiveCard)
+// and mount their existing PendingCard for a sensitive card instead. This component draws no
+// button for it, so a host that mounts it by mistake cannot confirm a change blind.
+//
+// Plain elements and its own --dc-* tokens, so it needs nothing from either app's stylesheet.
+// frappe-ui is not used because the phone app's Tailwind config deliberately has no frappe-ui
+// content glob (its components would render unstyled there), and both existing draft cards and
+// ExportCard use plain buttons. Swapping in frappe-ui Button belongs with the Phase 2 form work.
 import { computed } from "vue";
 import { draftCardView } from "../../lib/draftCardView.js";
 
@@ -24,6 +29,13 @@ const EVENT = {
 	cancel: "cancel",
 };
 
+// "+N more" rows and "N more columns" under a table.
+function notes(t) {
+	return [t.more ? `+${t.more} more` : "", t.moreColumns ? `${t.moreColumns} more columns` : ""]
+		.filter(Boolean)
+		.join(", ");
+}
+
 function press(button) {
 	if (button.disabled || button.loading) return;
 	emit(EVENT[button.id]);
@@ -31,13 +43,9 @@ function press(button) {
 </script>
 
 <template>
-	<section
-		class="dc"
-		:class="{ 'dc-sensitive': view.state === 'S11' }"
-		:data-state="view.state"
-		:aria-label="view.title || undefined"
-	>
-		<p v-if="view.message" class="dc-message" role="status">{{ view.message }}</p>
+	<section class="dc" :data-state="view.state" :aria-label="view.title || undefined">
+		<p v-if="view.useLegacyCard" class="dc-message">This change needs your confirmation.</p>
+		<p v-else-if="view.message" class="dc-message" role="status">{{ view.message }}</p>
 		<template v-else>
 			<header class="dc-head">
 				<h3 class="dc-title">{{ view.title }}</h3>
@@ -58,13 +66,41 @@ function press(button) {
 					<span class="dc-old">{{ d.old }}</span>
 					<span class="dc-arrow" aria-hidden="true">&rarr;</span>
 					<span class="dc-new">{{ d.new }}</span>
+					<div v-if="d.table" class="dc-table dc-diff-table">
+						<div class="dc-scroll">
+							<table>
+								<caption v-if="d.table.label">
+									{{
+										d.table.label
+									}}
+								</caption>
+								<thead v-if="d.table.columns.length">
+									<tr>
+										<th
+											v-for="(c, ci) in d.table.columns"
+											:key="'dc' + ci"
+											scope="col"
+										>
+											{{ c }}
+										</th>
+									</tr>
+								</thead>
+								<tbody>
+									<tr v-for="(r, ri) in d.table.rows" :key="'dr' + ri">
+										<td v-for="(c, ci) in r" :key="'dd' + ci">{{ c }}</td>
+									</tr>
+								</tbody>
+							</table>
+						</div>
+						<p v-if="notes(d.table)" class="dc-more">{{ notes(d.table) }}</p>
+					</div>
 				</li>
 			</ul>
 
 			<div v-for="(t, ti) in view.tables" :key="'t' + ti" class="dc-table">
 				<div class="dc-scroll">
 					<table>
-						<caption>
+						<caption v-if="t.label">
 							{{
 								t.label
 							}}
@@ -83,13 +119,14 @@ function press(button) {
 						</tbody>
 					</table>
 				</div>
-				<p v-if="t.more" class="dc-more">+{{ t.more }} more</p>
+				<p v-if="notes(t)" class="dc-more">{{ notes(t) }}</p>
 			</div>
 
 			<p v-if="view.ignoredNote" class="dc-note">{{ view.ignoredNote }}</p>
+			<p v-if="view.warning" class="dc-note dc-warning" role="note">{{ view.warning }}</p>
 		</template>
 
-		<div class="dc-buttons">
+		<div v-if="view.buttons.length" class="dc-buttons">
 			<button
 				v-for="b in view.buttons"
 				:key="b.id"
@@ -101,11 +138,14 @@ function press(button) {
 				@click="press(b)"
 			>
 				<span v-if="b.loading" class="dc-spin" aria-hidden="true"></span>
-				{{ b.label }}
+				<span class="dc-label">{{ b.label }}</span>
 			</button>
 		</div>
 		<!-- Always one line tall, so the card does not change height between states. -->
-		<p class="dc-foot" aria-live="polite">{{ view.footer || view.hint || " " }}</p>
+		<p v-if="!view.useLegacyCard" class="dc-foot">
+			<span v-if="view.footer" aria-live="polite">{{ view.footer }}</span>
+			<template v-else>{{ view.hint || "\u00a0" }}</template>
+		</p>
 	</section>
 </template>
 
@@ -121,8 +161,6 @@ function press(button) {
 	--dc-primary-bg: var(--cta, var(--inv-bg, #171717));
 	--dc-primary-fg: var(--cta-fg, var(--inv-ink, #ffffff));
 	--dc-focus: var(--link, var(--accent, #2563eb));
-	--dc-danger: var(--red, #dc2626);
-	--dc-ok: var(--green, #16a34a);
 	--dc-warn: var(--amber, #d97706);
 
 	margin: 12px 0;
@@ -136,9 +174,8 @@ function press(button) {
 	overflow-wrap: anywhere;
 	min-width: 0;
 }
-/* Sensitive keeps today's warning look; every other state is calm. */
-.dc-sensitive {
-	border-color: color-mix(in srgb, var(--dc-warn) 45%, var(--dc-border));
+.dc-warning {
+	color: color-mix(in srgb, var(--dc-warn) 70%, var(--dc-text));
 }
 .dc-head {
 	display: flex;
@@ -167,6 +204,12 @@ function press(button) {
 }
 .dc-message {
 	color: var(--dc-text);
+}
+.dc-field dd,
+.dc-old,
+.dc-new,
+.dc td {
+	white-space: pre-line;
 }
 .dc-fields {
 	display: grid;
@@ -226,7 +269,8 @@ function press(button) {
 	text-align: left;
 	padding: 4px 8px;
 	border-bottom: 1px solid var(--dc-border);
-	overflow-wrap: anywhere;
+	overflow-wrap: break-word;
+	min-width: 6ch;
 }
 .dc th {
 	color: var(--dc-muted);
@@ -266,12 +310,19 @@ function press(button) {
 	background: var(--dc-bg-soft);
 	color: var(--dc-text);
 	cursor: pointer;
+	position: relative;
 }
 .dc-primary {
 	background: var(--dc-primary-bg);
 	color: var(--dc-primary-fg);
 	border-color: var(--dc-primary-bg);
 	font-weight: 600;
+}
+.dc-btn:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--dc-text) 8%, var(--dc-bg-soft));
+}
+.dc-primary:hover:not(:disabled) {
+	background: color-mix(in srgb, var(--dc-text) 12%, var(--dc-primary-bg));
 }
 .dc-btn:disabled {
 	opacity: 0.55;
@@ -285,12 +336,17 @@ function press(button) {
 	outline-offset: 2px;
 }
 .dc-spin {
+	position: absolute;
 	width: 12px;
 	height: 12px;
 	border: 2px solid currentColor;
 	border-right-color: transparent;
 	border-radius: 50%;
 	animation: dc-spin 0.8s linear infinite;
+}
+/* The spinner sits over the label, which stays in the layout (hidden) so the button keeps its width. */
+.dc-loading .dc-label {
+	opacity: 0;
 }
 @keyframes dc-spin {
 	to {

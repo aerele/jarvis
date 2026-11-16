@@ -13,9 +13,6 @@ const FIXTURES = JSON.parse(
 );
 
 const cases = draftCardCases(draftCardView, FIXTURES);
-test("draftCardView: the shared case list is not empty", () => {
-	assert.ok(cases.length > 40);
-});
 for (const c of cases) {
 	test(c.name, () => assert.deepEqual(c.actual, c.expected));
 }

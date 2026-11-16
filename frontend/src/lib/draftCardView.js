@@ -7,10 +7,18 @@
 // S4 working, S11 sensitive, S12 unreadable, S13 turn running. The others are not card
 // states: S5 (fix needed) lives in the edit form, S6 to S10 are receipts drawn elsewhere.
 //
+// ROUTING: a sensitive card (state S11, `useLegacyCard: true`) is NOT drawn by DraftCard. The
+// view carries no content and no buttons for it, because the existing PendingCard shows more
+// (line diffs, from/to tables, consequence, warning) and a sensitive change must never be
+// confirmed with less detail. Hosts check `view.state === "S11"` (or `isSensitiveCard(card)`)
+// and mount their PendingCard, whose buttons read Confirm / Discard. `isDraftCard(card)` is
+// true only for a readable, non-sensitive draft.
+//
 // ctx = { earlier, busy: "create"|"cancel"|""|null, editing, streaming, surface: "desktop"|"phone" }
 // Precedence when several flags are true:
 //   unreadable > sensitive > busy > streaming > editing > earlier > ready
 import { typedApprovalHint } from "./typedCardReply.js";
+import { cardWarningOf } from "./actionSummary.js";
 
 export const UNREADABLE_TEXT = "Couldn't show this draft. Ask Jarvis to send it again.";
 
@@ -19,7 +27,12 @@ export const MAX_ROWS_DESKTOP = 8;
 export const MAX_ROWS_PHONE = 5;
 
 const isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
-const text = (v) => (v === null || v === undefined ? "" : String(v).trim());
+// Objects and arrays never print as "[object Object]"; "null" and "undefined" count as empty.
+const text = (v) => {
+	if (v === null || v === undefined || typeof v === "object") return "";
+	const t = String(v).trim();
+	return t === "null" || t === "undefined" ? "" : t;
+};
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 const TOOL_NAME = /\b(create|update)_doc\b/i;
 
@@ -27,6 +40,16 @@ function isReadable(card) {
 	if (!isObject(card) || !isObject(card.draft)) return false;
 	const d = card.draft;
 	return (d.verb === "create" || d.verb === "update") && isObject(d.values);
+}
+
+// True only for a readable, non-sensitive draft (the S1 family).
+export function isDraftCard(card) {
+	return isReadable(card) && !card.risk;
+}
+
+// True for any object card with `risk`: the host draws its legacy PendingCard.
+export function isSensitiveCard(card) {
+	return isObject(card) && !!card.risk;
 }
 
 function pressed(id, label, opts = {}) {
@@ -63,33 +86,39 @@ function isPressed(b, ctx) {
 	return !!ctx.busy && (ctx.busy === "cancel" ? b.id === "cancel" : b.primary);
 }
 
-// A column is dropped when every cell is empty, or every cell is the word "No" (an optional
-// flag nobody set, e.g. Is Billable). Zero is kept: "0" hours or "0.00" amount says something.
-// If that would drop every column, the first one stays so the rows can still be told apart.
+// A column is dropped only when every cell is empty. "No", "0" and false are real values the
+// agent drafted and the person must see before pressing Create. If every column would go, the
+// first one stays so the rows can still be told apart.
 function usefulColumns(columns, rows) {
 	const keep = [];
 	columns.forEach((_, i) => {
-		const cells = rows.map((r) => text(r[i]));
-		if (!cells.every((c) => c === "" || c.toLowerCase() === "no")) keep.push(i);
+		if (!rows.every((r) => text(r[i]) === "")) keep.push(i);
 	});
 	return keep.length || !columns.length ? keep : [0];
 }
 
 function tableView(t, surface) {
-	const columns = Array.isArray(t.columns) ? t.columns.map(text) : [];
 	const rows = (Array.isArray(t.rows) ? t.rows : []).map((r) =>
 		Array.isArray(r && r.cells) ? r.cells : []
 	);
+	// A row wider than the header keeps its extra cells under an empty header.
+	const width = Math.max(
+		Array.isArray(t.columns) ? t.columns.length : 0,
+		...rows.map((r) => r.length)
+	);
+	const columns = Array.from({ length: width }, (_, i) => text((t.columns || [])[i]));
 	const keep = usefulColumns(columns, rows);
 	const max = surface === "phone" ? MAX_ROWS_PHONE : MAX_ROWS_DESKTOP;
 	const shown = rows.slice(0, max);
-	const count = Number.isFinite(t.count) ? t.count : rows.length;
+	const count = Math.max(Number.isInteger(t.count) && t.count >= 0 ? t.count : 0, shown.length);
 	return {
 		label: text(t.label),
 		columns: keep.map((i) => columns[i]),
 		rows: shown.map((r) => keep.map((i) => text(r[i]))),
 		count,
 		more: Math.max(0, count - shown.length),
+		moreColumns:
+			Number.isInteger(t.extra_columns) && t.extra_columns > 0 ? t.extra_columns : 0,
 	};
 }
 
@@ -99,10 +128,17 @@ function rowsView(card) {
 		.filter((r) => r.value !== "" && r.value !== "-" && r.value !== "null" && r.label !== "");
 }
 
-function diffView(card) {
-	return (Array.isArray(card.diff) ? card.diff : [])
-		.filter(isObject)
-		.map((d) => ({ label: text(d.label), old: text(d.from), new: text(d.to) }));
+// A diff entry may carry `to_table` (rows the draft adds); only those new rows are drawn, under
+// the label "New rows". `from_table` and `lines` are not drawn on a normal draft card.
+function diffView(card, surface) {
+	return (Array.isArray(card.diff) ? card.diff : []).filter(isObject).map((d) => ({
+		label: text(d.label),
+		old: text(d.from),
+		new: text(d.to),
+		table: isObject(d.to_table)
+			? tableView({ ...d.to_table, label: "New rows" }, surface)
+			: null,
+	}));
 }
 
 function labels(list) {
@@ -131,7 +167,8 @@ function summaryFor(draft, tables) {
 	const parts = [];
 	if (fields) parts.push(plural(fields, "field", "fields"));
 	for (const t of tables)
-		if (t.count) parts.push(`${plural(t.count, "row", "rows")} in ${t.label}`);
+		if (t.count)
+			parts.push(plural(t.count, "row", "rows") + (t.label ? ` in ${t.label}` : ""));
 	const doctype = text(draft.doctype) || "record";
 	if (draft.verb === "update") {
 		const target = `${doctype} ${text(draft.name)}`.trim();
@@ -148,38 +185,29 @@ const EMPTY = {
 	tables: [],
 	diff: [],
 	ignoredNote: "",
+	warning: "",
 	buttons: [],
 	hint: "",
 	footer: "",
 	tag: "",
 	message: "",
+	useLegacyCard: false,
 };
 
-function unreadable() {
-	return { ...EMPTY, buttons: [pressed("cancel", "Cancel")], message: UNREADABLE_TEXT };
-}
-
-function sensitive(card, ctx) {
-	const busy = !!ctx.busy || !!ctx.streaming;
-	const doctype = text(card.doctype) || "record";
-	const verb = text(card.kind) === "update" ? "Update" : "Create";
-	const buttons = [
-		pressed("create", "Confirm", { primary: true }),
-		pressed("cancel", "Discard"),
-	].map((b) => ({
-		...b,
-		disabled: busy,
-		loading: isPressed(b, ctx),
-	}));
+// Cancel is the only way out of an unreadable card: it stays live unless a request is in flight.
+function unreadable(ctx = {}) {
 	return {
 		...EMPTY,
-		state: "S11",
-		title: text(card.title) || `${verb} ${doctype}`,
-		summary: text(card.risk_line),
-		rows: rowsView(card),
-		diff: diffView(card),
-		buttons,
+		buttons: [
+			pressed("cancel", "Cancel", { disabled: !!ctx.busy, loading: ctx.busy === "cancel" }),
+		],
+		message: UNREADABLE_TEXT,
 	};
+}
+
+// No content, no buttons: see ROUTING above.
+function sensitive() {
+	return { ...EMPTY, state: "S11", useLegacyCard: true };
 }
 
 function stateOf(ctx) {
@@ -191,8 +219,8 @@ function stateOf(ctx) {
 }
 
 function build(card, ctx) {
-	if (isObject(card) && card.risk) return sensitive(card, ctx);
-	if (!isReadable(card)) return unreadable();
+	if (isSensitiveCard(card)) return sensitive();
+	if (!isReadable(card)) return unreadable(ctx);
 	const draft = card.draft;
 	const state = stateOf(ctx);
 	const tables = (Array.isArray(card.tables) ? card.tables : [])
@@ -206,7 +234,8 @@ function build(card, ctx) {
 		summary: summaryFor(draft, tables),
 		rows: rowsView(card),
 		tables,
-		diff: draft.verb === "update" ? diffView(card) : [],
+		diff: draft.verb === "update" ? diffView(card, ctx.surface) : [],
+		warning: cardWarningOf(card),
 		ignoredNote: noteFor(draft),
 		buttons: ready
 			? readyButtons(draft.verb)

@@ -71,6 +71,7 @@ describe("DraftCard", () => {
 			"Field",
 			"Fieldtype",
 			"Custom Label",
+			"Mandatory",
 		]);
 		expect(draw("create-ignored-field").text()).toContain(
 			"Left out: colour. These are not fields on this form."
@@ -81,5 +82,55 @@ describe("DraftCard", () => {
 	it.each(FIXTURES.map((f) => f.id))("%s shows no tool name", (id) => {
 		const w = draw(id);
 		expect(w.text()).not.toMatch(/create_doc|update_doc/);
+	});
+
+	// Break: a sensitive card gets a button here, so a host that mounts it wrongly confirms blind.
+	it("S11 renders no button and says it needs confirmation", () => {
+		const w = draw("sensitive");
+		expect(w.findAll("button")).toHaveLength(0);
+		expect(w.text()).toBe("This change needs your confirmation.");
+	});
+
+	// Break: model-written text is parsed as HTML.
+	it("hostile text is drawn as text", () => {
+		const evil = "<img src=x onerror=alert(1)>";
+		const c = structuredClone(card("create-with-table"));
+		c.draft.title = evil;
+		c.tables[0].rows[0].cells[0] = evil;
+		const w = mount(DraftCard, { props: { card: c } });
+		expect(w.find("img").exists()).toBe(false);
+		expect(w.find("h3").text()).toBe(evil);
+		expect(w.find("td").text()).toBe(evil);
+	});
+
+	// Break: the Earlier tag, the footer lines or the "+N more" note are computed but not drawn.
+	it("draws the tag, the footers and the row note", () => {
+		expect(draw("create-simple", { earlier: true }).find(".dc-tag").text()).toBe("Earlier");
+		expect(draw("create-simple", { editing: true }).text()).toContain("Editing");
+		expect(draw("create-simple", { streaming: true }).text()).toContain("Jarvis is replying");
+		const c = structuredClone(card("create-with-table"));
+		c.tables[0].count = 12;
+		c.tables[0].rows = Array.from({ length: 12 }, (_, i) => ({
+			cells: [`r${i}`, "", "", "", ""],
+		}));
+		expect(mount(DraftCard, { props: { card: c } }).text()).toContain("+4 more");
+	});
+
+	// Break: the trial warning is computed but not drawn, or drawn when absent.
+	it("draws the trial warning as a note only when present", () => {
+		const c = { ...card("create-simple"), warning: { jobs: 1 } };
+		const w = mount(DraftCard, { props: { card: c } });
+		expect(w.find("[role=note]").text()).toBe("This will also start 1 background job.");
+		expect(draw("create-simple").find("[role=note]").exists()).toBe(false);
+	});
+
+	// Break: an unreadable card stays pressable while its Cancel is in flight.
+	it("S12 under busy cancel is disabled and spinning", async () => {
+		const w = draw("unreadable", { busy: "cancel" });
+		const b = w.find("button");
+		expect(b.attributes("disabled")).toBeDefined();
+		expect(b.attributes("aria-busy")).toBe("true");
+		await b.trigger("click");
+		expect(w.emitted("cancel")).toBeUndefined();
 	});
 });
