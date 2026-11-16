@@ -11,9 +11,11 @@ from pathlib import Path
 from frappe.apps import is_desk_apps
 
 from jarvis import hooks
+from jarvis.permissions import JARVIS_ACCESS_ROLES
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 DESKTOP_ICON = APP_ROOT / "desktop_icon" / "jarvis.json"
+CHAT_PAGE = APP_ROOT / "jarvis" / "page" / "jarvis_chat" / "jarvis_chat.json"
 
 
 class TestAppsScreenEntry(unittest.TestCase):
@@ -25,6 +27,13 @@ class TestAppsScreenEntry(unittest.TestCase):
 			is_desk_apps(hooks.add_to_apps_screen),
 			"add_to_apps_screen route left /desk; this changes where users land after login.",
 		)
+
+	def test_everyone_who_sees_the_entry_can_open_its_route(self):
+		"""The entry shows for JARVIS_ACCESS_ROLES but routes through a Desk
+		page with its own role list. A role missing there would see Jarvis on
+		/apps and get a no-permission page when clicking it."""
+		page_roles = {row["role"] for row in json.loads(CHAT_PAGE.read_text())["roles"]}
+		self.assertEqual(set(JARVIS_ACCESS_ROLES) - page_roles, set())
 
 	def test_logo_is_a_file_the_site_serves(self):
 		"""Both the hook and the Desk tile point at one committed file under
