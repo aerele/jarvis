@@ -191,14 +191,20 @@ def retires_draft(row: dict) -> bool:
 	)
 
 
-def pick(rows: list[dict]) -> dict | None:
+def pick(rows: list[dict], parked_draft: bool = False) -> dict | None:
 	"""The live draft among ``rows`` (messages in ``seq`` order), or None.
+
+	``parked_draft`` means the conversation has a Pending draft card (read from the Pending
+	Actions, whether or not its tool row is among ``rows``): exactly one card is shown, so no
+	typed draft is live then, wherever it sits in the row order.
 
 	Returns ``{"message": name, "verb": "create"|"update", "doctype": str, "bad": bool}``.
 	The newest draft row is chosen first and only then tested for retirement: an older
 	draft never comes back. ``counted`` holds the rows that count toward
 	``MAX_ROWS_AFTER_DRAFT``; ``tool_run`` the tool rows walked since the last row that was
 	not one, which are the draft's own turn if the draft comes next."""
+	if parked_draft:
+		return None
 	user_rows = counted = tool_run = 0
 	for row in reversed(rows or []):
 		if not _shown(row):
@@ -363,6 +369,10 @@ def pending_draft_cards(*, conversations=None, owner: str | None = None, limit: 
 	never taken from the stored text. One plain read, no lock: prompt assembly, the board and the
 	export all call this.
 
+	The server's view can differ from the app's for one fenced-off card: the apps redact a card
+	``pending_action_is_safe_to_render`` refuses, and that check locks, so it is not made here
+	(accepted: such a card is already dead and settles on its own).
+
 	``get_all``: every caller acts for the owner of these conversations (the turn's own prompt, a
 	board or export of the caller's own chats, a macro run for its owner), and the Pending Action
 	DocType grants no user read at all."""
@@ -370,7 +380,9 @@ def pending_draft_cards(*, conversations=None, owner: str | None = None, limit: 
 
 	from jarvis.chat import draft_card
 
-	filters = {"kind": "chat", "status": "Pending"}
+	# The ``like`` keeps the limit counting draft cards only (a newer plain pending card must not
+	# hide one); the parse below is the real test, the text match only narrows the read.
+	filters = {"kind": "chat", "status": "Pending", "card": ["like", '%"draft"%']}
 	if conversations is not None:
 		if not conversations:
 			return []
@@ -420,5 +432,11 @@ def _card_of(raw) -> dict | None:
 
 
 def find(conversation: str) -> dict | None:
-	"""The live draft of ``conversation``, or None: ``pick`` over ``load_rows``."""
-	return pick(load_rows(conversation))
+	"""The live draft of ``conversation``, or None: ``pick`` over ``load_rows``, and None
+	whenever a Pending draft card waits (one more plain read, whatever rows were loaded)."""
+	return pick(load_rows(conversation), parked_draft=has_pending_draft(conversation))
+
+
+def has_pending_draft(conversation: str) -> bool:
+	"""Whether ``conversation`` has a Pending draft card: ``pending_draft_cards`` for it alone."""
+	return bool(pending_draft_cards(conversations=[conversation], limit=1))

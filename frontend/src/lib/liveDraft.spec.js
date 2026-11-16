@@ -20,7 +20,9 @@ describe("liveDraftRow shared cases", () => {
 	});
 	for (const c of CASES) {
 		it(`${c.id}: ${c.note}`, () => {
-			expect(liveDraftRow(c.rows)?.name ?? null).toBe(c.live);
+			expect(liveDraftRow(c.rows, { parkedDraft: !!c.parked_draft })?.name ?? null).toBe(
+				c.live
+			);
 		});
 	}
 });

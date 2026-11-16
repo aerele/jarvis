@@ -4026,5 +4026,78 @@
 			}
 		],
 		"live": null
+	},
+	{
+		"id": "parked-tool-draft-then-typed-draft-next-turn",
+		"note": "a Pending draft card from an earlier turn: the typed block of the next turn is not live (one card)",
+		"rows": [
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t1",
+				"draft_card": true
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m2",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"parked_draft": true,
+		"live": null
+	},
+	{
+		"id": "typed-draft-with-old-parked-card-outside-loaded-rows",
+		"note": "the Pending card's row is not among the loaded rows: the flag alone hides the typed draft",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"parked_draft": true,
+		"live": null
+	},
+	{
+		"id": "typed-draft-after-parked-card-was-decided",
+		"note": "a decided card before a NEW typed draft does not hide it",
+		"rows": [
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> confirmed",
+				"tool_name": "create_doc",
+				"tool_status": "",
+				"tool_call_id": "call-t1",
+				"action_outcome": "confirmed",
+				"draft_card": false
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m2",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"parked_draft": false,
+		"live": "m2"
 	}
 ]

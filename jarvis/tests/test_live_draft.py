@@ -103,7 +103,7 @@ class TestRuleCases(_Base):
 			cases = json.load(f)
 		self.assertGreaterEqual(len(cases), 49)
 		for case in cases:
-			if any(r.get("draft_card") is True for r in case["rows"]):
+			if case.get("parked_draft") or any(r.get("draft_card") is True for r in case["rows"]):
 				continue  # needs real Pending Actions: TestParkedToolDraft runs these
 			with self.subTest(case=case["id"]):
 				conv = _make_conv(TEST_USER)
@@ -623,7 +623,8 @@ class TestParkedToolDraft(PendingActionTestMixin, FrappeTestCase):
 			cases = json.load(f)
 		ran = 0
 		for case in cases:
-			if not any(r.get("draft_card") is True for r in case["rows"]):
+			has_card = any(r.get("draft_card") is True for r in case["rows"])
+			if not (case.get("parked_draft") or has_card):
 				continue
 			ran += 1
 			with self.subTest(case=case["id"]):
@@ -637,11 +638,46 @@ class TestParkedToolDraft(PendingActionTestMixin, FrappeTestCase):
 					keys = ("action_outcome", "tool_name", "tool_status", "tool_call_id")
 					extra = {k: row[k] for k in keys if k in row}
 					names[row["name"]] = _insert(conv, seq, row["role"], row.get("content"), **extra)
+				if case.get("parked_draft") and not has_card:
+					# The card's row is outside the loaded rows (an older turn): only its Pending Action exists.
+					token = self.park(
+						conv,
+						tool="create_doc",
+						args={"doctype": "ToDo", "values": {"description": "x"}},
+						card=self._card(),
+						preview={"would": {}, "card": self._card()},
+					)
+					self.assertTrue(token)
 				found = live_draft.find(conv)
 				self.assertEqual(
 					found["message"] if found else None, names[case["live"]] if case["live"] else None
 				)
-		self.assertGreaterEqual(ran, 4)
+		self.assertGreaterEqual(ran, 6)
+
+	def test_newer_plain_pending_cards_do_not_hide_a_draft_card(self):
+		"""``pending_draft_cards`` limits in the query: without the draft filter there, enough
+		newer plain pending cards (here in two other chats of the owner) would push the draft
+		card out of a limited read and the board would not list it."""
+		conv = self.make_conv()
+		token = self._park_row(conv, 1)
+		plain = {"title": "Submit", "fields": []}
+		for _i in range(2):
+			self.park(self.make_conv(), card=plain, preview={"would": {}, "card": plain})
+		cards = live_draft.pending_draft_cards(owner=OWNER, limit=1)
+		self.assertEqual([c["token"] for c in cards], [token])
+
+	def test_the_clause_words_differ_for_a_parked_and_a_typed_draft(self):
+		"""A parked card is the agent's own tool call: telling it to re-emit a block would make it
+		type a second card. The typed draft's wording must stay as it was."""
+		parked = self.make_conv()
+		self._park_row(parked, 1)
+		out = self._clause(parked)
+		self.assertIn("call the tool again only for a change they ask for", out)
+		self.assertNotIn("re-emit the block", out)
+		typed = self.make_conv()
+		_insert(typed, 1, "assistant", _TODO)
+		self.assertIn("re-emit the block only for a change they ask for", self._clause(typed))
+		self.assertNotIn("call the tool again", self._clause(typed))
 
 	def test_a_decided_card_is_not_a_draft_card(self):
 		"""A confirmed or discarded card is no longer Pending, so its row must read
@@ -790,7 +826,7 @@ class TestPureRule(unittest.TestCase):
 			cases = json.load(f)
 		for case in cases:
 			with self.subTest(case=case["id"]):
-				found = live_draft.pick(case["rows"])
+				found = live_draft.pick(case["rows"], bool(case.get("parked_draft")))
 				self.assertEqual(found["message"] if found else None, case["live"])
 
 	def test_the_bounds_match_the_javascript_rule(self):

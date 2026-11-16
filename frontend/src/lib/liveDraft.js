@@ -81,10 +81,14 @@ export function isOwnActionRow(row) {
 }
 
 /**
+ * The caller passes `parkedDraft` from the pending-confirmations list (true when an item has
+ * `preview.card.draft`): a Pending draft card is the one card, so no typed draft is live.
  * @param {Array<object>|null|undefined} rows messages in order
+ * @param {{parkedDraft?: boolean}} [options]
  * @returns {object|null} the live draft row, or null
  */
-export function liveDraftRow(rows) {
+export function liveDraftRow(rows, { parkedDraft = false } = {}) {
+	if (parkedDraft) return null;
 	if (!Array.isArray(rows)) return null;
 	let userRows = 0;
 	// Rows that count toward MAX_ROWS_AFTER_DRAFT, and the run of tool rows walked since

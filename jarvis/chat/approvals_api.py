@@ -678,7 +678,7 @@ def _open_drafts(me: str) -> list[dict]:
 	parked = _parked_drafts(me)
 	out = []
 	for r in rows:
-		if is_collaborative(r.conversation) or r.conversation in parked:
+		if r.conversation in parked or is_collaborative(r.conversation):
 			continue  # a parked draft card is the one card of its chat: listed below
 		a = parse_action(r.content)
 		if not a:
@@ -696,19 +696,23 @@ def _open_drafts(me: str) -> list[dict]:
 			}
 		)
 	out.extend(parked.values())
-	out.sort(key=lambda d: d["last_at"], reverse=True)
+	out.sort(key=lambda d: frappe.utils.get_datetime(d["last_at"]), reverse=True)
 	return out[:_OPEN_DRAFTS_MAX]
 
 
 def _parked_drafts(me: str) -> dict[str, dict]:
 	"""Draft cards the agent parked (``create_doc`` / ``update_doc``) and that still wait, in chats
 	OWNED by ``me``: one open-drafts row per chat, same shape as a typed draft's. Two plain reads
-	(the cards, then their chats); only ``is_collaborative`` runs per chat, as in the rest of this file."""
+	(the cards, then their chats and whether each is collaborative), none in a loop."""
 	from jarvis.chat import live_draft
 
 	cards = live_draft.pending_draft_cards(owner=me, limit=50)
 	if not cards:
 		return {}
+	fields = ["name", "title", "origin_page", "file_box"]
+	if frappe.db.has_column("Jarvis Conversation", "collaboration_active"):
+		fields.append("collaboration_active")
+	# get_all: filtered to chats OWNED by ``me`` (the caller's own board); no user read is needed.
 	chats = {
 		c.name: c
 		for c in frappe.get_all(
@@ -718,7 +722,7 @@ def _parked_drafts(me: str) -> dict[str, dict]:
 				"owner": me,
 				"status": ["!=", "Archived"],
 			},
-			fields=["name", "title", "origin_page", "file_box"],
+			fields=fields,
 		)
 	}
 	out: dict[str, dict] = {}
@@ -726,7 +730,7 @@ def _parked_drafts(me: str) -> dict[str, dict]:
 		chat = chats.get(card["conversation"])
 		if not chat or chat.file_box or not card["doctype"] or card["conversation"] in out:
 			continue
-		if is_collaborative(card["conversation"]):
+		if chat.get("collaboration_active"):
 			continue
 		out[card["conversation"]] = {
 			"conversation": card["conversation"],

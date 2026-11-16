@@ -2918,7 +2918,7 @@ def _live_draft_clause(conv, binding) -> str:
 			# A parked draft card wins over a typed draft (the shared rule retires the typed one,
 			# so both exist only in a chat that parked the card first). It needs none of the typed
 			# draft's checks: its block cannot be broken and no reply card hides it.
-			return _draft_clause_text(f"{parked[0]} {parked[1] or 'a record'}", parked[2])
+			return _draft_clause_text(f"{parked[0]} {parked[1] or 'a record'}", parked[2], parked=True)
 		rows = live_draft.load_rows(conv.name)
 		draft = live_draft.pick(rows)
 		if not draft or draft["bad"]:
@@ -2935,12 +2935,14 @@ def _live_draft_clause(conv, binding) -> str:
 		return ""
 
 
-def _draft_clause_text(what: str, button: str) -> str:
+def _draft_clause_text(what: str, button: str, parked: bool = False) -> str:
 	"""The clause for a waiting draft, typed or parked: ``what`` is "verb Doctype", ``button``
-	the card's own word for the save button."""
+	the card's own word for the save button. A parked card is the agent's own tool call, so
+	for it the agent is told to call the tool again for a change, not to re-emit a block."""
+	change = "call the tool again" if parked else "re-emit the block"
 	return (
 		f"; unsaved draft waiting: {what}, its card with {button} and Cancel is on the user's screen: "
-		"remind them in one line to choose, re-emit the block only for a change they ask for, "
+		f"remind them in one line to choose, {change} only for a change they ask for, "
 		"never say it is above"
 	)
 
