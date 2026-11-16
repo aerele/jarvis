@@ -1,6 +1,6 @@
 // Zero desktop change for the shared draft components that the phone now draws (rule P10).
 //
-// DraftEditForm and DraftLinkMenu (shared) and the phone's Sheet each gained an
+// DraftEditForm, DraftPreview and DraftLinkMenu (shared) and the phone's Sheet each gained an
 // additive `surface` / `full` option. With the option absent, or "desktop", what the desktop draws
 // must be exactly what it drew before. The baseline file was recorded from the components at the
 // commit BEFORE the option existed (`DRAFT_SURFACE_BASELINE=write npx vitest run ...` only when
@@ -19,6 +19,7 @@ import { mount } from "@vue/test-utils";
 import { h, reactive } from "vue";
 import DraftEditForm from "./chat/DraftEditForm.vue";
 import DraftLinkMenu from "./chat/DraftLinkMenu.vue";
+import DraftPreview from "./doc/DraftPreview.vue";
 import Sheet from "../../../pwa/src/components/Sheet.vue";
 import { panelField } from "../lib/docFields.js";
 import { buildDraftTable } from "../lib/draftTables.js";
@@ -27,6 +28,7 @@ import { timesheetModel } from "../lib/timesheetDraftFixture.js";
 const FILE = path.resolve(__dirname, "draftSurfaceBaseline.json");
 const SOURCES = {
 	DraftEditForm: "chat/DraftEditForm.vue",
+	DraftPreview: "doc/DraftPreview.vue",
 	DraftLinkMenu: "chat/DraftLinkMenu.vue",
 	Sheet: "../../../pwa/src/components/Sheet.vue",
 };
@@ -129,6 +131,24 @@ const CASES = {
 			slots: { error: () => h("p", { class: "slot-error" }, "slot error") },
 		}).html();
 	},
+	"preview: timesheet create": (surface) =>
+		mount(DraftPreview, {
+			props: withSurface({ model: timesheetModel() }, surface),
+			global: { stubs: { transition: false } },
+		}).html(),
+	"preview: update with a headline, a label and disabled": (surface) =>
+		mount(DraftPreview, {
+			props: withSurface(
+				{
+					model: updateModel(),
+					headline: "Change an order",
+					confirmLabel: "Save changes",
+					disabled: true,
+				},
+				surface
+			),
+			global: { stubs: { transition: false } },
+		}).html(),
 	"link menu": (surface) => {
 		const w = mount(DraftLinkMenu, {
 			props: {
@@ -185,7 +205,7 @@ if (process.env.DRAFT_SURFACE_BASELINE === "write") {
 			it(`${name}: prop absent`, () =>
 				expect(norm(CASES[name]())).toBe(norm(baseline.html[name])));
 		}
-		for (const name of Object.keys(CASES).filter((n) => /^form:/.test(n))) {
+		for (const name of Object.keys(CASES).filter((n) => /^(form|preview):/.test(n))) {
 			it(`${name}: surface "desktop"`, () =>
 				expect(norm(CASES[name]("desktop"))).toBe(norm(baseline.html[name])));
 		}

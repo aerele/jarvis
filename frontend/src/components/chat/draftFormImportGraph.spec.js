@@ -34,6 +34,10 @@ const ENTRIES = [
 	here("../../lib/toolDraftKeys.js"),
 	here("../../lib/draftReceipt.js"),
 	here("../../lib/draftCardView.js"),
+	// What the phone's sheet host adds (pwa/src/lib/draftSheetHost.js imports these by relative path).
+	here("../../lib/toolDraftSheet.js"),
+	here("../../lib/draftSurface.js"),
+	here("../../lib/draftTables.js"),
 ];
 // The only package a file in the graph may import.
 const ALLOWED_PACKAGES = new Set(["vue"]);

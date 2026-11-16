@@ -1,4 +1,4 @@
-// The phone's host of the edit form of a server draft card. The decisions are the
+// The phone's host of the edit form and the preview of a server draft card. The decisions are the
 // shared ones (frontend/src/lib: toolDraftHost.js opens, saves and discards; toolDraftSheet.js
 // says what the footer, the close and the poll do; draftModel.js builds the form); this file only
 // supplies what is the phone's own: where the state lives, the pending list and the chat it
@@ -9,12 +9,12 @@
 // cannot resolve, so it is tested by vitest (frontend/src/components/PwaDraftSheet.spec.js); the
 // pure parts are in draftSheetView.js and draftCardUi.js. Relative imports only.
 import { computed, nextTick, ref, watch } from "vue";
-import { thrownActionError } from "../../../frontend/src/lib/chatErrorCopy.js";
 import { makeDraftModelBuilder } from "../../../frontend/src/lib/draftModel.js";
 import { applyAutoOpen } from "../../../frontend/src/lib/draftTables.js";
 import {
 	discardFromForm,
 	openToolDraftPanel,
+	openToolPreview,
 	saveToolDraft,
 	toolPanelDead,
 	toolPanelNotices,
@@ -23,6 +23,7 @@ import { focusFirstMark } from "../../../frontend/src/lib/toolDraftPanel.js";
 import {
 	TOOL_FORM_POLL_MS,
 	closeAsksFirst,
+	previewPrimaryDisabled,
 	toolFooterState,
 	watchCalculatedCells,
 } from "../../../frontend/src/lib/toolDraftSheet.js";
@@ -46,7 +47,8 @@ import { useDraftLink } from "../../../frontend/src/lib/useDraftLink.js";
 export function makeDraftSheet(io) {
 	const ui = io.ui;
 	const panel = ref(null); // the edit form's model (a ref: the form edits it in place)
-	const building = ref(""); // the token whose form is being built
+	const preview = ref(null); // { token, model }
+	const building = ref(""); // the token whose form or preview is being built
 	const confirming = ref(false); // the inline "Discard your changes?" is showing
 	const bodyEl = ref(null); // the form's wrapper, where the first mark is found
 
@@ -95,6 +97,9 @@ export function makeDraftSheet(io) {
 		setBuilding: (token) => {
 			building.value = token;
 		},
+		setPreview: (p) => {
+			preview.value = p;
+		},
 		notify: (text, opts) => notes.push({ text, type: (opts && opts.type) || "info" }),
 		warn: (...args) => console.warn(...args),
 		streaming: () => io.streaming(),
@@ -121,7 +126,10 @@ export function makeDraftSheet(io) {
 		showQueued: () => {},
 		save: (token, conversation, values) => io.api.saveDraftCard(token, conversation, values),
 		agent: () => io.agent(),
-		thrown: (e, fallback) => thrownActionError(e, fallback),
+		// as the card's own Create and Cancel read a thrown call (draftCardDecision.thrownOutcome):
+		// the error's own words, else the fallback. The desktop's thrownActionError cannot be shared:
+		// its import chain leaves src/ (lib/errors.js), which the phone build does not resolve.
+		thrown: (e, fallback) => ({ message: (e && e.message) || fallback }),
 		metaFields: (doctype) => (builder.formMetaCache[doctype] || {}).fields,
 		afterMarks: (mark) => nextTick(() => focusFirstMark(bodyEl.value, mark)),
 		where: ui.where,
@@ -130,12 +138,30 @@ export function makeDraftSheet(io) {
 	};
 
 	// ---- state the sheet and the card read ------------------------------------------------
-	const open = computed(() => !!panel.value);
+	const open = computed(() => !!panel.value || !!preview.value);
 	const editingToken = computed(() => (panel.value ? panel.value.token : ""));
 	const dead = computed(() => toolPanelDead(panel.value, io.items()));
 	const notices = computed(() => toolPanelNotices(panel.value, dead.value));
 	const footer = computed(() =>
 		toolFooterState(panel.value, { dead: dead.value, streaming: io.streaming() })
+	);
+	const previewItem = computed(() =>
+		preview.value ? io.items().find((x) => x.token === preview.value.token) : undefined
+	);
+	const previewOff = computed(() =>
+		previewPrimaryDisabled({
+			streaming: io.streaming(),
+			busy: !!(previewItem.value && ui.busyKind(previewItem.value.token)),
+		})
+	);
+
+	// A preview holds no edits: it closes when its card goes (confirmed, discarded, replaced, chat
+	// switched), as the desktop's does.
+	watch(
+		() => !!preview.value && !previewItem.value,
+		(gone) => {
+			if (gone) preview.value = null;
+		}
 	);
 	// The filled calculated cells follow the person's edits: the shared watcher.
 	watchCalculatedCells(watch, () => panel.value);
@@ -190,6 +216,10 @@ export function makeDraftSheet(io) {
 	// it did: "closed", "menu" (only the link menu closed), "asking" (the inline question is now
 	// showing), "kept" (the question was answered "keep editing" by closing it again), "none".
 	function requestClose() {
+		if (preview.value) {
+			preview.value = null;
+			return "closed";
+		}
 		const p = panel.value;
 		if (!p) return "none";
 		if (link.draftLink.value.open && link.draftLink.value.items.length) {
@@ -226,6 +256,15 @@ export function makeDraftSheet(io) {
 		return result;
 	}
 
+	async function openPreview(pa) {
+		if (!pa || !pa.token) return "ignored";
+		ui.setError(pa.token, "");
+		notes = [];
+		const result = await openToolPreview(pa, d);
+		tellAbout(pa.token, lastError());
+		return result;
+	}
+
 	// Save in the form. What each reply does is the shared door's (saveToolDraft / settleSave); the
 	// words it wanted to say are placed by its result:
 	//   closed-open, keep-closed  the card is still waiting: its error line
@@ -252,6 +291,17 @@ export function makeDraftSheet(io) {
 		return p ? discardFromForm(p, d) : Promise.resolve("ignored");
 	}
 
+	function createFromPreview() {
+		const pa = previewItem.value;
+		preview.value = null;
+		return pa ? io.create(pa) : undefined;
+	}
+	function editFromPreview() {
+		const pa = previewItem.value;
+		preview.value = null;
+		return pa ? openEdit(pa) : undefined;
+	}
+
 	// The router asks before leaving the chat (the phone's back button): while a sheet is open,
 	// back closes (or asks about) the sheet and the chat stays.
 	function guardLeave() {
@@ -260,8 +310,9 @@ export function makeDraftSheet(io) {
 		return false;
 	}
 
-	// A conversation switch or leaving the chat: nothing of this chat's form may stay.
+	// A conversation switch or leaving the chat: nothing of this chat's forms may stay.
 	function reset() {
+		preview.value = null;
 		building.value = "";
 		closeNow();
 		stopWatching();
@@ -270,6 +321,7 @@ export function makeDraftSheet(io) {
 	return {
 		// state
 		panel,
+		preview,
 		building,
 		confirming,
 		open,
@@ -277,6 +329,7 @@ export function makeDraftSheet(io) {
 		dead,
 		notices,
 		footer,
+		previewOff,
 		link,
 		bodyEl,
 		setBody: (el) => {
@@ -284,8 +337,11 @@ export function makeDraftSheet(io) {
 		},
 		// doors
 		openEdit,
+		openPreview,
 		save,
 		discardDraft,
+		createFromPreview,
+		editFromPreview,
 		requestClose,
 		keepEditing: () => {
 			confirming.value = false;

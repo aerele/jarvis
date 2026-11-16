@@ -191,26 +191,6 @@ export function draftCardCases(rawView, fixtures) {
 		}
 	}
 
-	// Break: `readOnly: "preview"` disables Edit too, or leaves Preview live in S1/S2, or changes any
-	// other state.
-	const offPreview = (list) =>
-		list.map((b) => (b[0] === "preview" ? [b[0], b[1], b[2], true, b[4]] : b));
-	for (const surface of ["desktop", "phone"]) {
-		for (const [state, ctx, expected] of STATE_BUTTONS) {
-			const view = draftCardView(card(fixtures, "create-simple"), {
-				...ctx,
-				readOnly: "preview",
-				surface,
-			});
-			const open = state === "S1" || state === "S2";
-			add(
-				`readOnly preview ${state} ${JSON.stringify(ctx)} on ${surface}`,
-				[view.state, shape(view)],
-				[state, open ? offPreview(expected("create")) : expected("create")]
-			);
-		}
-	}
-
 	// Break: a sensitive card gets content or buttons here, so a host could confirm it with less
 	// detail than its PendingCard (whose buttons read Confirm / Discard). It is a routing signal.
 	for (const surface of ["desktop", "phone"]) {

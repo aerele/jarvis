@@ -967,3 +967,142 @@ describe("the phone surface of the link menu", () => {
 		expect(desktop.top).toBe("294px");
 	});
 });
+
+// ---- Preview ----------------------------------------------------------------------------------
+const opensPreview = async (over) => {
+	const t = harness(over);
+	await t.host.openPreview(t.items.value[0]);
+	return t;
+};
+// The text of every grid cell the Preview draws, by column name, row by row.
+const previewGrid = (w) => {
+	const heads = w.findAll(".dp-grid th").map((th) => th.text());
+	return w
+		.findAll(".dp-grid tbody tr")
+		.map((tr) => Object.fromEntries(tr.findAll("td").map((td, i) => [heads[i], td.text()])));
+};
+
+describe("Preview of a draft card on the phone", () => {
+	// Break: the Preview shows its own recomputation (Hrs blank or another number), dates as the
+	// control's ISO text, or cells of another row, so it can disagree with the card it came from.
+	it("shows the card's own numbers and dates, cell for cell", async () => {
+		const t = await opensPreview();
+		const w = await mountSheet(t);
+		const card = timesheetCard().tables[0];
+		const rows = previewGrid(w);
+		expect(rows).toHaveLength(card.rows.length);
+		card.rows.forEach((row, i) =>
+			card.columns.forEach((name, j) =>
+				expect(rows[i][name], `${name} of row ${i + 1}`).toBe(row.cells[j])
+			)
+		);
+		expect(rows.map((r) => r.Hrs)).toEqual(["3", "1.50", "2"]);
+		expect(rows[0]["From Time"]).toBe("08-12-2026 09:30:00");
+		// the main fields too, in the card's date format
+		expect(w.findAll(".dp-fields dd").map((d) => d.text())).toContain("08-12-2026");
+		w.unmount();
+	});
+
+	// Break: the Preview is drawn as the desktop's resizable side panel (a drag handle, a width in
+	// storage that can throw), or in the sheet with the phone's chrome missing.
+	it("is the panel's content with no resize handle, no side-panel chrome and no storage", async () => {
+		const get = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+			throw new Error("storage blocked");
+		});
+		const t = await opensPreview();
+		const w = await mountSheet(t);
+		expect(w.find(".dp-resizer").exists()).toBe(false);
+		expect(w.find(".dp-overlay").classes()).toContain("dp-surface-phone");
+		expect(w.find(".jv-sheet").classes()).toContain("is-full");
+		expect(w.find(".jv-sheet .jv-draft-tokens .dp-panel").exists()).toBe(true);
+		expect(w.find(".dp-panel").attributes("style")).toContain("width");
+		expect(get).not.toHaveBeenCalled();
+		expect(w.findAll(".dp-foot button").map((b) => b.text())).toEqual([
+			"Create",
+			"Edit",
+			"Close",
+		]);
+		get.mockRestore();
+		w.unmount();
+	});
+
+	// Break: the primary does not create, creates twice on a double tap, or leaves the sheet open
+	// over the card's own spinner.
+	it("Create is the card's Create: once on a double tap, and the sheet closes", async () => {
+		const t = await opensPreview();
+		const w = await mountSheet(t);
+		const primary = w.find(".dp-foot .dp-btn-primary");
+		await primary.trigger("click");
+		await primary.trigger("click");
+		await flushPromises();
+		expect(t.calls.confirm).toEqual([["t1", "C1"]]);
+		expect(t.host.open.value).toBe(false);
+		expect(t.items.value).toEqual([]);
+		w.unmount();
+	});
+
+	// Break: Edit leaves the Preview open over the form, builds the form twice, or loses the card.
+	it("Edit closes the Preview and opens the edit sheet in the same sheet", async () => {
+		const t = await opensPreview();
+		const w = await mountSheet(t);
+		await w.find(".dp-foot .dp-btn:not(.dp-btn-primary)").trigger("click");
+		await flushPromises();
+		expect(t.host.preview.value).toBeNull();
+		expect(t.host.panel.value.token).toBe("t1");
+		expect(w.find(".dp-panel").exists()).toBe(false);
+		expect(w.find(".jv-dsheet-title").text()).toBe("New Timesheet");
+		expect(t.calls.confirm).toEqual([]);
+		w.unmount();
+	});
+
+	// Break: Create stays live while a turn runs (the server refuses it silently) or while the card
+	// is busy with another press.
+	it("Create is off while a turn runs or the card is busy", async () => {
+		const t = await opensPreview({ streaming: true });
+		const w = await mountSheet(t);
+		expect(w.find(".dp-btn-primary").attributes("disabled")).toBeDefined();
+		t.flags.streaming = false;
+		await nextTick();
+		expect(w.find(".dp-btn-primary").attributes("disabled")).toBeUndefined();
+		t.ui.setKind("t1", "cancel");
+		await nextTick();
+		expect(w.find(".dp-btn-primary").attributes("disabled")).toBeDefined();
+		w.unmount();
+	});
+
+	// Break: a Preview of a card that was cancelled or replaced elsewhere stays on screen with a
+	// Create that cannot work (the desktop closes it: a preview holds no edits).
+	it("closes when its card leaves the list", async () => {
+		const t = await opensPreview();
+		const w = await mountSheet(t);
+		t.items.value = [];
+		await flushPromises();
+		expect(t.host.preview.value).toBeNull();
+		expect(w.find(".jv-sheet").exists()).toBe(false);
+		w.unmount();
+	});
+
+	// Break: the close control, Escape or back ask "Discard your changes?" for a Preview (it holds no
+	// edits), or do not close it.
+	it("closes with the close control, Escape and back, and never asks", async () => {
+		const t = await opensPreview();
+		const w = await mountSheet(t);
+		await w.find(".dp-close").trigger("click");
+		expect(t.host.open.value).toBe(false);
+		await t.host.openPreview(t.items.value[0]);
+		expect(t.host.requestClose()).toBe("closed");
+		await t.host.openPreview(t.items.value[0]);
+		expect(t.host.guardLeave()).toBe(false);
+		expect(t.host.open.value).toBe(false);
+		expect(t.host.confirming.value).toBe(false);
+		w.unmount();
+	});
+
+	// Break: a Preview that cannot be built says nothing, or opens an empty sheet.
+	it("a Preview that cannot be built says so under the card", async () => {
+		const t = harness({ meta: { ok: false } });
+		expect(await t.host.openPreview(t.items.value[0])).toBe("failed");
+		expect(t.host.open.value).toBe(false);
+		expect(t.ui.error("t1")).toBe("Could not load this draft. Try again.");
+	});
+});

@@ -1,4 +1,4 @@
-// What the edit form of a server draft card decides besides the doors in
+// What the edit form and the preview of a server draft card decide besides the doors in
 // toolDraftHost.js: the footer's buttons, when a close must ask first, how often the pending list
 // is re-read while a form is open, and the wiring of the calculated cells. Pure (Vue's `watch` is
 // handed in), relative imports only, so the phone's host shares it.
@@ -54,4 +54,9 @@ export function toolFooterState(panel, { dead, streaming }) {
 // can save them: the person only needs to get out).
 export function closeAsksFirst(panel, { dead }) {
 	return !!panel && !!panel.tool && !panel.applying && !dead && draftIsDirty(panel);
+}
+
+// The preview's primary (Create) is off while a turn runs or the card is busy.
+export function previewPrimaryDisabled({ streaming, busy }) {
+	return !!streaming || !!busy;
 }

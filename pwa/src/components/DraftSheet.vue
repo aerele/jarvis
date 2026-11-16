@@ -1,12 +1,15 @@
 <script setup>
 // The full-screen sheet of a server draft card: the edit form (header, the shared form, a sticky
-// footer). Everything it shows or does comes from
-// `host` (lib/draftSheetHost.js makeDraftSheet); this file is the markup and the phone's look.
+// footer) or the shared preview (its own header, body and footer: Create, Edit, Close). Everything
+// it shows or does comes from `host` (lib/draftSheetHost.js makeDraftSheet); this file is the
+// markup and the phone's look.
 // The sheet is the phone's own Sheet (focus trap, Escape, scroll lock) at full height. The wrapper
 // carries `jv-draft-tokens` so the shared components read the phone's colours (index.css); the
 // teleported link menu takes the same values as its `palette`.
 import { computed, nextTick, ref, watch } from "vue";
 import DraftEditForm from "@shared/components/chat/DraftEditForm.vue";
+import DraftPreview from "@shared/components/doc/DraftPreview.vue";
+import { toolPrimaryLabel } from "@shared/lib/toolDraftPanel.js";
 import { draftPalette } from "../lib/draftTokens.js";
 import { errorLineOf, sheetTitle } from "../lib/draftSheetView.js";
 import { scrollFocusedIntoView } from "../lib/viewportFit.js";
@@ -14,15 +17,17 @@ import Sheet from "./Sheet.vue";
 
 const props = defineProps({ host: { type: Object, required: true } });
 // The host's state, unwrapped by the template.
-const { open, panel, confirming, notices, footer, link, setBody } = props.host;
+const { open, panel, preview, previewOff, confirming, notices, footer, link, setBody } =
+	props.host;
 const { draftLink, draftLinkError, onDraftLink, pickDraftLink, closeDraftLink } = link;
 const palette = draftPalette();
 
 const keepButton = ref(null);
 const title = computed(() => sheetTitle(panel.value));
 const errorLine = computed(() => errorLineOf(panel.value && panel.value.error));
-const label = computed(() => (panel.value ? "Edit draft" : "Draft"));
-
+const label = computed(() =>
+	preview.value ? "Preview of the draft" : panel.value ? "Edit draft" : "Draft"
+);
 // The question shows in the footer: its safe answer takes focus.
 watch(confirming, async (asking) => {
 	if (!asking) return;
@@ -36,7 +41,18 @@ const onFocusIn = (event) => scrollFocusedIntoView(event.target);
 <template>
 	<Sheet :open="open" full :label="label" @close="host.requestClose()">
 		<div class="jv-dsheet jv-draft-tokens" @focusin="onFocusIn">
-			<template v-if="panel">
+			<!-- The shared preview, drawn without its side-panel chrome. Create is the card's Create. -->
+			<DraftPreview
+				v-if="preview"
+				surface="phone"
+				:model="preview.model"
+				:confirm-label="toolPrimaryLabel(preview.model)"
+				:disabled="previewOff"
+				@close="host.requestClose()"
+				@edit="host.editFromPreview()"
+				@confirm="host.createFromPreview()"
+			/>
+			<template v-else-if="panel">
 				<header class="jv-dsheet-head">
 					<div class="jv-dsheet-titles">
 						<h2 class="jv-dsheet-title">{{ title }}</h2>

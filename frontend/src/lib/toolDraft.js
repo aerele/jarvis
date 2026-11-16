@@ -39,8 +39,8 @@ function busyOf(state) {
 // none spins, so a second click cannot start a second build. `surface` is "desktop" (default) or
 // "phone" (the card shows fewer table rows); any other value is the desktop. `busyState`
 // ({busy, busyKind}) replaces the item's own flags when the host keeps them elsewhere. `readOnly`
-// draws Preview and Edit disabled (a host that cannot open them yet), `"preview"` only Preview;
-// it is in the ctx only when true or "preview", so every other host's ctx is exactly what it was.
+// draws Preview and Edit disabled (a host that cannot open them yet); it is in the ctx only when
+// true, so every other host's ctx is exactly what it was.
 export function toolDraftCtx({
 	pa,
 	editingToken,
@@ -57,6 +57,6 @@ export function toolDraftCtx({
 		editing: !!editingToken && editingToken === item.token,
 		streaming: !!streaming,
 		surface: surface === "phone" ? "phone" : "desktop",
-		...(readOnly === true || readOnly === "preview" ? { readOnly } : {}),
+		...(readOnly === true ? { readOnly: true } : {}),
 	};
 }

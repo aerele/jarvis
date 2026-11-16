@@ -21,8 +21,6 @@ export { cardOfItem, isToolDraftItem };
 //   ui          the token-keyed store (draftCardUi.makeDraftUi)
 //   editingToken  the card whose edit sheet is open (it shows "Editing")
 //   buildingToken the card whose sheet is being built (every draft card is locked meanwhile)
-// Preview is drawn disabled (`readOnly: "preview"`) until its sheet exists; this is the one place
-// that stops passing it.
 export function phoneDraftModel({
 	items,
 	streaming,
@@ -40,7 +38,6 @@ export function phoneDraftModel({
 		readBusy: ui.where.read,
 		editingToken,
 		buildingToken,
-		readOnly: "preview",
 	});
 	const last = list[list.length - 1];
 	// The legacy tiles have no hint of their own here: the phone draws the stack hint under the

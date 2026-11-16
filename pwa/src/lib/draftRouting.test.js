@@ -48,11 +48,11 @@ test("one loop over the shown order: a draft item is the inline card, everything
 	assert.match(loop.slice(tile, tile + 40), /<DecisionCard\s+v-else/);
 	assert.match(loop.slice(draft, tile), /class="jv-tool-draft jv-draft-tokens"/);
 	assert.match(loop.slice(draft, tile), /:ctx="draftModel\.ctxMap\[p\.token\]"/);
-	// Create, Edit and Cancel are wired; Preview is drawn disabled until its sheet exists.
+	// Create, Preview, Edit and Cancel are wired.
 	assert.match(loop.slice(draft, tile), /@create="decideDraft\('create', p\)"/);
+	assert.match(loop.slice(draft, tile), /@preview="draftSheet\.openPreview\(p\)"/);
 	assert.match(loop.slice(draft, tile), /@edit="draftSheet\.openEdit\(p\)"/);
 	assert.match(loop.slice(draft, tile), /@cancel="decideDraft\('cancel', p\)"/);
-	assert.doesNotMatch(loop.slice(draft, tile), /@preview/);
 });
 
 // P5. A typed "confirm 2" binds to the token sitting at position 2 of `approval_tokens`
@@ -99,13 +99,15 @@ test("the draft card's handlers never call window.confirm", () => {
 // conversation switch or leaving the chat leaves the previous chat's form open, the phone's back
 // button leaves the chat over unsaved edits, or a saved card can be put back on the list by a stale
 // read (the removal does not settle its token).
-test("the view mounts the edit sheet, resets it on a switch and on unmount, guards back, settles a saved card", () => {
+test("the view mounts the edit sheet, resets it on a switch and on unmount, guards back and chat-to-chat, settles a saved card", () => {
 	assert.match(view, /<DraftSheet :host="draftSheet" \/>/);
 	const sw = view.slice(view.indexOf("() => props.id,"));
 	assert.match(sw.slice(0, sw.indexOf("\n);")), /draftSheet\.reset\(\);/);
 	const gone = view.slice(view.indexOf("onUnmounted(() => {"));
 	assert.match(gone.slice(0, gone.indexOf("\n});")), /draftSheet\.reset\(\);/);
 	assert.match(view, /onBeforeRouteLeave\(\(\) => draftSheet\.guardLeave\(\)\);/);
+	// a chat-to-chat change is an update of the same route record
+	assert.match(view, /onBeforeRouteUpdate\(\(\) => draftSheet\.guardLeave\(\)\);/);
 	const make = view.slice(view.indexOf("const draftSheet = makeDraftSheet({"));
 	const io = make.slice(0, make.indexOf("\n});"));
 	assert.match(

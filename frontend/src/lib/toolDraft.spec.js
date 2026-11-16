@@ -146,7 +146,5 @@ describe("toolDraftCtx: where the busy flags are read, and readOnly", () => {
 		expect("readOnly" in toolDraftCtx({ pa, ...base })).toBe(false);
 		expect("readOnly" in toolDraftCtx({ pa, ...base, readOnly: false })).toBe(false);
 		expect(toolDraftCtx({ pa, ...base, readOnly: true }).readOnly).toBe(true);
-		expect(toolDraftCtx({ pa, ...base, readOnly: "preview" }).readOnly).toBe("preview");
-		expect("readOnly" in toolDraftCtx({ pa, ...base, readOnly: "edit" })).toBe(false);
 	});
 });

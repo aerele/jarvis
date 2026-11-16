@@ -20,7 +20,7 @@ import {
 	recheck as recheckMaintenance,
 } from "../maintenanceGate";
 import { agentName } from "@/branding";
-import { onBeforeRouteLeave, useRouter } from "vue-router";
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from "vue-router";
 // The desktop SPA's renderer — dependency-free, and sharing it means an agent
 // reply reads identically on both surfaces.
 import { renderMarkdown } from "@shared/markdown.js";
@@ -387,8 +387,10 @@ const draftSheet = makeDraftSheet({
 	discard: (pa) => decideDraft("cancel", pa),
 });
 // The phone's back button: while a sheet is open it closes the sheet (or asks about unsaved edits)
-// and the chat stays.
+// and the chat stays. A change from one chat to another (/c/A to /c/B) is a route UPDATE, not a
+// leave, and would otherwise reset the sheet with its edits.
 onBeforeRouteLeave(() => draftSheet.guardLeave());
+onBeforeRouteUpdate(() => draftSheet.guardLeave());
 const draftModel = computed(() =>
 	phoneDraftModel({
 		items: orderedPending.value,
@@ -2128,6 +2130,7 @@ onUnmounted(() => {
 						:card="cardOfItem(p)"
 						:ctx="draftModel.ctxMap[p.token]"
 						@create="decideDraft('create', p)"
+						@preview="draftSheet.openPreview(p)"
 						@edit="draftSheet.openEdit(p)"
 						@cancel="decideDraft('cancel', p)"
 					/>
