@@ -3810,7 +3810,7 @@ def _last_reply_holds_a_card(conversation: str) -> bool:
 	Other tool rows are skipped, as the clients skip them."""
 	from jarvis.chat import live_draft
 
-	if live_draft.pending_draft_cards(conversations=[conversation], limit=1):
+	if live_draft.has_pending_draft(conversation):
 		return True
 	rows = frappe.get_all(
 		MSG,

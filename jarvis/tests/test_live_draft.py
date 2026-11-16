@@ -666,6 +666,21 @@ class TestParkedToolDraft(PendingActionTestMixin, FrappeTestCase):
 		cards = live_draft.pending_draft_cards(owner=OWNER, limit=1)
 		self.assertEqual([c["token"] for c in cards], [token])
 
+	def test_a_draft_value_in_a_plain_card_is_not_a_draft_card(self):
+		"""LIKE ignores case, so a loose text filter on ``"draft"`` also matched a plain card that
+		holds the status value "Draft" (a submit card of a Draft record). A newer such card then
+		hid the real draft card from a limited read, and a typed draft went live beside it. The
+		plain card sits in another chat of the owner: one Pending chat card per chat
+		(single-flight), so that is the only way two can wait together."""
+		conv = self.make_conv()
+		token = self._park_row(conv, 1)
+		plain = {"title": "Submit Sales Order", "fields": [{"label": "Status", "value": "Draft"}]}
+		other = self.make_conv()
+		self.park(other, tool="submit_doc", args={"doctype": "ToDo", "name": self.make_todo()}, card=plain, preview={"would": {}, "card": plain})
+		self.assertEqual([c["token"] for c in live_draft.pending_draft_cards(owner=OWNER, limit=1)], [token])
+		self.assertTrue(live_draft.has_pending_draft(conv))
+		self.assertFalse(live_draft.has_pending_draft(other))
+
 	def test_the_clause_words_differ_for_a_parked_and_a_typed_draft(self):
 		"""A parked card is the agent's own tool call: telling it to re-emit a block would make it
 		type a second card. The typed draft's wording must stay as it was."""

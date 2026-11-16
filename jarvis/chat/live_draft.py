@@ -31,6 +31,8 @@ MAX_USER_ROWS_AFTER_DRAFT = 5
 # (its own turn's tool rows aside) is never live: its card is not missing from a loaded page
 # while the server calls it live.
 MAX_ROWS_AFTER_DRAFT = 60
+# Pending cards read before the strict parse (a draft parks one card; a few more cover a batch).
+PARKED_CARDS_READ = 20
 # A receipt written before 2026-07-17 (``actions_api._append_receipt``) has no action_outcome
 # and no tool_call_id: its completed create / update row is the write.
 _WRITE_TOOLS = ("create_doc", "update_doc")
@@ -381,8 +383,10 @@ def pending_draft_cards(*, conversations=None, owner: str | None = None, limit: 
 	from jarvis.chat import draft_card
 
 	# The ``like`` keeps the limit counting draft cards only (a newer plain pending card must not
-	# hide one); the parse below is the real test, the text match only narrows the read.
-	filters = {"kind": "chat", "status": "Pending", "card": ["like", '%"draft"%']}
+	# hide one). It matches the canonical text of a top-level dict value (``_seal.json_text`` writes
+	# the column: sorted keys, no spaces), so the string value "Draft" (LIKE ignores case) does not
+	# match; the parse below is the real test, the text match only narrows the read.
+	filters = {"kind": "chat", "status": "Pending", "card": ["like", '%"draft":{%']}
 	if conversations is not None:
 		if not conversations:
 			return []
@@ -438,5 +442,7 @@ def find(conversation: str) -> dict | None:
 
 
 def has_pending_draft(conversation: str) -> bool:
-	"""Whether ``conversation`` has a Pending draft card: ``pending_draft_cards`` for it alone."""
-	return bool(pending_draft_cards(conversations=[conversation], limit=1))
+	"""Whether ``conversation`` has a Pending draft card: ``pending_draft_cards`` for it alone. It
+	reads up to ``PARKED_CARDS_READ`` rows and any one that passes the strict parse counts: a row
+	the text filter let through but the parse refused must not hide a real draft card."""
+	return bool(pending_draft_cards(conversations=[conversation], limit=PARKED_CARDS_READ))
