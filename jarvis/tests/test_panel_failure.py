@@ -47,9 +47,13 @@ def _business_rule(*_args, **_kwargs):
 BUSINESS_RULE = patch("jarvis.tools.create_doc.create_doc", side_effect=_business_rule)
 
 
-def _draft_reply(conversation: str, doctype: str) -> str:
-	"""The assistant reply a draft create is saved from (a save names it, #777)."""
-	block = json.dumps({"kind": "doc", "verb": "create", "doctype": doctype, "fields": []})
+def _draft_reply(conversation: str, doctype: str, verb: str = "create", name: str = "") -> str:
+	"""The assistant reply a draft is saved from (a save names it, #777, and only the live
+	draft may be saved: ``jarvis.chat.live_draft``)."""
+	action = {"kind": "doc", "verb": verb, "doctype": doctype, "fields": []}
+	if name:
+		action["name"] = name
+	block = json.dumps(action)
 	return (
 		frappe.get_doc(
 			{
@@ -99,18 +103,20 @@ class _PanelBase(_Hermetic, PendingActionTestMixin, FrappeTestCase):
 	def apply(
 		self, values: dict, *, message: str = "draft-msg-1", verb="create", doctype="ToDo", **extra
 	) -> dict:
-		if verb == "create" and message:
+		name = extra.pop("name", "")
+		if message:
 			# Each draft key is its own real reply, made (and committed, as a real reply
-			# is long before its draft is saved) on first use.
+			# is long before its draft is saved) on first use. A new key's reply is the
+			# newest draft, so it is the live one.
 			replies = self.__dict__.setdefault("_replies", {})
-			if (message, doctype) not in replies:
-				replies[(message, doctype)] = _draft_reply(self.conv, doctype)
+			if (message, doctype, verb) not in replies:
+				replies[(message, doctype, verb)] = _draft_reply(self.conv, doctype, verb, name)
 				frappe.db.commit()
-			message = replies[(message, doctype)]
+			message = replies[(message, doctype, verb)]
 		action = {
 			"verb": verb,
 			"doctype": doctype,
-			"name": extra.pop("name", ""),
+			"name": name,
 			"values": values,
 			"conversation": self.conv,
 			"message": message,
@@ -318,14 +324,16 @@ class TestPanelNotFixable(_PanelBase):
 		self.assertEqual(self.error_logs(), [])
 
 	def test_says_whether_the_assistant_was_told(self):
+		# Two drafts: the first one's failure ends its card, and only the live draft is saved.
 		with BUSINESS_RULE:
-			r = self.apply({"description": "pa-test told"})
+			r = self.apply({"description": "pa-test told"}, message="draft-told")
 		self.assertIs(r["assistant_told"], True)
 		with (
 			BUSINESS_RULE,
 			patch("jarvis.chat.api.enqueue_continuation", side_effect=RuntimeError("queue down")),
 		):
-			r = self.apply({"description": "pa-test untold"})
+			r = self.apply({"description": "pa-test untold"}, message="draft-untold")
+		self.assertEqual(r["error"]["kind"], "not_fixable", "the write ran and failed, not the draft check")
 		self.assertIs(r["closed"], True)
 		self.assertIs(r["assistant_told"], False)
 
@@ -957,3 +965,89 @@ class TestFirstFailureClaim(FrappeTestCase):
 			frappe.cache, "execute_command", side_effect=redis.exceptions.ConnectionError("down")
 		):
 			self.assertFalse(p._first_failure_of("d3"))
+
+
+class TestFailureEndsTheCard(_PanelBase):
+	"""A save that failed for good leaves a receipt row BEFORE the explaining turn is queued,
+	so the draft is no longer live (``jarvis.chat.live_draft``), also after a reload."""
+
+	def _receipts(self) -> list[frappe._dict]:
+		return frappe.get_all(
+			MSG,
+			filters={"conversation": self.conv, "role": "tool", "action_outcome": ["is", "set"]},
+			fields=["action_outcome", "seq"],
+			order_by="seq asc",
+		)
+
+	def _continuation_seqs(self) -> list[int]:
+		return frappe.get_all(
+			MSG,
+			filters={"conversation": self.conv, "origin": "continuation"},
+			pluck="seq",
+			order_by="seq asc",
+		)
+
+	def test_a_closed_failure_leaves_a_failed_receipt_ahead_of_the_continuation(self):
+		from jarvis.chat import live_draft
+
+		with BUSINESS_RULE:
+			r = self.apply({"description": "pa-test end closed"})
+		self.assertIs(r["closed"], True)
+		receipts = self._receipts()
+		self.assertEqual([x.action_outcome for x in receipts], ["failed"])
+		conts = self._continuation_seqs()
+		self.assertEqual(len(conts), 1)
+		self.assertLess(receipts[0].seq, conts[0])
+		self.assertIsNone(live_draft.find(self.conv))
+
+	def test_a_partial_failure_leaves_a_partial_receipt_ahead_of_the_continuation(self):
+		def _commit_then_fail(doctype, values, **kw):
+			frappe.get_doc({"doctype": "ToDo", "description": "pa-test end partial half"}).insert()
+			frappe.db.sql("commit")
+			raise frappe.ValidationError("the second half failed")
+
+		with patch("jarvis.tools.create_doc.create_doc", side_effect=_commit_then_fail):
+			r = self.apply({"description": "pa-test end partial"})
+		self.assertEqual(r["outcome"], "partial")
+		receipts = self._receipts()
+		self.assertEqual([x.action_outcome for x in receipts], ["partial"])
+		self.assertLess(receipts[0].seq, self._continuation_seqs()[0])
+
+	def test_a_draft_that_failed_for_good_is_never_written_again(self):
+		# Its failed receipt retired it: a second save (a card left open elsewhere) is refused
+		# as closed before the write runs, and leaves no second receipt.
+		with BUSINESS_RULE as create:
+			first = self.apply({"description": "pa-test end twice"})
+			again = self.apply({"description": "pa-test end twice"})
+		self.assertIs(first["closed"], True)
+		self.assertEqual(create.call_count, 1, "the second save never reached the write")
+		self.assertEqual((again["ok"], again.get("closed")), (False, True), again)
+		self.assertEqual(again["error"]["code"], "DraftClosedError")
+		self.assertEqual([x.action_outcome for x in self._receipts()], ["failed"])
+
+	def test_a_fixable_failure_keeps_the_draft_live(self):
+		from jarvis.chat import live_draft
+
+		r = self.apply({"priority": "High"})  # a mandatory value is missing: the panel stays open
+		self.assertEqual(r["error"]["kind"], "fixable")
+		self.assertEqual(self._receipts(), [])
+		self.assertIsNotNone(live_draft.find(self.conv))
+
+	def test_the_receipt_is_written_in_the_request_without_a_commit(self):
+		# Classes that keep their masters uncommitted on purpose (TestPanelOnErpnext) must
+		# never see a commit from the closed path; the request's own commit persists the row.
+		from jarvis.chat.panel_failure import end_draft_card
+
+		envelope = {"ok": False, "error": {"message": "x"}}
+		with patch.object(frappe.db, "commit") as commit:
+			end_draft_card(self.conv, "create_doc", {"doctype": "ToDo"}, envelope, draft="d-1")
+			end_draft_card(self.conv, "create_doc", {"doctype": "ToDo"}, envelope, draft="d-1")
+		commit.assert_not_called()
+		self.assertEqual([x.action_outcome for x in self._receipts()], ["failed"], "one per draft")
+		row = frappe.db.get_value(
+			MSG,
+			{"conversation": self.conv, "tool_call_id": "draft-failed:d-1"},
+			["tool_status", "tool_name", "role"],
+			as_dict=True,
+		)
+		self.assertEqual((row.role, row.tool_name, row.tool_status), ("tool", "create_doc", "error"))
