@@ -392,8 +392,21 @@ function onPick(event, u) {
 		return;
 	}
 	if (event.type !== "change") return;
-	if (event.target.checked) add(u);
-	else unpick(u);
+	if (event.target.checked) {
+		add(u);
+		clearSearchAfterPick();
+	} else unpick(u);
+}
+
+// A tick ends that search (#829): the box empties and the full list comes back, so
+// the next person is found by typing afresh, and focus returns to the box.
+function clearSearchAfterPick() {
+	if (search.value) {
+		clearTimeout(searchTimer);
+		search.value = "";
+		load();
+	}
+	nextTick(() => document.getElementById(searchId)?.focus());
 }
 
 function errorText(e, fallback) {
