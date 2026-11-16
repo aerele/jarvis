@@ -86,6 +86,20 @@ describe("SelectionActions", () => {
 		expect(wrapper.find(".jv-selbar").exists()).toBe(false);
 	});
 
+	test("on a touch screen the bar shows under a settled selection and a tap picks", async () => {
+		await wrapper.setProps({ below: true });
+		document.dispatchEvent(new Event("touchstart"));
+		select("a");
+		document.dispatchEvent(new Event("selectionchange"));
+		vi.advanceTimersByTime(500);
+		await nextTick();
+		const bar = wrapper.find(".jv-selbar");
+		expect(bar.exists()).toBe(true);
+		expect(bar.attributes("style")).toContain("top: 234px");
+		await wrapper.find(".jv-selbar-btn").trigger("touchend");
+		expect(wrapper.emitted("action")).toEqual([["reply", "Row 3: Acme, 1,200"]]);
+	});
+
 	test("Escape and a collapsed selection hide the bar", async () => {
 		select("a");
 		await release();

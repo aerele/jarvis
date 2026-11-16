@@ -2002,29 +2002,6 @@
 											:title="msgTimeFull(m)"
 											>{{ msgTime(m) }}</span
 										>
-										<!-- aerele/jarvis#2191: quote the whole reply into the composer
-										     (selecting part of it offers the same, for just that part) -->
-										<button
-											v-if="canCopyReply(m)"
-											class="jv-msgbtn"
-											@click="replyWith(replyBodyText($event))"
-											title="Reply"
-											aria-label="Reply"
-										>
-											<svg
-												width="14"
-												height="14"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.8"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<path d="M9 14 4 9l5-5" />
-												<path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
-											</svg>
-										</button>
 										<!-- read the reply aloud with the device's own voice -->
 										<button
 											v-if="reader.supported && canCopyReply(m)"
@@ -4570,18 +4547,6 @@
 			:actions="selectionActions"
 			@action="onSelectionAction"
 		/>
-		<!-- a selection being read has no bar of its own to stop it from -->
-		<button
-			v-if="speakingId === 'selection'"
-			type="button"
-			class="jv-readstop"
-			@click="reader.stop()"
-		>
-			<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-				<rect x="6" y="6" width="12" height="12" rx="2" />
-			</svg>
-			Stop reading
-		</button>
 		<!-- Periodic business-pulse survey: opened by maybeOpenPulseFeedback,
 		     checked once per genuine chat-open event. -->
 		<PulseFeedbackDialog />
@@ -9854,11 +9819,16 @@ function showCopied(id) {
 		copiedId.value = "";
 	}, 1300);
 }
-// aerele/jarvis#2191: Reply quotes text from an earlier reply at the top of the
-// composer (a Markdown blockquote, so the agent gets the exact text and the history
-// keeps it; the user bubble draws it as a quote). An unsent quote is replaced.
-// Read aloud: the browser's own voice (shared/read_aloud.mjs); no button where the
-// browser has none. One reading at a time; it stops on a chat switch and on leaving.
+// aerele/jarvis#2191: Reply, offered on text selected in a reply, quotes it at the top
+// of the composer (a Markdown blockquote, so the agent gets the exact text and the
+// history keeps it; the user bubble draws it as a quote). An unsent quote is replaced.
+const selectionActions = [{ key: "reply", label: "Reply" }];
+function onSelectionAction(key, text) {
+	if (key === "reply") replyWith(text);
+}
+// Read aloud, under each reply: the browser's own voice (shared/read_aloud.mjs); no
+// button where the browser has none. One reading at a time; it stops on a chat switch,
+// on leaving and on Escape.
 const reader = createReader(window);
 const speakingId = ref(null);
 reader.subscribe((id) => (speakingId.value = id));
@@ -9869,14 +9839,6 @@ function stopReadingOnEscape(e) {
 }
 document.addEventListener("keydown", stopReadingOnEscape);
 onBeforeUnmount(() => document.removeEventListener("keydown", stopReadingOnEscape));
-const selectionActions = [
-	{ key: "reply", label: "Reply" },
-	...(reader.supported ? [{ key: "read", label: "Read aloud" }] : []),
-];
-function onSelectionAction(key, text) {
-	if (key === "reply") replyWith(text);
-	else if (key === "read") reader.speak("selection", text);
-}
 // The reply as it reads on screen (tables, lists and links as text, no Markdown).
 function replyBodyText(e) {
 	const body = e?.currentTarget?.closest?.(".jv-amsg")?.querySelector?.(".jv-md-body");
@@ -15398,24 +15360,6 @@ onUnmounted(() => {
 }
 :deep(.jv-msgbar:has(.jv-msgbtn-on)) {
 	opacity: 1 !important;
-}
-.jv-readstop {
-	position: fixed;
-	left: 50%;
-	bottom: 132px;
-	transform: translateX(-50%);
-	z-index: 60;
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-	padding: 6px 12px;
-	font-size: 13px;
-	color: var(--text);
-	background: var(--surface);
-	border: 1px solid var(--border);
-	border-radius: 999px;
-	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
-	cursor: pointer;
 }
 .jv-metabar {
 	display: flex;
