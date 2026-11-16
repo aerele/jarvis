@@ -170,3 +170,30 @@ for (const [flag, plain, strict] of [
 		assert.equal(said(draftFailureOf(r, "Jarvis", { strictTold: true }).note), strict);
 	});
 }
+
+// Break: a server draft card's save on a discarded / superseded / cancelled card (the agent got a note
+// and no reply is coming) promises "The reply in the chat explains what to do", or says "could not be
+// told" about an agent that was told; the typed panel and the phone ignore `assistant_replies`.
+for (const [told, replies, strict, plain] of [
+	[true, false, "none", "reply"],
+	[true, true, "reply", "reply"],
+	[false, false, "untold", "untold"],
+]) {
+	test(`closed, told ${told}, assistant_replies ${replies}: server draft ${strict}, typed ${plain}`, () => {
+		const r = {
+			ok: false,
+			closed: true,
+			assistant_told: told,
+			assistant_replies: replies,
+			error: { message: "Gone." },
+		};
+		const said = (note) =>
+			note.includes("The reply in the chat explains what to do.")
+				? "reply"
+				: note.includes("could not be told")
+				? "untold"
+				: "none";
+		assert.equal(said(draftFailureOf(r, "Jarvis", { strictTold: true }).note), strict);
+		assert.equal(said(draftFailureOf(r).note), plain);
+	});
+}

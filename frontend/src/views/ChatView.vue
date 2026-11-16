@@ -9003,7 +9003,7 @@ async function confirmPending(pa) {
 				// (stale/target_missing/tampered/unverifiable, …) says why. Only a
 				// bare legacy token (no reason_code at all) gets the opaque guess:
 				// use the card's own wall-clock expiry for the right one (F15).
-				const settledReason = chatSettledReason(r);
+				const settledReason = chatSettledReason(r, { draft: isToolDraftItem(pa) });
 				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
 				notify(
 					settledReason ||
@@ -9100,7 +9100,7 @@ async function approveAndRunPending(pa) {
 				removePending(token);
 				// Mirrors confirmPending's InvalidConfirmation branch: a settled card
 				// carrying a specific reason_code says why, not the opaque guess.
-				const settledReason = chatSettledReason(r);
+				const settledReason = chatSettledReason(r, { draft: isToolDraftItem(pa) });
 				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
 				notify(
 					settledReason ||

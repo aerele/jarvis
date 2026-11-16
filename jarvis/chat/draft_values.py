@@ -365,3 +365,11 @@ def _label(meta, field) -> str:
 
 	df = meta.get_field(field)
 	return _(df.label) if df and df.label else str(field)
+
+
+def reply_follows(status: str, settled: bool, final_draft: bool) -> bool:
+	"""Whether the agent answers in the chat because this row ended. Only an Executed or
+	Failed row's settle queues a continuation turn, and a saved final draft queues none (the
+	agent hears of it on its next turn). A Discarded / Superseded row leaves a passive note
+	and a Cancelled one says nothing: the agent was (or was not) told, but nothing is coming."""
+	return bool(settled) and status in ("Executed", "Failed") and not final_draft

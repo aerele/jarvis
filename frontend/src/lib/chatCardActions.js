@@ -31,6 +31,8 @@ const REFUSALS = {
 	storage_outcome_unknown: "Lost track of whether that went through. Check before retrying.",
 };
 
+const DRAFT_STALE = "This record changed after the draft was made. Nothing was saved.";
+
 export function chatRefusalMessage(res) {
 	const code = (res && res.reason_code) || "";
 	// The person's words for a refusal written for the model (actionSummary.personError).
@@ -87,7 +89,9 @@ export function isChatSettled(res) {
 // say that, not the opaque "another tab" guess reserved for a bare legacy
 // token with no reason_code at all (keepsChatCard already routes the "keep it"
 // case away from here).
-export function chatSettledReason(res) {
+// `draft`: the card is a tool draft card, whose receipt says "changed after the draft was made".
+export function chatSettledReason(res, { draft = false } = {}) {
+	if (draft && res && res.ok === false && res.reason_code === "stale") return DRAFT_STALE;
 	return res && res.ok === false && res.reason_code ? chatRefusalMessage(res) : "";
 }
 

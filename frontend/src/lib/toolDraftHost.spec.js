@@ -1036,6 +1036,11 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 			"notify:Couldn't save this: Gone. Jarvis could not be told about it, so ask in the chat.",
 		],
 		["no flag: neither is said", {}, "notify:Couldn't save this: Gone."],
+		[
+			"told by a note only: no reply is promised",
+			{ assistant_told: true, assistant_replies: false },
+			"notify:Couldn't save this: Gone.",
+		],
 	])
 		it(`closed note, ${name}`, async () => expect(await closedNote(reply)).toBe(want));
 

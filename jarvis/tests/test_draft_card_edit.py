@@ -397,6 +397,22 @@ class TestDraftValuesPure(unittest.TestCase):
 		update = draft_values.edited_call("update_doc", {"doctype": "T", "name": "N", "changes": {}}, sent)
 		self.assertEqual(json.dumps(update["changes"]), text)
 
+	def test_a_chat_reply_follows_only_a_settled_executed_or_failed_row_that_is_not_a_final_draft(self):
+		"""The form promises "the reply in the chat" from ``assistant_replies``. A discarded,
+		superseded or cancelled row leaves the agent a note (or nothing) and a saved final
+		draft costs no turn, so none of them may say true."""
+		for status, settled, final, want in (
+			("Executed", True, False, True),
+			("Failed", True, False, True),
+			("Executed", True, True, False),
+			("Executed", False, False, False),
+			("Discarded", True, False, False),
+			("Superseded", True, False, False),
+			("Cancelled", True, False, False),
+		):
+			with self.subTest(status=status, settled=settled, final=final):
+				self.assertIs(draft_values.reply_follows(status, settled, final), want)
+
 
 try:
 	import frappe
@@ -858,6 +874,28 @@ if FrappeTestCase is not None:
 						out = self.save(token, conv, {})
 						self.assert_closed(out, draft_save.CLOSED, message)
 						self.assertIs(out["assistant_told"], bool(settled))
+
+		def test_a_closed_reply_promises_a_chat_reply_only_when_one_is_queued(self):
+			"""A Discarded row's settle leaves the agent a note and queues no turn, and a saved
+			final draft queues none either: both say ``assistant_replies`` false (the form
+			must not promise a reply). A Failed row's settle queues the continuation: true."""
+			gone_conv, gone = self.todo_draft(f"{MARK} gone2")
+			with as_user(OWNER):
+				actions_api.dismiss_tool(gone, conversation=gone_conv)
+			won_conv, won = self.todo_draft(f"{MARK} won2")
+			self.assertTrue(self.confirm(won, won_conv)["ok"])
+			lost_conv, lost = self.todo_draft(f"{MARK} lost2")
+			with patch("jarvis.api.dispatch_confirmed", side_effect=_fail):
+				self.assertFalse(self.confirm(lost, lost_conv)["ok"])
+			for token, conv, want in (
+				(gone, gone_conv, False),
+				(won, won_conv, False),
+				(lost, lost_conv, True),
+			):
+				with self.subTest(token=token):
+					out = self.save(token, conv, {})
+					self.assertIs(out["assistant_replies"], want)
+					self.assertIs(out["assistant_told"], True)
 
 		def test_a_failed_row_that_is_partial_answers_closed_as_partial(self):
 			"""A save that part-way failed may have written something: "was not saved" would be

@@ -17,8 +17,11 @@ export const FAILURE_FALLBACK = "Could not save. Check the values.";
 // { closed, partial, told, cardOpen, error, note } for a failed apply, else null. `agent` is
 // the assistant's (whitelabel) name. With `strictTold` (a server draft card's save) the chat is
 // promised only when the reply says the assistant was told (`assistant_told: true`) and a "could
-// not be told" is said only when it says it was not: a reply with no flag says neither. Without
-// it (the typed panel, the phone) an absent flag still reads as told, as it always has.
+// not be told" is said only when it says it was not: a reply with no flag says neither. A server
+// draft card's reply also says whether a chat reply is really coming (`assistant_replies`: false
+// for a discarded, superseded or cancelled card, which only leave the agent a note): the promise
+// follows that when it is present. Without `strictTold` (the typed panel, the phone) an absent
+// flag still reads as told, as it always has, and `assistant_replies` is ignored.
 export function draftFailureOf(r, agent = "Jarvis", { strictTold = false } = {}) {
 	if (!r || r.ok !== false) return null;
 	const err = personError(r.error || {});
@@ -28,6 +31,8 @@ export function draftFailureOf(r, agent = "Jarvis", { strictTold = false } = {})
 	const closed = !!r.closed;
 	const partial = r.outcome === "partial";
 	const told = strictTold ? r.assistant_told === true : r.assistant_told !== false;
+	const replies =
+		strictTold && typeof r.assistant_replies === "boolean" ? r.assistant_replies : told;
 	const untold = strictTold ? r.assistant_told === false : !told;
 	const cardOpen = closed && r.card_open === true;
 	let note = "";
@@ -35,7 +40,7 @@ export function draftFailureOf(r, agent = "Jarvis", { strictTold = false } = {})
 		note = `Part of this may already be saved: ${sentence} Check the record before trying again.`;
 	} else if (closed) {
 		note = `Couldn't save this: ${sentence}`;
-		if (told && !cardOpen) note += " The reply in the chat explains what to do.";
+		if (replies && !cardOpen) note += " The reply in the chat explains what to do.";
 	}
 	if (closed && untold && !cardOpen)
 		note += ` ${agent} could not be told about it, so ask in the chat.`;

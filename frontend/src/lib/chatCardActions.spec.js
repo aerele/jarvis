@@ -214,6 +214,22 @@ describe("ChatView keeps a refused card", () => {
 // so the generic InvalidConfirmation branch below must show the SPECIFIC
 // reason instead of guessing "another tab" - that guess is for a truly bare
 // legacy token (no reason_code at all).
+describe("chatSettledReason, tool draft card", () => {
+	// Break: a draft card's refused Confirm says "this was proposed ... Nothing ran" (the receipt's
+	// words are "draft was made"), or the draft wording leaks to other reasons or other cards.
+	it("rewords only stale, only for a draft", () => {
+		const stale = { ok: false, reason_code: "stale", pa_status: "Failed" };
+		expect(chatSettledReason(stale, { draft: true })).toBe(
+			"This record changed after the draft was made. Nothing was saved."
+		);
+		expect(chatSettledReason(stale)).toBe(
+			"The record changed after this was proposed. Nothing ran."
+		);
+		const gone = { ok: false, reason_code: "target_missing", pa_status: "Failed" };
+		expect(chatSettledReason(gone, { draft: true })).toBe(chatSettledReason(gone));
+	});
+});
+
 describe("chatSettledReason", () => {
 	it("gives the specific reason for a card that settled as Failed with a known reason_code", () => {
 		expect(
@@ -250,7 +266,7 @@ describe("ChatView shows the specific reason on a settled card", () => {
 			const start = src.indexOf(`async function ${fn}(`);
 			const body = src.slice(start, src.indexOf("\nasync function ", start + 1));
 			const invalid = body.indexOf('r.error.type === "InvalidConfirmation"');
-			const reason = body.indexOf("chatSettledReason(r)");
+			const reason = body.indexOf("chatSettledReason(r");
 			expect(invalid).toBeGreaterThan(-1);
 			expect(reason).toBeGreaterThan(invalid);
 		});
