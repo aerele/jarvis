@@ -14,6 +14,8 @@ import {
 	toolDraftCtxMap,
 	withBusyKind,
 } from "../lib/toolDraftHost.js";
+import { isToolDraftItem } from "../lib/toolDraft.js";
+import { draftReceipt, isDraftReceiptRow } from "../lib/draftReceipt.js";
 
 const src = fs.readFileSync(path.resolve(__dirname, "ChatView.vue"), "utf8");
 
@@ -690,5 +692,55 @@ describe("the twin row of a Claude-route draft", () => {
 			]
 		);
 		expect(queued).toEqual([{ token: "tok-2" }]);
+	});
+});
+
+describe("the receipt of a decided server draft card", () => {
+	// Break: the chip is told a draft wording for a row that is not a draft card (a flag-off site, or
+	// another tool), or loses the wording after a reload, or the chip is not handed the words at all.
+	it("hands ReceiptChip the draft wording only for a draft row, and remembers draft tokens", () => {
+		expect(squash(slice("<ReceiptChip", "/>"))).toContain(
+			':message="m" :draft-receipt="draftReceiptFor(m)"'
+		);
+		const code = [
+			slice("const draftTokensSeen = new Set();", "// The stack's hint, drawn under"),
+			"return { draftReceiptFor, draftTokensSeen };",
+		].join("\n");
+		const visiblePendingActions = ref([]);
+		const { draftReceiptFor, draftTokensSeen } = new Function(
+			"watch",
+			"visiblePendingActions",
+			"isToolDraftItem",
+			"isDraftReceiptRow",
+			"draftReceipt",
+			code
+		)(watch, visiblePendingActions, isToolDraftItem, isDraftReceiptRow, draftReceipt);
+		const discarded = (over) => ({
+			role: "tool",
+			tool_name: "create_doc",
+			tool_call_id: "tok-1",
+			action_outcome: "discarded",
+			...over,
+		});
+		// flag off: no stamp, nothing seen
+		expect(draftReceiptFor(discarded({}))).toBeNull();
+		// the site stamped it
+		expect(draftReceiptFor(discarded({ draft_card: false }))).toEqual({
+			text: "Draft cancelled",
+			tone: "ok",
+		});
+		// a draft card shown in this chat, then decided: no stamp on the live row
+		visiblePendingActions.value = [
+			{ token: "tok-1", preview: { card: { draft: { verb: "create", values: {} } } } },
+			{ token: "tok-2", preview: { card: { kind: "verb" } } },
+		];
+		return nextTick().then(() => {
+			expect([...draftTokensSeen]).toEqual(["tok-1"]);
+			expect(draftReceiptFor(discarded({}))).toEqual({
+				text: "Draft cancelled",
+				tone: "ok",
+			});
+			expect(draftReceiptFor(discarded({ tool_call_id: "tok-2" }))).toBeNull();
+		});
 	});
 });

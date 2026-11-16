@@ -208,6 +208,10 @@ const props = defineProps({
 	// submit / workflow receipt for this record): the parent hides the button.
 	nextDone: { type: Boolean, default: false },
 	nextBusy: { type: Boolean, default: false },
+	// The words of a decided SERVER draft card's receipt (lib/draftReceipt draftReceipt): they
+	// replace the title only. null (every other receipt, and the shared chat) leaves the chip
+	// exactly as receiptView draws it.
+	draftReceipt: { type: Object, default: null },
 });
 defineEmits(["next-action"]);
 
@@ -225,12 +229,14 @@ function parseJson(v) {
 
 const view = computed(() => {
 	const m = props.message;
-	return receiptView(
+	const base = receiptView(
 		m.tool_name,
 		parseJson(m.tool_args) || {},
 		parseJson(m.tool_result),
 		m.action_outcome
 	);
+	const d = props.draftReceipt;
+	return d && d.text ? { ...base, title: d.text } : base;
 });
 
 // Provenance for an armed-macro receipt: which macro authorized running this write

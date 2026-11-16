@@ -818,6 +818,7 @@
 						<ReceiptChip
 							v-else-if="m.role === 'tool' && hasCurrentMessageSnapshot"
 							:message="m"
+							:draft-receipt="draftReceiptFor(m)"
 							:auto-mode="!!convAutoMode"
 							:next-done="nextStepDone(m)"
 							:next-busy="nextBusyKey === m.name"
@@ -4585,6 +4586,7 @@ import {
 } from "@/lib/typedCardReply";
 import { proposedLabel } from "@/lib/cardAge";
 import { cardOfItem, isToolDraftItem } from "@/lib/toolDraft";
+import { draftReceipt, isDraftReceiptRow } from "@/lib/draftReceipt";
 import {
 	DRAFT_STALE_TEXT,
 	cancelToolItem,
@@ -8754,6 +8756,20 @@ const draftCtxByToken = computed(() =>
 		buildingToken: toolDraftBuilding.value,
 	})
 );
+// The receipt of a decided server draft card says what the State Table says (S6 to S10). A decided
+// row carries no card, so the chat remembers the tokens of the draft cards it showed; the site's own
+// stamp covers a reload (lib/draftReceipt isDraftReceiptRow). Any other row: null, the chip as before.
+const draftTokensSeen = new Set();
+watch(
+	visiblePendingActions,
+	(items) => {
+		for (const pa of items) if (isToolDraftItem(pa)) draftTokensSeen.add(pa.token);
+	},
+	{ immediate: true }
+);
+function draftReceiptFor(m) {
+	return isDraftReceiptRow(m, draftTokensSeen) ? draftReceipt(m) : null;
+}
 // The stack's hint, drawn under the stack when its last card is a draft card with no line for it.
 const orphanHint = computed(() =>
 	orphanStackHint({
