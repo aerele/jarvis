@@ -22,6 +22,11 @@ const ENTRIES = [
 	here("../doc/DraftPreview.vue"),
 	// The link-search state the phone sheet will call with its own search function.
 	here("../../lib/useDraftLink.js"),
+	// The helpers a server draft card's host uses (the phone shares them through @shared).
+	here("../../lib/draftFromCard.js"),
+	here("../../lib/toolDraft.js"),
+	here("../../lib/draftCardValues.js"),
+	here("../../lib/draftSave.js"),
 ];
 // The only package a file in the graph may import.
 const ALLOWED_PACKAGES = new Set(["vue"]);

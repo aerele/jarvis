@@ -6,13 +6,15 @@
 // says so where the person clicked). `assistant_told: false` means that explanation
 // could not be sent, so the note says to ask in the chat instead of promising a
 // reply. `outcome: "partial"` means something was saved before the failure, so the
-// words never say nothing was saved. Shared by the desktop panel and the phone card
+// words never say nothing was saved. `card_open: true` (a server draft card's save) means the
+// form closes but the card is still waiting: nothing was sent to the chat, so the note carries
+// no sentence about the chat. Shared by the desktop panel and the phone card
 // (@shared/lib/draftFailure.js).
 import { personError } from "./actionSummary.js";
 
 export const FAILURE_FALLBACK = "Could not save. Check the values.";
 
-// { closed, partial, told, error, note } for a failed apply, else null. `agent` is
+// { closed, partial, told, cardOpen, error, note } for a failed apply, else null. `agent` is
 // the assistant's (whitelabel) name.
 export function draftFailureOf(r, agent = "Jarvis") {
 	if (!r || r.ok !== false) return null;
@@ -23,13 +25,15 @@ export function draftFailureOf(r, agent = "Jarvis") {
 	const closed = !!r.closed;
 	const partial = r.outcome === "partial";
 	const told = r.assistant_told !== false;
+	const cardOpen = closed && r.card_open === true;
 	let note = "";
 	if (partial) {
 		note = `Part of this may already be saved: ${sentence} Check the record before trying again.`;
 	} else if (closed) {
 		note = `Couldn't save this: ${sentence}`;
-		if (told) note += " The reply in the chat explains what to do.";
+		if (told && !cardOpen) note += " The reply in the chat explains what to do.";
 	}
-	if (closed && !told) note += ` ${agent} could not be told about it, so ask in the chat.`;
-	return { closed, partial, told, error: { ...err, message }, note };
+	if (closed && !told && !cardOpen)
+		note += ` ${agent} could not be told about it, so ask in the chat.`;
+	return { closed, partial, told, cardOpen, error: { ...err, message }, note };
 }

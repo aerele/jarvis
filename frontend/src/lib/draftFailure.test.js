@@ -101,3 +101,46 @@ test("a message without a full stop still reads as two sentences", () => {
 		"Part of this may already be saved: Half saved! Check the record before trying again."
 	);
 });
+
+test("card_open: the form closes, the card stays, and the note says nothing about the chat", () => {
+	// the server sends assistant_told: false here because nothing is sent to the chat
+	const f = draftFailureOf(
+		{
+			ok: false,
+			closed: true,
+			card_open: true,
+			assistant_told: false,
+			error: { message: "Busy." },
+		},
+		"Jarvis"
+	);
+	assert.equal(f.cardOpen, true);
+	assert.equal(f.note, "Couldn't save this: Busy.");
+	// even if told were true, no promise of a reply in the chat
+	const told = draftFailureOf({
+		ok: false,
+		closed: true,
+		card_open: true,
+		error: { message: "Busy." },
+	});
+	assert.equal(told.note, "Couldn't save this: Busy.");
+});
+
+test("without card_open the old notes are unchanged and cardOpen is false", () => {
+	const closed = draftFailureOf({
+		ok: false,
+		closed: true,
+		assistant_told: false,
+		error: { message: "No." },
+	});
+	assert.equal(closed.cardOpen, false);
+	assert.equal(
+		closed.note,
+		"Couldn't save this: No. Jarvis could not be told about it, so ask in the chat."
+	);
+	// card_open on a reply that is not closed is not a card-open close
+	assert.equal(
+		draftFailureOf({ ok: false, card_open: true, error: { message: "x" } }).cardOpen,
+		false
+	);
+});
