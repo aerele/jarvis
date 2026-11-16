@@ -504,9 +504,8 @@ def _read_limits(now: int) -> dict:
 	cache = frappe.cache()
 	raw = cache.hgetall(LIMITS_KEY) or {}
 	live = {m: e for m, e in raw.items() if isinstance(e, dict) and _int(e.get("until")) > now}
-	lapsed = [m for m in raw if m not in live]
-	if lapsed:
-		cache.hdel(LIMITS_KEY, lapsed)
+	for model in [m for m in raw if m not in live]:
+		cache.hdel(LIMITS_KEY, model)  # one key per call: Frappe v15's hdel takes no list
 	return {(m.decode() if isinstance(m, bytes) else m): e for m, e in live.items()}
 
 
@@ -523,7 +522,8 @@ def record_usage_limit(model: str, wait_s: int) -> None:
 	cache = frappe.cache()
 	cache.hset(LIMITS_KEY, bare, {"since": now, "until": until})
 	latest = max([until, *(_int(e.get("until")) for e in limits.values())])
-	cache.expire_key(LIMITS_KEY, max(latest - now, 60))
+	# redis-py's expire on the site key: RedisWrapper.expire_key exists only from Frappe v16.
+	cache.expire(cache.make_key(LIMITS_KEY), max(latest - now, 60))
 	_publish_changed()
 
 
@@ -531,7 +531,9 @@ def _clear_usage_limits(models) -> None:
 	limits = _read_limits(int(time.time()))
 	drop = sorted({_bare(m) for m in models} & set(limits))
 	if drop:
-		frappe.cache().hdel(LIMITS_KEY, drop)
+		cache = frappe.cache()
+		for model in drop:
+			cache.hdel(LIMITS_KEY, model)  # one key per call: Frappe v15's hdel takes no list
 		_publish_changed()
 
 

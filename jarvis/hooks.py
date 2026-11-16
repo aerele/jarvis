@@ -15,7 +15,10 @@ app_license = "AGPL-3.0-only"
 boot_session = "jarvis.boot.set_jarvis_boot"
 # Runs after Frappe reads the cached boot_session blob, on every Desk load: the holiday
 # touch answer depends on the date, so it cannot live in the cached blob.
-extend_bootinfo = "jarvis.holiday_touch.boot.extend_bootinfo"
+extend_bootinfo = [
+	"jarvis.holiday_touch.boot.extend_bootinfo",
+	"jarvis.boot.extend_support_bootinfo",
+]
 
 # ---------------------------------------------------------------------------
 # Deployment constants

@@ -534,7 +534,7 @@ class TestConfirmTool(FrappeTestCase):
 					res = confirm_tool(token)
 		self.assertFalse(res["ok"])
 		self.assertEqual(res["error"]["type"], "ConfirmationOutcomeUnknownError")
-		self.assertIn("business action was not run", res["error"]["message"])
+		self.assertIn("Nothing was changed by this request", res["error"]["message"])
 		dispatch.assert_not_called()
 		self.assertFalse(frappe.db.exists("ToDo", {"description": desc}))
 

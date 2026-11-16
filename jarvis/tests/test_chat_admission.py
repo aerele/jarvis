@@ -713,7 +713,7 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 		a = self._mk_msg(conv, 1, role="assistant", content="", error=self.EMPTY_REPLY)
 		with patch("jarvis.chat.latency.get_logger") as logger:
 			res, calls = self._retry(a)
-		self._refused(res, calls, conv, "no preceding user message", turns=0)
+		self._refused(res, calls, conv, "We couldn't find the message to retry", turns=0)
 		self.assertEqual(_logged(logger)["reason"], "no_seed")
 
 	def test_a_later_hidden_continuation_blocks_the_retry(self):
@@ -962,7 +962,9 @@ class TestRetryErroredTurn(_AdmissionTestCase):
 		self.assertEqual(waited, [True], "thread 2 waited on the lock thread 1 held")
 		self.assertEqual(sorted(bool(r["ok"]) for r in results), [False, True])
 		refused = next(r for r in results if not r["ok"])
-		self.assertEqual(refused["reason"], "A reply is already in progress. Wait for it to finish.")
+		self.assertEqual(
+			refused["reason"], "A reply is already in progress. Wait for it to finish, then try again."
+		)
 		self.assertEqual(frappe.db.count(TURN, {"seed_message": u}), 2, "the failed turn + one retry")
 
 

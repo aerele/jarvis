@@ -10,6 +10,13 @@ vi.mock("./Banner.vue", () => ({
 	},
 }));
 
+vi.mock("frappe-ui", () => ({
+	Button: {
+		emits: ["click"],
+		template: '<button class="btn" @click="$emit(\'click\')"><slot /></button>',
+	},
+}));
+
 import ActionError from "./ActionError.vue";
 
 describe("ActionError shows the person's words for a refusal", () => {
@@ -47,5 +54,33 @@ describe("ActionError failure reference", () => {
 		expect(mount(ActionError, { props: { error: "boom" } }).text()).not.toContain(
 			"Reference:"
 		);
+	});
+});
+
+describe("ActionError Report error", () => {
+	const internal = { code: "InternalError", message: "Could not confirm.", reference: "pa-9" };
+	it("offers Report error for an internal failure and emits the reference", async () => {
+		const w = mount(ActionError, { props: { error: internal, canReport: true } });
+		expect(w.text()).toContain("Report error");
+		expect(w.text()).toContain("If it keeps happening, report it to support.");
+		await w.find("button.btn").trigger("click");
+		expect(w.emitted("report")[0][0]).toEqual({ reference: "pa-9" });
+	});
+	it("offers it for a 5xx status", () => {
+		const w = mount(ActionError, {
+			props: { error: { message: "x", status: 502 }, canReport: true },
+		});
+		expect(w.text()).toContain("Report error");
+	});
+	it("does not offer it when the user can fix it, or support is off", () => {
+		const fixable = mount(ActionError, {
+			props: {
+				error: { code: "ValidationError", message: "Due Date is required" },
+				canReport: true,
+			},
+		});
+		expect(fixable.text()).not.toContain("Report error");
+		const off = mount(ActionError, { props: { error: internal } });
+		expect(off.text()).not.toContain("Report error");
 	});
 });
