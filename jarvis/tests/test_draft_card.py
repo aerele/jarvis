@@ -309,18 +309,6 @@ if FrappeTestCase is not None:
 	PA = "Jarvis Pending Action"
 	FLAG = "jarvis_draft_cards"
 
-	# TEMPORARY DIAGNOSTIC (remove with the fix): print the pump watchdog's inputs before and after
-	# this module (grep DRAFTCARD-DIAG in the CI log). Never fails.
-	def setUpModule():
-		from jarvis.tests import _draftcard_diag
-
-		_draftcard_diag.snapshot("draft-card-start")
-
-	def tearDownModule():
-		from jarvis.tests import _draftcard_diag
-
-		_draftcard_diag.snapshot("draft-card-end")
-
 	def _park_card(tool, args, would, draft):
 		"""The card the park builds, as ``api._run_tool`` does."""
 		card = confirm_card.build_card(tool, args, {"would": would}, draft)
@@ -429,6 +417,9 @@ if FrappeTestCase is not None:
 			frappe.db.sql(f"DELETE FROM `tab{PA}` WHERE conversation=%(c)s", {"c": self.conv})
 			frappe.db.delete(MSG, {"conversation": self.conv})
 			frappe.delete_doc("Jarvis Conversation", self.conv, force=True, ignore_permissions=True)
+			# These tests commit mid-test (the park and the confirm do), so the class rollback keeps
+			# the committed rows: commit the deletes too, or the Executed row outlives the class.
+			frappe.db.commit()
 
 		def _park(self, flag):
 			args = {"doctype": "ToDo", "values": {"description": "draft-park-xyz"}}
@@ -539,6 +530,9 @@ if FrappeTestCase is not None:
 			frappe.db.sql(f"DELETE FROM `tab{PA}` WHERE conversation=%(c)s", {"c": self.conv})
 			frappe.db.delete(MSG, {"conversation": self.conv})
 			frappe.delete_doc("Jarvis Conversation", self.conv, force=True, ignore_permissions=True)
+			# These tests commit mid-test (the park and the confirm do), so the class rollback keeps
+			# the committed rows: commit the deletes too, or the Executed row outlives the class.
+			frappe.db.commit()
 
 		def _run(self, flag, tool, args):
 			with patch.dict(frappe.conf, {FLAG: flag}):
@@ -940,6 +934,9 @@ if FrappeTestCase is not None:
 			frappe.db.sql(f"DELETE FROM `tab{PA}` WHERE conversation=%(c)s", {"c": self.conv})
 			frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
 			frappe.delete_doc("Jarvis Conversation", self.conv, force=True, ignore_permissions=True)
+			# These tests commit mid-test (the park and the confirm do), so the class rollback keeps
+			# the committed rows: commit the deletes too, or the Executed row outlives the class.
+			frappe.db.commit()
 
 		def test_continue_is_kept_off_the_record_the_card_values_and_the_stored_values(self):
 			"""A `create_doc` call carrying `continue: true` must still create the record (the
