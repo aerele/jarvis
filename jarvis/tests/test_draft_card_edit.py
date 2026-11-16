@@ -1094,6 +1094,11 @@ if FrappeTestCase is not None:
 			[decided] = self.tool_rows(conv)
 			self.assertEqual((decided.tool_call_id, decided.action_outcome), (token, "failed"))
 			self.assertFalse(decided.pending_card)
+			# the settle's reason_code reaches the stored marker the receipt reads back
+			stamp = draft_card.decided_mark(
+				{"role": "tool", "action_outcome": "failed", "tool_result": decided.tool_result}
+			)
+			self.assertEqual(stamp, {"draft_receipt": True, "draft_receipt_reason": "stale"})
 			self.assertEqual(frappe.db.get_value("ToDo", todo, "status"), "Open")
 			self.assertEqual(len(self.cont.calls), 1)  # the agent is told once
 

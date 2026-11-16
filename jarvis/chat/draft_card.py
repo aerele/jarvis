@@ -76,7 +76,7 @@ def is_pending_draft_row(row) -> bool:
 
 # A DECIDED draft row loses its card (``persist_tool_receipt`` clears ``pending_card``) and its
 # Pending Action is purged a week after it settles, so the row itself keeps a tiny marker in its
-# stored ``tool_result``: ``{"draft_receipt": {"verb": "create"|"update", "reason"?: ...}}``. It
+# stored ``tool_result``: ``{"draft_receipt": {"reason"?: ...}}``. It
 # is written at settlement from the card that WAS a draft (``_settle._deliver``), never from the
 # flag, and read back by ``decided_mark``. ``reason`` is only the two causes the receipt words
 # differently: the record changed after the draft, or it is gone.
@@ -90,7 +90,7 @@ def with_receipt_mark(result, draft, reason_code: str | None):
 	becomes a result holding only the marker."""
 	if not isinstance(draft, dict):
 		return result
-	mark = {"verb": draft.get("verb") if draft.get("verb") in ("create", "update") else None}
+	mark = {}
 	if reason_code in _CHANGED_REASONS:
 		mark["reason"] = reason_code
 	return {**(result if isinstance(result, dict) else {}), RECEIPT_KEY: mark}
@@ -109,7 +109,7 @@ def decided_mark(row) -> dict:
 			return {}
 		try:
 			raw = json.loads(raw)
-		except ValueError:
+		except (ValueError, RecursionError):  # deep nesting must not 500 a history read
 			return {}
 	mark = raw.get(RECEIPT_KEY) if isinstance(raw, dict) else None
 	if not isinstance(mark, dict):
@@ -118,6 +118,29 @@ def decided_mark(row) -> dict:
 	if mark.get("reason") in _CHANGED_REASONS:
 		out["draft_receipt_reason"] = mark["reason"]
 	return out
+
+
+def without_mark(raw):
+	"""``raw`` (a stored ``tool_result``: a JSON string, a dict or anything else) without the
+	draft marker, in the kind it came in, or None when nothing else is left (a discard row is
+	empty again). The marker is for the apps only and must never reach the model or a share
+	recipient. Anything that holds no marker is returned as it came (the same object or string),
+	so with the feature off every payload is unchanged. Never raises."""
+	if isinstance(raw, str):
+		if RECEIPT_KEY not in raw:  # the common receipt: no parse
+			return raw
+		try:
+			parsed = json.loads(raw)
+		except (ValueError, RecursionError):
+			return raw
+		if not isinstance(parsed, dict) or RECEIPT_KEY not in parsed:
+			return raw
+		rest = {k: v for k, v in parsed.items() if k != RECEIPT_KEY}
+		return json.dumps(rest, ensure_ascii=False) if rest else None
+	if isinstance(raw, dict) and RECEIPT_KEY in raw:
+		rest = {k: v for k, v in raw.items() if k != RECEIPT_KEY}
+		return rest or None
+	return raw
 
 
 def payload_from(

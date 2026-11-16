@@ -323,13 +323,7 @@ class TestDecidedDraftMarkPure(unittest.TestCase):
 				stored = draft_card.with_receipt_mark(self.STALE_STORED, {"verb": verb}, reason)
 				self.assertEqual(stored["error"], self.STALE_STORED["error"], "the result is kept whole")
 				self.assertEqual(draft_card.decided_mark(self._row(stored)), want)
-
-	def test_a_stale_failure_as_stored_today_says_why_only_through_the_marker(self):
-		"""The stale row has no message and no reason on it (STALE_STORED): without the marker
-		the receipt could only guess from a sentence."""
-		self.assertEqual(draft_card.decided_mark(self._row(self.STALE_STORED)), {})
-		stored = draft_card.with_receipt_mark(self.STALE_STORED, {"verb": "update"}, "stale")
-		self.assertEqual(draft_card.decided_mark(self._row(stored))["draft_receipt_reason"], "stale")
+		self.assertEqual(draft_card.decided_mark(self._row(self.STALE_STORED)), {}, "no marker, no stamp")
 
 	def test_only_a_settled_draft_is_marked_and_only_a_decided_row_is_stamped(self):
 		"""A sensitive card (no `draft`) and a plain receipt get no marker and no stamp; a
@@ -337,7 +331,7 @@ class TestDecidedDraftMarkPure(unittest.TestCase):
 		self.assertIsNone(draft_card.with_receipt_mark(None, None, "stale"))
 		self.assertEqual(draft_card.with_receipt_mark({"ok": True}, "x", ""), {"ok": True})
 		discarded = draft_card.with_receipt_mark(None, {"verb": "create"}, "discarded")
-		self.assertEqual(discarded, {"draft_receipt": {"verb": "create"}})
+		self.assertEqual(discarded, {"draft_receipt": {}})
 		marked = self._row(discarded, "discarded")
 		self.assertEqual(draft_card.decided_mark(marked), {"draft_receipt": True})
 		for row in (
@@ -350,6 +344,46 @@ class TestDecidedDraftMarkPure(unittest.TestCase):
 		):
 			with self.subTest(row=row):
 				self.assertEqual(draft_card.decided_mark(row), {})
+
+
+class TestMarkNeverReachesTheModelPure(unittest.TestCase):
+	"""``draft_card.without_mark`` and the deep-nesting guard of ``decided_mark``."""
+
+	def test_the_marker_is_taken_off_in_the_kind_it_came_in(self):
+		"""The collaborative prompt and share recipients read ``tool_result`` through
+		``project_row``: the marker must be gone, the rest kept, a bare marker (a discard)
+		back to None, and a dict stays a dict while a JSON string stays a JSON string."""
+		mark = {"draft_receipt": {"reason": "stale"}}
+		cases = [
+			({"ok": False, **mark}, {"ok": False}),
+			(json.dumps({"ok": False, **mark}), json.dumps({"ok": False})),
+			(mark, None),
+			(json.dumps(mark), None),
+		]
+		for raw, want in cases:
+			with self.subTest(raw=raw):
+				self.assertEqual(draft_card.without_mark(raw), want)
+
+	def test_a_result_with_no_marker_comes_back_as_the_same_object(self):
+		"""With the feature off no marker exists: every payload must stay byte for byte what it
+		was, also what is not JSON, what is not a dict, and a marker that cannot be parsed."""
+		d, text = {"ok": True}, '{"ok": true}'
+		for raw in (d, text, "plain text", '{"draft_receipt": ', "[1]", '["draft_receipt"]', None, 3, ["x"]):
+			with self.subTest(raw=raw):
+				self.assertIs(draft_card.without_mark(raw), raw)
+
+	def test_deep_nesting_that_holds_the_key_text_never_raises(self):
+		deep = "[" * 100000 + '"draft_receipt"' + "]" * 100000
+		self.assertIs(draft_card.without_mark(deep), deep)
+		row = {"role": "tool", "action_outcome": "failed", "tool_result": deep}
+		self.assertEqual(draft_card.decided_mark(row), {})
+
+	def test_an_old_marker_that_carries_a_verb_still_stamps(self):
+		old = {"role": "tool", "action_outcome": "failed"}
+		old["tool_result"] = json.dumps({"draft_receipt": {"verb": "update", "reason": "stale"}})
+		self.assertEqual(
+			draft_card.decided_mark(old), {"draft_receipt": True, "draft_receipt_reason": "stale"}
+		)
 
 
 class TestRowDiffPure(unittest.TestCase):
