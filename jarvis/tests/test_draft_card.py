@@ -154,6 +154,10 @@ class TestDraftCallPure(unittest.TestCase):
 		self.assertIsInstance(items["unreadable"]["card"]["draft"]["values"], str)
 
 
+def _draft_with(verb, name, ignored, dropped):
+	return {"verb": verb, "doctype": "Timesheet", "name": name, "ignored": ignored, "dropped": dropped}
+
+
 def _sales_order_draft():
 	"""A Sales Order draft with a table, as the builder gives it (stand-in field list)."""
 	main = {"customer", "delivery_date", "items"}
@@ -193,6 +197,52 @@ class TestShortResultPure(unittest.TestCase):
 			},
 		)
 
+	def _assert_fits(self, draft, preview=None):
+		data = draft_card.short_result("create_doc", draft, preview)["data"]
+		self.assertLessEqual(len(json.dumps(data)), draft_card.SHORT_LIMIT)
+		for key in ("status", "tool", "note"):
+			self.assertIn(key, data)
+		for key in ("verb", "doctype", "name"):
+			self.assertIn(key, data["draft"])
+		self.assertEqual(data["note"], draft_card.SHORT_NOTE)
+		return data
+
+	def test_a_sales_order_draft_with_table_rows_fits(self):
+		"""A real-shaped Sales Order draft (table rows, an unknown row key) fits the bound and
+		names the row key as `items.colour`."""
+		data = self._assert_fits(_sales_order_draft())
+		self.assertEqual(data["ignored_fields"], ["items.colour"])
+
+	def test_a_140_character_non_ascii_record_name_still_fits(self):
+		"""JSON escapes a non-ASCII character to 6 bytes, so a long Tamil name alone broke the
+		bound; the name is shortened (kept from the start, ended with "...")."""
+		name = "\u0b9a" * 140
+		data = self._assert_fits(_draft_with("update", name, [], []))
+		self.assertTrue(data["draft"]["name"].endswith("..."))
+		self.assertTrue(name.startswith(data["draft"]["name"][:-3]))
+
+	def test_5000_unknown_keys_are_capped_and_counted(self):
+		"""Thousands of unknown keys give 10 clipped names and a count of the rest, so the
+		work and the size do not grow with the call."""
+		data = self._assert_fits(_draft_with("create", "", [f"made_up_{i}" for i in range(5000)], []))
+		self.assertEqual(len(data["ignored_fields"]), 10)
+		self.assertEqual(data["more_ignored"], 4990)
+		self.assertNotIn("more_dropped", data)
+
+	def test_a_long_field_name_is_clipped_to_40_characters(self):
+		"""One 300-character key does not take the model's budget: it is clipped to 40."""
+		data = self._assert_fits(_draft_with("create", "", ["k" * 300], []))
+		self.assertEqual(data["ignored_fields"], ["k" * 40])
+
+	def test_ten_long_non_ascii_names_and_a_long_name_cut_dropped_then_ignored_then_the_name(self):
+		"""When even the capped lists do not fit, `dropped_fields` loses names before
+		`ignored_fields` does, and each cut is counted."""
+		long_names = [f"{i}" + "\u0b9a" * 39 for i in range(10)]
+		data = self._assert_fits(_draft_with("update", "N" * 100, long_names, long_names))
+		self.assertNotIn("dropped_fields", data)
+		self.assertEqual(data["more_dropped"], 10)
+		self.assertEqual(data["more_ignored"] + len(data["ignored_fields"]), 10)
+
 	def test_dropped_fields_only_when_the_trial_dropped_some(self):
 		"""`dropped_fields` names what a permission filter removed, and is absent otherwise."""
 		bare = draft_card.short_result("create_doc", _build("create", "", {"employee": "E"}))
@@ -202,26 +252,16 @@ class TestShortResultPure(unittest.TestCase):
 		)
 		self.assertEqual(cut["data"]["dropped_fields"], ["note"])
 
-	def test_every_fixture_and_sales_order_draft_stays_under_600_characters(self):
-		"""The model-facing result of any real draft shape (the fixtures' Timesheet, ToDo, Web
-		Form drafts and a Sales Order with table rows) stays within the bound."""
-		with open(FIXTURES) as f:
-			drafts = [i["card"]["draft"] for i in json.load(f) if isinstance(i["card"].get("draft"), dict)]
-		for draft in [*drafts, _sales_order_draft()]:
-			with self.subTest(draft["title"]):
-				res = draft_card.short_result("create_doc", draft)
-				self.assertLessEqual(len(json.dumps(res["data"])), draft_card.SHORT_LIMIT)
-
-	def test_a_very_long_field_list_is_cut_and_counted(self):
-		"""A call with hundreds of unknown keys still fits the bound: the lists are cut and
-		`more_fields` says how many names were left out, so the model is never told the list
-		is complete when it is not."""
-		draft = _build("create", "", {f"made_up_field_{i}": 1 for i in range(200)})
-		self.assertEqual(len(draft["ignored"]), 200)
-		data = draft_card.short_result("create_doc", draft)["data"]
-		self.assertLessEqual(len(json.dumps(data)), draft_card.SHORT_LIMIT)
-		self.assertGreater(data["more_fields"], 0)
-		self.assertEqual(len(data["ignored_fields"]) + data["more_fields"], 200)
+	def test_the_trials_two_notes_ride_along_as_warnings_and_fit(self):
+		"""The jobs-a-confirm-starts sentence and the hook-rolled-back caveat reach the model,
+		and even with both the result fits; with neither there is no `warnings` key."""
+		queue_note = "Confirming will also start 2 background jobs, named in will_queue. " * 5
+		preview = {"will_queue_note": queue_note, "hook_rolled_back": True}
+		data = self._assert_fits(_sales_order_draft(), preview)
+		self.assertEqual(len(data["warnings"]), 2)
+		self.assertTrue(data["warnings"][0].startswith("Confirming will also start"))
+		self.assertEqual(data["warnings"][1], draft_card.HOOK_WARNING)
+		self.assertNotIn("warnings", self._assert_fits(_sales_order_draft(), {"would": {}}))
 
 
 try:

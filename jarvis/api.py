@@ -5189,7 +5189,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		)
 		if draft_for_model is not None:
 			# A parked draft: the person reads the card, the model gets a short result.
-			return draft_card.short_result(tool, draft_for_model)
+			return draft_card.short_result(tool, draft_for_model, preview)
 		return {
 			"ok": True,
 			"data": {

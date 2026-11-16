@@ -56,7 +56,7 @@ def is_draft_call(tool: str, args, *, must_card: bool) -> bool:
 
 def wanted(tool: str, args, *, must_card: bool) -> bool:
 	"""Whether this park builds a draft card: the flag is on and the call is one."""
-	return is_draft_call(tool, args, must_card=must_card) and enabled()
+	return enabled() and is_draft_call(tool, args, must_card=must_card)
 
 
 def payload_from(
@@ -210,35 +210,97 @@ def attach(card: dict, tool: str, args: dict, would) -> bool:
 
 
 SHORT_NOTE = "A review card is on the user's screen. Write one short line and stop. Nothing is saved until they choose."
-# The model's result for a parked draft stays this small (the JSON of ``data``): it is
-# the whole point of not sending the would-be document back.
+# The model's result for a parked draft stays this small (``len(json.dumps(data))``, where
+# a non-ASCII character costs 6): it is the whole point of not sending the would-be
+# document back.
 SHORT_LIMIT = 600
+_MAX_NAMES = 10
+_NAME_CHARS = 40
+HOOK_WARNING = "A hook was rolled back in the trial, so the saved record may differ from this draft."
 
 
-def short_result(tool: str, draft: dict) -> dict:
+def _clip(text: str, keep: int) -> str:
+	"""``text`` cut to its first ``keep`` characters and ended with "..."; whole when it fits."""
+	return text if keep >= len(text) else text[: max(keep, 0)] + "..."
+
+
+def _warnings_of(preview) -> list[str]:
+	"""The trial's two notes for the model, which the short result must not lose: the
+	jobs a confirm will start (``will_queue_note``, the existing sentence) and a hook that
+	rolled back (``hook_rolled_back``, a flag only; its long note would not fit)."""
+	if not isinstance(preview, dict):
+		return []
+	out = []
+	if preview.get("will_queue_note"):
+		out.append(str(preview["will_queue_note"]))
+	if preview.get("hook_rolled_back") is True:
+		out.append(HOOK_WARNING)
+	return out
+
+
+def short_result(tool: str, draft: dict, preview=None) -> dict:
 	"""What the MODEL gets back for a parked draft: the call's identity, the fields the
-	card left out, and a note. No ``preview``: the person reads the card, the model does
-	not need the would-be document. Field lists too long for ``SHORT_LIMIT`` are cut
-	(``ignored_fields`` last) and ``more_fields`` counts the names left out."""
-	ignored = list(draft.get("ignored") or [])
-	dropped = list(draft.get("dropped") or [])
-	left_out = 0
-	while True:
+	card left out, the trial's warnings, and a note. No ``preview``: the person reads the
+	card, the model does not need the would-be document.
+
+	At most ``SHORT_LIMIT`` characters of JSON for any input. Each field list is capped at
+	10 names of 40 characters up front (``more_ignored`` / ``more_dropped`` count the rest).
+	If it is still too long, names leave ``dropped_fields`` first, then ``ignored_fields``
+	(the model needs those to correct itself), then the record name, the doctype and
+	last the warnings are shortened. The fixed note is never cut."""
+	ignored = [str(n)[:_NAME_CHARS] for n in (draft.get("ignored") or [])]
+	dropped = [str(n)[:_NAME_CHARS] for n in (draft.get("dropped") or [])]
+	more = {
+		"more_ignored": max(len(ignored) - _MAX_NAMES, 0),
+		"more_dropped": max(len(dropped) - _MAX_NAMES, 0),
+	}
+	ignored, dropped = ignored[:_MAX_NAMES], dropped[:_MAX_NAMES]
+	name, doctype = str(draft.get("name") or ""), str(draft.get("doctype") or "")
+	warnings = _warnings_of(preview)
+	keep = {"name": len(name), "doctype": len(doctype), "warning": max(map(len, warnings), default=0)}
+
+	def build() -> dict:
 		data = {
 			"status": "pending_confirmation",
 			"tool": tool,
-			"draft": {k: draft.get(k) for k in ("verb", "doctype", "name")},
+			"draft": {
+				"verb": draft.get("verb"),
+				"doctype": _clip(doctype, keep["doctype"]),
+				"name": _clip(name, keep["name"]),
+			},
 			"ignored_fields": ignored,
 		}
+		if more["more_ignored"]:
+			data["more_ignored"] = more["more_ignored"]
 		if dropped:
 			data["dropped_fields"] = dropped
-		if left_out:
-			data["more_fields"] = left_out
+		if more["more_dropped"]:
+			data["more_dropped"] = more["more_dropped"]
+		if warnings:
+			data["warnings"] = [_clip(w, keep["warning"]) for w in warnings]
 		data["note"] = SHORT_NOTE
-		if len(json.dumps(data)) <= SHORT_LIMIT or not (ignored or dropped):
+		return data
+
+	while True:
+		data = build()
+		excess = len(json.dumps(data)) - SHORT_LIMIT
+		if excess <= 0:
 			return {"ok": True, "data": data}
-		left_out += 1
-		(ignored if ignored else dropped).pop()
+		if dropped:
+			dropped.pop()
+			more["more_dropped"] += 1
+		elif ignored:
+			ignored.pop()
+			more["more_ignored"] += 1
+		else:
+			# Each step takes off at least one character and about the excess in bytes.
+			step = max(1, excess // 6)
+			for field, text in (("name", name), ("doctype", doctype), ("warning", "x" * keep["warning"])):
+				if keep[field] > 0:
+					keep[field] = max(keep[field] - step, 0)
+					break
+			else:
+				return {"ok": True, "data": data}
 
 
 def refusal(exc, tool: str, args: dict) -> list[dict] | None:
