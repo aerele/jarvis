@@ -218,14 +218,18 @@
 				<span>minute</span><span>hour</span><span>day</span><span>month</span
 				><span>weekday</span>
 			</div>
-			<p class="mt-1 text-xs text-ink-gray-5">One schedule per line.</p>
+			<p class="mt-1 text-xs text-ink-gray-5">
+				One schedule per line, up to {{ MAX_CRON_LINES }}. An example adds its line.
+			</p>
 			<div class="mt-2.5 flex flex-wrap gap-1.5">
 				<button
 					v-for="ex in CRON_EXAMPLES"
 					:key="ex.cron"
 					type="button"
 					class="jv-sched-example"
-					@click="update({ cron: ex.cron })"
+					:aria-pressed="cronHas(ex.cron) ? 'true' : 'false'"
+					:disabled="!cronHas(ex.cron) && cronLineCount >= MAX_CRON_LINES"
+					@click="update({ cron: withCronLine(model.cron, ex.cron) })"
 				>
 					{{ ex.label }}
 				</button>
@@ -315,6 +319,7 @@ import {
 	DAY_SHORT,
 	EVERY_N_HOURS,
 	HOURS,
+	MAX_CRON_LINES,
 	MAX_TIMES,
 	MINUTES,
 	WEEK,
@@ -322,6 +327,7 @@ import {
 	presetCron,
 	schedulePreview,
 	wallClock,
+	withCronLine,
 } from "@/lib/macroCron";
 
 const props = defineProps({
@@ -427,6 +433,10 @@ function minuteOptions(current, prefix = "") {
 }
 
 const cronLineCount = computed(() => cronLinesOf(model.value.cron).length);
+// an example already in the box shows as picked (and clicking it again adds nothing)
+function cronHas(line) {
+	return cronLinesOf(model.value.cron).includes(line);
+}
 
 // The site's wall clock now, in macroCron's UTC parts.
 function siteNow() {
@@ -582,6 +592,16 @@ const preview = computed(() =>
 }
 .jv-sched-example:hover {
 	border-color: var(--outline-gray-4, #a3a3a3);
+}
+/* an example already in the cron box (#801) */
+.jv-sched-example[aria-pressed="true"] {
+	border-color: var(--outline-gray-4, #a3a3a3);
+	background: var(--surface-gray-2, #f3f3f3);
+	color: var(--ink-gray-9, #171717);
+}
+.jv-sched-example:disabled {
+	cursor: not-allowed;
+	opacity: 0.6;
 }
 .jv-sched-summary {
 	display: flex;
