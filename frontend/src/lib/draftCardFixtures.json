@@ -1,65 +1,73 @@
 [
  {
   "id": "create-simple",
+  "source": "builder",
+  "expect": "draft",
   "card": {
    "kind": "create",
-   "doctype": "Timesheet",
+   "doctype": "ToDo",
    "name": null,
    "rows": [
     {
-     "label": "Employee",
-     "value": "EMP-1"
-    },
-    {
-     "label": "Note",
-     "value": "Weekly"
+     "label": "Description",
+     "value": "Call the supplier"
     }
    ],
    "tables": [],
    "draft": {
     "verb": "create",
-    "doctype": "Timesheet",
+    "doctype": "ToDo",
     "name": "",
+    "title": "New ToDo",
     "values": {
-     "employee": "EMP-1",
-     "note": "Weekly"
+     "description": "Call the supplier"
     },
     "ignored": [],
+    "dropped": [],
     "continue": false
-   },
-   "title": "New Timesheet"
-  },
-  "expect": "draft"
+   }
+  }
  },
  {
   "id": "create-with-table",
+  "source": "builder",
+  "expect": "draft",
   "card": {
    "kind": "create",
-   "doctype": "Timesheet",
+   "doctype": "Web Form",
    "name": null,
    "rows": [
     {
-     "label": "Employee",
-     "value": "EMP-1"
+     "label": "Title",
+     "value": "Feedback"
     }
    ],
    "tables": [
     {
-     "label": "Time Logs",
+     "label": "Web Form Fields",
      "count": 1,
      "columns": [
-      "From Time",
-      "Hours"
+      "Field",
+      "Fieldtype",
+      "Custom Label",
+      "Mandatory",
+      "Options"
      ],
      "fieldnames": [
-      "from_time",
-      "hours"
+      "fieldname",
+      "fieldtype",
+      "label",
+      "reqd",
+      "options"
      ],
      "rows": [
       {
        "cells": [
-        "09:00",
-        "1.5"
+        "email",
+        "Data",
+        "Email",
+        "No",
+        ""
        ]
       }
      ],
@@ -71,26 +79,28 @@
    ],
    "draft": {
     "verb": "create",
-    "doctype": "Timesheet",
+    "doctype": "Web Form",
     "name": "",
+    "title": "New Web Form",
     "values": {
-     "employee": "EMP-1",
-     "time_logs": [
+     "title": "Feedback",
+     "web_form_fields": [
       {
-       "doctype": "Timesheet Detail",
-       "from_time": "09:00"
+       "fieldname": "email",
+       "fieldtype": "Data"
       }
      ]
     },
     "ignored": [],
+    "dropped": [],
     "continue": false
-   },
-   "title": "New Timesheet"
-  },
-  "expect": "draft"
+   }
+  }
  },
  {
   "id": "create-ignored-field",
+  "source": "hand",
+  "expect": "draft",
   "card": {
    "kind": "create",
    "doctype": "Timesheet",
@@ -106,74 +116,90 @@
     "verb": "create",
     "doctype": "Timesheet",
     "name": "",
+    "title": "New Timesheet",
     "values": {
      "employee": "EMP-1"
     },
     "ignored": [
      "colour"
     ],
+    "dropped": [],
     "continue": false
-   },
-   "title": "New Timesheet"
-  },
-  "expect": "draft"
+   }
+  }
  },
  {
   "id": "update-diff",
+  "source": "builder",
+  "expect": "draft",
+  "card": {
+   "kind": "update",
+   "doctype": "ToDo",
+   "name": "TD-0001",
+   "title": "Call the supplier",
+   "diff": [
+    {
+     "label": "Status",
+     "from": "Open",
+     "to": "Closed"
+    }
+   ],
+   "draft": {
+    "verb": "update",
+    "doctype": "ToDo",
+    "name": "TD-0001",
+    "title": "ToDo TD-0001",
+    "values": {
+     "status": "Closed"
+    },
+    "ignored": [],
+    "dropped": [],
+    "continue": false
+   }
+  }
+ },
+ {
+  "id": "update-table-rows",
+  "source": "hand",
+  "expect": "draft",
   "card": {
    "kind": "update",
    "doctype": "Timesheet",
    "name": "TS-0001",
+   "title": "",
    "diff": [
     {
-     "label": "Note",
-     "from": "",
-     "to": "Late"
+     "label": "Time Logs",
+     "from": "0 rows",
+     "to": "2 rows"
     }
    ],
    "draft": {
     "verb": "update",
     "doctype": "Timesheet",
     "name": "TS-0001",
-    "values": {
-     "note": "Late"
-    },
-    "ignored": [],
-    "continue": false
-   },
-   "title": "Timesheet TS-0001"
-  },
-  "expect": "draft"
- },
- {
-  "id": "update-table-rows",
-  "card": {
-   "kind": "update",
-   "doctype": "Timesheet",
-   "name": "TS-0001",
-   "diff": [],
-   "draft": {
-    "verb": "update",
-    "doctype": "Timesheet",
-    "name": "TS-0001",
+    "title": "Timesheet TS-0001",
     "values": {
      "time_logs": [
       {
        "from_time": "10:00"
+      },
+      {
+       "from_time": "11:00"
       }
      ]
     },
     "ignored": [
      "time_logs.hrs_worked"
     ],
+    "dropped": [],
     "continue": false
-   },
-   "title": "Timesheet TS-0001"
-  },
-  "expect": "draft"
+   }
+  }
  },
  {
   "id": "sensitive",
+  "source": "hand",
   "expect": "sensitive",
   "card": {
    "kind": "update",
@@ -187,6 +213,7 @@
  },
  {
   "id": "unreadable",
+  "source": "hand",
   "expect": "unreadable",
   "card": {
    "kind": "create",
@@ -194,13 +221,14 @@
    "name": null,
    "rows": [],
    "tables": [],
-   "title": "New Timesheet",
    "draft": {
     "verb": "create",
     "doctype": "Timesheet",
     "name": "",
+    "title": "New Timesheet",
     "values": "not an object",
     "ignored": [],
+    "dropped": [],
     "continue": false
    }
   }

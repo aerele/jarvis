@@ -594,7 +594,9 @@ def row_bookkeeping_keys() -> frozenset:
 	return frozenset(("doctype", *frappe.model.default_fields, *frappe.model.child_table_fields))
 
 
-def table_rows(meta, fieldname: str, rows: list, full: bool = False, stored: bool = False) -> dict | None:
+def table_rows(
+	meta, fieldname: str, rows: list, full: bool = False, stored: bool = False, draft: bool = False
+) -> dict | None:
 	"""A PROPOSED child table as a real table, or None when there is nothing to show.
 
 	Columns are the child doctype's ``in_list_view`` order UNION every key the caller
@@ -606,7 +608,9 @@ def table_rows(meta, fieldname: str, rows: list, full: bool = False, stored: boo
 	valid_columns), so it is counted in ``unknown_columns`` rather than rendered as
 	a value that will persist. Row bookkeeping (``row_bookkeeping_keys``: a row's own
 	``doctype``, ``name``, ``idx``, ...) is neither. The names are returned beside the
-	count as ``unknown_fields``.
+	count as ``unknown_fields`` when ``draft`` is asked for (a draft card names what it
+	leaves out; every other table dict keeps the keys it always had). A key that IS a
+	child field keeps its column even when it shares a name with a bookkeeping key.
 
 	STORED child tables keep "N rows" (fmt's list branch) - a delete card does not
 	need line items to identify the order.
@@ -635,10 +639,11 @@ def table_rows(meta, fieldname: str, rows: list, full: bool = False, stored: boo
 		if not isinstance(row, dict):
 			continue
 		for key in row:
-			if key in proposed or key in unknown or key in skip:
+			if key in proposed or key in unknown:
 				continue
 			if child.get_field(key) is None:
-				unknown.append(key)
+				if key not in skip:
+					unknown.append(key)
 				continue
 			proposed.append(key)
 
@@ -669,8 +674,9 @@ def table_rows(meta, fieldname: str, rows: list, full: bool = False, stored: boo
 		"extra": max(0, len(rows) - len(out_rows)),
 		"extra_columns": max(0, len(columns) - len(shown_cols)),
 		"unknown_columns": len(unknown),
-		"unknown_fields": unknown,
 	}
+	if draft:
+		out["unknown_fields"] = unknown
 	notes = [HIDDEN_BREAK_NOTE] if hidden_break else []
 	if full and len(shown_cols) > _WIDE_TABLE_COLS:
 		# A full card never drops a column, so a wide table scrolls sideways inside

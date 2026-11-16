@@ -311,6 +311,7 @@ def _create_card(args: dict, would, full: bool = False, draft: bool = False) -> 
 			if full
 			else _trial_rows(key, value, would, _list_view_fields(meta, key) if draft else ()),
 			full,
+			draft=draft,
 		)
 		if t:
 			tables.append(t)

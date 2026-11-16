@@ -1,9 +1,9 @@
 """A parked ``create_doc`` / ``update_doc`` call, marked as a DRAFT card.
 
 When the agent proposes ONE record, the card the server parks is a draft the person
-can read as a form: ``card["draft"]`` carries the call's values by field name and
-``card["title"]`` names it. Both go on the card BEFORE it is sealed and parked
-(``api._run_tool``), so the seal's card hash covers them.
+can read as a form: ``card["draft"]`` carries the call's values by field name and a
+title. It goes on the card BEFORE it is sealed and parked (``api._run_tool``), so the
+seal's card hash covers it.
 
 Dark behind the site flag ``jarvis_draft_cards`` (``enabled``, default off): with it
 off nothing here changes a card.
@@ -69,24 +69,30 @@ def payload_from(
 	skip,
 	cont: bool = False,
 ) -> dict:
-	"""The ``draft`` payload from plain inputs.
+	"""The ``draft`` payload from plain inputs: ``title`` ("New {doctype}" / "{doctype}
+	{name}"; ``card["title"]`` keeps what the card always had), the call's ``values``,
+	``ignored`` and ``dropped``.
 
 	``has_field(key)``: whether ``key`` is a field of the form. ``child_has(key)``: for a
 	table field, a predicate on its row keys, else None. ``skip``: bookkeeping keys that
 	are never fields and never ignored (``_record_summary.row_bookkeeping_keys``).
 	A key that is not a field is listed in ``ignored`` and left out of ``values`` (a
-	child row's as "table.field"); a key the trial dropped (``would`` is a dict that
-	lacks it: a permission filter) is left out of ``values`` too, as the card's rows do."""
+	child row's as "table.field"). A field the trial dropped (``would`` is a dict that
+	lacks it: a permission filter) is left out of ``values`` as the card's rows do, and
+	named in ``dropped``. A real field is judged first; a bookkeeping key that is no
+	field is kept and never ignored."""
 	ignored: list[str] = []
+	dropped: list[str] = []
 	out: dict = {}
 	for key, value in values.items():
-		if key in skip:
-			out[key] = value
-			continue
 		if not has_field(key):
-			ignored.append(key)
+			if key in skip:
+				out[key] = value
+			else:
+				ignored.append(key)
 			continue
 		if isinstance(would, dict) and key not in would:
+			dropped.append(key)
 			continue
 		row_has = child_has(key) if isinstance(value, list) else None
 		if row_has is not None:
@@ -96,8 +102,10 @@ def payload_from(
 		"verb": verb,
 		"doctype": doctype,
 		"name": name,
+		"title": title_of(verb, doctype, name),
 		"values": out,
 		"ignored": ignored,
+		"dropped": dropped,
 		"continue": bool(cont),
 	}
 
@@ -107,7 +115,7 @@ def _clean_row(table: str, row, row_has, skip, ignored: list) -> object:
 		return row
 	kept = {}
 	for key, value in row.items():
-		if key in skip or row_has(key):
+		if row_has(key) or key in skip:
 			kept[key] = value
 			continue
 		label = f"{table}.{key}"
@@ -179,8 +187,8 @@ def title_of(verb: str, doctype: str, name: str) -> str:
 
 
 def attach(card: dict, tool: str, args: dict, would) -> bool:
-	"""Put ``draft`` and ``title`` on ``card`` (before it is sealed). A create card
-	carries no trial-allocated name: a prompt-named DocType keeps the name the call
+	"""Put ``draft`` on ``card`` (before it is sealed); ``card["title"]`` is left alone.
+	A create card carries no trial-allocated name: a prompt-named DocType keeps the name the call
 	typed, any other gets none. False, and ``card`` untouched, when the doctype is not
 	a real one on this site."""
 	import frappe
@@ -194,7 +202,6 @@ def attach(card: dict, tool: str, args: dict, would) -> bool:
 		frappe.log_error(title="draft payload failed", message=frappe.get_traceback())
 		return False
 	card["draft"] = draft
-	card["title"] = title_of(draft["verb"], doctype, draft["name"])
 	if draft["verb"] == "create":
 		card["name"] = draft["name"] or None
 	return True
