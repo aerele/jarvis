@@ -249,7 +249,9 @@ class TestParseAsk(unittest.TestCase):
 			]
 		)
 		qs = parse_ask("```jarvis-ask\n" + body + "\n```")
-		self.assertEqual(qs[0]["options"], ["14:00 to 14:30", "17:00-17:30", "Another time you specify", "42"])
+		self.assertEqual(
+			qs[0]["options"], ["14:00 to 14:30", "17:00-17:30", "Another time you specify", "42"]
+		)
 
 	def test_last_fence_wins(self):
 		content = (

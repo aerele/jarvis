@@ -160,7 +160,9 @@ def parse_ask(content: str | None) -> list[dict]:
 			qtype = "single"
 		cap = 200 if qtype == "select" else 8
 		options = q.get("options")
-		options = [t for t in map(_option_text, options) if t][:cap] if isinstance(options, list) else []
+		options = (
+			[t for t in (_option_text(o) for o in options) if t][:cap] if isinstance(options, list) else []
+		)
 		if qtype == "select" and not options:
 			qtype = "text"
 		text = _ask_text(q)
