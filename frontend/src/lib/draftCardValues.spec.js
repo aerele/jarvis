@@ -11,7 +11,12 @@
 import { describe, expect, it } from "vitest";
 import { applyRuleValues, blankRow, buildDraftTable } from "./draftTables";
 import { panelField } from "./docFields";
-import { draftCardDirty, draftCardValues, snapshotDraftModel } from "./draftCardValues";
+import {
+	draftCardDirty,
+	draftCardValues,
+	snapshotDraftModel,
+	snapshotMatchesCard,
+} from "./draftCardValues";
 import CONTRACT from "./draftCardContractCases.json";
 
 const F = (fieldname, fieldtype = "Data", extra = {}) => ({
@@ -792,5 +797,142 @@ describe("draftCardDirty and robustness", () => {
 		expect(draftCardDirty(undefined, undefined, undefined)).toBe(false);
 		const built = createModel({ title: "Hello" });
 		expect(draftCardValues(built.model, null, built.card)).toEqual({ title: "Hello" });
+	});
+});
+
+describe("snapshotMatchesCard: is the baseline the card's own", () => {
+	const ok = (r) => expect(r).toEqual({ ok: true, why: "" });
+	const creating = () => createModel({ ...DRAFT, logs: ROWS() });
+	const updating = () =>
+		updateModel({
+			title: "Hello",
+			logs: [{ name: "tl-1", hours: 2 }, { name: "tl-2" }, { activity: "A9", hours: 9 }],
+		});
+	// the model after `edit`, snapshotted then: a late snapshot
+	const late = (build, edit) => {
+		const { model, card } = build();
+		edit(model);
+		return snapshotMatchesCard(snapshotDraftModel(model, card), card);
+	};
+
+	it("a snapshot of the untouched form is ok, create and update", () => {
+		for (const build of [creating, updating]) {
+			const { model, card } = build();
+			ok(snapshotMatchesCard(snapshotDraftModel(model, card), card));
+		}
+	});
+
+	it("every golden case's untouched form is ok (real models, drafted new rows included)", () => {
+		for (const c of CONTRACT.cases.filter((c) => c.side !== "server")) {
+			const update = c.verb === "update";
+			const table = buildDraftTable({
+				fieldname: "rows",
+				spec: {
+					label: "Rows",
+					child_doctype: "Row",
+					columns: [
+						F("item"),
+						F("qty", "Float"),
+						F("note"),
+						F("so_detail", "Data", { read_only: 1 }),
+					],
+					extra_columns: [],
+				},
+				required: !update,
+				proposed: c.sealed.rows,
+				saved: update ? c.savedRows || [] : [],
+				verb: c.verb,
+			});
+			const card = { draft: { verb: c.verb, doctype: "T", values: c.sealed } };
+			const model = { verb: c.verb, doctype: "T", fields: [], tables: [table] };
+			expect([c.id, snapshotMatchesCard(snapshotDraftModel(model, card), card).ok]).toEqual([
+				c.id,
+				true,
+			]);
+		}
+	});
+
+	it("after an edit to a main field it is not ok and names the field", () => {
+		const r = late(creating, (m) => (field(m, "title").value = "Changed"));
+		expect(r.ok).toBe(false);
+		expect(r.why).toContain("title");
+	});
+
+	it("after an edit to a create row cell it is not ok and names the table, row and cell", () => {
+		const r = late(creating, (m) => (logs(m).rows[1].hours = "9"));
+		expect(r.ok).toBe(false);
+		expect(r.why).toContain("logs row 2 hours");
+	});
+
+	it("after an edit to a saved row cell of an update draft it is not ok", () => {
+		const r = late(updating, (m) => (logs(m).rows[0].hours = "8"));
+		expect(r.ok).toBe(false);
+		expect(r.why).toContain("logs row tl-1 hours");
+	});
+
+	it("rows the draft names in another order than the snapshot's are not ok", () => {
+		const r = late(updating, (m) => {
+			const rows = logs(m).rows;
+			[rows[0], rows[1]] = [rows[1], rows[0]];
+		});
+		expect(r.ok).toBe(false);
+		expect(r.why).toContain("order");
+	});
+
+	it("a snapshot taken before the drafted values were applied is not ok", () => {
+		// create: the form is still blank when the card already holds the draft
+		const { card } = creating();
+		const blankModel = createModel({}).model;
+		blankModel.fields = MAIN.map((m) => panelField(m, ""));
+		const r = snapshotMatchesCard(snapshotDraftModel(blankModel, card), card);
+		expect(r.ok).toBe(false);
+		// update: only the stored rows are in the grid (the draft's overlay has not run)
+		const upd = updating();
+		const stored = updateModel({ title: "Hello" });
+		const early = snapshotMatchesCard(snapshotDraftModel(stored.model, upd.card), upd.card);
+		expect(early.ok).toBe(false);
+		expect(early.why).toContain("logs");
+	});
+
+	it("a default the form filled for a field or cell the draft does not hold is not a failure", () => {
+		const { model, card } = creating();
+		model.fields.push(panelField(F("priority"), "Medium"));
+		logs(model).rows[0].note = "form default";
+		ok(snapshotMatchesCard(snapshotDraftModel(model, card), card));
+	});
+
+	it("a control's own formatting is not a failure; an object value is compared as JSON text", () => {
+		const { model, card } = creating();
+		card.draft.values.qty = 3; // the form shows "3"
+		card.draft.values.at = "2026-11-01T09:30:00"; // the form shows the minutes only
+		card.draft.values.logs[2].hours = 3.0;
+		model.fields.push(panelField(F("meta", "JSON"), '{"a":1}'));
+		card.draft.values.meta = { a: 1 };
+		ok(snapshotMatchesCard(snapshotDraftModel(model, card), card));
+	});
+
+	it("never throws: an unreadable snapshot or card is simply not ok", () => {
+		const { model, card } = creating();
+		const snap = snapshotDraftModel(model, card);
+		const hostile = {
+			get draft() {
+				throw new Error("boom");
+			},
+		};
+		const inputs = [
+			[null, card],
+			[undefined, undefined],
+			[snap, null],
+			[snap, {}],
+			[snap, { draft: { values: [] } }],
+			[{ fields: 1, tables: 2 }, card],
+			[{ fields: {}, tables: { logs: { keys: "x", rows: 3 } } }, card],
+			[snap, hostile],
+		];
+		for (const [s, c] of inputs) {
+			const r = snapshotMatchesCard(s, c);
+			expect(r.ok).toBe(false);
+			expect(typeof r.why).toBe("string");
+		}
 	});
 });

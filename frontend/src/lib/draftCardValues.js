@@ -151,6 +151,8 @@ function snapshotTable(table, verb, card) {
 	const added = verb === "update" ? draftedNewRows(modelRows, drafted) : {};
 	const keys = [];
 	const rows = {};
+	const types = {};
+	for (const c of cols) types[c.fieldname] = c.fieldtype || "";
 	modelRows.forEach((r, i) => {
 		const k = rowKeyOf(r);
 		if (isReal(table, r)) keys.push(k);
@@ -161,7 +163,7 @@ function snapshotTable(table, verb, card) {
 		rows[k] = { origin, cells };
 		if (i in added) rows[k].draftRow = added[i];
 	});
-	return { keys, rows };
+	return { keys, rows, types };
 }
 
 // What the form showed when it was built: call it once, after the model is complete and
@@ -169,14 +171,17 @@ function snapshotTable(table, verb, card) {
 export function snapshotDraftModel(model, card) {
 	const verb = verbOf(model, null, card);
 	const fields = {};
+	const types = {};
 	for (const f of (model && model.fields) || []) {
-		if (f && f.fieldname) fields[f.fieldname] = norm(typeOf(f), f.value);
+		if (!f || !f.fieldname) continue;
+		fields[f.fieldname] = norm(typeOf(f), f.value);
+		types[f.fieldname] = typeOf(f);
 	}
 	const tables = {};
 	for (const t of (model && model.tables) || []) {
 		if (t && t.fieldname) tables[t.fieldname] = snapshotTable(t, verb, card);
 	}
-	return { verb, fields, tables };
+	return { verb, fields, types, tables };
 }
 
 function tableTouched(table, snap, real, cols) {
@@ -258,4 +263,105 @@ export function draftCardValues(model, snapshot, card) {
 // Whether closing the form would lose the person's work: the save would send something.
 export function draftCardDirty(model, snapshot, card) {
 	return Object.keys(draftCardValues(model, snapshot, card)).length > 0;
+}
+
+// ---- the snapshot guard ------------------------------------------------------------------
+//
+// `draftCardValues` is only as right as its baseline. A snapshot taken AFTER the person's
+// first keystroke makes a real edit read as "unchanged" (the drafted value is then written
+// while the form showed the edit); one taken BEFORE the form finished (an update's stored-
+// record overlay) makes untouched cells read as changes. The host calls this right after
+// taking the snapshot, and does not trust the snapshot when it says no.
+
+// A drafted value as the form model holds it: draftFromCard stringifies an object, panelField
+// and toPanelRow stringify everything else.
+const asText = (v) => (v == null ? "" : typeof v === "object" ? JSON.stringify(v) : String(v));
+const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+
+// The first cell of `drafted` the snapshot holds that differs from what the draft says, as
+// `{cell, form, draft}`, or null. Only cells the snapshot compares (writable columns) count.
+function firstCellDiff(drafted, cells, types, skip = []) {
+	for (const [cell, v] of Object.entries(drafted)) {
+		if (skip.includes(cell) || !own(cells, cell)) continue;
+		const want = norm(types[cell] || "", asText(v));
+		if (cells[cell] !== want) return { cell, form: cells[cell], draft: want };
+	}
+	return null;
+}
+
+const clip = (v) => JSON.stringify(String(v).slice(0, 30));
+
+function mismatchOf(cell, where) {
+	return `${where}: form ${clip(cell.form)} but draft ${clip(cell.draft)}`;
+}
+
+function checkTable(name, tsnap, drafted, verb) {
+	if (!tsnap || !isObject(tsnap.rows) || !Array.isArray(tsnap.keys))
+		return `table ${name}: unreadable snapshot`;
+	const types = tsnap.types || {};
+	const entries = tsnap.keys.map((k) => tsnap.rows[k]).filter(Boolean);
+	if (verb === "create") {
+		// Rows line up with the draft only when the snapshot gave them an origin.
+		for (const was of entries) {
+			if (was.origin == null || !isObject(drafted[was.origin])) continue;
+			const diff = firstCellDiff(drafted[was.origin], was.cells, types);
+			if (diff) return mismatchOf(diff, `table ${name} row ${was.origin + 1} ${diff.cell}`);
+		}
+		return "";
+	}
+	const draftRows = new Map();
+	const order = [];
+	for (const d of drafted) {
+		if (isObject(d) && typeof d.name === "string" && d.name && !draftRows.has(d.name)) {
+			draftRows.set(d.name, d);
+			order.push(d.name);
+		}
+	}
+	const named = entries.filter((w) => typeof w.origin === "string" && draftRows.has(w.origin));
+	const seen = named.map((w) => w.origin);
+	const expected = order.filter((n) => seen.includes(n));
+	if (seen.length !== expected.length || seen.some((n, i) => n !== expected[i]))
+		return `table ${name}: rows are not in the draft's order`;
+	for (const was of named) {
+		const diff = firstCellDiff(draftRows.get(was.origin), was.cells, types, ["name"]);
+		if (diff) return mismatchOf(diff, `table ${name} row ${was.origin} ${diff.cell}`);
+	}
+	return "";
+}
+
+// Is `snapshot` the form as `card` drafted it? `{ok, why}`; `why` is for logs, not users.
+// Compared: every main field the snapshot holds that the draft also holds (the same
+// normalisation the diff uses); on a create table whose rows lined up with the draft, each
+// row's cells against the drafted row at its origin index; on an update table, that the
+// saved rows the draft also names are in the draft's order and hold every cell the draft
+// set. A field or cell the draft does not hold (a default the form filled) is not compared.
+// Never throws: anything unreadable is "not ok".
+export function snapshotMatchesCard(snapshot, card) {
+	try {
+		const values = card && card.draft && card.draft.values;
+		if (!isObject(snapshot) || !isObject(snapshot.fields) || !isObject(snapshot.tables))
+			return { ok: false, why: "no snapshot" };
+		if (!isObject(values)) return { ok: false, why: "card has no draft values" };
+		const types = snapshot.types || {};
+		for (const [fieldname, was] of Object.entries(snapshot.fields)) {
+			if (!own(values, fieldname) || Array.isArray(values[fieldname])) continue;
+			const want = norm(types[fieldname] || "", asText(values[fieldname]));
+			if (was !== want) {
+				return {
+					ok: false,
+					why: mismatchOf({ form: was, draft: want }, `field ${fieldname}`),
+				};
+			}
+		}
+		const verb = snapshot.verb === "update" ? "update" : "create";
+		for (const [name, tsnap] of Object.entries(snapshot.tables)) {
+			const drafted = draftRowsOf(card, name);
+			if (!drafted) continue;
+			const why = checkTable(name, tsnap, drafted, verb);
+			if (why) return { ok: false, why };
+		}
+		return { ok: true, why: "" };
+	} catch (e) {
+		return { ok: false, why: `could not compare: ${e && e.message ? e.message : "error"}` };
+	}
 }

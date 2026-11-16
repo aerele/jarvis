@@ -116,10 +116,18 @@ describe("draftFromCard: the shape of the draft", () => {
 		expect(a.tables[0].rows).toEqual([{ q: 1 }, {}, {}, { q: 2 }]);
 	});
 
-	it("rows are copies: editing the action never edits the card", () => {
-		const c = mk({ values: { rows: [{ q: 1 }] } });
-		draftFromCard(c, "t").tables[0].rows[0].q = 99;
-		expect(c.draft.values.rows[0].q).toBe(1);
+	it("rows are deep copies, even of a reactive proxy: editing the action never edits the card", () => {
+		const c = mk({ values: { rows: [{ q: 1, meta: { tags: ["a"] } }] } });
+		const rows = draftFromCard(c, "t").tables[0].rows;
+		rows[0].q = 99;
+		rows[0].meta.tags.push("b");
+		expect(c.draft.values.rows[0]).toEqual({ q: 1, meta: { tags: ["a"] } });
+		// a Proxy (Vue's reactive card) makes structuredClone throw: the JSON fallback copies it
+		const live = mk({ values: { rows: [new Proxy({ q: 1, meta: { tags: ["a"] } }, {})] } });
+		const copy = draftFromCard(live, "t").tables[0].rows[0];
+		copy.meta.tags.push("b");
+		expect(live.draft.values.rows[0].meta.tags).toEqual(["a"]);
+		expect(copy).toEqual({ q: 1, meta: { tags: ["a", "b"] } });
 	});
 
 	it("a JSON object value becomes JSON text; null stays null; a number stays a number", () => {

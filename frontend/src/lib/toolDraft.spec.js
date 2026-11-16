@@ -69,10 +69,10 @@ describe("toolDraftCtx", () => {
 			{ busy: "create" },
 		],
 		[
-			"busy with no kind still locks the card",
+			"busy with no kind locks the card without naming a button",
 			{ token: "a", busy: true },
 			{},
-			{ busy: "create" },
+			{ busy: "busy" },
 		],
 		["editing this token", { token: "a" }, { editingToken: "a" }, { editing: true }],
 		["editing another token", { token: "a" }, { editingToken: "b" }, {}],

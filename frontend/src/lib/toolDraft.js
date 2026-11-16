@@ -22,12 +22,13 @@ export function isToolDraftItem(pa) {
 
 // The card view's busy flag: Cancel stays "cancel"; Create and a Save from the edit panel are
 // both "create" (every button disabled, the spinner on the primary one). An item marked busy
-// with no kind is still busy: its buttons stay locked.
+// with no kind is still busy but nobody knows which button was pressed: "busy" locks every
+// button and puts the spinner on none (draftCardView spins only "create" and "cancel").
 function busyOf(pa) {
 	const kind = pa.busyKind || "";
 	if (kind === "cancel") return "cancel";
 	if (kind === "create" || kind === "save") return "create";
-	return pa.busy ? "create" : "";
+	return pa.busy ? "busy" : "";
 }
 
 // The `ctx` of draftCardView for one pending item.

@@ -8,9 +8,24 @@ import { isSensitiveCard } from "./draftCardView.js";
 
 const isObject = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 
+// A deep copy, so a nested value (a JSON cell) is never shared with the card. A reactive
+// proxy cannot be structuredClone'd, so it goes through JSON; a value JSON cannot hold (a
+// cycle) falls back to a shallow copy.
+function copyOf(row) {
+	try {
+		return structuredClone(row);
+	} catch {
+		try {
+			return JSON.parse(JSON.stringify(row));
+		} catch {
+			return { ...row };
+		}
+	}
+}
+
 // draft.values[table] row `i` is the row `_draft_row: i` names on a create, so every entry
 // keeps its place: an entry that is not a row becomes an empty row, never a gap.
-const rowOf = (r) => (isObject(r) ? { ...r } : {});
+const rowOf = (r) => (isObject(r) ? copyOf(r) : {});
 
 // A field's value as the form shows it: a JSON field arrives as an object, shown as JSON
 // text, never "[object Object]".
