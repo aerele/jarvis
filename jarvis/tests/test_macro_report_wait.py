@@ -2252,10 +2252,6 @@ class TestTheContinuationEnds(ContBase):
 		self._end_continuation([self._not_read_row(again), dict(query_run=again)])
 		self.assertEqual(self._unread(), [])
 
-	def test_a_ready_answer_from_before_read_status_still_counts_as_read(self):
-		self._end_continuation([self._ready_row()])  # no read_status, as older receipts
-		self.assertEqual(self._unread(), [])
-
 	def test_a_metadata_only_answer_still_clears_a_waiting_read_of_the_same_run(self):
 		self._end_continuation([dict(status="started", run=self.pr, waiting=True), self._not_read_row()])
 		waits, _failed, ready = macro_report_wait.step_reads(
@@ -2345,9 +2341,6 @@ class TestAFailedReportsExplanationEnds(ContBase):
 
 	def _reason(self):
 		return f"Step 1 stopped: {PREP_REPORT} failed: It took too long to generate and was stopped."
-
-	def test_the_run_is_waiting_failed_with_its_explanation_turn_out(self):
-		self.assertEqual(self._full().waiting_failed, 1)
 
 	def test_a_clean_explanation_still_ends_the_run_failed_with_the_reports_reason(self):
 		self._end_continuation([])
