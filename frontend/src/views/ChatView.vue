@@ -1488,7 +1488,11 @@
 											v-if="summaryState.model && summaryState.model.error"
 											style="margin: 0 14px 10px"
 										>
-											<ActionError :error="summaryState.model.error" />
+											<ActionError
+												:error="summaryState.model.error"
+												:can-report="!!supportOn"
+												@report="openActionErrorSupport"
+											/>
 										</div>
 
 										<div
@@ -2313,7 +2317,11 @@
 							</template>
 						</div>
 						<div v-if="pa.error" style="margin: 0 14px 10px">
-							<ActionError :error="pa.error" />
+							<ActionError
+								:error="pa.error"
+								:can-report="!!supportOn"
+								@report="openActionErrorSupport"
+							/>
 						</div>
 						<!-- What the amber button covers, as text: a title is invisible on
 						     touch and to anyone who does not hover. -->
@@ -4410,7 +4418,11 @@
 							</p>
 						</div>
 						<div v-if="draftPanel.error" style="margin-top: 10px">
-							<ActionError :error="draftPanel.error" />
+							<ActionError
+								:error="draftPanel.error"
+								:can-report="!!supportOn"
+								@report="openActionErrorSupport"
+							/>
 						</div>
 						<!-- Always present, so a screen reader announces the note when it fills. -->
 						<div
@@ -4615,7 +4627,7 @@ import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
 import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
-import { supportErrorDraft } from "@/lib/supportErrorDraft";
+import { supportErrorDraft } from "../../../jarvis/public/js/shared/support_error_draft.mjs";
 import {
 	supportPillLabel as supportPillLabelFor,
 	supportAwaitingPhrase,
@@ -4689,7 +4701,7 @@ import {
 } from "@/maintenanceGate";
 import { onLlmSwitch } from "@/llmSwitch";
 import { parseAsk } from "@/lib/chatAsk";
-import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
+import { rejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import {
 	parseGoto,
@@ -4767,6 +4779,14 @@ import {
 	shouldHideNextStep,
 } from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo, showsRawReason } from "@/lib/errors";
+import {
+	actionErrorCopy,
+	causeOf,
+	micErrorCopy,
+	nextStepOf,
+	thrownActionError,
+	uploadErrorCopy,
+} from "@/lib/chatErrorCopy";
 import { __ } from "@/lib/i18n";
 import { conversationLoadFailure } from "@/lib/conversationLoadFailure";
 import { openChatShare } from "@/composables/useChatSharing";
@@ -5561,6 +5581,24 @@ async function openErrorSupport(m) {
 		openSupportInFlight.value = false;
 	}
 }
+// Report error on a failed action card (confirm, run, discard, save): the same ticket
+// draft as a failed turn, with the card's failure reference as the message reference.
+async function openActionErrorSupport({ reference } = {}) {
+	if (openSupportInFlight.value || !supportOn) return;
+	openSupportInFlight.value = true;
+	try {
+		const draft = supportErrorDraft({
+			code: "internal",
+			conversation: currentId.value,
+			message: reference || "",
+		});
+		if (draft) await router.push({ name: "SupportNew", query: draft });
+	} catch {
+		notify(__("Could not open Support. Try again."), { type: "error" });
+	} finally {
+		openSupportInFlight.value = false;
+	}
+}
 // Waiting-reply count pill (header headphones button). awaiting_count is a
 // cheap poll-driven number (stores/support.js's refreshAwaiting, already run
 // by UserMenu's 60s poll timer - no second poller started here); reading
@@ -5947,7 +5985,7 @@ async function rerunFromHistory(run) {
 			status: "running",
 		};
 	} catch (e) {
-		notify(errMessage(e), { type: "error" });
+		notify(actionErrorCopy("Couldn't run that again", e), { type: "error" });
 	}
 }
 async function stopRunFromHistory(run) {
@@ -5956,7 +5994,7 @@ async function stopRunFromHistory(run) {
 		run.status = "stopped"; // optimistic patch
 		loadMacroRunStats();
 	} catch (e) {
-		notify(errMessage(e), { type: "error" });
+		notify(actionErrorCopy("Couldn't stop that run", e), { type: "error" });
 	}
 }
 
@@ -6097,7 +6135,7 @@ async function runCompact(hint) {
 		compactDialogOpen.value = false;
 	} catch (e) {
 		if (chatViewIsCurrent(view))
-			notify(errMessage(e) || compactOutcome().text, { type: "error" });
+			notify(actionErrorCopy("Couldn't compact this chat", e), { type: "error" });
 	} finally {
 		if (chatViewIsCurrent(view)) compactSubmitting.value = false;
 	}
@@ -6976,7 +7014,12 @@ async function clearAllHistory() {
 	} catch (e) {
 		// The server deletes chat by chat: some may be gone although the request
 		// failed, so say so and show the list as it now is.
-		notify(clearHistoryFailedNotice(errMessage(e)), { type: "error" });
+		notify(
+			[clearHistoryFailedNotice(causeOf(e) || "Couldn't delete your history"), nextStepOf(e)]
+				.filter(Boolean)
+				.join(" "),
+			{ type: "error" }
+		);
 		store.loadConversations();
 	} finally {
 		clearingHistory.value = false;
@@ -8736,7 +8779,7 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 	} catch (e) {
 		if (!draftStillCurrent()) return;
 		p.applying = false;
-		p.error = { message: errMessage(e, "Could not save. Check the values.") };
+		p.error = thrownActionError(e, "Could not save your changes.");
 	}
 }
 
@@ -9167,7 +9210,7 @@ async function confirmPending(pa) {
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = { message: errMessage(e, "Could not confirm.") };
+		if (card) card.error = thrownActionError(e, "Could not confirm this action.");
 	} finally {
 		// The switch watcher already dropped this view's in-flight token. Do not
 		// delete a same-token action started by a later A view after A → B → A.
@@ -9261,7 +9304,7 @@ async function approveAndRunPending(pa) {
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = { message: errMessage(e, "Could not start the run.") };
+		if (card) card.error = thrownActionError(e, "Could not start the run.");
 	} finally {
 		// See confirmPending: this continuation must not clear a later view's
 		// matching token when the user leaves and returns while it is in flight.
@@ -9364,7 +9407,7 @@ async function discardPending(pa) {
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = { message: errMessage(e, "Could not discard.") };
+		if (card) card.error = thrownActionError(e, "Could not discard this action.");
 	} finally {
 		// A stale direct dismissal must leave a later view's in-flight guard
 		// untouched. The synchronous switch reset owns the old guard instead.
@@ -9411,7 +9454,7 @@ async function proposeNext(m, step) {
 		if (!messageActionIsCurrent(view) || nextBusyKey.value !== view.token) return;
 	} catch (e) {
 		if (!messageActionIsCurrent(view) || nextBusyKey.value !== view.token) return;
-		notify(errMessage(e, "Could not open that step."), { type: "error" });
+		notify(actionErrorCopy("Couldn't open that step", e), { type: "error" });
 		hideNextStep(step);
 	} finally {
 		if (messageActionIsCurrent(view) && nextBusyKey.value === view.token)
@@ -11568,9 +11611,7 @@ async function selectConversation(id) {
 // the extracted reason so a non-string Frappe error payload can't throw inside the
 // caller's catch and re-swallow the very failure we're trying to report.
 function notifyActionError(prefix, e) {
-	notify(`${prefix}: ${String(errMessage(e)).replace(/\.$/, "")}. Try again.`, {
-		type: "error",
-	});
+	notify(actionErrorCopy(prefix, e), { type: "error" });
 }
 // Promote the unsaved new-chat composer to a real conversation id via the shared voiceSendGlue
 // helper: migrate the sentinel draft, the active recording take scope (_micConvId), and every
@@ -11737,7 +11778,9 @@ async function retry(messageId) {
 				recheckMaintenance();
 			} else {
 				// e.g. the single-flight guard ("a reply is already in progress").
-				notify(r.reason || "Couldn't retry that.", { type: "error" });
+				notify(rejectionCopy(r, brand.agentName, "Couldn't retry that.").message, {
+					type: "error",
+				});
 			}
 		}
 		if (r && r.ok !== false) {
@@ -11894,7 +11937,7 @@ async function settleRecoveredSend(m, r, view) {
 	if (r.ok === false && !r.confirmed) {
 		m.deliveryState = "rejected";
 		m.failed = true;
-		m.deliveryNote = r.message || sendRejectionCopy(r.reason, brand.agentName, r).message;
+		m.deliveryNote = rejectionCopy(r, brand.agentName).message;
 		return;
 	}
 	if (r.ok !== false && r.run_id) rememberOwnRun(r.run_id);
@@ -12392,8 +12435,7 @@ async function send(textArg, resendAck) {
 		// those lines, and a second copy above the rejection block moves the anchor).
 		if (r && r.ok === false && !r.confirmed) {
 			_optBubble.deliveryState = "rejected";
-			_optBubble.deliveryNote =
-				r.message || sendRejectionCopy(r.reason, brand.agentName, r).message;
+			_optBubble.deliveryNote = rejectionCopy(r, brand.agentName).message;
 			// Decide from the full request identity, not an id-only lookup: an
 			// A → B → A return must not let A's rejected request remove B's cards
 			// or unlock B's composer.
@@ -12478,9 +12520,7 @@ async function send(textArg, resendAck) {
 				// "usage_limit" fires from BOTH the aggregate cap and the still-monthly
 				// per-model cap; the envelope names the window (limit_period) only for
 				// the former, so the copy stays period-neutral for the latter.
-				r.reason === "usage_limit"
-					? sendRejectionCopy(r.reason, brand.agentName, r).message
-					: r.message || r.reason || "Couldn't send your message.",
+				rejectionCopy(r, brand.agentName).message,
 				{ type: "error" }
 			);
 			return;
@@ -12765,6 +12805,7 @@ function onEvent(p) {
 			// CDX-3: a stale-epoch (or post-terminal) recovering banner is ignored.
 			if (pumpFenceReject(p)) break;
 			pumpFenceAccept(p, false);
+			// raw-ok: an internal key ("compacting" | "interrupted") recoveringLabel maps to copy.
 			recovering.value = { message_id: p.message_id, reason: p.reason || "interrupted" };
 			waiting.value = false;
 			sending.value = false;
@@ -12871,6 +12912,7 @@ function onEvent(p) {
 				// through the state->copy table (SUXI-7). Guarded by the chip check so
 				// the tab that itself clicked Cancel (chip already cleared) doesn't
 				// double-toast on top of its own optimistic "Cancelled.".
+				// raw-ok: the server's fixed cancel sentence (admission USER_CANCEL_REASON / AGE_OUT_REASON).
 				notify(p.reason || TURN_STATE_COPY.cancelled(), { type: "info" });
 			}
 			break;
@@ -13446,7 +13488,9 @@ async function cancelQueued() {
 			if (queuedTurn.value && queuedTurn.value.run_id === q.run_id) queuedTurn.value = null;
 			sending.value = true;
 			waiting.value = true;
-			notify((r && r.reason) || "That reply already started.", { type: "info" });
+			notify(rejectionCopy(r, brand.agentName, "That reply already started.").message, {
+				type: "info",
+			});
 		}
 	} catch (e) {
 		if (!queuedIsCurrent()) return;
@@ -13776,7 +13820,7 @@ const micRec = useDictationRecorder({
 	onError: (msg) => {
 		if (micState.value !== "recording") return;
 		micState.value = "idle";
-		notify(msg || "Recording failed. Try again.", { type: "error" });
+		notify(micErrorCopy(msg), { type: "error" });
 	},
 });
 
@@ -13805,7 +13849,7 @@ async function startMic() {
 	// voiceBusyCount then never returns to 0 and every send, voice or not, is refused.
 	const started = await micRec.start();
 	if (micRec.state === "error") {
-		notify(micRec.error || "Couldn't start the microphone.", { type: "error" });
+		notify(micErrorCopy(micRec.error, "Couldn't start the microphone."), { type: "error" });
 		return;
 	}
 	if (!started || micRec.state !== "recording") return;
@@ -13821,8 +13865,7 @@ async function stopMic() {
 	// Finalise: the recorder flushes its tail, assembles the take, and hands it to onDone for
 	// ONE transcription. The composer stays usable while that runs.
 	await micRec.stop();
-	if (micRec.state === "error")
-		notify(micRec.error || "Recording failed. Try again.", { type: "error" });
+	if (micRec.state === "error") notify(micErrorCopy(micRec.error), { type: "error" });
 }
 async function cancelMic() {
 	await micRec.cancel();
@@ -14126,7 +14169,9 @@ async function startNudgeMic() {
 	if (!nudge.value) return;
 	await nudgeRec.start();
 	if (nudgeRec.state === "error") {
-		notify(nudgeRec.error || "Couldn't start the microphone.", { type: "error" });
+		notify(micErrorCopy(nudgeRec.error, "Couldn't start the microphone."), {
+			type: "error",
+		});
 		return;
 	}
 	if (nudgeRec.state === "recording" && nudge.value) nudge.value.mode = "recording";
@@ -14137,8 +14182,7 @@ async function stopNudgeMic() {
 	const r = await nudgeRec.stop();
 	if (!r || !r.blob || !r.blob.size) {
 		if (nudge.value) nudge.value.mode = "idle";
-		if (nudgeRec.state === "error")
-			notify(nudgeRec.error || "Recording failed. Try again.", { type: "error" });
+		if (nudgeRec.state === "error") notify(micErrorCopy(nudgeRec.error), { type: "error" });
 		return;
 	}
 	await _nudgeTranscribe(r);
@@ -14313,10 +14357,10 @@ async function uploadOne(file) {
 		// Previously an empty catch: the file silently never appeared, which read
 		// as "the picker is broken" for anything the server refused (an oversize
 		// recording, a blocked extension, an expired session). Show it instead.
-		const why = errMessage(err) || "upload failed";
+		const why = uploadErrorCopy(err);
 		if (currentId.value === forConv) {
 			failedUploads.value = [...failedUploads.value, { id, name, error: why }];
-			notify(`Could not attach ${name}: ${why}`, { type: "error" });
+			notify(`Couldn't attach ${name}. ${why}`, { type: "error" });
 		}
 	} finally {
 		_inflightKeys.delete(key);

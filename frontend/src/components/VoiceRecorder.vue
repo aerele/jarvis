@@ -73,7 +73,8 @@ import { ref, computed, onBeforeUnmount } from "vue";
 import { Button, toast } from "frappe-ui";
 import { useAudioRecorder } from "@/composables/useAudioRecorder";
 import { transcribeAudio } from "@/api/voice";
-import { errHtml } from "@/lib/errors";
+import { escapeHtml } from "@/lib/errors";
+import { actionErrorCopy, micErrorCopy } from "@/lib/chatErrorCopy";
 
 defineProps({
 	// Compact/embedded mode for the Personalise ChatComposer toolbar: icon-only
@@ -105,7 +106,7 @@ const clock = computed(() => {
 async function begin() {
 	await rec.start();
 	if (rec.state === "error") {
-		toast.error(rec.error || "Couldn't start the microphone.");
+		toast.error(escapeHtml(micErrorCopy(rec.error, "Couldn't start the microphone.")));
 		return;
 	}
 	if (rec.state === "recording") phase.value = "recording";
@@ -117,7 +118,7 @@ async function finish() {
 	const r = await rec.stop();
 	if (!r || !r.blob || !r.blob.size) {
 		phase.value = "idle";
-		if (rec.state === "error") toast.error(rec.error || "Recording failed. Try again.");
+		if (rec.state === "error") toast.error(escapeHtml(micErrorCopy(rec.error)));
 		return;
 	}
 	await transcribe(r);
@@ -134,7 +135,7 @@ async function transcribe(r) {
 		if (text) emit("transcript", text, r.durationS || 0);
 		else toast.error("Nothing was transcribed - try again closer to the microphone.");
 	} catch (e) {
-		toast.error(errHtml(e));
+		toast.error(escapeHtml(actionErrorCopy("Couldn't transcribe that recording", e)));
 	} finally {
 		phase.value = "idle";
 	}
