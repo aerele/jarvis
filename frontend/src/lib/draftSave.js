@@ -11,6 +11,7 @@
 //   server never tells the assistant someone is fixing it (the card then stays, with
 //   its error, instead of the person being left with neither card nor panel).
 import { draftValues } from "./draftApply.js";
+import { draftCardDirty } from "./draftCardValues.js";
 import { draftFailureOf } from "./draftFailure.js";
 import { parkedNoteOf } from "./draftParked.js";
 import { liveDraftRow } from "./liveDraft.js";
@@ -88,8 +89,11 @@ export function markDraftBaseline(model) {
 }
 
 // Whether closing the panel would lose the person's work: a value changed since it
-// opened. A model with no baseline (never opened as a panel) is never dirty.
+// opened. A model with no baseline (never opened as a panel) is never dirty. The form of a
+// server draft card (`tool`) is dirty when a save would send anything: draftCardDirty against
+// the snapshot taken when it opened.
 export function draftIsDirty(model) {
+	if (model && model.tool) return draftCardDirty(model, model.snapshot, model.card);
 	if (!model || model.baseline === undefined) return false;
 	return JSON.stringify(draftValues(model)) !== model.baseline;
 }

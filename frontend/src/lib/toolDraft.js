@@ -31,12 +31,14 @@ function busyOf(pa) {
 	return pa.busy ? "busy" : "";
 }
 
-// The `ctx` of draftCardView for one pending item.
-export function toolDraftCtx({ pa, editingToken, streaming }) {
+// The `ctx` of draftCardView for one pending item. `building`: the edit form or the preview of
+// THIS item is being built (a click that has not opened anything yet): every button is locked,
+// none spins, so a second click cannot start a second build.
+export function toolDraftCtx({ pa, editingToken, streaming, building }) {
 	const item = isObject(pa) ? pa : {};
 	return {
 		earlier: item.recent === false,
-		busy: busyOf(item),
+		busy: busyOf(item) || (building ? "busy" : ""),
 		editing: !!editingToken && editingToken === item.token,
 		streaming: !!streaming,
 		surface: "desktop",

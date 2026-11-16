@@ -114,15 +114,16 @@ describe("the pending block routes on the card", () => {
 		expect(LEGACY_BRANCH).toContain("{{ typedApprovalHint }}");
 	});
 
-	// Break: Preview or Edit is wired before the panel exists, or Create / Cancel point at the
-	// wrong handler, or the card is told the wrong state.
-	it("hands DraftCard the card, the ctx, and only Create and Cancel", () => {
+	// Break: Preview or Edit points at the wrong handler (or at nothing), Create / Cancel point at
+	// the wrong one, or the card is told the wrong state.
+	it("hands DraftCard the card, the ctx, and its four events", () => {
 		const mount = squash(slice("<DraftCard", "/>", src.indexOf('v-if="isToolDraftItem(pa)"')));
 		expect(mount).toContain(':card="cardOfItem(pa)"');
 		expect(mount).toContain(':ctx="draftCtxByToken[pa.token]"');
 		expect(mount).toContain('@create="createToolDraft(pa)"');
 		expect(mount).toContain('@cancel="cancelToolDraft(pa)"');
-		expect(mount).not.toMatch(/@preview|@edit/);
+		expect(mount).toContain('@preview="previewToolDraft(pa)"');
+		expect(mount).toContain('@edit="openToolDraft(pa)"');
 	});
 
 	// Break: a failed Create / Cancel shows nothing for a draft card (the error line is drawn
@@ -140,7 +141,14 @@ describe("Create and Cancel use the existing handlers, with a busy kind", () => 
 	// the busy kind is not "create"; the same for Cancel.
 	it("Create is confirmPending under busyKind create, Cancel is discardPending under cancel", () => {
 		expect(fn("createToolDraft")).toContain('withBusyKind(pa, "create", confirmPending)');
-		expect(fn("cancelToolDraft")).toContain('withBusyKind(pa, "cancel", discardPending)');
+		// Cancel runs through the form-aware door, whose discard is the busy-kind wrapper
+		expect(fn("cancelToolDraft")).toContain("cancelToolItem(pa, toolDeps)");
+		expect(squash(slice("const toolDeps = {", "\n};\n"))).toContain(
+			'discard: (pa) => withBusyKind(pa, "cancel", discardPending)'
+		);
+		expect(squash(slice("const toolDeps = {", "\n};\n"))).toContain(
+			"create: (pa) => createToolDraft(pa)"
+		);
 	});
 
 	// The real computed from ChatView, run with real refs.
@@ -154,15 +162,34 @@ describe("Create and Cancel use the existing handlers, with a busy kind", () => 
 		]);
 		const convStreaming = ref(false);
 		const typedApprovalHint = ref("stack hint");
+		const draftPanel = ref(null);
+		const toolDraftBuilding = ref("");
 		const map = new Function(
 			"computed",
 			"toolDraftCtxMap",
 			"visiblePendingActions",
 			"convStreaming",
 			"typedApprovalHint",
+			"draftPanel",
+			"toolDraftBuilding",
 			code
-		)(computed, toolDraftCtxMap, visiblePendingActions, convStreaming, typedApprovalHint);
-		return { map, visiblePendingActions, convStreaming, typedApprovalHint };
+		)(
+			computed,
+			toolDraftCtxMap,
+			visiblePendingActions,
+			convStreaming,
+			typedApprovalHint,
+			draftPanel,
+			toolDraftBuilding
+		);
+		return {
+			map,
+			visiblePendingActions,
+			convStreaming,
+			typedApprovalHint,
+			draftPanel,
+			toolDraftBuilding,
+		};
 	}
 
 	// Break: the ctx is built per render (a new object for every streamed token), or one of its
@@ -185,6 +212,19 @@ describe("Create and Cancel use the existing handlers, with a busy kind", () => 
 		visiblePendingActions.value[0].busy = true;
 		visiblePendingActions.value[0].busyKind = "create";
 		expect(map.value.t1.busy).toBe("create");
+	});
+
+	// Break: the card does not read "Editing" while its form is open (and a typed form is taken for
+	// it), or a card whose form is being built can be pressed again.
+	it("reads the open form's token (a tool form only) and the token being built", () => {
+		const { map, draftPanel, toolDraftBuilding } = ctxMap();
+		expect(map.value.t1.editing).toBe(false);
+		draftPanel.value = { tool: true, token: "t1" };
+		expect(map.value.t1.editing).toBe(true);
+		draftPanel.value = { token: "t1" }; // a typed panel never "edits" a card
+		expect(map.value.t1.editing).toBe(false);
+		toolDraftBuilding.value = "t1";
+		expect(map.value.t1.busy).toBe("busy");
 	});
 });
 
@@ -402,6 +442,176 @@ describe("the typed edit panel when a server draft card arrives", () => {
 			["arrival with no panel", false],
 			["arrival with no panel (parked)", false],
 		]);
+	});
+});
+
+describe("a server draft card's edit form in the panel", () => {
+	const PANEL = slice('ref="draftPanelEl"', "</aside>");
+	const TYPED_FOOT = slice(
+		'<div v-if="!draftPanel.tool" class="jv-draft-foot">',
+		"<!-- A server draft:"
+	);
+	const TOOL_FOOT = slice(
+		'<div v-else class="jv-draft-foot">',
+		"</aside>",
+		src.indexOf('<div v-else class="jv-draft-foot">')
+	);
+
+	// Break: the tool form is judged by the typed rule and opens with "This draft changed" at once.
+	it("is never stale just because its own draft is parked", async () => {
+		const flagOf = (() => {
+			const code =
+				slice("const draftPanelStale = ref(false);", "\n});\n") +
+				"\n});\nreturn draftPanelStale;";
+			const hasParkedDraft = ref(true);
+			const draftPanel = ref(null);
+			const flag = new Function(
+				"ref",
+				"watch",
+				"nextPanelStale",
+				"hasParkedDraft",
+				"draftPanel",
+				code
+			)(ref, watch, nextPanelStale, hasParkedDraft, draftPanel);
+			return { flag, draftPanel };
+		})();
+		flagOf.draftPanel.value = { tool: true, token: "t1" };
+		await nextTick();
+		expect(flagOf.flag.value).toBe(false);
+		flagOf.draftPanel.value = { id: "typed" };
+		await nextTick();
+		expect(flagOf.flag.value).toBe(true);
+		flagOf.draftPanel.value = { tool: true, token: "t1" };
+		await nextTick();
+		expect(flagOf.flag.value).toBe(false);
+	});
+
+	// Break: the footer of a server draft reaches the typed save or the typed discard, offers
+	// Create & Submit, or says other words than the card's.
+	it("has its own footer: the tool save, the card's Cancel, no Create & Submit, no typed handler", () => {
+		expect(PANEL.indexOf('v-if="!draftPanel.tool"')).toBeLessThan(PANEL.indexOf("v-else"));
+		const foot = squash(TOOL_FOOT);
+		expect(foot).toContain('@click="saveToolDraft()"');
+		expect(foot).toContain('@click="discardToolPanel()"');
+		expect(foot).toContain("toolPrimaryLabel(draftPanel)");
+		expect(foot).toContain('draftPanel.applying ? "Saving…"');
+		for (const gone of [
+			"applyDraft",
+			"discardDraft",
+			"Create &amp; Submit",
+			"draftCta",
+			"cancelDraft",
+		])
+			expect(foot, gone).not.toContain(gone);
+		// the typed footer keeps its buttons and handlers (only a v-if was added to its div)
+		const typed = squash(TYPED_FOOT);
+		for (const kept of [
+			'@click="applyDraft(1)"',
+			'@click="applyDraft(0)"',
+			'@click="discardDraft"',
+			"draftCta",
+		])
+			expect(typed, kept).toContain(kept);
+	});
+
+	// Break: Save stays live on a blocked form, a dead card, a form that is saving, or while a
+	// turn runs (confirm would return silently).
+	it("disables the save on a blocked form, a dead card, a saving form and a running turn", () => {
+		const primary = squash(
+			slice(
+				'class="jv-action-primary"',
+				"</button>",
+				src.indexOf('<div v-else class="jv-draft-foot">')
+			)
+		);
+		for (const off of [
+			"draftPanel.applying",
+			"draftPanel.saveBlocked",
+			"draftPanelDead",
+			"convStreaming",
+		])
+			expect(primary, off).toContain(off);
+		const discard = squash(
+			slice(
+				'class="jv-action-discard"',
+				"</button>",
+				src.indexOf('<div v-else class="jv-draft-foot">')
+			)
+		);
+		expect(discard).toContain("draftPanel.applying || draftPanelDead");
+	});
+
+	// Break: the notices (dead card, blocked save, unloaded record) are not drawn, or below the form.
+	it("draws the notices above the form, one banner each", () => {
+		const at = PANEL.indexOf('v-for="n in toolNotices"');
+		expect(at).toBeGreaterThan(PANEL.indexOf('v-if="draftPanelStale"'));
+		expect(at).toBeLessThan(PANEL.indexOf("<DraftEditForm"));
+		expect(squash(PANEL.slice(at, at + 260))).toContain(
+			'<Banner :type="n.type" :message="n.text" />'
+		);
+	});
+
+	// Break: a dead card is not judged against the list the screen draws, or the banner is not
+	// derived (a one-shot watcher can miss it).
+	it("the dead-card flag and the notices are computed from the panel and the visible list", () => {
+		expect(squash(slice("const draftPanelDead = computed(", ");", 0))).toContain(
+			"toolPanelDead(draftPanel.value, visiblePendingActions.value)"
+		);
+		expect(squash(slice("const toolNotices = computed(", ";", 0))).toContain(
+			"toolPanelNotices(draftPanel.value, draftPanelDead.value)"
+		);
+	});
+
+	// Break: a typed draft that comes back after the card died replaces the form and drops its edits.
+	it("the typed watcher leaves a server draft's form alone", () => {
+		const w = slice("watch(actionFor, () => {", "\n});\n");
+		expect(w).toContain("if (draftPanel.value && !draftPanel.value.tool) {");
+	});
+
+	// Break: the tool path reaches the typed draft's functions, which need activeAction and would
+	// either do nothing or save the wrong thing.
+	it("no door of the tool path calls the typed draft's functions", () => {
+		const doors = slice("const toolDeps = {", "function onToolPreviewEdit()", 0);
+		for (const typed of [
+			"applyDraft(",
+			"openDraftPanel(",
+			"draftModelViewIsCurrent(",
+			"cancelDraftFor(",
+			"confirmSummary(",
+		])
+			expect(doors, typed).not.toContain(typed);
+		const lib = fs.readFileSync(path.resolve(__dirname, "../lib/toolDraftHost.js"), "utf8");
+		for (const typed of ["applyAction", "applyDraft", "openDraftPanel", "dismissDraft"])
+			expect(lib, typed).not.toContain(typed);
+	});
+
+	// Break: the second preview replaces the typed one (pinned elsewhere) or confirms something
+	// other than the card's Create, or says other words.
+	it("has its own preview mount; its Confirm is the card's Create and its Edit opens the form", () => {
+		expect(src).toContain(':model="cardModel"');
+		const mount = squash(slice("<DraftPreview", "/>", src.indexOf('v-if="toolPreview"') - 20));
+		for (const want of [
+			':model="toolPreview.model"',
+			':confirm-label="toolPrimaryLabel(toolPreview.model)"',
+			'@confirm="onToolPreviewConfirm"',
+			'@edit="onToolPreviewEdit"',
+			'@close="toolPreview = null"',
+		])
+			expect(mount, want).toContain(want);
+		expect(slice("function onToolPreviewConfirm()", "\n}\n")).toContain("createToolDraft(pa)");
+		expect(slice("function onToolPreviewEdit()", "\n}\n")).toContain("openToolDraft(pa)");
+	});
+
+	// Break: the model builder resolves a server draft's key by label (the value lands on a field
+	// whose label looks like it), or a typed action starts honouring a `fieldname` key.
+	it("the model builder is fieldname-first for a card, and unchanged for a typed action", () => {
+		const build = slice("async function buildDraftModel(a) {", "\n// Open the editable panel");
+		expect(squash(build)).toContain(
+			"resolveDraftField( f, meta.fields, (label) => _actField(metaLookup, label), !!a[FROM_CARD] )"
+		);
+		expect(build).not.toContain("_actField(metaLookup, f.label)");
+		// an unloadable record only stops a typed action
+		expect(build).toContain("if ((a.tables || []).length && !a[FROM_CARD]) {");
 	});
 });
 

@@ -9,6 +9,9 @@ const props = defineProps({
 	model: { type: Object, required: true },
 	headline: { type: String, default: "" },
 	disabled: { type: Boolean, default: false },
+	// The confirm button's words, when the host's own are not "Confirm create" / "Confirm update"
+	// (a server draft card's Preview says what its card says: "Create" / "Save changes").
+	confirmLabel: { type: String, default: "" },
 });
 const emit = defineEmits(["close", "edit", "confirm"]);
 
@@ -289,7 +292,7 @@ onBeforeUnmount(() => {
 						:disabled="disabled"
 						@click="emit('confirm')"
 					>
-						{{ isUpdate ? "Confirm update" : "Confirm create" }}
+						{{ confirmLabel || (isUpdate ? "Confirm update" : "Confirm create") }}
 					</button>
 					<button class="dp-btn" @click="emit('edit')">Edit</button>
 					<button class="dp-btn" @click="emit('close')">Close</button>

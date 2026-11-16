@@ -5,12 +5,23 @@ import fs from "fs";
 import path from "path";
 import { draftCardView } from "./draftCardView.js";
 import {
+	DRAFT_STALE_TEXT,
+	cancelToolItem,
+	discardFromForm,
 	hasParkedDraft,
 	nextPanelStale,
+	openToolDraftPanel,
+	openToolPreview,
 	receiptReloadNeeded,
+	saveToolDraft,
 	toolDraftCtxMap,
+	toolPanelDead,
+	toolPanelNotices,
 	withBusyKind,
 } from "./toolDraftHost.js";
+import { blankRow, buildDraftTable } from "./draftTables.js";
+import { panelField } from "./docFields.js";
+import { CANT_EDIT_TEXT, STORED_UNAVAILABLE_TEXT } from "./toolDraftPanel.js";
 
 const FIXTURES = JSON.parse(
 	fs.readFileSync(path.resolve(__dirname, "draftCardFixtures.json"), "utf8")
@@ -128,17 +139,29 @@ describe("a stack of pending cards: the hint and the number each draft card show
 		});
 	}
 
-	// Break: a legacy or sensitive card gets a draft ctx; Preview or Edit is live before the panel
-	// handles them (this commit; the next one enables them and rewrites this test).
-	it("only server draft cards get a ctx, with Preview and Edit still off", () => {
+	// Break: a legacy or sensitive card gets a draft ctx, Preview or Edit stays disabled, the open
+	// form's card does not read "Editing", or a card being built can be pressed again.
+	it("only server draft cards get a ctx; Preview and Edit are live; editing and building show", () => {
+		const items = [make(["legacy"], 0), make(["draft"], 1), make(["draft"], 2)];
 		const map = toolDraftCtxMap({
-			items: [make(["legacy"], 0), make(["draft"], 1), make(["sensitive"], 2)],
+			items,
 			streaming: false,
 			stackHint: ALL3,
+			editingToken: "t2",
+			buildingToken: "t3",
 		});
-		expect(Object.keys(map)).toEqual(["t2"]);
-		const buttons = draftCardView(card("create-simple"), map.t2).buttons;
-		expect(buttons.filter((b) => b.disabled).map((b) => b.id)).toEqual(["preview", "edit"]);
+		expect(Object.keys(map)).toEqual(["t2", "t3"]);
+		const seen = (ctx) => {
+			const v = draftCardView(card("create-simple"), ctx);
+			return [v.state, v.buttons.map((b) => `${b.id}${b.disabled ? ":off" : ""}`)];
+		};
+		expect(seen(map.t2)).toEqual(["S3", ["create:off", "preview:off", "edit:off", "cancel"]]);
+		expect(seen(map.t3)).toEqual([
+			"S4",
+			["create:off", "preview:off", "edit:off", "cancel:off"],
+		]);
+		const idle = toolDraftCtxMap({ items, streaming: false, stackHint: ALL3 });
+		expect(seen(idle.t2)).toEqual(["S1", ["create", "preview", "edit", "cancel"]]);
 	});
 
 	it("not a list gives no ctx", () => {
@@ -295,4 +318,621 @@ describe("nextPanelStale: the typed edit panel when a server draft arrives", () 
 	for (const [name, before, change, after] of table)
 		it(`${name}: ${before} -> ${after}`, () =>
 			expect(nextPanelStale(before, change)).toBe(after));
+});
+
+describe("toolPanelDead: a form on a card that is no longer pending", () => {
+	const panel = (extra = {}) => ({ tool: true, token: "t1", conversation: "c1", ...extra });
+	const live = [{ token: "t1", conversation: "c1" }];
+	// Break: edits on a replaced, confirmed or discarded draft are lost silently (no banner), or a
+	// form that is saving shows the banner during its own save.
+	const table = [
+		["the card is still pending", panel(), live, false],
+		["the card left the list", panel(), [{ token: "t2", conversation: "c1" }], true],
+		["the list is empty", panel(), [], true],
+		[
+			"another chat's card with the same token",
+			panel(),
+			[{ token: "t1", conversation: "c2" }],
+			true,
+		],
+		["its own save or cancel is running", panel({ applying: true }), [], false],
+		["a typed draft's panel is never judged here", { token: "t1" }, [], false],
+		["no panel", null, [], false],
+		["not a list", panel(), null, true],
+	];
+	for (const [name, p, items, want] of table)
+		it(`${name}: ${want}`, () => expect(toolPanelDead(p, items)).toBe(want));
+});
+
+describe("toolPanelNotices: the lines above a server draft's form", () => {
+	const p = (extra = {}) => ({ tool: true, ...extra });
+	// Break: a dead card, a blocked save or a record that could not be loaded goes unsaid, or the
+	// words change.
+	it("says each thing once, in order, in its own style", () => {
+		expect(toolPanelNotices(p(), false)).toEqual([]);
+		expect(
+			toolPanelNotices(p({ saveBlocked: CANT_EDIT_TEXT, storedUnavailable: true }), true)
+		).toEqual([
+			{
+				type: "error",
+				text: "This draft changed while you were editing. Your edits were not saved.",
+			},
+			{
+				type: "error",
+				text: "This draft can't be edited here. Use Create on the card, or ask Jarvis to change it.",
+			},
+			{
+				type: "warning",
+				text: "The saved values of this record could not be loaded, so the form shows only what Jarvis drafted.",
+			},
+		]);
+		expect(DRAFT_STALE_TEXT).toBe(
+			"This draft changed while you were editing. Your edits were not saved."
+		);
+		expect(STORED_UNAVAILABLE_TEXT).toContain("could not be loaded");
+	});
+	it("says nothing for a typed draft's panel or no panel", () => {
+		expect(toolPanelNotices({ saveBlocked: "x" }, true)).toEqual([]);
+		expect(toolPanelNotices(null, true)).toEqual([]);
+	});
+});
+
+// ---- the doors, with fake deps -------------------------------------------------------------
+
+const LOGS = {
+	label: "Logs",
+	child_doctype: "Log",
+	columns: [
+		{ fieldname: "activity", label: "activity", fieldtype: "Data", read_only: 0 },
+		{ fieldname: "hours", label: "hours", fieldtype: "Float", read_only: 0 },
+	],
+	extra_columns: [],
+	form_fields: [],
+};
+const DRAFT_CARD = () => ({
+	kind: "create",
+	draft: {
+		verb: "create",
+		doctype: "Timesheet",
+		values: {
+			title: "Hello",
+			logs: [
+				{ activity: "A1", hours: 1 },
+				{ activity: "A2", hours: 2 },
+			],
+		},
+	},
+});
+// What ChatView's buildDraftModel returns for DRAFT_CARD (the real field and table builders).
+function builtModel() {
+	const f = { fieldname: "title", label: "title", fieldtype: "Data", reqd: 0, read_only: 0 };
+	return {
+		verb: "create",
+		doctype: "Timesheet",
+		fields: [{ ...panelField(f, "Hello"), proposed: true }],
+		tables: [
+			buildDraftTable({
+				fieldname: "logs",
+				spec: LOGS,
+				required: true,
+				proposed: [
+					{ activity: "A1", hours: 1 },
+					{ activity: "A2", hours: 2 },
+				],
+				verb: "create",
+			}),
+		],
+		applying: false,
+		error: "",
+	};
+}
+
+// A fake host: the pending list, the open form, and a log of every effect in order.
+function host(over = {}) {
+	const state = {
+		items: [
+			{
+				token: "t1",
+				conversation: "c1",
+				busy: false,
+				busyKind: "",
+				preview: { card: DRAFT_CARD() },
+			},
+		],
+		panel: null,
+		preview: null,
+		building: "",
+		streaming: false,
+		chat: "c1",
+		log: [],
+		deadAt: [],
+	};
+	const log = (...a) => state.log.push(a.join(":"));
+	const d = {
+		find: (token, conv) =>
+			state.items.find((x) => x.token === token && x.conversation === conv),
+		capture: (token) => ({ token, conversation: state.chat }),
+		pendingCurrent: (v) =>
+			v.conversation === state.chat &&
+			(d.inflight.has(v.token) || state.items.some((x) => x.token === v.token)),
+		chatCurrent: (v) => v.conversation === state.chat,
+		panel: () => state.panel,
+		setPanel: (m) => {
+			state.panel = m;
+			log("setPanel");
+		},
+		closePanel: () => {
+			state.panel = null;
+			log("closePanel");
+		},
+		build: async (action) => {
+			log("build");
+			state.action = action;
+			return builtModel();
+		},
+		autoOpen: () => log("autoOpen"),
+		building: () => state.building,
+		setBuilding: (t) => {
+			state.building = t;
+			log("building", t || "off");
+		},
+		setPreview: (p) => {
+			state.preview = p;
+			log("setPreview");
+		},
+		notify: (text) => log("notify", text),
+		warn: (...a) => log("warn", a[0]),
+		streaming: () => state.streaming,
+		inflight: new Set(),
+		removePending: (token) => {
+			state.items = state.items.filter((x) => x.token !== token);
+			state.deadAt.push(toolPanelDead(state.panel, state.items));
+			log("removePending");
+		},
+		reload: async () => {
+			state.deadAt.push(toolPanelDead(state.panel, state.items));
+			log("reload");
+		},
+		refreshChats: () => log("refreshChats"),
+		showQueued: (r) => log("showQueued", r && r.queued ? "yes" : "no"),
+		save: async (token, conv, values) => {
+			log("save", JSON.stringify(values));
+			return state.reply;
+		},
+		agent: () => "Jarvis",
+		thrown: (e, fallback) => ({ message: `${fallback} (${e.message})` }),
+		metaFields: () => [],
+		afterMarks: () => log("afterMarks"),
+		create: async (pa) => {
+			log("create");
+			await state.createEffect?.(pa);
+		},
+		discard: async (pa) => {
+			log("discard");
+			await state.discardEffect?.(pa);
+			return !state.discardIgnored;
+		},
+		...over,
+	};
+	return { d, state };
+}
+// an open form on the card of "t1"
+async function openForm(h) {
+	await openToolDraftPanel(h.state.items[0], h.d);
+	h.state.log.length = 0;
+	return h.state.panel;
+}
+
+describe("openToolDraftPanel: build, snapshot, guard, then show", () => {
+	// Break: the form is shown before it is snapshotted and guarded, so a late edit or row becomes
+	// the baseline; or it is built from the label instead of the card.
+	it("builds from the card with the card marker, stamps and snapshots, then shows", async () => {
+		const h = host();
+		expect(await openToolDraftPanel(h.state.items[0], h.d)).toBe("opened");
+		expect(h.state.log).toEqual([
+			"building:t1",
+			"build",
+			"building:off",
+			"autoOpen",
+			"setPanel",
+		]);
+		const p = h.state.panel;
+		expect([p.tool, p.token, p.snapshot !== undefined, p.saveBlocked]).toEqual([
+			true,
+			"t1",
+			true,
+			"",
+		]);
+		// the action the builder was given: the card's fields by fieldname, and the marker
+		expect(h.state.action.fields).toEqual([
+			{ fieldname: "title", label: "title", value: "Hello" },
+		]);
+		expect(Object.getOwnPropertySymbols(h.state.action)).toHaveLength(1);
+	});
+
+	// Break: a form that does not match its card offers Save anyway.
+	it("a form that does not match its card still opens, with Save blocked and a log line without values", async () => {
+		const h = host({
+			build: async () => {
+				const m = builtModel();
+				m.tables[0].rows.push(blankRow(m.tables[0]));
+				return m;
+			},
+		});
+		await openToolDraftPanel(h.state.items[0], h.d);
+		expect(h.state.panel.saveBlocked).toBe(CANT_EDIT_TEXT);
+		expect(h.state.log).toContain("warn:Jarvis card: this draft form does not match its card");
+	});
+
+	// Break: a second click starts a second build; a build that fails opens an empty form.
+	it("ignores a click while a form is building, and one on an already open form", async () => {
+		const h = host();
+		h.state.building = "t1";
+		expect(await openToolDraftPanel(h.state.items[0], h.d)).toBe("failed");
+		expect(h.state.log).toEqual([]);
+		h.state.building = "";
+		await openToolDraftPanel(h.state.items[0], h.d);
+		h.state.log.length = 0;
+		expect(await openToolDraftPanel(h.state.items[0], h.d)).toBe("ignored");
+		expect(h.state.log).toEqual([]);
+	});
+
+	it("tells the person when the draft cannot be built, and clears the building flag", async () => {
+		const h = host({
+			build: async () => {
+				throw Object.assign(new Error("x"), {
+					jvUserMessage: "This draft has no fields to show.",
+				});
+			},
+		});
+		expect(await openToolDraftPanel(h.state.items[0], h.d)).toBe("failed");
+		expect(h.state.panel).toBeNull();
+		expect(h.state.log).toContain("notify:This draft has no fields to show.");
+		expect(h.state.building).toBe("");
+	});
+
+	// Break: a form opens on a card that was decided while it was building.
+	it("does not open when the card went while it was building", async () => {
+		const h = host({
+			build: async () => {
+				h.state.items = [];
+				return builtModel();
+			},
+		});
+		expect(await openToolDraftPanel({ ...h.state.items[0] }, h.d)).toBe("failed");
+		expect(h.state.panel).toBeNull();
+	});
+
+	it("an unreadable card is not opened", async () => {
+		const h = host();
+		h.state.items[0].preview.card = {
+			kind: "create",
+			draft: { verb: "create", values: "no" },
+		};
+		expect(await openToolDraftPanel(h.state.items[0], h.d)).toBe("failed");
+		expect(h.state.log[0]).toMatch(/^notify:Couldn't open this draft/);
+	});
+});
+
+describe("openToolPreview: the card's own numbers, no form", () => {
+	it("builds the model, fills the calculated cells from the card, and shows only the preview", async () => {
+		const h = host();
+		h.state.items[0].preview.card.tables = [
+			{
+				label: "Logs",
+				count: 2,
+				columns: ["activity", "hours"],
+				fieldnames: ["activity", "hours"],
+				rows: [{ cells: ["A1", "1.50"] }, { cells: ["A2", "2"] }],
+			},
+		];
+		expect(await openToolPreview(h.state.items[0], h.d)).toBe("opened");
+		expect(h.state.panel).toBeNull();
+		expect(h.state.preview.token).toBe("t1");
+		expect(h.state.preview.model.computed.logs[0]).toEqual({ activity: "A1", hours: "1.50" });
+	});
+});
+
+describe("saveToolDraft: the replies of the edit form's Save", () => {
+	const fixable = (fields = []) => ({
+		ok: false,
+		error: { code: "ValidationError", message: "Hours must be set.", fields },
+	});
+	const edit = (p) => (p.fields[0].value = "Edited");
+
+	// Break: Save sends more than the change, or on the wrong card; or the item is not busy /
+	// in flight while the request runs.
+	it("sends only what changed, with the item busy (save) and in flight meanwhile", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = { ok: true, verb: "create", name: "TS-1" };
+		const seen = {};
+		const save = h.d.save;
+		h.d.save = async (...a) => {
+			seen.busy = [
+				h.state.items[0].busy,
+				h.state.items[0].busyKind,
+				h.d.inflight.has("t1"),
+				p.applying,
+			];
+			return save(...a);
+		};
+		expect(await saveToolDraft(p, h.d)).toBe("saved");
+		expect(seen.busy).toEqual([true, "save", true, true]);
+		expect(h.state.log[0]).toBe('save:{"title":"Edited"}');
+	});
+
+	// Break: a saved reply leaves the form open, or closes it after the card went (a dead-token
+	// banner flashes on the person's own save), or skips the reload that shows the receipt.
+	it("saved: closes the form BEFORE the card leaves, reloads, and never shows a dead form", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = { ok: true, verb: "create", name: "TS-1", queued: true };
+		expect(await saveToolDraft(p, h.d)).toBe("saved");
+		expect(h.state.log).toEqual([
+			'save:{"title":"Edited"}',
+			"closePanel",
+			"removePending",
+			"reload",
+			"refreshChats",
+			"showQueued:yes",
+		]);
+		expect(h.state.deadAt).toEqual([false, false]);
+		expect([h.state.items.length, h.d.inflight.size]).toEqual([0, 0]);
+	});
+
+	// Break: a fixable reply closes the form (the edits go), shows no marks, or no focus.
+	it("fixable: the form stays, shows the error, marks its fields and rows, and asks for the focus", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		p.tables[0].rows[1].hours = "";
+		h.state.reply = fixable([
+			{ fieldname: "title", label: "title", message: "Bad", invalid: true },
+			{ fieldname: "hours", parentfield: "logs", idx: 2, message: "Needed" },
+		]);
+		expect(await saveToolDraft(p, h.d)).toBe("keep");
+		expect(h.state.panel).toBe(p);
+		expect(p.error.message).toBe("Hours must be set.");
+		expect(p.fields[0].serverInvalid).toBe(true);
+		expect(p.tables[0].rows[1].__missing).toEqual(["hours"]);
+		expect(h.state.log).toContain("afterMarks");
+		expect([
+			p.applying,
+			h.state.items[0].busy,
+			h.state.items[0].busyKind,
+			h.d.inflight.size,
+		]).toEqual([false, false, "", 0]);
+	});
+
+	// Break: the server's "keep a saved row" refusal marks the TABLE by name; markMissing would add
+	// the table to the form as a text field. The banner carries the message instead.
+	it("a mark on a table never adds the table as a field", async () => {
+		const h = host({
+			metaFields: () => [{ fieldname: "logs", label: "Logs", fieldtype: "Table" }],
+		});
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = fixable([
+			{
+				fieldname: "logs",
+				label: "Logs",
+				message:
+					"Keep the saved rows you want, or clear the table and save before adding new rows.",
+				invalid: 1,
+			},
+		]);
+		const before = p.fields.length;
+		expect(await saveToolDraft(p, h.d)).toBe("keep");
+		expect(p.fields).toHaveLength(before);
+		expect(h.state.log).toContain("afterMarks");
+	});
+
+	// Break: the busy reply (no fields) is treated as closed, or marks nothing and hides the banner.
+	it("busy (no fields): the form stays with the banner", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = {
+			ok: false,
+			error: {
+				code: "DraftBusyError",
+				message: "This draft is being handled. Try again in a moment.",
+				fields: [],
+			},
+		};
+		expect(await saveToolDraft(p, h.d)).toBe("keep");
+		expect(p.error.message).toBe("This draft is being handled. Try again in a moment.");
+		expect(h.state.panel).toBe(p);
+	});
+
+	// Break: card_open closes the card too (the item is lost), or says "could not be told".
+	it("closed with card_open: the form closes, the card STAYS, no 'could not be told'", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = {
+			ok: false,
+			closed: true,
+			card_open: true,
+			assistant_told: false,
+			error: { code: "X", message: "This draft cannot be saved right now" },
+		};
+		expect(await saveToolDraft(p, h.d)).toBe("closed-open");
+		expect(h.state.panel).toBeNull();
+		expect(h.state.items).toHaveLength(1);
+		const note = h.state.log.find((l) => l.startsWith("notify:"));
+		expect(note).toContain("Couldn't save this: This draft cannot be saved right now.");
+		expect(note).not.toContain("could not be told");
+		expect(h.state.log).not.toContain("reload");
+	});
+
+	// Break: a closed reply leaves the card on screen, or no receipt is loaded.
+	it("closed: the form closes, the card goes, the chat reloads", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = {
+			ok: false,
+			closed: true,
+			assistant_told: true,
+			error: { code: "X", message: "This record changed after the draft was made" },
+		};
+		expect(await saveToolDraft(p, h.d)).toBe("closed");
+		expect(h.state.items).toHaveLength(0);
+		expect(h.state.log).toEqual([
+			'save:{"title":"Edited"}',
+			"closePanel",
+			expect.stringMatching(/^notify:Couldn't save this: This record changed/),
+			"removePending",
+			"reload",
+			"refreshChats",
+			"showQueued:no",
+		]);
+	});
+
+	// Break: a thrown error closes the form or leaves it saving for good.
+	it("a thrown error keeps the form, shows an error, and clears the busy state", async () => {
+		const h = host({
+			save: async () => {
+				throw new Error("network");
+			},
+		});
+		const p = await openForm(h);
+		edit(p);
+		expect(await saveToolDraft(p, h.d)).toBe("error");
+		expect(p.error.message).toBe("Could not save your changes. (network)");
+		expect([
+			h.state.panel === p,
+			p.applying,
+			h.state.items[0].busy,
+			h.d.inflight.size,
+		]).toEqual([true, false, false, 0]);
+	});
+
+	// Break: a second press while one is in flight sends a second save.
+	it("a second Save while one is in flight does nothing", async () => {
+		let release;
+		const gate = new Promise((r) => (release = r));
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = { ok: true };
+		const inner = h.d.save;
+		h.d.save = async (...a) => {
+			await gate;
+			return inner(...a);
+		};
+		const first = saveToolDraft(p, h.d);
+		expect(await saveToolDraft(p, h.d)).toBe("ignored");
+		release();
+		expect(await first).toBe("saved");
+		expect(h.state.log.filter((l) => l.startsWith("save:"))).toHaveLength(1);
+	});
+
+	// Break: Save is live on a blocked form, a dead card, a busy item or while a turn runs.
+	it("does nothing when blocked, dead, busy or while Jarvis is replying", async () => {
+		for (const [name, arrange] of [
+			["blocked", (h, p) => (p.saveBlocked = CANT_EDIT_TEXT)],
+			["no such card", (h) => (h.state.items = [])],
+			["the item is busy", (h) => (h.state.items[0].busy = true)],
+			["a turn is running", (h) => (h.state.streaming = true)],
+		]) {
+			const h = host();
+			const p = await openForm(h);
+			edit(p);
+			arrange(h, p);
+			expect([name, await saveToolDraft(p, h.d)]).toEqual([name, "ignored"]);
+			expect(h.state.log).toEqual([]);
+		}
+	});
+
+	// Break: nothing changed is sent as an edited save ("saved with edited values" receipt) or
+	// does nothing at all.
+	it("nothing changed: Save is plain Create, and the form closes once the card is gone", async () => {
+		const h = host();
+		const p = await openForm(h);
+		h.state.createEffect = async () => (h.state.items = []);
+		expect(await saveToolDraft(p, h.d)).toBe("created");
+		expect(h.state.log).toEqual(["create", "closePanel"]);
+		expect(h.state.log).not.toContain("save");
+	});
+
+	it("nothing changed and Create refused: the form stays with the card's error", async () => {
+		const h = host();
+		const p = await openForm(h);
+		h.state.createEffect = async (pa) => (pa.error = { message: "Not now" });
+		expect(await saveToolDraft(p, h.d)).toBe("kept");
+		expect([h.state.panel === p, p.error.message, p.applying]).toEqual([
+			true,
+			"Not now",
+			false,
+		]);
+	});
+
+	// Break: the late answer of a chat the person left closes or marks the NEW chat's form.
+	it("a reply that lands after the chat changed touches nothing", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = { ok: true };
+		const inner = h.d.save;
+		h.d.save = async (...a) => {
+			h.state.chat = "c2";
+			return inner(...a);
+		};
+		expect(await saveToolDraft(p, h.d)).toBe("stale");
+		expect(h.state.log).toEqual(['save:{"title":"Edited"}']);
+	});
+});
+
+describe("cancelToolItem and discardFromForm: Cancel on the card, Discard in the form", () => {
+	// Break: Discard in the form leaves the form open on a gone card (the dead-token banner on the
+	// person's own discard), or closes it while the card is still there.
+	it("the form closes when the card is gone, and was never shown dead", async () => {
+		const h = host();
+		const p = await openForm(h);
+		h.state.discardEffect = async () => {
+			h.d.removePending("t1");
+			await h.d.reload();
+		};
+		expect(await discardFromForm(p, h.d)).toBe("cancelled");
+		expect(h.state.panel).toBeNull();
+		expect(h.state.deadAt).toEqual([false, false]);
+		expect(p.applying).toBe(false);
+	});
+
+	it("a refused discard keeps the form and shows the card's error", async () => {
+		const h = host();
+		const p = await openForm(h);
+		h.state.discardEffect = async (pa) => (pa.error = { message: "Busy" });
+		expect(await discardFromForm(p, h.d)).toBe("kept");
+		expect([h.state.panel === p, p.error.message, p.applying]).toEqual([true, "Busy", false]);
+	});
+
+	// Break: Cancel on the card with the form open leaves the form on a gone card.
+	it("the card's own Cancel closes the open form of that card, and only that card's", async () => {
+		const h = host();
+		await openForm(h);
+		h.state.discardEffect = async () => h.d.removePending("t1");
+		expect(await cancelToolItem(h.state.items[0], h.d)).toBe("cancelled");
+		expect(h.state.panel).toBeNull();
+	});
+
+	it("without a form it is just the discard; a discard that did not start is ignored", async () => {
+		const h = host();
+		expect(await cancelToolItem(h.state.items[0], h.d)).toBe("cancelled");
+		h.state.discardIgnored = true;
+		expect(await cancelToolItem(h.state.items[0], h.d)).toBe("ignored");
+	});
+
+	it("a form that is already saving is not discarded", async () => {
+		const h = host();
+		const p = await openForm(h);
+		p.applying = true;
+		expect(await discardFromForm(p, h.d)).toBe("ignored");
+		expect(h.state.log).toEqual([]);
+	});
 });

@@ -74,6 +74,18 @@ describe("toolDraftCtx", () => {
 			{},
 			{ busy: "busy" },
 		],
+		[
+			"this card's form or preview is being built",
+			{ token: "a" },
+			{ building: true },
+			{ busy: "busy" },
+		],
+		[
+			"a Create in flight outranks building",
+			{ token: "a", busy: true, busyKind: "create" },
+			{ building: true },
+			{ busy: "create" },
+		],
 		["editing this token", { token: "a" }, { editingToken: "a" }, { editing: true }],
 		["editing another token", { token: "a" }, { editingToken: "b" }, {}],
 		["no panel open", { token: "a" }, { editingToken: "" }, {}],

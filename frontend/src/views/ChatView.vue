@@ -2250,6 +2250,8 @@
 								:card="cardOfItem(pa)"
 								:ctx="draftCtxByToken[pa.token]"
 								@create="createToolDraft(pa)"
+								@preview="previewToolDraft(pa)"
+								@edit="openToolDraft(pa)"
 								@cancel="cancelToolDraft(pa)"
 							/>
 							<div v-if="pa.error" style="margin: 0 0 12px">
@@ -4193,6 +4195,16 @@
 					<div v-if="draftPanelStale" role="alert" style="margin: 10px 14px 0">
 						<Banner type="error" :message="DRAFT_STALE_TEXT" />
 					</div>
+					<!-- A server draft's form: a dead card, a form that cannot save, a record that
+					     could not be loaded (lib/toolDraftHost toolPanelNotices). -->
+					<div
+						v-for="n in toolNotices"
+						:key="n.text"
+						:role="n.type === 'error' ? 'alert' : 'status'"
+						style="margin: 10px 14px 0"
+					>
+						<Banner :type="n.type" :message="n.text" />
+					</div>
 					<DraftEditForm
 						ref="draftFormEl"
 						:model="draftPanel"
@@ -4212,7 +4224,7 @@
 							/>
 						</template>
 					</DraftEditForm>
-					<div class="jv-draft-foot">
+					<div v-if="!draftPanel.tool" class="jv-draft-foot">
 						<button
 							v-if="draftPanel.submittable && draftPanel.verb === 'create'"
 							class="jv-action-2nd"
@@ -4242,6 +4254,30 @@
 							Discard
 						</button>
 					</div>
+					<!-- A server draft: Create / Save changes is the tool save, Discard is the card's
+					     Cancel. No Create & Submit. -->
+					<div v-else class="jv-draft-foot">
+						<button
+							class="jv-action-primary"
+							:disabled="
+								draftPanel.applying ||
+								!!draftPanel.saveBlocked ||
+								draftPanelDead ||
+								convStreaming
+							"
+							:title="convStreaming ? 'Waiting for the current reply to finish' : ''"
+							@click="saveToolDraft()"
+						>
+							{{ draftPanel.applying ? "Saving…" : toolPrimaryLabel(draftPanel) }}
+						</button>
+						<button
+							class="jv-action-discard"
+							:disabled="draftPanel.applying || draftPanelDead"
+							@click="discardToolPanel()"
+						>
+							Discard
+						</button>
+					</div>
 				</aside>
 			</div>
 		</transition>
@@ -4253,6 +4289,17 @@
 			@close="previewOpen = false"
 			@edit="onPreviewEdit"
 			@confirm="onPreviewConfirm"
+		/>
+		<!-- Preview of a server draft card: its own model, the card's own numbers; Confirm is the
+		     card's Create. -->
+		<DraftPreview
+			v-if="toolPreview"
+			:model="toolPreview.model"
+			:confirm-label="toolPrimaryLabel(toolPreview.model)"
+			:disabled="convStreaming || !!(toolPreviewItem && toolPreviewItem.busy)"
+			@close="toolPreview = null"
+			@edit="onToolPreviewEdit"
+			@confirm="onToolPreviewConfirm"
 		/>
 
 		<FileBoxSheetReview
@@ -4535,12 +4582,25 @@ import { proposedLabel } from "@/lib/cardAge";
 import { cardOfItem, isToolDraftItem } from "@/lib/toolDraft";
 import {
 	DRAFT_STALE_TEXT,
+	cancelToolItem,
+	discardFromForm,
 	hasParkedDraft as itemsHoldParkedDraft,
 	nextPanelStale,
+	openToolDraftPanel,
+	openToolPreview,
 	receiptReloadNeeded,
+	saveToolDraft as saveToolPanel,
 	toolDraftCtxMap,
+	toolPanelDead,
+	toolPanelNotices,
 	withBusyKind,
 } from "@/lib/toolDraftHost";
+import {
+	FROM_CARD,
+	focusFirstMark,
+	resolveDraftField,
+	toolPrimaryLabel,
+} from "@/lib/toolDraftPanel";
 import {
 	chatRefusalMessage,
 	chatSettledReason,
@@ -8022,13 +8082,17 @@ async function buildDraftModel(a) {
 		return;
 	} // no meta → no panel (old card still shows)
 	let base = { values: {}, tables: {} };
+	let storedUnavailable = false;
 	if (verb === "update" && a.name) {
 		try {
 			base = await api.loadDocForEdit(a.doctype, a.name);
 		} catch (e) {
+			// A server draft card's form (a[FROM_CARD], which a typed action cannot carry) shows the
+			// draft's own cells and says so; the card itself already shows what changes.
+			storedUnavailable = !!a[FROM_CARD];
 			// Without the saved rows the card cannot show which rows a proposed table
 			// keeps or removes, so never offer to apply one blind (CR-3).
-			if ((a.tables || []).length) {
+			if ((a.tables || []).length && !a[FROM_CARD]) {
 				const err = new Error(
 					"Could not load this record's saved rows, so I can't show what would change. Tell me to try again."
 				);
@@ -8046,7 +8110,14 @@ async function buildDraftModel(a) {
 	}
 	const proposed = {}; // fieldname -> value
 	for (const f of a.fields || []) {
-		const m = _actField(metaLookup, f.label);
+		// A server draft's key is the field its `fieldname` names, exactly; a typed action's
+		// label is resolved as before (lib/toolDraftPanel resolveDraftField).
+		const m = resolveDraftField(
+			f,
+			meta.fields,
+			(label) => _actField(metaLookup, label),
+			!!a[FROM_CARD]
+		);
 		if (m && m.fieldtype !== "Table") proposed[m.fieldname] = f.value;
 	}
 	const fields = [];
@@ -8122,6 +8193,7 @@ async function buildDraftModel(a) {
 		applying: false,
 		error: "",
 		updatedToast: false,
+		...(storedUnavailable ? { storedUnavailable: true } : {}),
 	};
 }
 
@@ -8405,7 +8477,9 @@ watch(actionFor, () => {
 	if (!a || a.kind === "email" || !isEditVerb(a)) return;
 	const view = captureDraftActionView(a, actionFor.value || "", draftActionKey(a));
 	ensureActionSummary(a); // keep the summary card in sync with the latest action
-	if (draftPanel.value) {
+	// (A server draft card's form is not the typed draft's panel: a typed draft that comes back
+	// after that card died must never replace it, and with it the person's edits.)
+	if (draftPanel.value && !draftPanel.value.tool) {
 		// panel is open (user is editing) and the action re-emitted: rebuilt only when the
 		// agent proposed something different (openDraftPanel keeps the same draft's edits)
 		openDraftPanel({ verb: a.verb || "create", ...a }, view).then((rebuilt) => {
@@ -8656,22 +8730,26 @@ const olderCardsNoteText = computed(() =>
 );
 // What DraftCard is told about each server draft card on screen, built once per change of its
 // inputs (not once per render, which a streamed token triggers): its state, its place in the
-// stack and the stack's hint (Preview and Edit are disabled until the edit panel handles a
-// server draft).
+// stack and the stack's hint, whether its form is open ("Editing") and whether its form or
+// preview is being built.
 const draftCtxByToken = computed(() =>
 	toolDraftCtxMap({
 		items: visiblePendingActions.value,
 		streaming: convStreaming.value,
 		stackHint: typedApprovalHint.value,
+		editingToken: draftPanel.value?.tool ? draftPanel.value.token : "",
+		buildingToken: toolDraftBuilding.value,
 	})
 );
 // A typed edit panel that was open when a server draft card arrived: its Save has no typed
 // draft to act on. The panel stays open, shows DRAFT_STALE_TEXT, and its save buttons are off;
 // the X still closes it, which clears the flag.
 const draftPanelStale = ref(false);
+// The form of a server draft card (`panel.tool`) is not stale because a draft is parked: it IS
+// the parked draft's form, with its own dead-token rule (draftPanelDead below).
 watch([hasParkedDraft, draftPanel], ([parked, panel], [, previous]) => {
 	draftPanelStale.value = nextPanelStale(draftPanelStale.value, {
-		panelOpen: !!panel,
+		panelOpen: !!panel && !panel.tool,
 		panelChanged: panel !== previous,
 		parked,
 	});
@@ -9186,10 +9264,13 @@ async function proposeNext(m, step) {
 	}
 }
 
-// The two buttons of a server draft card. Create is the Confirm button's handler and Cancel the
-// Discard button's, each with the item's busyKind set around it (lib/toolDraftHost.withBusyKind)
-// so the card shows its working state and ignores a second press. Every reply, a refusal, an
-// already-decided card and a thrown error are handled by confirmPending / discardPending.
+// The buttons of a server draft card and its form. Create is the Confirm button's handler and
+// Cancel the Discard button's, each with the item's busyKind set around it
+// (lib/toolDraftHost.withBusyKind) so the card shows its working state and ignores a second
+// press. Every reply, a refusal, an already-decided card and a thrown error are handled by
+// confirmPending / discardPending. Edit and Preview build the form's model (lib/toolDraftHost
+// openToolDraftPanel / openToolPreview: build, snapshot, guard, then show); Save, Discard and
+// the dead-token rule of the form are in the same file.
 async function createToolDraft(pa) {
 	const started = await withBusyKind(pa, "create", confirmPending);
 	// A Create that spends the card without a receipt (State S10: the record changed after the
@@ -9207,8 +9288,88 @@ async function createToolDraft(pa) {
 	)
 		await loadConversation(pa.conversation);
 }
+const toolDraftBuilding = ref("");
+// The preview of a server draft card: { token, model } (the model's calculated cells are the card's).
+const toolPreview = ref(null);
+const toolPreviewItem = computed(() =>
+	toolPreview.value
+		? pendingActions.value.find((x) => x.token === toolPreview.value.token)
+		: undefined
+);
+// A preview holds no edits: it closes when its card goes (confirmed, discarded, replaced, chat switched).
+watch(
+	() => !!toolPreview.value && !toolPreviewItem.value,
+	(gone) => {
+		if (gone) toolPreview.value = null;
+	}
+);
+// The open form of a server draft card whose card is no longer pending: the banner, Save off,
+// the fields stay (never closed or rebuilt silently).
+const draftPanelDead = computed(() =>
+	toolPanelDead(draftPanel.value, visiblePendingActions.value)
+);
+const toolNotices = computed(() => toolPanelNotices(draftPanel.value, draftPanelDead.value));
+// What the lib doors need from this view.
+const toolDeps = {
+	find: (token, conversation) =>
+		pendingActions.value.find((x) => x.token === token && x.conversation === conversation),
+	capture: captureChatView,
+	pendingCurrent: pendingActionIsCurrent,
+	chatCurrent: chatViewIsCurrent,
+	panel: () => draftPanel.value,
+	setPanel: (model) => {
+		draftPanel.value = model;
+	},
+	closePanel: () => closeDraftPanel(),
+	build: (action) => buildDraftModel(action),
+	autoOpen: (model) => applyAutoOpen(model, null),
+	building: () => toolDraftBuilding.value,
+	setBuilding: (token) => {
+		toolDraftBuilding.value = token;
+	},
+	setPreview: (preview) => {
+		toolPreview.value = preview;
+	},
+	notify: (text, opts) => notify(text, opts),
+	warn: (...args) => console.warn(...args),
+	streaming: () => convStreaming.value,
+	inflight: inflightTokens,
+	removePending: (token) => removePending(token),
+	reload: (conversation) => loadConversation(conversation),
+	refreshChats: () => store.loadConversations(),
+	showQueued: (r) => showQueuedContinuation(r),
+	save: (token, conversation, values) => api.saveDraftCard(token, conversation, values),
+	agent: () => brand.agentName,
+	thrown: (e, fallback) => thrownActionError(e, fallback),
+	metaFields: (doctype) => (_formMetaCache[doctype] || {}).fields,
+	afterMarks: () => nextTick(() => focusFirstMark(draftPanelEl.value)),
+	create: (pa) => createToolDraft(pa),
+	discard: (pa) => withBusyKind(pa, "cancel", discardPending),
+};
 function cancelToolDraft(pa) {
-	return withBusyKind(pa, "cancel", discardPending);
+	return cancelToolItem(pa, toolDeps);
+}
+function openToolDraft(pa) {
+	return openToolDraftPanel(pa, toolDeps);
+}
+function previewToolDraft(pa) {
+	return openToolPreview(pa, toolDeps);
+}
+function saveToolDraft(panel = draftPanel.value) {
+	return saveToolPanel(panel, toolDeps);
+}
+function discardToolPanel(panel = draftPanel.value) {
+	return discardFromForm(panel, toolDeps);
+}
+function onToolPreviewConfirm() {
+	const pa = toolPreviewItem.value;
+	toolPreview.value = null;
+	if (pa) createToolDraft(pa);
+}
+function onToolPreviewEdit() {
+	const pa = toolPreviewItem.value;
+	toolPreview.value = null;
+	if (pa) openToolDraft(pa);
 }
 
 // Resync (R3 fix for #3): re-fetch the current conversation's live parked
