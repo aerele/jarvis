@@ -524,6 +524,23 @@ class TestNativeReorderJourney(FrappeTestCase):
 			with self.assertRaises(frappe.ValidationError):
 				review.get_review(self.run.name)
 
+	def test_the_stock_guard_reads_bin_values_on_erpnext_15_too(self):
+		# ERPNext 15 keeps stock_value and valuation_rate out of RECALCULATED_FIELDS. CI on this
+		# branch runs ERPNext 16, where the constant carries both, so the ERPNext 15 shape is
+		# put in place here: without the two fields asked for by name, the guard refuses.
+		erpnext_15 = (
+			"actual_qty",
+			"ordered_qty",
+			"indented_qty",
+			"planned_qty",
+			"reserved_qty",
+			"reserved_qty_for_production",
+			"reserved_qty_for_sub_contract",
+			"reserved_qty_for_production_plan",
+		)
+		with patch("erpnext.stock.doctype.bin.bin.RECALCULATED_FIELDS", erpnext_15):
+			self.assertEqual(review.prepare(self.run)["state"], "prepared")
+
 	def test_shadow_is_visible_but_cannot_be_approved(self):
 		frappe.db.set_value(review.RUN, self.run.name, "preparation_mode", "shadow")
 		self.run.reload()
