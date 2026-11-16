@@ -193,6 +193,29 @@ describe("a stack of pending cards: the hint and the number each draft card show
 	});
 });
 
+describe("toolDraftCtxMap surface: the same card draws fewer table rows on the phone", () => {
+	// Break: the map or the host ctx drops `surface`, so a phone card keeps the desktop's 8 rows.
+	const tall = () => {
+		const c = card("create-with-table");
+		const row = c.tables[0].rows[0];
+		c.tables[0].rows = Array.from({ length: 7 }, () => structuredClone(row));
+		c.tables[0].count = 7;
+		return c;
+	};
+	const rowsShown = (over) => {
+		const items = [{ token: "t1", recent: true, preview: { card: tall() } }];
+		const map = toolDraftCtxMap({ items, streaming: false, stackHint: "", ...over });
+		const view = draftCardView(tall(), map.t1);
+		return [view.tables[0].rows.length, view.tables[0].more];
+	};
+	it("the default is the desktop's 7 of 7", () => {
+		expect(rowsShown({})).toEqual([7, 0]);
+	});
+	it('surface "phone" shows 5 and says 2 more', () => {
+		expect(rowsShown({ surface: "phone" })).toEqual([5, 2]);
+	});
+});
+
 describe("receiptReloadNeeded: after Create, does the chat need a reload to show the receipt?", () => {
 	const base = {
 		token: "t1",

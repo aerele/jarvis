@@ -104,3 +104,23 @@ describe("toolDraftCtx", () => {
 		});
 	}
 });
+
+describe("toolDraftCtx surface", () => {
+	// Break: the surface is hard-coded again (the phone card would draw the desktop's 8 table rows),
+	// or an unknown value reaches the card view as itself.
+	const table = [
+		["no surface is the desktop", {}, "desktop"],
+		["desktop", { surface: "desktop" }, "desktop"],
+		["phone", { surface: "phone" }, "phone"],
+		["an unknown surface is the desktop", { surface: "tablet" }, "desktop"],
+		["an empty surface is the desktop", { surface: "" }, "desktop"],
+	];
+	for (const [name, over, want] of table) {
+		it(name, () => {
+			const pa = { token: "a", recent: true };
+			expect(
+				toolDraftCtx({ pa, editingToken: null, streaming: false, ...over }).surface
+			).toBe(want);
+		});
+	}
+});

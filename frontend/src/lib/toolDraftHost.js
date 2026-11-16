@@ -30,7 +30,7 @@ export function hasParkedDraft(items) {
 // draft card is locked until it opens (a second click on another card would be ignored, and a
 // card that ignores a click must not look pressable).
 // `position` / `count` / `stackHint` say where the card sits among the pending cards on screen
-// (see draftCardView).
+// (see draftCardView). `surface` is "desktop" (default) or "phone" (see toolDraftCtx).
 export function toolDraftHostCtx({
 	pa,
 	streaming,
@@ -39,9 +39,10 @@ export function toolDraftHostCtx({
 	stackHint,
 	editingToken = "",
 	building = false,
+	surface = "desktop",
 }) {
 	return {
-		...toolDraftCtx({ pa, editingToken, streaming, building }),
+		...toolDraftCtx({ pa, editingToken, streaming, building, surface }),
 		position,
 		count,
 		stackHint,
@@ -58,6 +59,7 @@ export function toolDraftCtxMap({
 	stackHint,
 	editingToken = "",
 	buildingToken = "",
+	surface = "desktop",
 }) {
 	const list = Array.isArray(items) ? items : [];
 	const map = {};
@@ -71,6 +73,7 @@ export function toolDraftCtxMap({
 				stackHint,
 				editingToken,
 				building: !!buildingToken,
+				surface,
 			});
 	});
 	return map;
