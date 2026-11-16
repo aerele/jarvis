@@ -239,7 +239,10 @@ class TestNativeReorderJourney(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		if not frappe.local.site.startswith("test_"):
+		# CI runs on the disposable site "jarvis-ci.test". The prefix check alone skipped the
+		# whole class there, so these tests never ran on CI.
+		site = frappe.local.site
+		if not (site.startswith("test_") or site == "jarvis-ci.test"):
 			raise unittest.SkipTest("A disposable test site is required")
 		from jarvis.tests import _erpnext_masters as masters
 
