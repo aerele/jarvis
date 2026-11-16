@@ -76,7 +76,15 @@ function pick(e) {
 function reset() {
 	autoGrow();
 }
-defineExpose({ reset });
+// Focus with the caret at the end, after the host filled the text (a Reply quote).
+function focusEnd() {
+	const el = inputEl.value;
+	if (!el) return;
+	autoGrow();
+	el.focus();
+	el.setSelectionRange(el.value.length, el.value.length);
+}
+defineExpose({ reset, focusEnd });
 </script>
 
 <template>

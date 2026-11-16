@@ -69,6 +69,7 @@ import ExportCard from "@shared/components/chat/ExportCard.vue";
 import { exportSummary } from "@shared/lib/exportJobs.js";
 import ReportScope from "../components/ReportScope.vue";
 import Composer from "../components/Composer.vue";
+import { splitQuote, withQuote } from "@jsshared/reply_quote.mjs";
 import {
 	boundedDelivery,
 	newSendRequestId,
@@ -310,6 +311,21 @@ const starred = ref(false);
 
 const scroller = ref(null);
 const composer = ref(null);
+
+// aerele/jarvis#2191: Reply quotes an earlier reply at the top of the composer (a
+// Markdown blockquote: the agent gets the exact text, the history keeps it, the
+// bubble draws it as a quote). An unsent quote is replaced.
+const quoteOf = (content) => splitQuote(content);
+function replyBodyText(e) {
+	const body = e?.currentTarget?.closest?.(".jv-msg-agent")?.querySelector?.(".jv-md");
+	return body ? body.innerText : "";
+}
+function replyWith(text) {
+	const next = withQuote(input.value, text);
+	if (next === input.value) return;
+	input.value = next;
+	nextTick(() => composer.value?.focusEnd?.());
+}
 // An action card is a live offer, not history: only the newest assistant turn
 // may still be applied. Scrolling back to last week's proposal and tapping
 // Create would write a record the user has long since moved on from.
@@ -1718,7 +1734,13 @@ onUnmounted(() => {
 
 		<template v-for="it in items" :key="it.key">
 			<div v-if="it.type === 'user'" class="jv-msg-user">
-				<div v-if="it.msg.content" class="jv-bubble-user">{{ it.msg.content }}</div>
+				<div v-if="it.msg.content" class="jv-bubble-user">
+					<template v-if="quoteOf(it.msg.content).quote">
+						<div class="jv-uquote">{{ quoteOf(it.msg.content).quote }}</div>
+						<span>{{ quoteOf(it.msg.content).rest }}</span>
+					</template>
+					<template v-else>{{ it.msg.content }}</template>
+				</div>
 				<MessageMedia
 					:items="it.msg.canvas"
 					:message-name="it.msg.name"
@@ -1748,6 +1770,29 @@ onUnmounted(() => {
 					     exists to fix. Gated only on `stopped`, it shows for both the
 					     partial and the empty stop. -->
 					<div v-if="it.msg.stopped" class="jv-stopped">You stopped this reply.</div>
+					<!-- aerele/jarvis#2191: a phone's own selection menu owns a selection, so
+					     the PWA quotes the whole reply from here instead of a selection bar. -->
+					<div v-if="it.view.html && !exportSummary(it.msg)" class="jv-msg-acts">
+						<button
+							type="button"
+							class="jv-msg-act"
+							@click="replyWith(replyBodyText($event))"
+						>
+							<svg
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.8"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<path d="M9 14 4 9l5-5" />
+								<path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
+							</svg>
+							Reply
+						</button>
+					</div>
 					<ActionCard
 						v-if="showsDraftCard(it)"
 						:action="anchor.action"
@@ -2179,6 +2224,40 @@ onUnmounted(() => {
 }
 .jv-msg-agent {
 	min-width: 0;
+}
+/* The quoted part of a Reply (aerele/jarvis#2191), above the question. */
+.jv-uquote {
+	margin: 0 0 7px;
+	padding: 1px 0 1px 9px;
+	border-left: 3px solid var(--border);
+	color: var(--ink5);
+	font-size: 12.5px;
+	display: -webkit-box;
+	-webkit-line-clamp: 5;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+.jv-msg-acts {
+	display: flex;
+	gap: 6px;
+	margin-top: 6px;
+}
+.jv-msg-act {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	min-height: 32px;
+	padding: 4px 10px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: transparent;
+	color: var(--ink5);
+	font-size: 12.5px;
+	-webkit-tap-highlight-color: transparent;
+}
+.jv-msg-act svg {
+	width: 14px;
+	height: 14px;
 }
 /* The activity card sits above the prose it produced; give it room. (Scoped
    styles reach a child component's root element, which is what .jv-tools is.) */

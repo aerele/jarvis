@@ -829,6 +829,7 @@
 							v-else-if="m.role === 'user'"
 							variant="bubble"
 							:text="m.content"
+							quotes
 							:attachments="m.canvas"
 							:timestamp="msgTime(m)"
 							:timestampFull="msgTimeFull(m)"
@@ -2006,6 +2007,29 @@
 											:title="msgTimeFull(m)"
 											>{{ msgTime(m) }}</span
 										>
+										<!-- aerele/jarvis#2191: quote the whole reply into the composer
+										     (selecting part of it offers the same, for just that part) -->
+										<button
+											v-if="canCopyReply(m)"
+											class="jv-msgbtn"
+											@click="replyWith(replyBodyText($event))"
+											title="Reply"
+											aria-label="Reply"
+										>
+											<svg
+												width="14"
+												height="14"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.8"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<path d="M9 14 4 9l5-5" />
+												<path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11" />
+											</svg>
+										</button>
 										<!-- hidden (not removed) while streaming so the bar keeps its
 										     height; copying half a reply would be wrong -->
 										<button
@@ -4630,6 +4654,13 @@
 		     maybeCheckSessionFeedback below, following the same shared-ref
 		     pattern as WhatsNewDialog/noticeGate. -->
 		<SessionFeedbackDialog />
+		<!-- aerele/jarvis#2191: the bar over text selected in a reply -->
+		<SelectionActions
+			:root="rootEl"
+			selector=".jv-amsg .jv-md-body"
+			:actions="selectionActions"
+			@action="onSelectionAction"
+		/>
 		<!-- Periodic business-pulse survey: opened by maybeOpenPulseFeedback,
 		     checked once per genuine chat-open event. -->
 		<PulseFeedbackDialog />
@@ -4787,6 +4818,8 @@ import Banner from "@/components/Banner.vue";
 import PendingCard from "@/components/PendingCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
+import SelectionActions from "@/components/chat/SelectionActions.vue";
+import { withQuote } from "@jsshared/reply_quote.mjs";
 import {
 	newSendRequestId,
 	observeDelivery,
@@ -9959,6 +9992,31 @@ function showCopied(id) {
 	_copyTimer = setTimeout(() => {
 		copiedId.value = "";
 	}, 1300);
+}
+// aerele/jarvis#2191: Reply quotes text from an earlier reply at the top of the
+// composer (a Markdown blockquote, so the agent gets the exact text and the history
+// keeps it; the user bubble draws it as a quote). An unsent quote is replaced.
+const selectionActions = [{ key: "reply", label: "Reply" }];
+function onSelectionAction(key, text) {
+	if (key === "reply") replyWith(text);
+}
+// The reply as it reads on screen (tables, lists and links as text, no Markdown).
+function replyBodyText(e) {
+	const body = e?.currentTarget?.closest?.(".jv-amsg")?.querySelector?.(".jv-md-body");
+	return body ? body.innerText : "";
+}
+function replyWith(text) {
+	const next = withQuote(input.value, text);
+	if (next === input.value) return;
+	input.value = next;
+	nextTick(() => {
+		const el = composerRef.value?.el;
+		if (el) {
+			el.focus();
+			const p = input.value.length;
+			el.setSelectionRange(p, p);
+		}
+	});
 }
 function editCommand(m) {
 	if (!messageActionIsCurrent(captureChatView(m?.name || ""))) return;
