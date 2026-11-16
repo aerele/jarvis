@@ -754,11 +754,21 @@ def _update_card(args: dict, would, full: bool = False, whole: bool = False, dra
 			if not whole and _same_rows(meta, key, to_val, from_val):
 				continue  # every row kept as it is: nothing to show
 		df = meta.get_field(key) if meta else None
-		if same_value(from_val, to_val, df):
+		as_draft = draft and not full and not whole
+		same = same_value(from_val, to_val, df)
+		# A draft card judges a listed table by its rows: the trial's rows can read as the saved
+		# ones while the write still changes a row (a masked secret, a clipped or rounded value).
+		listed_table = (
+			as_draft
+			and df is not None
+			and df.fieldtype in ("Table", "Table MultiSelect")
+			and (isinstance(changes.get(key), list) or changes.get(key) is None)
+		)
+		if same and not listed_table:
 			continue  # the save would not change the stored value
 		# Never a password / secret value (_diff_row masks it).
 		entry = _diff_row(meta, key, from_val, to_val, doc, full)
-		if draft and not full and not whole:
+		if as_draft:
 			# A draft card shows a table's row changes. ``from_val`` is the stored rows read
 			# (permission-checked) above: no second read. The trial's rows give the computed cells.
 			draft_card.decorate_update_entry(
@@ -766,9 +776,12 @@ def _update_card(args: dict, would, full: bool = False, whole: bool = False, dra
 				meta,
 				key,
 				changes.get(key),
-				would.get(key) if isinstance(would, dict) else None,
 				from_val,
+				to_val,
+				would.get(key) if isinstance(would, dict) else None,
 			)
+			if same and not draft_card.has_row_change(entry):
+				continue
 		diff.append(entry)
 		if not full and len(diff) >= _MAX_ROWS:
 			break
