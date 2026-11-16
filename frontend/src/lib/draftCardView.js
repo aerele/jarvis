@@ -140,19 +140,18 @@ const statusOf = (r) => {
 };
 
 // "1 row changed, 2 rows added, 1 row will be removed, 3 rows unchanged": non-zero parts only.
-// A missing or malformed `counts` is counted from the rows themselves.
-function changeSummary(rc, rows, removed, reordered) {
+// Per part the larger of the server's count and what the lists show, so the sentence never says
+// fewer rows than the card lists. `moreRemoved` is the server's removed rows beyond its list.
+function changeSummary(rc, rows, removed, moreRemoved, reordered) {
 	const given = isObject(rc.counts) ? rc.counts : {};
-	const keys = ["changed", "new", "removed", "kept"];
-	const usable = keys.every((k) => countOf(given[k]) !== null);
-	const n = usable
-		? given
-		: {
-				changed: rows.filter((r) => statusOf(r) === "changed").length,
-				new: rows.filter((r) => statusOf(r) === "new").length,
-				kept: rows.filter((r) => statusOf(r) === "kept").length,
-				removed: removed.length,
-		  };
+	const of = (k, derived) => Math.max(countOf(given[k]) || 0, derived);
+	const inRows = (s) => rows.filter((r) => statusOf(r) === s).length;
+	const n = {
+		changed: of("changed", inRows("changed")),
+		new: of("new", inRows("new")),
+		kept: of("kept", inRows("kept")),
+		removed: of("removed", removed.length + moreRemoved),
+	};
 	const row = (c) => (c === 1 ? "row" : "rows");
 	const parts = [
 		n.changed && `${n.changed} ${row(n.changed)} changed`,
@@ -163,6 +162,14 @@ function changeSummary(rc, rows, removed, reordered) {
 	].filter(Boolean);
 	const sentence = parts.join(", ");
 	return parts.length === 1 && reordered ? "Row order changes" : sentence;
+}
+
+// Changed and new rows are always shown (the server sends at most 50); unchanged rows only fill
+// what is left of the per-surface cap. The call's order is kept among the shown rows.
+function shownRows(rows, max) {
+	const room = Math.max(0, max - rows.filter((r) => statusOf(r) !== "kept").length);
+	let kept = 0;
+	return rows.filter((r) => statusOf(r) !== "kept" || kept++ < room);
 }
 
 // What an update does to a child table, row by row. Null when there is nothing to draw, so the
@@ -181,34 +188,44 @@ function rowChangesView(rc, surface) {
 	for (let i = 0; i < width; i++) if (!grids.every((g) => text(g[i]) === "")) keep.push(i);
 	if (!keep.length) keep.push(0);
 	const max = surface === "phone" ? MAX_ROWS_PHONE : MAX_ROWS_DESKTOP;
-	const shownRows = rows.slice(0, max);
+	const shown = shownRows(rows, max);
 	const shownRemoved = removed.slice(0, max);
 	const reordered = rc.reordered === true;
 	const given = isObject(rc.more) ? rc.more : {};
-	const moreRows = (countOf(given.rows) || 0) + rows.length - shownRows.length;
-	const moreRemoved = (countOf(given.removed) || 0) + removed.length - shownRemoved.length;
+	const hiddenKept = rows.length - shown.length;
+	const moreRemoved = removed.length - shownRemoved.length;
+	const serverRemoved = countOf(given.removed) || 0;
+	const serverRows = countOf(given.rows) || 0;
 	return {
 		columns: keep.map((i) => text(head[i])),
-		summary: changeSummary(rc, rows, removed, reordered),
+		summary: changeSummary(rc, rows, removed, serverRemoved, reordered),
 		reordered,
-		rows: shownRows.map((r) => ({
-			status: statusOf(r),
-			statusLabel: STATUS_LABEL[statusOf(r)] || "",
-			note: hiddenChange(r) ? HIDDEN_CHANGE_NOTE : "",
-			cells: keep.map((i) => {
+		rows: shown.map((r) => {
+			const cells = keep.map((i) => {
 				const now = text(cellsOf(r)[i]);
 				const old = statusOf(r) === "changed" && !hiddenChange(r) ? text(was(r)[i]) : "";
 				return { text: now, was: old === now ? "" : old };
-			}),
-		})),
+			});
+			// "Changed" always comes with a reason: a hidden value, or a visible old value.
+			const unexplained = statusOf(r) === "changed" && !cells.some((c) => c.was !== "");
+			return {
+				status: statusOf(r),
+				statusLabel: STATUS_LABEL[statusOf(r)] || "",
+				note: hiddenChange(r) || unexplained ? HIDDEN_CHANGE_NOTE : "",
+				cells,
+			};
+		}),
 		removed: shownRemoved.map((r) => ({ cells: keep.map((i) => text(cellsOf(r)[i])) })),
 		more: [
-			moreRows && `and ${plural(moreRows, "more row", "more rows")}`,
-			moreRemoved &&
-				`and ${moreRemoved} more ${moreRemoved === 1 ? "row" : "rows"} will be removed`,
+			hiddenKept && `and ${plural(hiddenKept, "more unchanged row", "more unchanged rows")}`,
+			moreRemoved + serverRemoved &&
+				`and ${moreRemoved + serverRemoved} more ${
+					moreRemoved + serverRemoved === 1 ? "row" : "rows"
+				} will be removed`,
 		]
 			.filter(Boolean)
 			.join(", "),
+		notShown: serverRows ? `and ${plural(serverRows, "more row", "more rows")} not shown` : "",
 	};
 }
 

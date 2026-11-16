@@ -375,11 +375,20 @@ export function draftCardCases(rawView, fixtures) {
 		removed: [{ cells: ["13:00:00", "0.5"] }],
 		more: "",
 		reordered: false,
+		notShown: "",
 	});
 	add("row changes hide the plain row text", [rcv.old, rcv.new], ["", ""]);
 
 	// Break: a summary part has the wrong wording, order or plural, or a zero part appears.
-	const word = (counts) => tableDiff({ rows: [{ cells: ["a"] }], counts }).rowChanges.summary;
+	const word = (counts) => {
+		const some = (n, o) => Array.from({ length: n }, () => ({ cells: ["a"], ...o }));
+		const rows = [
+			...some(counts.changed, { status: "changed", was: ["b"] }),
+			...some(counts.new, { status: "new" }),
+			...some(counts.kept, {}),
+		];
+		return tableDiff({ rows, removed: some(counts.removed, {}), counts }).rowChanges.summary;
+	};
 	for (const [counts, expected] of [
 		[{ changed: 1, new: 0, kept: 0, removed: 0 }, "1 row changed"],
 		[{ changed: 3, new: 0, kept: 0, removed: 0 }, "3 rows changed"],
@@ -410,15 +419,20 @@ export function draftCardCases(rawView, fixtures) {
 	// Break: the "more" line is worded wrong, or the bounded rows are not counted into it.
 	const many = (n) => Array.from({ length: n }, (_, i) => ({ cells: [String(i)] }));
 	for (const [more, rows, removed, expected] of [
-		[{ rows: 3 }, 1, 1, "and 3 more rows"],
-		[{ removed: 1 }, 1, 1, "and 1 more row will be removed"],
-		[{ rows: 2, removed: 5 }, 1, 1, "and 2 more rows, and 5 more rows will be removed"],
-		[undefined, 1, 1, ""],
-		[undefined, 10, 9, "and 2 more rows, and 1 more row will be removed"],
-		[{ rows: 1 }, 10, 1, "and 3 more rows"],
+		[{ rows: 3 }, 1, 1, ["", "and 3 more rows not shown"]],
+		[{ removed: 1 }, 1, 1, ["and 1 more row will be removed", ""]],
+		[
+			{ rows: 2, removed: 5 },
+			1,
+			1,
+			["and 5 more rows will be removed", "and 2 more rows not shown"],
+		],
+		[undefined, 1, 1, ["", ""]],
+		[undefined, 10, 9, ["and 2 more unchanged rows, and 1 more row will be removed", ""]],
+		[undefined, 9, 1, ["and 1 more unchanged row", ""]],
 	]) {
 		const rc = tableDiff({ rows: many(rows), removed: many(removed), more }).rowChanges;
-		add(`more ${JSON.stringify([more, rows, removed])}`, rc.more, expected);
+		add(`more ${JSON.stringify([more, rows, removed])}`, [rc.more, rc.notShown], expected);
 	}
 	const phone = (() => {
 		const c = card(fixtures, "update-table-rows");
@@ -428,7 +442,7 @@ export function draftCardCases(rawView, fixtures) {
 	add(
 		"rows and removed are capped separately on a phone",
 		[phone.rows.length, phone.removed.length, phone.more],
-		[5, 5, "and 2 more rows, and 2 more rows will be removed"]
+		[5, 5, "and 2 more unchanged rows, and 2 more rows will be removed"]
 	);
 
 	// Break: odd row_changes throws, or hides the old text when there is nothing to draw instead.
@@ -459,7 +473,7 @@ export function draftCardCases(rawView, fixtures) {
 			{
 				status: "changed",
 				statusLabel: "Changed",
-				note: "",
+				note: "A value not shown here changes.",
 				cells: [{ text: "y", was: "" }],
 			},
 			{ status: "kept", statusLabel: "", note: "", cells: [{ text: "", was: "" }] },
@@ -468,6 +482,7 @@ export function draftCardCases(rawView, fixtures) {
 		removed: [{ cells: [""] }, { cells: [""] }, { cells: [""] }],
 		more: "",
 		reordered: false,
+		notShown: "",
 	});
 	// Break: a column holding only an old value, or only a removed row's value, is dropped.
 	const keepCols = tableDiff({
@@ -522,15 +537,6 @@ export function draftCardCases(rawView, fixtures) {
 		inline({ rows: two, removed: [{ cells: ["x"] }], reordered: true }).summary,
 		"1 row will be removed, 2 rows unchanged, row order changes"
 	);
-	add(
-		"reordered alone",
-		inline({
-			rows: [{ cells: ["a"] }],
-			counts: { changed: 0, new: 0, kept: 0, removed: 0 },
-			reordered: true,
-		}).summary,
-		"Row order changes"
-	);
 	add("not reordered adds nothing", order(two, false), "2 rows unchanged");
 	// Break: a table of only unchanged rows is hidden although the user asked for it.
 	add(
@@ -541,6 +547,117 @@ export function draftCardCases(rawView, fixtures) {
 			inline({ rows: two }).rows.length,
 		],
 		["2 rows unchanged", 2]
+	);
+
+	// Break: with many rows and one change deep in the list, the cap hides the change.
+	const fifty = Array.from({ length: 50 }, (_, i) =>
+		i === 29
+			? { status: "changed", cells: ["row 30"], was: ["old"] }
+			: { status: "kept", cells: [`row ${i + 1}`] }
+	);
+	for (const [surface, shown] of [
+		["desktop", 8],
+		["phone", 5],
+	]) {
+		const c = card(fixtures, "update-diff");
+		c.diff[0] = { label: "Items", row_changes: { columns: ["Item"], rows: fifty } };
+		const rc = draftCardView(c, { surface }).diff[0].rowChanges;
+		add(
+			`50 rows, one change at row 30, on ${surface}`,
+			[
+				rc.rows.length,
+				rc.rows.some((r) => r.cells[0].text === "row 30"),
+				rc.more,
+				rc.summary,
+			],
+			[
+				shown,
+				true,
+				`and ${50 - shown} more unchanged rows`,
+				"1 row changed, 49 rows unchanged",
+			]
+		);
+	}
+	// Break: changed rows are cut by the cap, or kept rows are not shown in the call's order.
+	const twelve = Array.from({ length: 12 }, (_, i) => ({
+		status: "changed",
+		cells: [`c${i}`],
+		was: ["x"],
+	}));
+	const cap = card(fixtures, "update-diff");
+	cap.diff[0] = {
+		label: "Items",
+		row_changes: {
+			columns: ["Item"],
+			rows: [{ cells: ["k0"] }, ...twelve, { cells: ["k1"] }],
+		},
+	};
+	const capped = draftCardView(cap, { surface: "phone" }).diff[0].rowChanges;
+	add(
+		"12 changed rows on a phone are all shown, no kept row fills",
+		[capped.rows.length, capped.more],
+		[12, "and 2 more unchanged rows"]
+	);
+	cap.diff[0].row_changes.rows = [{ cells: ["k0"] }, twelve[0], { cells: ["k1"] }, twelve[1]];
+	add(
+		"kept rows fill the cap in the call's order",
+		draftCardView(cap, { surface: "phone" }).diff[0].rowChanges.rows.map(
+			(r) => r.cells[0].text
+		),
+		["k0", "c0", "k1", "c1"]
+	);
+	// Break: the sentence says fewer rows than the lists show.
+	const lists = (counts, more) =>
+		tableDiff({
+			rows: [{ status: "new", cells: ["a"] }],
+			removed: [{ cells: ["x"] }, { cells: ["y"] }],
+			counts,
+			more,
+		}).rowChanges.summary;
+	add(
+		"counts.removed 0 with 2 removed rows",
+		lists({ changed: 0, new: 1, kept: 0, removed: 0 }),
+		"1 row added, 2 rows will be removed"
+	);
+	add(
+		"counts.removed 1 with 2 removed rows",
+		lists({ changed: 0, new: 1, kept: 0, removed: 1 }),
+		"1 row added, 2 rows will be removed"
+	);
+	add(
+		"counts.removed 5 with 2 shown and more 3",
+		lists({ changed: 0, new: 1, kept: 0, removed: 5 }, { removed: 3 }),
+		"1 row added, 5 rows will be removed"
+	);
+	// Break: a whitespace-only change shows "Changed" with no reason.
+	const ws = inline({
+		columns: ["Name"],
+		rows: [{ status: "changed", cells: [" Bob "], was: ["Bob"] }],
+	});
+	add(
+		"a changed row with equal shown cells gets the note",
+		[ws.rows[0].statusLabel, ws.rows[0].note, ws.rows[0].cells],
+		["Changed", "A value not shown here changes.", [{ text: "Bob", was: "" }]]
+	);
+	// Break: a middle column empty everywhere shifts was out of line with cells, or the note row spans wrong.
+	const mid = inline({
+		columns: ["A", "B", "C"],
+		rows: [
+			{ status: "changed", hidden_change: true, cells: ["a", "", "c"], was: ["a", "", "c"] },
+			{ status: "changed", cells: ["a2", "", "c2"], was: ["a1", "", "c1"] },
+		],
+	});
+	add(
+		"an empty middle column is dropped from cells and was alike",
+		[mid.columns, mid.rows[1].cells, mid.columns.length + 1],
+		[
+			["A", "C"],
+			[
+				{ text: "a2", was: "a1" },
+				{ text: "c2", was: "c1" },
+			],
+			3,
+		]
 	);
 
 	// Break: the multi-line flag is lost, or set for a plain value.

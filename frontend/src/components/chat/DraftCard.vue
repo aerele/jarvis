@@ -83,7 +83,10 @@ function press(button) {
 						The rows are saved in the order shown.
 					</p>
 					<div v-if="d.rowChanges" class="dc-table dc-diff-table dc-changes">
-						<div class="dc-scroll">
+						<div
+							class="dc-scroll"
+							:class="{ 'dc-tall': d.rowChanges.rows.length > 12 }"
+						>
 							<table>
 								<thead>
 									<tr>
@@ -112,6 +115,7 @@ function press(button) {
 												<span v-if="r.statusLabel" class="dc-status">{{
 													r.statusLabel
 												}}</span>
+												<span v-else class="dc-unchanged">Unchanged</span>
 											</td>
 											<td v-for="(c, ci) in r.cells" :key="'rd' + ci">
 												<template v-if="c.was">
@@ -140,7 +144,7 @@ function press(button) {
 							<h4 class="dc-removed-title">Will be removed</h4>
 							<div class="dc-scroll">
 								<table>
-									<thead class="dc-sr">
+									<thead>
 										<tr>
 											<th
 												v-for="(c, ci) in d.rowChanges.columns"
@@ -165,6 +169,9 @@ function press(button) {
 							</div>
 						</div>
 						<p v-if="d.rowChanges.more" class="dc-more">{{ d.rowChanges.more }}</p>
+						<p v-if="d.rowChanges.notShown" class="dc-more">
+							{{ d.rowChanges.notShown }}
+						</p>
 					</div>
 					<div v-if="d.table" class="dc-table dc-diff-table">
 						<div class="dc-scroll">
@@ -407,6 +414,15 @@ function press(button) {
 	border-radius: 999px;
 	background: var(--dc-bg-soft);
 	color: var(--dc-text);
+}
+/* A long list of changes scrolls inside the card so the buttons stay reachable. */
+.dc-tall {
+	max-height: 22rem;
+	overflow-y: auto;
+}
+.dc-unchanged {
+	font-size: 11.5px;
+	color: var(--dc-muted);
 }
 .dc-was {
 	display: block;

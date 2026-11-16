@@ -192,4 +192,27 @@ describe("DraftCard", () => {
 		expect(w.text()).toContain("The rows are saved in the order shown.");
 		expect(w.text()).toContain("1 row changed, 1 row unchanged, row order changes");
 	});
+
+	// Break: the removed list loses its header semantics, or Was/Now lose their labels or breaks.
+	it("the removed table has a real header and a multi-line entry stacks Was over Now", () => {
+		const w = draw("update-table-rows");
+		const head = w.find(".dc-removed thead");
+		expect(head.classes()).not.toContain("dc-sr");
+		expect(head.findAll("th").map((h) => h.text())).toEqual(["From Time", "Hrs"]);
+		const c = structuredClone(card("update-diff"));
+		c.diff[0] = { label: "Notes", from: "a\nb", to: "c\nd", multiline: true };
+		const m = mount(DraftCard, { props: { card: c } });
+		const blocks = m.findAll(".dc-block");
+		expect(blocks.map((b) => b.find(".dc-block-label").text())).toEqual(["Was", "Now"]);
+		expect(blocks[0].text()).toContain("a\nb");
+		expect(blocks[1].text()).toContain("c\nd");
+	});
+
+	// Break: the footer live region is missing in a state where it is needed.
+	it.each([[{}], [{ editing: true }], [{ streaming: true }]])(
+		"the live region exists for %j",
+		(ctx) => {
+			expect(draw("create-simple", ctx).find("[aria-live=polite]").exists()).toBe(true);
+		}
+	);
 });
