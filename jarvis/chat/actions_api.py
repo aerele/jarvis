@@ -1468,13 +1468,17 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 
 @frappe.whitelist(methods=["POST"])
 @require_jarvis_user
-def save_draft_card(token: str, conversation: str, values=None) -> dict:
+def save_draft_card(
+	token: str, conversation: str, values: dict | list | str | int | float | None = None
+) -> dict:
 	"""Save a draft card with the values the person edited: their Save confirms THOSE
 	values (``jarvis.chat.draft_save``). Owner-checked like ``apply_action``.
 
-	``values`` is deliberately not annotated: Frappe validates a whitelisted call's annotations,
-	and a list, a number or a malformed body would get a framework type error instead of the
-	"could not be read" reply the form shows (``draft_save.values_of``).
+	``values`` is annotated wide on purpose. Every whitelisted parameter must be annotated
+	(``require_type_annotated_api_methods``: an un-annotated one is a 500), and Frappe validates
+	the call against the annotation: a narrow ``dict | str`` would turn a list, a number or a
+	malformed body into a framework type error instead of the "could not be read" reply the
+	form shows (``draft_save.values_of``).
 
 	``values``: the edited fields, written over the draft's own values; ``{}`` saves the
 	card as drafted. The exact contract, child tables included, is stated once in
