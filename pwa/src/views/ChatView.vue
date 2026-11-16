@@ -70,6 +70,7 @@ import { exportSummary } from "@shared/lib/exportJobs.js";
 import ReportScope from "../components/ReportScope.vue";
 import Composer from "../components/Composer.vue";
 import { splitQuote, withQuote } from "@jsshared/reply_quote.mjs";
+import { createReader } from "@jsshared/read_aloud.mjs";
 import {
 	boundedDelivery,
 	newSendRequestId,
@@ -326,6 +327,13 @@ function replyWith(text) {
 	input.value = next;
 	nextTick(() => composer.value?.focusEnd?.());
 }
+// Listen: the phone's own voice (shared/read_aloud.mjs); no chip where it has none.
+// One reading at a time; it stops on a chat switch and on leaving the chat.
+const reader = createReader(window);
+const speakingId = ref(null);
+reader.subscribe((id) => (speakingId.value = id));
+watch(convId, () => reader.stop());
+onUnmounted(() => reader.stop());
 // An action card is a live offer, not history: only the newest assistant turn
 // may still be applied. Scrolling back to last week's proposal and tapping
 // Create would write a record the user has long since moved on from.
@@ -1792,6 +1800,39 @@ onUnmounted(() => {
 							</svg>
 							Reply
 						</button>
+						<!-- read the reply aloud with the phone's own voice -->
+						<button
+							v-if="reader.supported"
+							type="button"
+							class="jv-msg-act"
+							:class="{ 'jv-msg-act-on': speakingId === it.key }"
+							:aria-pressed="speakingId === it.key"
+							@click="reader.toggle(it.key, replyBodyText($event))"
+						>
+							<svg
+								v-if="speakingId === it.key"
+								viewBox="0 0 24 24"
+								fill="currentColor"
+								aria-hidden="true"
+							>
+								<rect x="6" y="6" width="12" height="12" rx="2" />
+							</svg>
+							<svg
+								v-else
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.8"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<path d="M11 5 6 9H2v6h4l5 4z" />
+								<path d="M15.5 8.5a5 5 0 0 1 0 7" />
+								<path d="M19 5a10 10 0 0 1 0 14" />
+							</svg>
+							{{ speakingId === it.key ? "Stop" : "Listen" }}
+						</button>
 					</div>
 					<ActionCard
 						v-if="showsDraftCard(it)"
@@ -2254,6 +2295,10 @@ onUnmounted(() => {
 	color: var(--ink5);
 	font-size: 12.5px;
 	-webkit-tap-highlight-color: transparent;
+}
+.jv-msg-act-on {
+	color: var(--ink9);
+	border-color: var(--ink5);
 }
 .jv-msg-act svg {
 	width: 14px;
