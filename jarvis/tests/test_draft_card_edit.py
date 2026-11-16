@@ -16,10 +16,9 @@ from jarvis.chat import draft_values
 class _Rules:
 	"""Fixed site answers for ``draft_values.errors``."""
 
-	def __init__(self, tables=None, saved=None, draft=None, refused=()):
+	def __init__(self, tables=None, saved=None, refused=()):
 		self.tables = tables or {}
 		self.saved = saved or {}
-		self.draft = draft or {}
 		self.refused = set(refused)
 
 	def table_kind(self, field):
@@ -34,9 +33,6 @@ class _Rules:
 	def saved_rows(self, table):
 		return frozenset(self.saved.get(table, ()))
 
-	def draft_rows(self, table):
-		return frozenset(self.draft.get(table, ()))
-
 	def mark(self, field, message, *, table=None, idx=None):
 		return {"fieldname": field, "parentfield": table, "idx": idx, "message": message}
 
@@ -46,9 +42,10 @@ class TestDraftValuesPure(unittest.TestCase):
 		"""A made-up or foreign row name must be marked before the claim; otherwise it
 		reaches the write, fails after the claim, and closes the card instead of marking
 		the row. Saved rows, rows the draft named and new rows pass."""
-		rules = _Rules(tables={"items": "Table"}, saved={"items": {"r1"}}, draft={"items": {"r9"}})
+		rules = _Rules(tables={"items": "Table"}, saved={"items": {"r1"}})
 		rows = [{"name": "r1"}, {"name": "r9"}, {"name": "zz"}, {"label": "new"}, {"name": ""}]
-		found = draft_values.errors({"items": rows}, rules, is_update=True)
+		base = {"items": [{"name": "r9"}]}
+		found = draft_values.errors({"items": rows}, rules, is_update=True, base=base)
 		self.assertEqual(
 			found,
 			[{"fieldname": "name", "parentfield": "items", "idx": 3, "message": draft_values.NOT_A_ROW}],
@@ -77,8 +74,8 @@ class TestDraftValuesPure(unittest.TestCase):
 		self.assertEqual(draft_values.errors({"items": new_only}, empty, is_update=True), [])
 
 	def test_a_table_that_is_not_a_list_of_rows_is_refused_and_none_clears_it(self):
-		"""A malformed table must be a field mark, not a crash in the write; ``None`` is
-		update_doc's own "clear the table" and passes."""
+		"""A malformed table must be a field mark, not a crash in the write; ``None`` clears
+		the table and passes."""
 		rules = _Rules(tables={"items": "Table"})
 		for bad in ("x", [1], {"name": "r1"}):
 			with self.subTest(bad=bad):
@@ -86,38 +83,74 @@ class TestDraftValuesPure(unittest.TestCase):
 				self.assertEqual(mark["message"], draft_values.NOT_ROWS)
 		self.assertEqual(draft_values.errors({"items": None}, rules, is_update=True), [])
 
+	def test_a_draft_row_index_must_name_one_drafted_row_once(self):
+		"""``_draft_row`` says which drafted row a sent row is: an index that is not one,
+		or one two rows both claim, would copy the wrong drafted cells into the record."""
+		rules = _Rules(tables={"items": "Table"})
+		base = {"items": [{"x": 1}, {"x": 2}]}
+		rows = [{"_draft_row": 0}, {"_draft_row": 5}, {"_draft_row": "1"}, {"_draft_row": True}]
+		rows += [{"_draft_row": 1}, {"_draft_row": 1}]
+		found = draft_values.errors({"items": rows}, rules, is_update=False, base=base)
+		self.assertEqual(
+			[(f["idx"], f["message"]) for f in found],
+			[
+				(2, draft_values.NOT_A_DRAFTED_ROW),
+				(3, draft_values.NOT_A_DRAFTED_ROW),
+				(4, draft_values.NOT_A_DRAFTED_ROW),
+				(6, draft_values.TWICE),
+			],
+		)
+		on_update = _Rules(tables={"items": "Table"}, refused={"_draft_row"})
+		[mark] = draft_values.errors({"items": [{"_draft_row": 0}]}, on_update, is_update=True, base=base)
+		self.assertEqual(mark["message"], "refused", "an update's rows are keyed by name only")
+
 	def test_an_update_writes_the_edits_over_the_drafts_own_changes(self):
 		"""The form sends only what was edited: the draft's other changes must still be
-		written (an unedited save is exactly the card), and a table sent replaces the
-		draft's list for that table whole."""
+		written (an unedited save is exactly the card), a table sent replaces the draft's
+		list for that table whole, and None is sent on to set a field blank."""
 		args = {"doctype": "T", "name": "N", "changes": {"status": "Open", "items": [{"name": "r1"}]}}
-		same = draft_values.edited_call("update_doc", args, {})
-		self.assertEqual(same, args)
-		edited = draft_values.edited_call("update_doc", args, {"priority": "High"})
-		self.assertEqual(edited["changes"], {"status": "Open", "items": [{"name": "r1"}], "priority": "High"})
+		self.assertEqual(draft_values.edited_call("update_doc", args, {}), args)
+		edited = draft_values.edited_call("update_doc", args, {"priority": "High", "date": None})
+		self.assertEqual(
+			edited["changes"], {"status": "Open", "items": [{"name": "r1"}], "priority": "High", "date": None}
+		)
 		rows = [{"name": "r1"}, {"label": "new"}]
 		self.assertEqual(
 			draft_values.edited_call("update_doc", args, {"items": rows})["changes"]["items"], rows
 		)
 		self.assertEqual(args["changes"]["items"], [{"name": "r1"}], "the sealed call is never changed")
 
-	def test_a_create_writes_exactly_the_form_and_keeps_a_typed_prompt_name(self):
-		"""A create's form is its whole record: a field the person cleared must not come
-		back from the draft. Only the name a prompt-named doctype's draft typed is kept
-		when the form has no name field to send it."""
-		args = {"doctype": "T", "values": {"a": 1, "name": "X-1"}, "continue": True}
+	def test_a_create_keeps_every_drafted_key_the_form_did_not_send(self):
+		"""DATA LOSS guard: a value the form cannot show (an attachment, a hidden field, a
+		typed prompt name) must still be written; an unedited save is exactly the card;
+		None or "" clears a field."""
+		sealed = {"a": 1, "img": "https://example.com/x.png", "name": "X-1", "zero": 0}
+		args = {"doctype": "T", "values": sealed, "continue": True}
+		self.assertEqual(draft_values.edited_call("create_doc", args, {}), args)
+		edited = draft_values.edited_call("create_doc", args, {"b": 2, "a": "", "name": None})
 		self.assertEqual(
-			draft_values.edited_call("create_doc", args, {"b": 2}),
-			{"doctype": "T", "values": {"b": 2}, "continue": True},
+			edited,
+			{
+				"doctype": "T",
+				"values": {"img": "https://example.com/x.png", "zero": 0, "b": 2},
+				"continue": True,
+			},
 		)
-		self.assertEqual(
-			draft_values.edited_call("create_doc", args, {"b": 2}, prompt_name=True)["values"],
-			{"b": 2, "name": "X-1"},
-		)
-		self.assertEqual(
-			draft_values.edited_call("create_doc", args, {"name": "X-2"}, prompt_name=True)["values"],
-			{"name": "X-2"},
-		)
+		self.assertEqual(sealed["a"], 1, "the sealed call is never changed")
+
+	def test_a_create_table_merges_rows_by_their_drafted_index(self):
+		"""A sent table is the final rows: a row from the draft keeps the cells the form did
+		not send and loses the ones sent empty; a new row is added; a drafted row no sent
+		row names is removed; a table not sent keeps its drafted rows, None clears it."""
+		drafted = [{"x": 1, "hidden": "keep"}, {"x": 2}, {"x": 3, "note": "drop"}]
+		args = {"doctype": "T", "values": {"items": drafted, "tags": [{"tag": "t"}]}}
+		sent = [{"_draft_row": 0, "x": 10}, {"_draft_row": 2, "note": ""}, {"x": 9, "blank": ""}]
+		tables = {"items", "tags"}
+		edited = draft_values.edited_call("create_doc", args, {"items": sent}, tables=tables)["values"]
+		self.assertEqual(edited["items"], [{"x": 10, "hidden": "keep"}, {"x": 3}, {"x": 9}])
+		self.assertEqual(edited["tags"], [{"tag": "t"}])
+		cleared = draft_values.edited_call("create_doc", args, {"tags": None}, tables=tables)["values"]
+		self.assertNotIn("tags", cleared)
 
 
 try:
@@ -130,9 +163,10 @@ if FrappeTestCase is not None:
 	import threading
 	from unittest.mock import patch
 
+	from jarvis import api
 	from jarvis._commit_watch import CommitWatch
 	from jarvis.chat import actions_api, agent_notes, confirm_card, draft_card, draft_save, pending_confirm
-	from jarvis.chat.pending_actions import _execute
+	from jarvis.chat.pending_actions import _execute, _store
 	from jarvis.tests._pending_action_helpers import (
 		CONV,
 		MSG,
@@ -141,16 +175,18 @@ if FrappeTestCase is not None:
 		PA,
 		PendingActionTestMixin,
 		as_user,
-		ensure_user,
 	)
 	from jarvis.tests._transport_helpers import provision_legacy_site
 	from jarvis.tests.test_pending_confirm import _purge_legacy
 
 	FLAG = "jarvis_draft_cards"
-	WEB = "dce-web@example.com"  # may write a Web Form (Website Manager)
-	MARK = "pa-test dce"  # every ToDo here; the mixin's cleanup removes "pa-test%"
+	MARK = "pa-test dce"  # every ToDo and Web Form here; the mixin's cleanup removes "pa-test%"
+	IMAGE = "https://example.com/pa-test-dce.png"  # not a /files URL: Frappe attaches nothing
 	SUBMIT = {"kind": "submit", "action": None}
 	NOTE_PREFIX = "the user confirmed the draft and it was saved: "
+
+	def _fail(*args, **kwargs):
+		raise frappe.ValidationError("boom")
 
 	class _Continuations:
 		"""Stands in for ``actions_api.enqueue_continuation``: records the call and runs
@@ -169,12 +205,10 @@ if FrappeTestCase is not None:
 	class _DraftCase(PendingActionTestMixin, FrappeTestCase):
 		def setUp(self):
 			super().setUp()
-			ensure_user(WEB, ("Jarvis User", "Website Manager"))
 			provision_legacy_site(self)
-			for user in (OWNER, WEB):
+			for user in (OWNER, OTHER):
 				_purge_legacy(user)
 				self.addCleanup(_purge_legacy, user)
-			self.web_forms = []
 			self.addCleanup(self._wipe)
 			flag = patch.dict(frappe.conf, {FLAG: 1})
 			flag.start()
@@ -187,21 +221,26 @@ if FrappeTestCase is not None:
 		def _wipe(self):
 			frappe.db.rollback()
 			frappe.set_user(self._pa_orig_user)
-			frappe.db.sql(f"DELETE FROM `tab{PA}` WHERE owner_user=%(u)s", {"u": WEB})
-			convs = frappe.get_all(CONV, filters={"owner": WEB}, pluck="name")
-			if convs:
-				frappe.db.delete(MSG, {"conversation": ["in", convs]})
-				frappe.db.delete("Jarvis Chat Turn", {"conversation": ["in", convs]})
-				frappe.db.delete(CONV, {"name": ["in", convs]})
-			frappe.db.delete("Jarvis Agent Write", {"actor": WEB})
-			if self.web_forms:
-				frappe.db.delete("Web Form Field", {"parent": ["in", self.web_forms]})
-				frappe.db.delete("Web Form", {"name": ["in", self.web_forms]})
-			frappe.db.delete("Web Form", {"title": ["like", f"{MARK}%"]})
+			forms = frappe.get_all("Web Form", filters={"title": ["like", f"{MARK}%"]}, pluck="name")
+			if forms:
+				frappe.db.delete("Web Form Field", {"parent": ["in", forms]})
+				frappe.db.delete("Web Form", {"name": ["in", forms]})
 			frappe.db.delete("ToDo", {"description": ["like", f"%{MARK}%"]})
 			frappe.db.commit()
 
-		def mint(self, conv, tool, args, *, owner=OWNER, draft=True):
+		def website_manager(self):
+			"""OTHER may write Web Forms, for this test only."""
+			frappe.get_doc("User", OTHER).add_roles("Website Manager")
+			frappe.db.commit()
+			self.addCleanup(self._revoke)
+
+		def _revoke(self):
+			frappe.db.rollback()
+			frappe.set_user(self._pa_orig_user)
+			frappe.get_doc("User", OTHER).remove_roles("Website Manager")
+			frappe.db.commit()
+
+		def mint(self, conv, tool, args, *, owner=OWNER, exec_user=None, draft=True):
 			"""Park ``tool(args)`` as ``api._run_tool`` does (card, draft, display row)."""
 			would = args.get("values") if tool == "create_doc" else args.get("changes")
 			card = confirm_card.build_card(tool, args, {"would": would}, draft)
@@ -211,6 +250,7 @@ if FrappeTestCase is not None:
 			token = pending_confirm.mint(
 				conversation=conv,
 				owner=owner,
+				exec_user=exec_user,
 				tool=tool,
 				args=json.loads(json.dumps(args)),
 				run_id="",
@@ -223,6 +263,13 @@ if FrappeTestCase is not None:
 			conv = self.make_conv()
 			args = {"doctype": "ToDo", "values": {"description": description}, **extra}
 			return conv, self.mint(conv, "create_doc", args)
+
+		def form_draft(self, values, *, owner=OWNER):
+			"""A Web Form create draft (a title is added); ``(conv, token)``."""
+			conv = self.make_conv(owner=owner)
+			title = f"{MARK} {frappe.generate_hash(length=8)}"
+			args = {"doctype": "Web Form", "values": {"title": title, "doc_type": "ToDo", **values}}
+			return conv, self.mint(conv, "create_doc", args, owner=owner)
 
 		def save(self, token, conv, values=None, user=OWNER):
 			with as_user(user):
@@ -240,6 +287,12 @@ if FrappeTestCase is not None:
 			self.assertEqual(self.sealed(token), before)
 			self.assertEqual(before.status, "Pending")
 
+		def assert_closed(self, out, code, message=None):
+			self.assertIs(out.get("closed"), True, out)
+			self.assertEqual(out["error"]["code"], code)
+			if message is not None:
+				self.assertEqual(out["error"]["message"], message)
+
 		def tool_rows(self, conv):
 			return frappe.get_all(
 				MSG,
@@ -250,6 +303,14 @@ if FrappeTestCase is not None:
 		def todos(self, text):
 			"""ToDo records whose description holds ``MARK`` + ``text``."""
 			return frappe.get_all("ToDo", filters={"description": ["like", f"%{MARK} {text}%"]}, pluck="name")
+
+		def form_rows(self, form):
+			return frappe.get_all(
+				"Web Form Field",
+				filters={"parent": form, "parenttype": "Web Form", "parentfield": "web_form_fields"},
+				fields=["name", "fieldname", "label", "description"],
+				order_by="idx asc",
+			)
 
 		def notes(self, conv):
 			raw = frappe.db.get_value(CONV, conv, "pending_agent_notes")
@@ -266,13 +327,35 @@ if FrappeTestCase is not None:
 			self.assert_untouched(token, before)
 			self.assertEqual(self.todos("stranger"), [])
 
+		def test_a_stranger_with_their_own_chat_and_the_owners_token_is_refused(self):
+			"""Owning SOME conversation is not owning the card: the row's owner and its own
+			conversation must both match, or the stranger writes into the owner's card."""
+			conv, token = self.todo_draft()
+			before = self.sealed(token)
+			own = self.make_conv(owner=OTHER)
+			out = self.save(token, own, {"description": f"{MARK} borrowed"}, user=OTHER)
+			self.assert_closed(out, draft_save.CLOSED)
+			self.assert_untouched(token, before)
+			self.assertEqual(self.todos("borrowed"), [])
+
+		def test_a_card_that_runs_as_someone_else_is_refused(self):
+			"""The edited write runs as the person saving: a card sealed to run as another
+			user must never be written under the saver's rights instead."""
+			conv = self.make_conv()
+			args = {"doctype": "ToDo", "values": {"description": f"{MARK} other runner"}}
+			token = self.mint(conv, "create_doc", args, exec_user=OTHER)
+			before = self.sealed(token)
+			self.assert_closed(self.save(token, conv, {}), draft_save.CLOSED)
+			self.assert_untouched(token, before)
+			self.assertEqual(self.todos("other runner"), [])
+
 		def test_the_flag_off_refuses_and_leaves_the_card(self):
 			"""Dark means dark: with ``jarvis_draft_cards`` off the endpoint writes nothing."""
 			conv, token = self.todo_draft()
 			before = self.sealed(token)
 			with patch.dict(frappe.conf, {FLAG: 0}):
 				out = self.save(token, conv, {"description": f"{MARK} flag off"})
-			self.assertEqual((out["closed"], out["error"]["code"]), (True, draft_save.CLOSED))
+			self.assert_closed(out, draft_save.CLOSED)
 			self.assert_untouched(token, before)
 			self.assertEqual(self.todos("flag off"), [])
 
@@ -284,8 +367,7 @@ if FrappeTestCase is not None:
 			before = self.sealed(token)
 			frappe.db.set_value(CONV, conv, "file_box", 1)
 			frappe.db.commit()
-			out = self.save(token, conv, {"description": f"{MARK} file box"})
-			self.assertEqual((out["closed"], out["error"]["code"]), (True, draft_save.CLOSED))
+			self.assert_closed(self.save(token, conv, {"description": f"{MARK} file box"}), draft_save.CLOSED)
 			self.assert_untouched(token, before)
 			frappe.db.set_value(CONV, conv, "file_box", 0)
 			if frappe.db.has_column(CONV, "collaboration_active"):
@@ -316,6 +398,77 @@ if FrappeTestCase is not None:
 			self.assertIn(f"{MARK} edited", decided.tool_args)
 			self.assertNotIn("original", decided.tool_args)
 
+		def test_a_drafted_value_the_form_cannot_show_is_kept(self):
+			"""DATA LOSS guard: an attachment the model drafted is not on the form, so the form
+			never sends it; an unedited save and a save of another field must both still
+			write it, as a plain Confirm would."""
+			self.website_manager()
+			for values in ({}, {"success_message": f"{MARK} thanks"}):
+				with self.subTest(values=values):
+					conv, token = self.form_draft({"meta_image": IMAGE}, owner=OTHER)
+					out = self.save(token, conv, values, user=OTHER)
+					self.assertTrue(out["ok"], out)
+					saved = frappe.db.get_value(
+						"Web Form", out["name"], ["meta_image", "success_message"], as_dict=True
+					)
+					self.assertEqual(saved.meta_image, IMAGE)
+					self.assertEqual(saved.success_message, values.get("success_message"))
+
+		def test_a_create_table_keeps_drafted_cells_adds_and_removes_rows_by_index(self):
+			"""A row sent with ``_draft_row`` keeps the drafted cells the form did not send, a
+			new row is added, a drafted row left out is removed; a bad index is a mark and
+			changes nothing, so the same card can then be saved."""
+			self.website_manager()
+			drafted = [
+				{
+					"fieldname": "description",
+					"fieldtype": "Data",
+					"label": "First",
+					"description": "help one",
+				},
+				{"fieldname": "status", "fieldtype": "Data", "label": "Second"},
+				{"fieldname": "priority", "fieldtype": "Data", "label": "Third"},
+			]
+			conv, token = self.form_draft({"web_form_fields": drafted}, owner=OTHER)
+			before = self.sealed(token)
+			bad = self.save(token, conv, {"web_form_fields": [{"_draft_row": 7}]}, user=OTHER)
+			[mark] = bad["error"]["fields"]
+			self.assertEqual(
+				(mark["parentfield"], mark["fieldname"], mark["idx"]), ("web_form_fields", "_draft_row", 1)
+			)
+			self.assert_untouched(token, before)
+			table = [
+				{"_draft_row": 0, "label": "First changed"},
+				{"_draft_row": 2},
+				{"fieldname": "date", "fieldtype": "Data", "label": "New"},
+			]
+			out = self.save(token, conv, {"web_form_fields": table}, user=OTHER)
+			self.assertTrue(out["ok"], out)
+			rows = [(r.fieldname, r.label, r.description) for r in self.form_rows(out["name"])]
+			self.assertEqual(
+				rows,
+				[
+					("description", "First changed", "help one"),
+					("priority", "Third", None),
+					("date", "New", None),
+				],
+			)
+
+		def test_an_empty_value_clears_a_drafted_field_and_a_drafted_cell(self):
+			"""The form says "the person emptied this" with "": the drafted value must not be
+			written back, at the top level or in a row."""
+			self.website_manager()
+			rows = [
+				{"fieldname": "description", "fieldtype": "Data", "label": "First", "description": "help"}
+			]
+			conv, token = self.form_draft({"success_message": "Thanks", "web_form_fields": rows}, owner=OTHER)
+			values = {"success_message": "", "web_form_fields": [{"_draft_row": 0, "description": ""}]}
+			out = self.save(token, conv, values, user=OTHER)
+			self.assertTrue(out["ok"], out)
+			self.assertFalse(frappe.db.get_value("Web Form", out["name"], "success_message"))
+			[row] = self.form_rows(out["name"])
+			self.assertEqual((row.label, row.description), ("First", None))
+
 		def test_a_final_draft_queues_the_note_and_no_turn_and_continue_queues_one(self):
 			"""A4's rule must hold for an edited save too: a final draft costs no turn (one
 			note), and a card the agent marked ``continue`` wakes it for the next step. The
@@ -330,15 +483,68 @@ if FrappeTestCase is not None:
 			self.assertEqual(len(self.cont.calls), 1)
 			self.assertEqual(self.notes(chained), [])
 
-		def test_a_second_save_and_a_late_confirm_write_nothing_more(self):
-			"""Create pressed twice, or on two devices: one record. A second save is closed
-			and Confirm on the saved token runs nothing."""
+	class TestRetriesAndEndedCards(_DraftCase):
+		def test_a_second_save_answers_as_the_first_and_a_late_confirm_writes_nothing(self):
+			"""A double click or a retry after a lost reply must say "saved" again (a "draft
+			it again" answer would make the person create a duplicate), write nothing, and
+			Confirm on the saved token must run nothing."""
 			conv, token = self.todo_draft()
-			self.assertTrue(self.save(token, conv, {"description": f"{MARK} once"})["ok"])
+			first = self.save(token, conv, {"description": f"{MARK} once"})
+			self.assertTrue(first["ok"], first)
 			again = self.save(token, conv, {"description": f"{MARK} once"})
-			self.assertEqual((again["closed"], again["error"]["code"]), (True, draft_save.CLOSED))
+			self.assertTrue(again["ok"], again)
+			self.assertEqual((again["name"], again["doc_url"]), (first["name"], first["doc_url"]))
 			self.assertFalse(self.confirm(token, conv)["ok"])
 			self.assertEqual(len(self.todos("once")), 1)
+
+		def test_a_card_that_ended_another_way_says_how_it_ended(self):
+			"""Saved by a plain Confirm, failed, or discarded: each answers closed with words
+			that are true for it, and none writes anything."""
+			saved_conv, saved = self.todo_draft(f"{MARK} confirmed")
+			self.assertTrue(self.confirm(saved, saved_conv)["ok"])
+			failed_conv, failed = self.todo_draft(f"{MARK} failed")
+			with patch("jarvis.api.dispatch_confirmed", side_effect=_fail):
+				self.assertFalse(self.confirm(failed, failed_conv)["ok"])
+			gone_conv, gone = self.todo_draft(f"{MARK} gone")
+			with as_user(OWNER):
+				actions_api.dismiss_tool(gone, conversation=gone_conv)
+			cases = (
+				(saved, saved_conv, draft_save._ALREADY_SAVED),
+				(failed, failed_conv, draft_save._NOT_SAVED),
+				(gone, gone_conv, draft_save._CLOSED),
+			)
+			for token, conv, message in cases:
+				with self.subTest(message=message):
+					self.assert_closed(
+						self.save(token, conv, {"description": f"{MARK} late"}), draft_save.CLOSED, message
+					)
+			self.assertEqual(self.todos("late"), [])
+			self.assertEqual(len(self.todos("confirmed")), 1)
+
+		def test_a_confirm_that_ran_the_card_while_a_failed_save_rolled_back_wins(self):
+			"""Between the failed write's rollback and the row's end the card is Pending and
+			unlocked: a Confirm landing there runs it. The save must then say the card was
+			saved, never "couldn't save", or the person re-drafts a record that exists."""
+			conv, token = self.todo_draft()
+			todo = self.make_todo()
+			real = _execute._discard_failed_dispatch
+
+			def rollback_then_confirm(*args, **kwargs):
+				real(*args, **kwargs)
+				_store._terminal_update(
+					token, ["Pending"], "Executed", decided_by=OWNER, result_doctype="ToDo", result_name=todo
+				)
+				frappe.db.commit()
+
+			with (
+				patch("jarvis.api.dispatch_confirmed", side_effect=_fail),
+				patch.object(_execute, "_discard_failed_dispatch", side_effect=rollback_then_confirm),
+			):
+				out = self.save(token, conv, {"description": f"{MARK} lost"})
+			self.assert_closed(out, draft_save.CLOSED, draft_save._ALREADY_SAVED)
+			row = self.row(token)
+			self.assertEqual((row.status, row.edited), ("Executed", 0))
+			self.assertEqual(self.todos("lost"), [])
 
 	class TestRefusedBeforeTheClaim(_DraftCase):
 		def test_a_missing_value_is_marked_and_the_card_is_untouched(self):
@@ -347,7 +553,7 @@ if FrappeTestCase is not None:
 			conv, token = self.todo_draft()
 			before = self.sealed(token)
 			count = frappe.db.count("ToDo", {"owner": OWNER})
-			out = self.save(token, conv, {"priority": "High"})
+			out = self.save(token, conv, {"description": ""})
 			self.assertFalse(out["ok"])
 			self.assertNotIn("closed", out)
 			self.assertIn("description", [f["fieldname"] for f in out["error"]["fields"]])
@@ -364,6 +570,28 @@ if FrappeTestCase is not None:
 			self.assert_untouched(token, before)
 			self.assertEqual(self.todos("protected"), [])
 
+		def test_a_key_the_write_tool_refuses_is_marked_in_plain_words(self):
+			"""``amended_from`` and ``_``-names are refused by create_doc in a message meant for
+			the model; the form must get a plain mark first."""
+			conv, token = self.todo_draft()
+			out = self.save(token, conv, {"amended_from": "TD-1", "_assign": "[]"})
+			marks = {f["fieldname"]: f["message"] for f in out["error"]["fields"]}
+			self.assertEqual(marks, {"amended_from": draft_values.CANT_SET, "_assign": draft_values.CANT_SET})
+
+		def test_a_field_the_form_cannot_edit_is_refused_in_plain_words(self):
+			"""An attachment is a real field the form cannot edit: sending it, set or emptied,
+			is refused with words that are true ("can't be edited here", never "has no
+			field"), and the drafted value stays on the card."""
+			conv, token = self.form_draft({"meta_image": IMAGE})
+			before = self.sealed(token)
+			for value in ("https://example.com/other.png", ""):
+				with self.subTest(value=value):
+					[mark] = self.save(token, conv, {"meta_image": value})["error"]["fields"]
+					self.assertEqual(
+						(mark["fieldname"], mark["message"]), ("meta_image", draft_values.CANT_EDIT)
+					)
+			self.assert_untouched(token, before)
+
 		def test_a_field_above_the_users_level_is_marked_not_reset(self):
 			"""Frappe would reset a value above the writer's permission level without a word;
 			the save must refuse it with a mark instead."""
@@ -375,40 +603,44 @@ if FrappeTestCase is not None:
 			self.assertEqual([f["fieldname"] for f in out["error"]["fields"]], ["priority"])
 			self.assert_untouched(token, before)
 
+		def test_a_trial_the_form_cannot_fix_is_closed_and_the_card_stays(self):
+			"""A permission denial is no value the form fixes: a fixable reply with nothing
+			marked would leave the person stuck in the form. Closed, nothing claimed."""
+			conv, token = self.form_draft({})  # OWNER may not create a Web Form
+			before = self.sealed(token)
+			out = self.save(token, conv, {})
+			self.assertIs(out.get("closed"), True, out)
+			self.assertTrue(out["error"]["message"].endswith(draft_save._NOT_HERE), out)
+			self.assert_untouched(token, before)
+
 		def test_a_sensitive_edit_is_refused_closed(self):
 			"""Script put on a Web Form makes the write sensitive: the person's one click is
 			not that card, and the write runs without ``allow_risky``, so it is refused
 			before anything runs."""
-			conv = self.make_conv()
-			args = {"doctype": "Web Form", "values": {"title": f"{MARK} form", "doc_type": "ToDo"}}
-			token = self.mint(conv, "create_doc", args)
+			conv, token = self.form_draft({})
 			before = self.sealed(token)
-			values = {**args["values"], "client_script": "console.log(1)"}
-			out = self.save(token, conv, values)
-			self.assertEqual((out["closed"], out["error"]["code"]), (True, draft_save.NEEDS_CARD))
+			out = self.save(token, conv, {"client_script": "console.log(1)"})
+			self.assert_closed(out, draft_save.NEEDS_CARD)
 			self.assert_untouched(token, before)
-			self.assertFalse(frappe.db.exists("Web Form", {"title": f"{MARK} form"}))
 
 		def test_a_stale_update_target_is_refused_closed_and_the_card_stays(self):
 			"""A record changed after the draft must not be overwritten by it (update_doc
 			checks no ``modified``); the row stays Pending for the agent to redo."""
 			conv = self.make_conv()
 			todo = self.make_todo()
-			token = self.mint(
-				conv, "update_doc", {"doctype": "ToDo", "name": todo, "changes": {"status": "Closed"}}
-			)
+			args = {"doctype": "ToDo", "name": todo, "changes": {"status": "Closed"}}
+			token = self.mint(conv, "update_doc", args)
 			before = self.sealed(token)
 			frappe.db.set_value("ToDo", todo, "priority", "High")
 			frappe.db.commit()
-			out = self.save(token, conv, {})
-			self.assertEqual((out["closed"], out["error"]["code"]), (True, draft_save.STALE))
+			self.assert_closed(self.save(token, conv, {}), draft_save.STALE)
 			self.assert_untouched(token, before)
 			self.assertEqual(frappe.db.get_value("ToDo", todo, "status"), "Open")
 
-		def test_a_row_another_decider_holds_is_busy_and_nothing_is_written(self):
-			"""A Confirm, a Discard or a second device holding the row: the save must not
-			wait or write; exactly one decider runs. A real second connection holds the row
-			lock, as ``execute`` takes it."""
+		def test_a_row_another_decider_holds_is_busy_and_the_form_stays(self):
+			"""A Confirm, a Discard or a second device holding the row: the save must not wait,
+			write, or close the form (the person's edits would be lost); it says try again.
+			A real second connection holds the row lock, as ``execute`` takes it."""
 			conv, token = self.todo_draft()
 			site, locked, release = frappe.local.site, threading.Event(), threading.Event()
 			errors = []
@@ -436,12 +668,44 @@ if FrappeTestCase is not None:
 				release.set()
 				t.join(timeout=20)
 			self.assertEqual(errors, [])
-			self.assertEqual((out["closed"], out["error"]["code"]), (True, draft_save.BUSY))
+			self.assertEqual(
+				out,
+				{"ok": False, "error": {"code": draft_save.BUSY, "message": draft_save._BUSY, "fields": []}},
+			)
 			self.assertEqual(self.row(token).status, "Pending")
 			self.assertEqual(self.todos("busy"), [])
 
+		def test_a_card_another_claim_is_running_keeps_the_form_open(self):
+			"""A Confirm that already claimed the card is still running: the same "try again"
+			with the form kept, not a closed reply that drops the person's edits."""
+			conv, token = self.todo_draft()
+			self.set_col(token, status="Executing")
+			out = self.save(token, conv, {"description": f"{MARK} running"})
+			self.assertNotIn("closed", out)
+			self.assertEqual((out["error"]["code"], out["error"]["fields"]), (draft_save.BUSY, []))
+			self.assertEqual(self.todos("running"), [])
+
+	class TestRulesOnRealMeta(FrappeTestCase):
+		def test_a_row_carrying_bookkeeping_keys_is_refused(self):
+			"""A row's ``parent``, ``parenttype``, ``idx`` or ``docstatus`` would move or
+			re-parent it: each is a plain refused mark, on a create and on an update."""
+			row = {"parent": "x", "parenttype": "Web Form", "idx": 3, "docstatus": 1}
+			for is_update in (False, True):
+				with self.subTest(is_update=is_update):
+					found = draft_values.validate(
+						"Web Form", {"web_form_fields": [row]}, is_update=is_update, user="Administrator"
+					)
+					self.assertEqual(
+						{(f["fieldname"], f["message"]) for f in found},
+						{(key, draft_values.CANT_SET) for key in row},
+					)
+
 	class TestTableRows(_DraftCase):
 		"""An update's table is its complete final row list (``merge_child_rows``)."""
+
+		def setUp(self):
+			super().setUp()
+			self.website_manager()
 
 		def web_form(self):
 			doc = frappe.get_doc(
@@ -457,23 +721,14 @@ if FrappeTestCase is not None:
 				}
 			).insert(ignore_permissions=True)
 			frappe.db.commit()
-			self.web_forms.append(doc.name)
 			return doc.name, [r.name for r in doc.web_form_fields]
 
 		def draft_of(self, form, first):
-			"""An update draft that touches 1 of the 3 rows, parked for WEB."""
-			conv = self.make_conv(owner=WEB)
+			"""An update draft that touches 1 of the 3 rows, parked for OTHER."""
+			conv = self.make_conv(owner=OTHER)
 			changes = {"web_form_fields": [{"name": first, "label": "First changed"}]}
 			args = {"doctype": "Web Form", "name": form, "changes": changes}
-			return conv, self.mint(conv, "update_doc", args, owner=WEB)
-
-		def rows(self, form):
-			return frappe.get_all(
-				"Web Form Field",
-				filters={"parent": form, "parenttype": "Web Form", "parentfield": "web_form_fields"},
-				fields=["name", "fieldname", "label"],
-				order_by="idx asc",
-			)
+			return conv, self.mint(conv, "update_doc", args, owner=OTHER)
 
 		def test_an_unedited_save_leaves_what_confirm_leaves(self):
 			"""DATA LOSS guard: saving the card unedited must write the card's own call and
@@ -482,10 +737,10 @@ if FrappeTestCase is not None:
 			saved, (s1, _s2, _s3) = self.web_form()
 			conv_c, token_c = self.draft_of(confirmed, c1)
 			conv_s, token_s = self.draft_of(saved, s1)
-			self.assertTrue(self.confirm(token_c, conv_c, user=WEB)["ok"])
-			self.assertTrue(self.save(token_s, conv_s, {}, user=WEB)["ok"])
-			shape = [(r.fieldname, r.label) for r in self.rows(confirmed)]
-			self.assertEqual([(r.fieldname, r.label) for r in self.rows(saved)], shape)
+			self.assertTrue(self.confirm(token_c, conv_c, user=OTHER)["ok"])
+			self.assertTrue(self.save(token_s, conv_s, {}, user=OTHER)["ok"])
+			shape = [(r.fieldname, r.label) for r in self.form_rows(confirmed)]
+			self.assertEqual([(r.fieldname, r.label) for r in self.form_rows(saved)], shape)
 
 		def test_every_row_plus_a_new_one_and_a_changed_cell_ends_with_four_rows(self):
 			"""A table sent whole keeps each named row, changes only the cell edited, and
@@ -498,8 +753,8 @@ if FrappeTestCase is not None:
 				{"name": r3},
 				{"fieldname": "date", "fieldtype": "Data", "label": "Fourth"},
 			]
-			self.assertTrue(self.save(token, conv, {"web_form_fields": table}, user=WEB)["ok"])
-			rows = self.rows(form)
+			self.assertTrue(self.save(token, conv, {"web_form_fields": table}, user=OTHER)["ok"])
+			rows = self.form_rows(form)
 			self.assertEqual([r.label for r in rows], ["First", "Second changed", "Third", "Fourth"])
 			self.assertEqual([r.name for r in rows[:3]], [r1, r2, r3])
 
@@ -508,8 +763,10 @@ if FrappeTestCase is not None:
 			form, (r1, _r2, r3) = self.web_form()
 			conv, token = self.draft_of(form, r1)
 			values = {"web_form_fields": [{"name": r1}, {"name": r3}]}
-			self.assertTrue(self.save(token, conv, values, user=WEB)["ok"])
-			self.assertEqual([(r.name, r.label) for r in self.rows(form)], [(r1, "First"), (r3, "Third")])
+			self.assertTrue(self.save(token, conv, values, user=OTHER)["ok"])
+			self.assertEqual(
+				[(r.name, r.label) for r in self.form_rows(form)], [(r1, "First"), (r3, "Third")]
+			)
 
 		def test_a_row_name_not_on_the_record_is_marked_and_nothing_changes(self):
 			"""A row name the record does not have is a mark on that row before the claim;
@@ -518,13 +775,24 @@ if FrappeTestCase is not None:
 			conv, token = self.draft_of(form, r1)
 			before = self.sealed(token)
 			values = {"web_form_fields": [{"name": r1}, {"name": "zz-not-a-row"}]}
-			out = self.save(token, conv, values, user=WEB)
+			out = self.save(token, conv, values, user=OTHER)
 			[mark] = out["error"]["fields"]
 			self.assertEqual(
 				(mark["parentfield"], mark["fieldname"], mark["idx"]), ("web_form_fields", "name", 2)
 			)
 			self.assert_untouched(token, before)
-			self.assertEqual(len(self.rows(form)), 3)
+			self.assertEqual(len(self.form_rows(form)), 3)
+
+		def test_an_update_sends_none_to_set_a_field_blank(self):
+			"""On an update None is "make it blank": update_doc sets it, and the draft's own
+			changes still go with it."""
+			form, (r1, _r2, _r3) = self.web_form()
+			frappe.db.set_value("Web Form", form, "success_message", "Thanks")
+			frappe.db.commit()
+			conv, token = self.draft_of(form, r1)
+			self.assertTrue(self.save(token, conv, {"success_message": None}, user=OTHER)["ok"])
+			self.assertFalse(frappe.db.get_value("Web Form", form, "success_message"))
+			self.assertEqual(self.form_rows(form)[0].label, "First changed")
 
 	class TestFailureAfterTheClaim(_DraftCase):
 		def test_a_write_that_fails_after_the_claim_ends_failed_and_closed_with_one_receipt(self):
@@ -532,11 +800,7 @@ if FrappeTestCase is not None:
 			Failed, its one display row says failed with the values that were tried, the
 			agent is told once, and nothing is saved."""
 			conv, token = self.todo_draft()
-
-			def fail(*args, **kwargs):
-				raise frappe.ValidationError("boom")
-
-			with patch("jarvis.api.dispatch_confirmed", side_effect=fail):
+			with patch("jarvis.api.dispatch_confirmed", side_effect=_fail):
 				out = self.save(token, conv, {"description": f"{MARK} tried"})
 			self.assertIs(out["closed"], True)
 			self.assertNotIn("fields", out["error"])
@@ -549,7 +813,7 @@ if FrappeTestCase is not None:
 			self.assertEqual(len(self.cont.calls), 1)
 			self.assertEqual(self.todos("tried"), [])
 
-	class TestNextStepOnTheReceipt(_DraftCase):
+	class TestReceiptRow(_DraftCase):
 		def _next_step(self, conv, token):
 			raw = frappe.db.get_value(MSG, {"conversation": conv, "tool_call_id": token}, "tool_result")
 			return (json.loads(raw or "{}").get("data") or {}).get("suggested_next")
@@ -573,6 +837,15 @@ if FrappeTestCase is not None:
 			self.assertEqual(self._next_step(created, token), SUBMIT)
 			self.assertIsNone(self._next_step(updated, update))
 			self.assertIsNone(self._next_step(plain_conv, plain))
+
+		def test_a_flip_with_no_outcome_says_failed(self):
+			"""A card's row flipped with no outcome would lose its card and become a bare
+			activity row (the live-draft rule would not retire it); it must say "failed"."""
+			conv, token = self.todo_draft()
+			api.persist_tool_receipt(conv, "create_doc", {}, None, action_outcome=None, flip_token=token)
+			[row] = self.tool_rows(conv)
+			self.assertEqual((row.tool_call_id, row.action_outcome), (token, "failed"))
+			self.assertFalse(row.pending_card)
 
 		def test_flag_off_is_todays_behaviour(self):
 			"""With the flag off a confirmed card's receipt has no next step, even a draft

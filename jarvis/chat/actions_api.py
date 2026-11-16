@@ -1472,11 +1472,11 @@ def save_draft_card(token: str, conversation: str, values: dict | str | None = N
 	"""Save a draft card with the values the person edited: their Save confirms THOSE
 	values (``jarvis.chat.draft_save``). Owner-checked like ``apply_action``.
 
-	``values``: a create's whole form (child tables as complete row lists); an update's
-	edited fields only, written over the draft's own ``changes`` (a table sent is its
-	complete final row list: saved rows by ``name``, new rows without one, a row left
-	out is removed). Answers with ``apply_action``'s three shapes: saved, fixable
-	(``error.fields``; the card is still open and unchanged), or ``closed``."""
+	``values``: the edited fields, written over the draft's own values; ``{}`` saves the
+	card as drafted. The exact contract, child tables included, is stated once in
+	``jarvis.chat.draft_values``. Answers with ``apply_action``'s three shapes: saved,
+	fixable (``error.fields``, possibly empty; the card is still open and unchanged), or
+	``closed``. A retry of a save that went through answers saved again."""
 	refuse_in_tool_dispatch()
 	_require_own_conversation(conversation)
 	from jarvis._session import authenticated_user
