@@ -443,3 +443,32 @@ test("an indented code fence removes its list indentation from code", () => {
 	const partialTab = renderMarkdown("1. First\n\n   ```\n\tkeep one column\n   ```");
 	assert.match(partialTab, /<code> keep one column<\/code>/);
 });
+
+test("copyCode gives each fenced code block a copy button, and only when asked (#2170)", () => {
+	const src = "Here it is:\n\n```markdown\n## Title\nA <b>raw</b> & line\n```\n";
+	const plain = renderMarkdown(src);
+	assert.ok(!plain.includes("jv-code-copy"), "off by default: other views are unchanged");
+	assert.match(plain, /<pre class="jv-md-pre"><code>## Title/);
+
+	const body = dom(renderMarkdown(src, { copyCode: true }));
+	const block = body.querySelector(".jv-md-codeblock");
+	assert.ok(block, "the code block is wrapped");
+	const btn = block.querySelector("button.jv-code-copy");
+	assert.ok(btn, "with a copy button");
+	assert.equal(btn.getAttribute("type"), "button");
+	assert.equal(btn.getAttribute("aria-label"), "Copy code");
+	assert.equal(block.querySelector("pre code").textContent, "## Title\nA <b>raw</b> & line");
+	assert.ok(!block.querySelector("pre").contains(btn), "the button sits outside the <pre>");
+});
+
+test("copyCode covers a plain fence and one inside a list item, never a mermaid diagram", () => {
+	const html = renderMarkdown(
+		"```\nplain\n```\n\n1. Step\n\n   ```text\n   nested\n   ```\n\n```mermaid\ngraph TD; A-->B\n```",
+		{
+			copyCode: true,
+		}
+	);
+	const body = dom(html);
+	assert.equal(body.querySelectorAll(".jv-md-codeblock .jv-code-copy").length, 2);
+	assert.equal(body.querySelector(".jv-mermaid .jv-code-copy"), null);
+});
