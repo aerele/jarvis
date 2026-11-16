@@ -75,7 +75,6 @@ function harness() {
 		brand: { agentName: "Jarvis" },
 		closeDraftPanel: () => effects.push("close"),
 		notify: () => effects.push("notify"),
-		fixingDraft: { value: "" },
 		loadConversation: async (id) => effects.push(`load:${id}`),
 		chatViewIsCurrent: (view) =>
 			generation === view.generation && currentId.value === view.conversation,
