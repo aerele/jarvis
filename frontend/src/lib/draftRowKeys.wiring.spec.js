@@ -1,5 +1,5 @@
-// Source-level checks that ChatView is wired to the row keys and the row form's focus
-// helpers: the view is too big to mount. The behaviour itself is spec'd with
+// Source-level checks that the draft panel is wired to the row keys and the row form's focus
+// helpers: ChatView is too big to mount, and the form's template lives in DraftEditForm.vue. The behaviour itself is spec'd with
 // real components and key events in DraftRowBlock.spec.js, rowFormFocus in
 // draftTables/draftLinkFilters specs.
 import fs from "node:fs";
@@ -7,22 +7,32 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
+const form = fs.readFileSync(
+	path.resolve(__dirname, "../components/chat/DraftEditForm.vue"),
+	"utf8"
+);
+// Both markers must exist: a missing end marker must fail, never slice to the end of the file.
 const between = (s, from, to) => {
 	const i = s.indexOf(from);
-	expect(i).toBeGreaterThan(-1);
-	return s.slice(i, s.indexOf(to, i));
+	expect(i, `start marker not found: ${from}`).toBeGreaterThan(-1);
+	const j = s.indexOf(to, i);
+	expect(j, `end marker not found: ${to}`).toBeGreaterThan(-1);
+	return s.slice(i, j);
 };
-const grid = between(src, '<table class="jv-grid">', "</table>");
-const forms = between(src, "<DraftRowBlock", "/>");
+const grid = between(form, '<table class="jv-grid">', "</table>");
+const forms = between(form, "<DraftRowBlock", "/>");
+// The two sources the old single-file checks covered: nothing of the old shapes may return to either.
+const both = src + "\n" + form;
 
 describe("ChatView keys draft rows by __key", () => {
 	it("the grid rows, the form blocks and the link-search keys use __key, not the index", () => {
 		expect(grid).toMatch(/v-for="\(r, ri\) in t\.rows" :key="r\.__key"/);
 		// An open row's form is its grid row (in place), so it shares that row's key.
 		expect(grid).toContain("<DraftRowBlock");
-		expect(src.split("<DraftRowBlock").length - 1).toBe(1);
+		expect(form.split("<DraftRowBlock").length - 1).toBe(1);
+		expect(src).not.toContain("<DraftRowBlock"); // the form owns it; the view mounts the form
 		expect(grid).toMatch(/':' \+\s+r\.__key \+\s+':' \+\s+c\.fieldname/);
-		expect(src).not.toMatch(/v-for="\(r, ri\) in t\.rows" :key="ri"/);
+		expect(both).not.toMatch(/v-for="\(r, ri\) in t\.rows" :key="ri"/);
 	});
 	it("what stays index-based: Remove, the 'Row N' labels, the row status", () => {
 		expect(grid).toMatch(/removeDraftRow\(ti, ri\)/);
@@ -38,11 +48,11 @@ describe("ChatView focus for the row form", () => {
 		expect(toggle).toMatch(/@click="toggleRowForm\(ti, r\)"/);
 		expect(toggle).toMatch(/:id="rowToggleId\(ti, r\.__key\)"/);
 		expect(toggle).toMatch(/rowFormId\(ti, r\.__key\)/);
-		expect(src).not.toMatch(/r\.__open = !r\.__open/);
+		expect(both).not.toMatch(/r\.__open = !r\.__open/);
 	});
 	it("Done and Escape close through closeRowForm, which returns focus by key", () => {
 		expect(forms).toMatch(/@close="closeRowForm\(ti, r\)"/);
-		expect(src).not.toMatch(/@click="r\.__open = false"/);
+		expect(both).not.toMatch(/@click="r\.__open = false"/);
 	});
 	it("Escape is local to the block, not the window handler", () => {
 		const fn = between(src, "function onGlobalKey(e) {", "// ---- Publish chat context");

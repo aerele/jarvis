@@ -11,10 +11,10 @@ import { describe, expect, it } from "vitest";
 const SRC = path.resolve(__dirname, "../..");
 const here = (...p) => path.resolve(__dirname, ...p);
 
-// The files the phone will mount (plus the desktop-only preview, which shares the libs),
-// and the form's own libs that no component imports (the form builds its row memo from it).
+// The form the phone will mount, then each of its parts on its own (so a part stays clean even
+// if the form stops using it), and the desktop-only preview, which shares the libs.
 const ENTRIES = [
-	here("../../lib/rowStatusMemo.js"),
+	here("DraftEditForm.vue"),
 	here("DraftCell.vue"),
 	here("DraftLinkMenu.vue"),
 	here("DraftRowBlock.vue"),
@@ -103,6 +103,8 @@ describe("the draft edit form imports nothing the phone cannot resolve", () => {
 			"rowForm.js",
 			"docFields.js",
 			"rowStatusMemo.js",
+			"draftTotals.js",
+			"rowFormFocus.js",
 		]) {
 			expect(names, `${n} was not reached`).toContain(n);
 		}
