@@ -5,8 +5,8 @@
 // toggle (lib/rowFormFocus.js). Escape is handled here, on the block, not globally:
 // a Link input with its suggestion menu open closes only that menu (DraftCell).
 import { computed, ref } from "vue";
-import DraftRowForm from "@/components/chat/DraftRowForm.vue";
-import { rowFormId } from "@/lib/rowFormFocus";
+import DraftRowForm from "./DraftRowForm.vue";
+import { rowFormId } from "../../lib/rowFormFocus";
 
 const props = defineProps({
 	table: { type: Object, required: true },

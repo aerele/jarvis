@@ -1,9 +1,9 @@
 <script setup>
 import { ref, computed, onBeforeUnmount, onMounted } from "vue";
-import { isRequiredBlank, lineItemSummary } from "@/lib/actionSummary";
-import { draftParentDoc } from "@/lib/draftApply";
-import { AUTO_OPEN_MAX, savedRowsByName } from "@/lib/draftTables";
-import { changeDisplay, clipText, rowExtraValues } from "@/lib/rowForm";
+import { isRequiredBlank, lineItemSummary } from "../../lib/actionSummary";
+import { draftParentDoc } from "../../lib/draftApply";
+import { AUTO_OPEN_MAX, savedRowsByName } from "../../lib/draftTables";
+import { changeDisplay, clipText, rowExtraValues } from "../../lib/rowForm";
 
 const props = defineProps({
 	model: { type: Object, required: true },

@@ -3,9 +3,9 @@
 // field of the row's full form (DraftRowForm). Moved out of ChatView's grid so the
 // two render every fieldtype the same way; the link search stays in ChatView, which
 // owns the one shared popup, so this only reports focus/typing and the pick.
-import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
-import { cellOptions } from "@/lib/docFields";
-import { checkToYesNo } from "@/lib/draftApply";
+import DraftLinkMenu from "./DraftLinkMenu.vue";
+import { cellOptions } from "../../lib/docFields";
+import { checkToYesNo } from "../../lib/draftApply";
 
 const props = defineProps({
 	field: { type: Object, required: true },

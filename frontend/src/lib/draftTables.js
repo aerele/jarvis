@@ -13,8 +13,8 @@ import {
 	rowKeyColumn,
 	savedRowsMap,
 	toPanelRow,
-} from "@/lib/draftApply";
-import { gridNames, rowChangedSet } from "@/lib/rowForm";
+} from "./draftApply";
+import { gridNames, rowChangedSet } from "./rowForm";
 
 // A panel row's stable id (`__key`), unique for the page's life and never reused. The
 // row's position changes when a row above it is removed; this does not, so a link
