@@ -167,8 +167,10 @@ class TestOneApprovalPerCreate(PendingActionTestMixin, FrappeTestCase):
 		self.assertEqual(self.dates(), ["2026-10-29"])
 
 	def test_card_confirmed_first_refuses_the_same_proposals_draft(self):
-		draft = self.draft()
+		# The card's chat row comes before the draft's reply, so its receipt does not retire
+		# the draft (jarvis.chat.live_draft) and the save reaches the one-approval check.
 		token = self.card()
+		draft = self.draft()
 		self.assertTrue(self.confirm(token)["ok"])
 		created = frappe.db.get_value(PA, token, "result_name")
 		refused = self.save(draft)
@@ -231,9 +233,22 @@ class TestOneApprovalPerCreate(PendingActionTestMixin, FrappeTestCase):
 		self.assertFalse(self.confirm(token).get("ok"))
 		self.assertEqual(self.dates(), ["2026-10-30"])
 
-	def test_a_different_card_from_the_same_turn_confirmed_after_the_draft_is_not_taken_for_it(self):
+	def test_a_card_confirmed_after_the_draft_ends_the_draft(self):
+		# A card staged after the draft and confirmed is a decided write after it: the draft
+		# is no longer live, so its save is refused as closed before one-approval runs.
 		draft = self.draft()
+		token = self.card()
+		self.assertTrue(self.confirm(token)["ok"])
+		refused = self.save(draft)
+		self.assertEqual((refused["ok"], refused.get("closed")), (False, True), refused)
+		self.assertEqual(refused["error"]["code"], "DraftClosedError")
+		self.assertFalse(frappe.db.get_value(MSG, draft, "draft_saved_as"), "never claimed")
+		self.assertEqual(self.dates(), ["2026-10-20"])
+
+	def test_a_different_card_from_the_same_turn_confirmed_after_the_draft_is_not_taken_for_it(self):
+		# The card is staged first and confirmed after the draft (its row stays before it).
 		token = self.card(self.values("2026-11-05"))
+		draft = self.draft()
 		self.assertTrue(self.confirm(token)["ok"])
 		created = frappe.db.get_value(PA, token, "result_name")
 		refused = self.save(draft)
@@ -246,9 +261,10 @@ class TestOneApprovalPerCreate(PendingActionTestMixin, FrappeTestCase):
 		self.assertEqual(self.dates(), ["2026-11-05"])
 
 	def test_equal_values_confirmed_from_another_turn_after_the_draft_are_not_taken_for_it(self):
-		draft = self.draft()
-		self.human()
+		# Card, then the person, then the draft; the card is confirmed after the draft.
 		token = self.card()
+		self.human()
+		draft = self.draft()
 		self.assertTrue(self.confirm(token)["ok"])
 		refused = self.save(draft)
 		self.assertIn("may be this same record", refused["error"]["message"])
@@ -256,9 +272,9 @@ class TestOneApprovalPerCreate(PendingActionTestMixin, FrappeTestCase):
 		self.assertEqual(self.dates(), ["2026-10-20"])
 
 	def test_a_different_card_from_another_turn_confirmed_after_the_draft_refuses_it(self):
-		draft = self.draft()
-		self.human()
 		token = self.card(self.values("2026-11-05"))
+		self.human()
+		draft = self.draft()
 		self.assertTrue(self.confirm(token)["ok"])
 		refused = self.save(draft)
 		self.assertIn("may be this same record", refused["error"]["message"])
@@ -295,7 +311,8 @@ class TestOneApprovalPerCreate(PendingActionTestMixin, FrappeTestCase):
 		self.assertTrue(self.save(draft)["ok"])
 		again = self.save(draft)
 		self.assertFalse(again["ok"])
-		self.assertIn("already saved", again["error"]["message"])
+		# Its receipt retired the draft: refused as closed before the claim is even tried.
+		self.assertEqual((again.get("closed"), again["error"]["code"]), (True, "DraftClosedError"))
 		self.assertEqual(self.dates(), ["2026-10-29"])
 
 	def test_a_saved_draft_cannot_be_reopened_from_the_client(self):
@@ -326,7 +343,10 @@ class TestOneApprovalPerCreate(PendingActionTestMixin, FrappeTestCase):
 		draft = self.draft()
 		with patch("jarvis.chat.actions_api._append_receipt", side_effect=RuntimeError("receipt down")):
 			self.assertTrue(self.save(draft)["ok"])
-		self.assertFalse(self.save(draft)["ok"])
+		# No receipt, so the draft still looks live: the claim is the line that holds.
+		again = self.save(draft)
+		self.assertFalse(again["ok"])
+		self.assertIn("already saved", again["error"]["message"])
 		self.assertEqual(self.dates(), ["2026-10-29"])
 
 	def test_a_settle_failure_never_turns_a_saved_draft_into_a_failure(self):
@@ -459,14 +479,18 @@ class TestOneApprovalPerCreate(PendingActionTestMixin, FrappeTestCase):
 	# -- the source reply -----------------------------------------------------------------
 
 	def test_a_named_draft_must_be_a_create_reply_in_this_chat(self):
+		# What is not this chat's live draft is refused as closed (jarvis.chat.live_draft).
 		other = self.make_conv()
-		for message in (
-			"not-a-message",
-			self.draft(conv=other),
-			self.draft(role="user"),
-			self.draft({"title": self.tag}, doctype="Note"),
-			self.draft(verb="update"),
+		for message in ("not-a-message", self.draft(conv=other), self.draft(role="user")):
+			refused = self.save(message)
+			self.assertFalse(refused["ok"], message)
+			self.assertEqual(refused["error"]["code"], "DraftClosedError", message)
+		# The live draft, but not a create of this doctype: one-approval's own check refuses.
+		for make in (
+			lambda: self.draft({"title": self.tag}, doctype="Note"),
+			lambda: self.draft(verb="update"),
 		):
+			message = make()
 			refused = self.save(message)
 			self.assertFalse(refused["ok"], message)
 			self.assertIn("no longer available", refused["error"]["message"])

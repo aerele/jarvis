@@ -19,12 +19,14 @@ import frappe
 
 from jarvis._session import impersonate
 from jarvis.chat.events import publish_to_user
+from jarvis.chat.live_draft import ACTION_RE
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
 AR = "Jarvis Approval Request"
-# The client's fence grammar (ChatView.vue ``_ACTION_RE``): the FIRST block wins.
-_ACTION_RE = re.compile(r"```jarvis-action[ \t]*\n([\s\S]*?)```")
+# The client's fence grammar (ChatView.vue ``_ACTION_RE``): the FIRST block wins. Defined once,
+# in live_draft, so the live-draft rule and this module read a fence the same way.
+_ACTION_RE = ACTION_RE
 _DONE_OPTIONS = ["Done", "Skip"]
 _PROCESSING = "Sending this change to the Approval Board."
 _GONE = "This change was already sent to the Approval Board. Look for it there."

@@ -785,6 +785,10 @@ ENDPOINTS.update(
 			"arguments": {"conversation": "$conversation", "token": "$token"},
 			"scope": "chat_scoped",
 		},
+		"jarvis.chat.actions_api.dismiss_draft": {
+			"arguments": {"conversation": "$conversation", "message": "$message"},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.actions_api.dismiss_tool": {
 			"arguments": {"conversation": "$conversation", "token": "$token"},
 			"scope": "chat_scoped",
