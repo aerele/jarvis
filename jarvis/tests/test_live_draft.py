@@ -414,6 +414,117 @@ class TestLiveDraftContext(_Base):
 		self.assertNotIn("auto mode", notes)
 
 
+class TestDraftingClause(_Base):
+	"""The drafting note (``DRAFTING_CLAUSE``) in the assembled prompt: only with the site flag
+	``jarvis_draft_cards`` on, once, inside the one bracket, and never where the gate would not
+	park a draft card. The rule's own cases (shared chat, every origin, the typed reminder) run
+	without a site in ``test_drafting_clause``."""
+
+	def setUp(self):
+		super().setUp()
+		self.fixed = frappe.utils.now_datetime()
+
+	def _prompt(self, doc, msg: str, flag: bool) -> str:
+		"""The prompt for one stored turn with the flag on or off, the clock held still so two
+		builds differ only by the clause."""
+		from jarvis.chat.turn_handler import assemble_prompt
+
+		with (
+			patch.dict(frappe.conf, {"jarvis_draft_cards": 1 if flag else 0}),
+			patch("frappe.utils.now_datetime", return_value=self.fixed),
+		):
+			return assemble_prompt(
+				doc, message_id=msg, conversation_id=doc.name, context={}, attachments=[], user=TEST_USER
+			).user_message
+
+	def _turn(self, conv: str, seq: int = 1, origin: str = "human", text: str = "hello", **conv_flags):
+		"""``(conversation doc, user message)``; the flags are set in memory only, like the
+		sibling auto-mode context tests."""
+		doc = frappe.get_doc(CONV, conv)
+		for key, value in conv_flags.items():
+			doc.set(key, value)
+		extra = {"hidden": 1} if origin == "continuation" else {}
+		msg = _insert(conv, seq, "user", text, origin=origin, **extra)
+		frappe.db.commit()
+		return doc, msg
+
+	def _bracket(self, prompt: str) -> str:
+		start = prompt.index("[Context:")
+		return prompt[start : prompt.index("]\n", start)]
+
+	def test_the_note_is_in_the_one_bracket_once(self):
+		"""A second bracket would read as a forged system line (``test_context_identity``), and a
+		note outside the bracket is not the trusted line: it must sit in the bracket exactly once."""
+		from jarvis.chat.turn_handler import DRAFTING_CLAUSE
+
+		doc, msg = self._turn(_make_conv(TEST_USER))
+		out = self._prompt(doc, msg, flag=True)
+		self.assertEqual(out.count("[Context:"), 1)
+		self.assertEqual(out.count(DRAFTING_CLAUSE), 1)
+		bracket = self._bracket(out)
+		self.assertIn(DRAFTING_CLAUSE, bracket)
+		self.assertLess(bracket.index(f"; conv: {doc.name}"), bracket.index(DRAFTING_CLAUSE))
+
+	def test_a_continuation_turn_gets_the_note(self):
+		"""The agent stages the next step of a plan on the hidden turn after a Create, and that
+		is where it must still know to draft with the tool, not with a block."""
+		from jarvis.chat.turn_handler import DRAFTING_CLAUSE
+
+		doc, msg = self._turn(
+			_make_conv(TEST_USER), origin="continuation", text="[System] Applied: the user confirmed."
+		)
+		self.assertIn(DRAFTING_CLAUSE, self._bracket(self._prompt(doc, msg, flag=True)))
+
+	def test_no_note_where_the_gate_would_not_park_a_draft_card(self):
+		"""One row per way a turn runs writes without a card for a person, or is not the person's
+		own: the note would promise a draft card that never comes (auto mode, an armed macro, an
+		approved skill run, confirm all, a File Box chat) or send a macro, system, agent or
+		delegated turn to draft for nobody."""
+		cases = [
+			({"auto_mode": 1}, "human"),
+			({"skip_confirmation": 1}, "human"),
+			({"skill_autorun": 1}, "human"),
+			({"request_autorun": 1}, "human"),
+			({"file_box": 1}, "human"),
+			({}, "macro"),
+			({}, "system"),
+			({}, "agent"),
+			({}, "file_box"),
+			({}, "delegated"),
+		]
+		for flags, origin in cases:
+			with self.subTest(flags=flags, origin=origin):
+				doc, msg = self._turn(_make_conv(TEST_USER), origin=origin, **flags)
+				out = self._prompt(doc, msg, flag=True)
+				self.assertNotIn("; drafts:", out)
+
+	def test_the_flag_off_prompt_is_the_prompt_without_the_note(self):
+		"""The flag is off on every site today: the prompt must be today's bytes, the flag-on
+		one differing by the note and nothing else, for an ordinary turn, a continuation turn
+		and a turn with a typed draft waiting (the note steps aside there: both builds equal)."""
+		from jarvis.chat.turn_handler import DRAFTING_CLAUSE
+
+		ordinary = self._turn(_make_conv(TEST_USER))
+		continuation = self._turn(
+			_make_conv(TEST_USER), origin="continuation", text="[System] Applied: the user confirmed."
+		)
+		waiting_conv = _make_conv(TEST_USER)
+		_insert(waiting_conv, 1, "assistant", _TODO)
+		typed = self._turn(waiting_conv, seq=2)
+		for name, (doc, msg), note in (
+			("ordinary", ordinary, True),
+			("continuation", continuation, True),
+			("typed draft waiting", typed, False),
+		):
+			with self.subTest(turn=name):
+				on = self._prompt(doc, msg, flag=True)
+				off = self._prompt(doc, msg, flag=False)
+				self.assertNotIn("; drafts:", off)
+				self.assertEqual(on.replace(DRAFTING_CLAUSE, "", 1), off)
+				self.assertEqual(DRAFTING_CLAUSE in on, note)
+		self.assertIn("re-emit the block", self._prompt(*typed, flag=True), "the reminder is still sent")
+
+
 class TestOnlyTheLiveDraftApplies(PendingActionTestMixin, FrappeTestCase):
 	"""``apply_action`` with a draft ``message`` writes only when that message is the live
 	draft, and refuses a kept update draft whose record changed since; both as ``closed``."""
@@ -903,6 +1014,29 @@ class TestParkedToolDraft(PendingActionTestMixin, FrappeTestCase):
 		self._park_row(conv, 1, verb="update", rname=self.make_todo())
 		_insert(conv, 2, "assistant", _TODO)
 		self.assertIn("update ToDo, its card with Save changes", self._clause(conv))
+
+	def test_a_waiting_parked_draft_gets_the_drafting_note_and_then_its_reminder(self):
+		"""With the site flag on, the turn after a parked draft carries both texts: the note first
+		(how to draft), the reminder after it (the card waits; call the tool again only for a
+		change). A reminder that said "re-emit the block", or a note that went missing here,
+		would send the agent back to typing a second card beside the parked one."""
+		from jarvis.chat.turn_handler import DRAFTING_CLAUSE, assemble_prompt
+
+		conv = self.make_conv()
+		self._park_row(conv, 1)
+		with as_user(OWNER):
+			doc = frappe.get_doc(CONV, conv)
+			msg = _insert(conv, 2, "user", "and a note too?", origin="human")
+			with patch.dict(frappe.conf, {"jarvis_draft_cards": 1}):
+				out = assemble_prompt(
+					doc, message_id=msg, conversation_id=conv, context={}, attachments=[], user=OWNER
+				).user_message
+		self.assertEqual(out.count("[Context:"), 1)
+		bracket = out[: out.index("]\n")]
+		self.assertEqual(bracket.count(DRAFTING_CLAUSE), 1)
+		self.assertLess(bracket.index(DRAFTING_CLAUSE), bracket.index("; unsaved draft waiting: create ToDo"))
+		self.assertIn("call the tool again only for a change they ask for", bracket)
+		self.assertNotIn("re-emit the block", bracket)
 
 	def test_the_clause_for_a_parked_card_takes_no_lock(self):
 		"""Prompt assembly must never lock: the card read is a plain read (same spy the typed
