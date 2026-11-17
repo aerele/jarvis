@@ -23,7 +23,7 @@ function labelsOf(table) {
 	const out = new Set();
 	for (const c of [
 		...((table && table.columns) || []),
-		...((table && table.formFields) || []),
+		...((table && (table.formFields || table.form_fields)) || []),
 	]) {
 		const label = norm(c && c.label);
 		if (label) out.add(label);
@@ -31,9 +31,11 @@ function labelsOf(table) {
 	return out;
 }
 
-// { tableIndex, row } for the row the message names, or null. The table is the only one in the form,
-// or else the only one that has a field whose label the message names (a label that two tables share
-// proves nothing). Never a guess between two tables; null too when that table has no such row.
+// { tableIndex, row } for the row the message names, or null. The table is the only one the DocType
+// HAS (`tableMeta` holds every readable table, shown or not: a create form shows only the required or
+// proposed ones, so "the only one in the form" proves nothing), or else the only one that has a field
+// whose label the message names (a label that two tables share proves nothing). A label owned by a
+// table the form does not show marks nothing. Never a guess; null too when that table has no such row.
 export function rowNamedBy(message, model) {
 	const m = ROW.exec(typeof message === "string" ? message : "");
 	const tables = (model && model.tables) || [];
@@ -41,17 +43,29 @@ export function rowNamedBy(message, model) {
 	const number = Number(m[1]);
 	if (!(number >= 1)) return null;
 	let at = -1;
-	if (tables.length === 1) at = 0;
+	const all = Object.keys((model && model.tableMeta) || {}).length;
+	if (tables.length === 1 && all <= 1) at = 0;
 	else {
 		const text = norm(message.slice(m[0].length));
-		const labels = tables.map(labelsOf);
+		// every table of the DocType, shown (with its labels from the form) or hidden (from its spec)
+		const owners = Object.entries((model && model.tableMeta) || {}).map(
+			([fieldname, spec]) => ({
+				fieldname,
+				labels: labelsOf(spec),
+			})
+		);
+		const shown = tables.map((t, i) => ({ fieldname: t.fieldname, labels: labelsOf(t), i }));
+		for (const t of shown)
+			if (!owners.some((o) => o.fieldname === t.fieldname))
+				owners.push({ fieldname: t.fieldname, labels: t.labels });
 		const hit = new Set();
-		for (const label of new Set(labels.flatMap((l) => [...l]))) {
-			const owners = labels.map((l, i) => (l.has(label) ? i : -1)).filter((i) => i >= 0);
-			if (owners.length === 1 && names(text, label)) hit.add(owners[0]);
+		for (const label of new Set(owners.flatMap((o) => [...o.labels]))) {
+			const who = owners.filter((o) => o.labels.has(label));
+			if (who.length === 1 && names(text, label)) hit.add(who[0].fieldname);
 		}
 		if (hit.size !== 1) return null;
-		at = [...hit][0];
+		at = shown.findIndex((t) => t.fieldname === [...hit][0]);
+		if (at < 0) return null;
 	}
 	const row = sentRows(tables[at], model.verb)[number - 1];
 	return row ? { tableIndex: at, row } : null;

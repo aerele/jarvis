@@ -60,6 +60,45 @@ describe("rowNamedBy: which row of which table a message names", () => {
 		expect(hit && [hit.tableIndex, hit.row.__key]).toEqual(want);
 	});
 
+	// Break: "the only table the form shows" is taken as the only table of the DocType, so a "Row 1"
+	// from a table the form does not show (taxes, filled from a default template) marks a row of the
+	// shown one. The DocType's own tables (tableMeta) decide, and a hidden table's labels count.
+	describe("a DocType with a table the form does not show", () => {
+		const shown = () => {
+			const m = model([
+				[
+					"items",
+					"Items",
+					["Item Code", "Description"],
+					rows3("item_code"),
+					["Warehouse"],
+				],
+			]);
+			m.tableMeta = {
+				items: {
+					columns: cols("Item Code", "Description"),
+					form_fields: cols("Warehouse"),
+				},
+				taxes: { columns: cols("Account", "Description"), form_fields: [] },
+			};
+			return m;
+		};
+		it.each([
+			["no label named: no mark", "Row 1: something is wrong", null],
+			["a label of the shown table", "Row 2: Warehouse is required", [0, "k2"]],
+			["a label of the hidden table", "Row 1: Account is not valid", null],
+			["a label both tables share", "Row 1: Description is too long", null],
+		])("%s", (_, message, want) => {
+			const hit = rowNamedBy(message, shown());
+			expect(hit && [hit.tableIndex, hit.row.__key]).toEqual(want);
+		});
+		it("a DocType with one table still marks it (tableMeta of one)", () => {
+			const m = model([["time_logs", "Time Logs", ["From Time"], rows3()]]);
+			m.tableMeta = { time_logs: {} };
+			expect(rowNamedBy("Row 3: anything", m).row.__key).toBe("k3");
+		});
+	});
+
 	// Break: an update numbers rows the way a create does, so the server's "Row 2" lands on a different
 	// row (a saved row is always sent, a blank new row never is).
 	it("counts the rows the save sent: saved rows always, a blank new row never", () => {
