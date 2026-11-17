@@ -62,6 +62,11 @@ _JARVIS_DENY = {
 	"Webhook Request Log",
 	"Jarvis Conversation",
 	"Jarvis Chat Message",
+	# Audit rows: a trigger on them would amplify, since each fire's own reads
+	# insert more Activity Event rows (and its writes more Agent Write rows).
+	"Jarvis Activity Event",
+	"Jarvis Activity Daily",
+	"Jarvis Agent Write",
 }
 # High-churn / auth-path core doctypes not necessarily in log_types. File fires
 # on every attachment; the User/session/notification/email doctypes fire on the

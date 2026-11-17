@@ -1,0 +1,28 @@
+{
+ "actions": [],
+ "creation": "2026-11-13 00:00:00.000000",
+ "description": "Watermark of the activity rollup: the last day whose per-person totals are final in Jarvis Activity Daily. Written only by jarvis.activity_rollup. A Single on purpose: rewriting it clears only this document's cache (frappe.db.set_single_value), never the whole site cache that set_global would.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "rolled_through"
+ ],
+ "fields": [
+  {"fieldname": "rolled_through", "fieldtype": "Date", "label": "Rolled Through", "read_only": 1}
+ ],
+ "index_web_pages_for_search": 0,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-11-17 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Activity Rollup",
+ "owner": "Administrator",
+ "permissions": [
+  {"read": 1, "role": "System Manager"}
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
