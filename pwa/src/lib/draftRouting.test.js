@@ -60,11 +60,12 @@ test("one loop over the shown order: a draft item is the inline card, everything
 // are the position in `orderedPending`; the send path passes exactly that list in that order. A
 // draft card is an item of the same list, so its "confirm N" hint names the record it shows.
 // Break: the send path takes the tokens from another list or order than the one the cards are
-// numbered from (a typed "confirm 2" would approve a different record).
+// numbered from (a typed "confirm 2" would approve a different record). The text argument may
+// carry a Reply's quote in front (#2191); the tokens are what is pinned.
 test("typed approval sends the tokens in the order the cards are shown and numbered", () => {
 	assert.match(
 		view,
-		/sendRecovery\.stage\(\s*cid,\s*input\.value,\s*ready,\s*orderedPending\.value\.map\(\(p\) => p\.token\)\s*\)/
+		/sendRecovery\.stage\(\s*cid,[^;]*?\binput\.value,\s*ready,\s*orderedPending\.value\.map\(\(p\) => p\.token\)\s*\)/
 	);
 	assert.match(view, /items: orderedPending\.value,/); // the draft cards' numbers
 	assert.match(view, /`\$\{pi \+ 1\} of \$\{orderedPending\.length\}: `/); // the tiles' numbers
