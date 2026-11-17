@@ -160,6 +160,8 @@
 								v-if="r.__open"
 								class="jv-grid-openrow"
 								:class="{ 'jv-grid-flagged': r.__flag }"
+								@input="clearRowFlag(r)"
+								@change="clearRowFlag(r)"
 							>
 								<td :colspan="t.columns.length + 2" class="jv-grid-opencell">
 									<DraftRowBlock
@@ -391,6 +393,11 @@ provide(DRAFT_SURFACE, toRef(props, "surface"));
 const emit = defineEmits(["link-search", "link-blur", "link-pick", "link-close"]);
 // The host answers these; the arguments pass through unchanged.
 const onDraftLink = (...a) => emit("link-search", ...a);
+// The row's "Row N:" mark (lib/draftRowError.js) goes when the person edits that row; the next save reply
+// clears it too (markRowFromMessage resets every row's flag).
+const clearRowFlag = (row) => {
+	if (row.__flag) delete row.__flag;
+};
 const closeDraftLink = (e) => emit("link-blur", e);
 const pickDraftLink = (...a) => emit("link-pick", ...a);
 

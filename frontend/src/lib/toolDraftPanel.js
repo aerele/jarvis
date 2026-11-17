@@ -350,10 +350,14 @@ export function focusFirstMark(root, mark) {
 	}
 	if (typeof el.scrollIntoView === "function")
 		el.scrollIntoView({ block: "center", behavior: "smooth" });
-	const control =
-		el.matches && el.matches("input, select, textarea")
-			? el
-			: el.querySelector("input, select, textarea") || el;
+	// A row flagged by its message alone has no field to go to: focus the row's own block, never its
+	// first input (a link field opens its suggestion menu on focus and would cover the row).
+	const wholeRow = mark && mark.kind === "row" && !mark.fieldname;
+	const control = wholeRow
+		? el
+		: el.matches && el.matches("input, select, textarea")
+		? el
+		: el.querySelector("input, select, textarea") || el;
 	if (typeof control.focus === "function") control.focus({ preventScroll: true });
 	return el;
 }

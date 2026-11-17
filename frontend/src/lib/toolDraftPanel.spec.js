@@ -631,6 +631,17 @@ describe("focusFirstMark: the server's first mark is scrolled to and focused", (
 		gone.remove();
 	});
 
+	// Break: a row flagged by its message alone (no field) puts focus in its first input; a link field
+	// opens its suggestion menu on focus and covers the row.
+	it("a row flagged without a field takes focus on its block, not on its first input", () => {
+		const root = tree(
+			`<section id="jv-rowform-0-7" tabindex="-1"><input id="jv-rowform-0-7-activity"></section>`
+		);
+		focusFirstMark(root, { kind: "row", tableIndex: 0, key: 7, fieldname: "" });
+		expect(document.activeElement.id).toBe("jv-rowform-0-7");
+		root.remove();
+	});
+
 	// Break: a refusal with no mark (busy, a whole table refused) leaves the reason out of sight below
 	// a long form, or focus jumps to a field because it is empty.
 	it("with no mark it scrolls the error banner into view and takes no focus", () => {

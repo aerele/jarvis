@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { describe, expect, it } from "vitest";
 import { hasFlaggedRow, markRowFromMessage, rowNamedBy } from "./draftRowError.js";
 import { draftCardDirty, draftCardValues, snapshotDraftModel } from "./draftCardValues.js";
@@ -174,5 +175,17 @@ describe("the row number the server counts is the row the form marks", () => {
 		markRowFromMessage(m, "Row 2: From Time overlaps");
 		expect(m.tables[0].rows[1].__flag).toBe(true);
 		expect(draftCardDirty(m, snap, card)).toBe(false);
+	});
+});
+
+describe("the typed draft panel never sets the row flag", () => {
+	// Break: the typed path (ChatView's own draft functions) starts marking rows, which would change the
+	// typed panel's markup. Only the tool path's save reply (toolDraftHost) may call markRowFromMessage.
+	it("only toolDraftHost marks a row from a message; ChatView and the typed apply never do", () => {
+		const read = (f) => fs.readFileSync(new URL(f, import.meta.url), "utf8");
+		expect(read("./toolDraftHost.js")).toContain("markRowFromMessage(");
+		for (const f of ["../views/ChatView.vue", "./draftApply.js"]) {
+			expect(read(f)).not.toMatch(/markRowFromMessage|__flag/);
+		}
 	});
 });

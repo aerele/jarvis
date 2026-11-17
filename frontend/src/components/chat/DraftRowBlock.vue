@@ -61,6 +61,7 @@ function onEscape(ev) {
 		class="jv-rowform-block"
 		tabindex="-1"
 		:aria-labelledby="titleId"
+		:aria-invalid="row.__flag ? 'true' : undefined"
 		@keydown.esc="onEscape"
 	>
 		<!-- As Desk's row editor: which row, and its actions (fold all, insert a row
@@ -156,6 +157,18 @@ function onEscape(ev) {
    width). An accent edge marks the row being edited. */
 .jv-rowform-block {
 	box-shadow: inset 3px 0 0 var(--cta);
+}
+/* A row the server's message names ("Row 3: ..."; row.__flag): the same red the form uses for a refused
+   value (--red edge, --red-bg tint, --red-bd line), on the block and its header. */
+.jv-rowform-block[aria-invalid="true"] {
+	box-shadow: inset 3px 0 0 var(--red);
+	background: var(--red-bg);
+	outline: 1px solid var(--red-bd);
+	outline-offset: -1px;
+}
+.jv-rowform-block[aria-invalid="true"] .jv-rowform-head {
+	background: var(--red-bg);
+	border-bottom-color: var(--red-bd);
 }
 .jv-rowform-block:focus-visible {
 	outline: 2px solid var(--cta);

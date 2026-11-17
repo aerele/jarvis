@@ -947,6 +947,16 @@ describe("DraftSheet: what the person sees", () => {
 		// the screen goes to the row (not the banner) and focus is inside it
 		expect(scroll.mock.contexts.map((el) => el.id)).toEqual([block.element.id]);
 		expect(block.element.contains(document.activeElement)).toBe(true);
+		// focus is on the row's own block, so no link menu opened over its fields
+		expect(document.activeElement).toBe(block.element);
+		expect(block.attributes("aria-invalid")).toBe("true");
+		// editing a cell of that row clears the mark; the other open rows never had it
+		// (the harness row form has no fields, so the input event is raised on the row itself; it bubbles
+		// from a field in the same way)
+		await flagged[0].trigger("input");
+		await nextTick();
+		expect(w.findAll(".jv-grid-flagged")).toHaveLength(0);
+		expect(w.find(".jv-rowform-block").attributes("aria-invalid")).toBeUndefined();
 		w.unmount();
 		delete Element.prototype.scrollIntoView;
 	});
