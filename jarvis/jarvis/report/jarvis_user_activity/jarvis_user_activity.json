@@ -10,14 +10,14 @@
  "idx": 0,
  "is_standard": "Yes",
  "letterhead": null,
- "modified": "2026-09-20 00:00:00.000000",
+ "modified": "2026-11-06 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
- "name": "Agent Write Log",
+ "name": "Jarvis User Activity",
  "owner": "Administrator",
  "prepared_report": 0,
- "ref_doctype": "Jarvis Agent Write",
- "report_name": "Agent Write Log",
+ "ref_doctype": "Jarvis Activity Event",
+ "report_name": "Jarvis User Activity",
  "report_type": "Script Report",
  "roles": [
   {
