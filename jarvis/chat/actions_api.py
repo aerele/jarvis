@@ -686,6 +686,10 @@ def _append_receipt(
 	frappe.db.set_value(CONV, conversation, "last_active_at", frappe.utils.now(), update_modified=False)
 
 
+# The agent note for a saved draft, typed (``_note_applied``) or a card (``on_chat_settled``).
+_DRAFT_SAVED_NOTE = "the user confirmed the draft and it was saved: {receipt}"
+
+
 def _note_applied(conversation: str, receipt: str) -> None:
 	"""jarvis#2253: a Confirm without ``continue`` queues no turn, and the agent's own
 	session memory still says the write is pending. Queue the receipt as an agent note
@@ -693,7 +697,7 @@ def _note_applied(conversation: str, receipt: str) -> None:
 	from jarvis.chat import agent_notes
 
 	try:
-		agent_notes.append(conversation, f"the user confirmed the draft and it was saved: {receipt}")
+		agent_notes.append(conversation, _DRAFT_SAVED_NOTE.format(receipt=receipt))
 	except Exception:
 		frappe.log_error(title="apply_action agent note failed", message=frappe.get_traceback())
 
@@ -1460,6 +1464,33 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	"""
 	refuse_in_tool_dispatch()
 	return _confirm_core(token, conversation)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def save_draft_card(
+	token: str, conversation: str, values: dict | list | str | int | float | None = None
+) -> dict:
+	"""Save a draft card with the values the person edited: their Save confirms THOSE
+	values (``jarvis.chat.draft_save``). Owner-checked like ``apply_action``.
+
+	``values`` is annotated wide on purpose. Every whitelisted parameter must be annotated
+	(``require_type_annotated_api_methods``: an un-annotated one is a 500), and Frappe validates
+	the call against the annotation: a narrow ``dict | str`` would turn a list, a number or a
+	malformed body into a framework type error instead of the "could not be read" reply the
+	form shows (``draft_save.values_of``).
+
+	``values``: the edited fields, written over the draft's own values; ``{}`` saves the
+	card as drafted. The exact contract, child tables included, is stated once in
+	``jarvis.chat.draft_values``. Answers with ``apply_action``'s three shapes: saved,
+	fixable (``error.fields``, possibly empty; the card is still open and unchanged), or
+	``closed``. A retry of a save that went through answers saved again."""
+	refuse_in_tool_dispatch()
+	_require_own_conversation(conversation)
+	from jarvis._session import authenticated_user
+	from jarvis.chat import draft_save
+
+	return draft_save.save(str(token or "").strip(), conversation, values, authenticated_user())
 
 
 def _approve_run_refusal(record) -> dict | None:
@@ -2364,6 +2395,43 @@ def _stamp_correction(names: list[str], message: str) -> None:
 		)
 
 
+# Keyed on the STORED card (``item["draft"]``), not on the live ``jarvis_draft_cards`` flag: a draft
+# card parked while the flag was on and confirmed after it was turned off still takes the no-turn
+# path here, and the "draft saved" note still reaches the agent.
+def _is_final_draft(conversation: str | None, items: list[dict]) -> bool:
+	"""One confirmed (Executed) tool-driven draft card, not part of a typed batch, that the
+	agent did not mark ``continue``, in a conversation that is not an armed skill run
+	("Approve & run" queues no turn itself: it relies on this settle's continuation). Every
+	other settle keeps its continuation turn."""
+	from jarvis.chat.pending_actions._store import EXECUTED
+
+	if len(items) != 1:
+		return False
+	item = items[0]
+	draft = item.get("draft")
+	if not (
+		item["status"] == EXECUTED
+		and not item.get("batch_id")
+		and isinstance(draft, dict)
+		and draft.get("continue") is not True
+	):
+		return False
+	# One plain read, last: only a candidate final draft pays for it.
+	return not (conversation and frappe.db.get_value("Jarvis Conversation", conversation, "skill_autorun"))
+
+
+def _draft_saved_note(receipt: str) -> str:
+	"""The agent note for a saved draft card. The receipt carries a record name the model or
+	the user chose, and the note is later placed inside a ``[Context: ...; notes: ...]``
+	bracket, so it is made one safe line with no bracket or semicolon."""
+	from jarvis.chat.turn_handler import _safe_label_name
+
+	safe = _safe_label_name(receipt)
+	for ch in ";[]":
+		safe = safe.replace(ch, " ")
+	return _DRAFT_SAVED_NOTE.format(receipt=" ".join(safe.split()))
+
+
 def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 	"""``_settle.CONTINUATIONS["chat"]``: tell the agent how its settled card(s) ended,
 	at most once (D5). Executed/Failed: ONE hidden continuation turn carrying every
@@ -2381,6 +2449,16 @@ def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 
 	names = [i["name"] for i in items]
 	decided = [i for i in items if i["status"] in (EXECUTED, FAILED)]
+	if conversation and _is_final_draft(conversation, items):
+		# A saved final draft costs no turn: the receipt chip is already written
+		# (``_settle._deliver``), and the agent hears of it on its next turn.
+		lock_conversation(conversation)  # conversation -> pending action lock order
+		if claim_settled(names):
+			from jarvis.chat import agent_notes
+
+			receipt = _settled_plan(decided)["receipt"]
+			agent_notes.append(conversation, _draft_saved_note(receipt))  # commits the claim
+		return
 	if conversation and decided:
 		# A cron / operator settle runs as Administrator: the turn is the owner's, and
 		# never runs AS Administrator / Guest / a disabled user on their behalf.

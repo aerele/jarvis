@@ -1,0 +1,236 @@
+[
+ {
+  "id": "create-simple",
+  "source": "builder",
+  "expect": "draft",
+  "card": {
+   "kind": "create",
+   "doctype": "ToDo",
+   "name": null,
+   "rows": [
+    {
+     "label": "Description",
+     "value": "Call the supplier"
+    }
+   ],
+   "tables": [],
+   "draft": {
+    "verb": "create",
+    "doctype": "ToDo",
+    "name": "",
+    "title": "New ToDo",
+    "values": {
+     "description": "Call the supplier"
+    },
+    "ignored": [],
+    "dropped": [],
+    "continue": false
+   }
+  }
+ },
+ {
+  "id": "create-with-table",
+  "source": "builder",
+  "expect": "draft",
+  "card": {
+   "kind": "create",
+   "doctype": "Web Form",
+   "name": null,
+   "rows": [
+    {
+     "label": "Title",
+     "value": "Feedback"
+    }
+   ],
+   "tables": [
+    {
+     "label": "Web Form Fields",
+     "count": 1,
+     "columns": [
+      "Field",
+      "Fieldtype",
+      "Custom Label",
+      "Mandatory",
+      "Options"
+     ],
+     "fieldnames": [
+      "fieldname",
+      "fieldtype",
+      "label",
+      "reqd",
+      "options"
+     ],
+     "rows": [
+      {
+       "cells": [
+        "email",
+        "Data",
+        "Email",
+        "No",
+        ""
+       ]
+      }
+     ],
+     "extra": 0,
+     "extra_columns": 0,
+     "unknown_columns": 0,
+     "unknown_fields": []
+    }
+   ],
+   "draft": {
+    "verb": "create",
+    "doctype": "Web Form",
+    "name": "",
+    "title": "New Web Form",
+    "values": {
+     "title": "Feedback",
+     "web_form_fields": [
+      {
+       "fieldname": "email",
+       "fieldtype": "Data"
+      }
+     ]
+    },
+    "ignored": [],
+    "dropped": [],
+    "continue": false
+   }
+  }
+ },
+ {
+  "id": "create-ignored-field",
+  "source": "hand",
+  "expect": "draft",
+  "card": {
+   "kind": "create",
+   "doctype": "Timesheet",
+   "name": null,
+   "rows": [
+    {
+     "label": "Employee",
+     "value": "EMP-1"
+    }
+   ],
+   "tables": [],
+   "draft": {
+    "verb": "create",
+    "doctype": "Timesheet",
+    "name": "",
+    "title": "New Timesheet",
+    "values": {
+     "employee": "EMP-1"
+    },
+    "ignored": [
+     "colour"
+    ],
+    "dropped": [],
+    "continue": false
+   }
+  }
+ },
+ {
+  "id": "update-diff",
+  "source": "builder",
+  "expect": "draft",
+  "card": {
+   "kind": "update",
+   "doctype": "ToDo",
+   "name": "TD-0001",
+   "title": "Call the supplier",
+   "diff": [
+    {
+     "label": "Status",
+     "from": "Open",
+     "to": "Closed"
+    }
+   ],
+   "draft": {
+    "verb": "update",
+    "doctype": "ToDo",
+    "name": "TD-0001",
+    "title": "ToDo TD-0001",
+    "values": {
+     "status": "Closed"
+    },
+    "ignored": [],
+    "dropped": [],
+    "continue": false
+   }
+  }
+ },
+ {
+  "id": "update-table-rows",
+  "source": "hand",
+  "expect": "draft",
+  "card": {
+   "kind": "update",
+   "doctype": "Timesheet",
+   "name": "TS-0001",
+   "title": "",
+   "diff": [
+    {
+     "label": "Time Logs",
+     "from": "0 rows",
+     "to": "2 rows"
+    }
+   ],
+   "draft": {
+    "verb": "update",
+    "doctype": "Timesheet",
+    "name": "TS-0001",
+    "title": "Timesheet TS-0001",
+    "values": {
+     "time_logs": [
+      {
+       "from_time": "10:00"
+      },
+      {
+       "from_time": "11:00"
+      }
+     ]
+    },
+    "ignored": [
+     "time_logs.hrs_worked"
+    ],
+    "dropped": [],
+    "continue": false
+   }
+  }
+ },
+ {
+  "id": "sensitive",
+  "source": "hand",
+  "expect": "sensitive",
+  "card": {
+   "kind": "update",
+   "doctype": "Server Script",
+   "name": "SS-1",
+   "title": "",
+   "diff": [],
+   "risk": "sensitive",
+   "risk_line": "Changes code that runs on the server."
+  }
+ },
+ {
+  "id": "unreadable",
+  "source": "hand",
+  "expect": "unreadable",
+  "card": {
+   "kind": "create",
+   "doctype": "Timesheet",
+   "name": null,
+   "rows": [],
+   "tables": [],
+   "draft": {
+    "verb": "create",
+    "doctype": "Timesheet",
+    "name": "",
+    "title": "New Timesheet",
+    "values": "not an object",
+    "ignored": [],
+    "dropped": [],
+    "continue": false
+   }
+  }
+ }
+]

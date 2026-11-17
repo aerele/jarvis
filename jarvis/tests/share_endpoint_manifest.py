@@ -850,6 +850,14 @@ ENDPOINTS.update(
 			},
 			"scope": "chat_scoped",
 		},
+		"jarvis.chat.actions_api.save_draft_card": {
+			"arguments": {
+				"conversation": "$conversation",
+				"token": "$token",
+				"values": {"title": "recipient edit"},
+			},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.admission.active_turn_for_conversation": {
 			"arguments": {"conversation": "$conversation"},
 			"scope": "chat_scoped",

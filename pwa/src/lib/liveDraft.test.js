@@ -16,7 +16,10 @@ test("liveDraft: the case list is not empty", () => {
 
 for (const c of CASES) {
 	test(`liveDraft ${c.id}: ${c.note}`, () => {
-		assert.equal(liveDraftRow(c.rows)?.name ?? null, c.live);
+		assert.equal(
+			liveDraftRow(c.rows, { parkedDraft: !!c.parked_draft })?.name ?? null,
+			c.live
+		);
 	});
 }
 

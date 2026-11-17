@@ -1538,6 +1538,10 @@ def persist_tool_receipt(
 	or flipped, False when nothing was (a duplicate, a failed ``only_if``, a lost flip)."""
 	from jarvis.tools import _private_output
 
+	if flip_token and not action_outcome:
+		# A card's own row always ends saying how it ended: flipped (or inserted) with no
+		# outcome it would clear the card and leave a bare activity row in its place.
+		action_outcome = "failed"
 	# Preserve the execution name only long enough to classify a source result.
 	# Deposit metadata uses a fixed label at every durable/realtime boundary, but
 	# source_receipt must see the original name or a future permissive contract
@@ -3825,7 +3829,13 @@ def _refuse_risky_write(
 
 
 def _build_park_card(
-	tool: str, args: dict, preview: dict, *, sensitive: bool, structural: list | None = None
+	tool: str,
+	args: dict,
+	preview: dict,
+	*,
+	sensitive: bool,
+	structural: list | None = None,
+	draft: bool = False,
 ) -> tuple[dict | None, dict | None]:
 	"""``(card, refusal)`` for a park: the chat gate and the File Box hold share it.
 
@@ -3850,7 +3860,7 @@ def _build_park_card(
 	from jarvis.tools import _write_risk
 
 	if not sensitive and structural is None:
-		return confirm_card.build_card(tool, args, preview), None
+		return confirm_card.build_card(tool, args, preview, draft), None
 	if confirm_card.too_large(None, args):
 		return None, _refuse_unshowable_card(tool, args, too_large=True)
 	if structural is not None:
@@ -5174,7 +5184,15 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				frappe.DuplicateEntryError,
 			) as e:
 				frappe.clear_messages()
-				return _preview_error(e)
+				refused = _preview_error(e)
+				from jarvis.chat import draft_card
+
+				if draft_card.wanted(tool, args, must_card=_must_card):
+					# A draft the trial refused for a missing value names the fields.
+					fields = draft_card.refusal(e, tool, args)
+					if fields and isinstance(refused.get("error"), dict):
+						refused["error"]["fields"] = fields
+				return refused
 		else:
 			try:
 				preview = _pending_preview(tool, args)
@@ -5210,22 +5228,32 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			if tool in _SKILL_AUTORUN_COVERED and not _guarded and not shared_permit
 			else (None, None)
 		)
+		draft_for_model = None
 		if isinstance(preview, dict):
 			# A draft-panel write turned into this card (actions_api._park_sensitive):
 			# the clients read it to keep that draft "waiting" across a reload.
 			from_draft = frappe.flags.get("jarvis_park_from_draft")
 			if from_draft:
 				preview["from_draft"] = from_draft
+			# Dark behind the site flag: a single create / update parks as a draft card.
+			from jarvis.chat import draft_card
+
+			as_draft = draft_card.wanted(tool, args, must_card=_must_card)
 			card, refusal = _build_park_card(
 				tool,
 				args,
 				preview,
 				sensitive=_risk == "sensitive",
 				structural=_structure_lines,
+				draft=as_draft,
 			)
 			if refusal is not None:
 				frappe.clear_messages()
 				return refusal
+			if as_draft and isinstance(card, dict):
+				# On the card BEFORE it is parked, so the seal's card hash covers it.
+				if draft_card.attach(card, tool, args, preview.get("would")):
+					draft_for_model = card["draft"]
 			preview["card"] = card
 			if _merge_note and isinstance(card, dict):
 				# What the merge left out (rows with no valid address, repeated addresses,
@@ -5339,6 +5367,9 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		model_preview = (
 			{k: v for k, v in preview.items() if k != "card"} if isinstance(preview, dict) else preview
 		)
+		if draft_for_model is not None:
+			# A parked draft: the person reads the card, the model gets a short result.
+			return draft_card.short_result(tool, draft_for_model, preview)
 		return {
 			"ok": True,
 			"data": {
