@@ -44,10 +44,10 @@ def _move_links():
 	its own Dynamic Link rewrite reads a cache that can be hours stale."""
 	for table, type_col in _DYNAMIC_LINK_TABLES:
 		if frappe.db.table_exists(table):
-			frappe.db.sql(
-				f"update `tab{table}` set link_to = %s where `{type_col}` = 'Report' and link_to = %s",
-				(NEW, OLD),
-			)
+			t = frappe.qb.DocType(table)
+			frappe.qb.update(t).set(t.link_to, NEW).where(t[type_col] == "Report").where(
+				t.link_to == OLD
+			).run()
 
 
 def execute():
