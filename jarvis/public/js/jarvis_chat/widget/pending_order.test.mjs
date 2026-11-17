@@ -476,7 +476,9 @@ const HINT_CASES = [
   [[D("a"), P("b"), D("c")], 'or type "confirm 2"'],
 ];
 for (const [cards, want] of HINT_CASES) {
-  test(`visibleTypedHint: ${cards.map((c) => (c.draft_title ? "D" : "P")).join("") || "empty"}`, () => {
+  test(`visibleTypedHint: ${
+    cards.map((c) => (c.draft_title ? "D" : "P")).join("") || "empty"
+  }`, () => {
     assert.equal(visibleTypedHint(cards), want);
   });
 }
