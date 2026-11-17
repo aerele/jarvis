@@ -10,8 +10,10 @@ duplicate guard (#816) on overlapping event sets.
 from unittest.mock import patch
 
 import frappe
+from frappe.core.doctype.doctype.test_doctype import new_doctype
 
-from jarvis.tests.test_triggers_engine import CTRL_MOD, EXEC_FLAG, TRIGGER, _TriggerTestCase
+from jarvis.patches import v2_32_fill_trigger_doc_events
+from jarvis.tests.test_triggers_engine import ACTIVITY, CTRL_MOD, EXEC_FLAG, TRIGGER, _TriggerTestCase
 from jarvis.triggers import engine
 from jarvis.triggers.engine import split_events, trigger_events
 
@@ -115,24 +117,26 @@ class TestMultiEventDispatch(_TriggerTestCase):
 		self.assertNotIn(trig.name, [r["name"] for r in by_event.get("on_update", [])])
 
 	def test_the_script_runs_on_each_of_its_events(self):
+		# The ToDo exists BEFORE the trigger, so its insert fires nothing: every
+		# activity row below comes from the later real save and the real delete.
+		todo = self._make_todo()
 		trig = self._script_trigger("on_update\non_trash")
 		with patch(EXEC_FLAG, return_value=True):
-			todo = self._make_todo()
-			engine.dispatch(todo, "on_update")
-			engine.dispatch(todo, "on_trash")
-			engine.dispatch(todo, "after_insert")  # not one of its events
-		rows = frappe.get_all(
+			todo.reload()
+			todo.description = "edited after the trigger exists"
+			todo.save(ignore_permissions=True)
+			self.assertEqual(self._events(trig.name), ["on_update"])
+			frappe.delete_doc("ToDo", todo.name, ignore_permissions=True, force=True)
+		self.assertEqual(self._events(trig.name), ["on_update", "on_trash"])
+		self.assertTrue(all(r.status == "Success" for r in self._activities(trig.name)))
+
+	def _events(self, trigger):
+		return frappe.get_all(
 			"Jarvis Trigger Activity",
-			filters={"trigger": trig.name},
-			fields=["doc_event", "status"],
+			filters={"trigger": trigger},
+			pluck="doc_event",
 			order_by="creation asc",
 		)
-		# the real hooks also fire on_update when the ToDo is inserted
-		events = [r.doc_event for r in rows]
-		self.assertIn("on_trash", events)
-		self.assertIn("on_update", events)
-		self.assertNotIn("after_insert", events)
-		self.assertTrue(all(r.status == "Success" for r in rows))
 
 	def test_an_llm_trigger_queues_on_each_event(self):
 		trig = frappe.get_doc(
@@ -180,3 +184,136 @@ class TestDuplicateGuardOnEventSets(_TriggerTestCase):
 	def test_disjoint_events_are_not(self):
 		self._insert("on_update\non_trash")
 		self._insert("after_insert")
+
+
+class TestLegacyRowsAndRollout(_TriggerTestCase):
+	"""A trigger saved before ``doc_events`` existed has it blank. Until the
+	patch fills it, the engine must still fire it on its single ``doc_event``;
+	the patch fills such rows once and leaves everything else alone."""
+
+	def _legacy_script_trigger(self, event="on_update", body="x = 1"):
+		trig = self._make_script_trigger(body=body, event=event)
+		# what an existing row looks like before the field existed
+		frappe.db.set_value(TRIGGER, trig.name, "doc_events", "", update_modified=False)
+		engine.clear_cache()
+		return trig
+
+	def test_a_legacy_row_is_mapped_and_dispatched_on_its_doc_event(self):
+		todo = self._make_todo()
+		trig = self._legacy_script_trigger("on_update")
+		self.assertEqual(frappe.db.get_value(TRIGGER, trig.name, "doc_events"), "")
+		by_event = engine._build_triggers_map().get("ToDo") or {}
+		self.assertIn(trig.name, [r["name"] for r in by_event.get("on_update", [])])
+		for event, rows in by_event.items():
+			if event != "on_update":
+				self.assertNotIn(trig.name, [r["name"] for r in rows], event)
+		with patch(EXEC_FLAG, return_value=True):
+			engine.dispatch(todo, "on_update")
+			engine.dispatch(todo, "on_trash")
+		self.assertEqual(
+			frappe.get_all(ACTIVITY, filters={"trigger": trig.name}, pluck="doc_event"), ["on_update"]
+		)
+
+	def test_the_patch_fills_blank_rows_only_and_is_idempotent(self):
+		legacy = self._legacy_script_trigger("on_trash")
+		# distinct bodies, so the duplicate guard (#816) does not refuse the fixtures
+		populated = self._make_script_trigger(body="x = 2", event="on_update")
+		frappe.db.set_value(
+			TRIGGER, populated.name, "doc_events", "on_update\non_trash", update_modified=False
+		)
+		# an Intake rule runs from uploads, never from doc events: left blank
+		intake = self._legacy_script_trigger("on_update", body="x = 3")
+		frappe.db.set_value(TRIGGER, intake.name, "action_type", "Intake", update_modified=False)
+
+		def stored():
+			return {
+				n: frappe.db.get_value(TRIGGER, n, ["doc_events", "modified"])
+				for n in (legacy.name, populated.name, intake.name)
+			}
+
+		before = stored()
+		v2_32_fill_trigger_doc_events.execute()
+		after = stored()
+		self.assertEqual(after[legacy.name][0], "on_trash")
+		self.assertEqual(after[populated.name], before[populated.name])
+		self.assertEqual(after[intake.name], before[intake.name])
+		v2_32_fill_trigger_doc_events.execute()
+		self.assertEqual(stored(), after)
+
+
+class TestBlockingScriptOnSeveralEvents(_TriggerTestCase):
+	"""A Script trigger on validate + before_submit: both run through the real
+	save and submit, and a throw blocks on each of them."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.doctype = new_doctype(custom=1, is_submittable=1).insert(ignore_permissions=True).name
+
+	@classmethod
+	def tearDownClass(cls):
+		frappe.delete_doc("DocType", cls.doctype, force=True, ignore_permissions=True)
+		super().tearDownClass()
+
+	def _trigger(self, body):
+		with patch(CTRL_MOD + ".is_safe_exec_enabled", return_value=True):
+			doc = frappe.get_doc(
+				{
+					"doctype": TRIGGER,
+					"trigger_name": f"blocking-{frappe.generate_hash(length=8)}",
+					"target_doctype": self.doctype,
+					"doc_events": ["validate", "before_submit"],
+					"action_type": "Script",
+					"script_body": body,
+				}
+			).insert(ignore_permissions=True)
+		self._triggers.append(doc.name)
+		engine.clear_cache()
+		return doc
+
+	def _new(self, value="multi-event test"):
+		return frappe.get_doc({"doctype": self.doctype, "some_fieldname": value})
+
+	def test_both_events_run_on_a_real_insert_and_submit(self):
+		trig = self._trigger("x = 1")
+		with patch(EXEC_FLAG, return_value=True):
+			doc = self._new().insert(ignore_permissions=True)
+			doc.submit()
+		events = frappe.get_all(ACTIVITY, filters={"trigger": trig.name}, pluck="doc_event")
+		# validate runs on the insert and again on the submit, then before_submit
+		self.assertEqual(sorted(events), ["before_submit", "validate", "validate"])
+
+	def test_a_throw_blocks_the_insert_on_validate(self):
+		trig = self._trigger('frappe.throw("stopped by the multi-event trigger")')
+		with patch(EXEC_FLAG, return_value=True), patch("frappe.enqueue") as enq:
+			with self.assertRaises(frappe.ValidationError):
+				self._new().insert(ignore_permissions=True)
+		self.assertEqual(self._blocked(enq, trig.name), ["validate"])
+
+	def test_a_throw_blocks_on_before_submit(self):
+		trig = self._trigger('frappe.throw("stopped by the multi-event trigger")')
+		doc = self._new()
+		doc.docstatus = 1
+		with patch(EXEC_FLAG, return_value=True), patch("frappe.enqueue") as enq:
+			with self.assertRaises(frappe.ValidationError):
+				engine.dispatch(doc, "before_submit")
+		self.assertEqual(self._blocked(enq, trig.name), ["before_submit"])
+
+	def test_a_submit_blocked_by_the_trigger_stays_a_draft(self):
+		self._trigger('if doc.docstatus == 1:\n\tfrappe.throw("no submit")')
+		with patch(EXEC_FLAG, return_value=True):
+			doc = self._new().insert(ignore_permissions=True)
+			with patch("frappe.enqueue"), self.assertRaises(frappe.ValidationError):
+				doc.submit()
+		self.assertEqual(frappe.db.get_value(self.doctype, doc.name, "docstatus"), 0)
+
+	@staticmethod
+	def _blocked(enq, trigger):
+		return [
+			c.kwargs.get("doc_event")
+			for c in enq.call_args_list
+			if c.args
+			and c.args[0] == "jarvis.triggers.engine.write_activity"
+			and c.kwargs.get("trigger") == trigger
+			and c.kwargs.get("status") == "Blocked"
+		]
