@@ -73,6 +73,13 @@
 						<option>Yes</option>
 						<option>No</option>
 					</select>
+					<component
+						:is="dateControl"
+						v-else-if="dateControl && ['date', 'datetime', 'time'].includes(f.control)"
+						:kind="f.control"
+						:ariaLabel="f.label"
+						v-model="f.value"
+					/>
 					<input
 						v-else-if="f.control === 'date'"
 						type="date"
@@ -357,14 +364,14 @@
 // is a state machine the host owns: it is driven through the `link-*` events (the same
 // signatures DraftCell and DraftRowBlock emit) and shown from the read-only `draftLink`.
 // Relative imports only (see draftFormImportGraph.spec.js): the phone resolves `@/` elsewhere.
-import { computed, onMounted, onUpdated, provide, ref, toRef } from "vue";
+import { computed, inject, onMounted, onUpdated, provide, ref, toRef } from "vue";
 import DraftCell from "./DraftCell.vue";
 import DraftLinkMenu from "./DraftLinkMenu.vue";
 import DraftRowBlock from "./DraftRowBlock.vue";
 import { isFieldMissing, readonlyDisplay, removedSavedRows } from "../../lib/draftApply";
 import { blankRow, openChangedRows, toggleLabel, toggleParts } from "../../lib/draftTables";
 import { draftTotals as totalsOf } from "../../lib/draftTotals";
-import { DRAFT_SURFACE } from "../../lib/draftSurface";
+import { DRAFT_DATE_CONTROL, DRAFT_SURFACE } from "../../lib/draftSurface";
 import { createRowStatusMemo } from "../../lib/rowStatusMemo";
 import {
 	closeRowForm,
@@ -390,6 +397,9 @@ const props = defineProps({
 // Slot `top` (the phone's host: its notices, at the top of the scrolling body) draws nothing when
 // empty. The link menu is teleported to <body>, so it cannot see this component's classes: it asks.
 provide(DRAFT_SURFACE, toRef(props, "surface"));
+// The host's Date / Datetime / Time picker (the desktop's DateControl); none (the phone) keeps the
+// browser inputs. DraftCell finds it by injection too, so a table cell and a header field agree.
+const dateControl = inject(DRAFT_DATE_CONTROL, null);
 const emit = defineEmits(["link-search", "link-blur", "link-pick", "link-close"]);
 // The host answers these; the arguments pass through unchanged.
 const onDraftLink = (...a) => emit("link-search", ...a);
@@ -532,14 +542,15 @@ defineExpose({ parkedRegion });
 .jv-draft-fld .jv-req {
 	color: var(--red);
 }
-.jv-draft-fld.missing .jv-action-input {
+/* :deep so a field drawn inside a child control (DateControl's picker input, #833) is marked too. */
+.jv-draft-fld.missing :deep(.jv-action-input) {
 	border-color: var(--amber-bd);
 }
 /* a value the save refused (a bad option or link): marked until the next save */
-.jv-draft-fld.invalid .jv-action-input {
+.jv-draft-fld.invalid :deep(.jv-action-input) {
 	border-color: var(--red);
 }
-.jv-draft-fld.changed .jv-action-input {
+.jv-draft-fld.changed :deep(.jv-action-input) {
 	border-color: var(--cta-bd);
 	background: var(--cta-bg);
 }

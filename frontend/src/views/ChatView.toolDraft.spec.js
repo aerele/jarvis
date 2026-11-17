@@ -696,3 +696,40 @@ describe("the receipt of a decided server draft card", () => {
 		});
 	});
 });
+
+// Break: a card or note in the thread starts under the avatar (the owner's "starts from more
+// left"), or the indent drifts from the assistant row (avatar size or gap changed).
+describe("every agent-side card and note starts where the agent's replies do", () => {
+	const message = fs.readFileSync(
+		path.resolve(__dirname, "../components/chat/Message.vue"),
+		"utf8"
+	);
+	const indent = Number(/--jv-reply-indent: (\d+)px;/.exec(src)?.[1]);
+	const rule = (selector) => {
+		const at = src.indexOf(selector + " {");
+		expect(at, `rule not found: ${selector}`).toBeGreaterThan(-1);
+		return src.slice(at, src.indexOf("}", at));
+	};
+
+	it("the indent is the reply avatar plus the row's gap", () => {
+		const avatar = Number(
+			/<HolidayMark\s+:size="(\d+)"/.exec(slice("<!-- assistant -->", "#above-body"))?.[1]
+		);
+		const gap = Number(
+			/class="jv-amsg" style="display: flex; gap: (\d+)px"/.exec(message)?.[1]
+		);
+		expect(indent).toBe(avatar + gap);
+	});
+
+	it("receipts, tiles and pending cards use the indent, and user bubbles and banners do not", () => {
+		const listed = rule(
+			".jv-thread-inner > :is(.jv-receipt, .jv-toolfail, .jv-action, .jv-tool-draft, .jv-fbw, .jv-rrc)"
+		);
+		expect(listed).toContain("margin-left: var(--jv-reply-indent)");
+		expect(rule(".jv-thread-inner > :is(.jv-stack-hint, .jv-pending-older-note)")).toContain(
+			"calc(var(--jv-reply-indent) + 14px)"
+		);
+		for (const left of [".jv-umsg", ".jv-ububble", ".jv-daydivider", ".jv-macrobar"])
+			expect(listed, left).not.toContain(left);
+	});
+});

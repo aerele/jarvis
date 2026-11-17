@@ -4370,7 +4370,10 @@ def _single_flight_error() -> dict:
 		"a confirmation card for a previous action is still awaiting the user in this "
 		"conversation. Only one runs at a time - do NOT retry this call; stop and end "
 		"your turn now. The card does not expire: the user confirms or discards it, and "
-		"once they confirm you'll get a follow-up turn to continue with the next step.",
+		"once they confirm you'll get a follow-up turn to continue with the next step. "
+		"If the waiting card is not what the user asked for, tell them it is wrong and ask "
+		"them to discard it (Discard in the full chat, Deny on the phone); do not ask a "
+		"yes/no question in that reply.",
 	)
 
 
@@ -4972,6 +4975,32 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			)
 		if conversation_pending:
 			return _single_flight_error()
+		# send_email(recipients_from=...): the bench runs the query and writes one message
+		# per row NOW, so the card shows the real recipients and Confirm sends exactly
+		# them (send_email re-runs the query and refuses a changed list). The model never
+		# types the addresses (jarvis.tools._email_merge). From here on the call IS its
+		# expanded form, like a structure card's canonical args below.
+		_merge_note = None
+		if tool == "send_email" and isinstance(args, dict) and args.get("recipients_from") is not None:
+			from jarvis.tools import _email_merge
+
+			try:
+				args, _merge_note = _email_merge.expand(args)
+			except (JarvisError, frappe.PermissionError, frappe.ValidationError) as e:
+				frappe.clear_messages()
+				return _preview_error(e)
+		# #834: a send that can only fail for want of an outgoing Email Account is
+		# refused here, before the card, with the same code and hint the confirmed
+		# send would have returned. Otherwise the user drafts, reviews and confirms
+		# an email that dies on the click.
+		if tool == "send_email" and isinstance(args, dict):
+			from jarvis.tools.send_email import call_doctypes, require_outgoing_account
+
+			try:
+				require_outgoing_account(call_doctypes(args))
+			except frappe.OutgoingEmailError as e:
+				frappe.clear_messages()
+				return _translate_write_error(e, _msglog_mark(), is_write=True)
 		# Validate BEFORE parking. For a create/update (build-from-args) write,
 		# run the real call in the rollback sandbox now: a deterministic failure
 		# (missing mandatory field, bad link, no create permission) means the
@@ -5086,6 +5115,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				if draft_card.attach(card, tool, args, preview.get("would")):
 					draft_for_model = card["draft"]
 			preview["card"] = card
+			if _merge_note and isinstance(card, dict):
+				# What the merge left out (rows with no valid address, repeated addresses,
+				# the query's own limit), on the card's one warning line.
+				card["warning"] = {**(card.get("warning") or {}), "merge": _merge_note}
 			if tool == "create_doc" and isinstance(card, dict) and _risk != "sensitive" and not _guarded:
 				# The ORIGINAL proposal's identity: saving a draft card of the very same
 				# proposal retires this card (#777, jarvis.chat.one_approval). Not on a
