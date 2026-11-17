@@ -696,3 +696,35 @@ describe("the receipt of a decided server draft card", () => {
 		});
 	});
 });
+
+// Break: the draft card, its receipt or its hint start under the avatar (the owner's "starts from
+// more left"), or the indent drifts from the assistant row (avatar size or gap changed).
+describe("a draft card and its receipt start where the agent's replies do", () => {
+	const chip = fs.readFileSync(path.resolve(__dirname, "../components/ReceiptChip.vue"), "utf8");
+	const message = fs.readFileSync(
+		path.resolve(__dirname, "../components/chat/Message.vue"),
+		"utf8"
+	);
+	const indent = Number(/--jv-reply-indent: (\d+)px;/.exec(src)?.[1]);
+
+	it("the indent is the reply avatar plus the row's gap", () => {
+		const avatar = Number(
+			/<HolidayMark\s+:size="(\d+)"/.exec(slice("<!-- assistant -->", "#above-body"))?.[1]
+		);
+		const gap = Number(
+			/class="jv-amsg" style="display: flex; gap: (\d+)px"/.exec(message)?.[1]
+		);
+		expect(indent).toBe(avatar + gap);
+	});
+
+	it("the card, the stack hint and the draft receipt all use the indent", () => {
+		expect(src).toMatch(/\.jv-tool-draft \{[^}]*margin-left: var\(--jv-reply-indent\)/);
+		expect(src).toMatch(/\.jv-stack-hint \{[^}]*calc\(var\(--jv-reply-indent\) \+ 14px\)/);
+		expect(chip).toMatch(/\.jv-receipt--draft \{\s*margin-left: var\(--jv-reply-indent\)/);
+	});
+
+	it("only a draft receipt takes the class", () => {
+		expect(chip).toContain("{ 'jv-receipt--draft': draftReceipt }");
+		expect(chip.match(/jv-receipt--draft/g)).toHaveLength(2);
+	});
+});

@@ -18212,11 +18212,18 @@ onUnmounted(() => {
    so it is 12px + gap above and the gap alone below, as a .jv-action is. */
 .jv-tool-draft {
 	margin-top: 12px;
+	margin-left: var(--jv-reply-indent);
+}
+/* Where an assistant reply's text starts in the thread: the 28px HolidayMark plus the 12px gap
+   of Message.vue's row. A draft card, its receipt and its hint start here, not under the
+   avatar. ChatView.toolDraft.spec.js ties this number to those two. */
+.jv-thread-inner {
+	--jv-reply-indent: 40px;
 }
 /* The stack's typed-approval hint, when its last card is a draft card with no line for it. The look of
    .jv-pending-older-note. */
 .jv-stack-hint {
-	margin: 4px 14px 8px;
+	margin: 4px 14px 8px calc(var(--jv-reply-indent) + 14px);
 	font-size: 12px;
 	color: var(--text-3);
 }

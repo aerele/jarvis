@@ -17,7 +17,10 @@
   toggle, and a failed / partial / unknown chip its confirmation's reference.
 -->
 <template>
-	<div class="jv-receipt" :class="'jv-receipt--' + view.tone">
+	<div
+		class="jv-receipt"
+		:class="['jv-receipt--' + view.tone, { 'jv-receipt--draft': draftReceipt }]"
+	>
 		<span class="jv-receipt-ico" :class="view.icon" aria-hidden="true">
 			<svg
 				v-if="view.icon === 'confirmed'"
@@ -323,6 +326,12 @@ const ts = computed(() => {
 	font-size: 13px;
 	line-height: 1.45;
 	color: var(--text);
+}
+/* A decided server draft card's receipt starts where the agent's replies do: the chat sets
+   --jv-reply-indent (the reply avatar plus its gap) on the thread. Legacy receipts keep the
+   full width. The right edge is unchanged (the thread is a stretching flex column). */
+.jv-receipt--draft {
+	margin-left: var(--jv-reply-indent);
 }
 .jv-receipt--success {
 	border-color: color-mix(in srgb, var(--green) 32%, var(--border));
