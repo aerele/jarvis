@@ -697,15 +697,19 @@ describe("the receipt of a decided server draft card", () => {
 	});
 });
 
-// Break: the draft card, its receipt or its hint start under the avatar (the owner's "starts from
-// more left"), or the indent drifts from the assistant row (avatar size or gap changed).
-describe("a draft card and its receipt start where the agent's replies do", () => {
-	const chip = fs.readFileSync(path.resolve(__dirname, "../components/ReceiptChip.vue"), "utf8");
+// Break: a card or note in the thread starts under the avatar (the owner's "starts from more
+// left"), or the indent drifts from the assistant row (avatar size or gap changed).
+describe("every agent-side card and note starts where the agent's replies do", () => {
 	const message = fs.readFileSync(
 		path.resolve(__dirname, "../components/chat/Message.vue"),
 		"utf8"
 	);
 	const indent = Number(/--jv-reply-indent: (\d+)px;/.exec(src)?.[1]);
+	const rule = (selector) => {
+		const at = src.indexOf(selector + " {");
+		expect(at, `rule not found: ${selector}`).toBeGreaterThan(-1);
+		return src.slice(at, src.indexOf("}", at));
+	};
 
 	it("the indent is the reply avatar plus the row's gap", () => {
 		const avatar = Number(
@@ -717,14 +721,15 @@ describe("a draft card and its receipt start where the agent's replies do", () =
 		expect(indent).toBe(avatar + gap);
 	});
 
-	it("the card, the stack hint and the draft receipt all use the indent", () => {
-		expect(src).toMatch(/\.jv-tool-draft \{[^}]*margin-left: var\(--jv-reply-indent\)/);
-		expect(src).toMatch(/\.jv-stack-hint \{[^}]*calc\(var\(--jv-reply-indent\) \+ 14px\)/);
-		expect(chip).toMatch(/\.jv-receipt--draft \{\s*margin-left: var\(--jv-reply-indent\)/);
-	});
-
-	it("only a draft receipt takes the class", () => {
-		expect(chip).toContain("{ 'jv-receipt--draft': draftReceipt }");
-		expect(chip.match(/jv-receipt--draft/g)).toHaveLength(2);
+	it("receipts, tiles and pending cards use the indent, and user bubbles and banners do not", () => {
+		const listed = rule(
+			".jv-thread-inner > :is(.jv-receipt, .jv-toolfail, .jv-action, .jv-tool-draft, .jv-fbw, .jv-rrc)"
+		);
+		expect(listed).toContain("margin-left: var(--jv-reply-indent)");
+		expect(rule(".jv-thread-inner > :is(.jv-stack-hint, .jv-pending-older-note)")).toContain(
+			"calc(var(--jv-reply-indent) + 14px)"
+		);
+		for (const left of [".jv-umsg", ".jv-ububble", ".jv-daydivider", ".jv-macrobar"])
+			expect(listed, left).not.toContain(left);
 	});
 });

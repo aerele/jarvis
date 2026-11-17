@@ -18212,20 +18212,31 @@ onUnmounted(() => {
    so it is 12px + gap above and the gap alone below, as a .jv-action is. */
 .jv-tool-draft {
 	margin-top: 12px;
-	margin-left: var(--jv-reply-indent);
-}
-/* Where an assistant reply's text starts in the thread: the 28px HolidayMark plus the 12px gap
-   of Message.vue's row. A draft card, its receipt and its hint start here, not under the
-   avatar. ChatView.toolDraft.spec.js ties this number to those two. */
-.jv-thread-inner {
-	--jv-reply-indent: 40px;
 }
 /* The stack's typed-approval hint, when its last card is a draft card with no line for it. The look of
    .jv-pending-older-note. */
 .jv-stack-hint {
-	margin: 4px 14px 8px calc(var(--jv-reply-indent) + 14px);
+	margin: 4px 14px 8px;
 	font-size: 12px;
 	color: var(--text-3);
+}
+/* Where an assistant reply's text starts in the thread: the 28px HolidayMark plus the 12px gap
+   of Message.vue's row. ChatView.toolDraft.spec.js ties this number to those two. */
+.jv-thread-inner {
+	--jv-reply-indent: 40px;
+}
+/* Every agent-side card and note that is a direct child of the thread starts where the replies
+   do, not under the avatar: the receipts, the "didn't run" tile, the pending cards, the draft
+   card, the File Box and report cards. The child combinator keeps the same components (the
+   receipt in the shared read-only chat, the File Box card on the Approval Board) full width
+   elsewhere. Only the left edge moves: the thread is a stretching column, so the right edge
+   stays. User bubbles, day dividers and the full-width banners are not listed on purpose. */
+.jv-thread-inner > :is(.jv-receipt, .jv-toolfail, .jv-action, .jv-tool-draft, .jv-fbw, .jv-rrc) {
+	margin-left: var(--jv-reply-indent);
+}
+/* The two lines that already carry a 14px left margin keep it on top of the indent. */
+.jv-thread-inner > :is(.jv-stack-hint, .jv-pending-older-note) {
+	margin-left: calc(var(--jv-reply-indent) + 14px);
 }
 .jv-tool-draft :deep(.dc) {
 	margin: 0;

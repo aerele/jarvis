@@ -185,11 +185,9 @@ describe("ReceiptChip draft receipt wording", () => {
 		});
 		expect(draft.find(".jv-receipt-title").text()).toBe("Not saved");
 		expect(plain.find(".jv-receipt-title").text()).toBe("Failed, ToDo TD-1 was not updated");
-		// the one class a draft receipt adds is its column indent (ChatView.toolDraft.spec.js)
-		expect(draft.classes().filter((c) => c !== "jv-receipt--draft")).toEqual(plain.classes());
-		expect(plain.classes()).not.toContain("jv-receipt--draft");
+		expect(draft.classes()).toEqual(plain.classes());
 		expect(draft.find(".jv-receipt-toggle").exists()).toBe(true);
-		expect(draft.html().replace("Not saved", "X").replace(" jv-receipt--draft", "")).toBe(
+		expect(draft.html().replace("Not saved", "X")).toBe(
 			plain.html().replace("Failed, ToDo TD-1 was not updated", "X")
 		);
 	});
