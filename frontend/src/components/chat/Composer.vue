@@ -57,6 +57,9 @@
 		>
 			Drop image or file to attach
 		</div>
+		<!-- Host content inside the box, above attachments and text (chat's Reply
+		     quote, aerele/jarvis#2191). -->
+		<slot name="inside-top" />
 		<!-- pending attachments: image thumbnails (Claude-style) + file chips.
 		     Purely a projection of the `attachments` prop — an entry with a
 		     `preview_url` is a thumbnail, one with `uploading` is the in-flight
