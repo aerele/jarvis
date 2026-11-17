@@ -13,8 +13,8 @@ import {
 	rowKeyColumn,
 	savedRowsMap,
 	toPanelRow,
-} from "@/lib/draftApply";
-import { gridNames, rowChangedSet } from "@/lib/rowForm";
+} from "./draftApply";
+import { gridNames, rowChangedSet } from "./rowForm";
 
 // A panel row's stable id (`__key`), unique for the page's life and never reused. The
 // row's position changes when a row above it is removed; this does not, so a link
@@ -328,7 +328,7 @@ export function parentDefaults(metaFields) {
 // The panel rows the save sent, in the order it sent them: a blank new row is never
 // sent (draftValues / tableRowsPayload), so the server's row numbers count only the
 // rest. A saved row is always sent on an update (by name), even unchanged.
-function sentRows(table, verb) {
+export function sentRows(table, verb) {
 	return table.rows.filter(
 		(r) => (verb === "update" && r.__name) || Object.keys(coerceRow(table, r, verb)).length
 	);

@@ -11,6 +11,7 @@
 //   server never tells the assistant someone is fixing it (the card then stays, with
 //   its error, instead of the person being left with neither card nor panel).
 import { draftValues } from "./draftApply.js";
+import { draftCardDirty } from "./draftCardValues.js";
 import { draftFailureOf } from "./draftFailure.js";
 import { parkedNoteOf } from "./draftParked.js";
 import { liveDraftRow } from "./liveDraft.js";
@@ -62,11 +63,18 @@ export function applyActionPayload(model, { values, submit, conversation, fallba
 }
 
 // What the screen does with apply_action's answer:
-// closed (close the panel, toast `note`), keep (keep the panel or card open with
+// closed (close the panel, toast `note`; `cardOpen: true`, present only then, means the card is
+// still pending, so keep it), keep (keep the panel or card open with
 // `error`), parked (a confirmation card now waits, `note`) or saved.
-export function draftSaveOutcome(r, agent) {
-	const failed = draftFailureOf(r, agent);
-	if (failed && failed.closed) return { kind: "closed", note: failed.note };
+export function draftSaveOutcome(r, agent, opts) {
+	const failed = draftFailureOf(r, agent, opts);
+	if (failed && failed.closed) {
+		return {
+			kind: "closed",
+			note: failed.note,
+			...(failed.cardOpen ? { cardOpen: true } : {}),
+		};
+	}
 	if (failed) return { kind: "keep", error: failed.error };
 	const parked = parkedNoteOf(r);
 	if (parked) return { kind: "parked", note: parked };
@@ -81,8 +89,11 @@ export function markDraftBaseline(model) {
 }
 
 // Whether closing the panel would lose the person's work: a value changed since it
-// opened. A model with no baseline (never opened as a panel) is never dirty.
+// opened. A model with no baseline (never opened as a panel) is never dirty. The form of a
+// server draft card (`tool`) is dirty when a save would send anything: draftCardDirty against
+// the snapshot taken when it opened.
 export function draftIsDirty(model) {
+	if (model && model.tool) return draftCardDirty(model, model.snapshot, model.card);
 	if (!model || model.baseline === undefined) return false;
 	return JSON.stringify(draftValues(model)) !== model.baseline;
 }

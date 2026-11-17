@@ -1,0 +1,150 @@
+// Routing and card context of a pending item that holds a server draft card.
+import { describe, expect, it } from "vitest";
+import { cardOfItem, isToolDraftItem, toolDraftCtx } from "./toolDraft.js";
+
+const DRAFT = { kind: "create", draft: { verb: "create", doctype: "ToDo", values: { a: 1 } } };
+const UNREADABLE = { kind: "create", draft: { verb: "create", values: "no" } };
+const SENSITIVE = { kind: "update", risk: "sensitive" };
+const GATED = { kind: "verb", verb: "submit", doctype: "Sales Order" };
+// a draft that also carries a risk is still the warning card
+const RISKY_DRAFT = { ...DRAFT, risk: "sensitive" };
+
+const viaList = (card) => ({ token: "t", preview: { card } });
+const viaRow = (card) => ({ token: "t", pending_card: card });
+
+describe("isToolDraftItem", () => {
+	const table = [
+		["a draft card", DRAFT, true],
+		["an unreadable draft card (drawn with only Cancel)", UNREADABLE, true],
+		["a sensitive card", SENSITIVE, false],
+		["a draft that carries a risk", RISKY_DRAFT, false],
+		["an ordinary gated card", GATED, false],
+		["no card", null, false],
+	];
+	for (const [name, c, want] of table) {
+		it(`${name}: ${want}, by the list path and the row path`, () => {
+			expect(isToolDraftItem(c ? viaList(c) : { token: "t" })).toBe(want);
+			expect(isToolDraftItem(c ? viaRow(c) : { token: "t" })).toBe(want);
+		});
+	}
+
+	it("not an item: false", () => {
+		for (const x of [null, undefined, "x", 3, []]) expect(isToolDraftItem(x)).toBe(false);
+	});
+});
+
+describe("cardOfItem", () => {
+	it("reads the list path, then the row path, else null", () => {
+		expect(cardOfItem(viaList(DRAFT))).toBe(DRAFT);
+		expect(cardOfItem(viaRow(DRAFT))).toBe(DRAFT);
+		expect(cardOfItem({ preview: { card: "no" }, pending_card: DRAFT })).toBe(DRAFT);
+		expect(cardOfItem({ preview: {} })).toBeNull();
+		expect(cardOfItem(null)).toBeNull();
+	});
+});
+
+describe("toolDraftCtx", () => {
+	const ctx = (pa, over = {}) =>
+		toolDraftCtx({ pa, editingToken: null, streaming: false, ...over });
+	const table = [
+		["a fresh item", { token: "a", recent: true }, {}, {}],
+		["earlier is recent === false only", { token: "a", recent: false }, {}, { earlier: true }],
+		["an item with no recent flag is not earlier", { token: "a" }, {}, {}],
+		[
+			"create in flight",
+			{ token: "a", busy: true, busyKind: "create" },
+			{},
+			{ busy: "create" },
+		],
+		[
+			"cancel in flight",
+			{ token: "a", busy: true, busyKind: "cancel" },
+			{},
+			{ busy: "cancel" },
+		],
+		[
+			"a save from the panel counts as create",
+			{ token: "a", busy: true, busyKind: "save" },
+			{},
+			{ busy: "create" },
+		],
+		[
+			"busy with no kind locks the card without naming a button",
+			{ token: "a", busy: true },
+			{},
+			{ busy: "busy" },
+		],
+		[
+			"this card's form or preview is being built",
+			{ token: "a" },
+			{ building: true },
+			{ busy: "busy" },
+		],
+		[
+			"a Create in flight outranks building",
+			{ token: "a", busy: true, busyKind: "create" },
+			{ building: true },
+			{ busy: "create" },
+		],
+		["editing this token", { token: "a" }, { editingToken: "a" }, { editing: true }],
+		["editing another token", { token: "a" }, { editingToken: "b" }, {}],
+		["no panel open", { token: "a" }, { editingToken: "" }, {}],
+		["the turn is running", { token: "a" }, { streaming: true }, { streaming: true }],
+	];
+	for (const [name, pa, over, patch] of table) {
+		it(name, () => {
+			expect(ctx(pa, over)).toEqual({
+				earlier: false,
+				busy: "",
+				editing: false,
+				streaming: false,
+				surface: "desktop",
+				...patch,
+			});
+		});
+	}
+});
+
+describe("toolDraftCtx surface", () => {
+	// Break: the surface is hard-coded again (the phone card would draw the desktop's 8 table rows),
+	// or an unknown value reaches the card view as itself.
+	const table = [
+		["no surface is the desktop", {}, "desktop"],
+		["desktop", { surface: "desktop" }, "desktop"],
+		["phone", { surface: "phone" }, "phone"],
+		["an unknown surface is the desktop", { surface: "tablet" }, "desktop"],
+		["an empty surface is the desktop", { surface: "" }, "desktop"],
+	];
+	for (const [name, over, want] of table) {
+		it(name, () => {
+			const pa = { token: "a", recent: true };
+			expect(
+				toolDraftCtx({ pa, editingToken: null, streaming: false, ...over }).surface
+			).toBe(want);
+		});
+	}
+});
+
+describe("toolDraftCtx: where the busy flags are read, and readOnly", () => {
+	const base = { editingToken: null, streaming: false };
+	// Break: the default stops reading the item's own flags (the desktop's card would lose its
+	// spinner), or an injected state is ignored (the phone, which keeps the flags by token).
+	it("reads the item by default and the injected state when given", () => {
+		const pa = { token: "a", busyKind: "cancel" };
+		expect(toolDraftCtx({ pa, ...base }).busy).toBe("cancel");
+		expect(toolDraftCtx({ pa, ...base, busyState: { busyKind: "create" } }).busy).toBe(
+			"create"
+		);
+		expect(toolDraftCtx({ pa, ...base, busyState: { busy: false, busyKind: "" } }).busy).toBe(
+			""
+		);
+	});
+
+	// Break: `readOnly` is always in the ctx (every host's ctx changes), or true does not reach it.
+	it("carries readOnly only when it is true", () => {
+		const pa = { token: "a" };
+		expect("readOnly" in toolDraftCtx({ pa, ...base })).toBe(false);
+		expect("readOnly" in toolDraftCtx({ pa, ...base, readOnly: false })).toBe(false);
+		expect(toolDraftCtx({ pa, ...base, readOnly: true }).readOnly).toBe(true);
+	});
+});

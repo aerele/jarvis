@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from types import SimpleNamespace
 
 from jarvis.chat import draft_card
 
@@ -53,15 +54,22 @@ HAND_CALLS = {
 	"update-table-rows": (
 		"update",
 		"TS-0001",
-		{"time_logs": [{"from_time": "10:00", "hrs_worked": 2}, {"from_time": "11:00"}]},
+		{
+			"time_logs": [
+				{"name": "tl-1", "from_time": "09:00"},
+				{"name": "tl-2", "from_time": "11:00"},
+				{"from_time": "14:00", "hrs_worked": 2},
+			]
+		},
 	),
 }
 
 
 class TestDraftCallPure(unittest.TestCase):
 	def test_is_draft_call_truth_table(self):
-		"""A batch (docs / updates), a forced card or another tool must never be treated as a
-		single-record draft: the draft panel can only show one record."""
+		"""A batch (docs / updates), a forced card, another tool or a Jarvis Dashboard must never
+		be treated as a single-record draft: the draft panel can only show one record, and the
+		Dashboard Builder pane saves a dashboard with its own one-tap Approve."""
 		create = {"doctype": "ToDo", "values": {"description": "x"}}
 		update = {"doctype": "ToDo", "name": "T1", "changes": {"status": "Closed"}}
 		cases = [
@@ -74,9 +82,17 @@ class TestDraftCallPure(unittest.TestCase):
 			("delete_doc", update, False, False),
 			("create_doc", {"doctype": "To Do; drop", "values": {}}, False, False),
 			("update_doc", {"doctype": "ToDo", "changes": {"a": 1}}, False, False),
+			# a Jarvis Dashboard keeps its one-tap card (the builder pane's Approve), create and update
+			("create_doc", {"doctype": "Jarvis Dashboard", "values": {"dashboard_title": "X"}}, False, False),
+			("update_doc", {"doctype": "Jarvis Dashboard", "name": "D1", "changes": {"x": 1}}, False, False),
 		]
+		# the tool reads the name stripped and in any case, so the exemption must too
+		for spelling in ("jarvis dashboard", "JARVIS DASHBOARD", " Jarvis Dashboard", "Jarvis Dashboard\n"):
+			cases.append(
+				("create_doc", {"doctype": spelling, "values": {"dashboard_title": "X"}}, False, False)
+			)
 		for tool, args, must, want in cases:
-			with self.subTest(tool=tool, must=must, keys=sorted(args)):
+			with self.subTest(tool=tool, must=must, keys=sorted(args), doctype=args.get("doctype")):
 				self.assertIs(draft_card.is_draft_call(tool, args, must_card=must), want)
 
 	def test_create_payload_keeps_table_rows_and_names_the_ignored_fields(self):
@@ -292,6 +308,261 @@ class TestPendingDraftRowPure(unittest.TestCase):
 				self.assertIs(draft_card.is_pending_draft_row(case), want)
 
 
+class TestDecidedDraftMarkPure(unittest.TestCase):
+	# What a stale update draft stores today: `_settle.with_reference(None, token)` (the row
+	# fails before it runs, so it has no result of its own): outcome "failed", no message.
+	STALE_STORED = {"ok": False, "error": {"reference": "PA-0001"}}
+
+	def _row(self, result, outcome="failed", role="tool"):
+		return {"role": role, "action_outcome": outcome, "tool_result": json.dumps(result)}
+
+	def test_a_stored_marker_comes_back_as_the_stamp_with_only_the_two_changed_reasons(self):
+		"""The decided row keeps no card, so this marker is the only thing that tells the apps
+		it was a draft. A stale or deleted target is the one failure the receipt words
+		differently; any other reason must not leak into the stamp."""
+		both = {"draft_receipt": True}
+		cases = [
+			("update", "stale", {**both, "draft_receipt_reason": "stale"}),
+			("update", "target_missing", {**both, "draft_receipt_reason": "target_missing"}),
+			("update", "failed", both),
+			("create", "", both),
+		]
+		for verb, reason, want in cases:
+			with self.subTest(reason=reason):
+				stored = draft_card.with_receipt_mark(self.STALE_STORED, {"verb": verb}, reason)
+				self.assertEqual(stored["error"], self.STALE_STORED["error"], "the result is kept whole")
+				self.assertEqual(draft_card.decided_mark(self._row(stored)), want)
+		self.assertEqual(draft_card.decided_mark(self._row(self.STALE_STORED)), {}, "no marker, no stamp")
+
+	def test_only_a_settled_draft_is_marked_and_only_a_decided_row_is_stamped(self):
+		"""A sensitive card (no `draft`) and a plain receipt get no marker and no stamp; a
+		discard has no result and still keeps the marker; a pending row is never stamped."""
+		self.assertIsNone(draft_card.with_receipt_mark(None, None, "stale"))
+		self.assertEqual(draft_card.with_receipt_mark({"ok": True}, "x", ""), {"ok": True})
+		discarded = draft_card.with_receipt_mark(None, {"verb": "create"}, "discarded")
+		self.assertEqual(discarded, {"draft_receipt": {}})
+		marked = self._row(discarded, "discarded")
+		self.assertEqual(draft_card.decided_mark(marked), {"draft_receipt": True})
+		for row in (
+			self._row({"ok": True, "data": {"name": "X"}}, "confirmed"),
+			{**marked, "action_outcome": ""},
+			{**marked, "tool_result": None},
+			{**marked, "tool_result": '{"draft_receipt": '},
+			{**marked, "tool_result": '{"draft_receipt": "yes"}'},
+			{**marked, "role": "assistant"},
+		):
+			with self.subTest(row=row):
+				self.assertEqual(draft_card.decided_mark(row), {})
+
+
+class TestMarkNeverReachesTheModelPure(unittest.TestCase):
+	"""``draft_card.without_mark`` and the deep-nesting guard of ``decided_mark``."""
+
+	def test_the_marker_is_taken_off_in_the_kind_it_came_in(self):
+		"""The collaborative prompt and share recipients read ``tool_result`` through
+		``project_row``: the marker must be gone, the rest kept, a bare marker (a discard)
+		back to None, and a dict stays a dict while a JSON string stays a JSON string."""
+		mark = {"draft_receipt": {"reason": "stale"}}
+		cases = [
+			({"ok": False, **mark}, {"ok": False}),
+			(json.dumps({"ok": False, **mark}), json.dumps({"ok": False})),
+			(mark, None),
+			(json.dumps(mark), None),
+		]
+		for raw, want in cases:
+			with self.subTest(raw=raw):
+				self.assertEqual(draft_card.without_mark(raw), want)
+
+	def test_a_result_with_no_marker_comes_back_as_the_same_object(self):
+		"""With the feature off no marker exists: every payload must stay byte for byte what it
+		was, also what is not JSON, what is not a dict, and a marker that cannot be parsed."""
+		d, text = {"ok": True}, '{"ok": true}'
+		for raw in (d, text, "plain text", '{"draft_receipt": ', "[1]", '["draft_receipt"]', None, 3, ["x"]):
+			with self.subTest(raw=raw):
+				self.assertIs(draft_card.without_mark(raw), raw)
+
+	def test_deep_nesting_that_holds_the_key_text_never_raises(self):
+		deep = "[" * 100000 + '"draft_receipt"' + "]" * 100000
+		self.assertIs(draft_card.without_mark(deep), deep)
+		row = {"role": "tool", "action_outcome": "failed", "tool_result": deep}
+		self.assertEqual(draft_card.decided_mark(row), {})
+
+	def test_an_old_marker_that_carries_a_verb_still_stamps(self):
+		old = {"role": "tool", "action_outcome": "failed"}
+		old["tool_result"] = json.dumps({"draft_receipt": {"verb": "update", "reason": "stale"}})
+		self.assertEqual(
+			draft_card.decided_mark(old), {"draft_receipt": True, "draft_receipt_reason": "stale"}
+		)
+
+
+class TestRowDiffPure(unittest.TestCase):
+	"""``draft_card.row_diff``: stored rows against the final rows of an update, no site."""
+
+	STORED = [("a", ["Design", "1.5"]), ("b", ["Review", "2"]), ("c", ["Admin", "0.5"])]
+
+	@staticmethod
+	def _cells(row):
+		return row
+
+	def test_changed_kept_new_and_removed_rows(self):
+		"""A row that changes, one that stays, a new one and a row the call leaves out are four
+		different things on the card; the last one is DELETED by the save, so it must be
+		listed. `was` is only on a changed row."""
+		final = [("a", ["Design", "1.5"], False), ("b", ["Review", "3"], True), (None, ["Call", "1"], False)]
+		out = draft_card.row_diff(self.STORED, final, self._cells)
+		self.assertEqual(
+			out["rows"],
+			[
+				{"status": "kept", "cells": ["Design", "1.5"]},
+				{"status": "changed", "cells": ["Review", "3"], "was": ["Review", "2"]},
+				{"status": "new", "cells": ["Call", "1"]},
+			],
+		)
+		self.assertEqual(out["removed"], [{"cells": ["Admin", "0.5"]}])
+		self.assertEqual(out["counts"], {"changed": 1, "new": 1, "kept": 1, "removed": 1})
+		self.assertNotIn("more", out)
+		self.assertNotIn("reordered", out)
+
+	def test_a_change_the_shown_cells_do_not_show_is_still_changed(self):
+		"""A secret, a long text cut at the clip or a column beyond the cap reads the same on
+		both sides: the caller's raw verdict decides, and `hidden_change` says why `was` equals
+		`cells`. A row that is not changed never carries it."""
+		final = [("a", ["Design", "1.5"], True), ("b", ["Review", "2"], False)]
+		out = draft_card.row_diff(self.STORED, final, self._cells)
+		self.assertEqual(
+			out["rows"][0],
+			{
+				"status": "changed",
+				"cells": ["Design", "1.5"],
+				"was": ["Design", "1.5"],
+				"hidden_change": True,
+			},
+		)
+		self.assertEqual(out["rows"][1], {"status": "kept", "cells": ["Review", "2"]})
+
+	def test_a_row_name_that_is_not_saved_is_never_listed_as_new(self):
+		"""A name the record does not have is neither new nor changed: it is skipped, and the
+		saved rows it does not name are still reported as removed."""
+		final = [("a", ["Design", "1.5"], False), ("zzz", ["Ghost", "9"], True)]
+		out = draft_card.row_diff(self.STORED, final, self._cells)
+		self.assertEqual([r["status"] for r in out["rows"]], ["kept"])
+		self.assertEqual(out["counts"], {"changed": 0, "new": 0, "kept": 1, "removed": 2})
+
+	def test_clearing_the_table_removes_every_saved_row(self):
+		"""`[]` is the way to clear a table (`merge_child_rows`): every saved row is removed;
+		with no saved rows nothing can be removed."""
+		self.assertEqual(draft_card.row_diff(self.STORED, [], self._cells)["counts"]["removed"], 3)
+		out = draft_card.row_diff([], [(None, ["x", "1"], False)], self._cells)
+		self.assertEqual((out["counts"]["removed"], out["counts"]["new"]), (0, 1))
+
+	def test_over_fifty_rows_keeps_the_changes_and_formats_only_what_is_listed(self):
+		"""The card is sealed, so each list stops at 50; a change at row 59 must not be what
+		the bound hides, `more` / `counts` say what was left out, and a row that is not listed is
+		never formatted (the cost of a big table)."""
+		stored = [(f"r{i}", [f"v{i}"]) for i in range(60)]
+		final = [(f"r{i}", [f"v{i}"], i == 58) for i in range(60)]
+		seen = []
+
+		def cells(row):
+			seen.append(row)
+			return row
+
+		out = draft_card.row_diff(stored, final, cells)
+		self.assertEqual(len(out["rows"]), draft_card.MAX_CHANGE_ROWS)
+		self.assertEqual([r["status"] for r in out["rows"]].count("changed"), 1)
+		self.assertEqual(out["rows"][0]["cells"], ["v0"])
+		self.assertEqual(out["counts"], {"changed": 1, "new": 0, "kept": 59, "removed": 0})
+		self.assertEqual(out["more"], {"rows": 10, "removed": 0})
+		self.assertEqual(len(seen), draft_card.MAX_CHANGE_ROWS + 1)  # 50 rows and the one `was`
+		gone = draft_card.row_diff(stored, [], self._cells)
+		self.assertEqual((len(gone["removed"]), gone["more"]), (50, {"rows": 0, "removed": 10}))
+
+	def test_a_pure_reorder_is_flagged_and_a_same_order_update_is_not(self):
+		"""`update_doc` renumbers `idx` to the call's order, but every row reads as kept: only
+		`reordered` says so. New and removed rows do not count as moves, and the key is absent
+		(not False) when the order stands."""
+		kept = [(n, r, False) for n, r in self.STORED]
+		swapped = draft_card.row_diff(self.STORED, [kept[1], kept[0], kept[2]], self._cells)
+		self.assertIs(swapped["reordered"], True)
+		self.assertEqual({r["status"] for r in swapped["rows"]}, {"kept"})
+		same = draft_card.row_diff(self.STORED, [kept[0], (None, ["New", "1"], False), kept[2]], self._cells)
+		self.assertNotIn("reordered", same)
+
+	def test_a_removal_with_the_rest_in_order_is_not_reordered(self):
+		"""Dropping a row moves no other row: `reordered` is only about the rows that stay."""
+		kept = [(n, r, False) for n, r in self.STORED]
+		out = draft_card.row_diff(self.STORED, [kept[0], kept[2]], self._cells)
+		self.assertNotIn("reordered", out)
+		self.assertEqual(out["counts"]["removed"], 1)
+
+	def test_has_row_change_is_true_for_any_change_add_removal_or_reorder_only(self):
+		"""A table the write leaves as it is must not be drawn: only a changed, new or removed
+		row, or a new order, makes `has_row_change` true."""
+		base = {"changed": 0, "new": 0, "kept": 3, "removed": 0}
+		quiet = {"row_changes": {"counts": base}}
+		self.assertFalse(draft_card.has_row_change(quiet))
+		self.assertFalse(draft_card.has_row_change({}))
+		for key in ("changed", "new", "removed"):
+			with self.subTest(key):
+				self.assertTrue(draft_card.has_row_change({"row_changes": {"counts": {**base, key: 1}}}))
+		self.assertTrue(draft_card.has_row_change({"row_changes": {"counts": base, "reordered": True}}))
+
+	def test_a_table_multiselect_link_listed_twice_adds_one_and_listed_once_removes_one(self):
+		"""Links are counted: saved `[Sales]` and called `[Sales, Sales]` ADDS a row (kept 1 +
+		new 1), so the card cannot read as no change; saved twice and called once removes one."""
+		link = SimpleNamespace(fieldtype="Link", fieldname="role", label="Role")
+		child = SimpleNamespace(fields=[link])
+		sales = {"role": "Sales"}
+		out = draft_card._link_changes(child, [sales, sales], [sales])
+		self.assertEqual(out["counts"], {"changed": 0, "new": 1, "kept": 1, "removed": 0})
+		self.assertEqual([r["status"] for r in out["rows"]], ["kept", "new"])
+		back = draft_card._link_changes(child, [sales], [sales, sales])
+		self.assertEqual(back["counts"], {"changed": 0, "new": 0, "kept": 1, "removed": 1})
+		self.assertNotIn("reordered", out)
+
+	def test_a_cell_is_cut_to_eighty_characters(self):
+		"""The sealed card stays small: a long cell ends in "..." at 80 characters; a short one
+		is whole."""
+		clipped = draft_card._clip_cell("x" * 250)
+		self.assertEqual((len(clipped), clipped[-3:]), (80, "..."))
+		self.assertEqual(draft_card._clip_cell("y" * 80), "y" * 80)
+
+	def test_a_table_multiselect_is_links_new_kept_and_removed(self):
+		"""`update_doc` replaces a Table MultiSelect as a set: one column (the link), a link
+		in both is kept, a new one is new, a dropped one is removed, and there is no `changed`
+		or `reordered`."""
+		link = SimpleNamespace(fieldtype="Link", fieldname="role", label="Role")
+		child = SimpleNamespace(fields=[SimpleNamespace(fieldtype="Data", fieldname="x", label="X"), link])
+		out = draft_card._link_changes(
+			child, [{"role": "Sales"}, {"role": "HR"}], [{"role": "Sales"}, {"role": "Accounts"}]
+		)
+		self.assertEqual((out["columns"], out["fieldnames"]), (["Role"], ["role"]))
+		self.assertEqual(
+			out["rows"], [{"status": "kept", "cells": ["Sales"]}, {"status": "new", "cells": ["HR"]}]
+		)
+		self.assertEqual(out["removed"], [{"cells": ["Accounts"]}])
+		self.assertEqual(out["counts"], {"changed": 0, "new": 1, "kept": 1, "removed": 1})
+		self.assertNotIn("reordered", out)
+
+	def test_the_update_table_rows_fixture_is_what_row_diff_gives(self):
+		"""The hand-written `update-table-rows` fixture is coherent: its row_changes is the
+		pure diff of the saved rows and the final rows it implies, so the apps draw a shape
+		the server can send."""
+		with open(FIXTURES) as f:
+			card = {i["id"]: i for i in json.load(f)}["update-table-rows"]["card"]
+		entry = card["diff"][0]["row_changes"]
+		stored = [("tl-1", ["09:00:00", "1.5"]), ("tl-2", ["10:30:00", "2.0"]), ("tl-3", ["13:00:00", "0.5"])]
+		final = [
+			("tl-1", ["09:00:00", "1.5"], False),
+			("tl-2", ["11:00:00", "2.0"], True),
+			(None, ["14:00:00", "2.0"], False),
+		]
+		got = draft_card.row_diff(stored, final, self._cells)
+		self.assertEqual({k: entry[k] for k in got}, got)
+		self.assertEqual(len(entry["columns"]), len(entry["fieldnames"]))
+		self.assertEqual([r["name"] for r in card["draft"]["values"]["time_logs"][:2]], ["tl-1", "tl-2"])
+
+
 try:
 	import frappe
 	from frappe.tests.utils import FrappeTestCase
@@ -325,6 +596,17 @@ if FrappeTestCase is not None:
 			for raw, want in ((1, True), ("1", True), ("0", False), (0, False)):
 				with self.subTest(raw=raw), patch.dict(frappe.conf, {FLAG: raw}):
 					self.assertIs(draft_card.enabled(), want)
+
+		def test_flag_on_a_jarvis_dashboard_is_not_drafted_whatever_its_spelling(self):
+			"""With the flag on, the gate `api._run_tool` asks (`wanted`) says no to a Jarvis
+			Dashboard write, so it parks the ordinary one-tap card (no `draft`) the builder pane's
+			Approve reads, and yes to another DocType. Asserted at this seam, not by parking a
+			dashboard: a real dashboard needs fields and roles a fresh CI database may not give."""
+			dash = {"doctype": " jarvis dashboard", "values": {"dashboard_title": "X"}}
+			todo = {"doctype": "ToDo", "values": {"description": "x"}}
+			with patch.dict(frappe.conf, {FLAG: 1}):
+				self.assertFalse(draft_card.wanted("create_doc", dash, must_card=False))
+				self.assertTrue(draft_card.wanted("create_doc", todo, must_card=False))
 
 		def test_create_card_has_draft_and_no_trial_name_and_keeps_its_title(self):
 			"""A draft create card is titled "New ToDo" inside `draft`, drops the name the trial
@@ -736,6 +1018,25 @@ if FrappeTestCase is not None:
 				actions_api.dismiss_tool(token, conversation=conv)
 			self._assert_decided(conv, token, "discarded")
 
+		def test_a_decided_draft_row_says_it_was_a_draft_and_no_other_row_does(self):
+			"""The decided row has no card, so only settlement's marker tells the apps to word
+			its receipt as a draft's. A decided card that was not a draft (a sensitive one)
+			must read as a plain receipt, and with the flag off no row carries the key at all."""
+			self._on()
+			drafted, plain = self.make_conv(), self.make_conv()
+			draft_token, _card = self._mint(drafted)
+			plain_token, _plain = self._mint(plain, draft=False)
+			with fake_dispatch(), as_user(OWNER):
+				actions_api.dismiss_tool(draft_token, conversation=drafted)
+				actions_api.dismiss_tool(plain_token, conversation=plain)
+			row = self._history_row(drafted, draft_token)
+			self.assertIs(row["draft_receipt"], True)
+			self.assertNotIn("draft_receipt_reason", row)
+			self.assertIs(row["draft_card"], False, "draft_card still means a PENDING draft card")
+			self.assertNotIn("draft_receipt", self._history_row(plain, plain_token))
+			with patch.dict(frappe.conf, {FLAG: 0}):
+				self.assertNotIn("draft_receipt", self._history_row(drafted, draft_token))
+
 		def test_superseding_a_draft_clears_the_card_and_sets_the_outcome(self):
 			"""A newer proposal after the user spoke retires the draft card in park's own
 			transaction (`_flip_superseded_chip`); the chip must carry `superseded`."""
@@ -1018,3 +1319,552 @@ if FrappeTestCase is not None:
 			out = self._markdown(conv, self._park(conv, 0))
 			self.assertIn("Awaiting confirmation", out)
 			self.assertNotIn("Draft:", out)
+
+	ROWS_MARK = "dc-rows-test"  # every Web Form these tests make; the cleanup removes it
+
+	def _make_web_form(case, count=3):
+		"""A real Web Form with ``count`` field rows; ``(name, [row names])``. The cleanup is
+		registered first, so a failure after the insert cannot leak the form."""
+
+		def wipe():
+			frappe.db.rollback()
+			forms = frappe.get_all("Web Form", filters={"title": ["like", f"{ROWS_MARK}%"]}, pluck="name")
+			if forms:
+				frappe.db.delete("Web Form Field", {"parent": ["in", forms]})
+				frappe.db.delete("Web Form", {"name": ["in", forms]})
+			frappe.db.commit()
+
+		case.addCleanup(wipe)
+		labels = ("First", "Second", "Third")
+		# A Web Form rejects a value row whose field the doctype (ToDo) lacks, so the first three
+		# rows use real ToDo fields; the rest (the bound test) are layout rows, which it skips.
+		real = ("description", "status", "priority")
+		rows = [
+			{
+				"fieldname": real[i] if i < len(real) else f"f{i}",
+				"fieldtype": "Data" if i < len(real) else "Section Break",
+				"label": labels[i] if count == 3 else f"Row {i}",
+			}
+			for i in range(count)
+		]
+		doc = frappe.get_doc(
+			{
+				"doctype": "Web Form",
+				"title": f"{ROWS_MARK} {frappe.generate_hash(length=8)}",
+				"doc_type": "ToDo",
+				"web_form_fields": rows,
+			}
+		).insert(ignore_permissions=True)
+		return doc.name, [r.name for r in doc.web_form_fields]
+
+	def _entry(card):
+		"""The diff entry of the Web Form's `web_form_fields` table (found by its label)."""
+		label = frappe.get_meta("Web Form").get_field("web_form_fields").label
+		(entry,) = [e for e in card["diff"] if e["label"] == label]
+		return entry
+
+	def _row_changes(card):
+		return _entry(card)["row_changes"]
+
+	class TestUpdateRowChangesOnSite(FrappeTestCase):
+		"""An update draft card lists the rows it changes, adds and removes (`row_changes`),
+		built from the real card builder on a real Web Form with `web_form_fields` rows."""
+
+		def _update(self, form, rows, would=None, draft=True):
+			args = {"doctype": "Web Form", "name": form, "changes": {"web_form_fields": rows}}
+			return (
+				_park_card("update_doc", args, would, draft)
+				if draft
+				else (confirm_card.build_card("update_doc", args, {"would": would}))
+			)
+
+		def test_one_changed_one_kept_one_new_one_removed_with_the_trial_rows(self):
+			"""The card hides a DELETED row behind "3 rows -> 3 rows" without this: the four
+			counts, `was` differing only in the edited cell, the removed row's stored cells and
+			the child DocType's own column labels must all be on the card."""
+			form, (n1, n2, n3) = _make_web_form(self)
+			stored = {r.name: r.as_dict() for r in frappe.get_doc("Web Form", form).web_form_fields}
+			final_trial = [
+				stored[n1],
+				{**stored[n2], "label": "Second changed"},
+				{"fieldname": "extra", "fieldtype": "Data", "label": "Extra"},
+			]
+			rows = [{"name": n1}, {"name": n2, "label": "Second changed"}, {"fieldname": "extra"}]
+			card = self._update(form, rows, {"web_form_fields": final_trial})
+			changes = _row_changes(card)
+			self.assertEqual(changes["counts"], {"changed": 1, "new": 1, "kept": 1, "removed": 1})
+			self.assertEqual([r["status"] for r in changes["rows"]], ["kept", "changed", "new"])
+			col = changes["fieldnames"].index("label")
+			changed = changes["rows"][1]
+			self.assertEqual(changed["cells"][col], "Second changed")
+			self.assertEqual(changed["was"][col], "Second")
+			same = [
+				i for i, (a, b) in enumerate(zip(changed["cells"], changed["was"], strict=True)) if a == b
+			]
+			self.assertEqual(len(same), len(changes["fieldnames"]) - 1)
+			self.assertEqual(changes["removed"][0]["cells"][col], "Third")
+			child = frappe.get_meta("Web Form Field")
+			self.assertEqual(changes["columns"], [child.get_field(c).label for c in changes["fieldnames"]])
+			self.assertEqual(changes["rows"][2]["cells"][col], "Extra")
+			self.assertEqual(
+				_entry(card)["from"], _entry(card)["to"]
+			)  # today's "3 rows" text stays for older readers
+			self.assertEqual(card["draft"]["values"]["web_form_fields"], rows)
+			self.assertNotIn(n3, json.dumps(changes))
+			self._same_shape_as_the_fixture(_entry(card))
+
+		def _same_shape_as_the_fixture(self, entry):
+			"""The hand fixture `update-table-rows` cannot drift from the real builder: the key
+			sets of the diff entry, of `row_changes` and of each row dict are the same
+			(`more`, `reordered`, `hidden_change`, `was` are optional)."""
+			with open(FIXTURES) as f:
+				want = {i["id"]: i for i in json.load(f)}["update-table-rows"]["card"]["diff"][0]
+			self.assertEqual(set(entry), set(want))
+			optional = {"more", "reordered"}
+			self.assertEqual(set(entry["row_changes"]) - optional, set(want["row_changes"]) - optional)
+			by_status = {r["status"]: r for r in want["row_changes"]["rows"]}
+			for row in entry["row_changes"]["rows"]:
+				self.assertEqual(set(row) - {"hidden_change"}, set(by_status[row["status"]]))
+			self.assertEqual(set(entry["row_changes"]["removed"][0]), set(want["row_changes"]["removed"][0]))
+
+		def test_without_a_trial_a_named_row_is_the_saved_row_under_the_call(self):
+			"""With no dry run the final row is the saved row with the call's cells laid over it
+			(what `merge_child_rows` stores): a row sent by its name alone is `kept`, not blank
+			and not changed, and a new row's cells the call did not send stay empty."""
+			form, (n1, n2, _n3) = _make_web_form(self)
+			rows = [{"name": n1}, {"name": n2, "label": "Second changed"}, {"fieldname": "extra"}]
+			changes = _row_changes(self._update(form, rows, None))
+			self.assertEqual([r["status"] for r in changes["rows"]], ["kept", "changed", "new"])
+			col = changes["fieldnames"].index("label")
+			self.assertEqual(changes["rows"][0]["cells"][col], "First")
+			self.assertEqual(changes["rows"][2]["cells"][col], "")
+
+		def test_a_row_name_that_is_not_on_the_record_is_never_new(self):
+			"""The trial refuses such a call before any card exists (`merge_child_rows`); if a
+			card is still built, the unknown name must not turn into an invented `new` row."""
+			form, (n1, _n2, _n3) = _make_web_form(self)
+			rows = [{"name": n1}, {"name": "not-a-row", "label": "Ghost"}]
+			changes = _row_changes(self._update(form, rows, None))
+			self.assertEqual(changes["counts"], {"changed": 0, "new": 0, "kept": 1, "removed": 2})
+			self.assertNotIn("Ghost", json.dumps(changes))
+
+		def test_more_than_fifty_rows_is_bounded_and_the_change_is_kept(self):
+			"""55 saved rows all listed, the last one edited: 50 are drawn, the edit among
+			them, and `more` and `counts` say what the sealed card left out."""
+			form, names = _make_web_form(self, count=55)
+			rows = [{"name": n} for n in names]
+			rows[54]["label"] = "Edited last"
+			changes = _row_changes(self._update(form, rows, None))
+			self.assertEqual(len(changes["rows"]), draft_card.MAX_CHANGE_ROWS)
+			self.assertEqual(changes["more"], {"rows": 5, "removed": 0})
+			self.assertEqual(changes["counts"], {"changed": 1, "new": 0, "kept": 54, "removed": 0})
+			self.assertEqual([r["status"] for r in changes["rows"]].count("changed"), 1)
+
+		def test_the_row_changes_add_no_read_of_the_child_table(self):
+			"""ONE read of the table: the card builder loads the record once and the row
+			changes reuse those rows. Reading them again per table (or per row) would show up
+			as more queries on `tabWeb Form Field` than the same card without a draft."""
+			form, (n1, n2, _n3) = _make_web_form(self)
+			rows = [{"name": n1}, {"name": n2, "label": "Second changed"}]
+
+			def child_reads(draft):
+				with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as spy:
+					self._update(form, rows, None, draft=draft)
+				return [
+					c for c in spy.call_args_list if "tabWeb Form Field" in str(c.args[0] if c.args else "")
+				]
+
+			self.assertEqual(len(child_reads(True)), len(child_reads(False)))
+			self.assertTrue(child_reads(True))
+
+		def test_a_change_past_the_clip_is_changed_not_kept(self):
+			"""The formatter clips a long text at 200 characters and the card at 80, so two
+			texts that differ only at character 220 read the same: the row must still be
+			`changed` (with `hidden_change`), never `kept`."""
+			form, (n1, _n2, _n3) = _make_web_form(self)
+			base = "x" * 219
+			frappe.db.set_value("Web Form Field", n1, "description", base + "a" + "y" * 30)
+			rows = [{"name": n1, "description": base + "b" + "y" * 30}]
+			changes = _row_changes(self._update(form, rows, None))
+			(row,) = changes["rows"]
+			self.assertEqual(row["status"], "changed")
+			self.assertIs(row["hidden_change"], True)
+			self.assertEqual(row["was"], row["cells"])
+			self.assertEqual(changes["fieldnames"][0], "description")  # a key the call set comes first
+
+		def test_a_pure_reorder_is_flagged_on_the_real_card(self):
+			"""Listing the three saved rows in another order changes nothing a cell shows but
+			`update_doc` renumbers them: all `kept`, and `reordered` is the only sign."""
+			form, (n1, n2, n3) = _make_web_form(self)
+			changes = _row_changes(self._update(form, [{"name": n2}, {"name": n1}, {"name": n3}], None))
+			self.assertEqual({r["status"] for r in changes["rows"]}, {"kept"})
+			self.assertIs(changes["reordered"], True)
+			same = _row_changes(self._update(form, [{"name": n1}, {"name": n2, "label": "S2"}], None))
+			self.assertNotIn("reordered", same)
+
+		def _todo(self, **values):
+			"""A ToDo this test owns; removed (and committed) when the test ends, as the park
+			tests commit."""
+			made = []
+
+			def wipe():
+				frappe.db.rollback()
+				frappe.db.delete("ToDo", {"name": ["in", made]})
+				frappe.db.commit()
+
+			self.addCleanup(wipe)
+			todo = frappe.get_doc({"doctype": "ToDo", **values}).insert()
+			made.append(todo.name)
+			return todo
+
+		def test_an_unchanged_table_is_hidden_only_after_a_full_comparison(self):
+			"""Changing only a parent field and echoing the table back: with the trial's rows
+			matched (every field compared, nothing differs) the table is not drawn; with no trial
+			the card cannot know, so it KEEPS the entry, flags it `unverified` and marks no row as
+			a hidden change. No diff entry carries a private `_` key."""
+			form, (n1, n2, n3) = _make_web_form(self)
+			title = f"{ROWS_MARK} renamed"
+			rows = [{"name": n1}, {"name": n2}, {"name": n3}]
+			args = {"doctype": "Web Form", "name": form, "changes": {"title": title, "web_form_fields": rows}}
+			table = frappe.get_meta("Web Form").get_field("web_form_fields").label
+			saved = [r.as_dict() for r in frappe.get_doc("Web Form", form).web_form_fields]
+			full = _park_card("update_doc", args, {"title": title, "web_form_fields": saved}, True)
+			labels = [e["label"] for e in full["diff"]]
+			self.assertIn(frappe.get_meta("Web Form").get_field("title").label, labels)
+			self.assertNotIn(table, labels)
+			blind = _park_card("update_doc", args, None, True)
+			changes = _row_changes(blind)
+			self.assertIs(changes["unverified"], True)
+			self.assertEqual({r["status"] for r in changes["rows"]}, {"kept"})
+			self.assertTrue(all("hidden_change" not in r for r in changes["rows"]))
+			for card in (full, blind):
+				self.assertEqual([k for e in card["diff"] for k in e if k.startswith("_")], [])
+
+		def test_a_table_with_no_comparison_is_kept_and_unverified_and_a_scalar_is_still_skipped(self):
+			"""A listed table whose `row_changes` raised or came back empty must not be dropped on
+			"the trial rows read the same": the entry stays, marked `unverified` at entry level. A
+			scalar field that does not change is still skipped, on a draft or a plain card."""
+			form, (n1, n2, n3) = _make_web_form(self)
+			saved = [r.as_dict() for r in frappe.get_doc("Web Form", form).web_form_fields]
+			rows = [{"name": n1}, {"name": n2}, {"name": n3}]
+			args = {"doctype": "Web Form", "name": form, "changes": {"web_form_fields": rows}}
+			would = {"web_form_fields": saved}
+			for how, patched in (
+				("raises", {"side_effect": RuntimeError("boom")}),
+				("nothing", {"return_value": None}),
+			):
+				with self.subTest(how), patch.object(draft_card, "row_changes", **patched):
+					card = _park_card("update_doc", args, would, True)
+				(entry,) = card["diff"]
+				self.assertIs(entry["unverified"], True)
+				self.assertNotIn("row_changes", entry)
+			todo = self._todo(description="same", status="Open")
+			same = {"doctype": "ToDo", "name": todo.name, "changes": {"status": "Open"}}
+			for draft in (True, False):
+				with self.subTest(draft=draft):
+					card = _park_card("update_doc", same, {"status": "Open"}, draft)
+					self.assertEqual(card["diff"], [])
+
+		def test_a_line_break_past_the_clip_is_still_multiline(self):
+			"""`multiline` is read from the raw value: the display text is cut at 200
+			characters, so a break after that must still set it."""
+			todo = self._todo(description="one line")
+			text = "x" * 250 + "\ny"
+			args = {"doctype": "ToDo", "name": todo.name, "changes": {"description": text}}
+			card = _park_card("update_doc", args, {"description": text}, True)
+			self.assertIs(card["diff"][0]["multiline"], True)
+
+		def test_a_scalar_update_has_no_row_changes_and_only_a_line_break_is_multiline(self):
+			"""Only a table gets `row_changes`, and `multiline` is only on the entry whose text
+			holds a line break, so the apps keep the break and draw nothing else differently."""
+			todo = self._todo(description="one line", status="Open")
+			args = {
+				"doctype": "ToDo",
+				"name": todo.name,
+				"changes": {"description": "first\nsecond", "status": "Closed"},
+			}
+			card = _park_card("update_doc", args, {"description": "first\nsecond", "status": "Closed"}, True)
+			by_label = {e["label"]: e for e in card["diff"]}
+			self.assertIs(by_label["Description"]["multiline"], True)
+			self.assertNotIn("multiline", by_label["Status"])
+			self.assertTrue(all("row_changes" not in e for e in card["diff"]))
+
+	def _stand_in_child(*fields):
+		"""A child DocType stand-in: ``fields`` are ``(fieldname, fieldtype, in_list_view)``."""
+		rows = [
+			SimpleNamespace(
+				fieldname=n, fieldtype=t, in_list_view=int(v), label=n.title(), permlevel=0, options=None
+			)
+			for n, t, v in fields
+		]
+		return SimpleNamespace(
+			fields=rows, get_field=lambda k: next((f for f in rows if f.fieldname == k), None)
+		)
+
+	class TestRowChangeRules(FrappeTestCase):
+		"""The raw-value rules of ``row_changes`` on stand-in child DocTypes (no rows stored)."""
+
+		def test_a_secret_the_call_changes_is_a_change_and_an_echoed_mask_is_not(self):
+			"""Both sides of a secret cell show "[hidden]", and the trial holds a mask as long
+			as the new value: the row is judged on what the call sends."""
+			child = _stand_in_child(("api_key", "Data", 1), ("title", "Data", 1))
+			was = {"api_key": "old-key", "title": "T"}
+			same_len = {**was, "api_key": "new-key"}  # the trial's row is masked, as long as the new one
+			self.assertTrue(
+				draft_card._row_changed(child, was, same_len, {"api_key": "new-key"}, ["api_key", "title"])
+			)
+			self.assertFalse(
+				draft_card._row_changed(child, was, was, {"api_key": "old-key"}, ["api_key", "title"])
+			)
+
+		def _rows(self, child, stored, trial, sent):
+			"""`row_changes` of a stand-in table "t" of ``child``."""
+			meta = SimpleNamespace(get_field=lambda k: SimpleNamespace(fieldtype="Table", options="C"))
+			with patch("frappe.get_meta", return_value=child):
+				return draft_card.row_changes(meta, "t", sent, trial, stored)
+
+		def test_a_password_masked_alike_on_both_sides_is_changed_only_when_the_call_sent_it(self):
+			"""The stored row and the trial's row hold the same mask; only the CALL's new value
+			shows the change: `changed` + `hidden_change`, the cell stays "[hidden]". A call that
+			did not send the key leaves the row `kept`."""
+			child = _stand_in_child(("title", "Data", 1), ("pw", "Password", 0))
+			stored = [{"name": "r1", "title": "T", "pw": "*******"}]
+			trial = [{"name": "r1", "title": "T", "pw": "*******"}]
+			out = self._rows(child, stored, trial, [{"name": "r1", "pw": "newsecret"}])
+			(row,) = out["rows"]
+			self.assertEqual((row["status"], row["hidden_change"]), ("changed", True))
+			self.assertEqual(row["cells"][out["fieldnames"].index("pw")], "[hidden]")
+			self.assertNotIn("newsecret", json.dumps(out))
+			kept = self._rows(child, stored, trial, [{"name": "r1", "title": "T"}])
+			self.assertEqual(kept["rows"][0]["status"], "kept")
+
+		def test_a_field_the_call_did_not_set_and_the_card_does_not_show_still_counts(self):
+			"""Validation recalculates a base amount the call never sent and no column shows: with
+			the trial's own row matched it makes the row `changed` + `hidden_change`; equal, the
+			row is `kept`; with no trial only the call's keys can differ."""
+			child = _stand_in_child(("a", "Data", 1), ("base", "Currency", 0))
+			stored = [{"name": "r1", "a": "x", "base": 10.0}]
+			sent = [{"name": "r1"}]
+			moved = self._rows(child, stored, [{"name": "r1", "a": "x", "base": 12.0}], sent)
+			self.assertEqual(moved["rows"][0]["status"], "changed")
+			self.assertIs(moved["rows"][0]["hidden_change"], True)
+			same = self._rows(child, stored, [{"name": "r1", "a": "x", "base": 10.0}], sent)
+			self.assertEqual(same["rows"][0]["status"], "kept")
+			self.assertEqual(self._rows(child, stored, None, sent)["rows"][0]["status"], "kept")
+
+		def test_a_comparison_without_the_trial_rows_is_unverified_not_unchanged(self):
+			"""With no usable trial only the call's keys can differ, so "nothing differs" is not
+			known: `unverified`, and no row is called a hidden change. Matched against the trial,
+			the same call is a full comparison and carries no such flag."""
+			child = _stand_in_child(("a", "Data", 1), ("base", "Currency", 0))
+			stored = [{"name": "r1", "a": "x", "base": 10.0}]
+			sent = [{"name": "r1"}]
+			blind = self._rows(child, stored, None, sent)
+			self.assertIs(blind["unverified"], True)
+			self.assertNotIn("hidden_change", blind["rows"][0])
+			wrong_count = self._rows(child, stored, [], sent)  # trial rows that do not pair up
+			self.assertIs(wrong_count["unverified"], True)
+			full = self._rows(child, stored, [{"name": "r1", "a": "x", "base": 10.0}], sent)
+			self.assertNotIn("unverified", full)
+			self.assertFalse(draft_card.has_row_change({"row_changes": full}))
+
+		def test_a_hidden_field_that_differs_in_a_full_comparison_keeps_the_entry(self):
+			"""Exhaustive and one non-shown field differs: `changed` + `hidden_change`, no
+			`unverified`, and `has_row_change` is true so the table is drawn."""
+			child = _stand_in_child(("a", "Data", 1), ("base", "Currency", 0))
+			stored = [{"name": "r1", "a": "x", "base": 10.0}]
+			out = self._rows(child, stored, [{"name": "r1", "a": "x", "base": 12.0}], [{"name": "r1"}])
+			self.assertNotIn("unverified", out)
+			self.assertEqual((out["rows"][0]["status"], out["rows"][0]["hidden_change"]), ("changed", True))
+			self.assertTrue(draft_card.has_row_change({"row_changes": out}))
+
+		def test_a_trial_row_that_lacks_a_stored_field_is_unverified(self):
+			"""A trial row of only `name` says nothing about the stored `a`: that field cannot be
+			compared, so the comparison is not exhaustive: `unverified`, the entry is kept."""
+			child = _stand_in_child(("a", "Data", 1))
+			out = self._rows(child, [{"name": "r1", "a": "x"}], [{"name": "r1"}], [{"name": "r1"}])
+			self.assertIs(out["unverified"], True)
+			self.assertEqual(out["rows"][0]["status"], "kept")
+
+		def test_a_stored_row_with_no_name_is_unverified(self):
+			"""A saved row without a name cannot be matched or counted as removed, so nothing can
+			be called unchanged: `unverified`."""
+			child = _stand_in_child(("a", "Data", 1))
+			stored = [{"name": "r1", "a": "x"}, {"a": "nameless"}]
+			out = self._rows(child, stored, [{"name": "r1", "a": "x"}, {"a": "nameless"}], [{"name": "r1"}])
+			self.assertIs(out["unverified"], True)
+
+		def test_a_difference_of_type_only_is_not_a_change(self):
+			"""The call sends text or a bool, the row holds a number or a date: "3" and 3, 1 and
+			True, None and "", a date string and a date, a datetime string and a datetime are the
+			same stored value."""
+			from datetime import date, datetime
+
+			cases = [
+				("Int", "3", 3),
+				("Check", 1, True),
+				("Data", None, ""),
+				("Date", "2026-01-02", date(2026, 1, 2)),
+				("Datetime", "2026-01-02 10:00:00", datetime(2026, 1, 2, 10)),
+			]
+			for fieldtype, a, b in cases:
+				with self.subTest(fieldtype):
+					self.assertFalse(draft_card._differs(a, b, SimpleNamespace(fieldtype=fieldtype)))
+
+		def test_the_stored_order_is_idx_not_list_position(self):
+			"""Saved rows read out of `idx` order: a call in the true (idx) order is not
+			`reordered`, one in the list's order is."""
+			child = _stand_in_child(("a", "Data", 1))
+			stored = [{"name": "b", "idx": 2, "a": "y"}, {"name": "a", "idx": 1, "a": "x"}]
+			straight = self._rows(child, stored, None, [{"name": "a"}, {"name": "b"}])
+			self.assertNotIn("reordered", straight)
+			swapped = self._rows(child, stored, None, [{"name": "b"}, {"name": "a"}])
+			self.assertIs(swapped["reordered"], True)
+
+		def test_a_currency_that_differs_after_the_decimals_is_a_change(self):
+			"""100.001 and 100.004 print alike at 2 places; `same_value` casts without
+			rounding, so the card calls it changed (the safe side: never show a write as no
+			change). 100 and "100.0" are the same value."""
+			money = SimpleNamespace(fieldtype="Currency")
+			self.assertTrue(draft_card._differs(100.001, 100.004, money))
+			self.assertFalse(draft_card._differs(100, "100.0", money))
+
+		def test_a_time_sent_as_text_equals_the_stored_time(self):
+			"""The call sends "11:00", the row holds 11:00:00 (a timedelta): not a change; 11:30
+			is."""
+			from datetime import timedelta
+
+			clock = SimpleNamespace(fieldtype="Time")
+			self.assertFalse(draft_card._differs(timedelta(hours=11), "11:00", clock))
+			self.assertFalse(draft_card._differs("11:00:00", "11:00", clock))
+			self.assertTrue(draft_card._differs(timedelta(hours=11), "11:30", clock))
+
+		def test_same_value_still_reads_a_time_as_text(self):
+			"""Pins why `_differs` is not just `same_value`: the ordinary update card's
+			comparison has no Time cast ("11:00" vs 11:00:00 is a change there). If this
+			flips, those cards' diffs changed; revisit `_differs`."""
+			from datetime import timedelta
+
+			from jarvis.chat._record_summary import same_value
+
+			clock = SimpleNamespace(fieldtype="Time")
+			self.assertFalse(draft_card._differs(timedelta(hours=11), "11:00", clock))
+			self.assertFalse(same_value(timedelta(hours=11), "11:00", clock))
+			self.assertTrue(same_value("11:00:00", "11:00:00", clock))
+
+		def test_a_key_the_call_set_is_shown_even_as_the_ninth_column(self):
+			"""With ten list-view fields, the field the call edited comes first so the cap of 8
+			columns cannot hide it."""
+			child = _stand_in_child(*[(f"f{i}", "Data", 1) for i in range(10)])
+			columns = draft_card._row_columns(child, [{"f9": "x"}])
+			self.assertEqual((columns[0], len(columns)), ("f9", 8))
+
+		def test_a_child_with_no_list_columns_and_no_keys_shows_its_first_data_fields(self):
+			"""Removed and added rows must still say what they are: with no list-view field and
+			nothing set, the first 3 data fields (not layout, not secret) are the columns."""
+			child = _stand_in_child(
+				("sec", "Section Break", 0),
+				("api_key", "Data", 0),
+				("a", "Data", 0),
+				("b", "Int", 0),
+				("c", "Data", 0),
+				("d", "Data", 0),
+			)
+			self.assertEqual(draft_card._row_columns(child, [{"name": "x"}]), ["a", "b", "c"])
+
+		def test_none_clears_the_table_as_an_empty_list_does(self):
+			"""`merge_child_rows` takes None as a clear: every saved row is listed as removed,
+			for None and for []."""
+			child = _stand_in_child(("a", "Data", 1))
+			meta = SimpleNamespace(get_field=lambda k: SimpleNamespace(fieldtype="Table", options="C"))
+			stored = [{"name": "r1", "a": "x"}, {"name": "r2", "a": "y"}]
+			for sent in (None, []):
+				with self.subTest(sent=sent), patch("frappe.get_meta", return_value=child):
+					out = draft_card.row_changes(meta, "t", sent, None, stored)
+				self.assertEqual(out["counts"], {"changed": 0, "new": 0, "kept": 0, "removed": 2})
+				self.assertEqual(out["removed"], [{"cells": ["x"]}, {"cells": ["y"]}])
+
+	class TestParkedUpdateRowChanges(FrappeTestCase):
+		"""The real park (`api._run_tool`) of an update on a Web Form with 3 rows."""
+
+		def setUp(self):
+			super().setUp()
+			self.owner = frappe.session.user
+			frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
+			self.conv = (
+				frappe.get_doc({"doctype": "Jarvis Conversation", "title": "draft rows test"})
+				.insert(ignore_permissions=True)
+				.name
+			)
+			self.addCleanup(self._cleanup)
+
+		def _cleanup(self):
+			frappe.cache().delete_value(pending_confirm._OWNER_PREFIX + self.owner)
+			frappe.db.sql(f"DELETE FROM `tab{PA}` WHERE conversation=%(c)s", {"c": self.conv})
+			frappe.db.delete(MSG, {"conversation": self.conv})
+			frappe.delete_doc("Jarvis Conversation", self.conv, force=True, ignore_permissions=True)
+			# The park commits mid-test, so the class rollback keeps these rows: commit the deletes.
+			frappe.db.commit()
+
+		def _park(self, flag):
+			form, (n1, n2, _n3) = _make_web_form(self)
+			args = {
+				"doctype": "Web Form",
+				"name": form,
+				"changes": {
+					"web_form_fields": [
+						{"name": n1},
+						{"name": n2, "label": "Second changed"},
+						{"fieldname": "date", "fieldtype": "Data"},
+					]
+				},
+			}
+			with patch.dict(frappe.conf, {FLAG: flag}):
+				res = api._run_tool("update_doc", json.loads(json.dumps(args)), conversation=self.conv)
+			self.assertEqual(res["data"]["status"], "pending_confirmation", res)
+			[name] = frappe.get_all(PA, filters={"conversation": self.conv}, pluck="name")
+			fields = [*_seal.BOUND_FIELDS, "card", "preview", "summary", "sealed_call"]
+			return args, frappe.db.get_value(PA, name, fields, as_dict=True)
+
+		def test_flag_on_parks_the_rows_from_the_real_trial_and_the_seal_covers_them(self):
+			"""Through the real trial: one changed, one kept, one new, one removed; the stored
+			card verifies against its seal, and taking `row_changes` off breaks the hash."""
+			_args, row = self._park(1)
+			card = json.loads(row.card)
+			changes = _row_changes(card)
+			self.assertEqual([r["status"] for r in changes["rows"]], ["kept", "changed", "new"])
+			self.assertEqual(changes["counts"]["removed"], 1)
+			sealed = _seal.unseal_call(row)
+			bare = json.loads(row.card)
+			_entry(bare).pop("row_changes")
+			self.assertNotEqual(_seal.card_sha256({**row, "card": json.dumps(bare)}), sealed["card_sha256"])
+
+		def test_flag_off_is_todays_behaviour(self):
+			"""With the flag off the parked update card has no draft, no `row_changes`, no
+			`multiline`, and equals what the builder returns without the draft path for the
+			stored trial."""
+			args, row = self._park(0)
+			card = json.loads(row.card)
+			preview = {k: v for k, v in json.loads(row.preview).items() if k != "card"}
+			expected = json.loads(
+				json.dumps(confirm_card.build_card("update_doc", args, preview), default=str)
+			)
+			self.assertEqual(card, expected)
+			self.assertNotIn("draft", card)
+			self.assertTrue(all("row_changes" not in e and "multiline" not in e for e in card["diff"]))
+			_seal.unseal_call(row)
+
+		def test_an_unknown_row_name_is_refused_and_no_card_is_parked(self):
+			"""`merge_child_rows` refuses a row name the record does not have: the park returns
+			an error and leaves no Pending Action row, so no card can call it new."""
+			form, (n1, _n2, _n3) = _make_web_form(self)
+			args = {
+				"doctype": "Web Form",
+				"name": form,
+				"changes": {"web_form_fields": [{"name": n1}, {"name": "not-a-row", "label": "Ghost"}]},
+			}
+			with patch.dict(frappe.conf, {FLAG: 1}):
+				res = api._run_tool("update_doc", args, conversation=self.conv)
+			self.assertFalse(res["ok"], res)
+			self.assertIn("no row named", json.dumps(res))
+			self.assertEqual(frappe.get_all(PA, filters={"conversation": self.conv}, pluck="name"), [])

@@ -2,7 +2,7 @@
 // form shows (form_fields from get_doctype_form_meta), laid out in its sections and
 // columns, with Desk's depends_on / mandatory_depends_on / read_only_depends_on
 // rules evaluated on the row. Pure, so it is unit-testable without the view.
-import { allRowFields, checkToYesNo, ruleFetchSource, toPanelRow } from "@/lib/draftApply";
+import { allRowFields, checkToYesNo, ruleFetchSource, toPanelRow } from "./draftApply";
 
 const NUMERIC = new Set(["Int", "Float", "Currency", "Percent", "Rating"]);
 

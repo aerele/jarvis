@@ -132,7 +132,9 @@ describe("the card advertises both ways to approve", () => {
 	});
 
 	it("numbers the cards, since a typed selection picks by that number", () => {
-		expect(src).toContain('v-if="visiblePendingActions.length > 1" class="jv-pending-num"');
+		// whitespace-tolerant: the card sits one level deeper (under the draft/legacy branch), so
+		// the formatter may put the two attributes on separate lines
+		expect(src).toMatch(/v-if="visiblePendingActions\.length > 1"\s+class="jv-pending-num"/);
 		expect(src).toContain("{{ pi + 1 }} of {{ visiblePendingActions.length }}");
 	});
 

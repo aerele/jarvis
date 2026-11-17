@@ -189,6 +189,47 @@ export const applyAction = (action) =>
 export const dismissDraft = (conversation, message) =>
 	call("jarvis.chat.actions_api.dismiss_draft", { conversation, message });
 
+// ── Server draft cards (the shared draft host's calls) ──────────────────────
+// The shared form builder and draft host (@shared/lib/draftModel.js, toolDraftHost.js) call
+// these by the desktop SPA's names and argument order, so the phone passes them straight in.
+// Same endpoints, methods and serialisation as the desktop's api.js.
+// `loadDocForEdit` is `loadDoc` under the name the shared builder uses (one implementation).
+export const loadDocForEdit = loadDoc;
+// The hidden values a child table's row rules read that Desk fetches from a link:
+// {ok, values: {link field: {link value: {rule field: value}}}}.
+export const ruleValues = (doctype, table, links) =>
+	call("jarvis.chat.actions_api.rule_values", {
+		doctype,
+		table,
+		links: JSON.stringify(links),
+	});
+// Save an edited SERVER draft card: `values` is only what the person changed. The server runs the
+// edited call itself and the card ends as the decided row, or stays Pending when the reply says
+// `card_open`. Same envelopes as applyAction.
+export const saveDraftCard = (token, conversation, values) =>
+	call("jarvis.chat.actions_api.save_draft_card", {
+		token,
+		conversation: conversation || "",
+		values: JSON.stringify(values || {}),
+	});
+// The edit form's link picker: Frappe's own search_link. The optional context is sent only when known.
+export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkFieldname, filters) => {
+	const args = { doctype, txt: txt || "", page_length: pageLength || 8 };
+	if (referenceDoctype) args.reference_doctype = referenceDoctype;
+	if (linkFieldname) args.link_fieldname = linkFieldname;
+	if (filters?.length) args.filters = filters;
+	return call("frappe.desk.search.search_link", args);
+};
+// Park the confirm card for a create receipt's suggested next step (Submit). Nothing runs until Confirm.
+export const proposeNextAction = (conversation, step) =>
+	call("jarvis.chat.actions_api.propose_next_action", {
+		conversation,
+		doctype: step.doctype,
+		name: step.name,
+		kind: step.kind,
+		...(step.action ? { action: step.action } : {}),
+	});
+
 // ── Attachments ────────────────────────────────────────────────────────────
 // Standard Frappe upload, private by default: a chat attachment is the user's
 // document, not a public asset. Same shape the SPA's uploadFile uses.
