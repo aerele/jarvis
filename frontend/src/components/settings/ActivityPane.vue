@@ -1,11 +1,25 @@
 <template>
 	<SettingsPane title="Activity" description="Recent tool calls in this chat.">
+		<!-- User notice (user-activity report, D10): says what an admin can see. -->
+		<p
+			role="note"
+			class="mb-4 flex items-start gap-2 text-p-sm text-ink-gray-6"
+			data-testid="activity-privacy-notice"
+		>
+			<FeatherIcon
+				name="info"
+				class="mt-0.5 size-4 shrink-0 text-ink-gray-5"
+				aria-hidden="true"
+			/>
+			<span>{{ PRIVACY_NOTICE }}</span>
+		</p>
+
 		<h3 class="text-base font-semibold text-ink-gray-9">Recent tool runs</h3>
 
 		<div v-if="loading" class="grid place-items-center py-10"><JvSpinner /></div>
 
 		<div v-else-if="!runs.length" class="flex flex-col items-center gap-2 py-12 text-center">
-			<FeatherIcon name="activity" class="size-8 text-ink-gray-4" />
+			<FeatherIcon name="activity" class="size-8 text-ink-gray-4" aria-hidden="true" />
 			<span class="text-base text-ink-gray-6">No tool activity in this chat yet.</span>
 		</div>
 
@@ -16,7 +30,7 @@
 				class="border-t py-2.5 first:border-t-0 first:pt-0"
 			>
 				<div class="flex items-center gap-2 text-p-sm text-ink-gray-7">
-					<FeatherIcon name="tool" class="size-4 text-ink-gray-5" />
+					<FeatherIcon name="tool" class="size-4 text-ink-gray-5" aria-hidden="true" />
 					<span>{{ a.tools }} tool{{ a.tools === 1 ? "" : "s" }}</span>
 					<span v-if="a.ms" class="ml-auto tabular-nums text-ink-gray-5"
 						>{{ (a.ms / 1000).toFixed(1) }}s</span
@@ -40,6 +54,7 @@ import { useShellStore } from "@/stores/shell";
 import SettingsPane from "@/components/settings/SettingsPane.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import * as api from "@/api";
+import { PRIVACY_NOTICE } from "@/lib/privacyNotice";
 
 const shell = useShellStore();
 

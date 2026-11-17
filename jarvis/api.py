@@ -379,6 +379,10 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 					return refusal
 			finally:
 				_private_output.end_delegate_redaction(redaction_token)
+			# Activity (plan 4.3(3)): a refused call, attributed to the session's user.
+			_record_denied_call(
+				tool, "PermissionError", actor=_activity_session_actor(session_key), channel="chat"
+			)
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", "Private memory is unavailable in shared chats.")
 		# Custom App Learning has a private source-to-delegate data path. A shared
@@ -386,6 +390,9 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 		# the shared dispatcher must not see source names, source text, or Org-wiki
 		# bodies from an unattended source-learning run.
 		if shared_session and _is_private_app_learning_tool(tool):
+			_record_denied_call(  # activity, plan 4.3(3)
+				tool, "PermissionError", actor=_activity_session_actor(session_key), channel="chat"
+			)
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", "Custom App Learning tools are unavailable in shared chats.")
 		try:
@@ -394,10 +401,13 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 			)
 		except frappe.PermissionError:
 			_record_foreign_session(session_key)
+			# Activity (plan 4.3(5)): a signed call on a session that does not resolve.
+			_record_auth_rejected("session_unresolved", actor=_activity_session_actor(session_key))
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", "Collaborative chat execution is unavailable on this server.")
 		if not plugin_user:
 			_record_foreign_session(session_key)
+			_record_auth_rejected("unknown_session")  # activity, plan 4.3(5)
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
@@ -406,6 +416,7 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 		frappe.local.jarvis_call_tool_user = plugin_user
 		enabled = frappe.db.get_value("User", plugin_user, "enabled")
 		if enabled is None:
+			_record_auth_rejected("unknown_user", actor=plugin_user)  # activity, plan 4.3(5)
 			frappe.local.response.http_status_code = 400
 			return _error(
 				"InvalidArgumentError",
@@ -414,6 +425,7 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 		# Disabling a user is how access is revoked, but Frappe only ends their
 		# browser sessions, not this chat session row: refuse it here.
 		if not enabled:
+			_record_auth_rejected("user_disabled", actor=plugin_user)  # activity, plan 4.3(5)
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", f"session user is disabled: {plugin_user}")
 
@@ -455,6 +467,7 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 		from jarvis.chat.device import session_device_is_stale
 
 		if session_device_is_stale(row_device, current_device):
+			_record_auth_rejected("stale_session", actor=plugin_user)  # activity, plan 4.3(5)
 			frappe.local.response.http_status_code = 401
 			from jarvis.tools import _delegate_capability
 
@@ -578,6 +591,7 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 	# user without Jarvis access can't drive Jarvis tools even by POSTing
 	# call_tool directly. Per-DocType perms still apply beneath this.
 	if not has_jarvis_access():
+		_record_denied_call(tool, "PermissionError")  # activity, plan 4.3(3)
 		frappe.local.response.http_status_code = 403
 		return _error("PermissionError", "you do not have access to Jarvis")
 
@@ -3277,6 +3291,125 @@ def _app_learning_audit_payload(tool: str, args: dict | None, data) -> tuple[dic
 	return safe_args, {"status": "private app-learning tool result unavailable"}
 
 
+# Activity log (plan 2026-11-06-user-activity-report 4.3). Codes that mean "you may
+# not", as opposed to "it did not work": a refused read is a `denied` event.
+_ACTIVITY_DENIED_CODES = frozenset(
+	{"PermissionDeniedError", "PermissionError", "CapabilityDeniedError", "FeatureDisabledError"}
+)
+
+
+def _export_delivered(data) -> bool:
+	"""True only when an export tool returned a FILE (``file_url``): the immediate
+	success. A background job's state (``export_job``), a prepared-report status envelope
+	and any other shape without a file exported nothing on this call, and a job's
+	completion records its own event (plan 4.3(1)); an unrecognised shape records
+	nothing rather than a guess."""
+	return isinstance(data, dict) and bool(data.get("file_url"))
+
+
+def _activity_session_actor(session_key: str) -> str:
+	"""Best effort: the user a plugin session key was issued to ("" when unknown).
+	One column read of the Jarvis Chat Session row, for attribution only: not
+	``resolve_identity``, which ``frappe.throw``s (a message_log entry on the response)
+	for every key it cannot resolve, and this is called on exactly those refusals."""
+	try:
+		from jarvis.chat.collaboration import SESSION
+
+		return frappe.db.get_value(SESSION, {"session_key": session_key}, "user") or ""
+	except Exception:
+		return ""
+
+
+# An error code is stored only when it is a plain identifier (an exception / error
+# class name): anything else, such as free text a tool put in ``code``, is "failed".
+_ACTIVITY_CODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+
+
+def _activity_code(code) -> str:
+	return code if isinstance(code, str) and _ACTIVITY_CODE_RE.match(code) else "failed"
+
+
+def _activity_target(tool: str, args) -> tuple[str, str]:
+	"""``(method, ref_doctype)`` for an activity row: the one place the privacy rule
+	lives (plan D1). The caller's own tool string is never stored (an unregistered name
+	becomes ``unknown_tool``, with no ref), and the ref is only a real DocType / Report
+	name (``activity_log.ref_doctype_of``)."""
+	from jarvis import activity_log, api_errors
+
+	method = api_errors._known_tool(tool)
+	ref = "" if method == api_errors.UNKNOWN_TOOL else activity_log.ref_doctype_of(tool, args)
+	return method, ref
+
+
+def _record_tool_activity(tool: str, args, data, *, is_write: bool) -> None:
+	"""One ``read`` event per completed non-write tool call, and one ``export`` event
+	per delivered export (an export tool is a write, so it also keeps its Agent Write
+	row). Introspection tools are not logged (plan E4). A tool that dispatched but
+	answered ``{ok: false}`` in its OWN envelope (``_ENVELOPE_TOOLS``) is a `failed`
+	read, not an `ok` one. Never raises, never commits."""
+	from jarvis import activity_log
+
+	if is_write:
+		if tool not in activity_log.EXPORT_TOOLS or not _export_delivered(data):
+			return
+		event = "export"
+	elif tool in activity_log.INTROSPECTION_TOOLS:
+		return
+	else:
+		event = "read"
+	method, ref_doctype = _activity_target(tool, args)
+	activity_log.record(
+		event,
+		actor=frappe.session.user,
+		method=method,
+		ref_doctype=ref_doctype,
+		row_count=activity_log.row_count_of(tool, data),
+		outcome="ok" if envelope_ok(tool, {"ok": True, "data": data}) else "failed",
+	)
+
+
+def _record_read_failure(tool: str, args, envelope: dict) -> None:
+	"""A non-write tool that answered ``{ok: false}``: a `read` event, `denied` for a
+	permission-type code, else `failed`. The code only, never the message (plan 4.3(2)),
+	and only when it is a plain identifier (``_activity_code``)."""
+	from jarvis import activity_log
+
+	error = envelope.get("error")
+	raw = error.get("code") if isinstance(error, dict) else None
+	denied = isinstance(raw, str) and raw in _ACTIVITY_DENIED_CODES
+	method, ref_doctype = _activity_target(tool, args)
+	activity_log.record(
+		"read",
+		actor=frappe.session.user,
+		method=method,
+		ref_doctype=ref_doctype,
+		outcome="denied" if denied else "failed",
+		code=_activity_code(raw),
+	)
+
+
+def _record_denied_call(tool: str, code: str, *, actor: str | None = None, channel: str | None = None):
+	"""A call refused before the tool ran (plan 4.3(3)). The method is the registered
+	tool name or ``unknown_tool``: the caller's own string is never stored."""
+	from jarvis import activity_log
+
+	activity_log.record(
+		"denied_call",
+		actor=frappe.session.user if actor is None else actor,
+		method=_activity_target(tool, None)[0],
+		outcome="denied",
+		code=code,
+		channel=channel,
+	)
+
+
+def _record_auth_rejected(code: str, actor: str = "") -> None:
+	"""A signed plugin call whose session or user was refused (plan 4.3(5), E5)."""
+	from jarvis import activity_log
+
+	activity_log.record("auth_rejected", actor=actor, outcome="denied", code=code, channel="chat")
+
+
 def _dispatch_and_wrap(
 	tool: str,
 	args: dict,
@@ -3416,6 +3549,9 @@ def _dispatch_and_wrap(
 				provenance_name=provenance_name,
 				ref_doctype=err_obj.get("doctype") if refused else None,
 			)
+		if not is_write:
+			# Activity event for a failed read (plan 4.3(2)); after every rollback above.
+			_record_read_failure(tool, args, envelope)
 		# The agent got {ok: false}, a 200, so no other error lane sees it. Placed
 		# after every rollback above so the row rides the envelope's commit.
 		from jarvis import api_errors
@@ -3450,6 +3586,23 @@ def _dispatch_and_wrap(
 			provenance=provenance,
 			provenance_name=provenance_name,
 		)
+<<<<<<< HEAD
+=======
+	# Activity events (plan 4.3(1)): after the savepoint release, so they ride the
+	# envelope's commit like the Agent Write row above.
+	_record_tool_activity(tool, args, data, is_write=is_write)
+	if not envelope_ok(tool, {"ok": True, "data": data}):
+		# A connector call that dispatched but answered {ok: false} inside its own
+		# envelope: the agent got a failure under an outer ok:true, so no failure
+		# branch above saw it.
+		from jarvis import api_errors
+
+		api_errors.record_tool_failure(
+			tool,
+			_app_learning_safe_error(tool, data.get("error") if isinstance(data, dict) else None),
+		)
+		frappe.local.jarvis_tool_failure_recorded = True
+>>>>>>> 38ab11c (feat(activity): Jarvis User Activity report and per-user activity log)
 	return {"ok": True, "data": data}
 
 
@@ -4244,6 +4397,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 
 		shared_permit = permitted_callback(conversation, tool)
 		if not shared_permit:
+			_record_denied_call(tool, "PermissionError")  # activity, plan 4.3(3)
 			return _error("PermissionError", "Shared tool execution requires a current actor-bound callback.")
 
 	# S6: a tool body (e.g. run_method -> call_tool) must never re-enter the gate.
@@ -4260,6 +4414,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 
 		if not wiki_enabled():
 			code = FeatureDisabledError.__name__
+			_record_denied_call(tool, code)  # activity, plan 4.3(3)
 			return _error(code, WIKI_DISABLED_MESSAGE, hint=_hint_for(code, ""))
 
 	is_write = tool in _WRITE_TOOLS
@@ -4272,9 +4427,11 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 
 		try:
 			if tool_kind(tool) == "refused":
+				_record_denied_call(tool, "PermissionError")  # activity, plan 4.3(3)
 				return _error("PermissionError", "This tool is unavailable in shared chats.")
 			validate_targets(tool, args)
 		except frappe.PermissionError:
+			_record_denied_call(tool, "PermissionError")  # activity, plan 4.3(3)
 			return _error("PermissionError", "Private Jarvis context is unavailable in shared chats.")
 
 	# Write-risk guard (round 2, jarvis.tools._write_risk): ONE choke point, ahead of
