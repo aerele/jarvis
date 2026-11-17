@@ -376,6 +376,7 @@ const draftSheet = makeDraftSheet({
 	loadChat: () => load(),
 	loadPending: (source) => loadPending(source),
 	refreshChats: () => store.loadConversations(),
+	showQueued: (q) => showQueuedContinuation(convId.value, q),
 	say: (text) => {
 		errorBanner.value = text;
 	},
@@ -1676,6 +1677,15 @@ function submitNext(step) {
 	});
 }
 
+// A confirmed draft that continues the chat whose turn is waiting for a slot: the same waiting card
+// a queued send shows (recoveryState.queued, read and cancelled by refreshQueue / cancelWaiting).
+function showQueuedContinuation(cid, q) {
+	if (!q || !q.run_id || recoveryState.observedRuns[q.run_id] || recoveryState.queued[cid])
+		return;
+	queueGeneration++;
+	recoveryState.queued[cid] = { run_id: q.run_id, state: "queued", position: q.position };
+}
+
 // Create / Cancel on an inline draft card. No window.confirm: the card's Cancel asks nothing more
 // than the desktop's does. A final draft starts no agent turn, so after either one the chat and the
 // pending list are reloaded here (runDraftDecision); the receipt line comes from the reloaded rows.
@@ -1695,6 +1705,7 @@ function decideDraft(kind, pa) {
 		settle: (token) => {
 			settledTokens.value = withExcluded(settledTokens.value, [token]);
 		},
+		showQueued: (q) => showQueuedContinuation(cid, q),
 		say: (text) => {
 			errorBanner.value = text;
 		},

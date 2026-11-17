@@ -2,7 +2,7 @@
 // (where the state lives, what to reload) around the shared libs in frontend/src/lib. Relative
 // imports only. It imports toolDraftHost.js, whose import chain `node --test` cannot resolve, so
 // this file is tested by vitest (frontend/src/components/PwaDraftCard.spec.js); the pure parts
-// are in draftCardDecision.js and draftCardUi.js, which node tests run.
+// are draftCardUi.js (node tests run it) and the shared decision in chatCardActions.js.
 import { cardOfItem, isToolDraftItem } from "../../../frontend/src/lib/toolDraft.js";
 import {
 	hasParkedDraft,
@@ -10,7 +10,15 @@ import {
 	toolDraftCtxMap,
 	withBusyKind,
 } from "../../../frontend/src/lib/toolDraftHost.js";
-import { cancelOutcome, createOutcome, thrownOutcome } from "./draftCardDecision.js";
+import { pendingExpiry } from "../../../frontend/src/lib/actionSummary.js";
+import {
+	confirmReplyOutcome,
+	dismissReplyOutcome,
+	thrownCardError,
+} from "../../../frontend/src/lib/chatCardActions.js";
+
+// The line under a card when the server's own words are missing (a storage reply with no message).
+export const ACTION_FAILED_TEXT = "This action could not be completed.";
 
 export { cardOfItem, isToolDraftItem };
 
@@ -68,7 +76,11 @@ export function keepBusyItems(next, previous, busyTokens) {
 //           current() -> bool (this chat is still the one on screen), removePending(token),
 //           settle(token) (keep a stale read from putting the card back), say(text) (the chat's
 //           banner), reload() (the conversation), reloadPending(), receiptShown(token) (the
-//           reloaded rows hold a decided row for the card), agent }
+//           reloaded rows hold a decided row for the card), showQueued({run_id, position}) (a
+//           continuation turn is waiting for a slot) }
+// What a reply means is the shared decision (frontend/src/lib/chatCardActions.js, the one the
+// desktop's handlers apply): a card is kept with the server's words, or gone and the chat and the
+// pending list are reloaded. A thrown call says the shared sanitised text, never the raw error.
 // Resolves to "ignored" (a second press, the turn is running, no token), "stale" (the person left
 // the chat), "kept" (the card stays, usable again, with an error line) or "gone" (the card is
 // spent, both lists were reloaded). The busy kind is held for the whole call and cleared at the
@@ -82,31 +94,39 @@ export async function runDraftDecision(kind, pa, d) {
 		kind,
 		async () => {
 			d.ui.setError(token, "");
-			let outcome;
+			let out;
 			try {
 				const reply =
 					kind === "create"
 						? await d.confirm(token, conversation)
 						: await d.dismiss(token, conversation);
-				outcome =
+				out =
 					kind === "create"
-						? createOutcome(reply, { agent: d.agent })
-						: cancelOutcome(reply);
+						? confirmReplyOutcome(reply, {
+								draft: true,
+								expired: pendingExpiry(pa.expires_at, Date.now()).expired,
+						  })
+						: dismissReplyOutcome(reply);
 			} catch (e) {
-				outcome = thrownOutcome(kind, e);
+				out = {
+					fate: "kept",
+					message: thrownCardError(e, kind === "create" ? "confirm" : "dismiss").message,
+				};
 			}
 			if (!d.current()) {
 				result = "stale";
 				return;
 			}
-			if (!outcome.gone) {
-				d.ui.setError(token, outcome.error);
+			if (out.fate === "kept") {
+				d.ui.setError(token, out.message || ACTION_FAILED_TEXT);
 				result = "kept";
 				return;
 			}
 			d.removePending(token);
 			d.settle(token);
 			d.ui.forget(token);
+			// a draft that continues the chat: its turn is waiting for a slot (the queued card, as after a send)
+			if (out.queued) d.showQueued(out.queued);
 			// The decision is final and starts no agent turn, so nothing else will bring the receipt:
 			// reload the chat, then the pending list (it reads the reloaded rows).
 			try {
@@ -118,7 +138,7 @@ export async function runDraftDecision(kind, pa, d) {
 			// A card spent with no receipt of its own to say why (it was handled elsewhere, its token was
 			// used) gets one line in the chat's banner. When the reload brought its receipt, the receipt
 			// is the line (State Table: receipt only), so the banner would say it twice.
-			if (d.current() && outcome.say && !d.receiptShown(token)) d.say(outcome.say);
+			if (d.current() && out.message && !d.receiptShown(token)) d.say(out.message);
 			result = d.current() ? "gone" : "stale";
 		},
 		d.ui.where

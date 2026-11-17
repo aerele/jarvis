@@ -7,10 +7,10 @@ import fs from "fs";
 import path from "path";
 import DraftCard from "./chat/DraftCard.vue";
 import { draftCardView } from "../lib/draftCardView.js";
-import { chatSettledReason } from "../lib/chatCardActions.js";
+import { EXPECTED, REPLY_ROWS, THROWN_FALLBACK, thrownError } from "../lib/chatCardReplyCases.js";
 import { makeDraftUi } from "../../../pwa/src/lib/draftCardUi.js";
-import { DRAFT_STALE_TEXT } from "../../../pwa/src/lib/draftCardDecision.js";
 import {
+	ACTION_FAILED_TEXT,
 	keepBusyItems,
 	phoneDraftModel,
 	runDraftDecision,
@@ -188,6 +188,7 @@ function deps(ui, over = {}) {
 		current: () => true,
 		removePending: (t) => calls.push(["remove", t]),
 		settle: (t) => calls.push(["settle", t]),
+		showQueued: (q) => calls.push(["queued", q]),
 		say: (t) => calls.push(["say", t]),
 		reload: vi.fn(async () => calls.push(["reload"])),
 		reloadPending: vi.fn(async () => calls.push(["reloadPending"])),
@@ -196,100 +197,85 @@ function deps(ui, over = {}) {
 	};
 	return d;
 }
-const INVALID = { type: "InvalidConfirmation" };
 
-describe("runDraftDecision: what each reply does on screen", () => {
-	// [name, kind, how the call answers, result, card gone, error line, banner line]
-	// Break: a spent card stays (pressable twice), a pending card is taken away, a failure is silent,
-	// or the receipt is never reloaded (a final draft starts no agent turn, so nothing else will).
-	const stale = "This record changed after the draft was made. Nothing was saved.";
-	// One row per outcome class; the table checks effects and their order, the pure fate of every
-	// reply is in pwa/src/lib/draftCardDecision.test.js.
-	// [name, kind, how the call answers, result, card gone, error line, banner line, receipt loaded]
-	const ROWS = [
-		["Create ok", "create", { ok: true }, "gone", true, "", "", false],
-		[
-			"Create busy (card stays)",
-			"create",
-			{ ok: false, reason_code: "busy" },
-			"kept",
-			false,
-			"This action is being handled right now. Try again in a moment.",
-			"",
-			false,
-		],
-		[
-			"Create record changed, receipt loaded: the receipt is the line",
-			"create",
-			{ ok: false, reason_code: "stale", pa_status: "Failed", error: INVALID },
-			"gone",
-			true,
-			"",
-			"",
-			true,
-		],
-		[
-			"Create record changed, no receipt loaded: one banner line",
-			"create",
-			{ ok: false, reason_code: "stale", pa_status: "Failed", error: INVALID },
-			"gone",
-			true,
-			"",
-			stale,
-			false,
-		],
-		[
-			"Create thrown",
-			"create",
-			new Error("Failed to fetch"),
-			"kept",
-			false,
-			"Failed to fetch",
-			"",
-			false,
-		],
-		["Cancel ok", "cancel", { ok: true }, "gone", true, "", "", false],
-		[
-			"Cancel refused",
-			"cancel",
-			{ ok: false, error: { message: "Storage is down" } },
-			"kept",
-			false,
-			"Storage is down",
-			"",
-			false,
-		],
-	];
-	it.each(ROWS)("%s", async (_, kind, answer, result, gone, error, say, receipt) => {
+// The phone applies the shared decision (frontend/src/lib/chatCardActions.js) to every real reply of
+// chatCardReplyCases.js, the table the desktop's handlers are held to as well. The decision itself
+// is tested over that table in chatCardDecision.spec.js; here is what the PHONE does with it.
+describe("runDraftDecision: what each real server reply does on the phone's card", () => {
+	const doorOf = (kind) => (kind === "create" ? "confirm" : "dismiss");
+	const cases = [];
+	for (const kind of ["create", "cancel"])
+		for (const row of REPLY_ROWS.filter((r) => r.doors.includes(doorOf(kind))))
+			cases.push([`${kind}: ${row.id}`, kind, row]);
+
+	// Break: a spent card stays (pressable twice), a pending card is taken away (the bug this table
+	// came from: a storage reply made the card vanish while the draft was still Pending), a failure
+	// is silent or shows the raw error text, the receipt is never reloaded (a final draft starts no
+	// agent turn, so nothing else will), or the banner says what the receipt already says.
+	it.each(cases)("%s", async (_, kind, row) => {
+		const expected = EXPECTED[row.id];
 		const ui = makeDraftUi(reactive);
-		const pa = item("t1", cardOf("create-simple"));
-		const reply = vi.fn(async () => {
-			if (answer instanceof Error) throw answer;
-			return answer;
+		const expires =
+			row.expires === "past"
+				? Math.floor(Date.now() / 1000) - 100
+				: row.expires === "future"
+				? Math.floor(Date.now() / 1000) + 1000
+				: null;
+		const pa = item("t1", cardOf("create-simple"), { expires_at: expires });
+		const answer = vi.fn(async () => {
+			if (row.thrown) throw thrownError(row.thrown);
+			return row.reply;
 		});
-		const d = deps(ui, {
-			...(kind === "create" ? { confirm: reply } : { dismiss: reply }),
-			receiptShown: () => receipt,
-		});
-		expect(await runDraftDecision(kind, pa, d)).toBe(result);
-		expect(reply.mock.calls).toEqual([["t1", "C1"]]);
-		expect(kind === "create" ? d.dismiss : d.confirm).not.toHaveBeenCalled();
-		// the card is gone with both reloads (in that order, after it left the list), or it stays
-		// with an error line and the buttons usable again
-		expect(d.calls.map((c) => c[0])).toEqual(
-			gone ? ["remove", "settle", "reload", "reloadPending", ...(say ? ["say"] : [])] : []
-		);
-		if (say) expect(d.calls.find((c) => c[0] === "say")[1]).toBe(say);
-		expect(ui.error("t1")).toBe(error);
+		const d = deps(ui, kind === "create" ? { confirm: answer } : { dismiss: answer });
+		const result = await runDraftDecision(kind, pa, d);
+		expect(answer.mock.calls).toEqual([["t1", "C1"]]);
 		expect(ui.busyKind("t1")).toBe("");
 		expect(ui.busyTokens()).toEqual([]);
+		if (row.thrown) {
+			// kept, with the sanitised text and never the raw error
+			expect(result).toBe("kept");
+			expect(d.calls).toEqual([]);
+			const line = ui.error("t1");
+			expect(line).not.toBe(row.thrown.message);
+			expect(line).toBe(
+				expected.thrown.internal ? THROWN_FALLBACK[doorOf(kind)] : expected.thrown.message
+			);
+			return;
+		}
+		const want = kind === "create" && expected.draft ? expected.draft : expected;
+		if (want.fate === "kept") {
+			expect(result).toBe("kept");
+			expect(d.calls).toEqual([]);
+			expect(ui.error("t1")).toBe(want.message || ACTION_FAILED_TEXT);
+			return;
+		}
+		// gone: off the list and settled, the queued chip when a turn waits, then the chat and the
+		// pending list are read again in that order, then one banner line when nothing else says why
+		expect(result).toBe("gone");
+		expect(ui.error("t1")).toBe("");
+		expect(d.calls.map((c) => c[0])).toEqual([
+			"remove",
+			"settle",
+			...(want.queued ? ["queued"] : []),
+			"reload",
+			"reloadPending",
+			...(want.message ? ["say"] : []),
+		]);
+		if (want.queued) expect(d.calls.find((c) => c[0] === "queued")[1]).toEqual(want.queued);
+		if (want.message) expect(d.calls.find((c) => c[0] === "say")[1]).toBe(want.message);
 	});
 
-	// Break: the "changed after the draft was made" line drifts from the desktop's.
-	it("says what the desktop says when the record changed", () => {
-		expect(DRAFT_STALE_TEXT).toBe(
-			chatSettledReason({ ok: false, reason_code: "stale" }, { draft: true })
+	// Break: the banner repeats a receipt that the reload brought (State Table: receipt only).
+	it("says nothing in the banner when the reload brought the card's receipt", async () => {
+		const row = REPLY_ROWS.find((r) => r.id.startsWith("stale:"));
+		const d = deps(makeDraftUi(reactive), {
+			confirm: vi.fn(async () => row.reply),
+			receiptShown: () => true,
+		});
+		expect(await runDraftDecision("create", item("t1", cardOf("create-simple")), d)).toBe(
+			"gone"
 		);
+		expect(d.calls.map((c) => c[0])).toEqual(["remove", "settle", "reload", "reloadPending"]);
 	});
 
 	// Break: a second tap starts a second confirm (a double write), or Cancel runs under a Create.

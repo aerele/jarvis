@@ -10,6 +10,7 @@
 // pure parts are in draftSheetView.js and draftCardUi.js. Relative imports only.
 import { computed, nextTick, ref, watch } from "vue";
 import { makeDraftModelBuilder } from "../../../frontend/src/lib/draftModel.js";
+import { thrownActionError } from "../../../frontend/src/lib/chatErrorCopy.js";
 import { applyAutoOpen } from "../../../frontend/src/lib/draftTables.js";
 import {
 	discardFromForm,
@@ -41,7 +42,8 @@ import { useDraftLink } from "../../../frontend/src/lib/useDraftLink.js";
 //                       will); the poll and the foreground read do the same, because a card decided
 //                       elsewhere still reads "pending" in the thread's rows until the thread is
 //                       read again, and the list is merged from those rows
-//   refreshChats(), say(text) (the chat's banner), receiptShown(token)
+//   refreshChats(), say(text) (the chat's banner), receiptShown(token), showQueued({run_id, position})
+//                       (a continuation turn is waiting for a slot)
 //   create(pa), discard(pa)   the card's Create and Cancel (runDraftDecision under their busy kind);
 //                       discard resolves to runDraftDecision's string
 export function makeDraftSheet(io) {
@@ -121,15 +123,16 @@ export function makeDraftSheet(io) {
 			return io.isCurrent(cid, generation);
 		},
 		refreshChats: () => io.refreshChats(),
-		// A draft that continues the chat queues its turn; the phone has no chip for it (the legacy
-		// sheet has none either), the reply arrives as a normal turn.
-		showQueued: () => {},
+		// A draft that continues the chat can queue its turn: the waiting card, as after a send.
+		showQueued: (r) => {
+			if (r && r.queued)
+				io.showQueued({ run_id: r.run_id, position: r.queued_position || null });
+		},
 		save: (token, conversation, values) => io.api.saveDraftCard(token, conversation, values),
 		agent: () => io.agent(),
-		// as the card's own Create and Cancel read a thrown call (draftCardDecision.thrownOutcome):
-		// the error's own words, else the fallback. The desktop's thrownActionError cannot be shared:
-		// its import chain leaves src/ (lib/errors.js), which the phone build does not resolve.
-		thrown: (e, fallback) => ({ message: (e && e.message) || fallback }),
+		// the shared sanitised text of a failed call (what the desktop's card says too): what the
+		// server said on purpose, an expired session or the offline sentence, never the raw error
+		thrown: (e, fallback) => thrownActionError(e, fallback),
 		metaFields: (doctype) => (builder.formMetaCache[doctype] || {}).fields,
 		afterMarks: (mark) => nextTick(() => focusFirstMark(bodyEl.value, mark)),
 		where: ui.where,

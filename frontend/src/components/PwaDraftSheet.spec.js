@@ -710,10 +710,20 @@ describe("the footer's Discard draft is the card's Cancel", () => {
 	it("a refused Cancel keeps the sheet, the edits and shows the words", async () => {
 		const t = await opened();
 		edit(t.host, "parent_project", "PROJ-0002");
-		t.replies.dismiss = { ok: false, error: { message: "Not allowed" } };
+		// the real refusal of a card that is held right now (_lifecycle.py discard)
+		t.replies.dismiss = {
+			ok: false,
+			reason_code: "busy",
+			error: {
+				type: "InvalidConfirmation",
+				message: "This action is being handled right now.",
+			},
+		};
 		expect(await t.host.discardDraft()).toBe("kept");
 		expect(t.host.open.value).toBe(true);
-		expect(t.host.panel.value.error).toBe("Not allowed");
+		expect(t.host.panel.value.error).toBe(
+			"This action is being handled right now. Try again in a moment."
+		);
 		expect(valueOf(t.host, "parent_project")).toBe("PROJ-0002");
 	});
 });

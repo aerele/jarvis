@@ -118,3 +118,15 @@ test("the view mounts the edit sheet, resets it on a switch and on unmount, guar
 	assert.match(view, /editingToken: draftSheet\.editingToken\.value,/);
 	assert.match(view, /buildingToken: draftSheet\.building\.value,/);
 });
+
+// Break: the phone's Create / Cancel goes back to a decision of its own (a copy of the desktop's
+// reply handling, which drifted: it made a card vanish while the draft was still Pending), or the
+// legacy sheet's helpers are used to decide a draft card again.
+test("the draft card decides a reply with the shared decision, not a phone copy", () => {
+	const host = fs.readFileSync(new URL("./draftCardHost.js", import.meta.url), "utf8");
+	assert.match(host, /from "\.\.\/\.\.\/\.\.\/frontend\/src\/lib\/chatCardActions\.js"/);
+	for (const shared of ["confirmReplyOutcome", "dismissReplyOutcome", "thrownCardError"])
+		assert.ok(host.includes(shared), shared);
+	assert.doesNotMatch(host, /keptCard|denyOutcome|draftCardDecision/);
+	assert.ok(!fs.existsSync(new URL("./draftCardDecision.js", import.meta.url)));
+});
