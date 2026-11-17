@@ -1568,6 +1568,19 @@ describe("TriggerDetail events (#825)", () => {
 		await flushPromises();
 		expect(apiTr.updateTrigger).not.toHaveBeenCalled();
 		expect(wrapper.find(".error-message").text()).toBe("Pick at least one event.");
+		// the fieldset itself carries no aria-invalid (not a valid attribute there)
+		expect(
+			wrapper.find("fieldset.jv-trigger-events").attributes("aria-invalid")
+		).toBeUndefined();
+	});
+
+	it("warns that After Insert + After Save run twice on a new record", async () => {
+		const hint = "A new record fires both After Insert and After Save";
+		await mountWith({ doc_event: "after_insert", doc_events: ["after_insert"] });
+		expect(wrapper.find("fieldset.jv-trigger-events").text()).not.toContain(hint);
+		box(wrapper, "After Save").vm.$emit("update:modelValue", true);
+		await flushPromises();
+		expect(wrapper.find("fieldset.jv-trigger-events").text()).toContain(hint);
 	});
 });
 

@@ -96,11 +96,7 @@
 						/>
 						<ErrorMessage :message="fieldErrors.target_doctype" class="mt-2" />
 					</div>
-					<fieldset
-						v-if="!isIntake"
-						class="jv-trigger-events"
-						:aria-invalid="fieldErrors.doc_event ? 'true' : undefined"
-					>
+					<fieldset v-if="!isIntake" class="jv-trigger-events">
 						<!-- several events run the same action (#825); same label recipe
 						     as the DocType field above -->
 						<legend class="mb-1.5 block text-xs text-ink-gray-5">
@@ -122,9 +118,12 @@
 						</div>
 						<p class="mt-1.5 text-p-xs text-ink-gray-5">
 							{{
-								form.action_type === "LLM"
+								(form.action_type === "LLM"
 									? "The action runs on each event you tick. LLM actions support a reduced set of events."
-									: "The action runs on each event you tick."
+									: "The action runs on each event you tick.") +
+								(insertAndSave
+									? " A new record fires both After Insert and After Save, so it runs twice on insert."
+									: "")
 							}}
 						</p>
 						<ErrorMessage :message="fieldErrors.doc_event" class="mt-2" />
@@ -655,6 +654,11 @@ function toggleEvent(value, on) {
 	const rest = form.doc_events.filter((e) => e !== value);
 	form.doc_events = orderEvents(on ? [...rest, value] : rest);
 }
+
+// After Insert + After Save both fire when a record is created (#825 review)
+const insertAndSave = computed(
+	() => form.doc_events.includes("after_insert") && form.doc_events.includes("on_update")
+);
 
 function setActionType(t) {
 	if (form.action_type === t) return;
