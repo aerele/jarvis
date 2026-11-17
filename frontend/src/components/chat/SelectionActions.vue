@@ -73,13 +73,13 @@ function place() {
 	const width = 40 + props.actions.length * 90;
 	pos.value = {
 		top: Math.round(
-			props.below ? (fitsUnder ? under : Math.max(8, above)) : above >= 8 ? above : under,
+			props.below ? (fitsUnder ? under : Math.max(8, above)) : above >= 8 ? above : under
 		),
 		left: Math.round(
 			Math.min(
 				Math.max(8, rect.left + rect.width / 2 - width / 2),
-				window.innerWidth - width - 8,
-			),
+				window.innerWidth - width - 8
+			)
 		),
 	};
 }

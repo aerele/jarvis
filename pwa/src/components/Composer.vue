@@ -89,6 +89,9 @@ defineExpose({ reset, focusEnd });
 
 <template>
 	<div class="jv-composer jv-safe-bottom">
+		<!-- Host content above the attachments and the text (the chat's Reply quote,
+		     aerele/jarvis#2191). -->
+		<div v-if="$slots.top" class="jv-composer-top"><slot name="top" /></div>
 		<div v-if="props.attachments.length" class="jv-atts">
 			<div v-for="a in props.attachments" :key="a.key" class="jv-att">
 				<!-- Preview triggers are real <button>s: keyboard-focusable and
@@ -247,6 +250,13 @@ defineExpose({ reset, focusEnd });
 	flex: none;
 	background: var(--menu-bar);
 	border-top: 1px solid var(--border);
+}
+/* The slotted Reply quote lines up with the input row below it. */
+.jv-composer-top {
+	padding: 8px 10px 0;
+}
+.jv-composer-top:empty {
+	display: none;
 }
 .jv-composer-row {
 	display: flex;
