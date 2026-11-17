@@ -12,9 +12,10 @@ Two views, chosen by the ``view`` filter: "Events" (the newest rows: 500 on scre
 usage counts and red flags). The read model lives in ``jarvis.activity_report``; this
 file only shapes it into report columns."""
 
+import sys
+
 import frappe
 from frappe import _
-from frappe.utils import getdate
 
 from jarvis import activity_report
 from jarvis.permissions import require_jarvis_admin
@@ -35,13 +36,37 @@ _EXPORT_CMD = "frappe.desk.query_report.export_query"
 _EXPORT_JOB = "frappe.desk.query_report.run_export_query_job"
 
 
+# An Auto Email Report (a scheduled mail, or its Send Now / Download) calls the report
+# through ``AutoEmailReport.get_report_content`` -> ``Report.get_data``, which passes its
+# "no. of rows" only to Report Builder reports: a script report's ``execute`` gets the
+# filters alone, and no ``cmd`` or job (verified in Frappe 15.122 and 16.53,
+# ``email/doctype/auto_email_report/auto_email_report.py``). The only trace of the caller
+# is the call stack, so look for that one method in that one file.
+_AUTO_EMAIL_FILE = "email/doctype/auto_email_report/auto_email_report.py"
+_AUTO_EMAIL_METHOD = "get_report_content"
+
+
+def _from_auto_email_report():
+	frame = sys._getframe(1)
+	while frame is not None:
+		code = frame.f_code
+		if code.co_name == _AUTO_EMAIL_METHOD and code.co_filename.replace("\\", "/").endswith(
+			_AUTO_EMAIL_FILE
+		):
+			return True
+		frame = frame.f_back
+	return False
+
+
 def _is_export():
-	"""True while Desk's query-report export (foreground or background job) is calling
-	``execute``."""
+	"""True while an export (Desk's query-report export, foreground or background job, or an
+	Auto Email Report) is calling ``execute``: the full row ceiling applies, not the screen's."""
 	if (getattr(frappe.local, "form_dict", None) or {}).get("cmd") == _EXPORT_CMD:
 		return True
 	job = getattr(frappe.local, "job", None)
-	return bool(job) and job.get("method") == _EXPORT_JOB
+	if job and job.get("method") == _EXPORT_JOB:
+		return True
+	return _from_auto_email_report()
 
 
 def _events_columns():
@@ -83,130 +108,46 @@ def _summary_columns():
 	]
 
 
-def _day(value):
-	return str(getdate(value)) if value else ""
-
-
-def _scope_line(first_event_at):
-	"""What this report covers, and since when. Desk is out of scope on purpose, and
-	the two sources started recording on different days (the app-action hook shipped
-	after the tool-path one), so each states its own start. One whole template per case:
-	a translator needs the full sentence, not fragments to join."""
-	agent = _day((first_event_at or {}).get("agent"))
-	app = _day((first_event_at or {}).get("app"))
-	if agent and app:
-		return _(
-			"Covers actions taken in Jarvis only (not Desk). "
-			"Agent activity recorded from {0}; app actions from {1}."
-		).format(agent, app)
-	if agent:
-		return _(
-			"Covers actions taken in Jarvis only (not Desk). "
-			"Agent activity recorded from {0}. App actions are not recorded yet."
-		).format(agent)
-	if app:
-		return _(
-			"Covers actions taken in Jarvis only (not Desk). "
-			"No agent activity recorded yet; app actions from {0}."
-		).format(app)
-	return _(
-		"Covers actions taken in Jarvis only (not Desk). "
-		"No agent activity recorded yet. App actions are not recorded yet."
-	)
-
-
-def _kept_note():
-	return _("Data is kept for {0} days.").format(activity_report.HORIZON_DAYS)
-
-
-def _stale_note(n):
-	if n == 1:
-		return _("Totals for 1 day are still being prepared.")
-	return _("Totals for {0} days are still being prepared.").format(n)
-
-
-def _partial_note(n):
-	"""Days the summary left out because the daily totals were too far behind to compute
-	them on request (``activity_report.LIVE_DAY_CAP``)."""
-	if n == 1:
-		return _("Totals for the oldest day in this range are not included yet.")
-	return _("Totals for the {0} oldest days in this range are not included yet.").format(n)
-
-
-def _health_notes(health):
-	"""Plain-English warnings from the logging-health block, in a fixed order."""
-	notes = []
-	if health.get("warn"):
-		notes.append(
-			_(
-				"Warning: agents ran tools in the last 24 hours but no activity was recorded, "
-				"so logging may be broken."
-			)
-		)
-	if health.get("scheduler_disabled"):
-		notes.append(_("Background jobs are paused on this site, so daily totals are not being updated."))
-	lag = health.get("rollup_lag_days") or 0
-	if lag > 1:
-		notes.append(
-			_(
-				"Daily totals are {0} days behind. Ask your system administrator to check the scheduler."
-			).format(lag)
-		)
-	return notes
-
-
-def _before_horizon(from_date):
-	"""events() does not clamp; say so when the requested start predates what is kept."""
-	return bool(from_date) and getdate(from_date) < activity_report.horizon_day()
+# The message builders live in ``jarvis.activity_report`` (shared with the in-app page's
+# API, so the two always say the same thing), e.g. ``activity_report.scope_line``.
 
 
 def _events(filters):
 	exporting = _is_export()
 	if not frappe.db.table_exists(activity_report.ACTIVITY_EVENT):
-		return _events_columns(), [], _preparing_note()  # code deployed, migrate not run yet
+		# code deployed, migrate not run yet
+		return _events_columns(), [], activity_report.preparing_note()
 	limit = activity_report.EXPORT_MAX_LIMIT if exporting else SCREEN_LIMIT
 	res = activity_report.events(filters, limit=limit, for_export=True)
 	# Events view only needs the two start dates; the full summary would aggregate
 	# every person in range for nothing.
-	message = _scope_line(activity_report.first_event_at())
-	if _before_horizon(filters.get("from_date")):
-		message += " " + _kept_note()
+	notes = activity_report.events_notes(activity_report.first_event_at(), filters.get("from_date"))
 	if res.get("truncated"):
 		if exporting:
-			message += " " + _(
-				"Showing the newest {0} events; narrow the date range to see the rest."
-			).format(f"{limit:,}")
+			notes.append(
+				_("Showing the newest {0} events; narrow the date range to see the rest.").format(
+					f"{limit:,}"
+				)
+			)
 		else:
-			message += " " + _(
-				"Showing the newest {0} events; narrow the filters or export to see more."
-			).format(f"{limit:,}")
-	return _events_columns(), res["rows"], message
-
-
-def _preparing_note():
-	return _("Activity totals are still being prepared. Please try again in a few minutes.")
+			notes.append(
+				_("Showing the newest {0} events; narrow the filters or export to see more.").format(
+					f"{limit:,}"
+				)
+			)
+	return _events_columns(), res["rows"], " ".join(notes)
 
 
 def _summary(filters):
 	res = activity_report.summary(filters)
 	if res.get("preparing"):
-		return _summary_columns(), [], _preparing_note()
+		return _summary_columns(), [], activity_report.preparing_note()
 	data = []
 	for p in res["people"]:
 		row = {k: v for k, v in p.items() if k != "flags"}
 		row["flags"] = "; ".join(f["label"] for f in p.get("flags") or [])
 		data.append(row)
-	message = _scope_line(res.get("first_event_at"))
-	if res.get("clamped"):
-		message += " " + _kept_note()
-	stale = res.get("stale_days") or 0
-	if stale > 0:
-		message += " " + _stale_note(stale)
-	if res.get("partial") and res.get("excluded_days"):
-		message += " " + _partial_note(res["excluded_days"])
-	for note in _health_notes(res.get("logging_health") or {}):
-		message += " " + note
-	return _summary_columns(), data, message
+	return _summary_columns(), data, " ".join(activity_report.summary_notes(res))
 
 
 def _parse_filters(filters):

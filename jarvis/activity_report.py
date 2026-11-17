@@ -43,6 +43,7 @@ from pypika.functions import Date as _SqlDate
 from pypika.functions import Extract
 from pypika.terms import Case
 
+from jarvis import activity_actions
 from jarvis.activity_log import EVENTS as _EVENTS
 from jarvis.activity_log import EXPORT_TOOLS
 from jarvis.activity_log import OUTCOMES as _EVENT_OUTCOMES
@@ -73,6 +74,10 @@ THRESHOLDS = {
 	"business_hours_start": BUSINESS_HOURS_START,
 	"business_hours_end": BUSINESS_HOURS_END,
 }
+
+# The summary lists at most this many people (flagged first, then busiest): a site with
+# thousands of users must not ship, and render, every one of them. ``people_truncated`` says so.
+PEOPLE_CAP = 500
 
 # ---- Paging limits
 DEFAULT_LIMIT = 200
@@ -233,6 +238,8 @@ def _decode_cursor(cursor):
 
 
 def _humanise(tool):
+	# The tool-path label. The twin for direct app actions is ``activity_actions.label_for``
+	# (humanised function name + LABEL_OVERRIDES): change how one reads and check the other.
 	return (tool or "").replace("_", " ").strip().capitalize()
 
 
@@ -391,6 +398,137 @@ def events(filters=None, after=None, limit=DEFAULT_LIMIT, *, for_export=False):
 	if for_export:
 		out["truncated"] = has_more
 	return out
+
+
+# --------------------------------------------------------------------------- notes
+
+# The plain-English lines shown above the data: what the view covers and why its totals
+# may be incomplete. ONE builder for the Desk report (which joins them into its message)
+# and the in-app page (which renders them as a list), so the two can never say different
+# things about the same result. Each is a whole translatable sentence, never fragments.
+
+
+def _day(value):
+	return str(getdate(value)) if value else ""
+
+
+def scope_line(first_event_at):
+	"""What this view covers, and since when. Desk is out of scope on purpose, and
+	the two sources started recording on different days (the app-action hook shipped
+	after the tool-path one), so each states its own start. One whole template per case:
+	a translator needs the full sentence, not fragments to join."""
+	agent = _day((first_event_at or {}).get("agent"))
+	app = _day((first_event_at or {}).get("app"))
+	if agent and app:
+		return _(
+			"Covers actions taken in Jarvis only (not Desk). "
+			"Agent activity recorded from {0}; app actions from {1}."
+		).format(agent, app)
+	if agent:
+		return _(
+			"Covers actions taken in Jarvis only (not Desk). "
+			"Agent activity recorded from {0}. App actions are not recorded yet."
+		).format(agent)
+	if app:
+		return _(
+			"Covers actions taken in Jarvis only (not Desk). "
+			"No agent activity recorded yet; app actions from {0}."
+		).format(app)
+	return _(
+		"Covers actions taken in Jarvis only (not Desk). "
+		"No agent activity recorded yet. App actions are not recorded yet."
+	)
+
+
+def kept_note():
+	return _("Data is kept for {0} days.").format(HORIZON_DAYS)
+
+
+def stale_note(n):
+	if n == 1:
+		return _("Totals for 1 day are still being prepared.")
+	return _("Totals for {0} days are still being prepared.").format(n)
+
+
+def partial_note(n):
+	"""Days the summary left out because the daily totals were too far behind to compute
+	them on request (``LIVE_DAY_CAP``)."""
+	if n == 1:
+		return _("Totals for the oldest day in this range are not included yet.")
+	return _("Totals for the {0} oldest days in this range are not included yet.").format(n)
+
+
+def people_truncated_note():
+	return _(
+		"Showing the {0} people with red flags or the most activity. Narrow the dates or pick a person to see others."
+	).format(PEOPLE_CAP)
+
+
+def app_warn_note():
+	return _(
+		"Jarvis app actions are not being recorded. Ask your system administrator to check the activity log."
+	)
+
+
+def preparing_note():
+	return _("Activity totals are still being prepared. Please try again in a few minutes.")
+
+
+def health_notes(health):
+	"""Plain-English warnings from the logging-health block, in a fixed order."""
+	notes = []
+	if health.get("warn"):
+		notes.append(
+			_(
+				"Warning: agents ran tools in the last 24 hours but no activity was recorded, "
+				"so logging may be broken."
+			)
+		)
+	if health.get("app_warn"):
+		# Its own sentence and its own check: the agent warning above is about the tool path.
+		notes.append(app_warn_note())
+	if health.get("scheduler_disabled"):
+		notes.append(_("Background jobs are paused on this site, so daily totals are not being updated."))
+	lag = health.get("rollup_lag_days") or 0
+	if lag > 1:
+		notes.append(
+			_(
+				"Daily totals are {0} days behind. Ask your system administrator to check the scheduler."
+			).format(lag)
+		)
+	return notes
+
+
+def before_horizon(from_date):
+	"""``events`` does not clamp; say so when the requested start predates what is kept."""
+	return bool(from_date) and getdate(from_date) < horizon_day()
+
+
+def summary_notes(res):
+	"""The notes for a ``summary()`` result, in display order."""
+	if res.get("preparing"):
+		return [preparing_note()]
+	notes = [scope_line(res.get("first_event_at"))]
+	if res.get("clamped"):
+		notes.append(kept_note())
+	stale = res.get("stale_days") or 0
+	if stale > 0:
+		notes.append(stale_note(stale))
+	if res.get("partial") and res.get("excluded_days"):
+		notes.append(partial_note(res["excluded_days"]))
+	if res.get("people_truncated"):
+		notes.append(people_truncated_note())
+	notes += health_notes(res.get("logging_health") or {})
+	return notes
+
+
+def events_notes(first_event_at, from_date=None):
+	"""The notes for an events view: the scope line (``first_event_at()``) and, when the
+	range starts before the kept window, that it is kept for 90 days."""
+	notes = [scope_line(first_event_at)]
+	if before_horizon(from_date):
+		notes.append(kept_note())
+	return notes
 
 
 # --------------------------------------------------------------------------- counters
@@ -863,6 +1001,7 @@ def _preparing():
 	"""The empty payload for ``_tables_ready()`` False: every key the page reads."""
 	return {
 		"people": [],
+		"people_truncated": False,
 		"first_event_at": {"agent": None, "app": None},
 		"logging_health": {
 			"warn": False,
@@ -870,6 +1009,11 @@ def _preparing():
 			"events_24h": 0,
 			"rollup_lag_days": 0,
 			"scheduler_disabled": False,
+			"app_warn": False,
+			"app_seen_24h": 0,
+			"app_actions_24h": 0,
+			"app_failures_24h": 0,
+			"app_dropped_24h": 0,
 		},
 		"thresholds": dict(THRESHOLDS),
 		"stale_days": 0,
@@ -895,6 +1039,9 @@ def summary(filters=None):
 	the kept window is empty (and not ``clamped``). Days up to the rollup watermark are
 	read from ``Jarvis Activity Daily``, later closed days are computed live, and today is
 	its rolled rows (through the last full hour, ``through``) plus a live pass after that.
+
+	``people`` holds at most ``PEOPLE_CAP`` entries (flagged people first, then the busiest);
+	``people_truncated`` is true when more matched.
 
 	``stale_days`` is how many closed days the rollup has not reached. When it is above
 	zero the rollup is enqueued FIRST (before any live computation, so even a request that
@@ -925,8 +1072,10 @@ def summary(filters=None):
 			_enqueue_rollup()
 		people = _people(lo, hi, user, plan, yesterday)
 
+	people_truncated = len(people) > PEOPLE_CAP
 	return {
-		"people": people,
+		"people": people[:PEOPLE_CAP],  # already flagged first, then busiest (``_people``)
+		"people_truncated": people_truncated,
 		"first_event_at": first_event_at(),
 		"logging_health": _logging_health(),
 		"thresholds": dict(THRESHOLDS),
@@ -980,7 +1129,14 @@ def first_event_at():
 
 def _logging_health():
 	"""``warn`` when agents ran tools in the last 24 h yet not one Activity Event was
-	recorded: the activity log is probably broken (or the table is missing)."""
+	recorded: the activity log is probably broken (or the table is missing).
+
+	``app_warn`` is the same question for the app-action hooks: they saw a LOGGED request
+	(or failed to snapshot / record one) in the last 24 h but wrote no app row (an event
+	``action`` / ``read`` / ``export`` whose ``method`` is a dotted endpoint name, which a
+	tool-path row, named by a bare tool, never is). ``app_actions_24h`` is 0 or 1 (an
+	existence check: the question is "any?", not "how many?"). ``app_dropped_24h`` is how many
+	rows flood control dropped (data only: it raises no warning)."""
 	since = add_to_date(now_datetime(), hours=-24)
 	tu = frappe.qb.DocType(TURN_USAGE)
 	tool_calls = cint(
@@ -998,6 +1154,18 @@ def _logging_health():
 		.where((ev.at >= since) & ev.event.isin(list(_AGENT_EVENTS)))
 		.run()[0][0]
 	)
+	# The app-action logger (``activity_actions``) is checked on its own: requests it saw
+	# against rows it wrote. The check above must stay agent-only (an admin clicking around
+	# writes app rows and would mask a dead tool-path logger); this one must stay app-only
+	# (agents running tools write agent rows and would mask a dead request hook).
+	counters = activity_actions.health_counters()
+	app_actions = len(
+		frappe.qb.from_(ev)
+		.select(ev.name)
+		.where((ev.at >= since) & ev.event.isin(["action", "read", "export"]) & ev.method.like("%.%"))
+		.limit(1)
+		.run()
+	)
 	# Why totals may be behind: days the rollup has not reached, and whether anything
 	# is running it (pause_scheduler / maintenance mode / the System Settings switch).
 	now_day = today()
@@ -1011,4 +1179,108 @@ def _logging_health():
 		"scheduler_disabled": bool(
 			is_scheduler_inactive(verbose=False) or is_scheduler_disabled(verbose=False)
 		),
+		# A request the hook saw (or failed to snapshot / record) with no app row to show for it.
+		"app_warn": (counters["seen"] > 0 or counters["failures"] > 0) and app_actions == 0,
+		"app_seen_24h": counters["seen"],
+		"app_actions_24h": app_actions,
+		"app_failures_24h": counters["failures"],
+		"app_dropped_24h": counters["dropped"],
 	}
+
+
+# --------------------------------------------------------------------------- API
+
+API_VIEWS = ("summary", "events")
+
+
+def _arg(value, name):
+	"""A filter argument as a stripped string: nothing (``None`` / ``""``) is "no filter",
+	and anything that is not text is a clear refusal rather than a 500 from a query."""
+	if value is None:
+		return ""
+	if not isinstance(value, str):
+		frappe.throw(_("{0} must be text.").format(frappe.bold(name)), frappe.ValidationError)
+	return value.strip()
+
+
+def _date_arg(value, name):
+	text = _arg(value, name)
+	if not text:
+		return ""
+	try:
+		return str(getdate(text))
+	except Exception:
+		frappe.throw(_("{0} is not a valid date.").format(frappe.bold(name)), frappe.ValidationError)
+
+
+@frappe.whitelist(methods=["POST"])
+def get_user_activity(
+	view: str = "summary",
+	from_date: str | None = None,
+	to_date: str | None = None,
+	user: str | None = None,
+	activity: str | None = None,
+	outcome: str | None = None,
+	cursor: str | None = None,
+) -> dict:
+	"""The in-app "User activity" page's one endpoint (plan 4.6), Jarvis Admin /
+	System Manager only.
+
+	``view="summary"``: ``summary()`` (people, flags, thresholds, ``first_event_at``,
+	``logging_health``, ``stale_days`` / ``clamped`` / ``partial`` / ``excluded_days`` /
+	``preparing``) plus ``notes``. ``view="events"``: one page (200 rows) of ``events()``
+	plus ``thresholds``; ``cursor`` is the previous page's ``next_cursor``. The FIRST page
+	(no cursor) also carries ``first_event_at`` and ``logging_health``, as the summary does.
+
+	``notes`` is the list of plain, translated sentences the page shows above the data (the
+	Desk report builds its message from the same helpers). A follow-up events page (one
+	with a ``cursor``) carries an empty list: the first page's notes still stand, and the
+	scope line would cost two index lookups per click of "Load more".
+
+	Only allowlisted keys leave this function; no content columns exist in the source."""
+	require_jarvis_admin()
+	view = _arg(view, "view") or "summary"
+	if view not in API_VIEWS:
+		frappe.throw(_("Unknown view {0}").format(frappe.bold(view)), frappe.ValidationError)
+	filters = {
+		"from_date": _date_arg(from_date, "from_date"),
+		"to_date": _date_arg(to_date, "to_date"),
+		"user": _arg(user, "user"),
+		"activity": _arg(activity, "activity"),
+		"outcome": _arg(outcome, "outcome"),
+	}
+	filters = {k: v for k, v in filters.items() if v}
+	after = _arg(cursor, "cursor") or None
+
+	if view == "summary":
+		res = summary(filters)
+		return {**res, "notes": summary_notes(res)}
+
+	if not frappe.db.table_exists(ACTIVITY_EVENT):  # code deployed, migrate not run yet
+		blank = _preparing()
+		return {
+			"rows": [],
+			"next_cursor": None,
+			"thresholds": dict(THRESHOLDS),
+			"preparing": True,
+			"notes": [preparing_note()],
+			"first_event_at": blank["first_event_at"],
+			"logging_health": blank["logging_health"],
+		}
+	res = events(filters, after=after, limit=DEFAULT_LIMIT)
+	out = {
+		"rows": res["rows"],
+		"next_cursor": res["next_cursor"],
+		"thresholds": dict(THRESHOLDS),
+		"preparing": False,
+		"notes": [],
+	}
+	if not after:
+		# The first page also carries what the summary does, so a reload or a deep link straight
+		# to the Events tab can show the right banner severity and first-run text without a
+		# summary round trip. Follow-up pages (a cursor) carry neither.
+		first = first_event_at()
+		out["notes"] = events_notes(first, filters.get("from_date"))
+		out["first_event_at"] = first
+		out["logging_health"] = _logging_health()
+	return out

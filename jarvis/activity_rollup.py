@@ -82,7 +82,61 @@ Operations
   ran tools in the last 24 h but no AGENT event (read, export, refusal, rejected sign-in)
   was recorded (app ``action`` events do not count), ``rollup_lag_days`` is yesterday minus
   the watermark, ``scheduler_disabled`` is true when the scheduler is paused, in
-  maintenance mode or switched off in System Settings.
+  maintenance mode or switched off in System Settings. ``app_warn`` is the same question for
+  the direct app-action hooks (``activity_actions``): ``app_seen_24h`` LOGGED requests (and
+  ``app_failures_24h`` hook failures) were counted but no app row (an action / read / export
+  event with a dotted method) was written (``app_actions_24h``). The report then says "Jarvis
+  app actions are not being recorded. Ask your system administrator to check the activity
+  log." The two checks are separate on purpose: an admin clicking around writes app rows and
+  would mask a dead tool-path logger, and agents running tools write agent rows and would
+  mask a dead request hook.
+
+App actions (``jarvis.activity_actions``)
+-----------------------------------------
+
+The SPA / PWA calls a person makes are recorded by a ``before_request`` / ``after_request``
+pair (hooks.py), one ``action`` / ``read`` / ``export`` event per LOGGED endpoint.
+
+- **Classify a new endpoint**: every ``@frappe.whitelist`` function under ``jarvis/`` needs one
+  entry in ``CLASSIFICATION`` (``activity_actions.py``), keyed by ``module.qualname``, added
+  alphabetically: ``("LOGGED", id_param, event, ref_doctype, rows)`` or ``("SKIPPED",
+  reason)``. Ambiguous is LOGGED. A change or an operator command is ``action``; ERP data
+  handed back without the tool path is ``read`` (D15); a download is ``export`` (and must be
+  LOGGED). SKIPPED reasons: read / poll / ui_state / chat / tool_path / desk / self / auth
+  (the module docstring defines each). A plainer sentence than the humanised function name
+  goes in ``LABEL_OVERRIDES``. Never put a rule predicate or a threshold in a label.
+- **What the contract enforces**: ``tests/test_activity_contract.py`` reads the source with
+  ``ast`` (no import) and fails when a whitelisted function has no entry, an entry names no
+  such function, a key is duplicated, a method lives on a class, the entry is malformed, or a
+  download / export is not LOGGED. The failure line names the file and function and ends
+  "add a ('LOGGED', ...) or ('SKIPPED', reason) entry to CLASSIFICATION in
+  jarvis/activity_actions.py (see its docstring)". ``test_activity_actions`` then proves each
+  LOGGED entry records exactly one row and each SKIPPED one none.
+- **Debug a missing row**, in this order: (1) the request must carry the SPA / PWA header
+  ``X-Jarvis-Client: desktop|pwa`` for an upload (other endpoints are recorded without it, with
+  channel "api"); (2) the canonical key (``fn.__module__ + "." + fn.__qualname__``, so a
+  re-export or a decorator that forgets ``functools.wraps`` moves it) must be in
+  ``CLASSIFICATION`` as LOGGED; (3) status: 400 / 401 / 404 / 405 / 415 / 429 are never
+  recorded (the function did not run); (4) Guest is never recorded; (5) Desk is not tracked
+  (D5): a Desk call to a SKIPPED ``desk`` endpoint, or a Desk upload without the header;
+  (6) ``tool_path`` endpoints run a tool, which the tool path records; (7) flood control (dedupe): for
+  READS and for denied / failed calls only, the same person, endpoint, record and outcome
+  inside 5 minutes is one row, and one person is capped at 120 such rows a minute (Redis keys
+  ``jarvis:activity_flood:*``; a Redis error records instead of dropping). A successful
+  action or export is never deduped or capped. Drops are counted in
+  ``logging_health.app_dropped_24h`` (data only, no warning) and logged as "flood control
+  dropped rows" (one line per site per 5 minutes); (8) the file log: ``jarvis.activity_log.log`` lines
+  ``activity log [<site>] <event>: <text> (<ExceptionClass> at <file>:<line>)`` with the text
+  "request snapshot failed" (before_request), "request not recorded" (after_request),
+  "insert failed" (the row itself) or "flood control unavailable" (Redis); a line is logged
+  once per site per 5 minutes per text, and never carries a message or an argument.
+- **Counters** (``activity_actions.health_counters``): hourly Redis keys
+  ``jarvis:activity_seen:seen:<hour>``, ``...:failures:<hour>`` and ``...:dropped:<hour>``, 26 h TTL, site-scoped and
+  in ``persistent_cache_keys``. Inspect with ``bench --site <site> execute
+  jarvis.activity_actions.health_counters``.
+- **Known limits**: a browser tab opened before the release does not send the header until it
+  reloads, so its uploads are unlogged until then; a successful delete or rename leaves
+  ``ref_name`` blank (the existence check runs after it).
 """
 
 import datetime as _dt
@@ -304,9 +358,12 @@ def _report_failure(day, exc):
 	claim that expires after a day): a stuck day fails every hour and must not bury the
 	Error Log. Called after the rollback, so the insert is not undone. Never raises."""
 	frappe.logger("jarvis.activity_log").error(f"activity rollup: {day} failed: {type(exc).__name__}")
+	claimed = None
 	try:
-		if not _redis_lock.claim(f"{FAILURE_KEY}:{ar.today()}", FAILURE_THROTTLE_S):
+		key = f"{FAILURE_KEY}:{ar.today()}"
+		if not _redis_lock.claim(key, FAILURE_THROTTLE_S):
 			return
+		claimed = key
 		try:
 			rolled = ar.watermark()
 		except Exception:
@@ -316,4 +373,11 @@ def _report_failure(day, exc):
 			message=f"{type(exc).__name__}: {str(exc)[:200]}\nday: {day}\nwatermark: {rolled}",
 		)
 	except Exception:
-		pass
+		# The claim is the day's one entry: a failed Error Log insert must not spend it,
+		# or the next hourly failure would stay silent until tomorrow.
+		if claimed:
+			try:
+				cache = frappe.cache()
+				cache.delete(cache.make_key(claimed))
+			except Exception:
+				pass
