@@ -108,6 +108,7 @@ export async function runDraftDecision(kind, pa, d) {
 						? confirmReplyOutcome(reply, {
 								draft: true,
 								expired: pendingExpiry(pa.expires_at, Date.now()).expired,
+								surface: "phone",
 						  })
 						: dismissReplyOutcome(reply);
 			} catch (e) {

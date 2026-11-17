@@ -813,19 +813,23 @@ function takeThreadPage(d, refresh) {
 // or run send recovery, and a failed read is silent. The edit sheet's poll uses it, once, when the
 // card being edited has left the server's pending list (its thread row may still say pending until
 // the thread is read again). A loud load() that started meanwhile wins.
+// Resolves to true when the page was taken, false when the read failed or was overtaken (a loud load,
+// a chat switch): the sheet's poll counts only a read that landed.
 async function loadQuietly() {
 	const cid = convId.value;
 	const generation = viewGeneration;
 	const started = loadGeneration;
-	if (!cid) return;
+	if (!cid) return false;
 	try {
 		const refresh = refreshNames(messages.value);
 		const after = heldNewestSeq(messages.value, historyPaging.value);
 		const d = await api.getConversation(cid, { refresh, after });
-		if (!isCurrent(cid, generation) || loadGeneration !== started) return;
+		if (!isCurrent(cid, generation) || loadGeneration !== started) return false;
 		takeThreadPage(d, refresh);
+		return true;
 	} catch {
 		/* the next poll tick asks again */
+		return false;
 	}
 }
 async function load(force = false, staleRetry = true) {

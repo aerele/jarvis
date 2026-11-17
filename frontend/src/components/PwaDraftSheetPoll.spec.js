@@ -1,8 +1,10 @@
-// The phone's chat view with an edit sheet open, run with the REAL pending-list merge: a card that
-// was decided somewhere else is found by a list-only poll, then ONE quiet thread read, and the poll
-// never writes the banner, scrolls or shows the loading state. (The sheet host's own wiring is in
-// PwaDraftSheet.spec.js with fake I/O; the merge that makes a stale thread row keep a card on the
-// list is the view's loadPending + pendingResync.js, so it needs the view.)
+// The phone's chat view with a draft card, run with the REAL pending-list merge: with an edit sheet
+// open, a card that was decided somewhere else is found by a list-only poll, then ONE quiet thread
+// read, and the poll never writes the banner, scrolls or shows the loading state; and the view's own
+// wiring of the card (the waiting card of a continuing draft, the error line that leaves with its
+// card, the settling count). (The sheet host's own wiring is in PwaDraftSheet.spec.js with fake I/O;
+// the merge that makes a stale thread row keep a card on the list is the view's loadPending +
+// pendingResync.js, so it needs the view.)
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { ref } from "vue";
@@ -272,5 +274,193 @@ describe("the edit sheet's poll on the phone, with the real merge", () => {
 		await flushPromises();
 		expect(wrapper.find(".jv-banner").exists()).toBe(false);
 		expect(wrapper.text()).not.toContain("This draft changed while you were editing");
+	});
+
+	// Break: a card that is missing from the list but whose quiet thread read did not drop it (the row
+	// still says pending) is read again every tick for ever; or the latch never lets the NEXT episode
+	// (the card listed again, then missing again) read.
+	it("reads the thread once per episode of the card missing from the list, and again after it was listed", async () => {
+		vi.useFakeTimers();
+		await open();
+		await button("Edit").trigger("click");
+		await flushPromises();
+		const reads = () => api.getConversation.mock.calls.length;
+		const before = reads();
+		// missing from the list, and the thread still says pending: the quiet read cannot drop it
+		api.listPendingConfirmations.mockResolvedValue(listed([]));
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(reads()).toBe(before + 1);
+		await vi.advanceTimersByTimeAsync(20000);
+		expect(reads()).toBe(before + 1);
+		// listed again: a new episode when it goes missing next
+		api.listPendingConfirmations.mockResolvedValue(listed(["t1"]));
+		await vi.advanceTimersByTimeAsync(5000);
+		api.listPendingConfirmations.mockResolvedValue(listed([]));
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(reads()).toBe(before + 2);
+	});
+
+	// Break: a quiet read that FAILS counts as the episode's one read (the card is then never found
+	// dead while the phone is offline and comes back).
+	it("a quiet read that failed is asked for again on the next tick", async () => {
+		vi.useFakeTimers();
+		await open();
+		await button("Edit").trigger("click");
+		await flushPromises();
+		api.listPendingConfirmations.mockResolvedValue(listed([]));
+		const before = api.getConversation.mock.calls.length;
+		api.getConversation.mockRejectedValue(new TypeError("Failed to fetch"));
+		await vi.advanceTimersByTimeAsync(10000);
+		expect(api.getConversation.mock.calls.length).toBe(before + 2);
+		api.getConversation.mockResolvedValue(thread(decidedRow()));
+		await vi.advanceTimersByTimeAsync(5000);
+		await flushPromises();
+		expect(wrapper.text()).toContain("This draft changed while you were editing");
+	});
+
+	// Break: a quiet read that was already in flight when a loud load started writes its (older) page
+	// over the loud one: the thread jumps back, or the card is taken for dead on stale data.
+	it("a quiet read overtaken by a loud load does not write its page", async () => {
+		vi.useFakeTimers();
+		await open();
+		await button("Edit").trigger("click");
+		await flushPromises();
+		api.listPendingConfirmations.mockResolvedValue(listed([]));
+		let releaseQuiet;
+		api.getConversation.mockImplementationOnce(
+			() => new Promise((r) => (releaseQuiet = () => r(thread(decidedRow()))))
+		);
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(releaseQuiet).toBeTypeOf("function");
+		// a loud load starts (the app's resync event) and reads the still-pending thread
+		api.getConversation.mockResolvedValue(thread(pendingRow()));
+		window.dispatchEvent(new Event("jv:resync"));
+		await flushPromises();
+		releaseQuiet();
+		await flushPromises();
+		// the older (decided) page did not land: the card is not dead
+		expect(wrapper.text()).not.toContain("This draft changed while you were editing");
+	});
+
+	// Break: a quiet read that lands after the person switched chats writes the old chat's page onto
+	// the new one.
+	it("a quiet read that lands after a chat switch writes nothing", async () => {
+		vi.useFakeTimers();
+		await open();
+		await button("Edit").trigger("click");
+		await flushPromises();
+		api.listPendingConfirmations.mockImplementation(async (id) =>
+			id === "A" ? listed([]) : { ok: true, data: { pending: [] } }
+		);
+		let releaseQuiet;
+		api.getConversation.mockImplementationOnce(
+			() => new Promise((r) => (releaseQuiet = () => r(thread(decidedRow()))))
+		);
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(releaseQuiet).toBeTypeOf("function");
+		api.getConversation.mockResolvedValue({
+			conversation: { name: "B", title: "Chat B" },
+			messages: [
+				{
+					name: "b1",
+					role: "assistant",
+					content: "Only in chat B",
+					seq: 1,
+					created_at: 1,
+				},
+			],
+		});
+		await wrapper.setProps({ id: "B" });
+		await flushPromises();
+		expect(wrapper.text()).toContain("Only in chat B");
+		releaseQuiet();
+		await flushPromises();
+		expect(wrapper.text()).toContain("Only in chat B");
+		expect(wrapper.text()).not.toContain("Here is the draft.");
+	});
+});
+
+describe("the phone view's wiring of the draft card's decisions", () => {
+	const create = () => button("Create").trigger("click");
+
+	// Break: a draft that continues the chat gets no waiting card after Create (the person sees the
+	// card vanish and nothing says Jarvis will answer), or a run the view already saw starting is
+	// queued again, or a confirm that queued nothing makes one.
+	it("a confirmed draft that continues shows the waiting card; one that does not, shows none", async () => {
+		await open();
+		api.confirmTool.mockResolvedValue({
+			ok: true,
+			queued: true,
+			run_id: "r9",
+			queued_position: 2,
+		});
+		await create();
+		await flushPromises();
+		expect(recoveryState.queued.A).toEqual({ run_id: "r9", state: "queued", position: 2 });
+		expect(wrapper.find(".jv-waiting-card").text()).toContain("Message queued");
+
+		// a run the view has already seen start is not shown as waiting
+		wrapper.unmount();
+		recoveryState.queued = {};
+		recoveryState.observedRuns = { r10: true };
+		await open();
+		api.confirmTool.mockResolvedValue({ ok: true, queued: true, run_id: "r10" });
+		await create();
+		await flushPromises();
+		expect(recoveryState.queued.A).toBeUndefined();
+
+		// a confirm that queued nothing (a final draft) shows no waiting card
+		wrapper.unmount();
+		await open();
+		api.confirmTool.mockResolvedValue({ ok: true });
+		await create();
+		await flushPromises();
+		expect(recoveryState.queued.A).toBeUndefined();
+	});
+
+	// Break: a decision that throws leaves the settling count up, so the typed-draft card stays hidden
+	// for the rest of the chat (the one-card rule reads it); or the count is not raised while the call runs.
+	it("the settling count is up while a decision runs and back to 0 after a thrown one", async () => {
+		await open();
+		let fail;
+		api.confirmTool.mockImplementation(() => new Promise((_, reject) => (fail = reject)));
+		const pressed = create();
+		await flushPromises();
+		expect(wrapper.vm.decisionsSettling).toBe(1);
+		fail(new Error("Failed to fetch"));
+		await pressed;
+		await flushPromises();
+		expect(wrapper.vm.decisionsSettling).toBe(0);
+		// the card is still there, with the sanitised line
+		expect(wrapper.text()).toContain("Jarvis could not reach the server");
+	});
+
+	// Break: an error line stays in the store when its card leaves the list and comes back with the
+	// same token (a refused Create's words reappear under a fresh card for the same draft).
+	it("a card's error line leaves with the card", async () => {
+		await open();
+		api.confirmTool.mockResolvedValue({ ok: false, reason_code: "busy" });
+		await create();
+		await flushPromises();
+		const busy = "This action is being handled right now.";
+		expect(wrapper.text()).toContain(busy);
+		// the card is decided elsewhere: gone from the list and the thread
+		api.listPendingConfirmations.mockResolvedValue(listed([]));
+		api.getConversation.mockResolvedValue(thread(decidedRow()));
+		// (the resync reads the list from the rows it held when it started: it takes two to see the thread)
+		window.dispatchEvent(new Event("jv:resync"));
+		await flushPromises();
+		window.dispatchEvent(new Event("jv:resync"));
+		await flushPromises();
+		expect(button("Create")).toBeUndefined();
+		// the same token is pending again
+		api.listPendingConfirmations.mockResolvedValue(listed(["t1"]));
+		api.getConversation.mockResolvedValue(thread(pendingRow()));
+		window.dispatchEvent(new Event("jv:resync"));
+		await flushPromises();
+		window.dispatchEvent(new Event("jv:resync"));
+		await flushPromises();
+		expect(button("Create")).toBeDefined();
+		expect(wrapper.text()).not.toContain(busy);
 	});
 });

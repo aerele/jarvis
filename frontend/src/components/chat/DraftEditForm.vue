@@ -958,4 +958,9 @@ defineExpose({ parkedRegion });
 .jv-grid-flagged > .jv-grid-opencell > :deep(.jv-rowform-block) {
 	box-shadow: inset 3px 0 0 var(--red);
 }
+/* the row's remove glyph is drawn larger on the phone (the hit area above is 40px already) */
+.jv-surface-phone .jv-grid-del {
+	font-size: 20px;
+	line-height: 1;
+}
 </style>

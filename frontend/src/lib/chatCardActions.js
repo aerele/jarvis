@@ -175,8 +175,11 @@ const OUTCOME = {
 const outcome = (extra) => ({ ...OUTCOME, ...extra });
 
 const EXPIRED_TEXT = "This confirmation expired. Tell me the action again to retry it.";
+// The bare "no longer valid" guess. The phone has no tabs: its words name no place.
 const OTHER_TAB_TEXT =
 	"Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again.";
+const OTHER_PLACE_TEXT =
+	"Couldn't confirm. It may have been handled somewhere else. Refresh, or ask me to try again.";
 
 // The words for a refusal that none of the branches above knows how to settle: the card is kept
 // (nothing ran) and says what the server said.
@@ -203,7 +206,11 @@ function safetyOutcome(reply) {
 // confirm_tool and approve_and_run (they answer in the same envelopes).
 //   draft    the card is a server draft card: a stale record says "after the draft was made"
 //   expired  the card's own wall-clock expiry has passed (only a bare "no longer valid" reads it)
-export function confirmReplyOutcome(reply, { draft = false, expired = false } = {}) {
+//   surface  "desktop" (default) or "phone": the words that name a place ("another tab")
+export function confirmReplyOutcome(
+	reply,
+	{ draft = false, expired = false, surface = "desktop" } = {}
+) {
 	if (!reply || reply.ok !== false) {
 		const queued =
 			reply && reply.queued
@@ -224,7 +231,8 @@ export function confirmReplyOutcome(reply, { draft = false, expired = false } = 
 	// says why; only a bare legacy token (no reason_code at all) gets the opaque guess.
 	if (reply.error && reply.error.type === "InvalidConfirmation") {
 		const message =
-			chatSettledReason(reply, { draft }) || (expired ? EXPIRED_TEXT : OTHER_TAB_TEXT);
+			chatSettledReason(reply, { draft }) ||
+			(expired ? EXPIRED_TEXT : surface === "phone" ? OTHER_PLACE_TEXT : OTHER_TAB_TEXT);
 		return outcome({ message, toast: true });
 	}
 	// The token was consumed and the tool failed: a durable "failed" receipt is in the thread.

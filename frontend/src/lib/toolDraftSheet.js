@@ -3,10 +3,12 @@
 // is re-read while a form is open, and the wiring of the calculated cells. Pure (Vue's `watch` is
 // handed in), relative imports only, so the phone's host shares it.
 //
-// The desktop's ChatView keeps its own text for the footer expressions, the poll and the watcher
-// (specs cut that text out of the view and run it, so it cannot move without them): the spec
-// toolDraftSheet.spec.js runs the desktop's text and these functions on the same inputs, so the two
-// cannot drift.
+// Both apps call these functions: the desktop's ChatView imports `TOOL_FORM_POLL_MS`,
+// `watchCalculatedCells`, `toolFooterState` and `previewPrimaryDisabled` (its template and script read
+// them, nothing is copied), and the phone's sheet host imports the same, plus `closeAsksFirst`, which is
+// the phone's own rule (the desktop's X always closes). The specs run the view's own lines against
+// them (ChatView.toolDraft.spec.js, ChatView.toolDraftKeys.spec.js) and toolDraftSheet.spec.js holds
+// the tables, so a change here is a change on both.
 import { draftIsDirty } from "./draftSave.js";
 import { settleCalculatedCells, toolPrimaryLabel } from "./toolDraftPanel.js";
 

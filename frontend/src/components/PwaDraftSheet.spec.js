@@ -95,6 +95,7 @@ function harness({ meta = META, streaming = false, card = timesheetCard() } = {}
 		onChat: null,
 		onRemove: null,
 		saveGate: null,
+		metaGate: null,
 		beforeReply: null,
 		onDecideReload: null,
 		onQuiet: null,
@@ -104,6 +105,7 @@ function harness({ meta = META, streaming = false, card = timesheetCard() } = {}
 	};
 	const api = {
 		getDoctypeFormMeta: async (doctype) => {
+			if (state.metaGate) await state.metaGate;
 			calls.meta.push(doctype);
 			if (state.onMeta) state.onMeta();
 			return structuredClone(meta);
@@ -569,37 +571,9 @@ describe("a card that leaves the list while its form is open", () => {
 		expect(t.order).toEqual([]);
 	});
 
-	// Break: a tick that cannot reach the server (offline, a blip) reads the thread anyway, or
-	// takes the card for dead, or says something (the banner rewrite per tick this replaced).
-	it("a failed or unclean read is silent: no thread read, not dead, no banner", async () => {
-		vi.useFakeTimers();
-		const t = await opened();
-		t.state.listed = null;
-		await vi.advanceTimersByTimeAsync(20000);
-		expect(t.order).toEqual(["list", "list", "list", "list"]);
-		expect(dead(t)).toBe(false);
-		expect(t.calls.say).toEqual([]);
-		// a read that throws is silent too
-		t.io.loadPending = async () => {
-			throw new Error("offline");
-		};
-		await vi.advanceTimersByTimeAsync(10000);
-		expect(dead(t)).toBe(false);
-		expect(t.calls.say).toEqual([]);
-	});
-
-	// Break: the thread is read again while it still says pending (the contradiction waits for the
-	// next tick), or the card is marked dead on the list's word alone.
-	it("a card the thread still holds as pending is not dead yet", async () => {
-		vi.useFakeTimers();
-		const t = await opened();
-		t.state.onList = () => {
-			t.state.listed = [];
-		};
-		await vi.advanceTimersByTimeAsync(5000);
-		expect(t.order).toEqual(["list", "quiet", "list"]);
-		expect(dead(t)).toBe(false);
-	});
+	// (A tick that cannot reach the server is silent, and a card the thread still holds as pending is not
+	// dead yet: both are held by PwaDraftSheetPoll.spec.js with the view's real merge, which is what
+	// makes them true.)
 
 	// Break: coming back to the app does not look again (a card handled while the phone slept stays
 	// editable), or it looks while hidden, or after the sheet closed.
@@ -856,7 +830,7 @@ describe("DraftSheet: what the person sees", () => {
 		expect(w.find(".jv-sheet .jv-draft-tokens").exists()).toBe(true);
 		expect(w.find(".jv-draft-body").classes()).toContain("jv-surface-phone");
 		expect(w.find(".jv-dsheet-title").text()).toBe("New Timesheet");
-		expect(w.find(".jv-dsheet-badge").text()).toBe("Draft - not saved");
+		expect(w.find(".jv-dsheet-badge").text()).toBe("Draft, not saved");
 		expect(buttonsOf(w)).toEqual(["Create", "Discard draft"]);
 		// a grid cell carries its column's name for the stacked row card
 		const labels = w
@@ -1449,8 +1423,11 @@ describe("Preview of a draft card on the phone", () => {
 			(v) => seen.push(v),
 			{ flush: "sync" }
 		);
+		// the Preview and the form of one draft say the same thing in the same case
+		expect(w.find(".dp-badge").text()).toBe("Draft, not saved");
 		await w.find(".dp-foot .dp-btn:not(.dp-btn-primary)").trigger("click");
 		await flushPromises();
+		expect(w.find(".jv-dsheet-badge").text()).toBe("Draft, not saved");
 		expect(seen).toEqual([]); // `open` never changed: it was never false
 		expect(t.host.open.value).toBe(true);
 		expect(t.host.preview.value).toBeNull();
@@ -1477,6 +1454,29 @@ describe("Preview of a draft card on the phone", () => {
 		expect(t.calls.confirm).toEqual([]);
 		expect(t.host.preview.value).not.toBeNull();
 		w.unmount();
+	});
+
+	// Break: the person closes the Preview while the form is still being built (Edit tapped, slow
+	// network) and the form opens anyway when the build lands: a sheet they had dismissed comes back.
+	it("a Preview dismissed during the build to Edit does not open the form when the build lands", async () => {
+		const t = await opensPreview();
+		let release;
+		t.state.metaGate = new Promise((r) => (release = r));
+		const editing = t.host.editFromPreview();
+		await Promise.resolve();
+		expect(t.host.building.value).toBe("t1");
+		expect(t.host.requestClose()).toBe("closed");
+		expect(t.host.open.value).toBe(false);
+		release();
+		expect(await editing).toBe("ignored");
+		expect(t.host.panel.value).toBeNull();
+		expect(t.host.preview.value).toBeNull();
+		expect(t.host.open.value).toBe(false);
+		expect(t.host.building.value).toBe("");
+		// and an ordinary Edit afterwards still opens the form
+		t.state.metaGate = null;
+		expect(await t.host.openEdit(t.items.value[0])).toBe("opened");
+		expect(t.host.panel.value.token).toBe("t1");
 	});
 
 	// Break: a form that cannot be built closes the Preview (the person loses their place) or says

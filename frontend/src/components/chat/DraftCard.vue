@@ -611,4 +611,40 @@ function press(button) {
 	min-height: 40px;
 	padding: 6px 14px;
 }
+/* ---- the phone's buttons and tables (appended; everything is behind .dc-phone) ---------------------
+   The four buttons share ONE row, evenly (each its words plus an equal share of what is left), while
+   the card is wide enough for them; narrower, they sit two and two. Never one button alone on a line:
+   the old wrap left "Cancel" full width under three others for an update ("Save changes" is the long
+   word) and not for a create. The card is its own container, so this follows the card's width. */
+.dc-phone {
+	container-type: inline-size;
+	--dc-shade: color-mix(in srgb, var(--dc-text) 20%, transparent);
+}
+.dc-phone .dc-buttons {
+	flex-wrap: nowrap;
+	gap: 8px;
+}
+.dc-phone .dc-btn {
+	flex: 1 1 auto;
+	min-width: 0;
+	padding: 6px 8px;
+}
+@container (max-width: 319px) {
+	.dc-phone .dc-buttons {
+		display: grid;
+		grid-template-columns: 1fr 1fr;
+	}
+	.dc-phone .dc-btn:only-child {
+		grid-column: 1 / -1;
+	}
+}
+/* A table wider than the card scrolls inside it: a fade on the edge that has more, gone at the end of
+   the scroll (the cover gradients scroll with the content, the shades stay at the edges). */
+.dc-phone .dc-scroll {
+	background: linear-gradient(to right, var(--dc-bg) 30%, transparent) 0 0 / 28px 100% no-repeat
+			local,
+		linear-gradient(to left, var(--dc-bg) 30%, transparent) 100% 0 / 28px 100% no-repeat local,
+		linear-gradient(to right, var(--dc-shade), transparent) 0 0 / 14px 100% no-repeat scroll,
+		linear-gradient(to left, var(--dc-shade), transparent) 100% 0 / 14px 100% no-repeat scroll;
+}
 </style>

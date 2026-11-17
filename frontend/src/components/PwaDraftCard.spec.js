@@ -210,15 +210,62 @@ function deps(ui, over = {}) {
 // is tested over that table in chatCardDecision.spec.js; here is what the PHONE does with it.
 describe("runDraftDecision: what each real server reply does on the phone's card", () => {
 	const doorOf = (kind) => (kind === "create" ? "confirm" : "dismiss");
+	// The phone's own words where the desktop's name a place ("another tab"): written by hand, not
+	// derived from the desktop's text.
+	const SOMEWHERE_ELSE =
+		"Couldn't confirm. It may have been handled somewhere else. Refresh, or ask me to try again.";
+	const PHONE_TEXT = {
+		"a used legacy token, the card has no expiry": SOMEWHERE_ELSE,
+		"a used legacy token, the card's expiry is ahead": SOMEWHERE_ELSE,
+		"an armed run withdrew the confirmation (no reason_code)": SOMEWHERE_ELSE,
+	};
+	// ONE case per effect class of the phone (what it DOES with an outcome), not one per server reply:
+	// the shared decision maps every reply of the table to an outcome (chatCardDecision.spec.js, and the
+	// desktop's handlers over the same table in chatCardDoors.spec.js). A class is the door, kept / gone,
+	// whether a queued turn waits, whether a line is said, and a thrown call's text kind.
+	const effectClass = (kind, row) => {
+		const e = EXPECTED[row.id];
+		if (row.thrown) return `${kind} thrown ${e.thrown.internal ? "fallback" : "said"}`;
+		const want = kind === "create" && e.draft ? e.draft : e;
+		return `${kind} ${want.fate} queued:${!!want.queued} line:${!!want.message}`;
+	};
+	// plus the rows each named for a reason of its own: the REAL storage envelope (no reason_code; the bug
+	// this table came from), the draft's stale receipt line, the phone's wording, a refused Cancel with no code
+	const NAMED = [
+		["create", "storage unavailable (confirm_tool)"],
+		["create", "storage unavailable with no message"],
+		["create", "stale: the record changed after it was proposed"],
+		["create", "a used legacy token, the card has no expiry"],
+		["cancel", "discard: storage unavailable"],
+		["cancel", "discard: a refusal with no reason_code"],
+	];
 	const cases = [];
+	const seen = new Set();
+	const add = (kind, row) => {
+		const key = `${kind}|${row.id}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		cases.push([`${kind}: ${row.id}`, kind, row]);
+	};
+	for (const [kind, id] of NAMED)
+		add(
+			kind,
+			REPLY_ROWS.find((r) => r.id === id)
+		);
+	const classes = new Set();
 	for (const kind of ["create", "cancel"])
-		for (const row of REPLY_ROWS.filter((r) => r.doors.includes(doorOf(kind))))
-			cases.push([`${kind}: ${row.id}`, kind, row]);
+		for (const row of REPLY_ROWS.filter((r) => r.doors.includes(doorOf(kind)))) {
+			const c = effectClass(kind, row);
+			if (classes.has(c)) continue;
+			classes.add(c);
+			add(kind, row);
+		}
 
 	// Break: a spent card stays (pressable twice), a pending card is taken away (the bug this table
 	// came from: a storage reply made the card vanish while the draft was still Pending), a failure
 	// is silent or shows the raw error text, the receipt is never reloaded (a final draft starts no
-	// agent turn, so nothing else will), or the banner says what the receipt already says.
+	// agent turn, so nothing else will), the banner says what the receipt already says, or the phone
+	// says "another tab".
 	it.each(cases)("%s", async (_, kind, row) => {
 		const expected = EXPECTED[row.id];
 		const ui = makeDraftUi(reactive);
@@ -249,7 +296,11 @@ describe("runDraftDecision: what each real server reply does on the phone's card
 			);
 			return;
 		}
-		const want = kind === "create" && expected.draft ? expected.draft : expected;
+		const wanted = kind === "create" && expected.draft ? expected.draft : expected;
+		const want =
+			kind === "create" && PHONE_TEXT[row.id]
+				? { ...wanted, message: PHONE_TEXT[row.id] }
+				: wanted;
 		if (want.fate === "kept") {
 			expect(result).toBe("kept");
 			expect(d.calls).toEqual([]);

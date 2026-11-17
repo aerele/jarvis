@@ -4,6 +4,7 @@ import { isRequiredBlank, lineItemSummary } from "../../lib/actionSummary";
 import { draftParentDoc } from "../../lib/draftApply";
 import { AUTO_OPEN_MAX, savedRowsByName } from "../../lib/draftTables";
 import { changeDisplay, clipText, rowExtraValues } from "../../lib/rowForm";
+import { draftBadgeText } from "../../lib/draftBadge";
 
 const props = defineProps({
 	model: { type: Object, required: true },
@@ -21,7 +22,7 @@ const emit = defineEmits(["close", "edit", "confirm"]);
 const phone = computed(() => props.surface === "phone");
 
 const isUpdate = computed(() => props.model.verb === "update");
-const badge = computed(() => (isUpdate.value ? "Pending change" : "Draft - not saved"));
+const badge = computed(() => draftBadgeText(isUpdate.value, props.surface));
 const docTitle = computed(() => {
 	const m = props.model;
 	return `${isUpdate.value ? "Update" : "New"} ${m.doctype}${
@@ -677,5 +678,10 @@ onBeforeUnmount(() => {
 }
 .dp-surface-phone .dp-btn-primary {
 	flex: 2 1 0;
+}
+/* the badge reads as the edit sheet's does: as written, not capitals */
+.dp-surface-phone .dp-badge {
+	text-transform: none;
+	letter-spacing: 0.02em;
 }
 </style>

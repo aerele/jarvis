@@ -10,6 +10,7 @@ import { computed, nextTick, ref, watch } from "vue";
 import DraftEditForm from "@shared/components/chat/DraftEditForm.vue";
 import DraftPreview from "@shared/components/doc/DraftPreview.vue";
 import { toolPrimaryLabel } from "@shared/lib/toolDraftPanel.js";
+import { draftBadgeText } from "@shared/lib/draftBadge.js";
 import { toolDeadText } from "@shared/lib/toolDraftHost.js";
 import { draftPalette } from "../lib/draftTokens.js";
 import { bannerVisible, errorLineOf, footerStatus, sheetTitle } from "../lib/draftSheetView.js";
@@ -39,6 +40,10 @@ const palette = draftPalette();
 const keepButton = ref(null);
 const keepDraftButton = ref(null);
 const title = computed(() => sheetTitle(panel.value));
+// the same words as the Preview's badge (one function for both sheets)
+const badge = computed(() =>
+	draftBadgeText(!!panel.value && panel.value.verb === "update", "phone")
+);
 const errorLine = computed(() => errorLineOf(panel.value && panel.value.error));
 const label = computed(() =>
 	preview.value ? "Preview of the draft" : panel.value ? "Edit draft" : "Draft"
@@ -106,7 +111,7 @@ const onFocusIn = (event) => scrollFocusedIntoView(event.target);
 				<header class="jv-dsheet-head">
 					<div class="jv-dsheet-titles">
 						<h2 class="jv-dsheet-title">{{ title }}</h2>
-						<span class="jv-dsheet-badge">Draft - not saved</span>
+						<span class="jv-dsheet-badge">{{ badge }}</span>
 					</div>
 					<button
 						type="button"

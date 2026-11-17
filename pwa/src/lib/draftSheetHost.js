@@ -58,6 +58,7 @@ export function makeDraftSheet(io) {
 	const confirming = ref(false); // the inline "Discard your changes?" is showing
 	const confirmingDiscard = ref(false); // the inline "Discard this draft?" is showing
 	const previewNote = ref(""); // why the form could not be built from the Preview (shown in it)
+	let previewEdit = null; // { dismissed } while a form is being built from the Preview
 	const bodyEl = ref(null); // the form's wrapper, where the first mark is found
 
 	const builder = makeDraftModelBuilder({
@@ -95,6 +96,9 @@ export function makeDraftSheet(io) {
 			io.items().some((x) => x.token === v.token),
 		panel: () => panel.value,
 		setPanel: (model) => {
+			// a Preview the person dismissed while this form was being built from it: the form must not
+			// open when the build lands
+			if (previewEdit && previewEdit.dismissed) return;
 			confirming.value = false;
 			confirmingDiscard.value = false;
 			panel.value = model;
@@ -215,6 +219,10 @@ export function makeDraftSheet(io) {
 	// no banner), and the merge then drops the card: the banner shows.
 	let timer = null;
 	let refreshing = false;
+	// At most ONE quiet thread read per "the card is missing from the server's list" episode: if that
+	// read did not drop the card, reading the thread every tick would not either. The next episode starts
+	// when the card is listed again (or another form opens). A read that did not land does not count.
+	let quietReadDone = false;
 	const tick = async () => {
 		// a card already found dead stays dead: nothing more to read
 		if (refreshing || !panel.value || dead.value) return;
@@ -222,8 +230,11 @@ export function makeDraftSheet(io) {
 		const token = panel.value.token;
 		try {
 			const listed = await io.loadPending("auto", { quiet: true });
-			if (listed && !listed.has(token) && panel.value && panel.value.token === token) {
-				await io.loadChatQuietly();
+			if (listed && listed.has(token)) quietReadDone = false;
+			else if (listed && !quietReadDone && panel.value && panel.value.token === token) {
+				// a read that did not land (offline, overtaken by a loud load) does not count: the next
+				// tick asks again
+				quietReadDone = (await io.loadChatQuietly()) !== false;
 				await io.loadPending("auto", { quiet: true });
 			}
 		} catch {
@@ -244,6 +255,7 @@ export function makeDraftSheet(io) {
 		() => (panel.value ? panel.value.token : ""),
 		(token) => {
 			stopWatching();
+			quietReadDone = false;
 			confirming.value = false;
 			confirmingDiscard.value = false;
 			if (!token) return;
@@ -267,6 +279,7 @@ export function makeDraftSheet(io) {
 	// showing), "kept" (the question was answered "keep editing" by closing it again), "none".
 	function requestClose() {
 		if (preview.value && !panel.value) {
+			if (previewEdit) previewEdit.dismissed = true;
 			preview.value = null;
 			return "closed";
 		}
@@ -366,7 +379,16 @@ export function makeDraftSheet(io) {
 		// a build is already running (a second tap): the first one decides, nothing is said
 		if (!pa || building.value) return "ignored";
 		previewNote.value = "";
-		const { result, text } = await buildEdit(pa);
+		const mine = (previewEdit = { dismissed: false });
+		let built;
+		try {
+			built = await buildEdit(pa);
+		} finally {
+			if (previewEdit === mine) previewEdit = null;
+		}
+		// the Preview was closed while the form was being built: nothing opens, nothing is said
+		if (mine.dismissed) return "ignored";
+		const { result, text } = built;
 		if (result === "opened") {
 			preview.value = null;
 		} else if (result === "failed") {
