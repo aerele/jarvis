@@ -17,6 +17,7 @@ from frappe import _
 from frappe.utils import get_url, md_to_html, now_datetime
 
 from jarvis._redis_lock import redis_lock
+from jarvis.chat import live_draft
 from jarvis.chat.api import _get_owned_conversation, _live_turn_steps
 from jarvis.chat.error_taxonomy import headline_for
 from jarvis.chat.scrub import scrub_for_share
@@ -88,6 +89,7 @@ _FIELDS = [
 	"streaming",
 	"tool_name",
 	"tool_status",
+	"tool_call_id",  # a pending row's call id is its Pending Action's name
 	"action_outcome",
 	"canvas",
 	"ref_doctype",
@@ -363,6 +365,7 @@ def _markdown(conversation, rows: list) -> str:
 	else:
 		parts.append(_("No messages yet"))
 	tools = []
+	drafts = None  # a pending row's draft, read once on the first one
 
 	def flush_tools():
 		if tools:
@@ -389,7 +392,17 @@ def _markdown(conversation, rows: list) -> str:
 			tools.append(label)
 			outcome = row.get("action_outcome")
 			if row.get("tool_status") == "pending":
-				parts.append(_("Awaiting confirmation"))
+				if drafts is None:
+					drafts = {
+						d["token"]: d
+						for d in live_draft.pending_draft_cards(conversations=[conversation.name])
+					}
+				draft = drafts.get(row.get("tool_call_id"))
+				parts.append(
+					_("Draft: {0}, waiting").format(_escape(draft["title"]))
+					if draft and draft["title"]
+					else _("Awaiting confirmation")
+				)
 			elif outcome in {"confirmed", "auto_applied"}:
 				parts.append(
 					_("Created/Updated {0} {1}").format(

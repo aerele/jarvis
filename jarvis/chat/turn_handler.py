@@ -2802,6 +2802,12 @@ def _live_draft_clause(conv, binding) -> str:
 			return ""
 		from jarvis.chat import live_draft
 
+		parked = _pending_draft_card(conv)
+		if parked:
+			# A parked draft card wins over a typed draft (the shared rule retires the typed one,
+			# so both exist only in a chat that parked the card first). It needs none of the typed
+			# draft's checks: its block cannot be broken and no reply card hides it.
+			return _draft_clause_text(f"{parked[0]} {parked[1] or 'a record'}", parked[2], parked=True)
 		rows = live_draft.load_rows(conv.name)
 		draft = live_draft.pick(rows)
 		if not draft or draft["bad"]:
@@ -2812,14 +2818,43 @@ def _live_draft_clause(conv, binding) -> str:
 			return ""  # parked behind its own confirmation card: the clients show "waiting"
 		what = f"{draft['verb']} {live_draft.real_doctype(draft['doctype']) or 'a record'}"
 		button = "Save" if draft["verb"] == "update" else "Create"  # the card's own words
-		return (
-			f"; unsaved draft waiting: {what}, its card with {button} and Cancel is on the user's screen: "
-			"remind them in one line to choose, re-emit the block only for a change they ask for, "
-			"never say it is above"
-		)
+		return _draft_clause_text(what, button)
 	except Exception:
 		frappe.log_error(title="live draft context failed", message=frappe.get_traceback())
 		return ""
+
+
+def _draft_clause_text(what: str, button: str, parked: bool = False) -> str:
+	"""The clause for a waiting draft, typed or parked: ``what`` is "verb Doctype", ``button``
+	the card's own word for the save button. A parked card is the agent's own tool call, so
+	for it the agent is told to call the tool again for a change, not to re-emit a block."""
+	change = "call the tool again" if parked else "re-emit the block"
+	return (
+		f"; unsaved draft waiting: {what}, its card with {button} and Cancel is on the user's screen: "
+		f"remind them in one line to choose, {change} only for a change they ask for, "
+		"never say it is above"
+	)
+
+
+def _pending_draft_card(conv) -> tuple[str, str, str] | None:
+	"""``(verb, doctype, button)`` of this chat's newest Pending draft card (the agent's own
+	``create_doc`` / ``update_doc`` call parked as a draft), or None. The button is the card's
+	own word: ``Create`` for a create, ``Save changes`` for an update. The doctype has passed
+	``safe_doctype`` and ``real_doctype`` inside ``live_draft.pending_draft_cards``: nothing the
+	agent wrote reaches the clause unchecked, and a name that is no DocType comes back "".
+
+	No flag check here: a draft card exists only if ``jarvis_draft_cards`` was on when it was
+	parked, and the clause itself sits behind ``jarvis_live_draft_context``. One plain read, no
+	lock: prompt assembly never locks or writes."""
+	from jarvis.chat import live_draft
+
+	cards = live_draft.pending_draft_cards(
+		conversations=[conv.name], owner=conv.owner, limit=_PARKED_CARDS_READ
+	)
+	if not cards:
+		return None
+	card = cards[0]
+	return card["verb"], card["doctype"], "Save changes" if card["verb"] == "update" else "Create"
 
 
 # A draft parks one gated card; a few more cover a batch waiting in the same chat.

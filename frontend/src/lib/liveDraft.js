@@ -7,7 +7,9 @@
  * fence is broken, or parses to a non-email action whose verb is missing, create or
  * update. The live draft is the last draft row, unless a later tool row is a decided
  * write (a non-empty action_outcome, or an old receipt: a completed create_doc /
- * update_doc row with no tool_call_id), more than MAX_USER_ROWS_AFTER_DRAFT user rows
+ * update_doc row with no tool_call_id), a later tool row that is a parked tool draft
+ * (draft_card true: the agent's own create_doc / update_doc card, still Pending), more than
+ * MAX_USER_ROWS_AFTER_DRAFT user rows
  * follow it, or more than MAX_ROWS_AFTER_DRAFT rows of any role follow it. The tool rows
  * DIRECTLY after the draft row (up to the first later row that is not a tool row) are
  * the draft's own turn: the reply row takes its seq when the turn starts, so they do not
@@ -45,7 +47,9 @@ const isEditVerb = (verb) => verb === "create" || verb === "update";
 const WRITE_TOOLS = new Set(["create_doc", "update_doc"]);
 
 /**
- * A decided write after a draft retires it: a receipt (a non-empty action_outcome), or an
+ * A parked tool draft (draft_card true) or a decided write after a typed draft retires it:
+ * the tool card is then the one card, and once it is decided its row has an action_outcome
+ * and no draft_card, so the old typed draft never comes back. A decided write is a receipt (a non-empty action_outcome), or an
  * old receipt. A draft saved before 2026-07-17 left a completed create_doc / update_doc
  * row with no outcome AND no tool_call_id. An agent's tool call always carries its call
  * id, and a call that only staged a gated card is still "completed": it never retires a
@@ -55,6 +59,7 @@ const WRITE_TOOLS = new Set(["create_doc", "update_doc"]);
  */
 export function retiresDraft(row) {
 	if (!row || row.role !== "tool") return false;
+	if (row.draft_card === true) return true;
 	if (typeof row.action_outcome === "string" && row.action_outcome.trim() !== "") return true;
 	return WRITE_TOOLS.has(row.tool_name) && row.tool_status === "completed" && !row.tool_call_id;
 }
@@ -76,10 +81,14 @@ export function isOwnActionRow(row) {
 }
 
 /**
+ * The caller passes `parkedDraft` from the pending-confirmations list (true when an item has
+ * `preview.card.draft`): a Pending draft card is the one card, so no typed draft is live.
  * @param {Array<object>|null|undefined} rows messages in order
+ * @param {{parkedDraft?: boolean}} [options]
  * @returns {object|null} the live draft row, or null
  */
-export function liveDraftRow(rows) {
+export function liveDraftRow(rows, { parkedDraft = false } = {}) {
+	if (parkedDraft) return null;
 	if (!Array.isArray(rows)) return null;
 	let userRows = 0;
 	// Rows that count toward MAX_ROWS_AFTER_DRAFT, and the run of tool rows walked since

@@ -527,8 +527,9 @@ def list_approvals_page(
 	if start == 0:
 		from jarvis.chat.report_runs import ready_reports
 
-		out["awaiting_reply"] = _awaiting_reply(me)
-		out["open_drafts"] = _open_drafts(me)
+		parked = _parked_drafts(me)  # one read: the two lanes must agree on which chats it lists
+		out["awaiting_reply"] = _awaiting_reply(me, parked)
+		out["open_drafts"] = _open_drafts(me, parked)
 		try:
 			out["ready_reports"] = ready_reports(me)
 		except Exception:
@@ -538,16 +539,21 @@ def list_approvals_page(
 	return out
 
 
-def _awaiting_reply(me: str) -> list[dict]:
+def _awaiting_reply(me: str, parked: dict[str, dict] | None = None) -> list[dict]:
 	"""Conversations OWNED by ``me`` whose ball is in the user's court:
 	the last message is an assistant turn that ENDED cleanly (not
 	streaming/recovering/errored — the filebox.py SQL-ladder semantics)
 	and looks like a question (carries a ```jarvis-ask fence, or a "?" in
 	the last 200 chars), excluding conversations that already have a
 	Pending chat-sourced approval row (those ARE board rows). Newest
-	first, capped at 10. Rows: {conversation, title, question_excerpt,
+	first, capped at 10. ``parked`` is ``_parked_drafts(me)`` (read here when not
+	given): a chat it lists shows its draft under open drafts instead, and only
+	such a chat leaves this lane. Rows: {conversation, title, question_excerpt,
 	last_at}."""
 	from jarvis.chat.chat_asks import question_excerpt
+
+	if parked is None:
+		parked = _parked_drafts(me)
 
 	# A File Box sheet's conversation waits on its sheet, not on a reply.
 	on_sheet = (
@@ -610,7 +616,9 @@ def _awaiting_reply(me: str) -> list[dict]:
 			"last_at": str(r.last_at or ""),
 		}
 		for r in rows
-		if not is_collaborative(r.conversation) and not _shows_a_card(r.content)
+		if not is_collaborative(r.conversation)
+		and not _shows_a_card(r.content)
+		and r.conversation not in parked  # listed under open drafts instead
 	]
 
 
@@ -632,16 +640,18 @@ def _shows_a_card(content: str | None) -> bool:
 
 
 _OPEN_DRAFTS_MAX = 10
+_OPEN_DRAFT_CHATS = 50  # chats the open-drafts read looks at; a parked card read must cover as many
 
 
-def _open_drafts(me: str) -> list[dict]:
+def _open_drafts(me: str, parked: dict[str, dict] | None = None) -> list[dict]:
 	"""Create/update cards still open in chats OWNED by ``me``, newest first, at most
 	10. Read-only: confirming stays in the chat. Open is the chat page's live-card
 	rule: the chat's last turn message (user/assistant, not hidden; tool rows trail a
 	reply) is a finished reply carrying a create/update card. A Confirm's receipt or
 	any reply is a newer turn message, so the card closes. File Box chats are out:
 	their cards are held for the board already. Rows: {conversation, title,
-	origin_page, verb, doctype, summary, last_at}."""
+	origin_page, verb, doctype, summary, last_at}. ``parked`` is ``_parked_drafts(me)``
+	(read here when not given)."""
 	from jarvis.chat.filebox_cards import parse_action
 
 	rows = frappe.db.sql(
@@ -664,14 +674,16 @@ def _open_drafts(me: str) -> list[dict]:
 		AND COALESCE(m.recovering, 0) = 0
 		AND m.content LIKE %(card)s
 		ORDER BY m.creation DESC
-		LIMIT 50""",
-		{"me": me, "card": _CARD_FENCE},
+		LIMIT %(chats)s""",
+		{"me": me, "card": _CARD_FENCE, "chats": _OPEN_DRAFT_CHATS},
 		as_dict=True,
 	)
+	if parked is None:
+		parked = _parked_drafts(me)
 	out = []
 	for r in rows:
-		if is_collaborative(r.conversation):
-			continue
+		if r.conversation in parked or is_collaborative(r.conversation):
+			continue  # a parked draft card is the one card of its chat: listed below
 		a = parse_action(r.content)
 		if not a:
 			continue  # a submit/email card, or one the chat can't draw either
@@ -689,6 +701,54 @@ def _open_drafts(me: str) -> list[dict]:
 		)
 		if len(out) == _OPEN_DRAFTS_MAX:
 			break
+	if not parked:
+		return out  # exactly develop's answer
+	out.extend(parked.values())
+	out.sort(key=lambda d: frappe.utils.get_datetime(d["last_at"]), reverse=True)
+	return out[:_OPEN_DRAFTS_MAX]
+
+
+def _parked_drafts(me: str) -> dict[str, dict]:
+	"""Draft cards the agent parked (``create_doc`` / ``update_doc``) and that still wait, in chats
+	OWNED by ``me``: one open-drafts row per chat, same shape as a typed draft's. Two plain reads
+	(the cards, then their chats and whether each is collaborative), none in a loop."""
+	from jarvis.chat import live_draft
+
+	cards = live_draft.pending_draft_cards(owner=me, limit=_OPEN_DRAFT_CHATS)
+	if not cards:
+		return {}
+	fields = ["name", "title", "origin_page", "file_box"]
+	if frappe.db.has_column("Jarvis Conversation", "collaboration_active"):
+		fields.append("collaboration_active")
+	# get_all: filtered to chats OWNED by ``me`` (the caller's own board); no user read is needed.
+	chats = {
+		c.name: c
+		for c in frappe.get_all(
+			"Jarvis Conversation",
+			filters={
+				"name": ["in", [c["conversation"] for c in cards]],
+				"owner": me,
+				"status": ["!=", "Archived"],
+			},
+			fields=fields,
+		)
+	}
+	out: dict[str, dict] = {}
+	for card in cards:  # newest first: a chat keeps its newest
+		chat = chats.get(card["conversation"])
+		if not chat or chat.file_box or not card["doctype"] or card["conversation"] in out:
+			continue
+		if chat.get("collaboration_active"):
+			continue
+		out[card["conversation"]] = {
+			"conversation": card["conversation"],
+			"title": chat.title or "",
+			"origin_page": chat.origin_page or "",
+			"verb": card["verb"],
+			"doctype": card["doctype"],
+			"summary": card["title"][:140],
+			"last_at": card["created"],
+		}
 	return out
 
 
@@ -2564,15 +2624,29 @@ def _claim_lost(name: str, ref: tuple[str, str] = ("", "")) -> None:
 	)
 
 
-def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, str], items=()) -> dict:
+def _edit_created(
+	locked,
+	approver: str,
+	stamp,
+	result: dict,
+	ref: tuple[str, str],
+	items=(),
+	*,
+	reason: str = _EDITED_REASON,
+	edited_args: dict | None = None,
+) -> dict:
 	"""A successful Edit & create, the row re-read under its lock (a mid-dispatch commit
 	or rollback may have moved it): our claim -> Executed; Pending (a rollback dropped
 	the uncommitted claim, the insert went on) -> Failed/``partial`` naming the record,
 	never Pending with a record; decided elsewhere (the reconciler) -> its verdict
-	stands and the outcome is late."""
+	stands and the outcome is late.
+
+	``edited_args`` (a draft card's save): sealed with the settlement, so the receipt
+	and the agent are told the call that ran, not the one the card proposed."""
 	from jarvis.chat import held_parties
 	from jarvis.chat.pending_actions import _seal, settle
 	from jarvis.chat.pending_actions._execute import late_outcome, outcome_of
+	from jarvis.chat.pending_actions._settle import with_reference
 	from jarvis.chat.pending_actions._store import (
 		EXECUTED,
 		EXECUTING,
@@ -2592,12 +2666,15 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 		scope_cols["dedup_keys"] = _seal.canonical(
 			[_seal.open_key(locked.owner_user, held_parties.item_key(i)) for i in items]
 		)
+	ran = {"args": edited_args} if edited_args is not None else {}
 	if _our_claim(fresh, approver, stamp) and _terminal_update(
 		locked.name,
 		[EXECUTING],
 		EXECUTED,
-		reason=_EDITED_REASON,
-		sealed_settlement=_seal.seal_settlement(locked.name, {"result": result, "outcome": "confirmed"}),
+		reason=reason,
+		sealed_settlement=_seal.seal_settlement(
+			locked.name, {"result": result, "outcome": "confirmed", **ran}
+		),
 		**cols,
 		**scope_cols,
 	):
@@ -2610,10 +2687,15 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 			"outcome": "confirmed",
 			"edited": 1,
 		}
+	partial = {}
+	if ran:
+		partial["sealed_settlement"] = _seal.seal_settlement(
+			locked.name, {"result": with_reference(result, locked.name), "outcome": "partial", **ran}
+		)
 	if (
 		fresh
 		and fresh.status == PENDING
-		and _terminal_update(locked.name, [PENDING], FAILED, reason_code="partial", **cols)
+		and _terminal_update(locked.name, [PENDING], FAILED, reason_code="partial", **cols, **partial)
 	):
 		_claim_lost(locked.name, ref)
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before settle
@@ -2633,21 +2715,39 @@ def _edit_created(locked, approver: str, stamp, result: dict, ref: tuple[str, st
 	}
 
 
-def _edit_failed(locked, approver: str, stamp, result, interfered: bool) -> dict:
+def _edit_failed(
+	locked, approver: str, stamp, result, interfered: bool, *, edited_args: dict | None = None
+) -> dict:
 	"""A failed Edit & create, after the full rollback. The row ends Failed when it is
 	Pending again or still our claim (committed mid-dispatch); ``partial`` when a
 	mid-dispatch commit or rollback means something may have been saved. The reply
-	carries the row's real status."""
-	from jarvis.chat.pending_actions import settle
+	carries the row's real status.
+
+	``edited_args`` (a draft card's save): the failure, with the call that ran, is
+	sealed as the settlement, so the receipt and the agent see what failed and why."""
+	from jarvis.chat.pending_actions import _seal, settle
 	from jarvis.chat.pending_actions._execute import late_outcome, outcome_of
-	from jarvis.chat.pending_actions._settle import outcome_for
+	from jarvis.chat.pending_actions._settle import outcome_for, with_reference
 	from jarvis.chat.pending_actions._store import FAILED, PENDING, REASON_TEXT, _terminal_update, get_row
 
 	code = "partial" if interfered else "failed"
+	sealed = {}
+	if edited_args is not None:
+		failure = (
+			result if isinstance(result, dict) else {"ok": False, "error": {"message": REASON_TEXT[code]}}
+		)
+		sealed["sealed_settlement"] = _seal.seal_settlement(
+			locked.name,
+			{
+				"result": with_reference(failure, locked.name),
+				"outcome": outcome_for(FAILED, code, locked.tool),
+				"args": edited_args,
+			},
+		)
 	fresh = get_row(locked.name, lock="update")
 	if fresh and (fresh.status == PENDING or _our_claim(fresh, approver, stamp)):
 		done = _terminal_update(
-			locked.name, [fresh.status], FAILED, reason_code=code, decided_by=approver, edited=1
+			locked.name, [fresh.status], FAILED, reason_code=code, decided_by=approver, edited=1, **sealed
 		)
 		if done and interfered and fresh.status == PENDING:
 			_claim_lost(locked.name)
