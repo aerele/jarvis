@@ -408,10 +408,13 @@ const quoted = computed(() =>
 /* The quoted part of a Reply (aerele/jarvis#2191), above the question. */
 .jv-uquote {
 	margin: 0 0 8px;
-	padding: 2px 0 2px 10px;
-	border-left: 3px solid var(--border-2);
+	padding: 6px 10px;
+	border-left: 3px solid var(--cta);
+	border-radius: 7px;
+	background: var(--surface);
 	color: var(--text-2);
 	font-size: 13px;
+	white-space: pre-line;
 	display: -webkit-box;
 	-webkit-line-clamp: 6;
 	-webkit-box-orient: vertical;
