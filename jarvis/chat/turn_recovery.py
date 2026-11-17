@@ -130,6 +130,45 @@ def _latest_assistant_raw(messages: list, *, min_seq: int = 0, max_seq: int | No
 	return ""
 
 
+_TOOL_STOP_REASONS = {"tooluse", "tool_use", "tool_calls", "toolcalls"}
+_TOOL_BLOCK_TYPES = {"toolcall", "tool_call", "tooluse", "tool_use"}
+
+
+def tail_proves_run_ended(messages: list, *, min_seq: int = 0, max_seq: int | None = None) -> bool:
+	"""Does the windowed transcript hold positive proof the run ENDED (not merely that
+	an assistant message exists)? True only when the NEWEST message in the window is an
+	assistant message that carries a ``stopReason`` other than a tool-use one and has no
+	tool-call block. Narration written before a tool call (``stopReason`` ``toolUse``),
+	a message with no ``stopReason``, or any later tool result / user message in the
+	window means the run may still be working, so the answer is False (#2583)."""
+	metadata_key = get_profile().message_metadata_key
+
+	def seq(m):
+		return ((m or {}).get(metadata_key) or {}).get("seq", 0)
+
+	window = [
+		m
+		for m in (messages or [])
+		if isinstance(m, dict)
+		and not (min_seq > 0 and seq(m) <= min_seq)
+		and not (max_seq is not None and seq(m) > max_seq)
+	]
+	if not window:
+		return False
+	last = max(window, key=seq)
+	if (last.get("role") or "").lower() != "assistant":
+		return False
+	reason = str(last.get("stopReason") or "").strip().lower()
+	if not reason or reason in _TOOL_STOP_REASONS:
+		return False
+	content = last.get("content")
+	if isinstance(content, list):
+		for b in content:
+			if isinstance(b, dict) and str(b.get("type") or "").lower() in _TOOL_BLOCK_TYPES:
+				return False
+	return True
+
+
 def _latest_assistant_text(messages: list, *, min_seq: int = 0, max_seq: int | None = None) -> str:
 	"""Delivered form of :func:`_latest_assistant_raw`: the MEDIA: marker consumed
 	(stripped) and the text run through the white-label egress redactor.

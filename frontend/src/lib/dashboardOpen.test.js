@@ -844,10 +844,27 @@ test("?edit= wins over ?chat=, and says so", () => {
 
 test("gotoDashboards passes the message id through to the fired-stamp lookup", () => {
 	// see chatGoto.test.js for gotoDashboards' own body assertions - this only
-	// pins that BOTH call sites (the live redirect, the card button) pass the
-	// message id the stamp is keyed on, or the lookup has nothing to key off.
-	assert.match(chatSrc, /gotoDashboards\(goto\.prompt, m\.name\);/);
-	assert.match(chatSrc, /@click="gotoDashboards\(gotoOf\(m\)\.prompt, m\.name\)"/);
+	// pins that BOTH call sites (the live redirect, the card button) reach it
+	// through the one dispatcher, which passes the message id the stamp is keyed
+	// on, or the lookup has nothing to key off. The calendar branch of that
+	// dispatcher never touches the builder's prefill.
+	const dispatch = fnBody(
+		chatSrc,
+		'function openGotoAction(goto, action, messageId, { auto = false, runId = "" } = {})'
+	);
+	assert.match(dispatch, /return gotoDashboards\(goto\.prompt, messageId\);/);
+	assert.match(dispatch, /if \(action === PAYMENT_CALENDAR_PAGE\) \{/);
+	assert.match(dispatch, /return gotoPaymentCalendar\(messageId\);/);
+	assert.doesNotMatch(dispatch, /setDashboardPrefill|builderSeed/);
+	// the auto-open (timer expiry and Open now) names the run it consumes; the card click does not
+	assert.match(
+		chatSrc,
+		/openGotoAction\(goto, action, state\.messageId, \{\s*auto: true,\s*runId: state\.runId,?\s*\}\)/
+	);
+	assert.match(chatSrc, /openGotoAction\(goto, decision\.action, m\.name\);/);
+	assert.match(chatSrc, /@open="openGotoCard\(m\)"/);
+	const calendar = fnBody(chatSrc, "function gotoPaymentCalendar(messageId)");
+	assert.doesNotMatch(calendar, /setDashboardPrefill|builderSeed|requestBefore/);
 });
 
 test("send() learns the conversation a goto hand-off landed on and stamps it", () => {

@@ -26,7 +26,7 @@
 	>
 		<template #actions>
 			<Dropdown v-if="!isNew && caps.can_manage" :options="overflowOptions">
-				<Button icon="more-horizontal" variant="ghost" />
+				<Button icon="more-horizontal" variant="ghost" label="More actions" />
 			</Dropdown>
 			<Button
 				v-if="caps.can_manage"
@@ -42,7 +42,7 @@
 			<!-- 1. Trigger -->
 			<DocSection label="Trigger">
 				<div class="space-y-4">
-					<div>
+					<div data-testid="trigger-name">
 						<FormControl
 							type="text"
 							label="Name"
@@ -70,7 +70,7 @@
 						description="Off = the trigger stays saved but never fires."
 						:disabled="readOnly || saving"
 					/>
-					<div>
+					<div v-if="!isIntake">
 						<!-- hand-rolled label (Autocomplete has no label prop): mirror
 						     FormLabel's required recipe - red asterisk + sr-only text -->
 						<label class="mb-1.5 block text-xs text-ink-gray-5">
@@ -97,6 +97,7 @@
 						<ErrorMessage :message="fieldErrors.target_doctype" class="mt-2" />
 					</div>
 					<fieldset
+						v-if="!isIntake"
 						class="jv-trigger-events"
 						:aria-invalid="fieldErrors.doc_event ? 'true' : undefined"
 					>
@@ -132,7 +133,7 @@
 			</DocSection>
 
 			<!-- 2. Condition -->
-			<DocSection label="Condition">
+			<DocSection v-if="!isIntake" label="Condition">
 				<div class="space-y-2">
 					<FormControl
 						type="textarea"
@@ -203,6 +204,14 @@
 							@update:modelValue="(v) => (form.script_body = v)"
 						/>
 					</template>
+
+					<IntakeRuleFields
+						v-else-if="isIntake"
+						:form="form"
+						:disabled="readOnly || saving"
+						:read-only="readOnly"
+						@update="applyIntakePatch"
+					/>
 
 					<template v-else>
 						<FormControl
@@ -446,6 +455,8 @@ import {
 import DocPage from "@/components/doc/DocPage.vue";
 import DocSection from "@/components/doc/DocSection.vue";
 import ActivityDetailDialog from "./ActivityDetailDialog.vue";
+import IntakeRuleFields from "./IntakeRuleFields.vue";
+import { emptySpec, parseSpec, serializeSpec } from "./intakeSpec";
 import { timeAgo, exactDate } from "@/utils/datetime";
 import { searchLink } from "@/api";
 import * as apiTriggers from "@/api/triggers";
@@ -459,7 +470,10 @@ const props = defineProps({
 
 const router = useRouter();
 
-const ACTION_TYPES = ["Script", "LLM"];
+const ACTION_TYPES = ["Script", "LLM", "Intake"];
+// An intake reads files, not doc events: its default daily limit is higher than an LLM trigger's.
+const INTAKE_DEFAULT_CAP = 100;
+const LLM_DEFAULT_CAP = 25;
 const STATUS_THEME = { Success: "green", Failed: "red", Blocked: "orange", Skipped: "gray" };
 
 // ── caps (deep-linkable page → its own probe) ────────────────────────────────
@@ -495,7 +509,20 @@ const form = reactive({
 	llm_instruction: "",
 	llm_daily_cap: 25,
 	llm_allow_lookups: 0,
+	intake_source: "Folder",
+	intake_folder: "",
+	intake_record_doctype: "",
+	intake_target_doctype: "",
+	intake_spec: emptySpec(),
+	intake_instructions: "",
+	allow_incomplete_drafts: 0,
+	intake_status_field: "",
+	intake_link_field: "",
+	intake_record_event: "File attached",
 });
+const isIntake = computed(() => form.action_type === "Intake");
+// Intake pieces report their edits as one patch ({key: value}).
+const applyIntakePatch = (patch) => Object.assign(form, patch);
 // Saved-state copy for the dirty compare - a ref, per MacroDetail's lesson
 // (the computed must track it while the initial load is in flight).
 const snapshot = ref(null);
@@ -563,8 +590,32 @@ const FIELDS = [
 	"llm_instruction",
 	"llm_daily_cap",
 	"llm_allow_lookups",
+	"intake_source",
+	"intake_folder",
+	"intake_record_doctype",
+	"intake_target_doctype",
+	"intake_spec",
+	"intake_instructions",
+	"allow_incomplete_drafts",
+	"intake_status_field",
+	"intake_link_field",
+	"intake_record_event",
 ];
+// What each kind sends: an intake has no event, condition, script or instruction, and the
+// other kinds have no intake settings (the server rejects nothing, but stray values would
+// look like config).
+const INTAKE_FIELDS = FIELDS.filter(
+	(f) => f.startsWith("intake_") || f === "allow_incomplete_drafts"
+);
+const COMMON_FIELDS = ["trigger_name", "description", "enabled", "action_type", "llm_daily_cap"];
+const KIND_FIELDS = computed(() =>
+	isIntake.value
+		? [...COMMON_FIELDS, ...INTAKE_FIELDS]
+		: FIELDS.filter((f) => !INTAKE_FIELDS.includes(f))
+);
 function normalized(f) {
+	if (f === "intake_spec") return serializeSpec(form.intake_spec);
+	if (f === "allow_incomplete_drafts") return form.allow_incomplete_drafts ? 1 : 0;
 	if (f === "enabled") return form.enabled ? 1 : 0;
 	if (f === "llm_allow_lookups") return form.llm_allow_lookups ? 1 : 0;
 	if (f === "llm_daily_cap") return Number(form.llm_daily_cap) || 0;
@@ -608,6 +659,12 @@ function toggleEvent(value, on) {
 function setActionType(t) {
 	if (form.action_type === t) return;
 	form.action_type = t;
+	// swap the cap only while it still holds the other kind's untouched default
+	if (t === "Intake" && Number(form.llm_daily_cap) === LLM_DEFAULT_CAP)
+		form.llm_daily_cap = INTAKE_DEFAULT_CAP;
+	if (t !== "Intake" && Number(form.llm_daily_cap) === INTAKE_DEFAULT_CAP)
+		form.llm_daily_cap = LLM_DEFAULT_CAP;
+	if (t === "Intake") return;
 	// events outside the LLM whitelist can't stay ticked under LLM; if none is
 	// left, tick the first allowed one (as the single-event picker did)
 	const allowed = new Set(docEventOptions.value.map((o) => o.value));
@@ -945,11 +1002,21 @@ function seed(data) {
 			: []
 	);
 	form.condition = data.condition || "";
-	form.action_type = data.action_type === "Script" ? "Script" : "LLM";
+	form.action_type = ["Script", "Intake"].includes(data.action_type) ? data.action_type : "LLM";
 	form.script_body = data.script_body || "";
 	form.llm_instruction = data.llm_instruction || "";
 	form.llm_daily_cap = data.llm_daily_cap == null ? 25 : data.llm_daily_cap;
 	form.llm_allow_lookups = data.llm_allow_lookups ? 1 : 0;
+	form.intake_source = data.intake_source || "Folder";
+	form.intake_folder = data.intake_folder || "";
+	form.intake_record_doctype = data.intake_record_doctype || "";
+	form.intake_target_doctype = data.intake_target_doctype || "";
+	form.intake_spec = parseSpec(data.intake_spec);
+	form.intake_instructions = data.intake_instructions || "";
+	form.allow_incomplete_drafts = data.allow_incomplete_drafts ? 1 : 0;
+	form.intake_status_field = data.intake_status_field || "";
+	form.intake_link_field = data.intake_link_field || "";
+	form.intake_record_event = data.intake_record_event || "File attached";
 	const snap = {};
 	for (const f of FIELDS) snap[f] = normalized(f);
 	snapshot.value = snap;
@@ -1017,8 +1084,10 @@ async function save() {
 	fieldErrors.trigger_name = String(form.trigger_name || "").trim()
 		? ""
 		: "Give the trigger a name.";
-	fieldErrors.target_doctype = form.target_doctype ? "" : "Pick a DocType.";
-	fieldErrors.doc_event = form.doc_events.length ? "" : "Pick at least one event.";
+	// an intake has no event DocType or event: its own pickers carry the server's messages
+	fieldErrors.target_doctype = isIntake.value || form.target_doctype ? "" : "Pick a DocType.";
+	fieldErrors.doc_event =
+		isIntake.value || form.doc_events.length ? "" : "Pick at least one event.";
 	const missing = [
 		fieldErrors.trigger_name && "Name",
 		fieldErrors.target_doctype && "DocType",
@@ -1034,7 +1103,7 @@ async function save() {
 	try {
 		if (props.isNew) {
 			const payload = {};
-			for (const f of FIELDS) payload[f] = normalized(f);
+			for (const f of KIND_FIELDS.value) payload[f] = normalized(f);
 			payload.trigger_name = payload.trigger_name.trim();
 			const full = (await apiTriggers.createTrigger(payload)) || {};
 			toast.success("Trigger created");
@@ -1043,7 +1112,7 @@ async function save() {
 			else router.push({ name: "TriggersPage" });
 		} else {
 			const payload = {};
-			for (const f of FIELDS) {
+			for (const f of KIND_FIELDS.value) {
 				const v = normalized(f);
 				if (v !== snapshot.value[f])
 					payload[f] = f === "trigger_name" ? String(v).trim() : v;
@@ -1058,6 +1127,11 @@ async function save() {
 		toast.error(errHtml(e));
 	} finally {
 		saving.value = false;
+		// Save is disabled while it runs and after it, so it drops focus: land on the name field
+		// (when focus fell to <body>) instead of leaving a keyboard user at the top of the page.
+		await nextTick();
+		if (!document.activeElement || document.activeElement === document.body)
+			document.querySelector('[data-testid="trigger-name"] input')?.focus();
 	}
 }
 

@@ -23,8 +23,69 @@ export function monthGrid(month) {
 	const first = date(month + "-01");
 	if (!first) return [];
 	const start = addDays(month + "-01", -first.getUTCDay());
-	return Array.from({ length: 42 }, (_, index) => addDays(start, index));
+	const days = new Date(
+		Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)
+	).getUTCDate();
+	const weeks = Math.ceil((first.getUTCDay() + days) / 7);
+	return Array.from({ length: weeks * 7 }, (_, index) => addDays(start, index));
 }
+
+// Monday-start week containing the date.
+export function weekStrip(value) {
+	const parsed = date(value);
+	if (!parsed) return [];
+	const monday = addDays(value, -((parsed.getUTCDay() + 6) % 7));
+	return Array.from({ length: 7 }, (_, index) => addDays(monday, index));
+}
+
+// "26 Oct – 1 Nov": the Monday–Sunday week containing the date.
+export function weekLabel(value) {
+	const strip = weekStrip(value);
+	if (!strip.length) return "";
+	return `${dayMonthLabel(strip[0])} \u2013 ${dayMonthLabel(strip[6])}`;
+}
+
+// Fixed table: en-IN data in some runtimes writes September as "Sept".
+const SHORT_MONTHS = [
+	"Jan",
+	"Feb",
+	"Mar",
+	"Apr",
+	"May",
+	"Jun",
+	"Jul",
+	"Aug",
+	"Sep",
+	"Oct",
+	"Nov",
+	"Dec",
+];
+
+function utcFormat(value, options) {
+	const parsed = date(value);
+	if (!parsed) return "";
+	const parts = new Intl.DateTimeFormat("en-IN", {
+		timeZone: "UTC",
+		...options,
+	}).formatToParts(parsed);
+	return parts
+		.map((part) =>
+			part.type === "month" && options.month === "short"
+				? SHORT_MONTHS[parsed.getUTCMonth()]
+				: part.value
+		)
+		.join("");
+}
+
+// "11 Nov"
+export const dayMonthLabel = (value) => utcFormat(value, { day: "numeric", month: "short" });
+
+// "Wednesday, 11 Nov"
+export const fullDateLabel = (value) =>
+	utcFormat(value, { weekday: "long", day: "numeric", month: "short" });
+
+// "Mon"
+export const weekdayShort = (value) => utcFormat(value, { weekday: "short" });
 
 export function isSelectable(value, scope) {
 	return (
@@ -36,16 +97,14 @@ export function isSelectable(value, scope) {
 }
 
 export function dateLabel(value, full = false) {
-	const parsed = date(value);
-	return parsed
-		? new Intl.DateTimeFormat("en-IN", {
-				timeZone: "UTC",
-				day: "numeric",
-				month: full ? "long" : "short",
-				year: "numeric",
-				...(full ? { weekday: "short" } : {}),
-		  }).format(parsed)
-		: "Unavailable date";
+	return (
+		utcFormat(value, {
+			day: "numeric",
+			month: full ? "long" : "short",
+			year: "numeric",
+			...(full ? { weekday: "short" } : {}),
+		}) || "Unavailable date"
+	);
 }
 
 export function monthLabel(month) {
@@ -90,13 +149,22 @@ export function msUntilSiteMidnight(zone, epoch = Date.now()) {
 	return high - epoch;
 }
 
-export function snapshotTime(value, zone) {
+// "11 Nov, 10:42 IST": the template's snapshot time, in the site zone.
+export function snapshotStamp(value, zone) {
 	try {
-		return new Intl.DateTimeFormat("en-IN", {
+		const parts = new Intl.DateTimeFormat("en-IN", {
 			timeZone: zone || "UTC",
-			dateStyle: "medium",
-			timeStyle: "short",
-		}).format(new Date(value));
+			day: "numeric",
+			month: "numeric",
+			hour: "2-digit",
+			minute: "2-digit",
+			hourCycle: "h23",
+			timeZoneName: "short",
+		}).formatToParts(new Date(value));
+		const part = (type) => parts.find((item) => item.type === type).value;
+		return `${part("day")} ${SHORT_MONTHS[Number(part("month")) - 1]}, ${part("hour")}:${part(
+			"minute"
+		)} ${part("timeZoneName")}`;
 	} catch {
 		return "Unavailable time";
 	}

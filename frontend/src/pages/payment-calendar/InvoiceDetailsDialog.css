@@ -1,0 +1,237 @@
+/* Full-details dialog (template L159-174, phone cards at <=540). It is teleported to <body>, so
+   the template's viewport @media rules apply, not container queries. */
+.pcal-modal .modal-context {
+	margin: 0;
+	padding: 0 23px 5px;
+	font-size: 11px;
+	color: var(--pc-muted);
+}
+.pcal-modal .ledger-tabs {
+	gap: 24px;
+	justify-content: flex-start;
+	padding: 0 23px;
+}
+.pcal-modal .ledger-tabs button {
+	min-width: 150px;
+}
+.sort-bar {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 12px 22px;
+	font-size: var(--pc-fs-small);
+	color: var(--pc-text-2);
+}
+.sort-bar label {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+}
+/* The template's native select: the forms plugin's chevron and padding are switched off, so
+   the browser draws its own control at 26 px. */
+.sort-bar select {
+	appearance: auto;
+	background-image: none;
+	padding: 4px 6px;
+	line-height: normal;
+	border: 1px solid var(--pc-border);
+	border-radius: var(--pc-radius-input);
+	background-color: var(--pc-card);
+	color: var(--pc-select-text);
+	font-size: var(--pc-fs-small);
+	color-scheme: light;
+}
+[data-theme="dark"] .sort-bar select {
+	background-color: var(--pc-surface-2);
+	border-color: var(--pc-border-strong);
+	color-scheme: dark;
+}
+.table-wrap {
+	overflow: auto;
+}
+.detail-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: var(--pc-fs-small);
+	white-space: nowrap;
+}
+.detail-table th {
+	padding: 12px 22px;
+	background: var(--pc-head);
+	color: var(--pc-muted);
+	font-size: 11px;
+	font-weight: 500;
+	text-align: left;
+}
+.detail-table th button {
+	padding: 0;
+	border: 0;
+	background: none;
+	color: inherit;
+	font-size: inherit;
+	text-align: inherit;
+	cursor: pointer;
+}
+.detail-table td {
+	padding: 16px 22px;
+	border-bottom: 1px solid var(--pc-border-soft);
+}
+.detail-table th:last-child,
+.detail-table td:last-child {
+	text-align: right;
+}
+.detail-table small {
+	display: block;
+	margin-top: 3px;
+	font-size: var(--pc-fs-micro);
+	color: var(--pc-muted);
+}
+.detail-table strong {
+	font-weight: 550;
+}
+.detail-table .invoice-reference {
+	color: var(--pc-text);
+	font-size: var(--pc-fs-small);
+}
+.detail-table .empty-table {
+	text-align: center;
+	color: var(--pc-text-2);
+}
+.mobile-label {
+	display: none;
+}
+.modal-foot {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 15px;
+	padding: 16px 23px;
+	font-size: 11px;
+	color: var(--pc-muted);
+}
+.modal-foot p {
+	max-width: 490px;
+	margin: 0;
+}
+.modal-pager {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.modal-pager .pcal-btn {
+	min-height: 30px;
+	padding: 4px 10px;
+	font-size: var(--pc-fs-small);
+}
+
+@media (max-width: 540px) {
+	.pcal-modal .ledger-tabs {
+		gap: 14px;
+		padding: 0 16px;
+	}
+	.pcal-modal .ledger-tabs button {
+		min-width: 0;
+		flex: 1;
+		font-size: var(--pc-fs-small);
+	}
+	.pcal-modal .modal-context {
+		padding: 0 16px 5px;
+	}
+	.sort-bar {
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 7px;
+		padding: 12px 15px;
+		font-size: 11px;
+	}
+	.modal-foot {
+		align-items: flex-start;
+		flex-direction: column;
+		padding: 14px 16px;
+	}
+	.modal-foot p {
+		font-size: var(--pc-fs-micro);
+	}
+	/* Stacked cards: party, invoice, date, then Invoice and Settled amounts; Remaining on the right. */
+	.detail-table,
+	.detail-table tbody {
+		display: block;
+		width: 100%;
+		white-space: normal;
+	}
+	.detail-table thead {
+		display: none;
+	}
+	.detail-table tr {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		column-gap: 6px;
+		padding: 13px 10px;
+		border-bottom: 1px solid var(--pc-border-soft);
+	}
+	.detail-table td {
+		align-self: start;
+		padding: 3px 0;
+		border: 0;
+		font-size: var(--pc-fs-small);
+	}
+	.detail-table td.invoice-column,
+	.detail-table td.party-column,
+	.detail-table td.date-column,
+	.detail-table td.original-column {
+		text-align: left;
+	}
+	.detail-table td.party-column {
+		grid-row: 1;
+		grid-column: 1;
+		font-size: 13px;
+		font-weight: 600;
+	}
+	.detail-table td.invoice-column {
+		grid-row: 2;
+		grid-column: 1;
+		padding-top: 2px;
+	}
+	.detail-table td.date-column {
+		grid-row: 3;
+		grid-column: 1;
+		font-size: var(--pc-fs-micro);
+		color: var(--pc-muted);
+	}
+	.detail-table td.original-column {
+		grid-row: 4;
+		grid-column: 1;
+		margin-top: 7px;
+		font-size: 11px;
+		color: var(--pc-text-2);
+	}
+	.detail-table td.settled-column {
+		grid-row: 4;
+		grid-column: 2;
+		margin-top: 7px;
+		text-align: right;
+		font-size: 11px;
+		color: var(--pc-text-2);
+	}
+	.detail-table td.remaining-column {
+		grid-row: 1 / 4;
+		grid-column: 2;
+		align-self: center;
+		font-size: 14px;
+	}
+	.detail-table td.empty-table {
+		grid-row: auto;
+		grid-column: 1 / -1;
+		text-align: center;
+	}
+	.mobile-label {
+		display: inline;
+		color: var(--pc-muted);
+		font-size: var(--pc-fs-micro);
+	}
+	.remaining-column .mobile-label {
+		display: block;
+		margin-bottom: 5px;
+	}
+}

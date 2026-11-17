@@ -244,7 +244,16 @@ def _publish_enriched(
 
 
 class _Ctx:
-	__slots__ = ("conversation", "errored", "owner", "payload", "run_id", "shared_binding", "turn")
+	__slots__ = (
+		"conversation",
+		"errored",
+		"final_reply",
+		"owner",
+		"payload",
+		"run_id",
+		"shared_binding",
+		"turn",
+	)
 
 	def __init__(self, *, run_id, turn, conversation, owner, errored, payload, shared_binding=None):
 		self.run_id = run_id
@@ -254,6 +263,7 @@ class _Ctx:
 		self.errored = errored
 		self.payload = payload
 		self.shared_binding = shared_binding
+		self.final_reply = None  # the assistant row's content/error, read at most once per finalize
 
 
 def _load_payload(turn: dict) -> dict:
@@ -342,11 +352,8 @@ def _effect_chat_asks(ctx: _Ctx) -> None:
 	# Skipped for an errored/cancelled turn (a partial fence is not a real ask).
 	if ctx.errored:
 		return
-	am = ctx.turn.get("assistant_message")
-	if not am:
-		return
-	final = frappe.db.get_value(MSG, am, ["content", "error"], as_dict=True) or {}
-	if final.get("error"):
+	final = _final_reply(ctx)
+	if final is None or final.get("error"):
 		return
 	from jarvis.chat import chat_asks
 
@@ -454,6 +461,8 @@ def _effect_usage(ctx: _Ctx) -> None:
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	with agent_session_pool.checkout(gateway_url) as sess:
 		row = _usage.fetch_fresh_session_row(sess, session_key)
+		# sessions.list carries no cache numbers; the transcript's per-message usage does.
+		cache = _usage.fetch_run_cache(sess, session_key, ctx.run_id)
 	# Reply length for the claude-cli output estimate: read once, BEFORE the fresh snapshot (a
 	# read after it would open a new snapshot right before the guard CAS on the same Turn row),
 	# outside the replayed unit, and only for a row that can use it. None on any lookup failure.
@@ -470,7 +479,9 @@ def _effect_usage(ctx: _Ctx) -> None:
 		# the model whether or not its token counters have gone fresh yet, and an audit
 		# ("which model proposed this journal entry") must not be lost to a slow counter.
 		_stamp_reply_model(ctx, row)
-		return _usage.record_turn_usage(session_key, row, run_id=ctx.run_id, reply_chars=reply_chars)
+		return _usage.record_turn_usage(
+			session_key, _usage.with_run_cache(row, cache), run_id=ctx.run_id, reply_chars=reply_chars
+		)
 
 	# CDX-6: honour record_turn_usage's EXPLICIT outcome. A `retry` (stale/missing/
 	# no-fresh row) must NOT permanently mark usage recorded — RAISE so the runner
@@ -638,6 +649,38 @@ def _effect_telemetry(ctx: _Ctx) -> None:
 			approval_wait_ms=timing["approval_wait_ms"],
 			active_ms=timing["active_ms"],
 		)
+	except Exception:
+		pass
+	_count_pc_handoff_goto(ctx)
+
+
+def _final_reply(ctx: _Ctx) -> dict | None:
+	"""The assistant row's ``content`` / ``error`` (one PK read, kept on ``ctx``), or None when
+	the turn has no assistant message."""
+	if ctx.final_reply is None:
+		am = ctx.turn.get("assistant_message")
+		if not am:
+			return None
+		ctx.final_reply = frappe.db.get_value(MSG, am, ["content", "error"], as_dict=True) or {}
+	return ctx.final_reply
+
+
+def _count_pc_handoff_goto(ctx: _Ctx) -> None:
+	# Count-only telemetry: a finished reply that carries a Payment Calendar goto. Skipped
+	# (no DB read at all) while the hand-off switch is off or for an errored/cancelled turn;
+	# otherwise reuses the reply row an earlier effect already read. No reply text is logged.
+	try:
+		if ctx.errored:
+			return
+		from jarvis.chat.turn_handler import payment_calendar_handoff_enabled
+
+		if not payment_calendar_handoff_enabled():
+			return
+		final = _final_reply(ctx)
+		if final is not None and not final.get("error"):
+			from jarvis import telemetry
+
+			telemetry.record_pc_handoff_goto(final.get("content"), ctx.conversation, ctx.run_id)
 	except Exception:
 		pass
 

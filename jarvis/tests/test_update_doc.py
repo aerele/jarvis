@@ -163,6 +163,7 @@ class TestUpdateDocHappyPath(FrappeTestCase):
 			doctype=NOTE_DT,
 			name=self.note,
 			changes={"content": "after update"},
+			fields=["content"],
 		)
 		# Returned dict reflects the new value
 		self.assertEqual(result["content"], "after update")
@@ -180,18 +181,18 @@ class TestUpdateDocHappyPath(FrappeTestCase):
 		self.assertEqual(fresh["content"], "updated content")
 		self.assertEqual(fresh["title"], "updated title")
 
-	def test_returns_full_saved_doc(self):
-		"""Caller (the agent) needs the post-save state so it can confirm
-		what happened - include all fields, not just the changed ones."""
+	def test_returns_the_compact_result(self):
+		"""The agent gets the record's identity and title, not the whole doc;
+		``fields`` (or get_doc) reads more."""
 		result = update_doc(
 			doctype=NOTE_DT,
 			name=self.note,
 			changes={"content": "x"},
 		)
-		self.assertEqual(result["doctype"], NOTE_DT)
-		self.assertEqual(result["name"], self.note)
-		# Whatever else Note has (title, public) should be in there too
-		self.assertIn("title", result)
+		self.assertEqual(
+			result,
+			{"doctype": NOTE_DT, "name": self.note, "docstatus": 0, "title": "jarvis-test-note"},
+		)
 
 
 class TestUpdateDocMissing(FrappeTestCase):

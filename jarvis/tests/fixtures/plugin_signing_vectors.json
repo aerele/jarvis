@@ -1,0 +1,37 @@
+{
+  "_comment": "Golden vectors for the plugin <-> site request signature. Identical copy in aerele/jarvis (jarvis/tests/fixtures/plugin_signing_vectors.json) and the plugin repo (tests/fixtures/plugin-signing-vectors.json). Change both together. Test key only.",
+  "algorithm": "hex(hmac_sha256(key, session_key | hex(sha256(utf8(body))) | nonce | timestamp))",
+  "key": "3f1c2a9b7e6d5c4b3a29180f7e6d5c4b3a29180f7e6d5c4b3a29180f7e6d5c4b",
+  "cases": [
+    {
+      "name": "ascii_json_body",
+      "session_key": "agent:main:dashboard:7d3b1c2e-1f0a-4b5c-9d8e-0a1b2c3d4e5f",
+      "body": "{\"tool\":\"get_list\",\"args\":{\"doctype\":\"Customer\",\"limit\":5}}",
+      "nonce": "0123456789abcdef0123456789abcdef",
+      "timestamp": 1793952000,
+      "body_sha256": "76eb8e78602d399a8add5e4aac5d9e950f21b7b814352230277d9c1ee019255c",
+      "canonical": "agent:main:dashboard:7d3b1c2e-1f0a-4b5c-9d8e-0a1b2c3d4e5f|76eb8e78602d399a8add5e4aac5d9e950f21b7b814352230277d9c1ee019255c|0123456789abcdef0123456789abcdef|1793952000",
+      "signature": "b9e41ce23704a7cb9804defe9195dd5e7acaf4499ccfeddd85c34046fc7aacbd"
+    },
+    {
+      "name": "non_ascii_body",
+      "session_key": "agent:main:dashboard:7d3b1c2e-1f0a-4b5c-9d8e-0a1b2c3d4e5f",
+      "body": "{\"text\":\"வணக்கம் ₹ 1,250 · naïve café\"}",
+      "nonce": "fedcba9876543210fedcba9876543210",
+      "timestamp": 1793952061,
+      "body_sha256": "36ee8cfabd2f02f944e470fff343c9d2cf9677abb94b8f1ef34ecd43d1778a11",
+      "canonical": "agent:main:dashboard:7d3b1c2e-1f0a-4b5c-9d8e-0a1b2c3d4e5f|36ee8cfabd2f02f944e470fff343c9d2cf9677abb94b8f1ef34ecd43d1778a11|fedcba9876543210fedcba9876543210|1793952061",
+      "signature": "89f3041f270720b22f37b43585ea456c77f28ca3c76d38d9ff0cbedc04fc932a"
+    },
+    {
+      "name": "empty_body",
+      "session_key": "agent:main:main",
+      "body": "",
+      "nonce": "00000000000000000000000000000000",
+      "timestamp": 1793952122,
+      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "canonical": "agent:main:main|e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855|00000000000000000000000000000000|1793952122",
+      "signature": "8f7c51604c74b4af687130f287837d2233a9e1fdcb97d6c29be2996af39800a3"
+    }
+  ]
+}

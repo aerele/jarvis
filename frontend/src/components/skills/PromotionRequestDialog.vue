@@ -29,49 +29,71 @@
 						<!-- Inline search + list, NOT the frappe-ui Autocomplete: its search
 						     box renders in a popover portaled OUTSIDE this reka-ui Dialog, where
 						     the Dialog's focus scope left it unclickable. A plain input and an
-						     inline list both sit inside the Dialog, so search AND selection work. -->
-						<FormControl
-							type="text"
-							placeholder="Search your roles"
-							:modelValue="roleQuery"
-							@update:modelValue="(v) => (roleQuery = v)"
-						/>
+						     inline list both sit inside the Dialog, so search AND selection work.
+						     The list behaves as a dropdown (#803): it opens when the search box
+						     is focused or clicked, and closes on a click outside the picker, on
+						     Esc (which then leaves the Dialog open) and after a single pick. -->
 						<div
-							class="max-h-44 overflow-y-auto rounded border"
-							:role="multiple ? 'group' : 'listbox'"
+							ref="rolePicker"
+							class="flex flex-col gap-1"
+							@keydown="onPickerKeydown"
 						>
-							<button
-								v-for="r in filteredRoles"
-								:key="r"
-								type="button"
-								:role="multiple ? 'checkbox' : 'option'"
-								:aria-checked="multiple ? isSelected(r) : undefined"
-								:aria-selected="multiple ? undefined : isSelected(r)"
-								class="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-surface-gray-2"
-								:class="
-									isSelected(r)
-										? 'bg-surface-gray-3 font-medium text-ink-gray-9'
-										: 'text-ink-gray-7'
-								"
-								@click="pick(r)"
-							>
-								<span>{{ r }}</span>
-								<FeatherIcon
-									v-if="isSelected(r)"
-									name="check"
-									class="h-4 w-4 text-ink-gray-7"
+							<div @focusin="listOpen = true" @click="listOpen = true">
+								<FormControl
+									type="text"
+									placeholder="Search your roles"
+									:modelValue="roleQuery"
+									@update:modelValue="(v) => (roleQuery = v)"
 								/>
-							</button>
-							<p
-								v-if="!filteredRoles.length"
-								class="px-3 py-2 text-p-sm text-ink-gray-5"
+							</div>
+							<div
+								v-if="listOpen"
+								class="max-h-44 overflow-y-auto rounded border"
+								:role="multiple ? 'group' : 'listbox'"
 							>
-								No roles match your search.
-							</p>
+								<button
+									v-for="r in filteredRoles"
+									:key="r"
+									type="button"
+									:role="multiple ? 'checkbox' : 'option'"
+									:aria-checked="multiple ? isSelected(r) : undefined"
+									:aria-selected="multiple ? undefined : isSelected(r)"
+									class="flex w-full items-center justify-between px-3 py-2 text-left text-sm hover:bg-surface-gray-2"
+									:class="
+										isSelected(r)
+											? 'bg-surface-gray-3 font-medium text-ink-gray-9'
+											: 'text-ink-gray-7'
+									"
+									@click="pick(r)"
+								>
+									<span>{{ r }}</span>
+									<FeatherIcon
+										v-if="isSelected(r)"
+										name="check"
+										class="h-4 w-4 text-ink-gray-7"
+									/>
+								</button>
+								<p
+									v-if="!filteredRoles.length"
+									class="px-3 py-2 text-p-sm text-ink-gray-5"
+								>
+									No roles match your search.
+								</p>
+							</div>
 						</div>
 						<p v-if="multiple && selected.length" class="text-p-sm text-ink-gray-5">
-							{{ selected.length }} role{{ selected.length === 1 ? "" : "s" }}
-							selected
+							{{ selected.length }} role{{
+								selected.length === 1 ? "" : "s"
+							}}
+							selected<template v-if="!listOpen"
+								>: {{ selected.join(", ") }}</template
+							>
+						</p>
+						<p
+							v-else-if="!multiple && selected.length && !listOpen"
+							class="text-p-sm text-ink-gray-5"
+						>
+							Selected: {{ selected[0] }}
 						</p>
 					</template>
 					<p v-else-if="!rolesLoading" class="text-p-sm text-ink-gray-5">
@@ -112,7 +134,7 @@
 // owns the API call (request_skill_promotion / request_wiki_promotion) and the
 // busy flag. Role options are the requester's OWN targetable roles
 // (promotable_target_roles) — a requester widens to a team they belong to.
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { Button, Dialog, FeatherIcon, FormControl, toast } from "frappe-ui";
 import { promotableTargetRoles } from "@/api/skills";
 import { isWiderScope } from "@/pages/skills/promotionScope";
@@ -170,8 +192,30 @@ function pick(r) {
 			: [...selected.value, r];
 	} else {
 		selected.value = [r];
+		listOpen.value = false;
 	}
 }
+
+// The role list as a dropdown (#803). A click anywhere outside the picker closes
+// it; the listener lives only while the list is open.
+const rolePicker = ref(null);
+const listOpen = ref(false);
+function onOutsidePointer(e) {
+	if (rolePicker.value && !rolePicker.value.contains(e.target)) listOpen.value = false;
+}
+// Esc closes an open list and stops there, so the Dialog stays open; with the list
+// already closed, Esc reaches the Dialog as before.
+function onPickerKeydown(e) {
+	if (e.key !== "Escape" || !listOpen.value) return;
+	e.preventDefault();
+	e.stopPropagation();
+	listOpen.value = false;
+}
+watch(listOpen, (open) => {
+	if (open) document.addEventListener("pointerdown", onOutsidePointer, true);
+	else document.removeEventListener("pointerdown", onOutsidePointer, true);
+});
+onBeforeUnmount(() => document.removeEventListener("pointerdown", onOutsidePointer, true));
 
 const dialogTitle = computed(() => `Request promotion: ${props.noun}`);
 const roleOptions = computed(() => roles.value.map((r) => ({ label: r, value: r })));
@@ -223,6 +267,7 @@ watch(
 			: TO_SCOPE_OPTIONS.value[0]?.value || "Org";
 		selected.value = [];
 		roleQuery.value = "";
+		listOpen.value = false;
 		note.value = "";
 		loadRoles();
 	}

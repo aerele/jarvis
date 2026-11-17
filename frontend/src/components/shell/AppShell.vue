@@ -51,14 +51,21 @@
 					<div
 						class="flex flex-1 flex-col h-full min-w-0 overflow-auto bg-surface-white"
 					>
-						<!-- Phone top bar for chrome'd non-chat routes: the sidebar is a
-						     drawer now, so each such page needs a hamburger to reach nav.
-						     Chat renders its own hamburger inside its header. -->
+						<!-- Header strip for chrome'd non-chat routes (D41). ONE #app-header for
+						     phone and desktop: LayoutHeader's Teleport only resolves its target
+						     when it mounts or its `to` changes, so a second #app-header behind a
+						     v-if would strand the page header on a live resize. On phone the
+						     sidebar is a drawer, so the hamburger sits beside it; chat renders
+						     its own hamburger and "Go to Desk" button inside its header. -->
 						<div
-							v-if="store.mobile && !route.meta.chat && !route.meta.chromeless"
-							class="flex h-12 shrink-0 items-center gap-2 border-b px-3"
+							v-if="!route.meta.chat && !route.meta.chromeless"
+							class="flex border-b"
+							:class="
+								store.mobile ? 'min-h-12 shrink-0 items-center gap-2 px-3' : ''
+							"
 						>
 							<button
+								v-if="store.mobile"
 								class="jv-focus-ring grid size-9 place-items-center rounded-md text-ink-gray-7"
 								aria-label="Open navigation"
 								@click="store.mobileDrawerOpen = true"
@@ -66,18 +73,6 @@
 								<FeatherIcon name="menu" class="size-5" />
 							</button>
 							<div id="app-header" class="min-w-0 flex-1" />
-						</div>
-						<!-- LayoutHeader teleport target — non-chat routes only (D41).
-						     The "Go to Desk" button is rendered INSIDE LayoutHeader's right
-						     cluster (leftmost, before each page's own actions) so it is
-						     uniform across pages and never displaces the page's primary
-						     action from the rightmost corner; chat has its own header button
-						     (ChatView openErpDesk), styled to match. -->
-						<div
-							v-else-if="!route.meta.chat && !route.meta.chromeless"
-							class="flex border-b"
-						>
-							<div id="app-header" class="flex-1" />
 						</div>
 						<router-view v-if="booted" />
 					</div>

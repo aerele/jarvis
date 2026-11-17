@@ -24,10 +24,16 @@ def require_calendar_test_site():
 	source_profile()
 
 
+def clear_error_throttle():
+	"""The API writes one Error Log row per (operation, exception class) in 300 s; start with none written."""
+	frappe.cache.delete_keys("jarvis:pcal:errlog:")
+
+
 class CalendarFixtures:
 	def __init__(self):
 		require_calendar_test_site()
 		self.prefix = "_JPC_" + uuid4().hex[:10]
+		clear_error_throttle()
 		self.created = []
 		self.today = nowdate()
 		# The canonical engine needs these real setup records to apply its

@@ -456,7 +456,7 @@ class TestNumbersReachValidateAsNumbers(_Defaults, FrappeTestCase):
 		self.assertEqual(values["items"][0]["conversion_factor"], "1")  # the caller's dict is not rewritten
 
 	def test_an_update_casts_a_numeric_string(self):
-		doc = create_doc("Sales Order", self._order_values(qty=1, rate=10))
+		doc = create_doc("Sales Order", self._order_values(qty=1, rate=10), fields=["items"])
 		row = doc["items"][0]["name"]
 		types = self._row_types_at_validate(
 			lambda: update_doc("Sales Order", doc["name"], {"items": [{"name": row, "qty": "3"}]})

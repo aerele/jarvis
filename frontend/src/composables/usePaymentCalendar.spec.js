@@ -7,10 +7,10 @@ import { usePaymentCalendar } from "./usePaymentCalendar";
 import {
 	fakeApi,
 	complete,
-	detail,
 	ok,
 	refusal,
 	deferred,
+	installMonthlyApi,
 	SID,
 } from "../../tests/payment-calendar/fixtures";
 
@@ -36,6 +36,30 @@ describe("Payment Calendar state and async boundaries", () => {
 		expect(model.snapshot.value.snapshot_id).toBe(SID);
 		expect(model.selectedDate.value).toBe("2026-10-24");
 		expect(model.day.value.projected_closing).toBe("110.00");
+	});
+	it("makes no detail read of its own: day and bucket reads belong to the ledger", async () => {
+		await model.initialize();
+		await flushPromises();
+		await model.selectDate("2026-10-25");
+		expect(api.getDayDetail).not.toHaveBeenCalled();
+		expect(api.getBucketDetail).not.toHaveBeenCalled();
+		const removed = [
+			"detail",
+			"detailLoading",
+			"activeView",
+			"side",
+			"pages",
+			"bucket",
+			"bucketData",
+			"bucketLoading",
+			"bucketPages",
+			"setDetailView",
+			"changeDetailPage",
+			"openBucket",
+			"closeBucket",
+			"changeBucketPage",
+		];
+		for (const key of removed) expect(model).not.toHaveProperty(key);
 	});
 	it("does not guess a company when no preference exists", async () => {
 		api.getPreferences.mockResolvedValue(ok(null));
@@ -63,7 +87,7 @@ describe("Payment Calendar state and async boundaries", () => {
 		await flushPromises();
 		const next = model.chooseCompany("Services");
 		expect(model.snapshot.value).toBeNull();
-		expect(model.detail.value).toBeNull();
+		expect(model.upcoming.value).toEqual([]);
 		expect(model.accounts.value).toEqual([]);
 		await next;
 		late.resolve(ok(complete()));
@@ -71,28 +95,16 @@ describe("Payment Calendar state and async boundaries", () => {
 		await flushPromises();
 		expect(model.snapshot.value.scope.company).toBe("Services");
 	});
-	it("drops a slow older date response without rerunning accounting sources", async () => {
-		await model.initialize();
-		await flushPromises();
-		const late = deferred();
-		api.getDayDetail.mockReturnValueOnce(late.promise);
-		const old = model.selectDate("2026-10-25");
-		await flushPromises();
-		await model.selectDate("2026-10-26");
-		late.resolve(ok(detail("2026-10-25")));
-		await old;
-		expect(model.detail.value.rows[0].voucher_no).toContain("2026-10-26");
-		expect(api.requestSnapshot).toHaveBeenCalledTimes(1);
-	});
 	it("preserves selection when browsing months and refuses lookahead date selection", async () => {
 		await model.initialize();
 		await flushPromises();
 		model.browseMonth(1);
 		expect(model.month.value).toBe("2026-11");
 		expect(model.selectedDate.value).toBe("2026-10-24");
-		const count = api.getDayDetail.mock.calls.length;
+		const count = api.getUpcoming.mock.calls.length;
 		await model.selectDate("2027-10-01");
-		expect(api.getDayDetail).toHaveBeenCalledTimes(count);
+		expect(api.getUpcoming).toHaveBeenCalledTimes(count);
+		expect(model.selectedDate.value).toBe("2026-10-24");
 	});
 	it("expires financial values explicitly and preserves selection for retry", async () => {
 		await model.initialize();
@@ -107,10 +119,11 @@ describe("Payment Calendar state and async boundaries", () => {
 		await flushPromises();
 		const late = deferred();
 		api.getUpcoming.mockReturnValueOnce(late.promise);
-		api.getDayDetail.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
 		api.getCapabilities.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
 		const pending = model.selectDate("2026-10-25");
 		await flushPromises();
+		// The ledger reports a refused read through handleRefusal (usePaymentLedger.spec.js).
+		await model.handleRefusal(refusal("forbidden", "forbidden"), model.generation);
 		expect(model.snapshot.value).toBeNull();
 		late.resolve(ok({ rows: [{ remaining: "PRIVATE_OLD_VALUE" }] }));
 		await pending;
@@ -226,62 +239,15 @@ describe("Payment Calendar state and async boundaries", () => {
 		await model.refresh();
 		expect(model.caps.value.settings.safety_floor).toBe("90.00");
 	});
-	it("rechecks cleared capabilities when access is restored and Refresh is pressed", async () => {
-		await model.initialize();
-		api.getDayDetail.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
-		api.getCapabilities.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
-		await model.selectDate("2026-10-25");
-		expect(model.caps.value).toBeNull();
-		await model.refresh();
-		expect(model.caps.value?.can_configure).toBe(true);
-	});
-	it("rechecks capabilities when a revocation purges the snapshot as expired", async () => {
-		await model.initialize();
-		api.getDayDetail.mockResolvedValueOnce(refusal("not_found_or_expired", "expired"));
-		api.getCapabilities.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
-		await model.selectDate("2026-10-25");
-		expect(model.phase.value).toBe("forbidden");
-		expect(model.caps.value).toBeNull();
-	});
-	it("preserves still-permitted bank choices after a successful access recheck", async () => {
-		await model.initialize();
-		api.getDayDetail.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
-		await model.selectDate("2026-10-25");
-		expect(model.accounts.value).toEqual(["Bank A"]);
-		expect(api.setPreferences.mock.calls.at(-1)).toEqual(["Manufacturing", ["Bank A"]]);
-	});
-	it("persists the permitted intersection when an expired snapshot rechecks accounts", async () => {
-		const normal = (await api.getCapabilities("Manufacturing")).data;
-		api.getCapabilities.mockResolvedValue(
-			ok({ ...normal, accounts: [...normal.accounts, { name: "Cash" }] })
-		);
-		api.getPreferences.mockResolvedValue(
-			ok({ company: "Manufacturing", accounts: ["Bank A", "Cash"] })
-		);
-		await model.initialize();
-		api.getDayDetail.mockResolvedValueOnce(refusal("not_found_or_expired", "expired"));
-		api.getCapabilities.mockResolvedValueOnce(ok(normal));
-		await model.selectDate("2026-10-25");
-		expect(model.accounts.value).toEqual(["Bank A"]);
-		expect(api.setPreferences).toHaveBeenLastCalledWith("Manufacturing", ["Bank A"]);
-	});
-	it("ignores a slow party-page response after switching to customers", async () => {
-		await model.initialize();
-		const late = deferred();
-		api.getDayDetail.mockReturnValueOnce(late.promise);
-		const previous = model.changeDetailPage("parties", 2);
-		await flushPromises();
-		await model.setDetailView("customers");
-		late.resolve(ok(detail("2026-10-24", "Payable", 1, 2)));
-		await previous;
-		expect(model.detail.value.rows[0].voucher_type).toBe("Sales Invoice");
-	});
+	// Access recovery after a refused detail read moved to usePaymentLedger.spec.js (F7): the
+	// ledger owns the detail reads and reports a refusal through handleRefusal.
+
+	// Dropped in F7 (plan decision 3): the full-details view has no Payees tab, so there is no
+	// party page to race against a side switch.
 	it("soft refreshes before expiry and swaps a fresh snapshot without losing the view", async () => {
 		await model.initialize();
 		await model.selectDate("2026-10-25");
 		model.browseMonth(1);
-		await model.setDetailView("customers");
-		await model.changeDetailPage("rows", 2);
 		const late = deferred();
 		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
 		await vi.advanceTimersByTimeAsync(270000);
@@ -298,8 +264,6 @@ describe("Payment Calendar state and async boundaries", () => {
 		expect(model.snapshot.value.projection.book_cash).toBe("150.00");
 		expect(model.selectedDate.value).toBe("2026-10-25");
 		expect(model.month.value).toBe("2026-11");
-		expect(model.activeView.value).toBe("customers");
-		expect(model.pages.value.Receivable.rows).toBe(2);
 	});
 	it("does not restart an automatic job on focus and clears expired figures while it finishes", async () => {
 		await model.initialize();
@@ -350,22 +314,19 @@ describe("Payment Calendar state and async boundaries", () => {
 
 	it("keeps the displayed snapshot usable while polling a different replacement ID", async () => {
 		await model.initialize();
-		await model.openBucket("Payable", "overdue");
 		const nextId = "b".repeat(32);
 		api.requestSnapshot.mockResolvedValueOnce(ok({ snapshot_id: nextId, state: "queued" }));
 		api.getSnapshotStatus.mockResolvedValueOnce(ok({ snapshot_id: nextId, state: "running" }));
 		await vi.advanceTimersByTimeAsync(270000);
 		expect(model.snapshotId.value).toBe(SID);
 		await model.selectDate("2026-10-26");
-		expect(api.getDayDetail.mock.calls.at(-1)[0]).toBe(SID);
+		expect(api.getUpcoming.mock.calls.at(-1)[0]).toBe(SID);
 		const fresh = complete("Manufacturing", ["Bank A"], nextId);
 		fresh.expires_at = new Date(Date.now() + 300000).toISOString();
 		api.getSnapshotStatus.mockResolvedValueOnce(ok(fresh));
 		await vi.advanceTimersByTimeAsync(1000);
 		expect(model.snapshotId.value).toBe(nextId);
-		expect(api.getDayDetail.mock.calls.at(-1)[0]).toBe(nextId);
-		expect(api.getBucketDetail.mock.calls.at(-1)[0]).toBe(nextId);
-		expect(model.bucket.value.name).toBe("overdue");
+		expect(api.getUpcoming.mock.calls.at(-1)[0]).toBe(nextId);
 	});
 	it("resumes after expiry in a hidden tab and cancels all refresh work on disposal", async () => {
 		await model.initialize();
@@ -421,39 +382,7 @@ describe("Payment Calendar state and async boundaries", () => {
 		expect(model.caps.value).toBeNull();
 		expect(model.accounts.value).toEqual([]);
 	});
-	function monthlyApi() {
-		api.requestSnapshot.mockImplementation(async (company, accounts, month = "2026-10") =>
-			ok({
-				snapshot_id: (month === "current"
-					? new Date(Date.now()).toISOString().slice(0, 7)
-					: month
-				)
-					.replace("-", "")
-					.padStart(32, "0"),
-				state: "queued",
-			})
-		);
-		api.getSnapshotStatus.mockImplementation(async (id) => {
-			const month = id.slice(-6, -2) + "-" + id.slice(-2);
-			const value = complete();
-			value.snapshot_id = id;
-			value.expires_at = new Date(Date.now() + 300000).toISOString();
-			value.scope.anchor = new Date(Date.now()).toISOString().slice(0, 10);
-			value.scope = {
-				...value.scope,
-				month,
-				window_start: month + "-01",
-				window_end:
-					month +
-					"-" +
-					new Date(Number(month.slice(0, 4)), Number(month.slice(5)), 0).getDate(),
-			};
-			value.projection.start = value.scope.window_start;
-			value.projection.end = value.scope.window_end;
-			value.projection.month = month;
-			return ok(value);
-		});
-	}
+	const monthlyApi = () => installMonthlyApi(api);
 	it("loads only the current month initially and requests a new month on navigation", async () => {
 		monthlyApi();
 		await model.initialize();
@@ -470,7 +399,7 @@ describe("Payment Calendar state and async boundaries", () => {
 		await model.selectDate("2026-11-02");
 		await flushPromises();
 		expect(model.snapshot.value.scope.month).toBe("2026-11");
-		expect(api.getDayDetail.mock.calls.at(-1)[1]).toBe("2026-11-02");
+		expect(api.getUpcoming.mock.calls.at(-1)[1]).toBe("2026-11-02");
 		await model.goToday();
 		await flushPromises();
 		expect(model.snapshot.value.scope.month).toBe("2026-10");
@@ -495,21 +424,6 @@ describe("Payment Calendar state and async boundaries", () => {
 		await old;
 		expect(model.month.value).toBe("2026-12");
 		expect(model.snapshot.value.scope.month).toBe("2026-12");
-	});
-	it("keeps tab changes local while another month is being fetched", async () => {
-		monthlyApi();
-		await model.initialize();
-		const late = deferred();
-		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
-		const pending = model.browseMonth(1);
-		await flushPromises();
-		const before = api.getDayDetail.mock.calls.length;
-		await model.setDetailView("customers");
-		expect(api.getDayDetail).toHaveBeenCalledTimes(before);
-		const monthly = await api.getSnapshotStatus("202611".padStart(32, "0"));
-		late.resolve(monthly);
-		await pending;
-		expect(api.getDayDetail.mock.calls.at(-1)[2]).toBe("Receivable");
 	});
 	it("honours an adjacent click back into the loaded month during a slow navigation", async () => {
 		monthlyApi();
@@ -659,15 +573,13 @@ describe("Payment Calendar state and async boundaries", () => {
 		try {
 			api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
 			await model.browseMonth(1);
-			expect(model.detailLoading.value).toBe(true);
+			expect(model.upcomingLoading.value).toBe(true);
 			await vi.advanceTimersByTimeAsync(65000);
 			expect(model.refreshIssue.value.code).toBe("worker_busy");
-			expect(model.detailLoading.value).toBe(false);
 			expect(model.upcomingLoading.value).toBe(false);
 			monthlyApi();
 			await model.refresh();
 			expect(model.snapshot.value.scope.month).toBe("2026-11");
-			expect(model.detailLoading.value).toBe(false);
 			expect(model.upcomingLoading.value).toBe(false);
 		} finally {
 			clock.mockRestore();
@@ -682,7 +594,6 @@ describe("Payment Calendar state and async boundaries", () => {
 		expect(requests).toBeGreaterThan(initialRequests + 5);
 		expect(model.snapshot.value).not.toBeNull();
 		expect(Date.parse(model.snapshot.value.expires_at)).toBeGreaterThan(Date.now());
-		expect(model.detail.value).not.toBeNull();
 		expect(model.phase.value).toBe("ready");
 		expect(model.notice.value).not.toContain("inactive");
 		scope.stop();
@@ -880,5 +791,297 @@ describe("Payment Calendar state and async boundaries", () => {
 		await flushPromises();
 		expect(model.month.value).toBe("2025-11");
 		expect(model.snapshot.value.scope.month).toBe("2025-11");
+	});
+});
+
+describe("Payment Calendar core to ledger contract", () => {
+	let scope, api, model, invalidated, abandoned;
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-10-24T12:00:00Z"));
+		api = fakeApi();
+		scope = effectScope();
+		model = scope.run(() => usePaymentCalendar({ api, timezone: () => "UTC" }));
+		invalidated = vi.fn();
+		abandoned = vi.fn();
+		model.onPanelsInvalidated(invalidated);
+		model.onPanelsAbandoned(abandoned);
+	});
+	afterEach(() => {
+		scope.stop();
+		vi.useRealTimers();
+	});
+	const reasons = () => invalidated.mock.calls.map(([event]) => event.reason);
+
+	it("exposes generation as a live read-only getter and isCurrent for tokens", async () => {
+		const before = model.generation;
+		const token = before;
+		expect(model.isCurrent(token)).toBe(true);
+		await model.initialize();
+		await flushPromises();
+		expect(model.generation).toBeGreaterThan(before);
+		expect(model.isCurrent(token)).toBe(false);
+		expect(model.isCurrent(model.generation)).toBe(true);
+		expect(() => {
+			model.generation = 0;
+		}).toThrow();
+	});
+	it("reports a snapshot swap and a date change to the ledger", async () => {
+		await model.initialize();
+		await flushPromises();
+		expect(reasons()).toContain("snapshot");
+		invalidated.mockClear();
+		await model.selectDate("2026-10-25");
+		expect(reasons()).toEqual(["date"]);
+	});
+	it("reports a company change as a scope change", async () => {
+		await model.initialize();
+		await flushPromises();
+		invalidated.mockClear();
+		await model.chooseCompany("Services");
+		expect(reasons()[0]).toBe("scope");
+	});
+	it("reports expiry when the snapshot values are removed", async () => {
+		await model.initialize();
+		await flushPromises();
+		invalidated.mockClear();
+		await vi.advanceTimersByTimeAsync(300001);
+		expect(model.snapshot.value).toBeNull();
+		expect(reasons()).toContain("expiry");
+	});
+	it("stops calling a listener after it unsubscribes", async () => {
+		const quiet = vi.fn();
+		model.onPanelsInvalidated(quiet)();
+		await model.initialize();
+		await flushPromises();
+		expect(quiet).not.toHaveBeenCalled();
+	});
+	it("isolates a throwing listener from the core and from other listeners", async () => {
+		const log = vi.spyOn(console, "error").mockImplementation(() => {});
+		try {
+			model.onPanelsInvalidated(() => {
+				throw new Error("listener bug");
+			});
+			model.onPanelsAbandoned(() => {
+				throw new Error("listener bug");
+			});
+			await model.initialize();
+			await flushPromises();
+			expect(model.phase.value).toBe("ready");
+			expect(invalidated).toHaveBeenCalled();
+			expect(log).toHaveBeenCalled();
+		} finally {
+			log.mockRestore();
+		}
+	});
+	it("reports abandoned panel loads when worker-busy retries give up", async () => {
+		api.getSnapshotStatus.mockImplementation(async () => {
+			const value = complete();
+			value.scope.month = "2026-10";
+			return ok(value);
+		});
+		await model.initialize();
+		await flushPromises();
+		const clock = vi.spyOn(performance, "now").mockImplementation(() => Date.now());
+		try {
+			api.requestSnapshot.mockResolvedValue(refusal("worker_busy"));
+			await model.browseMonth(1);
+			expect(abandoned).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(65000);
+			expect(model.refreshIssue.value.code).toBe("worker_busy");
+			expect(abandoned).toHaveBeenCalledTimes(1);
+		} finally {
+			clock.mockRestore();
+		}
+	});
+	it("delegates a refusal to the access recovery of the core", async () => {
+		await model.initialize();
+		await flushPromises();
+		const token = model.generation;
+		api.getCapabilities.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
+		await model.handleRefusal(refusal("forbidden", "forbidden"), token);
+		expect(model.phase.value).toBe("forbidden");
+		expect(model.snapshot.value).toBeNull();
+	});
+	it("ignores a refusal that carries a stale token", async () => {
+		await model.initialize();
+		await flushPromises();
+		const stale = model.generation - 1;
+		await model.handleRefusal(refusal("forbidden", "forbidden"), stale);
+		expect(model.snapshot.value).not.toBeNull();
+	});
+});
+
+describe("Payment Calendar automatic recovery budget", () => {
+	const MINUTE = 60000;
+	let scope, api, model;
+	beforeEach(async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date("2026-10-24T12:00:00Z"));
+		api = fakeApi();
+		installMonthlyApi(api);
+		scope = effectScope();
+		model = scope.run(() => usePaymentCalendar({ api, timezone: () => "UTC" }));
+		await model.initialize();
+		await flushPromises();
+	});
+	afterEach(() => {
+		scope.stop();
+		vi.useRealTimers();
+	});
+	const snapshotRequests = () => api.requestSnapshot.mock.calls.length;
+	const refuse = async (code = "scope_changed", state = "unavailable") => {
+		await model.handleRefusal(refusal(code, state), model.generation);
+		await flushPromises();
+	};
+
+	it("recovers once, automatically, from the scope change of a deploy", async () => {
+		const before = snapshotRequests();
+		await refuse();
+		expect(snapshotRequests()).toBe(before + 1);
+		expect(model.phase.value).toBe("ready");
+		expect(model.error.value).toBeNull();
+	});
+	it("stops after two automatic recoveries and asks for a manual refresh", async () => {
+		await refuse();
+		await refuse();
+		const before = snapshotRequests();
+		await refuse();
+		expect(snapshotRequests()).toBe(before);
+		expect(model.phase.value).toBe("failed");
+		expect(model.error.value.code).toBe("recovery_limit");
+		expect(model.snapshot.value).toBeNull();
+	});
+	it("does not reset the window when a recovered calendar becomes ready", async () => {
+		await refuse();
+		expect(model.phase.value).toBe("ready");
+		await refuse();
+		expect(model.phase.value).toBe("ready");
+		await refuse();
+		expect(model.error.value.code).toBe("recovery_limit");
+	});
+	it("refills the budget five minutes after the recoveries", async () => {
+		await refuse();
+		await refuse();
+		await refuse();
+		expect(model.error.value.code).toBe("recovery_limit");
+		vi.setSystemTime(Date.now() + 5 * MINUTE + 1);
+		const before = snapshotRequests();
+		await model.refresh();
+		await flushPromises();
+		expect(snapshotRequests()).toBe(before + 1);
+		await refuse();
+		expect(model.phase.value).toBe("ready");
+		expect(snapshotRequests()).toBe(before + 2);
+	});
+	it("refills the budget without a manual refresh when the window has passed", async () => {
+		await refuse();
+		await refuse();
+		vi.setSystemTime(Date.now() + 5 * MINUTE + 1);
+		const before = snapshotRequests();
+		await refuse();
+		expect(snapshotRequests()).toBe(before + 1);
+		expect(model.phase.value).toBe("ready");
+	});
+	it("counts an expired snapshot refusal as a recovery", async () => {
+		await refuse("not_found_or_expired", "expired");
+		await refuse("scope_changed");
+		const before = snapshotRequests();
+		await refuse("not_found_or_expired", "expired");
+		expect(snapshotRequests()).toBe(before);
+		expect(model.error.value.code).toBe("recovery_limit");
+	});
+	it("recovers automatically from an expired snapshot refusal and rechecks access", async () => {
+		const caps = api.getCapabilities.mock.calls.length;
+		const before = snapshotRequests();
+		await refuse("not_found_or_expired", "expired");
+		expect(api.getCapabilities.mock.calls.length).toBeGreaterThan(caps);
+		expect(snapshotRequests()).toBe(before + 1);
+		expect(model.phase.value).toBe("ready");
+	});
+	it("counts an expired superseded snapshot found while polling another month", async () => {
+		await refuse();
+		await refuse();
+		const late = deferred();
+		api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+		const pending = model.browseMonth(1);
+		await flushPromises();
+		await model.browseMonth(1);
+		const before = snapshotRequests();
+		late.resolve(refusal("not_found_or_expired", "expired"));
+		await pending;
+		await flushPromises();
+		expect(snapshotRequests()).toBe(before);
+		expect(model.error.value.code).toBe("recovery_limit");
+	});
+	it("does not count the regular expiry refresh against the budget", async () => {
+		await vi.advanceTimersByTimeAsync(4.6 * MINUTE);
+		await refuse();
+		await refuse();
+		expect(model.phase.value).toBe("ready");
+	});
+	it("gives a user action a fresh budget", async () => {
+		await refuse();
+		await refuse();
+		await model.setAccounts(["Bank A"]);
+		await flushPromises();
+		await refuse();
+		await refuse();
+		expect(model.phase.value).toBe("ready");
+		await refuse();
+		expect(model.error.value.code).toBe("recovery_limit");
+	});
+	describe("recovery while a floor save is running", () => {
+		const startSave = async () => {
+			const save = deferred();
+			api.configureFloor.mockReturnValueOnce(save.promise);
+			const saving = model.saveFloor("30.00");
+			await flushPromises();
+			expect(model.floorSaving.value).toBe(true);
+			return { save, saving };
+		};
+		it("waits for the save, then recovers: never stuck on the access check", async () => {
+			const { save, saving } = await startSave();
+			const before = snapshotRequests();
+			await refuse();
+			expect(model.phase.value).toBe("loading_company");
+			expect(snapshotRequests()).toBe(before);
+			save.resolve(ok(complete().floor));
+			await saving;
+			await flushPromises();
+			expect(snapshotRequests()).toBe(before + 1);
+			expect(model.phase.value).toBe("ready");
+		});
+		it("recovers after a save that the recovery superseded and the server refused", async () => {
+			const { save, saving } = await startSave();
+			await refuse();
+			save.resolve(refusal("settings_changed", "scope_changed"));
+			await saving;
+			await flushPromises();
+			expect(["ready", "failed"]).toContain(model.phase.value);
+		});
+		it("resumes the expired-month recovery that waited for a save", async () => {
+			const late = deferred();
+			api.getSnapshotStatus.mockReturnValueOnce(late.promise);
+			const pending = model.browseMonth(1);
+			await flushPromises();
+			await model.browseMonth(1);
+			const { save, saving } = await startSave();
+			late.resolve(refusal("not_found_or_expired", "expired"));
+			await pending;
+			await flushPromises();
+			save.resolve(ok(complete().floor));
+			await saving;
+			await flushPromises();
+			await vi.advanceTimersByTimeAsync(0);
+			expect(["ready", "failed"]).toContain(model.phase.value);
+		});
+	});
+	it("still lets a forbidden refusal end in the forbidden state at the cap", async () => {
+		await refuse();
+		await refuse();
+		api.getCapabilities.mockResolvedValueOnce(refusal("forbidden", "forbidden"));
+		await refuse("forbidden", "forbidden");
+		expect(model.phase.value).toBe("forbidden");
 	});
 });

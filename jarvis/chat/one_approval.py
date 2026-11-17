@@ -130,7 +130,9 @@ def _claim(message: str) -> bool:
 
 
 def mark_saved(message: str, name: str) -> None:
-	"""Name the record the draft became, in the write's transaction."""
+	"""Name the record the draft became (a create) or changed (an update), in the write's
+	transaction. Only a create is claimed (``_claim``); a Cancel that waited on the
+	conversation lock reads either mark and writes nothing (``actions_api.dismiss_draft``)."""
 	if message:
 		frappe.db.set_value(MSG, message, "draft_saved_as", name, update_modified=False)
 

@@ -2,7 +2,7 @@
 
 from collections import defaultdict
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
 
 
 class ProjectionError(ValueError):
@@ -38,6 +38,15 @@ def _amount(value, precision):
 		raise ProjectionError("invalid_source_amount") from exc
 
 
+def listed_row(remaining, original, kind):
+	"""Whether a dated row is listed on its day: dues, and settled terms that once owed something.
+
+	Negative residuals are excluded; zero-original placeholders do not make a date look settled.
+	Day detail, the window bucket and the month row counts all use this one rule.
+	"""
+	return remaining > 0 or (remaining == 0 and original > 0 and kind == "obligation")
+
+
 def _source(source, anchor, end, precision):
 	if source is None:
 		return None, None
@@ -64,12 +73,8 @@ def _source(source, anchor, end, precision):
 					else "current_future"
 				)
 				buckets[bucket] += remaining
-			# Positive accounting adjustments are still amounts owed. Only negative
-			# residuals are excluded from daily cash flows. Zero-original placeholders
-			# do not make an empty date look settled.
-			if due is not None and (
-				remaining > 0 or (remaining == 0 and original > 0 and row["kind"] == "obligation")
-			):
+			# Positive accounting adjustments are still amounts owed.
+			if due is not None and listed_row(remaining, original, row["kind"]):
 				groups[due].append((row, remaining, original))
 		canonical = _amount(source["canonical_total"], precision)
 		if sum(buckets.values(), Decimal(0)) != canonical:
@@ -94,7 +99,39 @@ def _tallies(rows, prefix, precision):
 		f"{prefix}_parties": len({(r[0]["party_type"], r[0]["party"]) for r in rows}),
 		f"{prefix}_parties_due": len({(r[0]["party_type"], r[0]["party"]) for r in rows if r[1] > 0}),
 		f"{prefix}_rows_due": sum(r[1] > 0 for r in rows),
+		f"{prefix}_rows": len(rows),
+		f"{prefix}_top_invoice": _top_invoice(rows, precision),
 	}
+
+
+def _top_invoice(rows, precision):
+	"""Largest invoice by summed remaining; ties go to the smallest voucher, then party."""
+	invoices = {}
+	for row, remaining, _ in rows:
+		if remaining <= 0:
+			continue
+		key = (row["voucher_type"], row["voucher_no"], row["party_type"], row["party"])
+		name = row.get("party_name") or row["party"]
+		invoice = invoices.setdefault(key, {"party_name": name, "remaining": Decimal(0)})
+		invoice["remaining"] += remaining
+	if not invoices:
+		return None
+	key = min(invoices, key=lambda k: (-invoices[k]["remaining"], *k))
+	return {
+		"voucher_type": key[0],
+		"voucher_no": key[1],
+		"party_name": invoices[key]["party_name"],
+		"remaining": str(_amount(invoices[key]["remaining"], precision)),
+	}
+
+
+def _concentration(top, dues):
+	"""(star flag, share of the day's dues); the star needs strictly more than half."""
+	if top is None or Decimal(dues) <= 0:
+		return False, None
+	remaining, total = Decimal(top["remaining"]), Decimal(dues)
+	share = (remaining * 100 / total).quantize(Decimal("0.1"), rounding=ROUND_DOWN)
+	return remaining * 2 > total, str(share)
 
 
 def _settlement(rows):
@@ -145,7 +182,7 @@ def _verified_settled_fx(source, precision):
 		return False
 
 
-def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision=2):
+def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision=2, month=None):
 	"""Aggregate complete residuals; carry from the anchor even before visible start."""
 	if isinstance(precision, bool) or not isinstance(precision, int) or not 0 <= precision <= 9:
 		raise ProjectionError("invalid_precision")
@@ -174,7 +211,12 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 	if minimum is None:
 		reasons.add("floor_unconfigured")
 	available = not reasons
+
+	def display(value):
+		return str(_amount(value, precision)) if value is not None else None
+
 	closing = opening
+	cumulative_in = cumulative_out = Decimal(0)
 	days = {}
 	day = min(start, anchor)
 	while day <= end:
@@ -182,40 +224,39 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 		ar_rows = receivables.get(day, []) if receivables is not None else []
 		outgoing = sum((r[1] for r in ap_rows), Decimal(0))
 		incoming = sum((r[1] for r in ar_rows), Decimal(0))
-		projected_opening = projected_closing = risk = None
+		cash = dict.fromkeys(
+			(
+				"projected_opening",
+				"projected_closing",
+				"risk",
+				"cumulative_receivable",
+				"cumulative_payable",
+				"margin",
+			)
+		)
 		if available and day >= anchor:
-			projected_opening = closing
+			cash["projected_opening"] = display(closing)
+			# Running sums count scheduled rows only; overdue and undated dues are
+			# charged once on the anchor day through due_now.
+			cumulative_in += incoming
+			cumulative_out += outgoing
 			if day == anchor:
 				outgoing += ap_buckets["overdue"] + ap_buckets["undated"]
 			closing += incoming - outgoing
-			projected_closing = closing
-			risk = "red" if closing < 0 else "orange" if closing < minimum else "green"
+			cash.update(
+				projected_closing=display(closing),
+				risk="red" if closing < 0 else "orange" if closing < minimum else "green",
+				cumulative_receivable=display(cumulative_in),
+				cumulative_payable=display(cumulative_out),
+				margin=display(closing - minimum),
+			)
 		if day >= start:
-			days[day.isoformat()] = {
-				"date": day.isoformat(),
-				**_tallies(ap_rows, "payable", precision),
-				**_tallies(ar_rows, "receivable", precision),
-				"settlement": _settlement(ap_rows) if ap is not None else "Unavailable",
-				"projected_opening": str(_amount(projected_opening, precision))
-				if projected_opening is not None
-				else None,
-				"projected_closing": str(_amount(projected_closing, precision))
-				if projected_closing is not None
-				else None,
-				"risk": risk,
-			}
-			for prefix, source in (("payable_", ap), ("receivable_", ar)):
-				if source is None:
-					for field in days[day.isoformat()]:
-						if field.startswith(prefix):
-							days[day.isoformat()][field] = None
+			days[day.isoformat()] = _day(day, ap, ar, ap_rows, ar_rows, cash, precision, complete_sides)
 		day += timedelta(days=1)
 
-	def display(value):
-		return str(_amount(value, precision)) if value is not None else None
-
 	scheduled = sum((r[1] for r in payables.get(anchor, [])), Decimal(0)) if ap is not None else None
-	return {
+	immediate = ap_buckets["overdue"] + ap_buckets["undated"] if ap is not None else None
+	result = {
 		"anchor": anchor.isoformat(),
 		"start": start.isoformat(),
 		"end": end.isoformat(),
@@ -230,9 +271,8 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 			"scheduled": display(scheduled),
 			"overdue": display(ap_buckets["overdue"]) if ap is not None else None,
 			"undated": display(ap_buckets["undated"]) if ap is not None else None,
-			"total": display(scheduled + ap_buckets["overdue"] + ap_buckets["undated"])
-			if ap is not None
-			else None,
+			"immediate": display(immediate),
+			"total": display(scheduled + immediate) if ap is not None else None,
 		},
 		"excluded_collections": {
 			key: display(ar_buckets[key]) if ar is not None else None
@@ -246,6 +286,112 @@ def project_snapshot(ap, ar, bank_total, floor, anchor, start, end, *, precision
 			side: {key: display(value) for key, value in buckets.items()} if buckets is not None else None
 			for side, buckets in (("Payable", ap_buckets), ("Receivable", ar_buckets))
 		},
+		"month_totals": None,
+	}
+	if month:
+		result["month"] = month
+		result["month_totals"] = _month_totals(payables, receivables, complete_sides, start, end, precision)
+	return result
+
+
+def _day(day, ap, ar, ap_rows, ar_rows, cash, precision, complete_sides):
+	"""One calendar cell; side fields are null for an unavailable side."""
+	payable = _tallies(ap_rows, "payable", precision)
+	concentrated, share = _concentration(payable["payable_top_invoice"], payable["payable_remaining"])
+	entry = {
+		"date": day.isoformat(),
+		**payable,
+		**_tallies(ar_rows, "receivable", precision),
+		"settlement": _settlement(ap_rows) if ap is not None else "Unavailable",
+		"payable_concentration_pct": share,
+		**cash,
+	}
+	for prefix, source in (("payable_", ap), ("receivable_", ar)):
+		if source is None:
+			for field in entry:
+				if field.startswith(prefix):
+					entry[field] = None
+	# Set after the null loop: both stay meaningful when their side is unavailable.
+	entry["net"] = _net(entry, complete_sides, precision)
+	entry["receivable_settlement"] = _settlement(ar_rows) if ar is not None else "Unavailable"
+	entry["payable_concentrated"] = concentrated
+	return entry
+
+
+def _net(entry, complete_sides, precision):
+	"""Receivable minus payable remaining for the day; null unless both sides are complete."""
+	if not (complete_sides["payables"] and complete_sides["receivables"]):
+		return None
+	net = Decimal(entry["receivable_remaining"]) - Decimal(entry["payable_remaining"])
+	return str(_amount(net, precision))
+
+
+def _month_totals(payables, receivables, complete_sides, start, end, precision):
+	"""Positive dated remaining inside the window; null unless both sides are complete.
+
+	The row counts are the rows the window bucket lists (settled-zero terms included).
+	"""
+	complete = complete_sides["payables"] and complete_sides["receivables"]
+	totals = dict.fromkeys(("receivable", "payable", "net", "receivable_rows", "payable_rows"))
+	if not complete:
+		return {**totals, "complete": False}
+	sums = {}
+	for side, groups in (("payable", payables), ("receivable", receivables)):
+		rows = [r for due, day_rows in groups.items() if start <= due <= end for r in day_rows]
+		sums[side] = sum((r[1] for r in rows if r[1] > 0), Decimal(0))
+		totals[f"{side}_rows"] = len(rows)
+	totals.update(
+		receivable=str(_amount(sums["receivable"], precision)),
+		payable=str(_amount(sums["payable"], precision)),
+		net=str(_amount(sums["receivable"] - sums["payable"], precision)),
+	)
+	return {**totals, "complete": True}
+
+
+def horizon_summary(horizon):
+	"""The stored 30-day horizon from a projection that starts on the anchor.
+
+	Days keep only closing and margin. `lowest` needs a closing on every day.
+	"""
+	days = {
+		iso: {"projected_closing": day["projected_closing"], "margin": day["margin"]}
+		for iso, day in horizon["days"].items()
+	}
+	closings = [
+		(iso, Decimal(day["projected_closing"]))
+		for iso, day in days.items()
+		if day["projected_closing"] is not None
+	]
+	lowest = first_below = None
+	if closings:
+		floor = Decimal(horizon["floor"])
+		first_below = next((iso for iso, value in closings if value < floor), None)
+		if len(closings) == len(days):
+			lowest = _lowest(closings, floor, horizon["precision"])
+	return {
+		"start": horizon["start"],
+		"end": horizon["end"],
+		"forecast_available": horizon["forecast_available"],
+		"scope_reasons": horizon["scope_reasons"],
+		"days": days,
+		"lowest": lowest,
+		"first_below_floor": first_below,
+	}
+
+
+def _lowest(closings, floor, precision):
+	"""The minimum closing; a tie keeps the first date."""
+	day, closing = closings[0]
+	for iso, value in closings:
+		if value < closing:
+			day, closing = iso, value
+	cushion = closing - floor
+	state = "below" if cushion < 0 else "tight" if cushion <= floor * Decimal("0.10") else "safe"
+	return {
+		"date": day,
+		"closing": str(_amount(closing, precision)),
+		"cushion": str(_amount(cushion, precision)),
+		"state": state,
 	}
 
 

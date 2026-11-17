@@ -3,26 +3,47 @@
 from __future__ import annotations
 
 import json
-from datetime import date as Date
-from decimal import Decimal
+from contextlib import contextmanager
 from functools import wraps
-from urllib.parse import quote
+from time import monotonic
 
 import frappe
 
 from jarvis.exceptions import PermissionDeniedError
-from jarvis.payment_calendar import jobs, preferences, store
-from jarvis.payment_calendar.access import ScopeChanged, authorize_scope, refresh_actor_access
-from jarvis.payment_calendar.banks import validate_bank_accounts
-from jarvis.payment_calendar.errors import CalendarSourceUnavailable
-from jarvis.payment_calendar.permissions import require_company, require_floor_write, require_report
+from jarvis.payment_calendar import (
+	access,
+	balances,
+	bank_labels,
+	catalog,
+	detail,
+	jobs,
+	preferences,
+	read_log,
+	store,
+)
+from jarvis.payment_calendar.access import authorize_scope, refresh_actor_access
+from jarvis.payment_calendar.errors import (
+	CalendarSourceUnavailable,
+	ScopeChanged,
+	SnapshotExpired,
+	safe_code,
+	safe_detail,
+)
+from jarvis.payment_calendar.permissions import require_floor_write
 from jarvis.payment_calendar.projection import ProjectionError, upcoming_days
 from jarvis.payment_calendar.scope import normalize_scope
 from jarvis.payment_calendar.settings import get_settings, update_safety_floor
 
-
-class SnapshotExpired(frappe.DoesNotExistError):
-	pass
+STATUS_RESULT_KEYS = store.STATUS_RESULT_KEYS
+STATUS_SCOPE_KEYS = (
+	"company",
+	"accounts",
+	"anchor",
+	"selectable_start",
+	"selectable_end",
+	"window_start",
+	"window_end",
+)
 
 
 def _safe(fn):
@@ -51,23 +72,14 @@ def _safe(fn):
 			elif isinstance(exc, (frappe.PermissionError, PermissionDeniedError, frappe.DoesNotExistError)):
 				state, code = "forbidden", "forbidden"
 			elif isinstance(exc, (CalendarSourceUnavailable, ProjectionError)):
-				state = "unavailable"
-				code = exc.code if exc.code in store.SAFE_CODES else "source_contract_unavailable"
+				state, code = "unavailable", safe_code(exc, "source_contract_unavailable")
 			elif isinstance(exc, frappe.TimestampMismatchError):
 				state, code = "scope_changed", "settings_changed"
 			elif isinstance(exc, frappe.ValidationError):
 				state, code = "invalid", "invalid_request"
 			else:
 				state, code = "failed", "internal_error"
-				try:
-					frappe.log_error(
-						title="Payment Calendar API",
-						message=json.dumps(
-							{"code": code, "operation": fn.__name__, "exception_class": type(exc).__name__}
-						),
-					)
-				except Exception:
-					frappe.logger().warning("Payment Calendar API: safe_failure_unavailable")
+				_log_internal_error(fn.__name__, exc)
 			frappe.local.message_log = []
 			return {
 				"ok": False,
@@ -80,122 +92,170 @@ def _safe(fn):
 	return call
 
 
-def _load(snapshot_id):
+def _log_internal_error(operation, exc):
+	"""The operation and error classes, plus key names or a fixed code when the error has one; no other text.
+
+	`cause_class` is the class of the error that was wrapped (a hook error inside the identifier check).
+	One row per operation and exception class in 300 s.
+	"""
+	body = {"code": "internal_error", "operation": operation, "exception_class": type(exc).__name__}
+	if exc.__cause__ is not None:
+		body["cause_class"] = type(exc.__cause__).__name__
+	detail = safe_detail(exc)
+	if detail:
+		body["detail"] = detail
+	try:
+		read_log.error_log_once(
+			f"Payment Calendar API {operation}", json.dumps(body), operation, body["exception_class"]
+		)
+	except Exception:
+		frappe.logger().warning("Payment Calendar API: safe_failure_unavailable")
+
+
+def _load(snapshot_id, *, bank=False, endpoint="_load", side=None):
+	"""The caller's snapshot row and, once complete, its small status part; never a side part.
+
+	The stored scope is authorized once, without a result: the rows a reply returns are checked
+	by the caller. `bank` runs the accounts gate, and only on a complete snapshot.
+	"""
 	actor = frappe.session.user
 	status = store.load_status(actor, snapshot_id)
-	if not status:
+	if status is None:
+		raise store.gone(actor, snapshot_id)
+	# The kind comes before any discard: a balances id must never reach the discard path below.
+	if status.get("kind", "snapshot") != "snapshot":
 		raise SnapshotExpired()
-	result = store.load_result(actor, snapshot_id)
+	complete = status["state"] == "complete"
+	part = _stored(endpoint, "status", store.load_part, actor, snapshot_id, "status") if complete else None
 	try:
-		authorize_scope(status["scope"], expected_fingerprint=status["fingerprint"], result=result)
-	except (frappe.PermissionError, PermissionDeniedError):
-		store.discard(actor, snapshot_id)
+		_authorize(status, part, check_accounts=bank and complete)
+	except (frappe.PermissionError, PermissionDeniedError) as exc:
+		_discard(snapshot_id, exc, endpoint, side)
 		raise
-	if status["state"] == "complete" and result is None:
-		raise SnapshotExpired()
-	return status, result
+	except CalendarSourceUnavailable as exc:
+		if exc.code == "restricted_obligations":
+			read_log.refused(endpoint, "obligation", side)
+		raise
+	return status, part
 
 
-def _complete(snapshot_id):
-	status, result = _load(snapshot_id)
-	if not result:
-		raise SnapshotExpired()
-	return status, result
-
-
-def _date(value, scope):
+def _stored(endpoint, name, load, actor, snapshot_id, *args):
+	"""One stored part or hash read. A key that is gone while its status row lives is an eviction: log it."""
 	try:
-		if not isinstance(value, str) or len(value) != 10 or Date.fromisoformat(value).isoformat() != value:
-			raise ValueError
-	except ValueError as exc:
-		raise frappe.ValidationError("Choose a calendar date.") from exc
-	if not scope["window_start"] <= value <= scope["window_end"]:
-		raise frappe.ValidationError("Choose a date in the snapshot window.")
-	return value
+		return load(actor, snapshot_id, *args)
+	except (SnapshotExpired, ScopeChanged):
+		if store.load_status(actor, snapshot_id) is not None:
+			read_log.part_missing(endpoint, name)
+		raise
 
 
-def _page(value, size):
-	def integer(number):
-		if (
-			isinstance(number, bool)
-			or not isinstance(number, (int, str))
-			or not str(number).isascii()
-			or not str(number).isdigit()
-		):
-			raise frappe.ValidationError("Choose a page.")
-		return int(number)
-
-	value, size = integer(value), integer(size)
-	if not 1 <= value <= 100000 or not 1 <= size <= 100:
-		raise frappe.ValidationError("Choose a page size up to 100.")
-	return value, size
-
-
-def _slice(rows, page, size):
-	page, size = _page(page, size)
-	offset = (page - 1) * size
-	return {
-		"rows": rows[offset : offset + size],
-		"total": len(rows),
-		"page": page,
-		"page_size": size,
-		"has_more": offset + size < len(rows),
-	}
-
-
-def _source_rows(result, side):
-	if side not in ("Payable", "Receivable"):
-		raise frappe.ValidationError("Choose payables or receivables.")
-	source = result["sources"].get(side)
-	if source is None:
-		code = result["unavailable"].get(side, "source_contract_unavailable")
-		if code == "forbidden":
-			raise frappe.PermissionError("Report access is unavailable.")
-		raise CalendarSourceUnavailable(code)
-	return source["rows"]
-
-
-def _public_row(row):
-	row = {key: value for key, value in row.items() if not key.startswith("_")}
-	doctype = row["voucher_type"]
-	row["source_link"] = (
-		"/app/" + frappe.scrub(doctype).replace("_", "-") + "/" + quote(row["voucher_no"], safe="")
-		if doctype in ("Purchase Invoice", "Sales Invoice", "Journal Entry", "Payment Entry")
-		else None
+def _authorize(status, part, *, check_accounts):
+	sides = [side for side in store.SIDES if side not in part["unavailable"]] if part is not None else []
+	authorize_scope(
+		status["scope"],
+		expected_fingerprint=status["fingerprint"],
+		check_accounts=check_accounts,
+		actor_refreshed=True,
+		sides=tuple(sides),
 	)
-	return row
 
 
-def _detail(rows, result, page, page_size, party_page):
-	parties = {}
-	for row in rows:
-		key = (row["party_type"], row["party"])
-		party = parties.setdefault(
-			key,
-			{
-				"party_type": key[0],
-				"party": key[1],
-				"party_name": row["party_name"],
-				"remaining": Decimal(0),
-				"terms": 0,
-				"invoices": set(),
-			},
-		)
-		party["remaining"] += Decimal(row["remaining"])
-		party["terms"] += 1
-		party["invoices"].add((row["voucher_type"], row["voucher_no"]))
-	party_rows = [
-		{**party, "remaining": str(party["remaining"]), "invoices": len(party["invoices"])}
-		for party in parties.values()
-	]
-	party_rows.sort(key=lambda r: (-Decimal(r["remaining"]), r["party_type"], r["party"]))
-	return {
-		**_slice([_public_row(row) for row in rows], page, page_size),
-		"parties": _slice(party_rows, party_page, page_size)["rows"],
-		"party_total": len(party_rows),
-		"party_page": _page(party_page, page_size)[0],
-		"generated_at": result["generated_at"],
-	}
+def _complete(snapshot_id, *, bank=False, endpoint="_complete", side=None):
+	status, part = _load(snapshot_id, bank=bank, endpoint=endpoint, side=side)
+	if part is None:
+		raise SnapshotExpired()
+	return status, part
+
+
+def _discard(snapshot_id, exc, endpoint, side):
+	"""A refused snapshot is deleted and tombstoned, the refusal is logged and counted."""
+	actor, kind = frappe.session.user, getattr(exc, "kind", "scope")
+	store.discard(actor, snapshot_id)
+	read_log.refused(endpoint, kind, side)
+	read_log.count_discard(actor, snapshot_id, kind)
+
+
+@contextmanager
+def _verified(snapshot_id, endpoint, side=None):
+	"""Wraps only the check of returned identifiers.
+
+	A refusal discards the snapshot. An error of a hook or lookup is not a refusal: it keeps
+	the snapshot and answers `internal_error`, also a ValidationError, which `_safe` would show as invalid.
+	"""
+	try:
+		yield
+	except ScopeChanged as exc:
+		_discard(snapshot_id, exc, endpoint, side)
+		raise
+	except CalendarSourceUnavailable:
+		raise
+	except frappe.ValidationError as exc:
+		raise RuntimeError("pcal_identifier_check") from exc
+
+
+def _verify_top_proofs(snapshot_id, status, part):
+	"""Check the stored proofs of every day's top invoice, both sides as present; returns the row count."""
+	count = 0
+	with _verified(snapshot_id, "get_snapshot_status"):
+		for side, proofs in part["_top_proofs"].items():
+			access.verify_returned_rows(status["scope"], side, part["_permission_columns"][side], proofs)
+			count += len(proofs)
+	return count
+
+
+def snapshot_status_body(status, part):
+	"""The status response body; `part` is the stored status part, which must hold every key."""
+	data = store.public_status(status)
+	if part is None:
+		return data
+	data.update({key: part[key] for key in STATUS_RESULT_KEYS})
+	data["horizon"] = part["horizon"]
+	data["bank"] = bank_labels.bank_breakdown(status["scope"]["company"], part["bank"])
+	data["scope"] = {key: status["scope"][key] for key in STATUS_SCOPE_KEYS}
+	if "month" in status["scope"]:
+		data["scope"]["month"] = status["scope"]["month"]
+	return data
+
+
+def _flag(value):
+	"""A boolean from a bool or its text form (a whitelisted call may bring either)."""
+	text = value.strip().lower() if isinstance(value, str) else value
+	if text in (True, 1, "1", "true"):
+		return True
+	if text in (False, 0, "0", "false"):
+		return False
+	raise frappe.ValidationError("Choose true or false.")
+
+
+def _detail(endpoint, make_query, snapshot_id, side, parties, **request):
+	"""A day or bucket reply: authorize, validate, load the side part and entry, check the page, render."""
+	started = monotonic()
+	status, part = _complete(snapshot_id, endpoint=endpoint, side=side)
+	# A forbidden or unavailable side answers before the request is read; it never discards.
+	detail.check_side(part, side)
+	# Every invalid request answers before a side part is loaded.
+	query = make_query(status, side=side, parties=_flag(parties), **request)
+	actor, name = frappe.session.user, store.SIDE_PARTS[side]
+	source = _stored(endpoint, name, store.load_part, actor, snapshot_id, name)
+	entry = _stored(endpoint, f"index-{name}", store.load_index_entry, actor, snapshot_id, side, query.field)
+	source["index"] = {} if entry is None else {query.field: entry}
+	page = detail.page_of(query, {**part, "sources": {side: source}})
+	rows = _rows_with_proofs(endpoint, snapshot_id, side, page.rows)
+	with _verified(snapshot_id, endpoint, side):
+		columns = part["_permission_columns"][side]
+		access.verify_returned_rows(status["scope"], side, columns, rows, page.party_keys)
+	read_log.slow(endpoint, started, len(page.rows), len(page.party_keys))
+	return detail.render(page)
+
+
+def _rows_with_proofs(endpoint, snapshot_id, side, rows):
+	"""The page rows with their proofs: one HMGET of exactly their ids, none for an empty page."""
+	if not rows:
+		return rows
+	ids = [row["id"] for row in rows]
+	name = f"proofs-{store.SIDE_PARTS[side]}"
+	proofs = _stored(endpoint, name, store.load_proofs, frappe.session.user, snapshot_id, side, ids)
+	return store.with_proofs(rows, proofs)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -208,28 +268,10 @@ def get_capabilities(company: str | None = None) -> dict:
 		raise CalendarSourceUnavailable("too_large")
 	data = {"companies": companies, "accounts": [], "settings": None, "can_configure": False}
 	if company:
-		require_company(company)
-		require_report(company, "Payable")
-		accounts = frappe.get_list(
-			"Account",
-			filters={
-				"company": company,
-				"is_group": 0,
-				"disabled": 0,
-				"account_type": ["in", ["Bank", "Cash"]],
-			},
-			fields=["name", "account_name", "account_type", "account_currency"],
-			order_by="account_name",
-			limit_page_length=501,
-		)
-		if len(accounts) > 500:
-			raise CalendarSourceUnavailable("too_large")
-		for account in accounts:
-			try:
-				validate_bank_accounts(company, [account.name])
-				data["accounts"].append(account)
-			except (frappe.PermissionError, PermissionDeniedError):
-				continue
+		data["accounts"] = catalog.permitted_accounts(company)
+		labels = bank_labels.bank_labels(company, [account.name for account in data["accounts"]])
+		for account in data["accounts"]:
+			account.update(labels[account.name])
 		data["settings"] = get_settings(company)
 		try:
 			require_floor_write(company)
@@ -279,38 +321,34 @@ def request_snapshot(company: str, accounts: list[str] | str | None = None, mont
 @frappe.whitelist(methods=["POST"])
 @_safe
 def get_snapshot_status(snapshot_id: str) -> dict:
-	status, result = _load(snapshot_id)
-	if result is None:
+	started, endpoint = monotonic(), "get_snapshot_status"
+	status, part = _load(snapshot_id, bank=True, endpoint=endpoint)
+	if part is None:
 		status = jobs.observe_job(status)
-	if (status["state"] == "complete" and result is None) or (
-		result is not None and status["state"] != "complete"
-	):
-		# Publication can land between the independent Redis reads above. Reload
-		# through the complete-result authorization path before claiming readiness.
-		status, result = _complete(snapshot_id)
-	data = jobs.public_status(status)
-	if result:
-		data.update(
-			{
-				key: result[key]
-				for key in ("projection", "currency", "floor", "generated_at", "bank_code", "unavailable")
-			}
-		)
-		data["scope"] = {
-			key: status["scope"][key]
-			for key in (
-				"company",
-				"accounts",
-				"anchor",
-				"selectable_start",
-				"selectable_end",
-				"window_start",
-				"window_end",
-			)
-		}
-		if "month" in status["scope"]:
-			data["scope"]["month"] = status["scope"]["month"]
-	return data
+		if status["state"] == "complete":
+			# Publication landed between the Redis reads above: serve it only through the complete path.
+			status, part = _complete(snapshot_id, bank=True, endpoint=endpoint)
+	proofs = _verify_top_proofs(snapshot_id, status, part) if part is not None else 0
+	read_log.slow(endpoint, started, proofs, 0)
+	return snapshot_status_body(status, part)
+
+
+@frappe.whitelist(methods=["POST"])
+@_safe
+def request_account_balances(company: str) -> dict:
+	return jobs.request_account_balances(company)
+
+
+@frappe.whitelist(methods=["POST"])
+@_safe
+def get_account_balances_status(job_id: str) -> dict:
+	status, result = balances.checked(balances.load(job_id))
+	if result is None and status["state"] in ("queued", "running"):
+		status = jobs.observe_job(status)
+		if status["state"] == "complete":
+			# Publication landed while the job looked queued: serve it only through the gate.
+			status, result = balances.checked(status)
+	return balances.balances_status_body(status, result)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -322,37 +360,40 @@ def get_day_detail(
 	page: int = 1,
 	page_size: int = 25,
 	party_page: int = 1,
+	sort: str | None = None,
+	order: str | None = None,
+	parties: bool | str = True,
 ) -> dict:
-	status, result = _complete(snapshot_id)
-	selected = _date(date, status["scope"])
-	rows = [
-		row
-		for row in _source_rows(result, side)
-		if row["due_date"] == selected
-		and (
-			Decimal(row["remaining"]) > 0
-			or (
-				Decimal(row["remaining"]) == 0
-				and Decimal(row["original"]) > 0
-				and row["kind"] == "obligation"
-			)
-		)
-	]
-	return _detail(rows, result, page, page_size, party_page)
+	return _detail(
+		"get_day_detail",
+		detail.day_query,
+		snapshot_id,
+		side,
+		parties,
+		date=date,
+		page=page,
+		page_size=page_size,
+		party_page=party_page,
+		sort=sort,
+		order=order,
+	)
 
 
 @frappe.whitelist(methods=["POST"])
 @_safe
 def get_upcoming(snapshot_id: str, date: str, page: int = 1, page_size: int = 30) -> dict:
-	status, result = _complete(snapshot_id)
-	_source_rows(result, "Payable")
-	selected = _date(date, status["scope"])
+	started, endpoint = monotonic(), "get_upcoming"
+	status, part = _complete(snapshot_id, endpoint=endpoint, side="Payable")
+	detail.check_side(part, "Payable")
+	selected = detail.check_date(date, status["scope"])
 	if selected > status["scope"]["selectable_end"]:
 		raise frappe.ValidationError("Choose a date inside the selectable range.")
-	return {
-		**_slice(upcoming_days(result["projection"], selected), page, page_size),
-		"generated_at": result["generated_at"],
+	reply = {
+		**detail.page_rows(upcoming_days(part["projection"], selected), page, page_size),
+		"generated_at": part["generated_at"],
 	}
+	read_log.slow(endpoint, started, 0, 0)
+	return reply
 
 
 @frappe.whitelist(methods=["POST"])
@@ -364,28 +405,20 @@ def get_bucket_detail(
 	page: int = 1,
 	page_size: int = 25,
 	party_page: int = 1,
+	sort: str | None = None,
+	order: str | None = None,
+	parties: bool | str = True,
 ) -> dict:
-	status, result = _complete(snapshot_id)
-	if bucket not in ("overdue", "undated", "adjustments", "outside_horizon"):
-		raise frappe.ValidationError("Choose a reconciliation bucket.")
-	scope = status["scope"]
-
-	def belongs(row):
-		amount, due = Decimal(row["remaining"]), row["due_date"]
-		if amount < 0:
-			return bucket == "adjustments"
-		if amount <= 0:
-			return False
-		return bucket == (
-			"undated"
-			if due is None
-			else "overdue"
-			if due < scope["anchor"]
-			else "outside_horizon"
-			if due > scope["window_end"]
-			else "current_future"
-		)
-
 	return _detail(
-		[row for row in _source_rows(result, side) if belongs(row)], result, page, page_size, party_page
+		"get_bucket_detail",
+		detail.bucket_query,
+		snapshot_id,
+		side,
+		parties,
+		bucket=bucket,
+		page=page,
+		page_size=page_size,
+		party_page=party_page,
+		sort=sort,
+		order=order,
 	)

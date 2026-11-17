@@ -15,6 +15,7 @@ from frappe.query_builder.functions import Coalesce, Count, IfNull
 from pypika.terms import ExistsCriterion
 
 from jarvis.chat import admission, txn, user_settings_api
+from jarvis.chat.directive_filter import DirectiveRefusal
 from jarvis.chat.usage import current_month_key as _usage_month_key
 from jarvis.chat.usage import period_select_fields
 from jarvis.permissions import (
@@ -44,7 +45,7 @@ def _get_owned_conversation(conversation: str):
 	"""
 	doc = frappe.get_doc(CONV, conversation)
 	if doc.owner != frappe.session.user:
-		raise frappe.PermissionError("not your conversation")
+		raise frappe.PermissionError("This chat belongs to someone else.")
 	return doc
 
 
@@ -178,7 +179,7 @@ def _normalise_origin_page(origin_page: str | None) -> str:
 	"""Validate an explicit conversation namespace used by first-party builders."""
 	origin = str(origin_page or "").strip().lower()
 	if origin and origin not in _BUILDER_ORIGINS:
-		frappe.throw(_("Invalid conversation origin."))
+		frappe.throw(_("We couldn't tell where this chat came from. Reload the chat and try again."))
 	return origin
 
 
@@ -1139,7 +1140,9 @@ def get_tool_detail(message: str) -> dict:
 		MSG, message, ["conversation", "role", "hidden", "tool_args", "tool_result"], as_dict=True
 	)
 	if not row or row.role != "tool" or frappe.utils.cint(row.hidden):
-		frappe.throw(_t("message not found"), frappe.DoesNotExistError)
+		frappe.throw(
+			_t("We couldn't find that message. Reload the chat and try again."), frappe.DoesNotExistError
+		)
 	_get_owned_conversation(row.conversation)  # non-owner: PermissionError
 	from jarvis.chat.collaboration import require_legacy_conversation
 
@@ -1338,7 +1341,9 @@ def get_canvas(message: str, name: str | None = None, dark: int = 0) -> dict:
 
 	row = frappe.db.get_value(MSG, message, ["conversation", "canvas"], as_dict=True)
 	if not row:
-		frappe.throw(_t("message not found"), frappe.DoesNotExistError)
+		frappe.throw(
+			_t("We couldn't find that message. Reload the chat and try again."), frappe.DoesNotExistError
+		)
 	_get_owned_conversation(row.conversation)  # non-owner: PermissionError
 	from jarvis.chat.collaboration import require_legacy_conversation
 
@@ -1346,7 +1351,10 @@ def get_canvas(message: str, name: str | None = None, dark: int = 0) -> dict:
 
 	items = frappe.parse_json(row.canvas) if row.canvas else []
 	if not isinstance(items, list) or not items:
-		frappe.throw(_t("no canvas on this message"), frappe.DoesNotExistError)
+		frappe.throw(
+			_t("This message has no preview to show. Reload the chat and try again."),
+			frappe.DoesNotExistError,
+		)
 	item = next((c for c in items if c.get("name") == name), None) if name else None
 	if item is None:
 		item = items[0]
@@ -1360,7 +1368,10 @@ def get_canvas(message: str, name: str | None = None, dark: int = 0) -> dict:
 	# Mirror the File-read gate turn_handler._prepare_attachments enforces before
 	# it reads attachment bytes, and read_file enforces before serving one.
 	if not frappe.has_permission("File", "read", doc=fdoc.name):
-		frappe.throw(_t("no permission to read this file"), frappe.PermissionError)
+		frappe.throw(
+			_t("You don't have permission to open this file. Ask your workspace admin for access."),
+			frappe.PermissionError,
+		)
 	raw = fdoc.get_content()
 	out = {
 		"name": item.get("name"),
@@ -1756,7 +1767,7 @@ def rename_conversation(conversation: str, title: str) -> dict:
 	require_jarvis_access()
 	title = (title or "").strip()[:140]
 	if not title:
-		return {"ok": False, "reason": _("title is empty")}
+		return {"ok": False, "reason": _("Give the chat a title, then try again.")}
 
 	def _save() -> None:
 		# Reloaded on every attempt (see archive_conversation's _save for why).
@@ -2189,7 +2200,13 @@ def _confirm_typed_items(conversation, items):
 		else:
 			res = _confirm_core(token, conversation, batch=True, batch_id=batch_id)
 		if not isinstance(res, dict):
-			res = {"ok": False, "error": {"code": "InternalError", "message": "confirmation failed"}}
+			res = {
+				"ok": False,
+				"error": {
+					"code": "InternalError",
+					"message": "We couldn't complete that confirmation. Reload the chat and try again.",
+				},
+			}
 		if single:
 			solo_envelope = res
 		tokens.append(token)
@@ -2240,12 +2257,13 @@ def _confirm_typed_items(conversation, items):
 		out = {"ok": not failed}
 		if failed:
 			failed_positions = ", ".join(str(r["position"]) for r in failed)
+			plural = len(failed) != 1
 			out["error"] = {
 				"type": "PartialConfirmation",
 				"message": (
-					f"{len(results) - len(failed)} of {len(results)} actions went through; "
-					f"{len(failed)} could not be completed "
-					f"(card{'s' if len(failed) != 1 else ''} {failed_positions})."
+					f"{len(results) - len(failed)} of {len(results)} actions went through. "
+					f"Card{'s' if plural else ''} {failed_positions} could not be completed. "
+					f"Check {'them' if plural else 'it'} and try again."
 				),
 			}
 		if cont and cont.get("queued"):
@@ -2528,7 +2546,7 @@ def send_message(
 			atts = []
 
 	if (not message or not message.strip()) and not atts:
-		return {"ok": False, "reason": _("message is empty")}
+		return {"ok": False, "reason": _("Type a message before sending.")}
 
 	# A human (non-delegated) send whose conversation was reaped out from under a
 	# stale tab - an empty chat deleted by session_lifecycle's empty-reap, or a
@@ -2643,7 +2661,10 @@ def send_message(
 		if _rej := _compacting_reject(conversation):
 			return _rej
 		if _conversation_busy(conversation):
-			return {"ok": False, "reason": _("a reply is already in progress - hang on a moment")}
+			return {
+				"ok": False,
+				"reason": _in_progress_sentence(),
+			}
 
 	# Apply model override BEFORE enqueueing so the worker sees the new value
 	# when it loads the conversation. (If we set this after the enqueue, the
@@ -2920,7 +2941,10 @@ def send_message(
 	# query-report route, OR {page: "triggers"|"dashboards"} when the user is
 	# on the Triggers / Dashboards page, OR {focus_connector: {key, label}}
 	# when the composer's connector-focus pill is armed (binding for the turn:
-	# jarvis.chat.connector_focus gates the tools too). Only forwarded when
+	# jarvis.chat.connector_focus gates the tools too), OR {handoff_pages:
+	# ["payment-calendar"]} when the web chat can open the Payment Calendar
+	# page (a capability, not a viewing context; see the allow-list below
+	# and turn_handler._payment_calendar_clause). Only forwarded when
 	# present, for the same not-yet-reloaded worker safety as attachments
 	# above. The narrowing here is deliberate (allow-list, not passthrough) so
 	# a compromised / stale frontend can't smuggle arbitrary keys into the
@@ -2948,12 +2972,24 @@ def send_message(
 				if isinstance(_focus_raw, dict) and _focus_raw.get("key") and _focus_raw.get("label")
 				else None
 			)
+			# Payment Calendar hand-off capability: the web chat names the pages it
+			# can open. A literal allow-list of ONE value (never a passthrough): the
+			# server hint (turn_handler._payment_calendar_clause) only checks that
+			# this one literal is present, and still gates on the switch and on the
+			# user's own visibility. Anything else the client sends is dropped.
+			_pages_raw = ctx.get("handoff_pages") if isinstance(ctx, dict) else None
+			handoff_pages = (
+				["payment-calendar"]
+				if isinstance(_pages_raw, list) and "payment-calendar" in _pages_raw
+				else []
+			)
 			if isinstance(ctx, dict) and (
 				ctx.get("doctype")
 				or ctx.get("report_name")
 				or ground_wiki
 				or ctx.get("page") in ("triggers", "dashboards")
 				or focus_connector
+				or handoff_pages
 			):
 				enqueue_kwargs["context"] = {
 					"doctype": ctx.get("doctype") or "",
@@ -2972,6 +3008,8 @@ def send_message(
 				# this pill existed (mirrors how `page` below is handled).
 				if focus_connector:
 					enqueue_kwargs["context"]["focus_connector"] = focus_connector
+				if handoff_pages:
+					enqueue_kwargs["context"]["handoff_pages"] = handoff_pages
 				# `page` is a literal allow-list of two values (not a
 				# passthrough) — the prompt-side only consumes "triggers"
 				# and "dashboards".
@@ -3837,6 +3875,9 @@ def compact_conversation(conversation: str, hint: str | None = None) -> dict:
 		return {"ok": False, "reason": "conversation_busy"}
 	try:
 		clean = compaction.sanitize_hint(hint)
+	except DirectiveRefusal:
+		# F-Q8: a model/runtime change in the hint; its own reason so the UI can say so.
+		return {"ok": False, "reason": "directive_refused"}
 	except frappe.ValidationError:
 		return {"ok": False, "reason": "bad_hint"}
 	return compaction.start_compaction(conversation, frappe.session.user, clean)
@@ -3865,11 +3906,11 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 			"ok": False,
 			"error": {
 				"code": "unknown_conversation",
-				"message": f"conversation {conversation!r} not found",
+				"message": "We couldn't find that chat. Reload and try again.",
 			},
 		}
 	if owner != frappe.session.user:
-		raise frappe.PermissionError("not your conversation")
+		raise frappe.PermissionError("This chat belongs to someone else.")
 
 	settings = frappe.get_single("Jarvis Settings")
 
@@ -3895,8 +3936,8 @@ def set_conversation_model(conversation: str, model: str | None = None) -> dict:
 			"error": {
 				"code": "unknown_model",
 				"message": (
-					f"{model!r} is not a recognized model for {settings.llm_provider!r}. "
-					f"Allowed: {sorted(allowed)!r}"
+					"That model isn't available for your workspace. Choose one of: "
+					f"{', '.join(sorted(allowed)[:12])}."
 				),
 			},
 		}
@@ -3948,18 +3989,18 @@ def set_conversation_thinking(conversation: str, thinking: str | None = None) ->
 			"ok": False,
 			"error": {
 				"code": "unknown_conversation",
-				"message": f"conversation {conversation!r} not found",
+				"message": "We couldn't find that chat. Reload and try again.",
 			},
 		}
 	if owner != frappe.session.user:
-		raise frappe.PermissionError("not your conversation")
+		raise frappe.PermissionError("This chat belongs to someone else.")
 	level = (thinking or "").strip().lower()
 	if level not in _ALLOWED_THINKING:
 		return {
 			"ok": False,
 			"error": {
 				"code": "unknown_thinking",
-				"message": f"{thinking!r} is not a valid thinking level. Allowed: low, medium, high",
+				"message": "Choose Low, Medium or High thinking.",
 			},
 		}
 	# Nothing has written in this request's transaction yet at this point, so a lost
@@ -4027,9 +4068,15 @@ def retry_message(message: str) -> dict:
 				refusal=_Refusal("busy", _in_progress_sentence()),
 			)
 	if doc.role != "assistant":
-		return {"ok": False, "reason": _("only assistant messages can be retried")}
+		return {
+			"ok": False,
+			"reason": _("Only Jarvis replies can be retried. Send your message again instead."),
+		}
 	if not doc.error:
-		return {"ok": False, "reason": _("message did not error")}
+		return {
+			"ok": False,
+			"reason": _("That reply finished without an error, so there is nothing to retry."),
+		}
 
 	# The user message right before this reply: the seed when no turn is bound to it.
 	prev_rows = frappe.db.sql(
@@ -4045,7 +4092,9 @@ def retry_message(message: str) -> dict:
 		return _refusal_response(
 			conversation=doc.conversation,
 			message=doc.name,
-			refusal=_Refusal("no_seed", _("no preceding user message to retry")),
+			refusal=_Refusal(
+				"no_seed", _("We couldn't find the message to retry. Send your message again instead.")
+			),
 		)
 	return _retry_errored(doc.conversation, message=doc.name, failed=failed)
 
@@ -4063,7 +4112,8 @@ class _Refusal(NamedTuple):
 
 
 def _in_progress_sentence() -> str:
-	return _("A reply is already in progress. Wait for it to finish.")
+	"""The one sentence for a send or retry refused because a reply is still running."""
+	return _("A reply is already in progress. Wait for it to finish, then try again.")
 
 
 def _retry_log(level: str, line: str, *args, **kwargs) -> None:
@@ -4383,7 +4433,10 @@ def stop_run(conversation: str, run_id: str | None = None) -> dict:
 			sess.chat_abort(conv.session_key, abort_run_id)
 	except Exception as e:
 		frappe.log_error(title="jarvis stop_run", message=str(e))
-		return {"ok": False, "reason": _("couldn't reach the assistant to stop it")}
+		return {
+			"ok": False,
+			"reason": _("We couldn't reach Jarvis to stop the reply. Try again in a moment."),
+		}
 	return {"ok": True}
 
 
@@ -5343,7 +5396,7 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile:
 		# A profile pick skips the connect, so check here that the agent is reachable in
 		# principle: an agent_url and a paired chat device (never the owner token).
 		if not gateway_url or not device.has_paired_token(settings):
-			frappe.throw(_("agent is not configured"))
+			frappe.throw(_("Jarvis isn't connected yet. Ask your workspace admin to finish the setup."))
 		# ":dashboard:" is the SAME chat-session namespace marker the gateway
 		# stamps into every legacy-minted key - session_lifecycle.py's
 		# _CHAT_NAMESPACE_MARKER (the idle/orphan reaper) and
@@ -5360,7 +5413,7 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile:
 		# AgentSession.connect pairs the chat device on first use, so only the URL
 		# can be checked up front; a device that cannot pair fails the connect itself.
 		if not gateway_url:
-			frappe.throw(_("agent is not configured"))
+			frappe.throw(_("Jarvis isn't connected yet. Ask your workspace admin to finish the setup."))
 
 		one_shot = AgentSession.connect(gateway_url)
 		try:
@@ -5431,12 +5484,20 @@ def get_doctype_fields(
 	require_jarvis_access()
 	doctype = (doctype or "").strip()
 	if not doctype or not frappe.db.exists("DocType", doctype):
-		return {"ok": False, "reason": _("unknown doctype"), "fields": []}
+		return {
+			"ok": False,
+			"reason": _("We don't recognise that record type. Reload the chat and try again."),
+			"fields": [],
+		}
 	meta = frappe.get_meta(doctype)
 	parent_doctype, parentfield = (parent_doctype or "").strip(), (parentfield or "").strip()
 	if parent_doctype or parentfield:
 		if not meta.istable or not parent_doctype or not frappe.db.exists("DocType", parent_doctype):
-			return {"ok": False, "reason": _("invalid parent"), "fields": []}
+			return {
+				"ok": False,
+				"reason": _("That table doesn't belong to this record. Reload the chat and try again."),
+				"fields": [],
+			}
 		parent_meta = frappe.get_meta(parent_doctype)
 		tables = [
 			df
@@ -5444,7 +5505,11 @@ def get_doctype_fields(
 			if df.options == doctype and (not parentfield or df.fieldname == parentfield)
 		]
 		if parent_meta.istable or len(tables) != 1:
-			return {"ok": False, "reason": _("invalid parent"), "fields": []}
+			return {
+				"ok": False,
+				"reason": _("That table doesn't belong to this record. Reload the chat and try again."),
+				"fields": [],
+			}
 		parentfield = tables[0].fieldname
 		if (
 			frappe.session.user != "Administrator"
@@ -5455,7 +5520,11 @@ def get_doctype_fields(
 	if not frappe.has_permission(doctype, "read", parent_doctype=parent_doctype or None):
 		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
 	if meta.istable and not parent_doctype:
-		return {"ok": False, "reason": _("parent required"), "fields": []}
+		return {
+			"ok": False,
+			"reason": _("Open the table from its parent record, then try again."),
+			"fields": [],
+		}
 	from jarvis.chat.link_filters import draft_link_query_filters
 
 	levels = (

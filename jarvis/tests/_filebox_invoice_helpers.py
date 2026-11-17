@@ -69,7 +69,8 @@ class InvoiceFixture:
 				"cost_center": self.cost_center,
 			},
 		)
-		group = self.insert("Supplier Group", supplier_group_name=self.prefix, is_group=1)
+		# a leaf group: ERPNext refuses a supplier in a group-type Supplier Group
+		group = self.insert("Supplier Group", supplier_group_name=self.prefix)
 		self.supplier = self.insert(
 			"Supplier",
 			supplier_name=self.prefix,

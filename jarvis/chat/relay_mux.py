@@ -91,6 +91,7 @@ from jarvis.chat.agent_client import (
 	_chat_final_text,
 	_is_yield_aborted_final,
 	failed_final_error,
+	uncut_error_message,
 )
 from jarvis.chat.events import parse_event
 from jarvis.chat.generated_media import detect_media_paths, has_embedded_media_path, has_media_marker
@@ -1034,7 +1035,8 @@ class RelayMux:
 			raw = {
 				"kind_hint": "error",
 				"state": state,
-				"error_message": payload.get("errorMessage") or state,
+				"error_message": uncut_error_message(payload.get("errorMessage"), lane.failure_detail)
+				or state,
 				"text": _chat_final_text(payload) or "",
 			}
 		else:

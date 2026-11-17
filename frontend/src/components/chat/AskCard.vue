@@ -3,7 +3,10 @@
 		<div v-for="(q, qi) in questions" :key="qi" class="jv-ask-q">
 			<div class="jv-ask-qt">
 				<span class="jv-ask-num">{{ qi + 1 }}</span
-				>{{ q.q }}
+				>{{ q.q
+				}}<span v-if="q.optional && !saysOptional(q.q)" class="jv-ask-optional">
+					(optional)</span
+				>
 			</div>
 			<!-- field: waiting on the field's meta -->
 			<div v-if="q.type === 'loading'" class="jv-ask-loading">
@@ -72,15 +75,21 @@
 				placeholder="Select an option"
 				@update:model-value="pickSingle(qi, $event)"
 			/>
-			<!-- number: a field's Int / Float / Currency / Percent -->
-			<FormControl
+			<!-- number: a field's Int / Float / Currency / Percent. The card's own
+			     field, like its date/text/link siblings: a frappe-ui FormControl is
+			     styled by Tailwind utilities, and the chat surface's forms-plugin
+			     compensation (index.css, `.jv-root :where(input…)`) reverts those to
+			     the browser's bare input (jarvis-admin-v2#806). -->
+			<input
 				v-else-if="q.type === 'number'"
 				type="text"
 				inputmode="decimal"
-				:model-value="sel[qi] || ''"
+				class="jv-ask-field"
+				:value="sel[qi] || ''"
 				:disabled="answered"
 				placeholder="Type a number"
-				@update:model-value="pickSingle(qi, $event)"
+				@input="pickSingle(qi, $event.target.value)"
+				@keydown.enter.prevent
 			/>
 			<!-- link: search a record of the given DocType -->
 			<div
@@ -136,9 +145,11 @@
 			<button class="jv-ask-submit" :disabled="!ready || answered || busy" @click="submit">
 				{{ answered ? "Answered" : "Submit answers" }}
 			</button>
-			<span v-if="!ready && !answered" class="jv-ask-hint"
-				>Answer each question to continue</span
-			>
+			<span v-if="!ready && !answered" class="jv-ask-hint">{{
+				hasOptional
+					? "Answer each required question to continue"
+					: "Answer each question to continue"
+			}}</span>
 		</div>
 	</div>
 </template>
@@ -163,7 +174,7 @@
 // identity) on every stream tick — resetting on a `spec` watcher would wipe
 // half-made picks. Remounting on a new message is what clears the draft.
 import { ref, computed, watch } from "vue";
-import { FormControl, LoadingIndicator, Select } from "frappe-ui";
+import { LoadingIndicator, Select } from "frappe-ui";
 import { getDoctypeFields, searchLink } from "@/api";
 import { controlFor } from "@/lib/docFields";
 import { DraftLinkFilterError, resolveLinkFilters } from "@/lib/draftLinkFilters";
@@ -293,6 +304,11 @@ function drawn(q, i) {
 }
 const questions = computed(() => props.spec.questions.map(drawn));
 const ready = computed(() => isAskReady({ questions: questions.value }, sel.value, other.value));
+// An optional question (parseAsk: `optional: true`, `required: false`, or a label
+// ending in "(optional)") never holds Submit back while blank. The label is shown
+// as written; only a flag-marked one gets an "(optional)" suffix drawn for it.
+const hasOptional = computed(() => questions.value.some((q) => q.optional));
+const saysOptional = (text) => /\(\s*optional\s*\)\s*$/i.test(text || "");
 const linkSeq = {};
 watch(
 	() => props.spec.questions.map((q) => JSON.stringify([q.type, fieldKey(q)])),
@@ -485,6 +501,10 @@ function submit() {
 }
 .jv-ask--form .jv-ask-num {
 	display: none;
+}
+.jv-ask-optional {
+	font-weight: 400;
+	color: var(--text-3);
 }
 .jv-ask--form .jv-ask-q {
 	border-bottom: 0;

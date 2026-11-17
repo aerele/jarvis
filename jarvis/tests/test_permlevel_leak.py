@@ -34,6 +34,7 @@ import frappe
 from frappe.core.doctype.doctype.test_doctype import new_doctype
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis.exceptions import PermissionDeniedError
 from jarvis.tools.amend_doc import amend_doc
 from jarvis.tools.cancel_doc import cancel_doc
 from jarvis.tools.create_doc import create_doc
@@ -218,17 +219,21 @@ class TestCreateDocPermlevelLeak(PermlevelLeakTestCase):
 
 	def test_restricted_user_does_not_see_restricted_field(self):
 		with _as(USER_RESTRICTED):
-			result = create_doc(doctype=DT_NAME, values={FIELD_PUBLIC: "created"})
-		# apply_fieldlevel_read_permissions() deletes the in-memory attribute,
-		# but as_dict() still emits the key (schema-defined column) with a
-		# None fallback rather than omitting it - assert the value is gone,
-		# not the key.
-		self.assertIsNone(result.get(FIELD_RESTRICTED))
+			result = create_doc(doctype=DT_NAME, values={FIELD_PUBLIC: "created"}, fields=[FIELD_PUBLIC])
+		# The compact default never carries a custom field, and a named field the
+		# user cannot read is refused (before the write), not returned as None.
+		self.assertNotIn(FIELD_RESTRICTED, result)
 		self.assertEqual(result[FIELD_PUBLIC], "created")
+
+	def test_restricted_user_cannot_ask_for_restricted_field(self):
+		before = frappe.db.count(DT_NAME)
+		with _as(USER_RESTRICTED), self.assertRaises(PermissionDeniedError):
+			create_doc(doctype=DT_NAME, values={FIELD_PUBLIC: "created"}, fields=[FIELD_RESTRICTED])
+		self.assertEqual(frappe.db.count(DT_NAME), before)
 
 	def test_privileged_user_sees_restricted_field(self):
 		with _as(USER_PRIVILEGED):
-			result = create_doc(doctype=DT_NAME, values={FIELD_PUBLIC: "created"})
+			result = create_doc(doctype=DT_NAME, values={FIELD_PUBLIC: "created"}, fields=[FIELD_RESTRICTED])
 		self.assertEqual(result[FIELD_RESTRICTED], SECRET_VALUE)
 
 
@@ -238,18 +243,26 @@ class TestUpdateDocPermlevelLeak(PermlevelLeakTestCase):
 	def test_restricted_user_does_not_see_restricted_field(self):
 		name = _make_doc()
 		with _as(USER_RESTRICTED):
-			result = update_doc(doctype=DT_NAME, name=name, changes={FIELD_PUBLIC: "updated"})
-		# apply_fieldlevel_read_permissions() deletes the in-memory attribute,
-		# but as_dict() still emits the key (schema-defined column) with a
-		# None fallback rather than omitting it - assert the value is gone,
-		# not the key.
-		self.assertIsNone(result.get(FIELD_RESTRICTED))
+			result = update_doc(
+				doctype=DT_NAME, name=name, changes={FIELD_PUBLIC: "updated"}, fields=[FIELD_PUBLIC]
+			)
+		self.assertNotIn(FIELD_RESTRICTED, result)
 		self.assertEqual(result[FIELD_PUBLIC], "updated")
+
+	def test_restricted_user_cannot_ask_for_restricted_field(self):
+		name = _make_doc()
+		with _as(USER_RESTRICTED), self.assertRaises(PermissionDeniedError):
+			update_doc(
+				doctype=DT_NAME, name=name, changes={FIELD_PUBLIC: "updated"}, fields=[FIELD_RESTRICTED]
+			)
+		self.assertNotEqual(frappe.db.get_value(DT_NAME, name, FIELD_PUBLIC), "updated")
 
 	def test_privileged_user_sees_restricted_field(self):
 		name = _make_doc()
 		with _as(USER_PRIVILEGED):
-			result = update_doc(doctype=DT_NAME, name=name, changes={FIELD_PUBLIC: "updated"})
+			result = update_doc(
+				doctype=DT_NAME, name=name, changes={FIELD_PUBLIC: "updated"}, fields=[FIELD_RESTRICTED]
+			)
 		self.assertEqual(result[FIELD_RESTRICTED], SECRET_VALUE)
 
 
@@ -372,9 +385,8 @@ class TestCreateDocPermlevelWriteReset(PermlevelLeakTestCase):
 	permlevel write hole.
 
 	NB: assert the PERSISTED value (raw ``frappe.db.get_value``), not the
-	returned dict - create_doc permlevel-read-filters its return, so the
-	restricted field always reads back None there regardless of what was stored
-	(that read-side leak is covered by TestCreateDocPermlevelLeak)."""
+	returned dict - create_doc permlevel-read-filters its return (the read-side
+	leak is covered by TestCreateDocPermlevelLeak)."""
 
 	def test_restricted_user_cannot_persist_permlevel_field(self):
 		with _as(USER_RESTRICTED):

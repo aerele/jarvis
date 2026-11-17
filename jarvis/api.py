@@ -1426,12 +1426,13 @@ def _persist_and_publish_tool_call(
 
 
 def _locked_insert_chat_message(
-	conv_name: str, fields: dict, *, dedupe_filters: dict | None = None
+	conv_name: str, fields: dict, *, dedupe_filters: dict | None = None, only_if=None
 ) -> str | None:
 	"""Allocate the next ``seq`` for ``conv_name`` UNDER a ``Jarvis Conversation``
 	``FOR UPDATE`` lock and insert one ``Jarvis Chat Message`` with ``fields`` merged
 	onto ``{conversation, seq}``. Returns the message name, or ``None`` when
-	``dedupe_filters`` already matches a row (nothing inserted).
+	``dedupe_filters`` already matches a row, or ``only_if()`` is false under the lock
+	(nothing inserted).
 
 	MUST be called inside an ``impersonate(conv_owner)`` block that has already
 	``commit``ed, so this ``FOR UPDATE`` is the first statement of the transaction
@@ -1445,6 +1446,10 @@ def _locked_insert_chat_message(
 		{"c": conv_name},
 	)
 	if dedupe_filters and frappe.db.exists("Jarvis Chat Message", dedupe_filters):
+		return None
+	# ``only_if``: a check that must hold UNDER the lock (a Cancel racing a Create re-reads
+	# the conversation here, after the other writer has committed and released it).
+	if only_if is not None and not only_if():
 		return None
 	seq = (
 		frappe.db.sql(
@@ -1472,7 +1477,8 @@ def persist_tool_receipt(
 	flip_token: str | None = None,
 	overwrite_outcomes: tuple = (),
 	require_pending_flip: bool = False,
-) -> None:
+	only_if=None,
+) -> bool:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
 	publish the realtime tool:result event, running as the conversation owner so
 	DocType perms allow the insert. Shared by the inline model-write path
@@ -1511,7 +1517,11 @@ def persist_tool_receipt(
 
 	``require_pending_flip``: do not use the normal fallback insert when a matching
 	pending row is absent. Close-fence cleanup uses this mode so an unseen or
-	already-settled legacy token cannot manufacture a new terminal receipt."""
+	already-settled legacy token cannot manufacture a new terminal receipt.
+
+	``only_if``: a no-argument check run under the conversation lock just before the
+	fallback insert; when false nothing is written. Returns True when a row was written
+	or flipped, False when nothing was (a duplicate, a failed ``only_if``, a lost flip)."""
 	from jarvis.tools import _private_output
 
 	# Preserve the execution name only long enough to classify a source result.
@@ -1662,7 +1672,7 @@ def persist_tool_receipt(
 			# Release the conversation lock without manufacturing a new receipt. A
 			# concurrent terminal writer won this card, or it was never displayed.
 			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release flip-only lock
-			return
+			return False
 		if msg_name is None:
 			msg_name = _locked_insert_chat_message(
 				conv_name,
@@ -1688,11 +1698,12 @@ def persist_tool_receipt(
 					if (tool_call_id or flip_token)
 					else None
 				),
+				only_if=only_if,
 			)
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist receipt before reply
 		if msg_name is None:
 			# Duplicate callback for the same tool call — already recorded (R-6 idempotent).
-			return
+			return False
 		if tool_call_id and not flip_token:
 			_bind_callback_tool(conv_name, tool_call_id)
 		publish_realtime_tool_result(
@@ -1712,6 +1723,7 @@ def persist_tool_receipt(
 		# same surface the agent's own canvas files use.
 		if not redacted_delegate:
 			_maybe_attach_artifact(conv_name, conv_owner, result)
+	return True
 
 
 def persist_pending_action(
@@ -2826,10 +2838,11 @@ def _run_preview(tool: str, args: dict) -> dict:
 	Raises ``PreviewSandboxLost`` when the dry run could not be undone cleanly;
 	every caller turns that into a refusal (see the class)."""
 	from jarvis.tools import _write_risk
+	from jarvis.tools._doc_parts import full_write_results
 	from jarvis.tools._preview_sandbox import preview_sandbox, will_queue_summary
 
 	_write_risk.take_refusal()
-	with preview_sandbox() as dropped:
+	with preview_sandbox() as dropped, full_write_results():
 		would = dispatch(tool, args)
 	hidden = _write_risk.take_refusal()
 	if hidden is not None:

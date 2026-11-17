@@ -94,6 +94,42 @@ describe("sendMessage context forwarding", () => {
 		expect(JSON.parse(lastSendArgs().context)).toMatchObject({ ground_wiki: 1 });
 	});
 
+	it("forwards the payment-calendar handoff capability alone, exactly", async () => {
+		await sendMessage("C1", "hi", undefined, undefined, {
+			handoff_pages: ["payment-calendar"],
+		});
+		expect(JSON.parse(lastSendArgs().context)).toEqual({
+			handoff_pages: ["payment-calendar"],
+		});
+	});
+
+	it("does NOT forward any other handoff_pages value as a capability", async () => {
+		for (const bad of [
+			["other"],
+			["payment-calendar", "other"],
+			[],
+			"payment-calendar",
+			{ 0: "payment-calendar" },
+			null,
+			1,
+		]) {
+			call.mockClear();
+			await sendMessage("C1", "hi", undefined, undefined, { handoff_pages: bad });
+			expect(lastSendArgs().context).toBeUndefined();
+		}
+	});
+
+	it("keeps forwarding the other context keys unchanged alongside handoff_pages", async () => {
+		await sendMessage("C1", "hi", undefined, undefined, {
+			page: "triggers",
+			handoff_pages: ["payment-calendar"],
+		});
+		expect(JSON.parse(lastSendArgs().context)).toEqual({
+			page: "triggers",
+			handoff_pages: ["payment-calendar"],
+		});
+	});
+
 	it("serialises attachments and model override when given", async () => {
 		await sendMessage("C1", "hi", "gpt-x", [{ file_url: "/f.png" }]);
 		const args = lastSendArgs();

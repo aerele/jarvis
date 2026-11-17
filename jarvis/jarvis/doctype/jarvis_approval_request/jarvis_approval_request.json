@@ -39,7 +39,9 @@
   "collaboration_run_id",
   "collaboration_grant_revision",
   "collaboration_epoch",
-  "collaboration_question_key"
+  "collaboration_question_key",
+  "intake_activity",
+  "intake_missing"
  ],
  "fields": [
   {
@@ -91,7 +93,7 @@
    "fieldtype": "Select",
    "in_standard_filter": 1,
    "label": "Source",
-   "options": "File Box\nChat\nFile Box Wiki\nAgent Review\nTicket Triage"
+   "options": "File Box\nChat\nFile Box Wiki\nAgent Review\nTicket Triage\nIntake"
   },
   {
    "description": "The business document type this decision concerns (e.g. Purchase Invoice). Blank = the document type itself is undetermined (Unclassified tab).",
@@ -321,6 +323,23 @@
    "hidden": 1,
    "no_copy": 1,
    "unique": 1
+  },
+  {
+   "fieldname": "intake_activity",
+   "fieldtype": "Link",
+   "label": "Intake Activity",
+   "options": "Jarvis Trigger Activity",
+   "read_only": 1,
+   "search_index": 1,
+   "description": "Document Intake: the row waiting for these values. Server-set."
+  },
+  {
+   "fieldname": "intake_missing",
+   "fieldtype": "JSON",
+   "label": "Intake Missing Values",
+   "read_only": 1,
+   "hidden": 1,
+   "description": "Document Intake: the missing values with field metadata, plus the values already read. Server-set."
   }
  ],
  "index_web_pages_for_search": 0,

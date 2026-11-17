@@ -87,6 +87,12 @@
 					<div v-else-if="m.error" class="flex">
 						<div class="max-w-[95%] text-sm text-ink-red-4" role="status">
 							<strong>{{ m.err.headline }}</strong>
+							<div v-if="m.err.models" class="mt-1 text-xs">
+								<div v-for="(mod, mdi) in m.err.models" :key="mdi">
+									<strong>{{ mod.model }}</strong> {{ mod.reason }}.
+									{{ mod.next }}
+								</div>
+							</div>
 							<p>
 								{{ m.err.hint }}
 								<a
@@ -98,33 +104,31 @@
 									>{{ m.err.statusLabel }}
 									<span aria-hidden="true">&#8599;</span></a
 								>
-								<span v-if="m.err.hint" aria-hidden="true"> &middot; </span>
-								<button
-									type="button"
-									class="underline underline-offset-2"
-									:aria-expanded="rawOpen.has(m.name) ? 'true' : 'false'"
-									:aria-controls="`dash-err-raw-${m.name}`"
-									@click="toggleRaw(m.name)"
-								>
-									{{ rawOpen.has(m.name) ? "Hide details" : "Details" }}
-								</button>
 							</p>
 							<pre
-								v-if="rawOpen.has(m.name)"
-								:id="`dash-err-raw-${m.name}`"
+								v-if="showsRawReason(m.err) && m.error"
 								class="mt-1 whitespace-pre-wrap break-words font-sans text-xs"
 								>{{ m.error }}</pre
 							>
 							<!-- the same retry API and target rule as ChatView -->
-							<Button
-								v-if="m.err.retryable && m.name === retryTarget"
-								class="mt-1.5"
-								variant="subtle"
-								size="sm"
-								:label="retryButtonLabel"
-								:disabled="retryDisabled"
-								@click="retryFailed(m)"
-							/>
+							<div class="mt-1.5 flex gap-1.5">
+								<Button
+									v-if="m.err.retryable && m.name === retryTarget"
+									variant="subtle"
+									size="sm"
+									:label="retryButtonLabel"
+									:disabled="retryDisabled"
+									@click="retryFailed(m)"
+								/>
+								<Button
+									v-if="supportOn && m.err.support"
+									variant="subtle"
+									size="sm"
+									label="Report error"
+									:disabled="reportingError"
+									@click="reportError(m)"
+								/>
+							</div>
 						</div>
 					</div>
 					<!-- assistant: markdown, same renderer + prose classes as the
@@ -430,14 +434,18 @@ import {
 	getConversationContext,
 	compactConversation,
 	retryMessage,
+	getErrorReportDetails,
 } from "@/api";
+import { useRouter } from "vue-router";
+import { supportErrorDraft } from "../../../../jarvis/public/js/shared/support_error_draft.mjs";
 import { brand } from "@/branding";
-import { errHtml, escapeHtml, turnErrorInfo } from "@/lib/errors";
+import { escapeHtml, turnErrorInfo, showsRawReason } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
 import { sortPendingCards } from "@/lib/sortPendingCards";
 import { discardedTokens } from "@/lib/typedCardReply";
-import { compactFailureCopy } from "@/lib/compact";
-import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
+import { compactOutcome } from "@/lib/compact";
+import { rejectionCopy } from "@/lib/sendRejectionCopy";
+import { actionErrorCopy } from "@/lib/chatErrorCopy";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
 
 // get_dashboards_caps payload (creatable_scopes/manageable_roles feed the save
@@ -637,7 +645,10 @@ async function runCompact(hint) {
 		const res = await compactConversation(view.conversation, hint);
 		if (!dashboardViewIsCurrent(view)) return;
 		if (!res || !res.ok) {
-			toast.error(compactFailureCopy(res && res.reason));
+			{
+				const o = compactOutcome(res && res.reason);
+				toast[o.type](o.text);
+			}
 			return;
 		}
 		compacting.value = true;
@@ -645,9 +656,11 @@ async function runCompact(hint) {
 		compactHintSeed.value = hint || "";
 		compactDialogOpen.value = false;
 	} catch (e) {
-		// frappe-ui toast renders `message` via v-html: feed it the escaped
-		// errHtml, never the plain-text errMessage (lib/noInlineErrorFormatter guard).
-		if (dashboardViewIsCurrent(view)) toast.error(errHtml(e));
+		// frappe-ui toast renders `message` via v-html: feed it escaped text, never the
+		// plain-text errMessage (lib/noInlineErrorFormatter guard).
+		if (dashboardViewIsCurrent(view)) {
+			toast.error(escapeHtml(actionErrorCopy("Couldn't compact this chat", e)));
+		}
 	} finally {
 		if (dashboardViewIsCurrent(view)) compactSubmitting.value = false;
 	}
@@ -698,15 +711,20 @@ async function selectModel(model) {
 	const previous = modelOverride.value;
 	modelOverride.value = model;
 	if (!view.conversation) return;
+	let refused = "";
 	try {
 		const result = await setConversationModel(view.conversation, model);
 		if (!dashboardViewIsCurrent(view)) return;
-		if (result && result.ok === false)
-			throw new Error(result.reason || "Model change rejected");
-	} catch {
+		if (result && result.ok === false) {
+			refused = rejectionCopy(result, brand.agentName, "").message;
+			throw new Error("rejected");
+		}
+	} catch (e) {
 		if (!dashboardViewIsCurrent(view)) return;
 		modelOverride.value = previous;
-		toast.error("Couldn't change the model for this dashboard chat.");
+		toast.error(
+			escapeHtml(actionErrorCopy("Couldn't change the model for this chat", e, refused))
+		);
 	}
 }
 
@@ -715,15 +733,20 @@ async function selectThinking(level) {
 	const previous = thinkingOverride.value;
 	thinkingOverride.value = level;
 	if (!view.conversation) return;
+	let refused = "";
 	try {
 		const result = await setConversationThinking(view.conversation, level);
 		if (!dashboardViewIsCurrent(view)) return;
-		if (result && result.ok === false)
-			throw new Error(result.reason || "Effort change rejected");
-	} catch {
+		if (result && result.ok === false) {
+			refused = rejectionCopy(result, brand.agentName, "").message;
+			throw new Error("rejected");
+		}
+	} catch (e) {
 		if (!dashboardViewIsCurrent(view)) return;
 		thinkingOverride.value = previous;
-		toast.error("Couldn't change the effort for this dashboard chat.");
+		toast.error(
+			escapeHtml(actionErrorCopy("Couldn't change the effort for this chat", e, refused))
+		);
 	}
 }
 
@@ -754,15 +777,43 @@ const scroller = ref(null);
 // failure the same way ChatView does for the same event. Not persisted: a
 // reload has only the row's error text and reclassifies from that.
 const errorMeta = ref({});
-// Failed bubbles whose raw error text is expanded ("Details" in the note).
-const rawOpen = ref(new Set());
-function toggleRaw(name) {
-	const next = new Set(rawOpen.value);
-	next.has(name) ? next.delete(name) : next.add(name);
-	rawOpen.value = next;
-}
 function errorNote(m) {
-	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", { provider: m.provider });
+	return turnErrorInfo(m.error, errorMeta.value[m.name] || "", {
+		provider: m.provider,
+		admin: canConnectModel,
+	});
+}
+// Report error, as in the main chat: a ticket draft carrying the server's scrubbed copy of the
+// error and the run id, since support works from the ticket alone.
+const router = useRouter();
+const supportOn =
+	typeof window !== "undefined" && !!(window.support_available && window.has_support_access);
+const reportingError = ref(false);
+async function reportError(m) {
+	if (reportingError.value || !supportOn || !conversation.value || !m?.name) return;
+	reportingError.value = true;
+	try {
+		let details = null;
+		try {
+			const res = await getErrorReportDetails(conversation.value, m.name);
+			details = res && res.data ? res.data : null;
+		} catch {
+			details = null;
+		}
+		const draft = supportErrorDraft({
+			code: m.err?.code,
+			upstream: m.err?.upstream,
+			conversation: conversation.value,
+			message: m.name,
+			at: m.modified || m.creation,
+			details,
+		});
+		if (draft) await router.push({ name: "SupportNew", query: draft });
+	} catch {
+		toast.error("Could not open Support. Try again.");
+	} finally {
+		reportingError.value = false;
+	}
 }
 // `err` is classified once here, not per template read (five reads per bubble).
 const bubbles = computed(() =>
@@ -788,6 +839,8 @@ const retryText = computed(() => retryLabel(retryRows.value));
 // stripped from the PROSE here too, but unlike the others it is not discarded:
 // <AskCard> renders it below the bubble (see activeAsk), so the clarifying
 // questions the agent asks before building are answerable in this pane.
+// `jarvis-goto` (a hand-off to a page of the app) is dropped for any page: this
+// pane is already on Dashboards, and nothing here follows it.
 function stripBlocks(text) {
 	return (text || "")
 		.replace(/```jarvis-action[ \t]*\n[\s\S]*?```/g, "")
@@ -796,6 +849,7 @@ function stripBlocks(text) {
 		.replace(/```jarvis-cards[ \t]*\n[\s\S]*?```/g, "")
 		.replace(/```jarvis-skill[ \t]*\n[\s\S]*?```/g, "")
 		.replace(/```jarvis-macro[ \t]*\n[\s\S]*?```/g, "")
+		.replace(/```jarvis-goto[ \t]*\n[\s\S]*?```/g, "")
 		.replace(/```jarvis-chart[ \t]*\n[\s\S]*?```/g, "")
 		.replace(/\n{3,}/g, "\n\n")
 		.trim();
@@ -1110,7 +1164,7 @@ async function approve(pa) {
 	} catch (e) {
 		if (!dashboardActionIsCurrent(view)) return;
 		keepCard = true;
-		toast.error(errHtml(e));
+		toast.error(escapeHtml(actionErrorCopy("Couldn't confirm that action", e)));
 	} finally {
 		if (dashboardViewIsCurrent(view)) {
 			// The switch fence already cleared the old guard. Do not clear a
@@ -1163,7 +1217,7 @@ async function dismiss(pa) {
 	} catch (e) {
 		if (!dashboardActionIsCurrent(view)) return;
 		keepCard = true;
-		toast.error(errHtml(e));
+		toast.error(escapeHtml(actionErrorCopy("Couldn't discard that action", e)));
 	} finally {
 		if (dashboardViewIsCurrent(view)) {
 			// Keep a new view's busy token intact when this older request settles.
@@ -1355,7 +1409,7 @@ async function send(gotoMessageId = "") {
 		messages.value = messages.value.filter((m) => m.name !== tmpName);
 		if (!draft.value) draft.value = text;
 		forgetGotoClaim(gotoMessageId);
-		toast.error(errHtml(e));
+		toast.error(escapeHtml(actionErrorCopy("Couldn't send your message", e)));
 	} finally {
 		if (dashboardViewIsCurrent(view)) sending.value = false;
 	}
@@ -1377,7 +1431,7 @@ function applyRestoredRun(restored) {
 
 // A refused send or retry. The toast renders HTML, so the whole message is escaped.
 function toastRejection(r, fallback) {
-	const { message, type } = sendRejectionCopy(r.reason, brand.agentName, r, fallback);
+	const { message, type } = rejectionCopy(r, brand.agentName, fallback);
 	(toast[type] || toast.error)(escapeHtml(message));
 }
 
@@ -1439,7 +1493,7 @@ async function retryFailed(m) {
 	} catch (e) {
 		if (disposed || !dashboardViewIsCurrent(view)) return;
 		if (runStarts === starts) endStartedRun();
-		toast.error(errHtml(e, RETRY_FALLBACK));
+		toast.error(escapeHtml(actionErrorCopy("Couldn't retry that", e)));
 	} finally {
 		if (dashboardViewIsCurrent(view)) retrying.value = false;
 	}
@@ -1602,7 +1656,10 @@ function onEvent(p) {
 		case "context:compact_failed":
 			compacting.value = false;
 			compactHintSeed.value = "";
-			toast.error(compactFailureCopy(p.reason));
+			{
+				const o = compactOutcome(p.reason);
+				toast[o.type](o.text);
+			}
 			break;
 	}
 }

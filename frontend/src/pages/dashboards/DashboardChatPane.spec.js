@@ -104,7 +104,13 @@ vi.mock("@/api", () => ({
 	getConversationContext: vi.fn(async () => null),
 	compactConversation: vi.fn(async () => ({ ok: true })),
 	retryMessage: vi.fn(async () => ({ ok: true, run_id: "r2" })),
+	getErrorReportDetails: vi.fn(async () => ({
+		ok: true,
+		data: { error: "Request timed out", model: "gpt-5.6-terra", run: "89200d04e322" },
+	})),
 }));
+const routerPush = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("vue-router", () => ({ useRouter: () => ({ push: routerPush }) }));
 
 import {
 	confirmTool,
@@ -209,16 +215,126 @@ describe("DashboardChatPane surfaces a run that failed before its first token", 
 		await flushPromises();
 		const note = wrapper.find(".text-ink-red-4");
 		expect(note.exists()).toBe(true);
-		// The row renders the classified headline and guidance, not the raw
-		// provider text; the raw text sits behind the inline Details toggle.
+		// The row renders the classified headline and guidance. A named cause
+		// never shows the raw provider text, and there is no Details toggle.
 		expect(note.text()).toContain("The model’s request limit was reached");
 		expect(note.text()).not.toContain("API rate limit reached");
-		const details = note.findAll("button").find((b) => b.text() === "Details");
-		expect(details).toBeTruthy();
-		await details.trigger("click");
-		expect(note.text()).toContain("API rate limit reached. Please try again later.");
-		expect(note.find("button[aria-expanded='true']").text()).toBe("Hide details");
+		expect(note.findAll("button").some((b) => b.text() === "Details")).toBe(false);
 		localStorage.removeItem("jarvis-dash-conv-u@x.com");
+	});
+});
+
+describe("DashboardChatPane failed-turn card names the exact cause", () => {
+	async function mountWithError(error) {
+		localStorage.setItem("jarvis-dash-conv-u@x.com", "conv1");
+		api.getDashboardConversation.mockResolvedValueOnce({
+			conversation: { name: "conv1" },
+			messages: [
+				{ name: "m1", role: "user", content: "Build me a dashboard" },
+				{ name: "m2", role: "assistant", content: "", error },
+			],
+		});
+		const { wrapper } = mountPane();
+		await flushPromises();
+		localStorage.removeItem("jarvis-dash-conv-u@x.com");
+		return wrapper.find(".text-ink-red-4");
+	}
+
+	it("Report error opens a ticket draft carrying the scrubbed error and run id", async () => {
+		window.support_available = true;
+		window.has_support_access = true;
+		try {
+			const note = await mountWithError("ws open failed");
+			const report = note.findAll("button").find((b) => b.text() === "Report error");
+			expect(report).toBeTruthy();
+			await report.trigger("click");
+			await flushPromises();
+			expect(routerPush).toHaveBeenCalledOnce();
+			const { name, query } = routerPush.mock.calls[0][0];
+			expect(name).toBe("SupportNew");
+			expect(query.body).toContain("Conversation: conv1");
+			expect(query.body).toContain("Run: 89200d04e322");
+			expect(query.body).toContain("Error text (secrets removed):\nRequest timed out");
+		} finally {
+			delete window.support_available;
+			delete window.has_support_access;
+			routerPush.mockClear();
+		}
+	});
+
+	it("shows no Report error where support is off", async () => {
+		const note = await mountWithError("ws open failed");
+		expect(note.findAll("button").some((b) => b.text() === "Report error")).toBe(false);
+	});
+
+	it("shows no Report error on a failure the user or admin can fix", async () => {
+		window.support_available = true;
+		window.has_support_access = true;
+		try {
+			const note = await mountWithError("Please run /login");
+			expect(note.findAll("button").some((b) => b.text() === "Report error")).toBe(false);
+		} finally {
+			delete window.support_available;
+			delete window.has_support_access;
+		}
+	});
+
+	it("lists each failed model and has no Details toggle", async () => {
+		const note = await mountWithError(
+			"All models failed (2): openai_compat/jarvis-pool: 429 All credentials for model gpt-5.6-terra are cooling down (last error: usage_limit_reached: The usage limit has been reached); Retry-After: 169907 seconds (rate_limit) | anthropic/claude-opus-5: Failed to authenticate: OAuth session expired and could not be refreshed (auth)."
+		);
+		expect(note.text()).toContain("None of your models could answer");
+		expect(note.text()).toContain("gpt-5.6-terra");
+		expect(note.text()).toContain("Usage limit reached.");
+		expect(note.text()).toContain("claude-opus-5");
+		expect(note.findAll("button").some((b) => b.text() === "Details")).toBe(false);
+		expect(note.find("pre").exists()).toBe(false);
+	});
+
+	it("shows the raw text with no toggle when it is the only reason", async () => {
+		const note = await mountWithError("zzq unclassifiable backend failure 4821");
+		expect(note.find("pre").text()).toContain("zzq unclassifiable backend failure 4821");
+		expect(note.findAll("button").some((b) => b.text() === "Details")).toBe(false);
+	});
+});
+
+describe("DashboardChatPane hides a jarvis-goto block from the prose", () => {
+	// The block is a hand-off for the main chat. Here it is dropped, not rendered:
+	// the pane's renderMarkdown double is the identity, so any text left in the
+	// bubble is text the user would read.
+	const seed = async (content) => {
+		localStorage.setItem("jarvis-dash-conv-u@x.com", "conv1");
+		api.getDashboardConversation.mockResolvedValueOnce({
+			conversation: { name: "conv1" },
+			messages: [
+				{ name: "m1", role: "user", content: "Show the cash view" },
+				{ name: "m2", role: "assistant", content },
+			],
+		});
+		const { wrapper } = mountPane();
+		await flushPromises();
+		localStorage.removeItem("jarvis-dash-conv-u@x.com");
+		return wrapper;
+	};
+	const gotoBlock = (page) =>
+		"```jarvis-goto\n" + JSON.stringify({ page, prompt: "Cash by month" }) + "\n```";
+
+	for (const page of ["dashboards", "payment-calendar"]) {
+		it(`strips a ${page} goto and keeps the prose around it`, async () => {
+			const wrapper = await seed(`Opening that.\n\n${gotoBlock(page)}\n\nAnything else?`);
+			const text = wrapper.text();
+			expect(text).toContain("Opening that.");
+			expect(text).toContain("Anything else?");
+			expect(text).not.toContain("jarvis-goto");
+			expect(text).not.toContain("Cash by month");
+		});
+	}
+
+	it("strips a goto that is not valid JSON, so no raw fence shows", async () => {
+		const wrapper = await seed("Hold on.\n\n```jarvis-goto\n{not json\n```");
+		expect(wrapper.text()).toContain("Hold on.");
+		expect(wrapper.text()).not.toContain("jarvis-goto");
+		expect(wrapper.text()).not.toContain("not json");
 	});
 });
 
@@ -1071,16 +1187,30 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 				(p) => p.resolve({ ok: false, reason: "maintenance" }),
 				"Jarvis is temporarily unavailable for maintenance. Try again shortly.",
 			],
-			["error", (p) => p.reject(new Error("Network down")), "Network down"],
+			[
+				"error: never the raw exception text",
+				(p) => p.reject(new Error("Network down")),
+				"Couldn&#39;t retry that. Try again in a moment.",
+			],
+			[
+				"offline: plain sentence, not Failed to fetch",
+				(p) => p.reject(new TypeError("Failed to fetch")),
+				"Couldn&#39;t retry that. Jarvis could not reach the server. Check your internet connection and try again.",
+			],
 			[
 				"markup only in an error: its own sentence",
 				(p) => p.reject(new Error("<img src=x onerror=1>")),
-				"Couldn&#39;t retry that.",
+				"Couldn&#39;t retry that. Try again in a moment.",
 			],
 			[
 				"markup beside text in an error",
-				(p) => p.reject(new Error("Rate <b>limit</b> hit: a < b")),
-				"Rate limit hit: a &lt; b",
+				(p) =>
+					p.reject(
+						Object.assign(new Error("x"), {
+							messages: ["Rate <b>limit</b> hit: a < b"],
+						})
+					),
+				"Couldn&#39;t retry that: Rate limit hit: a &lt; b. Try again.",
 			],
 		]) {
 			toast.error.mockClear();

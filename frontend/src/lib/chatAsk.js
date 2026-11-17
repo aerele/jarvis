@@ -23,6 +23,14 @@ const FIELDNAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // Types a model may put in `kind` instead of `type`.
 const ASK_KINDS = ["single", "multi", "yesno", "boolean", ...ASK_FIELD_TYPES];
 
+// A question the user may leave blank: `optional: true` / `required: false`, or
+// a label that says so the way models write it ("Last name (optional)"). The
+// label is kept as written: the board and the answer text quote it verbatim.
+const OPTIONAL_LABEL_RE = /\(\s*optional\s*\)\s*$/i;
+function askOptional(q, text) {
+	return q.optional === true || q.required === false || OPTIONAL_LABEL_RE.test(text);
+}
+
 // The question text, under whichever key the model used.
 function askText(q) {
 	for (const key of ["q", "question", "label", "title", "prompt"]) {
@@ -90,6 +98,7 @@ export function parseAsk(content) {
 				// A dropdown with nothing to pick from is just a typed answer.
 				if (type === "select" && !options.length) type = "text";
 				const text = askText(q);
+				const optional = askOptional(q, text) ? { optional: true } : {};
 				if (type === "field") {
 					const doctype = String((nested || q).doctype || "").trim();
 					const fieldname = String((nested || q).fieldname || "").trim();
@@ -108,6 +117,7 @@ export function parseAsk(content) {
 							type: "text",
 							options: [],
 							doctype: "",
+							...optional,
 						};
 					}
 					return {
@@ -118,6 +128,7 @@ export function parseAsk(content) {
 						fieldname,
 						...(parent ? { parent } : {}),
 						...(parentfield ? { parentfield } : {}),
+						...optional,
 					};
 				}
 				return {
@@ -126,6 +137,7 @@ export function parseAsk(content) {
 					// yesno may carry exactly 2 custom labels (e.g. ["Approve","Reject"]).
 					options,
 					doctype: type === "link" ? String(q.doctype || q.link || "").trim() : "",
+					...optional,
 				};
 			})
 			.filter((q) => {
@@ -140,11 +152,23 @@ export function parseAsk(content) {
 	}
 }
 
-/** True once every question carries an answer (a pick, a typed value, or "Other"). */
+// Nothing picked or typed for a question.
+function askBlank(v, free) {
+	if (free) return false;
+	if (Array.isArray(v)) return v.length === 0;
+	return v == null || String(v).trim() === "";
+}
+
+/**
+ * True once every question carries an answer (a pick, a typed value, or "Other").
+ * An optional question may stay blank; once something is typed into it, it must
+ * be a valid answer like any other (a bad number still blocks).
+ */
 export function isAskReady(spec, sel, other) {
 	if (!spec) return false;
 	return spec.questions.every((q, i) => {
 		const v = sel[i];
+		if (q.optional && askBlank(v, (other[i] || "").trim())) return true;
 		// Drawn-only types (a `field` question resolved to a control).
 		if (q.type === "loading") return false;
 		if (q.type === "number") {
@@ -172,7 +196,9 @@ export function askAnswerText(spec, sel, other) {
 		// belt-and-braces for stale state).
 		else if (v != null && v !== "" && !free) ans.push(v);
 		if (free) ans.push(free);
-		return `${i + 1}. ${q.q} → ${ans.join(", ") || "(no answer)"}`;
+		// A blank optional question was skipped on purpose; the agent must not re-ask it.
+		const blank = q.optional ? "(skipped)" : "(no answer)";
+		return `${i + 1}. ${q.q} → ${ans.join(", ") || blank}`;
 	});
 	return "Here are my answers:\n" + lines.join("\n");
 }

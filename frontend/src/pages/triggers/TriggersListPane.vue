@@ -93,6 +93,12 @@
 			>
 				LLM
 			</span>
+			<Badge
+				v-else-if="row.action_type === 'Intake'"
+				variant="subtle"
+				theme="green"
+				label="Intake"
+			/>
 			<span v-else class="text-base text-ink-gray-4">-</span>
 		</template>
 
@@ -116,7 +122,7 @@
 					{ label: 'Delete', onClick: () => bulkDelete(selections, unselectAll) },
 				]"
 			>
-				<Button icon="more-horizontal" variant="ghost" />
+				<Button icon="more-horizontal" variant="ghost" label="More actions" />
 			</Dropdown>
 		</template>
 	</ListPage>
@@ -159,6 +165,7 @@ const ACTION_OPTIONS = [
 	{ label: "All actions", value: "" },
 	{ label: "Script", value: "Script" },
 	{ label: "LLM", value: "LLM" },
+	{ label: "Intake", value: "Intake" },
 ];
 
 // Column budget: the list shares the tab with a 380px chat pane, so at a

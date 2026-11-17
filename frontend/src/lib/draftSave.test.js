@@ -121,20 +121,26 @@ test("a panel is dirty once a value changes, and only then", () => {
 	assert.equal(draftIsDirty(null), false);
 });
 
-test("the draft being fixed keeps its card through the assistant's acknowledgement", () => {
-	const msg = (name, role, action) => ({ name, role, action });
-	const hasAction = (m) => !!m.action;
-	const draft = msg("m2", "assistant", { verb: "create" });
-	const ack = msg("m3", "assistant", null);
-	const thread = [msg("m1", "user"), draft, ack];
-	assert.equal(liveDraftMessage(thread, ack, "m2", hasAction), draft);
-	assert.equal(liveDraftMessage(thread, ack, "", hasAction), ack, "nothing being fixed");
-	const receipt = msg("t1", "tool");
-	const saved = [msg("m1", "user"), draft, receipt, ack];
-	assert.equal(liveDraftMessage(saved, ack, "m2", hasAction), ack, "a receipt retires it");
-	const asked = [msg("m1", "user"), draft, msg("m4", "user"), ack];
-	assert.equal(liveDraftMessage(asked, ack, "m2", hasAction), ack, "the person moved on");
-	const newDraft = msg("m5", "assistant", { verb: "create" });
-	assert.equal(liveDraftMessage([draft, newDraft], newDraft, "m2", hasAction), newDraft);
-	assert.equal(liveDraftMessage(thread, null, "m2", hasAction), null, "a turn is running");
+test("the live draft keeps its card through later replies, and only then", () => {
+	const row = (name, role, content = "", action_outcome = "") => ({
+		name,
+		role,
+		content,
+		action_outcome,
+	});
+	const block = (body) => "Here:\n```jarvis-action\n" + body + "\n```";
+	const draft = row("m2", "assistant", block('{"verb":"create","doctype":"ToDo"}'));
+	const ack = row("m3", "assistant", "I'll wait.");
+	assert.equal(liveDraftMessage([row("m1", "user"), draft, ack], ack), draft);
+	const asked = [row("m1", "user"), draft, row("m4", "user"), ack];
+	assert.equal(liveDraftMessage(asked, ack), draft, "a question does not retire it");
+	const saved = [draft, row("t1", "tool", "", "created"), ack];
+	assert.equal(liveDraftMessage(saved, ack), null, "a receipt retires it");
+	const newDraft = row("m5", "assistant", block('{"verb":"update","doctype":"ToDo"}'));
+	assert.equal(
+		liveDraftMessage([draft, newDraft], newDraft),
+		newDraft,
+		"a newer one replaces it"
+	);
+	assert.equal(liveDraftMessage([draft, ack], null), null, "a turn is running");
 });

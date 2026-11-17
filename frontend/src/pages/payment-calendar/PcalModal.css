@@ -1,0 +1,86 @@
+/* Modal frame (template L131-355). Teleported to <body>, so the viewport @media rules apply. */
+.pcal-backdrop {
+	position: fixed;
+	inset: 0;
+	z-index: 100;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+	background: var(--pc-backdrop);
+	backdrop-filter: blur(2px);
+}
+.pcal-modal {
+	width: 850px;
+	max-width: 100%;
+	max-height: 90vh;
+	overflow: auto;
+	background: var(--pc-card);
+	color: var(--pc-text);
+	border: 1px solid transparent;
+	border-radius: var(--pc-radius-modal);
+	box-shadow: var(--pc-shadow-modal);
+}
+.pcal-modal-sm {
+	width: 650px;
+}
+.pcal-modal-lg {
+	width: 1080px;
+}
+[data-theme="dark"] .pcal-modal {
+	border-color: var(--pc-border);
+}
+.pcal-modal-heading {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 12px;
+	padding: 21px 23px 8px;
+}
+.pcal-modal-heading h2 {
+	margin: 0;
+	font-size: var(--pc-fs-modal-title);
+	font-weight: 650;
+	letter-spacing: -0.3px;
+}
+.pcal-icon-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-width: 32px;
+	min-height: 32px;
+	padding: 6px;
+	border: 0;
+	border-radius: var(--pc-radius-chip);
+	background: transparent;
+	color: var(--pc-muted);
+	cursor: pointer;
+}
+.pcal-icon-btn:hover {
+	background: var(--pc-surface-2);
+}
+.pcal-icon-btn svg {
+	width: 16px;
+	height: 16px;
+	flex-shrink: 0;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.6;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+@media (max-width: 540px) {
+	.pcal-backdrop {
+		padding: 12px;
+	}
+	.pcal-modal {
+		max-height: calc(100vh - 24px);
+		border-radius: 10px;
+	}
+	.pcal-modal-heading {
+		padding: 17px 16px 8px;
+	}
+	.pcal-modal-heading h2 {
+		font-size: 16px;
+	}
+}

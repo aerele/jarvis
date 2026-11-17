@@ -21,15 +21,20 @@
 		:aria-describedby="describedby"
 		@change="$emit('update', $event.target.checked ? 'Yes' : 'No')"
 	/>
+	<!-- Grows with its text so a long value (a Small Text / Text field such as
+	     Supplier Details) is readable without dragging the corner (#760); past
+	     TEXT_MAX_PX it scrolls. Still resizable by hand. -->
 	<textarea
 		v-else-if="field.control === 'text'"
 		:id="id"
-		rows="2"
+		ref="textEl"
+		rows="3"
 		:class="inputClass"
+		:style="{ maxHeight: TEXT_MAX_PX + 'px' }"
 		:value="field.value"
 		:aria-invalid="invalid ? 'true' : 'false'"
 		:aria-describedby="describedby"
-		@input="$emit('update', $event.target.value)"
+		@input="onTextInput"
 	/>
 	<template v-else>
 		<input
@@ -49,7 +54,7 @@
 </template>
 
 <script setup>
-import { computed } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 const props = defineProps({
 	field: { type: Object, required: true },
@@ -59,7 +64,47 @@ const props = defineProps({
 	describedby: { type: String, default: undefined },
 	suggestions: { type: Array, default: () => [] },
 });
-defineEmits(["update"]);
+const emit = defineEmits(["update"]);
+
+// A text field fits its content up to this height (about 14 lines), then scrolls.
+const TEXT_MAX_PX = 320;
+const textEl = ref(null);
+
+function fitText() {
+	const el = textEl.value;
+	if (!el) return;
+	el.style.height = "auto"; // shrink first, so deleted text gives the space back
+	const border = el.offsetHeight - el.clientHeight;
+	el.style.height = Math.min(el.scrollHeight + border, TEXT_MAX_PX) + "px";
+}
+
+function onTextInput(event) {
+	emit("update", event.target.value);
+	fitText();
+}
+
+// Refit when the value is set from outside (another record picked, a reset) and when
+// the panel's width changes the wrapping.
+watch(
+	() => props.field.value,
+	() => nextTick(fitText)
+);
+let resizeObserver = null;
+onMounted(() => {
+	fitText();
+	if (textEl.value && typeof ResizeObserver !== "undefined") {
+		let width = textEl.value.clientWidth;
+		resizeObserver = new ResizeObserver(() => {
+			const now = textEl.value?.clientWidth;
+			if (now !== width) {
+				width = now;
+				fitText();
+			}
+		});
+		resizeObserver.observe(textEl.value);
+	}
+});
+onBeforeUnmount(() => resizeObserver?.disconnect());
 
 const TYPES = { number: "number", date: "date", datetime: "datetime-local", time: "time" };
 const type = computed(() => TYPES[props.field.control] || "text");

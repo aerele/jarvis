@@ -6,7 +6,7 @@ import time
 import frappe
 
 from jarvis.chat import collaboration as c
-from jarvis.chat import policy, prepare, txn
+from jarvis.chat import directive_filter, policy, prepare, txn
 from jarvis.chat import turn_state as ts
 from jarvis.chat.collaboration_bindings import require_live
 from jarvis.chat.collaboration_context import require_prompt_budget
@@ -164,6 +164,8 @@ def build_payload(binding, run_id: str, seed_message: str) -> dict:
 			context_tokens=runtime.context_tokens,
 			runtime_reserve=runtime.runtime_reserve,
 		)
+		# F-Q8: the parts were cleaned at assembly; verify the refit, never rewrite it.
+		ap.user_message = directive_filter.assert_clean(ap.user_message)
 	require_prompt_budget(
 		ap.user_message,
 		attachments=managed or [],

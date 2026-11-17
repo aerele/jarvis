@@ -1,0 +1,110 @@
+{
+ "data": {
+  "generated_at": "2026-11-11T05:12:00+00:00",
+  "has_more": false,
+  "page": 1,
+  "page_size": 100,
+  "parties": [
+   {
+    "invoices": 1,
+    "party": "Cedar Trading Co.",
+    "party_name": "Cedar Trading Co.",
+    "party_type": "Supplier",
+    "remaining": "18500.00",
+    "terms": 1
+   },
+   {
+    "invoices": 1,
+    "party": "Atlas Components",
+    "party_name": "Atlas Components",
+    "party_type": "Supplier",
+    "remaining": "14280.00",
+    "terms": 1
+   },
+   {
+    "invoices": 1,
+    "party": "Meridian Packaging",
+    "party_name": "Meridian Packaging",
+    "party_type": "Supplier",
+    "remaining": "9268.00",
+    "terms": 1
+   }
+  ],
+  "party_page": 1,
+  "party_total": 3,
+  "rows": [
+   {
+    "account": "Creditors - NM",
+    "credit": "0.00",
+    "discount": "0.00",
+    "due_date": "2026-11-11",
+    "id": "payable-2026-11-11-0",
+    "kind": "obligation",
+    "original": "25000.00",
+    "paid": "6500.00",
+    "party": "Cedar Trading Co.",
+    "party_name": "Cedar Trading Co.",
+    "party_type": "Supplier",
+    "posting_date": "2026-10-15",
+    "remaining": "18500.00",
+    "settled": "6500.00",
+    "settlement": "Partially paid",
+    "term": "",
+    "voucher_no": "PINV-2026-0142",
+    "voucher_type": "Purchase Invoice"
+   },
+   {
+    "account": "Creditors - NM",
+    "credit": "0.00",
+    "discount": "0.00",
+    "due_date": "2026-11-11",
+    "id": "payable-2026-11-11-1",
+    "kind": "obligation",
+    "original": "14280.00",
+    "paid": "0.00",
+    "party": "Atlas Components",
+    "party_name": "Atlas Components",
+    "party_type": "Supplier",
+    "posting_date": "2026-10-15",
+    "remaining": "14280.00",
+    "settled": "0.00",
+    "settlement": "Unpaid",
+    "term": "",
+    "voucher_no": "PINV-2026-0148",
+    "voucher_type": "Purchase Invoice"
+   },
+   {
+    "account": "Creditors - NM",
+    "credit": "0.00",
+    "discount": "0.00",
+    "due_date": "2026-11-11",
+    "id": "payable-2026-11-11-2",
+    "kind": "obligation",
+    "original": "9268.00",
+    "paid": "0.00",
+    "party": "Meridian Packaging",
+    "party_name": "Meridian Packaging",
+    "party_type": "Supplier",
+    "posting_date": "2026-10-15",
+    "remaining": "9268.00",
+    "settled": "0.00",
+    "settlement": "Unpaid",
+    "term": "",
+    "voucher_no": "PINV-2026-0151",
+    "voucher_type": "Purchase Invoice"
+   }
+  ],
+  "total": 3,
+  "total_remaining": "42048.00"
+ },
+ "request": {
+  "date": "2026-11-11",
+  "kind": "day",
+  "order": null,
+  "page": 1,
+  "page_size": 100,
+  "side": "Payable",
+  "sort": null
+ },
+ "scenario": "default_day_payable"
+}

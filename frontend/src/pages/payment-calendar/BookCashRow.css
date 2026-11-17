@@ -1,0 +1,63 @@
+/* Book cash context row under the filter bar (template L240, L119). */
+.headline-context {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 14px;
+	margin: 10px 0 12px;
+	font-size: 11px;
+	color: var(--pc-muted);
+}
+.headline-context > span:first-child {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+}
+.headline-context button {
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--pc-link);
+	font-size: 11px;
+	cursor: pointer;
+}
+.headline-context button:hover {
+	text-decoration: underline;
+	text-underline-offset: 3px;
+}
+.headline-context #header-book-cash {
+	color: var(--pc-text);
+	font-size: 13px;
+	font-weight: 600;
+}
+.headline-context .context-time {
+	margin-left: auto;
+	font-size: var(--pc-fs-micro);
+	color: var(--pc-muted);
+}
+.headline-context button:disabled {
+	color: var(--pc-muted);
+	cursor: default;
+	text-decoration: none;
+}
+@container (max-width: 1100px) {
+	.headline-context .context-time {
+		margin-left: 0;
+	}
+}
+@container (max-width: 540px) {
+	.headline-context {
+		gap: 7px 12px;
+		margin: 11px 0;
+		font-size: var(--pc-fs-micro);
+	}
+	.headline-context .context-time {
+		display: none;
+	}
+	.headline-context button {
+		font-size: var(--pc-fs-micro);
+	}
+	.headline-context #header-book-cash {
+		font-size: 12px;
+	}
+}

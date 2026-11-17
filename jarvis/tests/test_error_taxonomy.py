@@ -4,11 +4,13 @@ import json
 import unittest
 from pathlib import Path
 
+from jarvis.chat.directive_filter import NUL_TEXT, REFUSAL_TEXT
 from jarvis.chat.error_taxonomy import (
 	_RULES,
 	SUBSCRIPTION_LABELS,
 	classify_error_text,
 	headline_for,
+	model_failures,
 	subscription_upstream_from_error,
 )
 
@@ -35,6 +37,14 @@ class TestErrorTaxonomy(unittest.TestCase):
 		for earlier in ("session-archived", "session-ended"):
 			for later in ("billing", "quota", "rate-limit", "timeout", "permission", "invalid-request"):
 				self.assertLess(codes.index(earlier), codes.index(later), f"{earlier} before {later}")
+
+	def test_directive_refused_has_its_own_rule_after_the_session_rules(self):
+		# F-Q8: the fixed refusal texts get a headline of their own, not the generic internal one.
+		codes = [code for code, _, _ in _RULES]
+		self.assertIn("directive_refused", codes)
+		self.assertGreater(codes.index("directive_refused"), codes.index("session-ended"))
+		for text in (REFUSAL_TEXT, NUL_TEXT):
+			self.assertEqual(headline_for(text), "This message was not sent")
 
 	def test_structured_error(self):
 		self.assertEqual(classify_error_text({"error": {"type": "overloaded_error"}}), "service-unavailable")
@@ -102,3 +112,18 @@ class TestSubscriptionExpiredRule(unittest.TestCase):
 		self.assertEqual(headline_for(cases[5]["error"]), "Kimi (Moonshot) sign-in expired")
 		# A strong signal that names no upstream still has no placeholder in it.
 		self.assertEqual(headline_for("auth_unavailable: unauthorized"), "Sign-in expired")
+
+
+class TestModelFailures(unittest.TestCase):
+	"""One cause per model of a failover error; the JS side reads the same fixture."""
+
+	def test_fixture_cases(self):
+		cases = json.loads((Path(__file__).parent / "fixtures/model_failures.json").read_text())
+		for case in cases:
+			with self.subTest(error=case["error"][:60]):
+				self.assertEqual(model_failures(case["error"]), case["models"])
+
+	def test_a_usage_cap_behind_a_429_is_quota_not_rate_limit(self):
+		text = "429 cooling down (last error: usage_limit_reached: The usage limit has been reached)"
+		self.assertEqual(classify_error_text(text), "quota")
+		self.assertEqual(classify_error_text("429 Too Many Requests"), "rate-limit")
