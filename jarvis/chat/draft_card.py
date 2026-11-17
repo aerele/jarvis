@@ -23,7 +23,7 @@ _TOOLS = ("create_doc", "update_doc")
 # Builder pane saves a dashboard with its own "Save dashboard" Approve in the pane (a draft card would
 # send it to the full chat, away from the builder and its unsaved canvas), and a dashboard is
 # configuration, not a record to review field by field.
-_NOT_DRAFTED = frozenset({"Jarvis Dashboard"})
+_NOT_DRAFTED = frozenset({"jarvis dashboard"})  # casefolded: compared as the tool reads the name
 _TABLE_TYPES = ("Table", "Table MultiSelect")
 
 
@@ -46,9 +46,11 @@ def is_draft_call(tool: str, args, *, must_card: bool) -> bool:
 	fit to show and is not one of ``_NOT_DRAFTED``."""
 	if must_card or tool not in _TOOLS or not isinstance(args, dict):
 		return False
-	if not live_draft.safe_doctype(args.get("doctype")):
+	doctype = live_draft.safe_doctype(args.get("doctype"))
+	if not doctype:
 		return False
-	if args.get("doctype") in _NOT_DRAFTED:
+	# the tool takes the name stripped and any case (the DocType lookup is case-insensitive)
+	if doctype.casefold() in _NOT_DRAFTED:
 		return False
 	if tool == "create_doc":
 		return not _is_batch(args, "docs") and isinstance(args.get("values"), dict)

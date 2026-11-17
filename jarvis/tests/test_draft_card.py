@@ -86,8 +86,13 @@ class TestDraftCallPure(unittest.TestCase):
 			("create_doc", {"doctype": "Jarvis Dashboard", "values": {"dashboard_title": "X"}}, False, False),
 			("update_doc", {"doctype": "Jarvis Dashboard", "name": "D1", "changes": {"x": 1}}, False, False),
 		]
+		# the tool reads the name stripped and in any case, so the exemption must too
+		for spelling in ("jarvis dashboard", "JARVIS DASHBOARD", " Jarvis Dashboard", "Jarvis Dashboard\n"):
+			cases.append(
+				("create_doc", {"doctype": spelling, "values": {"dashboard_title": "X"}}, False, False)
+			)
 		for tool, args, must, want in cases:
-			with self.subTest(tool=tool, must=must, keys=sorted(args)):
+			with self.subTest(tool=tool, must=must, keys=sorted(args), doctype=args.get("doctype")):
 				self.assertIs(draft_card.is_draft_call(tool, args, must_card=must), want)
 
 	def test_create_payload_keeps_table_rows_and_names_the_ignored_fields(self):
@@ -591,6 +596,17 @@ if FrappeTestCase is not None:
 			for raw, want in ((1, True), ("1", True), ("0", False), (0, False)):
 				with self.subTest(raw=raw), patch.dict(frappe.conf, {FLAG: raw}):
 					self.assertIs(draft_card.enabled(), want)
+
+		def test_flag_on_a_jarvis_dashboard_is_not_drafted_whatever_its_spelling(self):
+			"""With the flag on, the gate `api._run_tool` asks (`wanted`) says no to a Jarvis
+			Dashboard write, so it parks the ordinary one-tap card (no `draft`) the builder pane's
+			Approve reads, and yes to another DocType. Asserted at this seam, not by parking a
+			dashboard: a real dashboard needs fields and roles a fresh CI database may not give."""
+			dash = {"doctype": " jarvis dashboard", "values": {"dashboard_title": "X"}}
+			todo = {"doctype": "ToDo", "values": {"description": "x"}}
+			with patch.dict(frappe.conf, {FLAG: 1}):
+				self.assertFalse(draft_card.wanted("create_doc", dash, must_card=False))
+				self.assertTrue(draft_card.wanted("create_doc", todo, must_card=False))
 
 		def test_create_card_has_draft_and_no_trial_name_and_keeps_its_title(self):
 			"""A draft create card is titled "New ToDo" inside `draft`, drops the name the trial
