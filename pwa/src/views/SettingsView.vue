@@ -9,6 +9,7 @@ import { applyTheme, theme } from "../lib/theme";
 import { agentName } from "@/branding";
 import { holidayTouch } from "../holidayTouch";
 import { createHolidaySwitch } from "../lib/holidaySwitch";
+import { PRIVACY_NOTICE } from "@shared/lib/privacyNotice.js";
 
 // Settings, as the native app has them: Chat (default model + effort),
 // Appearance, Notifications. No "open full workspace" — this is the workspace.
@@ -113,6 +114,7 @@ onMounted(async () => {
 	<AppBar title="Settings" />
 
 	<div class="jv-scroll jv-pad">
+		<p class="jv-hint jv-notice" data-testid="privacy-notice">{{ PRIVACY_NOTICE }}</p>
 		<div class="jv-label">Chat</div>
 		<div class="jv-card">
 			<button class="jv-row is-tap" @click="modelSheet = true">
@@ -405,6 +407,11 @@ onMounted(async () => {
 	font-size: 12px;
 	line-height: 1.45;
 	color: var(--ink5);
+}
+.jv-notice {
+	margin-top: 4px;
+	/* --ink5 is 3.8:1 on --bg in the light theme; --ink6 clears 4.5:1 in both. */
+	color: var(--ink6);
 }
 
 .jv-msheet {
