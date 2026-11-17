@@ -19,6 +19,7 @@ import unittest
 from unittest import mock
 
 import frappe
+from frappe import cache_manager
 from frappe.utils import add_days, getdate
 
 from jarvis import activity_report as ar
@@ -652,12 +653,16 @@ class TestRollup(RollupCase):
 	def test_no_full_cache_clear_during_a_rollup(self):
 		self.short_horizon(5)
 		build_fixture()
-		spy = self._patch("frappe.clear_cache")
-		spy2 = self._patch("frappe.cache_manager.clear_cache")
+		# The full clear is frappe.clear_cache on v15 and v16 (v16 also has
+		# cache_manager.clear_cache, which v15 lacks); both funnel through clear_global_cache.
+		targets = ["frappe.clear_cache", "frappe.cache_manager.clear_global_cache"]
+		if hasattr(cache_manager, "clear_cache"):
+			targets.append("frappe.cache_manager.clear_cache")
+		spies = [self._patch(t) for t in targets]
 		ru.rollup_days()
 		self.assertEqual(stored_watermark(), d(1))
-		spy.assert_not_called()
-		spy2.assert_not_called()
+		for target, spy in zip(targets, spies, strict=True):
+			self.assertFalse(spy.called, f"{target} was called during a rollup")
 
 	def test_watermark_is_read_for_update_and_written_with_set_single_value(self):
 		self.short_horizon(3)
