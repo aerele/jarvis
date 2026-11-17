@@ -1,3 +1,5 @@
+// FIRST: marks every same-origin /api/ request X-Jarvis-Client: desktop (see lib/clientHeader.js).
+import "./lib/clientHeaderDesktop";
 import { createApp } from "vue";
 import { setConfig, frappeRequest, resourcesPlugin } from "frappe-ui";
 

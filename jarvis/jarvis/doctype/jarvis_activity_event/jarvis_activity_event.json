@@ -1,0 +1,52 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-11-06 00:00:00.000000",
+ "description": "Append-only, metadata-only trail of what each user read, exported, did or was refused in Jarvis (admin security report). Written server-side by jarvis.activity_log; no role may create/write/delete rows (retention prunes via clear_old_logs). Deliberately carries NO conversation content, tool arguments, results or error messages.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "at",
+  "actor",
+  "actor_name",
+  "event",
+  "method",
+  "label",
+  "ref_doctype",
+  "ref_name",
+  "row_count",
+  "outcome",
+  "channel",
+  "code"
+ ],
+ "fields": [
+  {"fieldname": "at", "fieldtype": "Datetime", "label": "At", "search_index": 1, "in_list_view": 1, "read_only": 1},
+  {"fieldname": "actor", "fieldtype": "Link", "options": "User", "label": "Actor", "search_index": 1, "in_list_view": 1, "read_only": 1},
+  {"fieldname": "actor_name", "fieldtype": "Data", "label": "Actor Name", "read_only": 1},
+  {"fieldname": "event", "fieldtype": "Select", "options": "read\nexport\naction\ndenied_call\nauth_rejected\nforeign_session", "label": "Event", "search_index": 1, "in_list_view": 1, "read_only": 1},
+  {"fieldname": "method", "fieldtype": "Data", "label": "Method", "in_list_view": 1, "read_only": 1},
+  {"fieldname": "label", "fieldtype": "Data", "label": "Label", "read_only": 1},
+  {"fieldname": "ref_doctype", "fieldtype": "Data", "label": "Reference Doctype", "search_index": 1, "read_only": 1},
+  {"fieldname": "ref_name", "fieldtype": "Data", "length": 140, "label": "Reference Name", "read_only": 1},
+  {"fieldname": "row_count", "fieldtype": "Int", "label": "Row Count", "read_only": 1},
+  {"fieldname": "outcome", "fieldtype": "Select", "options": "ok\ndenied\nfailed", "label": "Outcome", "in_list_view": 1, "read_only": 1},
+  {"fieldname": "channel", "fieldtype": "Select", "options": "desktop\npwa\nchat\nagent_run\nmacro\ntrigger\napi", "label": "Channel", "read_only": 1},
+  {"fieldname": "code", "fieldtype": "Data", "length": 64, "label": "Code", "read_only": 1}
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-17 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Activity Event",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {"read": 1, "report": 1, "export": 1, "role": "System Manager"},
+  {"read": 1, "report": 1, "export": 1, "role": "Jarvis Admin"}
+ ],
+ "sort_field": "at",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

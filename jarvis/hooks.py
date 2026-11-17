@@ -520,6 +520,12 @@ scheduler_events = {
 		# attempt ceiling, then alerts.
 		"jarvis.oauth.pending_capture.sweep_expired",
 	],
+	# Long queue: rolls the user-activity summary's closed days into Jarvis Activity Daily
+	# (one grouped pass per day, up to a 240 s budget). Frappe's "Hourly Long" frequency
+	# (0 * * * *) enqueues on the long queue (scheduled_job_type.get_queue_name).
+	"hourly_long": [
+		"jarvis.activity_rollup.rollup_days",
+	],
 	"daily": [
 		"jarvis.onboarding.scheduled_sync_connection",
 		# Jarvis Pending Action purge (D3): settled terminal rows older than 7 days,
@@ -654,6 +660,15 @@ doc_events["Landed Cost Voucher"] = {
 doc_events["Error Log"] = {"before_insert": "jarvis.api_errors.tag_error_log_origin"}
 after_request = ["jarvis.api_errors.capture_failed_request"]
 
+# User-activity report, direct SPA/PWA actions (jarvis.activity_actions). The pair is one
+# feature: before_request snapshots the method name and the ORIGINAL form_dict (because
+# frappe.set_user, which jarvis._session.impersonate calls on entry and exit, REPLACES
+# local.form_dict, so after_request alone would lose `cmd` and the id parameter);
+# record_request then writes the event. Appended AFTER capture_failed_request, which rolls
+# back and commits its own row; both never raise.
+before_request = ["jarvis.activity_actions.capture_request"]
+after_request.append("jarvis.activity_actions.record_request")
+
 # Org-scope wiki pages are mirrored as markdown into the tenant container
 # workspace; every page write/delete enqueues a debounced mirror sync (the
 # handler filters to Org scope itself and no-ops when the tenant is
@@ -771,6 +786,10 @@ ignore_links_on_delete = [
 	# reaped after 90 days, so it must never block deleting what it points at; every
 	# reader (File Box, worker, review) tolerates the dangling link.
 	"Jarvis Trigger Activity",
+	# User-activity trail (plan D12): a deleted user's events stay until the 90-day
+	# expiry instead of blocking the delete. `actor_name` keeps them attributable.
+	"Jarvis Activity Event",
+	"Jarvis Activity Daily",
 ]
 
 # ---------------------------------------------------------------------------
@@ -882,6 +901,11 @@ default_log_clearing_doctypes = {
 	# 90 days matches the other Jarvis logs. Its clear_old_logs prunes on the
 	# indexed `at` column.
 	"Jarvis Agent Write": 90,
+	# Admin user-activity trail (reads, exports, app actions, refusals). Metadata
+	# only; its clear_old_logs prunes on the indexed `at` column. 90 days (plan D8).
+	"Jarvis Activity Event": 90,
+	# Its pre-aggregated per-person daily totals. clear_old_logs prunes on `day`.
+	"Jarvis Activity Daily": 90,
 }
 
 # Slice B fast-path: runs in the `finally` of EVERY background job on the bench (Frappe
@@ -1214,6 +1238,17 @@ has_permission.update(
 # wiped the marker, so on a Frappe 16.35+ control plane every */5 admin call
 # (``reconcile_pending_llm_sync``) re-sent the doomed grant and logged an
 # "oauth token request rejected" Error Log row every five minutes. Its one-hour TTL still applies.
+#
+# jarvis:activity_rollup (2026-11-13): the claim that keeps two runs of
+# ``activity_rollup.rollup_days`` from interleaving (``_redis_lock.claim``). Unlike
+# ``redis_lock`` it takes a SITE-prefixed key (``cache.make_key``), so a full clear would
+# drop it mid-run and let a second run start on the same day. 10-minute TTL.
+#
+# jarvis:activity_flood: and jarvis:activity_seen: (2026-11-17, user-activity report): the
+# direct-action hook's flood control (``activity_actions._flood_allows``: identical-call dedupe,
+# per-person per-minute cap) and the hourly counters behind ``logging_health.app_warn``. Without
+# them the watchdog's 5-minute full clear resets the dedupe window mid-flood and wipes the 24 h
+# health counters, so the warning could never fire. All keys carry their own TTL (<= 26 h).
 persistent_cache_keys = [
 	"jarvis:pairing_proof:",  # One-time site-proof nonces: 600 s TTL must survive watchdog clears.
 	"jarvis:key_resync:",  # The 10-minute stale-key self-heal throttle must survive the 5-minute clear.
@@ -1235,6 +1270,9 @@ persistent_cache_keys = [
 	"jarvis:session_claim:",  # Claims must outlive the 5-minute watchdog cache clear.
 	"jarvis:foreign_session:",  # Once-a-day throttles must survive the 5-minute watchdog cache clear.
 	"jarvis:admin_oauth_grant_refused",  # The password-grant refusal must hold for its hour.
+	"jarvis:activity_rollup",  # The rollup's run claim (600 s TTL) must survive any full cache clear.
+	"jarvis:activity_flood:",  # App-action dedupe (5 min) and per-person cap (1 min) must survive the clear.
+	"jarvis:activity_seen:",  # The 24 h app-action health counters (activity_actions) must survive it too.
 ]
 
 # Durable background export state is owner-scoped, including direct REST reads.
