@@ -85,6 +85,15 @@ test("object options show their label, else their value, never [object Object] (
 	]);
 });
 
+test("scalar options read the same as the Approval Board row (chat_asks.py)", () => {
+	const spec = parseAsk(
+		fence(
+			'[{"q":"Pick","type":"single","options":[true,false,1.0,2.5,{"value":true},{"label":3.0}]}]'
+		)
+	);
+	assert.deepEqual(spec.questions[0].options, ["true", "false", "1", "2.5", "true", "3"]);
+});
+
 test("choice questions with no options are dropped; field types survive without them", () => {
 	const spec = parseAsk(fence('[{"q":"No opts","type":"single"},{"q":"When?","type":"date"}]'));
 	assert.deepEqual(
