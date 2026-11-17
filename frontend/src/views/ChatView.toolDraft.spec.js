@@ -527,6 +527,15 @@ describe("a server draft card's edit form in the panel", () => {
 		);
 	});
 
+	// Break: the panel header says "Draft - not saved" for a server UPDATE draft (the phone and the
+	// Preview say "Pending change"), or the typed panel's text changes.
+	it("the header badge reads Pending change for a tool update only; the typed text stays", () => {
+		const badge = squash(PANEL.slice(PANEL.indexOf('<span class="jv-draft-badge">')));
+		expect(badge).toContain(
+			'draftPanel.tool && draftPanel.verb === "update" ? draftBadgeText(true) : "Draft - not saved"'
+		);
+	});
+
 	// Break: a dead card is not judged against the list the screen draws, or the banner is not
 	// derived (a one-shot watcher can miss it).
 	it("the dead-card flag and the notices are computed from the panel and the visible list", () => {

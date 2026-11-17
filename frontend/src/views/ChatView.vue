@@ -4176,7 +4176,11 @@
 								· {{ draftPanel.docName }}</template
 							></span
 						>
-						<span class="jv-draft-badge">Draft - not saved</span>
+						<span class="jv-draft-badge">{{
+							draftPanel.tool && draftPanel.verb === "update"
+								? draftBadgeText(true)
+								: "Draft - not saved"
+						}}</span>
 						<button
 							class="jv-art-close"
 							@click="closeDraftPanel"
@@ -4575,6 +4579,7 @@ import {
 } from "@/lib/typedCardReply";
 import { proposedLabel } from "@/lib/cardAge";
 import { cardOfItem, isToolDraftItem } from "@/lib/toolDraft";
+import { draftBadgeText } from "@/lib/draftBadge";
 import { draftReceipt, isDraftReceiptRow } from "@/lib/draftReceipt";
 import {
 	DRAFT_STALE_TEXT,
