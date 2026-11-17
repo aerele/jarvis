@@ -1,12 +1,12 @@
 """The drafting note in the per-turn ``[Context: ...]`` bracket: which turns get it.
 
 ``turn_handler._drafting_clause`` decides from the site flag, the conversation's own flags,
-the binding and the origin of the turn's user row, so the rule runs without a site. The
-assembled prompt (one bracket, the order, byte-identity with the flag off) is in
-``test_live_draft`` (``TestDraftingClause``, ``TestParkedToolDraft``).
+the binding, the origin of the turn's user row and the turn's context, so the rule runs
+without a site. What needs a site (the origin read from the stored row, the one bracket, the
+order, byte-identity with the flag off) is in ``test_live_draft`` (``TestDraftingClause``,
+``TestParkedToolDraft``).
 """
 
-import json
 import unittest
 from unittest.mock import patch
 
@@ -14,20 +14,13 @@ from jarvis.chat import turn_handler
 from jarvis.chat.turn_handler import DRAFTING_CLAUSE, _drafting_clause
 
 ENABLED = "jarvis.chat.draft_card.enabled"
-
-
-def _banned_terms() -> list[str]:
-	"""The words the runtime-branding guard refuses in any file, read from the policy the CI
-	check itself loads (the words are not spelled out here: this file is scanned too)."""
-	from jarvis.ci.inputs import decode
-
-	return [term.lower() for term in json.loads(decode("policy"))["terms"]]
+FOCUS = {"focus_connector": {"key": "gmail", "label": "Gmail"}}
 
 
 class TestDraftingClauseRule(unittest.TestCase):
-	def clause(self, conv=None, binding=None, origin="human", live="", flag=True):
+	def clause(self, conv=None, binding=None, origin="human", live="", flag=True, context=None):
 		with patch(ENABLED, return_value=flag):
-			return _drafting_clause(conv or {}, binding, origin, live)
+			return _drafting_clause(conv or {}, binding, origin, live, context=context)
 
 	def test_an_ordinary_turn_gets_the_note_and_the_flag_off_gets_nothing(self):
 		"""The site flag is the only switch for everyone else: if the helper ignored it, every
@@ -35,14 +28,21 @@ class TestDraftingClauseRule(unittest.TestCase):
 		self.assertEqual(self.clause(), DRAFTING_CLAUSE)
 		self.assertEqual(self.clause(flag=False), "")
 
-	def test_a_shared_chat_gets_nothing(self):
-		"""A shared chat's draft card UI is unverified: the binding must keep the note out."""
+	def test_a_chat_that_runs_writes_without_a_card_gets_nothing(self):
+		"""Auto mode, an armed macro, an approved skill run, confirm all and a File Box chat run
+		a create / update with no card for a person, and a shared chat's draft card UI is
+		unverified: the note would promise a card that never comes. Each flag is read from the
+		conversation, so dropping one from the shared predicate shows here."""
+		for flag in ("auto_mode", "skip_confirmation", "skill_autorun", "request_autorun", "file_box"):
+			with self.subTest(flag=flag):
+				self.assertEqual(self.clause(conv={flag: 1}), "")
 		self.assertEqual(self.clause(binding=object()), "")
 
 	def test_a_turn_a_person_does_not_start_gets_nothing(self):
-		"""A macro step, a system or agent-run turn, a File Box drop or a delegated re-entry has no
-		person at a card; an app send, the follow-up after a decision and a blank (legacy) origin
-		do. Dropping an origin from the skip set, or adding one, changes who is told to draft."""
+		"""A macro step, a system or agent-run turn, a File Box drop and a delegated re-entry have
+		no person at a card; an app send, the follow-up after a decision and a blank (legacy)
+		origin do. Dropping an origin from the skip set, or adding one, changes who is told to
+		draft."""
 		for origin in ("macro", "system", "agent", "file_box", "delegated", "anything-else"):
 			with self.subTest(origin=origin):
 				self.assertEqual(self.clause(origin=origin), "")
@@ -62,6 +62,23 @@ class TestDraftingClauseRule(unittest.TestCase):
 				self.assertEqual(self.clause(conv={"origin_page": page}), "")
 		self.assertEqual(self.clause(conv={"origin_page": ""}), DRAFTING_CLAUSE)
 
+	def test_a_connector_focused_turn_gets_nothing(self):
+		"""With a connector focus the prompt says only the connector tools may be called and the
+		gate refuses create_doc / update_doc: the note would tell the agent to do what is refused.
+		A focus the prompt itself ignores (no label) is no focus."""
+		self.assertEqual(self.clause(context=FOCUS), "")
+		self.assertEqual(self.clause(context={"focus_connector": {"key": "gmail"}}), DRAFTING_CLAUSE)
+
+	def test_a_failure_leaves_the_note_out_and_never_fails_the_turn(self):
+		"""Every neighbouring clause is best-effort: a prompt line must never break a turn. With
+		the flag on, a dependency that raises gives no note and one log line, not an error."""
+		with (
+			patch("jarvis.chat.connector_focus.focus_of", side_effect=RuntimeError("boom")),
+			patch("frappe.log_error") as log,
+		):
+			self.assertEqual(self.clause(), "")
+		log.assert_called_once()
+
 	def test_a_waiting_typed_draft_is_not_told_to_stop_writing_blocks(self):
 		"""The typed draft's reminder says to re-emit the block for a change; the note says never
 		to write one. Telling the agent both would break one of them, so the note steps aside;
@@ -74,16 +91,15 @@ class TestDraftingClauseRule(unittest.TestCase):
 
 	def test_the_clause_is_one_safe_line_that_fits_the_bracket(self):
 		"""The bracket is ``; ``-joined and closed by ``]`` on one line: a leading ``; ``, a line
-		break, a ``]`` or a backtick fence would break the bracket or the agent's reading of it.
-		The persona quotes this constant, and the branding guard refuses its words."""
+		break, a ``]`` or a backtick fence would break the bracket or the agent's reading of it,
+		and neighbours use only ``:`` and ``,`` inside a clause, so an inner ``;`` or sentence stop
+		would read as the next clause. The persona and plugin refer to the ``drafts:`` key."""
 		text = DRAFTING_CLAUSE
 		self.assertTrue(text.startswith("; drafts: "))
-		for bad in ("\n", "\r", "]", "[", "`", "—", "–"):
-			self.assertNotIn(bad, text)
-		self.assertFalse(text.endswith((".", ";", " ")))
-		lowered = text.lower()
-		for term in _banned_terms():
-			self.assertNotIn(term, lowered)
+		body = text[2:]
+		for bad in ("\n", "\r", "]", "[", "`", ";", ". ", chr(0x2014), chr(0x2013)):
+			self.assertNotIn(bad, body)
+		self.assertFalse(text.endswith((".", " ")))
 
 
 if __name__ == "__main__":

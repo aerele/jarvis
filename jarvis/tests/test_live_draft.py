@@ -424,7 +424,7 @@ class TestDraftingClause(_Base):
 		super().setUp()
 		self.fixed = frappe.utils.now_datetime()
 
-	def _prompt(self, doc, msg: str, flag: bool) -> str:
+	def _prompt(self, doc, msg: str, flag: bool, context=None) -> str:
 		"""The prompt for one stored turn with the flag on or off, the clock held still so two
 		builds differ only by the clause."""
 		from jarvis.chat.turn_handler import assemble_prompt
@@ -434,7 +434,12 @@ class TestDraftingClause(_Base):
 			patch("frappe.utils.now_datetime", return_value=self.fixed),
 		):
 			return assemble_prompt(
-				doc, message_id=msg, conversation_id=doc.name, context={}, attachments=[], user=TEST_USER
+				doc,
+				message_id=msg,
+				conversation_id=doc.name,
+				context=context or {},
+				attachments=[],
+				user=TEST_USER,
 			).user_message
 
 	def _turn(self, conv: str, seq: int = 1, origin: str = "human", text: str = "hello", **conv_flags):
@@ -462,42 +467,30 @@ class TestDraftingClause(_Base):
 		self.assertEqual(out.count("[Context:"), 1)
 		self.assertEqual(out.count(DRAFTING_CLAUSE), 1)
 		bracket = self._bracket(out)
-		self.assertIn(DRAFTING_CLAUSE, bracket)
-		self.assertLess(bracket.index(f"; conv: {doc.name}"), bracket.index(DRAFTING_CLAUSE))
-
-	def test_a_continuation_turn_gets_the_note(self):
-		"""The agent stages the next step of a plan on the hidden turn after a Create, and that
-		is where it must still know to draft with the tool, not with a block."""
-		from jarvis.chat.turn_handler import DRAFTING_CLAUSE
-
-		doc, msg = self._turn(
-			_make_conv(TEST_USER), origin="continuation", text="[System] Applied: the user confirmed."
-		)
-		self.assertIn(DRAFTING_CLAUSE, self._bracket(self._prompt(doc, msg, flag=True)))
+		self.assertIn(f"; conv: {doc.name}{DRAFTING_CLAUSE}", bracket, "right after the conv id")
 
 	def test_no_note_where_the_gate_would_not_park_a_draft_card(self):
-		"""One row per way a turn runs writes without a card for a person, or is not the person's
-		own: the note would promise a draft card that never comes (auto mode, an armed macro, an
-		approved skill run, confirm all, a File Box chat, a builder chat) or send a macro, system, agent or
-		delegated turn to draft for nobody."""
+		"""The rows that need a site: the origin is read from the stored user row, the builder from
+		the conversation's origin_page and the focus from the turn's context, and each must reach
+		the helper through the real assembly. A macro, system, agent, File Box or delegated turn
+		would send the agent to draft for nobody; a builder pane and a connector-focused turn
+		(whose gate refuses create_doc / update_doc) must keep today's text. The conversation
+		flags are in ``test_drafting_clause``."""
+		focus = {"focus_connector": {"key": "gmail", "label": "Gmail"}}
 		cases = [
-			({"auto_mode": 1}, "human"),
-			({"skip_confirmation": 1}, "human"),
-			({"skill_autorun": 1}, "human"),
-			({"request_autorun": 1}, "human"),
-			({"file_box": 1}, "human"),
-			({"origin_page": "dashboards"}, "human"),
-			({"origin_page": "triggers"}, "human"),
-			({}, "macro"),
-			({}, "system"),
-			({}, "agent"),
-			({}, "file_box"),
-			({}, "delegated"),
+			({"origin_page": "dashboards"}, "human", None),
+			({"origin_page": "triggers"}, "human", None),
+			({}, "human", focus),
+			({}, "macro", None),
+			({}, "system", None),
+			({}, "agent", None),
+			({}, "file_box", None),
+			({}, "delegated", None),
 		]
-		for flags, origin in cases:
-			with self.subTest(flags=flags, origin=origin):
+		for flags, origin, context in cases:
+			with self.subTest(flags=flags, origin=origin, context=context):
 				doc, msg = self._turn(_make_conv(TEST_USER), origin=origin, **flags)
-				out = self._prompt(doc, msg, flag=True)
+				out = self._prompt(doc, msg, flag=True, context=context)
 				self.assertNotIn("; drafts:", out)
 
 	def test_the_flag_off_prompt_is_the_prompt_without_the_note(self):
@@ -1036,7 +1029,7 @@ class TestParkedToolDraft(PendingActionTestMixin, FrappeTestCase):
 		self.assertEqual(out.count("[Context:"), 1)
 		bracket = out[: out.index("]\n")]
 		self.assertEqual(bracket.count(DRAFTING_CLAUSE), 1)
-		self.assertLess(bracket.index(DRAFTING_CLAUSE), bracket.index("; unsaved draft waiting: create ToDo"))
+		self.assertIn(DRAFTING_CLAUSE + "; unsaved draft waiting: create ToDo", bracket)
 		self.assertIn("call the tool again only for a change they ask for", bracket)
 		self.assertNotIn("re-emit the block", bracket)
 

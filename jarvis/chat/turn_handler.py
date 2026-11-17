@@ -1495,7 +1495,13 @@ def _assemble_prompt(
 	live_draft_clause = _live_draft_clause(conv, binding)
 	# Site flag ``jarvis_draft_cards`` on: tell the agent to draft with the tool, on the turns
 	# where the gate would park a draft card. "" with the flag off, so the bytes are today's.
-	drafting_clause = _drafting_clause(conv, binding, msg_row.get("origin"), live_draft_clause)
+	drafting_clause = _drafting_clause(
+		conv,
+		binding,
+		msg_row.get("origin"),
+		live_draft_clause,
+		context=context,
+	)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
 	# agent applies them without depending on agent's undocumented auto-retrieval.
@@ -2912,9 +2918,9 @@ _DRAFT_TURN_ORIGINS = frozenset({"", "human", "continuation", "board_answer"})
 # persona and the tests quote it. It is the whole clause, leading "; " included, like the
 # neighbours in the bracket, and a single line without backticks.
 DRAFTING_CLAUSE = (
-	"; drafts: to propose one new or changed record, call create_doc or update_doc; "
-	"the site shows the user a draft card with Create, Preview, Edit and Cancel. "
-	"Do not write a jarvis-action block. One draft at a time"
+	"; drafts: to propose one new or changed record call create_doc or update_doc, "
+	"the site then shows the user a draft card to check, edit, save or cancel, "
+	"write no jarvis-action block for it, one draft at a time"
 )
 
 
@@ -2934,7 +2940,7 @@ def _runs_without_cards(conv, binding) -> bool:
 	)
 
 
-def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
+def _drafting_clause(conv, binding, origin, live_draft_clause: str = "", *, context=None) -> str:
 	"""``DRAFTING_CLAUSE`` when the site flag ``jarvis_draft_cards`` is on and an agent call to
 	``create_doc`` / ``update_doc`` in this turn would park a draft card, else "".
 
@@ -2950,23 +2956,35 @@ def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
 	A waiting TYPED draft (``live_draft_clause`` tells the agent to re-emit its block for a
 	change) gets nothing: the note forbids the block, the reminder asks for it, and the site
 	shows that one card either way. A waiting parked draft gets both: its reminder says to
-	call the tool again only for a change, which agrees with "one draft at a time"."""
+	call the tool again only for a change, which agrees with "one draft at a time".
+
+	Also nothing on a turn with a connector focus (``context.focus_connector``: the gate refuses
+	``create_doc`` / ``update_doc`` then).
+
+	Best-effort like the neighbouring clauses: a failure is logged and leaves the note out."""
 	from jarvis.chat import draft_card
 
 	if not draft_card.enabled():
 		return ""
-	if _runs_without_cards(conv, binding) or (origin or "") not in _DRAFT_TURN_ORIGINS:
-		return ""
-	# A builder chat (the app's own ``_BUILDER_ORIGINS``: Dashboard Builder, Triggers) shows a draft
-	# card only as a title and a link to the full chat, so it keeps today's text. Imported here: the
-	# api module is where the set lives, and the import is lazy like this module's others.
-	from jarvis.chat.api import _BUILDER_ORIGINS
+	try:
+		if _runs_without_cards(conv, binding) or (origin or "") not in _DRAFT_TURN_ORIGINS:
+			return ""
+		# A builder chat (the app's own ``_BUILDER_ORIGINS``: Dashboard Builder, Triggers) shows a
+		# draft card only as a title and a link to the full chat, so it keeps today's text. Imported
+		# here: the api module is where the set lives, and the import is lazy like this module's others.
+		from jarvis.chat import connector_focus
+		from jarvis.chat.api import _BUILDER_ORIGINS
 
-	if conv.get("origin_page") in _BUILDER_ORIGINS:
+		if conv.get("origin_page") in _BUILDER_ORIGINS:
+			return ""
+		if connector_focus.focus_of(context):
+			return ""
+		if _TYPED_CHANGE in live_draft_clause:
+			return ""
+		return DRAFTING_CLAUSE
+	except Exception:
+		frappe.log_error(title="drafting note failed", message=frappe.get_traceback())
 		return ""
-	if _TYPED_CHANGE in live_draft_clause:
-		return ""
-	return DRAFTING_CLAUSE
 
 
 def _live_draft_clause(conv, binding) -> str:
