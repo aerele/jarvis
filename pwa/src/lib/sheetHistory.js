@@ -22,30 +22,45 @@ export function makeSheetHistory(router) {
 	let entry = false; // the marker entry is on top of the history
 	let running = 0; // our own navigations in flight
 
-	// Runs a navigation of our own and resolves when the router has finished it (or after a second:
-	// a navigation that never settles must not hold the guard open for ever).
-	function run(start) {
+	// Runs a navigation of our own and resolves when THAT navigation has finished: the router's
+	// `afterEach` fired for the target `matches(to, from)` accepts (a success or a failure of it: a
+	// cancelled or refused navigation is also afterEach, with a failure), or the promise the router
+	// returned for a push or replace settled. Another navigation finishing meanwhile does not end the
+	// run: the guard would then read the marker's own pop as the person's Back. A second is the
+	// fallback: a navigation that never settles must not hold the guard open for ever. `running` goes
+	// down exactly once, whichever of the three ends the run first.
+	function run(start, matches) {
 		running++;
 		return new Promise((resolve) => {
 			let done = false;
 			let off = () => {};
+			let timer = null;
 			const finish = () => {
 				if (done) return;
 				done = true;
 				off();
+				clearTimeout(timer);
 				running--;
 				resolve();
 			};
-			off = router.afterEach(() => finish());
-			setTimeout(finish, 1000);
+			off = router.afterEach((to, from) => {
+				if (matches(to, from)) finish();
+			});
+			timer = setTimeout(finish, 1000);
 			try {
 				const result = start();
-				if (result && typeof result.catch === "function") result.catch(finish);
+				if (result && typeof result.then === "function") result.then(finish, finish);
 			} catch {
 				finish();
 			}
 		});
 	}
+
+	// Is `to` where a push / replace of `target` lands.
+	const lands = (target) => {
+		const want = router.resolve(target).fullPath;
+		return (to) => to.fullPath === want;
+	};
 
 	return {
 		own: () => running > 0,
@@ -55,13 +70,19 @@ export function makeSheetHistory(router) {
 			if (entry || !router || !router.currentRoute) return;
 			entry = true;
 			const here = router.currentRoute.value;
-			await run(() => router.push({ path: here.path, query: here.query, hash: SHEET_HASH }));
+			const target = { path: here.path, query: here.query, hash: SHEET_HASH };
+			await run(() => router.push(target), lands(target));
 		},
 		// The sheet closed by itself: pop the marker entry.
 		async release() {
 			if (!entry || !router) return;
 			entry = false;
-			await run(() => router.back());
+			// back() has no promise and no known target: it leaves the marker entry (to a location
+			// without the hash), refused or not.
+			await run(
+				() => router.back(),
+				(to, from) => from.hash === SHEET_HASH && to.hash !== SHEET_HASH
+			);
 		},
 		// Is this navigation a PUSH (a link, a notification tap) rather than a pop (the phone's Back)? The
 		// router's history already holds the target of a pop while the guards run, and still holds the
@@ -92,7 +113,7 @@ export function makeSheetHistory(router) {
 			const target = { path: to.path, query: to.query, hash: to.hash };
 			if (!entry) return router.push(target);
 			entry = false;
-			return run(() => router.replace(target));
+			return run(() => router.replace(target), lands(target));
 		},
 		// The page was loaded (or reloaded) with the marker in its URL but no sheet: the sheet's state
 		// is gone, so take the hash off the URL in place (no history entry added).
@@ -100,9 +121,8 @@ export function makeSheetHistory(router) {
 			if (entry || !router || !router.currentRoute) return Promise.resolve(false);
 			const here = router.currentRoute.value;
 			if (here.hash !== SHEET_HASH) return Promise.resolve(false);
-			return run(() =>
-				router.replace({ path: here.path, query: here.query, hash: "" })
-			).then(() => true);
+			const target = { path: here.path, query: here.query, hash: "" };
+			return run(() => router.replace(target), lands(target)).then(() => true);
 		},
 	};
 }
