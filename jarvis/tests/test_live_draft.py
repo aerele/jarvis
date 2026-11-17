@@ -478,7 +478,7 @@ class TestDraftingClause(_Base):
 	def test_no_note_where_the_gate_would_not_park_a_draft_card(self):
 		"""One row per way a turn runs writes without a card for a person, or is not the person's
 		own: the note would promise a draft card that never comes (auto mode, an armed macro, an
-		approved skill run, confirm all, a File Box chat, the Dashboard Builder pane) or send a macro, system, agent or
+		approved skill run, confirm all, a File Box chat, a builder chat) or send a macro, system, agent or
 		delegated turn to draft for nobody."""
 		cases = [
 			({"auto_mode": 1}, "human"),
@@ -487,6 +487,7 @@ class TestDraftingClause(_Base):
 			({"request_autorun": 1}, "human"),
 			({"file_box": 1}, "human"),
 			({"origin_page": "dashboards"}, "human"),
+			({"origin_page": "triggers"}, "human"),
 			({}, "macro"),
 			({}, "system"),
 			({}, "agent"),

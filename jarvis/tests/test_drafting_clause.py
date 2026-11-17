@@ -50,11 +50,16 @@ class TestDraftingClauseRule(unittest.TestCase):
 			with self.subTest(origin=origin):
 				self.assertEqual(self.clause(origin=origin), DRAFTING_CLAUSE)
 
-	def test_the_dashboard_builder_pane_gets_nothing(self):
-		"""The pane shows a draft card only as a title and a link, and saves dashboards with one
-		tap: telling its agent to draft with the tool would send people out of the builder. An
-		ordinary chat and another builder page (not named here) keep the note."""
-		self.assertEqual(self.clause(conv={"origin_page": "dashboards"}), "")
+	def test_no_builder_chat_gets_the_note_and_an_ordinary_chat_does(self):
+		"""A builder pane shows a draft card only as a title and a link, and saves with one tap:
+		telling its agent to draft with the tool would send people out of the builder. The skip set
+		is the app's own list of builders, so a builder added there is skipped here too."""
+		from jarvis.chat.api import _BUILDER_ORIGINS
+
+		self.assertGreaterEqual(_BUILDER_ORIGINS, {"dashboards", "triggers"})
+		for page in sorted(_BUILDER_ORIGINS):
+			with self.subTest(origin_page=page):
+				self.assertEqual(self.clause(conv={"origin_page": page}), "")
 		self.assertEqual(self.clause(conv={"origin_page": ""}), DRAFTING_CLAUSE)
 
 	def test_a_waiting_typed_draft_is_not_told_to_stop_writing_blocks(self):
