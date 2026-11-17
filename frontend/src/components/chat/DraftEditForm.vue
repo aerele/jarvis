@@ -156,7 +156,11 @@
 						<template v-for="(r, ri) in t.rows" :key="r.__key">
 							<!-- An open row is its full form in place, as Desk opens a
 							     row: a card the panel's width at the row's own spot. -->
-							<tr v-if="r.__open" class="jv-grid-openrow">
+							<tr
+								v-if="r.__open"
+								class="jv-grid-openrow"
+								:class="{ 'jv-grid-flagged': r.__flag }"
+							>
 								<td :colspan="t.columns.length + 2" class="jv-grid-opencell">
 									<DraftRowBlock
 										:table="t"
@@ -948,5 +952,10 @@ defineExpose({ parkedRegion });
 /* the read-only totals keep room for their lock glyph (the rule above gives every input 10px) */
 .jv-surface-phone .jv-draft-total-input {
 	padding-right: 28px;
+}
+/* A row the server's message names ("Row 3: ..."): its open form carries a red edge instead of the
+   usual one, and the sheet scrolls to it. */
+.jv-grid-flagged > .jv-grid-opencell > :deep(.jv-rowform-block) {
+	box-shadow: inset 3px 0 0 var(--red);
 }
 </style>

@@ -291,7 +291,8 @@ export function toolPrimaryLabel(model) {
 // ---- where the first mark of a refused save is -------------------------------------------
 //
 // Only what the SERVER marked counts: a main field it named (`error.fields` without a
-// parentfield) or a row it named (`row.__missing`, put there by markMissingRows). A field that is
+// parentfield), a row it named (`row.__missing`, put there by markMissingRows) or a row its message
+// names (`row.__flag`, put there by markRowFromMessage). A field that is
 // merely required and empty is not a mark: the form draws it too, but the person is not sent
 // there.
 
@@ -310,9 +311,16 @@ export function firstServerMark(model, fields) {
 	const tables = (model && model.tables) || [];
 	for (let tableIndex = 0; tableIndex < tables.length; tableIndex++) {
 		const row = (tables[tableIndex].rows || []).find(
-			(r) => Array.isArray(r.__missing) && r.__missing.length
+			(r) => (Array.isArray(r.__missing) && r.__missing.length) || r.__flag
 		);
-		if (row) return { kind: "row", tableIndex, key: row.__key, fieldname: row.__missing[0] };
+		// a row flagged by the message alone (lib/draftRowError.js) has no field to go to: the row's own form
+		if (row)
+			return {
+				kind: "row",
+				tableIndex,
+				key: row.__key,
+				fieldname: (Array.isArray(row.__missing) && row.__missing[0]) || "",
+			};
 	}
 	return null;
 }

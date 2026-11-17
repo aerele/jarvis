@@ -933,6 +933,32 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 		]).toEqual([false, false, "", 0]);
 	});
 
+	// Break: a refusal that names its row only in the words (a controller's rule: no `fields`) leaves the
+	// form unmarked and sends the screen to the top, on either surface (the door is shared).
+	it("a fixable reply with no fields marks the row its message names; one with fields marks none", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		h.state.reply = fixable([]);
+		h.state.reply.error.message = "Row 2: Hrs and Hrs of TS-1 is overlapping with TS-0";
+		expect(await saveToolDraft(p, h.d)).toBe("keep");
+		expect(p.tables[0].rows.map((r) => !!r.__flag)).toEqual([false, true]);
+		expect(p.tables[0].rows[1].__open).toBe(true);
+		expect(h.state.mark).toEqual({
+			kind: "row",
+			tableIndex: 0,
+			key: p.tables[0].rows[1].__key,
+			fieldname: "",
+		});
+		// the next refusal, with a server mark, clears it
+		h.state.reply = fixable([
+			{ fieldname: "title", label: "title", message: "Bad", invalid: true },
+		]);
+		h.state.reply.error.message = "Row 2: Hrs";
+		expect(await saveToolDraft(p, h.d)).toBe("keep");
+		expect(p.tables[0].rows.some((r) => r.__flag)).toBe(false);
+	});
+
 	// Break: the server's "keep a saved row" refusal marks the TABLE by name; markMissing would add
 	// the table to the form as a text field. The banner carries the message instead.
 	it("a mark on a table never adds the table as a field", async () => {

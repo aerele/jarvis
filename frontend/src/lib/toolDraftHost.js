@@ -7,6 +7,7 @@ import { draftFromCard } from "./draftFromCard.js";
 import { draftCardView } from "./draftCardView.js";
 import { draftIsDirty, draftSaveOutcome } from "./draftSave.js";
 import { markMissingRows } from "./draftTables.js";
+import { markRowFromMessage } from "./draftRowError.js";
 import { cardOfItem, isToolDraftItem, toolDraftCtx } from "./toolDraft.js";
 import {
 	CANT_EDIT_TEXT,
@@ -323,6 +324,9 @@ async function settleSave(p, view, r, outcome, d) {
 		const mainFields = (d.metaFields(p.doctype) || []).filter((f) => f.fieldtype !== "Table");
 		markMissing(p, p.error.fields, mainFields);
 		markMissingRows(p, p.error.fields);
+		// A rule the DocType's controller enforces names its row only in the message ("Row 3: ..."): when the
+		// server marked nothing and the table is unambiguous, that row is marked and scrolled to.
+		markRowFromMessage(p, (p.error.fields || []).length ? "" : p.error.message);
 		d.afterMarks(firstServerMark(p, p.error.fields));
 		return "keep";
 	}

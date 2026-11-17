@@ -925,6 +925,38 @@ describe("DraftSheet: what the person sees", () => {
 		w.unmount();
 	});
 
+	// Break: a refusal that names its row only in the words ("Row 2: ...", no fields, as a controller's
+	// overlap rule comes back) jumps to the top banner and focuses the body: the row is not marked,
+	// opened, scrolled to or focused.
+	it("a refusal that names a row only in its message marks that row, opens it and goes there", async () => {
+		const scroll = vi.fn();
+		Element.prototype.scrollIntoView = scroll;
+		const t = await opened();
+		const w = await mountSheet(t);
+		edit(t.host, "parent_project", "PROJ-0002");
+		const message =
+			"Row 2: From Time and To Time of TS-2026-00008 is overlapping with TS-2026-00007";
+		t.replies.save = {
+			ok: false,
+			error: { code: "InvalidArgumentError", message, fields: [] },
+		};
+		await w.find("footer .is-primary").trigger("click");
+		await flushPromises();
+		await nextTick();
+		await nextTick();
+		expect(w.find(".jv-draft-body [role=alert]").text()).toBe(message);
+		const flagged = w.findAll(".jv-grid-flagged");
+		expect(flagged).toHaveLength(1);
+		const rows = w.findAll(".jv-grid tbody > tr");
+		expect(rows.map((r) => r.element).indexOf(flagged[0].element)).toBe(1);
+		const block = flagged[0].find(".jv-rowform-block");
+		// the screen goes to the row (not the banner) and focus is inside it
+		expect(scroll.mock.contexts.map((el) => el.id)).toEqual([block.element.id]);
+		expect(block.element.contains(document.activeElement)).toBe(true);
+		w.unmount();
+		delete Element.prototype.scrollIntoView;
+	});
+
 	// Break: a string error (copied from the card) is not drawn, only an envelope is.
 	it("draws both a string error and an envelope", async () => {
 		const t = await opened();

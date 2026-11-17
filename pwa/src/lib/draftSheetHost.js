@@ -13,6 +13,7 @@ import { makeDraftModelBuilder } from "../../../frontend/src/lib/draftModel.js";
 import { errorLineOf } from "./draftSheetView.js";
 import { thrownActionError } from "../../../frontend/src/lib/chatErrorCopy.js";
 import { applyAutoOpen } from "../../../frontend/src/lib/draftTables.js";
+import { hasFlaggedRow } from "../../../frontend/src/lib/draftRowError.js";
 import {
 	discardFromForm,
 	openToolDraftPanel,
@@ -183,12 +184,15 @@ export function makeDraftSheet(io) {
 	});
 	// The banner sits at the top of the form's scrolling body: when a message arrives that no field
 	// mark takes the person to (a failed call, an offline phone, a card that died), scroll it into
-	// view. A refusal that marks fields has its own scroll to the first mark (the shared door).
+	// view. A refusal that marks fields or names a row has its own scroll to the mark (the shared door).
 	watch(
 		() => {
 			const p = panel.value;
 			const line = p && errorLineOf(p.error);
-			return line && !((p.error && p.error.fields) || []).length ? line.message : "";
+			// a message that marks fields or names a row ("Row 3: ...") has its own scroll to the mark
+			return line && !((p.error && p.error.fields) || []).length && !hasFlaggedRow(p)
+				? line.message
+				: "";
 		},
 		(message) => {
 			if (message) d.afterMarks(null);
