@@ -237,9 +237,9 @@
 					class="flex flex-col gap-2 rounded-md p-3 ring-1 ring-outline-gray-modals"
 				>
 					<div class="flex min-w-0 flex-col gap-0.5">
-						<span class="text-sm font-medium text-ink-gray-8"
-							>Draft: {{ draftTitleOfItem(pa) }}</span
-						>
+						<span class="break-words text-sm font-medium text-ink-gray-8">{{
+							draftLineOfItem(pa)
+						}}</span>
 					</div>
 					<div class="flex items-center gap-2">
 						<Button
@@ -462,7 +462,7 @@ import {
 import { useRouter } from "vue-router";
 import { supportErrorDraft } from "../../../../jarvis/public/js/shared/support_error_draft.mjs";
 import {
-	draftTitleOfItem,
+	draftLineOfItem,
 	isDraftPendingItem,
 } from "../../../../jarvis/public/js/shared/draft_pending.mjs";
 import { brand } from "@/branding";

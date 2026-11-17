@@ -6,7 +6,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { applyEvent, emptyStream } from "./chat_stream.mjs";
-import { listPendingItem, rowPendingItem } from "./pending_items.mjs";
+import {
+  listPendingItem,
+  mergePendingByToken,
+  rowPendingItem,
+} from "./pending_items.mjs";
 
 const toEpoch = (s) =>
   s ? Date.parse(String(s).replace(" ", "T")) / 1000 : null;
@@ -77,6 +81,10 @@ test("all three builders give a draft its title, as draft_title and summary", ()
       assert.equal(item.draft_title, title, name);
       assert.equal(item.summary, title, name);
       assert.doesNotMatch(`${item.summary} ${item.draft_title}`, /_doc/, name);
+      // the item never carries the card itself
+      assert.equal(item.preview, undefined, name);
+      assert.equal(item.card, undefined, name);
+      assert.equal(item.pending_card, undefined, name);
     }
   }
 });
@@ -143,7 +151,38 @@ test("Panel.vue: a draft item has no Confirm, one solid Review in full chat, and
   );
   assert.match(panel, /rowPendingItem\(m, toEpoch\)/);
   assert.match(panel, /\.map\(listPendingItem\)/);
-  // the merge keeps the first item per token (live stack, then rows, then list), so every builder
-  // above must carry the title: none of the three may be replaced by an inline copy.
-  assert.match(panel, /\[\.\.\.base, \.\.\.rowItems, \.\.\.backstop\]/);
+  // the merge (mergePendingByToken, tested below) is what the panel uses, with these builders
+  assert.match(panel, /mergePendingByToken\(base, rowItems, backstop\)/);
+  // a draft's line is the shared one ("Draft: <title>", "Draft to review" for the bare fallback)
+  assert.match(squash(panel), /\? draftLine\(p\.draft_title\)/);
+});
+
+// Break: the merge keeps a later source's item for a token (the list's, without the row's title or
+// recency), drops an item for a second token, reorders cards (their typed numbers move), or keeps a
+// token-less item. Behaviour, not a source pin.
+test("mergePendingByToken: the first item per token wins, in first-seen order, token-less dropped", () => {
+  const live = { token: "a", from: "live" };
+  const rowA = { token: "a", from: "row" };
+  const rowB = { token: "b", from: "row" };
+  const listB = { token: "b", from: "list" };
+  const listC = { token: "c", from: "list" };
+  assert.deepEqual(
+    mergePendingByToken(
+      [live],
+      [rowA, rowB],
+      [listB, listC, { from: "no token" }]
+    ),
+    [live, rowB, listC]
+  );
+  // a failed list read: the live stack is the base; with none, rows then list
+  assert.deepEqual(mergePendingByToken([], [rowB], [listB]), [rowB]);
+  assert.deepEqual(mergePendingByToken([], [], []), []);
+  // a draft that came from every source reads the same whichever wins
+  const w = threeWays("d1", DRAFT);
+  for (const order of [
+    [[w.live], [w.row], [w.list]],
+    [[], [w.row], [w.list]],
+    [[], [], [w.list]],
+  ])
+    assert.equal(mergePendingByToken(...order)[0].draft_title, "New Timesheet");
 });

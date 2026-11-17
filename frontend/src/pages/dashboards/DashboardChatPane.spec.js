@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
 /**
@@ -112,18 +112,20 @@ vi.mock("@/api", () => ({
 	})),
 }));
 const routerPush = vi.hoisted(() => vi.fn(async () => undefined));
-// resolve() is the real router's, over a copy of the Conversation route, so the href the pane
-// opens is built the way the app builds it (base "/jarvis", path "/c/:id").
+const appRouter = vi.hoisted(() => ({ router: null }));
+// resolve() is the APP's own router (frontend/src/router/index.js: its base, its Conversation route),
+// loaded in beforeAll, so the href the pane opens is the one the app builds. Only the chat view the
+// router imports statically is stubbed.
+vi.mock("@/views/ChatView.vue", () => ({ default: { template: "<div />" } }));
 vi.mock("vue-router", async (importOriginal) => {
 	const actual = await importOriginal();
-	const real = actual.createRouter({
-		history: actual.createMemoryHistory("/jarvis"),
-		routes: [{ path: "/c/:id", name: "Conversation", component: { template: "<div />" } }],
-	});
 	return {
 		...actual,
-		useRouter: () => ({ push: routerPush, resolve: (to) => real.resolve(to) }),
+		useRouter: () => ({ push: routerPush, resolve: (to) => appRouter.router.resolve(to) }),
 	};
+});
+beforeAll(async () => {
+	appRouter.router = (await import("@/router/index.js")).default;
 });
 
 import {
@@ -1716,10 +1718,34 @@ describe("DashboardChatPane draft cards go to the full chat (jarvis_draft_cards)
 		expect(confirmTool).not.toHaveBeenCalled();
 	});
 
-	// Break: the route the pane resolves is renamed or moved, so the link silently 404s.
-	it("the route the pane resolves is the app's Conversation route", () => {
-		const routes = fs.readFileSync(path.resolve(__dirname, "../../router/index.js"), "utf8");
-		expect(routes).toContain('{ path: "/c/:id", name: "Conversation"');
+	// Break: a draft that arrives while the pane is open (the realtime path: a frame, the debounced
+	// refresh, the pending list) is drawn as an ordinary card with Approve, or not drawn at all.
+	it("a draft that arrives by a realtime frame shows as a draft after the debounced refresh", async () => {
+		vi.useFakeTimers();
+		try {
+			listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: [] } });
+			const { wrapper, socket } = mountPane();
+			await vi.advanceTimersByTimeAsync(10);
+			expect(buttons(wrapper)).not.toContain("Review in full chat");
+			listPendingConfirmations.mockResolvedValue({
+				ok: true,
+				data: {
+					pending: [
+						item({ preview: { would: { doctype: "Timesheet" }, card: draftCard } }),
+					],
+				},
+			});
+			socket.fire({ kind: "action:pending", conversation: "conv1" });
+			// the refresh is debounced: nothing yet
+			await vi.advanceTimersByTimeAsync(100);
+			expect(buttons(wrapper)).not.toContain("Review in full chat");
+			await vi.advanceTimersByTimeAsync(300);
+			expect(wrapper.text()).toContain("Draft: New Timesheet");
+			expect(buttons(wrapper).filter((b) => b === "Review in full chat")).toHaveLength(1);
+			expect(buttons(wrapper)).not.toContain("Approve");
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	// Break: a card that is not a draft changes: a sensitive card (risk), a plain gated card, an
@@ -1733,7 +1759,9 @@ describe("DashboardChatPane draft cards go to the full chat (jarvis_draft_cards)
 		expect(buttons(wrapper).filter((b) => b === "Approve")).toHaveLength(2);
 		expect(buttons(wrapper).filter((b) => b === "Dismiss")).toHaveLength(2);
 		expect(buttons(wrapper).filter((b) => b === "Review in full chat")).toHaveLength(1);
-		expect(wrapper.text()).toContain("Draft: Draft");
+		// the bare fallback reads as a line, not "Draft: Draft"
+		expect(wrapper.text()).toContain("Draft to review");
+		expect(wrapper.text()).not.toContain("Draft: Draft");
 	});
 
 	// Break: the draft branch swallows a sibling ordinary card's buttons (the v-if / v-else pair

@@ -284,7 +284,11 @@ test("Panel.vue wires the recency helpers into the hint, the send and the resync
     confirmed > -1 && marked > confirmed,
     "after the confirmed early return"
   );
-  assert.match(src, /keepEarlier\(\s*\[\.\.\.byToken\.values\(\)\]/);
+  // the merged list (first item per token, pending_items.test.mjs) is what keepEarlier reads
+  assert.match(
+    src,
+    /keepEarlier\(\s*mergePendingByToken\(base, rowItems, backstop\)/
+  );
   assert.match(src, /v-if="!isRecentCard\(p\)"[^>]*>Earlier</);
 });
 
@@ -464,7 +468,7 @@ test("visibleTypedHint: no hint while any card of the stack is a draft; otherwis
   assert.equal(visibleTypedHint([plain]), 'or type "go ahead"');
   assert.equal(
     visibleTypedHint([plain, { token: "c" }]),
-    typedApprovalHint([plain, { token: "c" }])
+    'or type "confirm all", or "confirm 1 and 2"'
   );
   assert.equal(visibleTypedHint([]), "");
 });

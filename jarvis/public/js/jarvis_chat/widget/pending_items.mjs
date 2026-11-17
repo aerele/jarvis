@@ -47,3 +47,15 @@ export function listPendingItem(r) {
     r
   );
 }
+
+// The panel's merge of its three sources into one list: the live stack (kept when the pending list
+// could not be read), then the transcript rows, then the server's pending list. The FIRST item seen
+// for a token wins, an item with no token is dropped, and the order is first-seen. (Every builder
+// above gives a draft its title, so whichever source wins shows it.)
+export function mergePendingByToken(base, rowItems, backstop) {
+  const byToken = new Map();
+  for (const c of [...base, ...rowItems, ...backstop]) {
+    if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
+  }
+  return [...byToken.values()];
+}

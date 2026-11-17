@@ -3,6 +3,7 @@
 // It must stay the full chat's rule, toolDraft.js isToolDraftItem.
 import { describe, expect, it } from "vitest";
 import { cardOfItem, isToolDraftItem } from "./toolDraft.js";
+import { draftCardView } from "./draftCardView.js";
 import {
 	cardOfPendingItem,
 	draftTitleOfItem,
@@ -46,5 +47,42 @@ describe("shared draft_pending.mjs agrees with toolDraft.js", () => {
 		for (const x of [null, undefined, "x", 3, []]) {
 			expect(isDraftPendingItem(x)).toBe(isToolDraftItem(x));
 		}
+	});
+});
+
+describe("the title of a draft is one rule on every surface", () => {
+	const named = (title, extra = {}) => ({
+		draft: {
+			verb: "create",
+			doctype: "Timesheet",
+			name: null,
+			values: { a: 1 },
+			title,
+			...extra,
+		},
+	});
+	// Break: either rule (the tool-name pattern, the "null" / "undefined" rule, the fallback) changes
+	// alone, so the full chat's card, the pane's strip and the widget's line name one draft differently.
+	// Real cards carry "New <doctype>" / "<doctype> <name>"; the rest are what a model or an old row
+	// could put there. Readable cards only: an unreadable one has no card title at all.
+	it.each([
+		["a real create title", named("New Timesheet")],
+		["a real update title", named("Timesheet TS-1", { verb: "update", name: "TS-1" })],
+		["a title with spaces", named("  Timesheet for May ")],
+		["a tool name", named("create_doc")],
+		["a prefixed tool name", named("jarvis__update_doc")],
+		["a tool name inside words", named("please create_doc now")],
+		["another snake_case word", named("submit_doc")],
+		["the string null", named("null")],
+		["the string undefined", named("undefined")],
+		["an empty title, create", named("")],
+		["an empty title, update", named("", { verb: "update", name: "TS-2" })],
+		["no title at all", named(undefined)],
+		["a number title", named(42)],
+		["an object title", named({ a: 1 })],
+		["no doctype", named("", { doctype: undefined })],
+	])("%s", (_, card) => {
+		const item = { token: "t", preview: { card } };
+		expect(draftTitleOfItem(item)).toBe(draftCardView(card, {}).title);
 	});
 });

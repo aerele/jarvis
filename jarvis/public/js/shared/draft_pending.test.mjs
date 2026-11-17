@@ -5,6 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   cardOfPendingItem,
+  draftLine,
+  draftLineOfItem,
   draftTitleOfItem,
   isDraftPendingItem,
 } from "./draft_pending.mjs";
@@ -57,6 +59,18 @@ const CARDS = [
   ],
   ["a create without a title", draft({ title: undefined }), "New Timesheet"],
   ["a blank title", draft({ title: "   " }), "New Timesheet"],
+  ["the string null as a title", draft({ title: "null" }), "New Timesheet"],
+  [
+    "the string undefined as a title",
+    draft({ title: " undefined " }),
+    "New Timesheet",
+  ],
+  ["an object as a title", draft({ title: { a: 1 } }), "New Timesheet"],
+  [
+    "the string null as a doctype",
+    draft({ title: "", doctype: "null" }),
+    "New record",
+  ],
   [
     "an update without a title",
     draft({ verb: "update", name: "TS-7", title: "" }),
@@ -124,4 +138,17 @@ test("the card's own title is never used", () => {
     draft: { verb: "update", doctype: "Customer", name: "CUST-1", values: {} },
   };
   assert.equal(draftTitleOfItem(viaList(card)), "Customer CUST-1");
+});
+
+// Break: an unreadable draft reads "Draft: Draft" (the fallback title said twice), or a real title
+// loses its "Draft:" lead, or an empty title prints a bare "Draft:".
+test("the line a surface shows for a draft", () => {
+  assert.equal(draftLine("New Timesheet"), "Draft: New Timesheet");
+  assert.equal(draftLine("Draft"), "Draft to review");
+  assert.equal(draftLine(""), "");
+  assert.equal(draftLine(null), "");
+  assert.equal(draftLine("null"), "");
+  assert.equal(draftLineOfItem(viaList(draft())), "Draft: New Timesheet");
+  assert.equal(draftLineOfItem(viaList({ draft: "junk" })), "Draft to review");
+  assert.equal(draftLineOfItem(viaList({ risk: "sensitive" })), "");
 });

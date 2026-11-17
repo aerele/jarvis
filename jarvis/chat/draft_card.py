@@ -19,6 +19,11 @@ import json
 from jarvis.chat import live_draft
 
 _TOOLS = ("create_doc", "update_doc")
+# DocTypes whose write keeps today's one-tap confirmation card even with the flag on. The Dashboard
+# Builder pane saves a dashboard with its own "Save dashboard" Approve in the pane (a draft card would
+# send it to the full chat, away from the builder and its unsaved canvas), and a dashboard is
+# configuration, not a record to review field by field.
+_NOT_DRAFTED = frozenset({"Jarvis Dashboard"})
 _TABLE_TYPES = ("Table", "Table MultiSelect")
 
 
@@ -38,10 +43,12 @@ def _is_batch(args: dict, key: str) -> bool:
 def is_draft_call(tool: str, args, *, must_card: bool) -> bool:
 	"""A single-record ``create_doc`` / ``update_doc`` that is not ``must_card`` (a
 	sensitive, structural or forced card keeps its own shape), whose doctype name is
-	fit to show."""
+	fit to show and is not one of ``_NOT_DRAFTED``."""
 	if must_card or tool not in _TOOLS or not isinstance(args, dict):
 		return False
 	if not live_draft.safe_doctype(args.get("doctype")):
+		return False
+	if args.get("doctype") in _NOT_DRAFTED:
 		return False
 	if tool == "create_doc":
 		return not _is_batch(args, "docs") and isinstance(args.get("values"), dict)

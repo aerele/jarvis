@@ -42,7 +42,10 @@ const text = (v) => {
 	return t === "null" || t === "undefined" ? "" : t;
 };
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
-const TOOL_NAME = /\b(create|update)_doc\b/i;
+// A raw tool name (`create_doc`, `jarvis__update_doc`, any snake_case word) is never a title. The SAME
+// pattern as jarvis/public/js/shared/draft_pending.mjs (the dashboard pane and the Desk widget name a
+// draft with it); draftPending.drift.spec.js compares the two over one table of titles.
+const TOOL_NAME = /\b(?:create|update)_doc\b|^[A-Za-z0-9]+(?:_+[A-Za-z0-9]+)+$/i;
 
 function isReadable(card) {
 	if (!isObject(card) || !isObject(card.draft)) return false;

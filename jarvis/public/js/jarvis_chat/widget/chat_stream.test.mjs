@@ -595,7 +595,7 @@ test("a terminal frame clears the waking phase", () => {
 });
 
 // A server DRAFT card (flag jarvis_draft_cards): the widget cannot show its contents, so the
-// realtime item carries its title for the panel's "Draft: <title>" line. Never the card itself.
+// realtime item carries its title for the panel's "Draft: <title>" line.
 const DRAFT_CARD = {
   kind: "create",
   draft: {
@@ -605,21 +605,6 @@ const DRAFT_CARD = {
     values: {},
   },
 };
-test("action:pending of a draft card carries its title, as summary too, and never the card", () => {
-  const s = applyEvent(emptyStream(), {
-    kind: "action:pending",
-    token: "d1",
-    pending_card_safe: true,
-    tool: "create_doc",
-    summary: "create_doc doctype=Timesheet time_logs=[...]",
-    preview: { card: DRAFT_CARD },
-  });
-  assert.equal(s.pending[0].draft_title, "New Timesheet");
-  assert.equal(s.pending[0].summary, "New Timesheet");
-  assert.equal(s.pending[0].preview, undefined);
-  assert.equal(s.pending[0].card, undefined);
-});
-
 // Break: the title is only added on the action:pending frame, so a draft that arrives in a
 // run:end / run:error pending list shows the raw summary and a Confirm.
 test("a draft in a run:end or run:error pending list carries its title too", () => {
@@ -647,17 +632,10 @@ test("a draft in a run:end or run:error pending list carries its title too", () 
   }
 });
 
-// Break: a sensitive card (risk) or an unreadable draft is routed the wrong way: a sensitive card
-// loses its Confirm, or an unreadable draft keeps one.
-test("a sensitive card has no draft title; an unreadable draft is still a draft", () => {
-  const s = applyEvent(emptyStream(), {
-    kind: "action:pending",
-    token: "s1",
-    pending_card_safe: true,
-    summary: "update_doc",
-    preview: { card: { risk: "sensitive" } },
-  });
-  assert.equal("draft_title" in s.pending[0], false);
+// Break: an unreadable draft (a draft key that is not an object) keeps a Confirm: it is still a
+// draft, with the fallback title. (A sensitive card, and a draft on each of the three paths, are in
+// pending_items.test.mjs.)
+test("an unreadable draft is still a draft, with the fallback title", () => {
   const u = applyEvent(emptyStream(), {
     kind: "action:pending",
     token: "u1",

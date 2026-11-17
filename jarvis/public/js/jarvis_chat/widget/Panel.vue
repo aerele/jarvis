@@ -567,12 +567,12 @@
 					</div>
 				</div>
 				<div v-for="(p, pi) in orderedPending" :key="p.token" class="jvp-pending-row">
-					<div class="jvp-pending-txt">
+					<div class="jvp-pending-txt" :class="{ 'jvp-pending-draft': p.draft_title }">
 						<b v-if="orderedPending.length > 1"
 							>{{ pi + 1 }} of {{ orderedPending.length }}: </b
 						>{{
 							p.draft_title
-								? `Draft: ${p.draft_title}`
+								? draftLine(p.draft_title)
 								: p.summary || "Jarvis wants to make a change."
 						}}
 						<!-- Parked before the user's latest message: only its number binds it. -->
@@ -874,7 +874,8 @@ import {
 	withExcluded,
 	withoutTokens,
 } from "./pending_order.mjs";
-import { listPendingItem, rowPendingItem } from "./pending_items.mjs";
+import { listPendingItem, mergePendingByToken, rowPendingItem } from "./pending_items.mjs";
+import { draftLine } from "../../shared/draft_pending.mjs";
 import { ONBOARDING_URL } from "./config.mjs";
 import {
 	listConversations,
@@ -1592,12 +1593,8 @@ async function resyncPending(source) {
 			? pc.data.pending.filter((r) => r?.pending_card_safe === true).map(listPendingItem)
 			: [];
 		const base = clean ? [] : stream.value.pending || [];
-		const byToken = new Map();
-		for (const c of [...base, ...rowItems, ...backstop]) {
-			if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
-		}
 		const merged = keepEarlier(
-			[...byToken.values()],
+			mergePendingByToken(base, rowItems, backstop),
 			stream.value.pending,
 			rowItems,
 			backstop
@@ -3706,6 +3703,11 @@ defineExpose({ load, startNewChat, convId });
 	font-size: 13px;
 	line-height: 1.45;
 	color: var(--jv-ink);
+}
+/* a draft's title is the user's or a model's own words: a long unbroken one must wrap, not widen the
+   panel (draft items only: an ordinary item's text is unchanged) */
+.jvp-pending-draft {
+	overflow-wrap: anywhere;
 }
 .jvp-pending-earlier {
 	margin-left: 6px;

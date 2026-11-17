@@ -31,9 +31,12 @@ export function isDraftPendingItem(item) {
   );
 }
 
+// Objects and arrays never print as "[object Object]"; the strings "null" and "undefined" count as
+// empty. The SAME rule as frontend/src/lib/draftCardView.js `text` (a spec compares the titles).
 const text = (v) => {
-  if (typeof v === "string") return v.trim();
-  return typeof v === "number" && Number.isFinite(v) ? String(v) : "";
+  if (v === null || v === undefined || typeof v === "object") return "";
+  const t = String(v).trim();
+  return t === "null" || t === "undefined" ? "" : t;
 };
 
 // A raw tool name: `create_doc`, `update_doc`, `jarvis__create_doc`, any snake_case word.
@@ -55,4 +58,17 @@ export function draftTitleOfItem(item) {
   return draft.verb === "update"
     ? `${doctype} ${text(draft.name)}`.trim()
     : `New ${doctype}`;
+}
+
+// The words a surface that cannot draw a draft shows for it: "Draft: <title>", or, for the bare
+// fallback title (an unreadable draft: "Draft"), "Draft to review" ("Draft: Draft" says nothing).
+// "" for an empty title. `draftLineOfItem` is the same for a pending item.
+export function draftLine(title) {
+  const t = text(title);
+  if (!t) return "";
+  return t === "Draft" ? "Draft to review" : `Draft: ${t}`;
+}
+
+export function draftLineOfItem(item) {
+  return draftLine(draftTitleOfItem(item));
 }

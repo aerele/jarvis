@@ -67,8 +67,9 @@ HAND_CALLS = {
 
 class TestDraftCallPure(unittest.TestCase):
 	def test_is_draft_call_truth_table(self):
-		"""A batch (docs / updates), a forced card or another tool must never be treated as a
-		single-record draft: the draft panel can only show one record."""
+		"""A batch (docs / updates), a forced card, another tool or a Jarvis Dashboard must never
+		be treated as a single-record draft: the draft panel can only show one record, and the
+		Dashboard Builder pane saves a dashboard with its own one-tap Approve."""
 		create = {"doctype": "ToDo", "values": {"description": "x"}}
 		update = {"doctype": "ToDo", "name": "T1", "changes": {"status": "Closed"}}
 		cases = [
@@ -81,6 +82,9 @@ class TestDraftCallPure(unittest.TestCase):
 			("delete_doc", update, False, False),
 			("create_doc", {"doctype": "To Do; drop", "values": {}}, False, False),
 			("update_doc", {"doctype": "ToDo", "changes": {"a": 1}}, False, False),
+			# a Jarvis Dashboard keeps its one-tap card (the builder pane's Approve), create and update
+			("create_doc", {"doctype": "Jarvis Dashboard", "values": {"dashboard_title": "X"}}, False, False),
+			("update_doc", {"doctype": "Jarvis Dashboard", "name": "D1", "changes": {"x": 1}}, False, False),
 		]
 		for tool, args, must, want in cases:
 			with self.subTest(tool=tool, must=must, keys=sorted(args)):

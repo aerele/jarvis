@@ -55,6 +55,6 @@ describe("DashboardChatPane parked-card markup", () => {
 			expect(draft, gone).not.toContain(gone);
 		}
 		expect(draft).toContain('label="Review in full chat"');
-		expect(draft).toContain("draftTitleOfItem(pa)");
+		expect(draft).toContain("draftLineOfItem(pa)");
 	});
 });
