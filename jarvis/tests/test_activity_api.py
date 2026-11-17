@@ -17,6 +17,17 @@ from jarvis.tests import test_activity_report as base
 
 ENDPOINT = "jarvis.activity_report.get_user_activity"
 
+# Frappe validates whitelisted-function argument annotations (typing_validations) when a request is
+# live or frappe.in_test is set (CI), and raises FrappeTypeError (HTTP 417, like ValidationError)
+# before our code runs; a bare local run does not. Either is a client error, never a 500.
+_CLIENT_ERRORS = (frappe.ValidationError, frappe.FrappeTypeError)
+
+
+def _unwrapped():
+	"""``get_user_activity`` without Frappe's annotation-validation wrapper, so our own guard is
+	exercised regardless of whether the wrapper is active."""
+	return getattr(ar.get_user_activity, "__wrapped__", ar.get_user_activity)
+
 
 class TestGetUserActivity(base.ReportTestCase):
 	def _range(self, **extra):
@@ -114,12 +125,19 @@ class TestGetUserActivity(base.ReportTestCase):
 
 	def test_an_unknown_view_is_rejected(self):
 		for bad in ("everything", "Summary", "events; drop", 7):
-			with self.assertRaises(frappe.ValidationError, msg=repr(bad)):
+			with self.assertRaises(_CLIENT_ERRORS, msg=repr(bad)):
 				ar.get_user_activity(bad)
+		# The public wrapper may (under a request or in_test) turn a non-str into a type error
+		# before our code runs; the unwrapped function must itself reject every one of them.
+		for bad in ("everything", "Summary", "events; drop", 7):
+			with self.assertRaises(frappe.ValidationError, msg=repr(bad)):
+				_unwrapped()(bad)
 
 	def test_non_text_and_bad_dates_are_rejected_not_a_500(self):
-		with self.assertRaises(frappe.ValidationError):
+		with self.assertRaises(_CLIENT_ERRORS):
 			ar.get_user_activity("events", user=["a@example.com"])
+		with self.assertRaises(frappe.ValidationError):
+			_unwrapped()("events", user=["a@example.com"])
 		with self.assertRaises(frappe.ValidationError):
 			ar.get_user_activity("summary", from_date="not-a-date")
 		with self.assertRaises(frappe.ValidationError):
