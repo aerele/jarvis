@@ -73,13 +73,13 @@ function place() {
 	const width = 40 + props.actions.length * 90;
 	pos.value = {
 		top: Math.round(
-			props.below ? (fitsUnder ? under : Math.max(8, above)) : above >= 8 ? above : under
+			props.below ? (fitsUnder ? under : Math.max(8, above)) : above >= 8 ? above : under,
 		),
 		left: Math.round(
 			Math.min(
 				Math.max(8, rect.left + rect.width / 2 - width / 2),
-				window.innerWidth - width - 8
-			)
+				window.innerWidth - width - 8,
+			),
 		),
 	};
 }
@@ -90,6 +90,11 @@ function schedule(delay = 0) {
 	timer = setTimeout(place, delay);
 }
 const onPointerUp = () => schedule(0);
+// A keyboard selection (Shift + arrows) shows the bar on key release; releasing the
+// Escape that just hid it must not bring it back (the selection is still there).
+const onKeyUp = (e) => {
+	if (e.key !== "Escape") schedule(0);
+};
 const onTouchEnd = () => schedule(350);
 
 // A touch selection is made and adjusted with handles, which fire no mouseup: place
@@ -120,7 +125,7 @@ function pick(key) {
 
 onMounted(() => {
 	document.addEventListener("mouseup", onPointerUp);
-	document.addEventListener("keyup", onPointerUp);
+	document.addEventListener("keyup", onKeyUp);
 	document.addEventListener("touchstart", onTouchStart, { passive: true });
 	document.addEventListener("touchend", onTouchEnd, { passive: true });
 	document.addEventListener("selectionchange", onSelectionChange);
@@ -131,7 +136,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
 	clearTimeout(timer);
 	document.removeEventListener("mouseup", onPointerUp);
-	document.removeEventListener("keyup", onPointerUp);
+	document.removeEventListener("keyup", onKeyUp);
 	document.removeEventListener("touchstart", onTouchStart);
 	document.removeEventListener("touchend", onTouchEnd);
 	document.removeEventListener("selectionchange", onSelectionChange);
