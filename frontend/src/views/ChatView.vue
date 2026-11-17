@@ -4127,22 +4127,12 @@
 										<option>Yes</option>
 										<option>No</option>
 									</select>
-									<input
-										v-else-if="f.control === 'date'"
-										type="date"
-										class="jv-action-input"
-										v-model="f.value"
-									/>
-									<input
-										v-else-if="f.control === 'datetime'"
-										type="datetime-local"
-										class="jv-action-input"
-										v-model="f.value"
-									/>
-									<input
-										v-else-if="f.control === 'time'"
-										type="time"
-										class="jv-action-input"
+									<DateControl
+										v-else-if="
+											['date', 'datetime', 'time'].includes(f.control)
+										"
+										:kind="f.control"
+										:ariaLabel="f.label"
 										v-model="f.value"
 									/>
 									<input
@@ -4552,6 +4542,7 @@ import {
 } from "vue-router";
 import { Button, Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
+import DateControl from "@/components/forms/DateControl.vue";
 import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
 import DraftCell from "@/components/chat/DraftCell.vue";
 import DraftRowBlock from "@/components/chat/DraftRowBlock.vue";
@@ -18559,14 +18550,16 @@ onUnmounted(() => {
 .jv-draft-fld .jv-req {
 	color: var(--red);
 }
-.jv-draft-fld.missing .jv-action-input {
+/* :deep so a field drawn inside a child control (DateControl's picker input,
+   #833) is marked too; ChatView's own inputs still match. */
+.jv-draft-fld.missing :deep(.jv-action-input) {
 	border-color: var(--amber-bd);
 }
 /* a value the save refused (a bad option or link): marked until the next save */
-.jv-draft-fld.invalid .jv-action-input {
+.jv-draft-fld.invalid :deep(.jv-action-input) {
 	border-color: var(--red);
 }
-.jv-draft-fld.changed .jv-action-input {
+.jv-draft-fld.changed :deep(.jv-action-input) {
 	border-color: var(--cta-bd);
 	background: var(--cta-bg);
 }
