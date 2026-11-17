@@ -4,6 +4,7 @@
 // two render every fieldtype the same way; the link search stays in ChatView, which
 // owns the one shared popup, so this only reports focus/typing and the pick.
 import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
+import DateControl from "@/components/forms/DateControl.vue";
 import { cellOptions } from "@/lib/docFields";
 import { checkToYesNo } from "@/lib/draftApply";
 
@@ -127,22 +128,11 @@ function search(ev) {
 		:aria-required="required ? 'true' : undefined"
 		v-model="row[field.fieldname]"
 	/>
-	<input
-		v-else-if="field.fieldtype === 'Datetime' || field.fieldtype === 'Time'"
-		:type="field.fieldtype === 'Datetime' ? 'datetime-local' : 'time'"
-		class="jv-action-input"
+	<DateControl
+		v-else-if="['Date', 'Datetime', 'Time'].includes(field.fieldtype)"
+		:kind="field.fieldtype.toLowerCase()"
+		:ariaLabel="label || ''"
 		:id="controlId || undefined"
-		:aria-label="label || undefined"
-		:aria-describedby="describedby || undefined"
-		:aria-required="required ? 'true' : undefined"
-		v-model="row[field.fieldname]"
-	/>
-	<input
-		v-else-if="field.fieldtype === 'Date'"
-		type="date"
-		class="jv-action-input"
-		:id="controlId || undefined"
-		:aria-label="label || undefined"
 		:aria-describedby="describedby || undefined"
 		:aria-required="required ? 'true' : undefined"
 		v-model="row[field.fieldname]"
