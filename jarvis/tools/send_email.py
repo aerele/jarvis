@@ -23,6 +23,10 @@ Two shapes:
   in ONE atomic savepoint: if any message is invalid, NONE are queued or sent.
   "One message to many people" is already the single call's ``recipients`` list;
   this adds the per-document case.
+- **Merge from a query:** ``send_email(recipients_from={result_id | spec, email_field,
+  name_field?, doctype?}, subject, content)`` -> one message per row of a query the
+  bench runs, ``{{ column }}`` filled per row. The model never types an address
+  (``jarvis.tools._email_merge``); up to ``MAX_MERGE`` per call, one card.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ def send_email(
 	print_format: str | None = None,
 	messages: list | None = None,
 	attachments: list[str] | None = None,
+	recipients_from: dict | None = None,
 ) -> dict:
 	"""Send an email about ``doctype/name`` - or a mail-merge batch when
 	``messages`` is given.
@@ -55,8 +60,27 @@ def send_email(
 	export tools. Each file must be readable by the caller.
 
 	Single: returns ``{communication_name, recipients, subject, doctype, name}``.
-	Batch: returns ``{sent:[{name, recipients, communication_name}], count}``.
+	Batch and merge: return ``{sent:[{name, recipients, communication_name}], count}``.
 	"""
+	if recipients_from is not None:
+		from jarvis.tools import _email_merge
+
+		# The card's messages (set by the gate's _email_merge.expand) must still be what
+		# the query gives now; an uncarded run has none and sends what it gives.
+		merged = _email_merge.assert_unchanged(
+			{
+				"recipients_from": recipients_from,
+				"messages": messages,
+				"subject": subject,
+				"content": content,
+				"cc": cc,
+				"bcc": bcc,
+				"print_format": print_format,
+				"send_me_a_copy": send_me_a_copy or None,
+				"attachments": attachments,
+			}
+		)
+		return _send_batch(merged, max_batch=_email_merge.MAX_MERGE)
 	if messages is not None:
 		if attachments is not None:
 			raise InvalidArgumentError("put attachments inside each message when using messages")
@@ -132,7 +156,7 @@ def _send_one(
 	return (result or {}).get("name")
 
 
-def _send_batch(messages: list) -> dict:
+def _send_batch(messages: list, *, max_batch: int | None = None) -> dict:
 	if not isinstance(messages, list) or not messages:
 		raise InvalidArgumentError(
 			"messages must be a non-empty list of {doctype, name, recipients, subject, content}"
@@ -161,7 +185,12 @@ def _send_batch(messages: list) -> dict:
 		)
 		return {"name": m.get("name"), "recipients": m.get("recipients"), "communication_name": cn}
 
-	sent = run_atomic_batch(prepared, _do, label=lambda m: m.get("name") or str(m.get("recipients")))
+	sent = run_atomic_batch(
+		prepared,
+		_do,
+		label=lambda m: m.get("name") or str(m.get("recipients")),
+		**({"max_batch": max_batch} if max_batch else {}),
+	)
 	return {"sent": sent, "count": len(sent)}
 
 
