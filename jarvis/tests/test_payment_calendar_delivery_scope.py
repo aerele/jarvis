@@ -52,9 +52,9 @@ class TestPaymentCalendarDeliveryScope(TestCase):
 		self.assertTrue(data["ok"], data)
 		self.assertEqual(data["data"]["state"], "complete", data)
 		self.assertFalse(data["data"]["projection"]["forecast_available"])
-		cached = store.load_result(self.user, run["snapshot_id"])
-		self.assertFalse(any(row["voucher_no"] == hidden for row in cached["sources"]["Payable"]["rows"]))
-		self.assertEqual(cached["sources"]["Payable"]["canonical_total"], "100.00")
+		stored = store.load_part(self.user, run["snapshot_id"], "payable")
+		self.assertFalse(any(row["voucher_no"] == hidden for row in stored["rows"]))
+		self.assertEqual(stored["canonical_total"], "100.00")
 
 	def test_no_payment_entry_read_delivers_permitted_invoice_dues(self):
 		self.fx.ple("Advance", "Payment Entry", self.fx.prefix + "Advance", -25)

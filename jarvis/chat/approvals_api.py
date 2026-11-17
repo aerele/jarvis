@@ -54,6 +54,17 @@ def _refuse_if_wiki_write(doc) -> None:
 		)
 
 
+def _is_intake(doc) -> bool:
+	return (doc.get("source") or "") == _ar.INTAKE_SOURCE
+
+
+def _refuse_if_intake(doc) -> None:
+	"""An Intake request is closed only by Approve or Reject: ignoring it would leave its
+	upload waiting for a review nobody can reach."""
+	if _is_intake(doc):
+		frappe.throw("Approve or reject this review. It cannot be ignored.", frappe.PermissionError)
+
+
 def _refuse_if_ticket_triage(doc) -> None:
 	"""Ticket Triage has a typed sidecar, never a generic decision/resume path."""
 	from jarvis.chat.ticket_triage import is_ticket_triage_approval
@@ -698,6 +709,11 @@ def get_approval(name: str) -> dict:
 	requester = approval_reviewers.requester(doc) if chat_question else doc.owner
 	is_requester = requester == frappe.session.user
 	can_act = approval_reviewers.may_review(doc) if chat_question else _may_act_on(doc.conversation)
+	intake = _is_intake(doc)
+	if intake:
+		from jarvis.intake import review
+
+		can_act = review.may_decide(doc)  # SM or the rule owner, not a conversation owner
 	can_read = can_act
 	if doc.get("assessment_key"):
 		from jarvis.chat.operator_review import may_review
@@ -761,6 +777,7 @@ def get_approval(name: str) -> dict:
 		else "",
 		"reviewers": approval_reviewers.reviewers(doc.name) if chat_question else [],
 		**(_continuation_dto(doc, is_requester) if chat_question else {}),
+		**({"intake": review.view(doc)} if intake else {}),
 	}
 
 
@@ -895,10 +912,19 @@ def decide(name: str, decision: str, approve: int = 1) -> dict:
 	agent sees it exactly like any chat turn - same session, same context.
 	"""
 	refuse_in_tool_dispatch()
+	# Frappe does not type-check this module (see ``from __future__``), and an Intake
+	# approval is answered with a JSON object, so a non-text value is refused up front.
+	if decision is not None and not isinstance(decision, str):
+		frappe.throw("Decision must be text")
 	decision = (decision or "").strip()
 	if not decision:
 		frappe.throw("Decision text is required")
 	doc = frappe.get_doc(APPROVAL, name)
+	if _is_intake(doc):
+		# Before every chat path: an Intake request has no conversation to resume.
+		from jarvis.intake import review
+
+		return review.decide(doc, decision, bool(int(approve)))
 	_refuse_if_ticket_triage(doc)
 	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
@@ -1211,6 +1237,7 @@ def dismiss_approval(name: str) -> dict:
 	"""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_intake(doc)
 	_refuse_if_ticket_triage(doc)
 	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation
@@ -1259,6 +1286,7 @@ def restore_approval(name: str) -> dict:
 	accidental dismiss."""
 	refuse_in_tool_dispatch()
 	doc = frappe.get_doc(APPROVAL, name)
+	_refuse_if_intake(doc)
 	_refuse_if_ticket_triage(doc)
 	_require_cycle_count_plan_read(doc)
 	from jarvis.chat.collaboration import require_legacy_conversation

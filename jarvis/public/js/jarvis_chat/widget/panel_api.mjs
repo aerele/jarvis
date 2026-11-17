@@ -5,6 +5,11 @@
 // frappe.call resolves to the full envelope; every caller here wants
 // `.message`, so unwrap it once at this boundary.
 
+// serverReason lives in shared/chat_failure_copy.mjs so the mobile app reads upload errors the
+// same way; re-exported here for the panel and its tests.
+import { serverReason } from "../../shared/chat_failure_copy.mjs";
+export { serverReason };
+
 const CHAT = "jarvis.chat.api.";
 const ACTIONS = "jarvis.chat.actions_api.";
 const ACCOUNT = "jarvis.account.";
@@ -58,40 +63,6 @@ export function csrf() {
   return globalThis.frappe?.csrf_token || globalThis.csrf_token || "";
 }
 
-// Mirrors MAX_MESSAGE_CHARS in frontend/src/lib/errors.js (smaller, for the panel).
-const MAX_REASON_CHARS = 300;
-
-// Best human-readable reason in a Frappe error body: _server_messages (a JSON
-// list of JSON strings), then message, then exception. HTML tags are stripped.
-export function serverReason(body) {
-  if (!body || typeof body !== "object") return "";
-  let text = "";
-  try {
-    const first = JSON.parse(body._server_messages || "[]")[0];
-    text = first ? JSON.parse(first).message || "" : "";
-  } catch (e) {
-    text = "";
-  }
-  if (!text && typeof body.message === "string") text = body.message;
-  if (!text && typeof body.exception === "string") {
-    // Only the text after the first colon; a bare class name is no use to users.
-    text = body.exception.split(":").slice(1).join(":");
-  }
-  text = text
-    .replace(/<\/?[a-zA-Z][^>]*>/g, " ")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#(\d+);/g, (_m, n) => String.fromCharCode(Number(n)))
-    .replace(/&amp;/g, "&")
-    .replace(/\s+/g, " ")
-    .trim();
-  return text.length > MAX_REASON_CHARS
-    ? text.slice(0, MAX_REASON_CHARS - 1) + "…"
-    : text;
-}
-
 // Multipart endpoints cannot go through frappe.call, so these two use fetch
 // with the Desk's CSRF token, the same way the SPA's uploadFile does.
 export async function uploadFile(file) {
@@ -106,6 +77,7 @@ export async function uploadFile(file) {
   });
   if (!r.ok) {
     const err = new Error(`upload failed (${r.status})`);
+    err.status = r.status;
     err.serverReason = serverReason(await r.json().catch(() => null));
     throw err;
   }
@@ -140,7 +112,11 @@ export async function transcribeAudio(blob, durationS) {
       signal: ctrl.signal,
     });
     const data = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(`transcription failed (${r.status})`);
+    if (!r.ok) {
+      const err = new Error(`transcription failed (${r.status})`);
+      err.status = r.status;
+      throw err;
+    }
     return data.message || data;
   } finally {
     clearTimeout(timer);
@@ -185,3 +161,8 @@ export const isReadyForChat = () => call(ACCOUNT + "is_ready_for_chat");
 // not already serving, throttled 180s server-side. Admin-gated (require_jarvis_admin);
 // the panel only shows the Retry CTA to a Jarvis Admin / System Manager.
 export const resyncLlm = () => call(ONBOARDING + "resync_llm");
+
+// The failed reply's error (secrets removed), model and run id, for the Report error draft.
+// Resolves {ok, data}; rejects when the user has no support access or the reply is not theirs.
+export const getErrorReportDetails = (conversation, message) =>
+  call("jarvis.support.api.error_report_details", { conversation, message });

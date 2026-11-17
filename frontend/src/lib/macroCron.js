@@ -240,6 +240,16 @@ export function cronLinesOf(text) {
 		.filter(Boolean);
 }
 
+// The cron box with one more line (#801): an example ADDS its schedule instead of
+// replacing the ones already written. A line already there, or a box already at
+// MAX_CRON_LINES, leaves the text as it was.
+export function withCronLine(text, line) {
+	const lines = cronLinesOf(text);
+	const add = cronLinesOf(line)[0];
+	if (!add || lines.includes(add) || lines.length >= MAX_CRON_LINES) return String(text || "");
+	return [...lines, add].join("\n");
+}
+
 // ── the form's state <-> what is saved ───────────────────────────────────────
 // The cron lines a preset is saved as. Throws with a sentence when the state cannot
 // be saved (no day picked).

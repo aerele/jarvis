@@ -1,0 +1,83 @@
+/* Phone week strip (template .week-strip, L108). Every rule sits under .pcal-cal so it beats
+   the toolbar's shared .icon-btn rules; colours follow the --pc-* tokens. */
+.pcal-cal .week-strip {
+	display: flex;
+	align-items: center;
+	gap: 0;
+	padding: 4px 6px 10px;
+	background: var(--pc-card);
+	border-bottom: 1px solid var(--pc-border-soft);
+	touch-action: pan-y;
+}
+.pcal-cal .week-strip > .icon-btn {
+	/* 44 px touch target */
+	min-width: 44px;
+	width: 44px;
+	min-height: 44px;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	font-size: 22px;
+	color: var(--pc-muted);
+	cursor: pointer;
+}
+.pcal-cal .week-strip > .icon-btn:hover:not(:disabled) {
+	background: transparent;
+}
+.pcal-cal .week-strip > .icon-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+.pcal-cal .week-days {
+	display: grid;
+	grid-template-columns: repeat(7, minmax(0, 1fr));
+	gap: 2px;
+	flex: 1;
+	min-width: 0;
+}
+.pcal-cal .week-day {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 5px;
+	min-width: 0;
+	padding: 7px 1px;
+	border: 1px solid transparent;
+	border-radius: 7px;
+	background: none;
+	color: var(--pc-muted);
+	cursor: pointer;
+}
+.pcal-cal .week-day:disabled {
+	opacity: 0.45;
+	cursor: default;
+}
+.pcal-cal .week-day > span {
+	font-size: 10px;
+}
+.pcal-cal .week-day strong {
+	font-size: 15px;
+	font-weight: 600;
+	color: var(--pc-text);
+}
+.pcal-cal .week-day i {
+	width: 4px;
+	height: 4px;
+	border-radius: 50%;
+	background: transparent;
+}
+.pcal-cal .week-day i.activity {
+	background: var(--pc-muted);
+}
+.pcal-cal .week-day.selected {
+	background: var(--pc-hover);
+	border-color: var(--pc-focus);
+}
+/* Landing of a "View {date}" jump: kept until the button's first blur. */
+.pcal-cal .week-day.trough-target:focus {
+	outline: 2px solid #2f7152;
+	outline-offset: 2px;
+}
+[data-theme="dark"] .pcal-cal .week-day.trough-target:focus {
+	outline-color: var(--pc-link);
+}

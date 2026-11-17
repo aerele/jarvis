@@ -53,7 +53,7 @@ from frappe.utils import now_datetime
 from rq.timeouts import JobTimeoutException
 
 from jarvis._session import authenticated_user, impersonate
-from jarvis.chat import agent_scope, derived_config
+from jarvis.chat import agent_scope, derived_config, directive_filter
 from jarvis.chat.agent_activity import ACTIVITY, log_activity
 from jarvis.chat.macro_scheduler import compute_next_run
 from jarvis.exceptions import InvalidArgumentError
@@ -1721,14 +1721,19 @@ def _launch_audit(
 			run_id=run.name,
 			agent_id=f"agent-{slug}",
 			session_key=session_key,
-			message=_audit_prompt(
-				listing,
-				inst,
-				trigger,
-				scope,
-				engagement_config=engagement_config,
-				record_scope_supported=record_scope_supported,
-				explicit_config=prompt_config,
+			# F-Q8: the prompt holds tenant-set values (company, scope, explicit config).
+			# A ``/model`` token in one must not reach the host's directive parser. A normal
+			# prompt is byte-identical after the filter (test_directive_filter_assembly).
+			message=directive_filter.clean_added(
+				_audit_prompt(
+					listing,
+					inst,
+					trigger,
+					scope,
+					engagement_config=engagement_config,
+					record_scope_supported=record_scope_supported,
+					explicit_config=prompt_config,
+				)
 			),
 			timeout_s=registry_timeout_s(slug),
 		)

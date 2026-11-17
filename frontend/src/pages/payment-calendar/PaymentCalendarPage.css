@@ -1,0 +1,321 @@
+/* Page shell and header (template L131-355, header L373). The padding is on .pcal-main and
+   follows the content width: .pcal-root is the container, so the sidebar is excluded.
+   .pcal-layout is unpadded, so its container width is the content width and its @container
+   thresholds equal the template's @media widths. */
+.pcal-root {
+	background: var(--pc-bg);
+	color: var(--pc-text);
+	container-type: inline-size;
+	container-name: pcal-page;
+}
+.pcal-main {
+	flex: 1;
+	min-height: 0;
+	overflow: auto;
+	background: var(--pc-bg);
+	padding: 23px 30px 30px;
+}
+/* Template .page is 1632 border-box: 1572 of content at 30px padding. */
+.pcal-main > .pcal-layout {
+	max-width: 1572px;
+	margin-left: auto;
+	margin-right: auto;
+	container-type: inline-size;
+}
+@container pcal-page (min-width: 851px) {
+	.pcal-main {
+		padding-top: 19px;
+	}
+}
+@container pcal-page (max-width: 1100px) {
+	.pcal-main {
+		padding: 22px 20px;
+	}
+}
+@container pcal-page (max-width: 540px) {
+	.pcal-main {
+		padding: 19px 15px 26px;
+	}
+}
+
+.pcal-page-heading {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 14px;
+	margin-bottom: 20px;
+}
+.pcal-page-heading h1 {
+	margin: 0;
+	font-size: var(--pc-fs-h1);
+	font-weight: 650;
+	letter-spacing: -0.7px;
+	line-height: 1.2;
+}
+.pcal-heading-tools {
+	display: flex;
+	align-items: center;
+	gap: 15px;
+}
+.pcal-updated {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: var(--pc-fs-small);
+	color: var(--pc-muted);
+}
+.pcal-updated i {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--pc-positive);
+}
+.pcal-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
+	min-height: 36px;
+	padding: 7px 12px;
+	border: 1px solid var(--pc-border-strong);
+	border-radius: var(--pc-radius-button);
+	background: var(--pc-card);
+	color: var(--pc-text);
+	font-size: 13px;
+	font-weight: 550;
+	cursor: pointer;
+}
+.pcal-btn:hover:not(:disabled) {
+	background: var(--pc-surface-2);
+}
+.pcal-btn:disabled {
+	cursor: default;
+	opacity: 0.5;
+}
+.pcal-btn svg {
+	width: 16px;
+	height: 16px;
+	flex-shrink: 0;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.6;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+.pcal-theme-toggle {
+	width: 36px;
+	padding: 8px;
+	flex-shrink: 0;
+}
+[data-theme="dark"] .pcal-btn:hover:not(:disabled) {
+	background: var(--pc-surface-3);
+}
+
+@container (max-width: 850px) {
+	.pcal-updated {
+		font-size: 11px;
+	}
+}
+@container (max-width: 540px) {
+	.pcal-page-heading {
+		gap: 8px;
+		margin-bottom: 15px;
+	}
+	.pcal-page-heading h1 {
+		font-size: 23px;
+	}
+	.pcal-heading-tools {
+		gap: 0;
+		flex-shrink: 0;
+	}
+	/* The time and its dot go; the update status ("Update paused", "Refreshing") stays, on a
+	   line of its own below the title and the buttons. */
+	.pcal-page-heading {
+		flex-wrap: wrap;
+	}
+	.pcal-as-of,
+	.pcal-updated i {
+		display: none;
+	}
+	.pcal-updated {
+		order: 3;
+		flex-basis: 100%;
+		justify-content: flex-end;
+	}
+	.pcal-heading-tools .pcal-btn {
+		min-height: 34px;
+		padding: 6px 9px;
+		font-size: 12px;
+	}
+	.pcal-heading-tools .pcal-theme-toggle {
+		width: 34px;
+		margin-right: 6px;
+		padding: 8px;
+	}
+}
+@container (max-width: 350px) {
+	.pcal-page-heading h1 {
+		font-size: 20px;
+	}
+	.pcal-heading-tools .pcal-theme-toggle {
+		margin-right: 4px;
+	}
+}
+@media (min-width: 851px) {
+	.pcal-page-heading {
+		margin-bottom: 15px;
+	}
+}
+
+/* Calendar and aside (template .content, .calendar-column, .aside: L56, L102, L106, L113).
+   Left column: the calendar, then Next payments (gap 12). Right aside: the side ledger, then
+   the method note, sticky. Effective widths after the template's cascade: 340 px, 310 px at
+   <= 1200; one column at <= 850 with the order calendar, aside, Next payments. */
+.pcal-calendar-layout {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 340px;
+	gap: 18px;
+	align-items: start;
+	margin-bottom: 0;
+}
+.pcal-calendar-column {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	min-width: 0;
+}
+.pcal-aside {
+	position: sticky;
+	top: 16px;
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	gap: 14px;
+	min-width: 0;
+}
+@container (max-width: 1200px) {
+	.pcal-calendar-layout {
+		grid-template-columns: minmax(0, 1fr) 310px;
+		gap: 14px;
+	}
+}
+@container (max-width: 850px) {
+	.pcal-calendar-layout {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+	}
+	.pcal-calendar-column {
+		display: contents;
+	}
+	.pcal-calendar-column > .pcal-cal {
+		order: 0;
+		width: 100%;
+	}
+	.pcal-aside {
+		order: 1;
+		position: static;
+		gap: 12px;
+		width: 100%;
+	}
+	.pcal-calendar-column > .pcal-next {
+		order: 2;
+		width: 100%;
+	}
+}
+
+/* Back row, state panels and notices (merged from the former page-level sheet). */
+/* The title takes programmatic focus on arrival from the chat hand-off (a screen
+   reader lands on it). It is not interactive, so it never draws a ring. */
+#pcal-title:focus {
+	outline: none;
+}
+.pcal-back-row {
+	margin-bottom: 10px;
+}
+.pcal-back {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+.pcal-text-button {
+	color: var(--pc-link);
+	font-weight: 550;
+	text-decoration: underline;
+	text-underline-offset: 3px;
+}
+/* Primary button of the page body: the details' "View invoices" and the empty-state refresh.
+   The picker's Apply keeps its own `.btn.primary` rule in CalendarFilterBar.css. */
+.pcal-primary-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 7px;
+	min-height: 33px;
+	padding: 7px 12px;
+	border: 1px solid var(--pc-primary);
+	border-radius: var(--pc-radius-button);
+	background: var(--pc-primary);
+	font-size: 12px;
+	font-weight: 550;
+	white-space: nowrap;
+	color: var(--pc-primary-fg);
+}
+.pcal-primary-btn:hover:not(:disabled) {
+	background: var(--pc-primary-hover);
+}
+.pcal-primary-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+.pcal-panel {
+	min-width: 0;
+	background: var(--pc-card);
+	border: 1px solid var(--pc-border);
+	border-radius: 10px;
+	overflow: hidden;
+}
+.pcal-state {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 16px;
+	text-align: center;
+	padding: 70px 24px;
+	margin-top: 22px;
+}
+.pcal-state h2 {
+	font-size: 18px;
+	font-weight: 600;
+}
+.pcal-state p {
+	max-width: 480px;
+	color: var(--pc-text-2);
+	font-size: 13px;
+	line-height: 1.8;
+}
+.pcal-warning {
+	background: var(--pc-caution-bg);
+	border: 1px solid var(--pc-caution-bd);
+	color: var(--pc-caution);
+	border-radius: 8px;
+	padding: 14px 18px;
+	font-size: 11px;
+	line-height: 1.8;
+	margin-bottom: 18px;
+}
+.pcal-warning strong {
+	font-weight: 600;
+}
+.pcal-notice {
+	font-size: 11px;
+	color: var(--pc-text-2);
+	padding: 12px 0;
+	line-height: 1.6;
+}
+.pcal-inline-error {
+	font-size: 12px;
+	color: var(--pc-negative);
+	line-height: 1.6;
+	margin: 10px 0;
+}

@@ -151,12 +151,37 @@ class TestPaymentCalendarMonthSnapshot(TestCase):
 		sid, _ = store.admit("Administrator", "c" * 64, monthly, proof["fingerprint"])
 		try:
 			self.assertTrue(store.mark_running("Administrator", sid))
-			self.assertTrue(store.publish("Administrator", sid, value))
+			self.assertTrue(store.publish_snapshot("Administrator", sid, store.split_result(value, monthly)))
 			result = api.get_snapshot_status(sid)
 			self.assertTrue(result["ok"])
 			self.assertEqual(result["data"]["scope"]["month"], month)
 			self.assertEqual(len(result["data"]["projection"]["days"]), get_last_day(nowdate()).day)
 			self.assertTrue(api.get_day_detail(sid, nowdate())["ok"])
 			self.assertFalse(api.get_day_detail(sid, add_months(month + "-01", 1))["ok"])
+			totals = value["projection"]["month_totals"]
+			self.assertIs(totals["complete"], True)
+			for side in ("Payable", "Receivable"):
+				window = api.get_bucket_detail(sid, "window", side)["data"]
+				self.assertEqual(window["total_remaining"], totals[side.lower()])
+				self.assertEqual(window["total"], totals[side.lower() + "_rows"])
 		finally:
 			store.purge_actor("Administrator")
+
+	def test_collect_stamps_schema_two_and_keeps_month_a_string_with_month_totals(self):
+		legacy = scope.normalize_scope(self.fx.company, [self.fx.bank])
+		full = snapshot.collect(legacy, authorize_scope(legacy)["fingerprint"])
+		self.assertEqual(full["schema"], 2)
+		self.assertNotIn("month", full["projection"])
+		self.assertIsNone(full["projection"]["month_totals"])
+		month = nowdate()[:7]
+		monthly = scope.normalize_scope(self.fx.company, [self.fx.bank], month=month)
+		value = snapshot.collect(monthly, authorize_scope(monthly)["fingerprint"])
+		self.assertEqual(value["schema"], 2)
+		self.assertEqual(value["projection"]["month"], month)
+		totals = value["projection"]["month_totals"]
+		self.assertEqual(
+			set(totals), {"receivable", "payable", "net", "receivable_rows", "payable_rows", "complete"}
+		)
+		self.assertIs(totals["complete"], True)
+		self.assertEqual((totals["payable"], totals["payable_rows"]), ("100.00", 1))
+		self.assertEqual((totals["receivable"], totals["receivable_rows"]), ("100.00", 1))

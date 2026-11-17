@@ -212,6 +212,18 @@ class TestChatExportBlocks(unittest.TestCase):
 		):
 			self.assertNotIn(dropped, out)
 
+	def test_a_payment_calendar_goto_is_dropped_from_the_blocks(self):
+		goto = (
+			'```jarvis-goto\n{"page":"payment-calendar","prompt":"PRIVATE-CALENDAR-PROMPT '
+			'per-day cash view"}\n```'
+		)
+		out = chat_export._render_blocks("Your Payment Calendar shows this.\n\n" + goto + "\n\nAfter")
+		readable = _readable(out)
+		self.assertIn("Your Payment Calendar shows this.", readable)
+		self.assertIn("After", readable)
+		for dropped in ("PRIVATE-CALENDAR-PROMPT", "payment-calendar", "jarvis-goto", "```"):
+			self.assertNotIn(dropped, out)
+
 	def test_bad_chart_has_readable_fallback(self):
 		out = chat_export._render_chart('{"type":"unknown","title":"Chart title"}')
 		self.assertIn("[Chart: Chart title]", out)
@@ -383,6 +395,20 @@ class TestChatExportEndpoint(FrappeTestCase):
 		self.assertLess(out.index("FIRST"), out.index("LAST"))
 		self.assertNotIn("HIDDEN-SENTINEL", out)
 		self.assertNotIn("AUTOMATED-PRIVATE-PROMPT", out)
+
+	def test_a_payment_calendar_goto_never_reaches_the_markdown_or_pdf_export(self):
+		self._message(
+			content='Your Payment Calendar shows this.\n\n```jarvis-goto\n{"page":"payment-calendar",'
+			'"prompt":"PRIVATE-CALENDAR-PROMPT"}\n```'
+		)
+		md = self._markdown()
+		self.assertIn("Your Payment Calendar shows this.", _readable(md))
+		for dropped in ("PRIVATE-CALENDAR-PROMPT", "payment-calendar", "jarvis-goto"):
+			self.assertNotIn(dropped, md)
+		with patch.object(furniture, "render_pdf", return_value=b"%PDF-1.4 fixture") as render:
+			self._download("pdf")
+		for dropped in ("PRIVATE-CALENDAR-PROMPT", "payment-calendar", "jarvis-goto"):
+			self.assertNotIn(dropped, render.call_args.args[0])
 
 	def test_empty_chat_download_is_a_markdown_attachment(self):
 		response = self._download()

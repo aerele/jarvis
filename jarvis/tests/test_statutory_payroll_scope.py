@@ -416,9 +416,9 @@ class TestStatutoryPayrollScope(FrappeTestCase):
 			patch.object(
 				frappe,
 				"get_doc",
-				side_effect=lambda doctype, name: installation
-				if doctype == writeback.INSTALLATION
-				else run_doc,
+				side_effect=lambda doctype, name: (
+					installation if doctype == writeback.INSTALLATION else run_doc
+				),
 			),
 			patch("jarvis.chat.agent_runs.record_delegate_run") as persist,
 		):

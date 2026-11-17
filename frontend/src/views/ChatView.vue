@@ -840,7 +840,6 @@
 							:failed="hasCurrentMessageSnapshot && m.failed"
 							:delivery-state="hasCurrentMessageSnapshot ? m.deliveryState : ''"
 							:delivery-note="hasCurrentMessageSnapshot ? m.deliveryNote : ''"
-							:delivery-conversation="m.deliveryConversation"
 							@edit="editCommand(m)"
 							@copy="copyMsg(m.name, m.content)"
 							@retry="resendFailed(m)"
@@ -865,6 +864,7 @@
 							:timestampFull="msgTimeFull(m)"
 							:copied="copiedId === m.name"
 							@copy="copyReplyMsg(m.name, m.content)"
+							@code-copy="announceCodeCopy"
 							@open-attachment="openArtifact(m, $event)"
 						>
 							<template #avatar>
@@ -1098,20 +1098,28 @@
 											No changes were made to your data.
 										</div>
 										<!-- #702: the "what you can do" line - mirrors ActionError.vue's
-										     `.jv-ae-hint`, so a turn failure gets the same headline + hint +
-										     expandable-raw-detail treatment an ACTION-card failure already
-										     does (headline/hint from errorInfo(m); the raw detail is m.error,
-										     shown behind the inline "Details" toggle), instead of a bare
-										     message with no next step. -->
-										<!-- One guidance line: the hint, then the status link and the
-										     raw-detail toggle inline at its end, the way production chat
-										     UIs keep a failed turn to a title + one action line. -->
+										     `.jv-ae-hint`. A failover error lists each model and why it
+										     failed; the raw text shows only when it is the sole reason. -->
 										<div
-											v-if="
-												errorInfo(m).hint ||
-												errorInfo(m).statusUrl ||
-												m.error
+											v-if="errorInfo(m).models"
+											style="
+												font-size: 12.5px;
+												color: var(--text-2);
+												line-height: 1.5;
+												margin-top: 6px;
 											"
+										>
+											<div
+												v-for="(mod, mdi) in errorInfo(m).models"
+												:key="mdi"
+											>
+												<strong>{{ mod.model }}</strong>
+												{{ mod.reason }}.
+												{{ mod.next }}
+											</div>
+										</div>
+										<div
+											v-if="errorInfo(m).hint || errorInfo(m).statusUrl"
 											style="
 												font-size: 12.5px;
 												color: var(--text-2);
@@ -1129,30 +1137,9 @@
 												>{{ errorInfo(m).statusLabel }}
 												<span aria-hidden="true">&#8599;</span></a
 											>
-											<template v-if="m.error">
-												<span v-if="errorInfo(m).hint" aria-hidden="true">
-													&middot;
-												</span>
-												<button
-													type="button"
-													class="jv-err-link"
-													:aria-expanded="
-														rawOpen[m.name] ? 'true' : 'false'
-													"
-													:aria-controls="`jv-err-raw-${m.name}`"
-													@click="toggleRaw(m.name)"
-												>
-													{{
-														rawOpen[m.name]
-															? "Hide details"
-															: "Details"
-													}}
-												</button>
-											</template>
 										</div>
 										<div
-											v-if="rawOpen[m.name]"
-											:id="`jv-err-raw-${m.name}`"
+											v-if="showsRawReason(errorInfo(m)) && m.error"
 											style="
 												font-size: 12px;
 												color: var(--text-2);
@@ -1212,8 +1199,32 @@
 								</div>
 							</template>
 							<template #below-body>
+								<!-- a draft block we cannot show: the error card INSTEAD of any draft card -->
+								<div
+									v-if="draftBlockErrorText && actionAnchor === m.name"
+									class="jv-action jv-summary"
+								>
+									<div role="alert" class="jv-summary-body jv-summary-err">
+										<svg
+											width="16"
+											height="16"
+											viewBox="0 0 24 24"
+											fill="none"
+											stroke="var(--red)"
+											stroke-width="1.9"
+											stroke-linecap="round"
+											stroke-linejoin="round"
+										>
+											<path
+												d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+											/>
+											<path d="M12 9v4M12 17h.01" />
+										</svg>
+										<span>{{ draftBlockErrorText }}</span>
+									</div>
+								</div>
 								<!-- rich action card the agent emits (doc confirm / email draft) -->
-								<template v-if="actionFor === m.name && activeAction">
+								<template v-else-if="actionAnchor === m.name && activeAction">
 									<!-- email draft -->
 									<div v-if="activeAction.kind === 'email'" class="jv-email">
 										<div class="jv-email-head">
@@ -1483,7 +1494,11 @@
 											v-if="summaryState.model && summaryState.model.error"
 											style="margin: 0 14px 10px"
 										>
-											<ActionError :error="summaryState.model.error" />
+											<ActionError
+												:error="summaryState.model.error"
+												:can-report="!!supportOn"
+												@report="openActionErrorSupport"
+											/>
 										</div>
 
 										<div
@@ -1493,13 +1508,26 @@
 										>
 											{{ activeParkedNote }}
 										</div>
-										<template v-else-if="!summaryState.error">
+										<div v-else-if="summaryState.error" class="jv-action-foot">
+											<button
+												class="jv-action-2nd"
+												:disabled="
+													(cardModel && cardModel.applying) ||
+													cancellingDraft
+												"
+												@click="cancelDraft"
+											>
+												Cancel
+											</button>
+										</div>
+										<template v-else>
 											<div class="jv-action-foot">
 												<button
 													class="jv-action-primary"
 													:disabled="
 														!cardModel ||
 														cardModel.applying ||
+														cancellingDraft ||
 														convStreaming
 													"
 													:title="
@@ -1535,6 +1563,16 @@
 													"
 												>
 													Edit
+												</button>
+												<button
+													class="jv-action-2nd"
+													:disabled="
+														(cardModel && cardModel.applying) ||
+														cancellingDraft
+													"
+													@click="cancelDraft"
+												>
+													Cancel
 												</button>
 											</div>
 											<div class="jv-summary-hint">
@@ -1716,45 +1754,33 @@
 								</div>
 								<!-- redirect card: dashboard builds no longer run inline in main
 								     chat (jarvis#884) - the agent restates the request and points
-								     here with ```jarvis-goto. Stays clickable in history so an
-								     old transcript still has a way through, even though the
-								     redirect itself only auto-fires once, live (see gotoDashboards
-								     / the run:end handler). jarvis#912: every click on an old card
-								     hands off through the same fired-stamp lookup as the live
-								     redirect, so a second/third click resumes the builder
-								     conversation the first hand-off created instead of starting a
-								     new one. -->
+								     here with ```jarvis-goto (to Dashboards, or to the Payment
+								     Calendar; the copy comes from the page map in lib/chatGoto.js).
+								     The Dashboards subtitle is the agent's restated request; the
+								     Payment Calendar's is fixed copy (gotoCardCopy), because the
+								     calendar does not apply the restatement.
+								     A live auto-open is a visible, cancellable countdown ON this card
+								     (gotoCd; see startGotoCountdown / the run:end handler).
+								     Stays clickable in history so an old transcript still has a way
+								     through, even though the countdown only runs once, live, for a
+								     message (see openGotoAction). jarvis#912:
+								     every click on an old Dashboards card hands off through the
+								     same fired-stamp lookup as the live redirect, so a second/third
+								     click resumes the builder conversation the first hand-off
+								     created instead of starting a new one. -->
 								<template v-if="hasCurrentMessageSnapshot">
-									<div v-if="gotoOf(m)" class="jv-macrocard">
-										<div class="jv-macrocard-ic">
-											<svg
-												width="16"
-												height="16"
-												viewBox="0 0 24 24"
-												fill="none"
-												stroke="currentColor"
-												stroke-width="1.7"
-												stroke-linecap="round"
-												stroke-linejoin="round"
-											>
-												<path d="M18 20V10M12 20V4M6 20v-6" />
-											</svg>
-										</div>
-										<div class="jv-macrocard-txt">
-											<span class="jv-macrocard-title"
-												>Continue in Dashboards</span
-											>
-											<span class="jv-macrocard-sub">{{
-												gotoOf(m).prompt
-											}}</span>
-										</div>
-										<button
-											class="jv-macrocard-btn"
-											@click="gotoDashboards(gotoOf(m).prompt, m.name)"
-										>
-											Open Dashboards
-										</button>
-									</div>
+									<GotoCard
+										v-if="gotoCardOf(m)"
+										:ref="(el) => setGotoCardRef(m.name, el)"
+										:copy="gotoCardOf(m)"
+										:countdown="gotoCountdownOf(m)"
+										:opening="gotoOpeningOf(m)"
+										@open="openGotoCard(m)"
+										@stay="onGotoStay"
+										@open-now="gotoCd.openNow()"
+										@pause="onGotoCardPause(m, $event)"
+										@resume="onGotoCardResume(m, $event)"
+									/>
 								</template>
 								<!-- inline charts: ECharts rendered from the agent's jarvis-chart spec -->
 								<div
@@ -2043,11 +2069,22 @@
 								/>
 							</template>
 						</Message>
+						<!-- a File Box file's open questions, right after the reply whose turn
+						     filed them (also on the Approval Board) -->
+						<FileBoxWaits
+							v-if="fileboxWaitGroups.byMessage[m.name]"
+							:items="fileboxWaitGroups.byMessage[m.name]"
+							:busy="fileboxWaitBusy"
+							@decide="decideFileboxWait"
+							@review="reviewFileboxSheet"
+						/>
 					</template>
-					<!-- a File Box file's open questions, also on the Approval Board -->
+					<!-- a File Box file's open questions that no loaded reply produced (filed
+					     before any reply, or under a reply that is not loaded); the rest sit
+					     under their own reply above -->
 					<FileBoxWaits
-						v-if="visibleFileboxWaits.length"
-						:items="visibleFileboxWaits"
+						v-if="fileboxWaitGroups.rest.length"
+						:items="fileboxWaitGroups.rest"
 						:busy="fileboxWaitBusy"
 						@decide="decideFileboxWait"
 						@review="reviewFileboxSheet"
@@ -2066,10 +2103,11 @@
 					     exactly ONE JarvisMark + ONE StepsBox: the real row's box is
 					     boxViewByMsg[m.name], mounted in Message's #above-body above;
 					     the synthetic in-flight row below (inFlightRowVisible) covers
-					     the turn before that row exists. gotoMorph's own
-					     navigation/hold-timer logic (dropGotoMorph, streamingGoto watch,
-					     GOTO_MORPH_HOLD_MS) is untouched — only this line's markup is
-					     gone, the redirect it drives still fires off run:end; its copy
+					     the turn before that row exists. gotoMorph's latch
+					     (dropGotoMorph, streamingGoto watch, settleGoto) still feeds
+					     the steps-box override; only this line's markup is gone, and
+					     the redirect it announced is the visible, cancellable
+					     hand-off countdown on the card now (gotoCd); its copy
 					     ("Taking you to the Dashboards builder") is reused verbatim by
 					     boxViewFor's override (T5a). Recovering keeps its own steps too
 					     (T5a's overrideFor + liveStepsForRun, keyed off msgId, not just
@@ -2285,7 +2323,11 @@
 							</template>
 						</div>
 						<div v-if="pa.error" style="margin: 0 14px 10px">
-							<ActionError :error="pa.error" />
+							<ActionError
+								:error="pa.error"
+								:can-report="!!supportOn"
+								@report="openActionErrorSupport"
+							/>
 						</div>
 						<!-- What the amber button covers, as text: a title is invisible on
 						     touch and to anyone who does not hover. -->
@@ -2403,13 +2445,15 @@
 					style="margin-bottom: 10px"
 				>
 					<template v-if="canReverifySite" #action>
-						<button
-							class="jv-btn jv-btn--sm"
+						<Button
+							size="sm"
+							variant="subtle"
+							:loading="reverifying"
 							:disabled="reverifying"
 							@click="reverifySite"
 						>
 							Re-verify this site
-						</button>
+						</Button>
 					</template>
 				</Banner>
 				<Banner
@@ -4498,7 +4542,11 @@
 							</p>
 						</div>
 						<div v-if="draftPanel.error" style="margin-top: 10px">
-							<ActionError :error="draftPanel.error" />
+							<ActionError
+								:error="draftPanel.error"
+								:can-report="!!supportOn"
+								@report="openActionErrorSupport"
+							/>
 						</div>
 						<!-- Always present, so a screen reader announces the note when it fills. -->
 						<div
@@ -4529,7 +4577,15 @@
 						>
 							{{ draftPanel.applying ? "Saving…" : draftCta }}
 						</button>
-						<button class="jv-action-discard" @click="discardDraft">Discard</button>
+						<!-- A parked draft already became a confirmation card: Discard would record
+						     "nothing was saved" while that card stays confirmable. -->
+						<button
+							class="jv-action-discard"
+							:disabled="draftPanel.applying || !!draftPanel.parked"
+							@click="discardDraft"
+						>
+							Discard
+						</button>
 					</div>
 				</aside>
 			</div>
@@ -4605,7 +4661,13 @@ import {
 	watch,
 	watchEffect,
 } from "vue";
-import { useRoute, useRouter, onBeforeRouteLeave } from "vue-router";
+import {
+	useRoute,
+	useRouter,
+	onBeforeRouteLeave,
+	isNavigationFailure,
+	NavigationFailureType,
+} from "vue-router";
 import { Button, Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
 import DateControl from "@/components/forms/DateControl.vue";
@@ -4613,6 +4675,8 @@ import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
 import DraftCell from "@/components/chat/DraftCell.vue";
 import DraftRowBlock from "@/components/chat/DraftRowBlock.vue";
 import ExportCard from "@/components/chat/ExportCard.vue";
+import GotoCard from "@/components/chat/GotoCard.vue";
+import { createGotoCountdown, GOTO_COUNTDOWN_MS, PAUSE } from "@/lib/gotoCountdown";
 import { exportSummary } from "@/lib/exportJobs.js";
 import ReportScope from "@/components/chat/ReportScope.vue";
 import { useConversationActivity } from "@/lib/useConversationActivity";
@@ -4645,8 +4709,10 @@ import {
 import UsagePill from "@/components/chat/UsagePill.vue";
 import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
-import { parseCompactCommand, compactFailureCopy } from "@/lib/compact";
+import { parseCompactCommand, compactOutcome } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
+import { isDraftRow, liveDraftRow } from "@/lib/liveDraft";
+import { tailCard } from "@/lib/tailCard";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
 import { isReceiptEcho } from "@/lib/receiptEcho";
@@ -4686,7 +4752,7 @@ import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
 import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
-import { supportErrorDraft } from "@/lib/supportErrorDraft";
+import { supportErrorDraft } from "../../../jarvis/public/js/shared/support_error_draft.mjs";
 import {
 	supportPillLabel as supportPillLabelFor,
 	supportAwaitingPhrase,
@@ -4761,17 +4827,26 @@ import {
 } from "@/maintenanceGate";
 import { onLlmSwitch } from "@/llmSwitch";
 import { parseAsk } from "@/lib/chatAsk";
-import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
+import { rejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import {
 	parseGoto,
 	gotoFiredKey,
-	parseFiredStamp,
 	claimGotoFire,
 	builderSeed,
 	requestBefore,
+	gotoDecision,
+	gotoCardCopy,
+	gotoPageInfo,
+	gotoCountdownCopy,
+	hasInteractiveFence,
+	focusInsideField,
+	modalIsOpen,
+	pruneGotoStamps,
 } from "@/lib/chatGoto";
+import { PAYMENT_CALENDAR_PAGE } from "../../../jarvis/public/js/shared/goto_pages.mjs";
 import { normaliseAction } from "@/lib/chatAction";
+import { draftBlockError } from "@/lib/chatAction";
 import { isSilentRun, shouldStopSpinning, streamingRowIsLive } from "@/lib/silentRun";
 import { markMissing, panelField as _panelField } from "@/lib/docFields";
 import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "@/lib/draftLinkFilters";
@@ -4811,6 +4886,7 @@ import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
 import { preConnectStatusLabel } from "@/lib/statusPhrase";
 import { createRevealer } from "@/lib/streamReveal";
 import { sortPendingCards } from "@/lib/sortPendingCards";
+import { anchorFileboxWaits } from "@/lib/fileboxWaitAnchors";
 import { reconcilePending } from "@/lib/pendingResync";
 import {
 	discardedTokens,
@@ -4828,7 +4904,15 @@ import {
 	receiptRecord,
 	shouldHideNextStep,
 } from "@/lib/chatCardActions";
-import { errMessage, turnErrorInfo } from "@/lib/errors";
+import { errMessage, turnErrorInfo, showsRawReason } from "@/lib/errors";
+import {
+	actionErrorCopy,
+	causeOf,
+	micErrorCopy,
+	nextStepOf,
+	thrownActionError,
+	uploadErrorCopy,
+} from "@/lib/chatErrorCopy";
 import { __ } from "@/lib/i18n";
 import { conversationLoadFailure } from "@/lib/conversationLoadFailure";
 import { openChatShare } from "@/composables/useChatSharing";
@@ -5585,7 +5669,9 @@ function canReportError(m) {
 		!row.hidden &&
 		!row.stopped &&
 		!row.streaming &&
-		errorInfo(row).code !== "cancelled"
+		errorInfo(row).code !== "cancelled" &&
+		// Only a failure no one on the workspace can fix: the card shows the step for the rest.
+		errorInfo(row).support === true
 	);
 }
 
@@ -5593,17 +5679,46 @@ async function openErrorSupport(m) {
 	if (openSupportInFlight.value || !canReportError(m)) return;
 	const row = messages.value.find((item) => item.name === m.name);
 	const info = errorInfo(row);
-	const draft = supportErrorDraft({
-		code: info.code,
-		upstream: info.upstream,
-		conversation: currentId.value,
-		message: row.name,
-		at: row.modified || row.creation,
-	});
-	if (!draft) return;
+	const conversation = currentId.value;
 	openSupportInFlight.value = true;
 	try {
+		// Support works from the ticket alone, so it carries the server's scrubbed copy of the error
+		// and the run id. A failed read still opens the ticket, with the references only.
+		let details = null;
+		try {
+			const res = await api.getErrorReportDetails(conversation, row.name);
+			details = res && res.data ? res.data : null;
+		} catch {
+			details = null;
+		}
+		const draft = supportErrorDraft({
+			code: info.code,
+			upstream: info.upstream,
+			conversation,
+			message: row.name,
+			at: row.modified || row.creation,
+			details,
+		});
+		if (!draft) return;
 		await router.push({ name: "SupportNew", query: draft });
+	} catch {
+		notify(__("Could not open Support. Try again."), { type: "error" });
+	} finally {
+		openSupportInFlight.value = false;
+	}
+}
+// Report error on a failed action card (confirm, run, discard, save): the same ticket
+// draft as a failed turn, with the card's failure reference as the message reference.
+async function openActionErrorSupport({ reference } = {}) {
+	if (openSupportInFlight.value || !supportOn) return;
+	openSupportInFlight.value = true;
+	try {
+		const draft = supportErrorDraft({
+			code: "internal",
+			conversation: currentId.value,
+			message: reference || "",
+		});
+		if (draft) await router.push({ name: "SupportNew", query: draft });
 	} catch {
 		notify(__("Could not open Support. Try again."), { type: "error" });
 	} finally {
@@ -6005,7 +6120,7 @@ async function rerunFromHistory(run) {
 			status: "running",
 		};
 	} catch (e) {
-		notify(errMessage(e), { type: "error" });
+		notify(actionErrorCopy("Couldn't run that again", e), { type: "error" });
 	}
 }
 async function stopRunFromHistory(run) {
@@ -6014,7 +6129,7 @@ async function stopRunFromHistory(run) {
 		run.status = "stopped"; // optimistic patch
 		loadMacroRunStats();
 	} catch (e) {
-		notify(errMessage(e), { type: "error" });
+		notify(actionErrorCopy("Couldn't stop that run", e), { type: "error" });
 	}
 }
 
@@ -6143,7 +6258,10 @@ async function runCompact(hint) {
 		const res = await api.compactConversation(view.conversation, hint);
 		if (!chatViewIsCurrent(view)) return;
 		if (!res || !res.ok) {
-			notify(compactFailureCopy(res && res.reason), { type: "error" });
+			{
+				const o = compactOutcome(res && res.reason);
+				notify(o.text, { type: o.type });
+			}
 			return;
 		}
 		compacting.value = true;
@@ -6152,7 +6270,7 @@ async function runCompact(hint) {
 		compactDialogOpen.value = false;
 	} catch (e) {
 		if (chatViewIsCurrent(view))
-			notify(errMessage(e) || compactFailureCopy(), { type: "error" });
+			notify(actionErrorCopy("Couldn't compact this chat", e), { type: "error" });
 	} finally {
 		if (chatViewIsCurrent(view)) compactSubmitting.value = false;
 	}
@@ -6183,11 +6301,6 @@ const currentRunId = ref(null);
 const stoppedRunId = ref(null);
 const stoppedMsgIds = ref(new Set()); // assistant rows the user stopped — ignore later (incl. "recovered") events for them
 const currentMsgId = ref(null); // in-flight assistant row id (from run:start) — lets Stop pin the reply even before the first token
-// Raw error text disclosure per failed message ("Details" in the guidance line).
-const rawOpen = ref({});
-function toggleRaw(id) {
-	rawOpen.value = { ...rawOpen.value, [id]: !rawOpen.value[id] };
-}
 const errorMeta = ref({}); // { [message_id]: { code, changed_data } } from a live run:error (not persisted; a refresh falls back to classifying the error string)
 // Pump streaming (Relay Pump) end-to-end epoch/seq fence (CDX-3 + CDX-12). The pure fence
 // logic lives in @/utils/eventFence.js (extracted so it is unit-tested by a real node test
@@ -6604,7 +6717,9 @@ function errorInfo(m) {
 		meta.changed_data
 	}\u0000${m.provider || ""}\u0000${canConnectModel ? 1 : 0}\u0000${
 		known ? known.join(",") : "-"
-	}\u0000${m.model || ""}\u0000${Object.entries(expiredModels.value)
+	}\u0000${m.model || ""}\u0000${m.modified || m.creation || ""}\u0000${Object.entries(
+		expiredModels.value
+	)
 		.map(([id, e]) => `${id}:${e.upstream}`)
 		.join(",")}`;
 	let info = errorInfoCache.get(key);
@@ -6616,6 +6731,7 @@ function errorInfo(m) {
 				subscriptionUpstreams: known || undefined,
 				model: m.model,
 				expiredModels: expiredModels.value,
+				failedAtMs: toLocalMs(m.modified || m.creation) || undefined,
 			}),
 			noChange: meta.changed_data === false,
 		};
@@ -7033,7 +7149,12 @@ async function clearAllHistory() {
 	} catch (e) {
 		// The server deletes chat by chat: some may be gone although the request
 		// failed, so say so and show the list as it now is.
-		notify(clearHistoryFailedNotice(errMessage(e)), { type: "error" });
+		notify(
+			[clearHistoryFailedNotice(causeOf(e) || "Couldn't delete your history"), nextStepOf(e)]
+				.filter(Boolean)
+				.join(" "),
+			{ type: "error" }
+		);
 		store.loadConversations();
 	} finally {
 		clearingHistory.value = false;
@@ -7637,19 +7758,21 @@ function askOf(m) {
 function gotoOf(m) {
 	return parseGoto((m && m.content) || "");
 }
-// Shared by the card's button and the run:end auto-redirect below: stash the
-// restated request for the Dashboards builder to pick up on its own mount,
-// then navigate there.
+// The Dashboards leg of openGotoAction (the card's button and the hand-off
+// countdown's open both reach it through that dispatcher): stash the restated
+// request for the Dashboards builder to pick up on its own mount, then navigate
+// there. A calendar goto lands here too when the user cannot open the calendar
+// (gotoDecision's action is then "dashboards"), with the same prompt.
 //
-// jarvis#912: the card button has no per-click guard (the run:end
-// auto-redirect fires once, live, but the card stays clickable on every
+// jarvis#912: the card button has no per-click guard (the countdown opens it
+// once, live, but the card stays clickable on every
 // later visit to the transcript), so a second/third click used to build a
 // brand-new builder conversation each time - discarding the in-progress one
 // and burning a fresh ~78k-token agent session per click. The fired stamp
 // (see lib/chatGoto.js) now remembers which builder conversation the FIRST
 // hand-off for this message landed on: a later trigger navigates there
 // instead of building again. `messageId` is optional only for callers that
-// predate #912's stamp lookup; every real caller below passes it.
+// predate #912's stamp lookup; every real caller passes it.
 //
 // jarvis#912 round 2: TWO triggers for the same message this close together
 // (a double-click - the card still has no per-click guard) used to both read
@@ -7664,37 +7787,136 @@ function gotoOf(m) {
 //
 // The builder is sent the restatement with the user's own words under it
 // (builderSeed), so a detail the restatement dropped still reaches the build.
+//
+// Storage can throw (private mode, blocked site data): a failed read counts as
+// "no stamp" and a failed write is skipped, so the hand-off itself still works.
+function readGotoStamp(key) {
+	try {
+		return localStorage.getItem(key);
+	} catch (e) {
+		return null;
+	}
+}
+function writeGotoStamp(key, value) {
+	try {
+		localStorage.setItem(key, value);
+		pruneGotoStamps(localStorage);
+	} catch (e) {
+		// the stamp is a guard against repeats, not a requirement for the hand-off
+	}
+}
 function gotoDashboards(prompt, messageId) {
 	const view = captureChatView(messageId || "");
 	if (!messageActionIsCurrent(view)) return;
 	const text = builderSeed(prompt, requestBefore(messages.value, messageId));
 	const key = messageId ? gotoFiredKey(messageId) : null;
-	const claim = key ? claimGotoFire(localStorage.getItem(key)) : { build: true };
+	const claim = key ? claimGotoFire(readGotoStamp(key)) : { build: true };
 	if (claim.build) {
-		if (key) {
-			localStorage.setItem(key, claim.stamp);
-			// Bounded stamp set: these keys are write-once per redirect and
-			// would otherwise accumulate for the life of the origin. Keep the
-			// newest ~50 (the fired-stamp check above is the real guard; this
-			// only defends reloads of RECENT transcripts).
-			const stamps = [];
-			for (let i = 0; i < localStorage.length; i++) {
-				const k = localStorage.key(i);
-				if (k && k.startsWith("jarvis:goto-fired:")) {
-					const parsed = parseFiredStamp(localStorage.getItem(k));
-					stamps.push([k, parsed ? parsed.t : 0]);
-				}
-			}
-			stamps
-				.sort((a, b) => b[1] - a[1])
-				.slice(50)
-				.forEach(([k]) => localStorage.removeItem(k));
-		}
+		if (key) writeGotoStamp(key, claim.stamp);
 		setDashboardPrefill({ text, autoSend: true, messageId });
 	} else if (claim.conv) {
 		setDashboardPrefill({ text, resume: true, conv: claim.conv, messageId });
 	}
-	router.push("/dashboards");
+	// Caught like the calendar's push: a caller that ignores the promise must not leave an
+	// unhandled rejection; a caller that waits on it still sees the failure.
+	const pushed = router.push("/dashboards");
+	pushed.catch(() => {});
+	return pushed;
+}
+// The calendar hand-off: navigate to the fixed route from the page map. Nothing is
+// stashed for a builder (the calendar reads no prefill), a card click is never
+// limited by the 45 s claim window above - it always navigates - and no stamp is
+// written: the automatic open's exactly-once is the ownership token openGotoAction
+// consumes. `fromChat` lets the page move focus to its title on arrival. The push
+// promise is returned: the countdown settles on a failed navigation (a stale route
+// chunk, say), and a caller that ignores it must not leave an unhandled rejection.
+function gotoPaymentCalendar(messageId) {
+	const view = captureChatView(messageId || "");
+	if (!messageActionIsCurrent(view)) return;
+	const pushed = router.push({
+		...gotoPageInfo(PAYMENT_CALENDAR_PAGE).route,
+		state: { fromChat: true, chatConv: view.conversation },
+	});
+	pushed.catch(() => {});
+	return pushed;
+}
+// The one dispatcher for a goto's navigation: the card click and the countdown's
+// auto-open (timer expiry, Open now) both go through it, with the action
+// gotoDecision chose. It returns the push promise. `auto` is the countdown's
+// open: for the calendar it consumes this run's ownership token FIRST
+// (before anything can fail), so a replayed run:end or a reload finds no ownership
+// and the page never opens twice; a card click never touches it.
+function openGotoAction(goto, action, messageId, { auto = false, runId = "" } = {}) {
+	if (action === PAYMENT_CALENDAR_PAGE) {
+		if (auto) ownRuns.delete(runId);
+		return gotoPaymentCalendar(messageId);
+	}
+	return gotoDashboards(goto.prompt, messageId);
+}
+// The existing boot flag, strictly: the page itself re-checks it in its route
+// guard and the backend gates the data. Read at call time (it is not reactive).
+function canViewCalendar() {
+	return window.can_view_payment_calendar === true;
+}
+// Run ids of the turns THIS tab sent (filled from the accepted send's response).
+// A second tab, a reload, and a turn started by anything else are not "own", so
+// they get the card only.
+const ownRuns = new Set();
+// A long session must not grow the set without bound: keep the newest runs only
+// (a Set iterates in insertion order, so the first entry is the oldest).
+const OWN_RUNS_MAX = 50;
+function rememberOwnRun(runId) {
+	ownRuns.add(runId);
+	while (ownRuns.size > OWN_RUNS_MAX) ownRuns.delete(ownRuns.values().next().value);
+}
+// Something half-written or open that an automatic page change would destroy: the
+// composer's text, an attachment, or a recording; any OTHER field in the chat view
+// being typed in (the focused composer alone is not a draft - its text is checked
+// above, and it keeps focus after every send); or a dialog open anywhere (dialogs
+// are teleported out of the chat view, so the whole document is searched).
+function composerHasDraft() {
+	return (
+		input.value.trim().length > 0 ||
+		pendingFiles.value.length > 0 ||
+		micState.value === "recording" ||
+		focusInsideField(document.activeElement, rootEl.value, composerRef.value?.el) ||
+		modalIsOpen(document)
+	);
+}
+// A parked confirmation of THIS turn is on screen: the user has a card to answer.
+function turnHasParkedCard(runId) {
+	return pendingActions.value.some(
+		(pa) => pa.conversation === currentId.value && !!runId && pa.run_id === runId
+	);
+}
+// The inputs gotoDecision needs for a LIVE turn (the streaming latch and run:end).
+function gotoInputs(m, runId) {
+	return {
+		canView: canViewCalendar(),
+		ownTurn: ownRuns.has(runId),
+		draft: composerHasDraft(),
+		queued: !!queuedTurn.value,
+		interactive: hasInteractiveFence(m.content) || turnHasParkedCard(runId),
+		live: true,
+		error: !!m.error,
+		stopped: !!m.stopped,
+		stamp: readGotoStamp(gotoFiredKey(m.name)),
+	};
+}
+// What the card shows for a message. A calendar goto the user cannot open reads as
+// an information-only card (no button); see gotoCardCopy.
+function gotoCardOf(m) {
+	const goto = gotoOf(m);
+	return gotoCardCopy(goto, gotoDecision(goto, { canView: canViewCalendar() }));
+}
+// Every click on the card navigates, however old the message.
+function openGotoCard(m) {
+	const goto = gotoOf(m);
+	if (!goto) return;
+	const decision = gotoDecision(goto, { canView: canViewCalendar() });
+	// the no-access calendar card has no button; never hand off to Dashboards
+	if (goto.page === PAYMENT_CALENDAR_PAGE && decision.action !== PAYMENT_CALENDAR_PAGE) return;
+	openGotoAction(goto, decision.action, m.name);
 }
 // Canonicalised at the single _ACTION_RE parse point so every consumer (render
 // gate, build watcher, buildDraftModel, edit panel, apply) sees ONE shape. See
@@ -7737,7 +7959,11 @@ function render(text, streaming = false) {
 	const key = (streaming ? "S:" : "F:") + text;
 	const hit = _renderCache.get(key);
 	if (hit !== undefined) return hit;
-	const out = linkifyDocs(renderMarkdown(stripBlocks(text, streaming)));
+	// copyCode: each settled code block gets a copy button, handled by Message.vue
+	// (#2170). Not while streaming: the block may still be growing.
+	const out = linkifyDocs(
+		renderMarkdown(stripBlocks(text, streaming), { copyCode: !streaming })
+	);
 	if (_renderCache.size >= 800) _renderCache.clear();
 	_renderCache.set(key, out);
 	return out;
@@ -7830,25 +8056,66 @@ const _lastAssistant = computed(() => {
 	}
 	return last && last.role === "assistant" && !last.streaming ? last : null;
 });
-// The draft whose save failed on a value the person is fixing in the panel (its
-// message name). The assistant's "I'll wait" reply to that failure must not retire the
-// draft's card, or closing the panel would leave no Edit to reopen it.
-const fixingDraft = ref("");
-watch(currentId, () => {
-	fixingDraft.value = "";
+// The newest unsaved draft row (lib/liveDraft, the one rule the phone and the server
+// share): kept through later replies until it is saved, cancelled or replaced. Null
+// whenever _lastAssistant is, so nothing shows mid-turn. It reads the loaded rows as the
+// server counts them (`messages`: every role, every tool row), never visibleMessages,
+// which drops the tool rows that have no receipt chip. A draft cancelled here whose card
+// would still show (the server answered `already`, or the reload failed) stays hidden for
+// this session (hiddenDrafts, keyed by the draft row's name).
+const hiddenDrafts = ref(new Set());
+const _liveDraft = computed(() => {
+	const live = liveDraftMessage(messages.value, _lastAssistant.value);
+	return live && !hiddenDrafts.value.has(live.name) ? live : null;
 });
-// The message that owns the live draft card: the last assistant message, or the draft
-// being fixed when only the assistant's replies follow it (lib/draftSave).
-const _cardMessage = computed(() =>
-	liveDraftMessage(visibleMessages.value, _lastAssistant.value, fixingDraft.value, (m) =>
-		Boolean(actionOf(m))
-	)
+// The last message's own action block that is not a draft (an email draft, a gated verb's
+// legacy note, an unknown verb's error card). It wins the tail over a kept draft.
+const _tailOwnAction = computed(() => {
+	const last = _lastAssistant.value;
+	return last && !isDraftRow(last) && actionOf(last) ? last : null;
+});
+// One card at the tail (lib/tailCard): the last message's own card (action block, ask or
+// confirm strip) hides a KEPT draft card until it is answered. A draft in the last
+// message itself still wins.
+const _tailCard = computed(() => {
+	const last = _lastAssistant.value;
+	return tailCard({
+		tailHasOwnAction: !!_tailOwnAction.value,
+		hasDraft: !!_liveDraft.value,
+		draftIsTail: !!last && !!_liveDraft.value && _liveDraft.value.name === last.name,
+		tailHasAsk: !!last && !!askOf(last),
+		tailHasConfirm: !!last && !!confirmLabel(last),
+	});
+});
+// The message that owns the card: the last message when it has its own action block (as
+// before this rule), else the live draft row. Every save and cancel
+// names THIS row; the card is drawn under actionAnchor.
+const _cardMessage = computed(() => {
+	const last = _lastAssistant.value;
+	if (!last) return null;
+	const live = _liveDraft.value;
+	if (live && live.name === last.name) return live;
+	if (_tailOwnAction.value) return last;
+	return _tailCard.value === "draft" ? live : null;
+});
+// The message the card and the draft error alert are drawn under: always the last
+// assistant message, so the card sits at the bottom of the thread.
+const actionAnchor = computed(() =>
+	_cardMessage.value && _lastAssistant.value ? _lastAssistant.value.name : ""
 );
 // `messages` intentionally stays visible while a different conversation loads.
 // Do not let its old action card remain actionable in that new view. A raw action
 // re-enables itself only when the new view receives its own message snapshot.
+// A draft block we cannot show (broken JSON, unreadable fields or tables, unknown
+// verb) gets ONE red error card and no live draft: _rawActiveAction is null for it,
+// so the summary card, the model build watcher and the edit panel never start.
+const draftBlockErrorText = computed(() => {
+	const m = _cardMessage.value;
+	if (!m) return "";
+	return draftBlockError(m.content || "", actionOf(m), brand.agentName);
+});
 const _rawActiveAction = computed(() =>
-	_cardMessage.value ? actionOf(_cardMessage.value) : null
+	_cardMessage.value && !draftBlockErrorText.value ? actionOf(_cardMessage.value) : null
 );
 const activeAction = computed(() =>
 	hasCurrentMessageSnapshot.value ? _rawActiveAction.value : null
@@ -7880,7 +8147,10 @@ function draftModelViewIsCurrent(view, model) {
 	);
 }
 const confirmFor = computed(() =>
-	_lastAssistant.value && !activeAction.value && confirmLabel(_lastAssistant.value)
+	_lastAssistant.value &&
+	!activeAction.value &&
+	!draftBlockErrorText.value &&
+	confirmLabel(_lastAssistant.value)
 		? _lastAssistant.value.name
 		: null
 );
@@ -7963,13 +8233,28 @@ const draftParkedRegion = ref(null);
 const DRAFT_DEFAULT_WIDTH = 720;
 const DRAFT_MIN_WIDTH = 440;
 const DRAFT_WIDTH_KEY = "jarvis-draftpanel-width";
-const draftMaxWidth = () => Math.min(1100, Math.round(window.innerWidth * 0.92));
+const draftPanelEl = ref(null);
+// The overlay fills the chat column, not the window: beside the in-flow sidebar
+// the column is narrower than the viewport, and a width clamped to the viewport
+// let the panel's left edge run under the sidebar (jarvis-admin-v2#776). While
+// the panel is closed the column is unknown, so the number falls back to the
+// window; .jv-draft-panel's percentage max-width caps the paint, and the watcher
+// below re-clamps once the panel is in the DOM.
+const draftHostWidth = () => draftPanelEl.value?.parentElement?.clientWidth || window.innerWidth;
+const draftMaxWidth = () => Math.min(1100, Math.round(draftHostWidth() * 0.92));
 const clampDraftWidth = (w) => Math.min(draftMaxWidth(), Math.max(DRAFT_MIN_WIDTH, w));
 const _storedDraftW = Number(localStorage.getItem(DRAFT_WIDTH_KEY));
 const draftPanelWidth = ref(clampDraftWidth(_storedDraftW || DRAFT_DEFAULT_WIDTH));
-const draftPanelEl = ref(null);
 const draftResizing = ref(false);
 let _draftPanelRight = 0;
+watch(
+	() => !!draftPanel.value,
+	async (open) => {
+		if (!open) return;
+		await nextTick();
+		draftPanelWidth.value = clampDraftWidth(draftPanelWidth.value);
+	}
+);
 
 function onDraftResizeMove(e) {
 	draftResizing.value = true;
@@ -8505,7 +8790,13 @@ async function confirmSummary() {
 		model?.messageKey || actionFor.value,
 		model?.actionKey || (a ? draftActionKey(a) : "")
 	);
-	if (!model || model.applying || convStreaming.value || !draftModelViewIsCurrent(view, model))
+	if (
+		!model ||
+		model.applying ||
+		cancellingDraft.value ||
+		convStreaming.value ||
+		!draftModelViewIsCurrent(view, model)
+	)
 		return;
 	// The panel is open on this draft: Confirm saves what the person sees there (their
 	// edits, not the card's copy), and a failure marks the fields in that same panel.
@@ -8547,7 +8838,6 @@ function resetDraftActionState() {
 	draftPanel.value = null;
 	summaryState.value = blankSummaryState();
 	previewOpen.value = false;
-	fixingDraft.value = "";
 	parkedDrafts.value = new Map();
 }
 function previewSummary() {
@@ -8639,7 +8929,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 			// the chat explains (or the note says to ask, when it could not be sent).
 			closeDraftPanel();
 			notify(outcome.note, { type: "error" });
-			fixingDraft.value = "";
 			await loadConversation(view.conversation);
 			if (!chatViewIsCurrent(view)) return;
 			store.loadConversations();
@@ -8651,8 +8940,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 			// detail + hint, and nothing was saved) instead of throwing a raw Frappe
 			// 403/417. Keep the panel open so the values are editable (R2-9: the
 			// assistant is only told the user is fixing it here).
-			// The panel's draft stays live through the assistant's acknowledgement.
-			if (p.editable) fixingDraft.value = draftKey;
 			p.applying = false;
 			p.error = outcome.error;
 			markMissing(p, p.error.fields, (_formMetaCache[p.doctype] || {}).fields);
@@ -8664,7 +8951,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 		// draft so it can't park a second card.
 		if (outcome.kind === "parked") {
 			const parked = outcome.note;
-			fixingDraft.value = "";
 			p.applying = false;
 			p.parked = parked;
 			parkedDrafts.value = markParked(parkedDrafts.value, draftKey, parked);
@@ -8675,7 +8961,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 			await loadConversation(view.conversation);
 			return;
 		}
-		fixingDraft.value = "";
 		closeDraftPanel();
 		await loadConversation(view.conversation);
 		if (!chatViewIsCurrent(view)) return;
@@ -8684,7 +8969,7 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 	} catch (e) {
 		if (!draftStillCurrent()) return;
 		p.applying = false;
-		p.error = { message: errMessage(e, "Could not save. Check the values.") };
+		p.error = thrownActionError(e, "Could not save your changes.");
 	}
 }
 
@@ -8700,9 +8985,64 @@ function showQueuedContinuation(r) {
 	sending.value = true;
 }
 
+// Cancel on the draft card: the server records it (a "discarded" receipt), so the card
+// is gone on both apps and after a reload. Always the DRAFT row's name (actionFor), never
+// the tail's. One click at a time, and not while a save is running.
+const cancellingDraft = ref(false);
+function cancelDraft() {
+	return cancelDraftFor(actionFor.value);
+}
+// The edit panel's Discard is the same Cancel. The panel names the draft it was opened on
+// (stamped then), so it still names it while a turn runs.
 function discardDraft() {
-	closeDraftPanel();
-	send("No, cancel that.");
+	return cancelDraftFor(draftPanel.value?.messageKey || actionFor.value);
+}
+async function cancelDraftFor(key) {
+	if (!key || cancellingDraft.value || cardModel.value?.applying || draftPanel.value?.applying)
+		return;
+	// Parked (its confirmation card waits, perhaps parked from another device while this panel
+	// was open): cancelling the draft would say nothing was saved while that card stays live.
+	if (parkedNoteFor(parkedDrafts.value, key) || parkedByCard(pendingActions.value, key)) return;
+	const view = captureDraftActionView(activeAction.value, key);
+	cancellingDraft.value = true;
+	try {
+		try {
+			await api.dismissDraft(view.conversation, key);
+		} catch {
+			if (chatViewIsCurrent(view)) {
+				notify("Couldn't cancel this draft. Try again.", { type: "error" });
+			}
+			return;
+		}
+		// Cancelled for good on the server. A reload that fails now is not a failed cancel.
+		if (!chatViewIsCurrent(view)) return;
+		closeDraftPanel();
+		previewOpen.value = false;
+		try {
+			await loadConversation(view.conversation);
+		} catch (e) {
+			console.warn("Jarvis: could not reload after cancelling a draft", e);
+		}
+		if (!chatViewIsCurrent(view)) return;
+		// Still the live draft (the server answered `already`, or the reload failed): hide
+		// it here for this session, so Cancel never looks dead. The rule itself, on the loaded
+		// rows: _liveDraft is null while a turn runs (a panel Discard mid-turn).
+		if (liveDraftRow(messages.value)?.name === key) hiddenDrafts.value.add(key);
+		store.loadConversations();
+	} finally {
+		cancellingDraft.value = false;
+	}
+}
+
+// Drafts a typed "show it" already took the person to: the next one is sent as a message.
+const draftsShownOnRequest = new Set();
+// The draft card, or its error card, is the one `.jv-action.jv-summary` in the thread.
+function scrollDraftCardIntoView() {
+	const el = threadEl.value?.querySelector(".jv-action.jv-summary");
+	if (!el) return scrollBottom(true);
+	const reduced =
+		window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+	el.scrollIntoView?.({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
 }
 
 // --- action:pending confirm card (write-safety gate, issue #186) ---
@@ -9060,7 +9400,7 @@ async function confirmPending(pa) {
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = { message: errMessage(e, "Could not confirm.") };
+		if (card) card.error = thrownActionError(e, "Could not confirm this action.");
 	} finally {
 		// The switch watcher already dropped this view's in-flight token. Do not
 		// delete a same-token action started by a later A view after A → B → A.
@@ -9154,7 +9494,7 @@ async function approveAndRunPending(pa) {
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = { message: errMessage(e, "Could not start the run.") };
+		if (card) card.error = thrownActionError(e, "Could not start the run.");
 	} finally {
 		// See confirmPending: this continuation must not clear a later view's
 		// matching token when the user leaves and returns while it is in flight.
@@ -9257,7 +9597,7 @@ async function discardPending(pa) {
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = { message: errMessage(e, "Could not discard.") };
+		if (card) card.error = thrownActionError(e, "Could not discard this action.");
 	} finally {
 		// A stale direct dismissal must leave a later view's in-flight guard
 		// untouched. The synchronous switch reset owns the old guard instead.
@@ -9304,7 +9644,7 @@ async function proposeNext(m, step) {
 		if (!messageActionIsCurrent(view) || nextBusyKey.value !== view.token) return;
 	} catch (e) {
 		if (!messageActionIsCurrent(view) || nextBusyKey.value !== view.token) return;
-		notify(errMessage(e, "Could not open that step."), { type: "error" });
+		notify(actionErrorCopy("Couldn't open that step", e), { type: "error" });
 		hideNextStep(step);
 	} finally {
 		if (messageActionIsCurrent(view) && nextBusyKey.value === view.token)
@@ -9463,7 +9803,9 @@ async function resyncQueuedTurn(id) {
 
 // --- interactive clarifying questions (card on the last assistant message) ---
 const activeAsk = computed(() =>
-	_lastAssistant.value && !activeAction.value ? askOf(_lastAssistant.value) : null
+	_lastAssistant.value && !activeAction.value && !draftBlockErrorText.value
+		? askOf(_lastAssistant.value)
+		: null
 );
 const askFor = computed(() => (activeAsk.value ? _lastAssistant.value.name : null));
 // The draft state, readiness and answer formatting live in <AskCard> +
@@ -9593,6 +9935,11 @@ function copyReplyMsg(id, content) {
 				conversation: currentId.value,
 			}),
 	});
+}
+// A code block's copy button (Message.vue) has no text of its own to change, so
+// its result is read out through the same live region as the reply Copy.
+function announceCodeCopy(ok) {
+	announceSR(ok ? "Code copied." : "Couldn't copy the code. Select it and copy it instead.");
 }
 function replyCopyLabel(id) {
 	if (copiedId.value === id) return "Copied";
@@ -9875,21 +10222,25 @@ const dashboardBuildTurn = computed(() =>
 );
 // ---- pre-redirect morph line (jarvis#884) ─────────────────────────────────
 // The moment the turn CURRENTLY streaming into this conversation carries a
-// COMPLETE ```jarvis-goto block, the generic "Working on it…" line morphs in
-// place into a branded "Taking you to the Dashboards builder" line. gotoOf
-// only returns truthy once the closing fence has actually arrived (chatGoto.js
-// requires it), so "complete" falls out of the existing parser for free —
-// nothing here holds back an unterminated block itself.
+// COMPLETE ```jarvis-goto block that will actually navigate (gotoDecision's
+// autoOpen, off the live inputs), the generic "Working on it…" line morphs in
+// place into the page's own line ("Taking you to the Dashboards builder" / "…the
+// Payment Calendar"; see gotoPageInfo). gotoOf only returns truthy once the
+// closing fence has actually arrived (chatGoto.js requires it), so "complete"
+// falls out of the existing parser for free - nothing here holds back an
+// unterminated block itself.
 //
 // Rendering off `streamingGoto` directly would drop the line the instant
-// run:end flips `m.streaming` false (line ~8668), which lands BEFORE
-// gotoDashboards() fires a few statements later — exactly the "instant
-// between run:end and navigation" the line is required to survive, and a
-// lazy-loaded /dashboards route chunk can turn that instant into a real
-// visible gap. So this is a LATCH: once a turn earns the morph, `gotoMorph`
-// stays truthy until the next turn starts, errors, is stopped, or the
-// conversation is left — never cleared by run:end itself, since surviving
-// that is the entire point.
+// run:end flips `m.streaming` false, which lands BEFORE the hand-off countdown
+// (below) runs out and opens the page - exactly the "instant between run:end and
+// navigation" the line is required to survive, and a lazy-loaded route chunk can
+// turn that instant into a real visible gap. So this is a LATCH: once a turn
+// earns the morph, `gotoMorph` stays truthy until the next turn starts, errors,
+// is stopped, the conversation is left, the countdown ends without opening
+// (Stay, Esc, typing, a refusal, a failed navigation: settleGoto), or the run:end
+// handler finds no navigation coming (dropGotoMorph) - never cleared by run:end
+// itself when it DOES start the countdown, since surviving that is the entire
+// point.
 const streamingMessage = computed(
 	() => [...messages.value].reverse().find((m) => m.role === "assistant" && m.streaming) || null
 );
@@ -9899,22 +10250,247 @@ const streamingGoto = computed(() => {
 });
 const gotoMorph = ref(null);
 watch(streamingGoto, (g) => {
-	if (g) gotoMorph.value = g;
+	// Only a goto that will actually navigate earns the morph line. The latch carries its
+	// message id, so an exit only drops a latch that still belongs to it.
+	if (g && gotoDecision(g, gotoInputs(streamingMessage.value, currentRunId.value)).autoOpen)
+		gotoMorph.value = { ...g, messageId: streamingMessage.value?.name };
 });
-// The goto block usually lands with the reply's LAST tokens, so without a
-// short hold the morph line gets a sub-frame of screen time before the
-// redirect (measured live: under 400ms, one capture frame). The hold IS the
-// animation's screen time; reduced-motion users skip it and navigate at once.
-const GOTO_MORPH_HOLD_MS = 900;
-let gotoNavTimer = null;
-function dropGotoMorph() {
-	if (gotoNavTimer) {
-		clearTimeout(gotoNavTimer);
-		gotoNavTimer = null;
-	}
+// Cancels the running hand-off countdown as well: a cleared latch with a live
+// countdown would still redirect a user who moved on. `reason` is only for
+// the countdown's exit callback ("switch": a new turn or a chat switch).
+function dropGotoMorph(reason = "switch") {
 	gotoMorph.value = null;
+	gotoCd.cancel(reason);
 }
-onUnmounted(dropGotoMorph);
+onUnmounted(() => dropGotoMorph("unmount"));
+// ---- hand-off countdown (UX-D1) ───────────────────────────────────────────
+// The automatic open is a visible 3 s countdown on the card (lib/gotoCountdown.js
+// is the state machine, components/chat/GotoCard.vue the card). Stay, Esc, typing
+// and a new send cancel it; hovering or focusing the card, or a hidden tab, pause
+// it. `gotoCdState` mirrors the running countdown for the card; `gotoOpening` is
+// the card's "Opening…" state between the open and the arrival.
+const gotoCdState = ref(null);
+const gotoOpening = ref(null);
+const gotoCd = createGotoCountdown({
+	durationMs: GOTO_COUNTDOWN_MS,
+	// Monotonic: a system clock change cannot make the countdown early or late.
+	now: () => performance.now(),
+	setInterval: (fn, ms) => setInterval(fn, ms),
+	clearInterval: (id) => clearInterval(id),
+	onTick: (s) => {
+		gotoCdState.value = s;
+	},
+	onExpire: onGotoExpire,
+	onOpenNow: onGotoOpenNow,
+	onCancel: (s, reason) => settleGoto(s, reason),
+});
+// The mounted GotoCards by message id: to scroll one into view and to focus its Open button.
+const gotoCardRefs = new Map();
+function setGotoCardRef(id, el) {
+	if (el) gotoCardRefs.set(id, el);
+	else gotoCardRefs.delete(id);
+}
+// The card gets countdown copy only for the message that holds the countdown.
+function gotoCountdownOf(m) {
+	const s = gotoCdState.value;
+	return s && s.messageId === m.name ? gotoCountdownCopy(s.page, s.secondsLeft, s.paused) : null;
+}
+// ... and the Opening text only for the message that is opening.
+function gotoOpeningOf(m) {
+	const s = gotoOpening.value;
+	return s && s.messageId === m.name ? gotoCountdownCopy(s.page, 1)?.opening || "" : "";
+}
+function clearGotoOpening(messageId) {
+	if (gotoOpening.value?.messageId === messageId) gotoOpening.value = null;
+}
+// The ONE place every exit ends (cancel, expiry, Open now, navigation failure): the card
+// returns to normal, and unless the page really opened the run's ownership and the morph
+// latch go too - or a replayed run:end or a reload would open the page late. The state
+// guard keeps a late navigation failure from clearing another message's countdown, and the
+// latch is dropped only while it still belongs to this message.
+//
+// `outcome` is "opened" or the reason the page did not open ("stay", "esc", "typing",
+// "send", "switch", "unmount", "claimed", "refused", "navfail"). Only "opened" changes
+// behaviour; the rest differ in the debug line and in what the user is told.
+function settleGoto(state, outcome) {
+	window.removeEventListener("storage", onGotoStamp);
+	console.debug("jarvis goto", {
+		messageId: state.messageId,
+		page: state.page,
+		outcome: outcome === "opened" ? "opened" : "not-opened",
+		reason: outcome,
+	});
+	if (gotoCdState.value && gotoCdState.value.messageId === state.messageId)
+		gotoCdState.value = null;
+	if (outcome === "opened") return;
+	ownRuns.delete(state.runId);
+	if (gotoMorph.value?.messageId === state.messageId) gotoMorph.value = null;
+	// The user chose to stay (or the open was refused): say so once, so a screen-reader user
+	// is not left wondering whether the page will still open.
+	if (["stay", "esc", "typing", "refused"].includes(outcome)) {
+		const copy = gotoCountdownCopy(state.page, 1);
+		if (copy) announceSR(copy.staying);
+	}
+}
+// A second tab claimed this hand-off's Dashboards build while this one counted down: this tab
+// must not start another (E12). The storage event never fires in the tab that wrote the stamp.
+function onGotoStamp(e) {
+	const id = gotoCd.state()?.messageId;
+	if (id && e.key === gotoFiredKey(id) && e.newValue) gotoCd.cancel("claimed");
+}
+// The message a countdown belongs to, as it is NOW (a reload may have replaced it); null
+// when it or its goto is gone.
+function resolveGotoFor(state) {
+	const m = messages.value.find((x) => x.name === state.messageId);
+	const goto = m ? gotoOf(m) : null;
+	return goto ? { m, goto } : null;
+}
+// A navigation that failed for real (a stale route chunk, a guard that aborted): tell the user,
+// on both the toast and the live region, and let the card be clicked again. A cancelled or
+// duplicated navigation is not a failure (something else navigated, or we are already there).
+function gotoNavFailed(state, action, why) {
+	console.warn("Jarvis goto: navigation failed", action, why);
+	clearGotoOpening(state.messageId);
+	settleGoto(state, "navfail");
+	const copy = gotoCountdownCopy(action, 1);
+	if (!copy) return;
+	notify(copy.failed, { type: "error" });
+	announceSR(copy.failed);
+}
+// Runs only after the countdown has cleared itself. Returns "opened" when a navigation
+// started, else "refused" (the chat view moved on). The card shows "Opening…" until the push
+// settles.
+function openGotoFromCountdown(state, goto, action) {
+	const pushed = openGotoAction(goto, action, state.messageId, {
+		auto: true,
+		runId: state.runId,
+	});
+	if (!pushed) return "refused";
+	gotoOpening.value = { messageId: state.messageId, page: action };
+	Promise.resolve(pushed).then(
+		(result) => {
+			clearGotoOpening(state.messageId);
+			const failed =
+				isNavigationFailure(result) &&
+				!isNavigationFailure(
+					result,
+					NavigationFailureType.cancelled | NavigationFailureType.duplicated
+				);
+			if (failed) gotoNavFailed(state, action, result);
+		},
+		(err) => gotoNavFailed(state, action, err)
+	);
+	return "opened";
+}
+// Both exits settle in a finally: whatever throws, the row cannot stick and Esc is never
+// permanently swallowed.
+function onGotoExpire(state) {
+	let outcome = "refused";
+	try {
+		const found = resolveGotoFor(state);
+		if (!found || found.goto.page !== state.page) return;
+		// Only the timer is refused for a draft; the Open now button never is.
+		if (composerHasDraft()) return;
+		const stillOpen =
+			found.goto.page === PAYMENT_CALENDAR_PAGE
+				? gotoDecision(found.goto, gotoInputs(found.m, state.runId)).autoOpen
+				: // Dashboards: a second tab may have claimed the build while this one counted down.
+				  !readGotoStamp(gotoFiredKey(state.messageId));
+		if (stillOpen) outcome = openGotoFromCountdown(state, found.goto, state.action);
+	} finally {
+		settleGoto(state, outcome);
+	}
+}
+// Open now opens the goto as it is now: its own prompt. A calendar goto whose access was lost
+// meanwhile is refused (no hand-off to Dashboards), the same outcome the timer expiry gives.
+function onGotoOpenNow(state) {
+	let outcome = "refused";
+	try {
+		const found = resolveGotoFor(state);
+		if (!found) return;
+		const { action } = gotoDecision(found.goto, { canView: canViewCalendar() });
+		const lost = found.goto.page === PAYMENT_CALENDAR_PAGE && action !== PAYMENT_CALENDAR_PAGE;
+		if (action && !lost) outcome = openGotoFromCountdown(state, found.goto, action);
+	} finally {
+		settleGoto(state, outcome);
+	}
+}
+// Only when the card is in the LAST message and the list follows the bottom: a user who
+// scrolled up to read must not be yanked back, and a card in older history is not where the
+// turn ended. 'auto' (not 'instant') under reduced motion: no animation either way.
+function scrollGotoCardIntoView(id) {
+	const last = messages.value[messages.value.length - 1];
+	if (!last || last.name !== id || !pinnedToBottom.value) return;
+	nextTick(() => {
+		const el = gotoCardRefs.get(id)?.$el;
+		const reduced =
+			window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+		el?.scrollIntoView?.({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
+	});
+}
+// Called from run:end once gotoDecision says autoOpen. Returns the countdown's copy when
+// one started (its announcement replaces "… replied."), else null. A tab nobody can see, or
+// a composer with a draft in it, gets the card only: a countdown could only run to a silent
+// refusal. The message is marked handled so no later run:end starts one.
+function startGotoCountdown(m, goto, decision, runId) {
+	if (document.visibilityState !== "visible" || composerHasDraft()) {
+		gotoCd.markHandled(m.name);
+		return null;
+	}
+	const started = gotoCd.start({
+		messageId: m.name,
+		runId,
+		page: goto.page,
+		action: decision.action,
+	});
+	if (!started) return null;
+	if (goto.page !== PAYMENT_CALENDAR_PAGE) window.addEventListener("storage", onGotoStamp);
+	// Latch explicitly: when the block lands WITH the terminal, the streaming watcher
+	// never saw it.
+	gotoMorph.value = { ...goto, messageId: m.name };
+	const copy = gotoCountdownCopy(goto.page, gotoCd.state().secondsLeft);
+	announceSR(copy.announce);
+	scrollGotoCardIntoView(m.name);
+	return copy;
+}
+// run:end that started no countdown for its message (and was no repeat): nothing opens by
+// itself, so a calendar run gives up its ownership - or a replayed run:end after the composer
+// clears would open the page late - and the morph latch goes, or the line would animate
+// forever with no redirect coming. A countdown running for ANOTHER message is not this
+// run's to cancel; only a latch that is not that countdown's goes.
+function giveUpGotoAtRunEnd(p, goto) {
+	if (goto && goto.page === PAYMENT_CALENDAR_PAGE) ownRuns.delete(p.run_id);
+	const running = gotoCd.state();
+	if (!running || running.messageId === p.message_id) dropGotoMorph();
+	else if (gotoMorph.value?.messageId !== running.messageId) gotoMorph.value = null;
+}
+// Stay (the button, or Esc): cancel and, when focus was in the card, give it back to the
+// Open button that the countdown row replaced.
+function stayInChat(focusCard, reason = "stay") {
+	const id = gotoCd.state()?.messageId;
+	gotoCd.cancel(reason);
+	if (focusCard && id) nextTick(() => gotoCardRefs.get(id)?.focusOpen?.());
+}
+// The Stay button: a keyboard activation (a click event with detail 0) returns focus to the
+// card's Open button; a pointer click hands it to the composer, where the user goes next.
+function onGotoStay(event) {
+	if (event && event.detail === 0) return stayInChat(true);
+	stayInChat(false);
+	nextTick(() => composerRef.value?.focusInput?.());
+}
+function gotoCardHasFocus() {
+	const id = gotoCd.state()?.messageId;
+	const el = id && gotoCardRefs.get(id)?.$el;
+	return !!el && el.contains(document.activeElement);
+}
+// Only the card that holds the countdown may pause or resume it: a late resume from an
+// older card (its countdown prop just went null) must not resume the new countdown.
+function onGotoCardPause(m, reason) {
+	if (gotoCd.state()?.messageId === m.name) gotoCd.pause(reason);
+}
+function onGotoCardResume(m, reason) {
+	if (gotoCd.state()?.messageId === m.name) gotoCd.resume(reason);
+}
 // ---- common artifact activity card (jarvis#884) ───────────────────────────
 // Generalizes the #874 dashboard-only live card to any artifact-producing
 // main-chat turn: whichever write tool actually ran (or the builder-origin
@@ -9955,7 +10531,7 @@ const MEDIA_YIELD_TOOLS = new Set([
 // The live box's `override`: whichever state currently owns the CURRENT
 // step, in precedence order. Only one ever applies to a given row at a time.
 function overrideFor(m) {
-	if (gotoMorph.value) return { text: "Taking you to the Dashboards builder" };
+	if (gotoMorph.value) return { text: gotoPageInfo(gotoMorph.value.page).morph };
 	if (recovering.value && m && recovering.value.message_id === m.name) {
 		// agent-yield after a media tool means the model handed back control
 		// waiting on the asset (image/video/music), not a stalled connection.
@@ -10540,6 +11116,11 @@ const {
 	load: api.fileboxOpenWaits,
 	onChanged: () => store.refreshApprovalsCount?.(),
 });
+// Each wait sits under the reply whose turn filed it (a wait is created between
+// that reply row and the next message); the rest keep the bottom of the thread.
+const fileboxWaitGroups = computed(() =>
+	anchorFileboxWaits(visibleFileboxWaits.value, visibleMessages.value)
+);
 const fileboxWaitBusy = ref("");
 const fileboxWaitInFlight = new Set();
 function fileboxWaitIsCurrent(view) {
@@ -11199,7 +11780,7 @@ function resetRunState() {
 	mention.value = { ...mention.value, open: false };
 	histIdx.value = null;
 	histDraft.value = "";
-	dropGotoMorph(); // a latch (or pending hold-nav) from the chat we are leaving must not follow us in
+	dropGotoMorph(); // the latch and any running hand-off countdown of the chat we are leaving must not follow us in
 }
 // Stash the leaving chat's draft and restore the target chat's own, so unsent
 // text follows its conversation instead of bleeding into the next one. Both the
@@ -11232,9 +11813,7 @@ async function selectConversation(id) {
 // the extracted reason so a non-string Frappe error payload can't throw inside the
 // caller's catch and re-swallow the very failure we're trying to report.
 function notifyActionError(prefix, e) {
-	notify(`${prefix}: ${String(errMessage(e)).replace(/\.$/, "")}. Try again.`, {
-		type: "error",
-	});
+	notify(actionErrorCopy(prefix, e), { type: "error" });
 }
 // Promote the unsaved new-chat composer to a real conversation id via the shared voiceSendGlue
 // helper: migrate the sentinel draft, the active recording take scope (_micConvId), and every
@@ -11409,10 +11988,13 @@ async function retry(messageId) {
 				recheckMaintenance();
 			} else {
 				// e.g. the single-flight guard ("a reply is already in progress").
-				notify(r.reason || "Couldn't retry that.", { type: "error" });
+				notify(rejectionCopy(r, brand.agentName, "Couldn't retry that.").message, {
+					type: "error",
+				});
 			}
 		}
 		if (r && r.ok !== false) {
+			if (r.run_id) rememberOwnRun(r.run_id);
 			workersWarnShown.value = false; // a retry got through: workers are back
 			// A retry that got through also proves any maintenance hold lifted.
 			clearHold();
@@ -11553,7 +12135,7 @@ async function refreshRecoveredSend(m, r, view) {
 	} catch {
 		// Delivery stays authoritative even when refreshing the transcript fails.
 		m.deliveryNote +=
-			" The conversation could not be refreshed. Open it to see the latest result.";
+			" The conversation could not be refreshed. Reload it to see the latest result.";
 	}
 }
 
@@ -11565,9 +12147,10 @@ async function settleRecoveredSend(m, r, view) {
 	if (r.ok === false && !r.confirmed) {
 		m.deliveryState = "rejected";
 		m.failed = true;
-		m.deliveryNote = r.message || sendRejectionCopy(r.reason, brand.agentName, r).message;
+		m.deliveryNote = rejectionCopy(r, brand.agentName).message;
 		return;
 	}
+	if (r.ok !== false && r.run_id) rememberOwnRun(r.run_id);
 	consumeRecoveredContext(m.sendRequest, scope);
 	voiceStore?.acknowledge(m.voiceAck || []);
 	for (const id of m.failedVoiceIds || []) voiceStore?.markSentWithout(id);
@@ -11576,11 +12159,6 @@ async function settleRecoveredSend(m, r, view) {
 	m.deliveryConversation = r.conversation_id;
 	m.deliveryMessageId = r.message_id;
 	m.deliveryConfirmed = !!r.confirmed;
-	m.deliveryNote =
-		r.confirmed && r.ok === false
-			? r.error?.message ||
-			  "One or more actions could not be completed. Check the action receipts."
-			: "Delivery confirmed. View the conversation for the current result.";
 	// Only adopt this home send while the same empty surface still owns it.
 	// A newer draft/request or another mounted route must never be moved.
 	let refreshView = view;
@@ -11604,6 +12182,20 @@ async function settleRecoveredSend(m, r, view) {
 		originOf.value = "";
 		router.replace("/c/" + r.conversation_id);
 	}
+	// The note names where the result is. The bubble sits in its own chat, so
+	// that is "this chat" unless the receipt landed elsewhere: a home send whose
+	// surface was not adopted above (newer draft) or a request promoted to
+	// another scope. No link (jarvis-admin-v2#805): it opened the same chat in a
+	// new tab. Receipt resolution never navigates; the sidebar list is reloaded
+	// below, so the other chat is one click away in Recent chats.
+	const elsewhere = !!r.conversation_id && _pendingSends.scopeOf(m) !== r.conversation_id;
+	m.deliveryNote =
+		r.confirmed && r.ok === false
+			? r.error?.message ||
+			  "One or more actions could not be completed. Check the action receipts."
+			: elsewhere
+			? "Delivery confirmed. The result is in another chat; open it from Recent chats."
+			: "Delivery confirmed. The result is in this chat.";
 	if (
 		_recoveryViewActive &&
 		viewIsCurrent() &&
@@ -11712,6 +12304,10 @@ let _prefillSendRevision = 0;
 async function send(textArg, resendAck) {
 	// Restoration must choose the destination before a send captures its conversation scope.
 	if (booting.value) return;
+	// Any send attempt is a stay signal: cancel a running hand-off countdown synchronously,
+	// before any await. This runs before most refusals below on purpose - a send that is then
+	// refused (a hold, a dictation in flight) still means the user is here and acting.
+	gotoCd.cancel("send");
 	_recoveryRefreshEpoch++;
 	dismissFeedback(); // sending the next turn clears any pending feedback line
 	// Maintenance HARD block: once a hold is known, no send runs — this guards the paths that call
@@ -11770,6 +12366,18 @@ async function send(textArg, resendAck) {
 		if (chatViewIsCurrent(_typedView) && visiblePendingActions.value.length > before) {
 			input.value = "";
 			notify("Found a pending confirmation.", { type: "success" });
+			return;
+		}
+		// No pending card, but the card at the tail is a kept draft's (lib/tailCard): take
+		// them to that card, once per draft, and say so. A card of the last message's own,
+		// or a second "show it" for the same draft, goes to the agent as a normal message.
+		const shownDraft = _tailCard.value === "draft" ? _liveDraft.value?.name : "";
+		if (chatViewIsCurrent(_typedView) && shownDraft && !draftsShownOnRequest.has(shownDraft)) {
+			draftsShownOnRequest.add(shownDraft);
+			input.value = "";
+			notify("Your draft is at the bottom.", { type: "info" });
+			await nextTick();
+			scrollDraftCardIntoView();
 			return;
 		}
 	}
@@ -11903,6 +12511,11 @@ async function send(textArg, resendAck) {
 			...(sendCtx || {}),
 			focus_connector: { key: _sentFocus.key, label: _sentFocus.label },
 		};
+	// Hand-off capability: tells the server this client can open the Payment Calendar
+	// (the existing boot flag - no new one). Only ever ADDS a key; a client without it
+	// sends none and gets today's behaviour.
+	if (canViewCalendar())
+		sendCtx = { ...(sendCtx || {}), handoff_pages: [PAYMENT_CALENDAR_PAGE] };
 	// The confirmation cards currently on screen, in the order the numbers are
 	// shown, so a typed "confirm 2" binds to the card the user actually sees.
 	// Deliberately confirm-only (step-by-step): send_message forwards these
@@ -12045,8 +12658,7 @@ async function send(textArg, resendAck) {
 		// those lines, and a second copy above the rejection block moves the anchor).
 		if (r && r.ok === false && !r.confirmed) {
 			_optBubble.deliveryState = "rejected";
-			_optBubble.deliveryNote =
-				r.message || sendRejectionCopy(r.reason, brand.agentName, r).message;
+			_optBubble.deliveryNote = rejectionCopy(r, brand.agentName).message;
 			// Decide from the full request identity, not an id-only lookup: an
 			// A → B → A return must not let A's rejected request remove B's cards
 			// or unlock B's composer.
@@ -12131,14 +12743,13 @@ async function send(textArg, resendAck) {
 				// "usage_limit" fires from BOTH the aggregate cap and the still-monthly
 				// per-model cap; the envelope names the window (limit_period) only for
 				// the former, so the copy stays period-neutral for the latter.
-				r.reason === "usage_limit"
-					? sendRejectionCopy(r.reason, brand.agentName, r).message
-					: r.message || r.reason || "Couldn't send your message.",
+				rejectionCopy(r, brand.agentName).message,
 				{ type: "error" }
 			);
 			return;
 		}
 		if (r && r.ok !== false) {
+			if (r.run_id) rememberOwnRun(r.run_id);
 			_pendingSends.remove(_pendingSends.scopeOf(_optBubble), _optBubble.name);
 			_optBubble.deliveryState = undefined;
 			// An accepted send proves the CP-side gate passed, i.e. any upgrade
@@ -12422,6 +13033,7 @@ function onEvent(p) {
 			// CDX-3: a stale-epoch (or post-terminal) recovering banner is ignored.
 			if (pumpFenceReject(p)) break;
 			pumpFenceAccept(p, false);
+			// raw-ok: an internal key ("compacting" | "interrupted") recoveringLabel maps to copy.
 			recovering.value = { message_id: p.message_id, reason: p.reason || "interrupted" };
 			waiting.value = false;
 			sending.value = false;
@@ -12466,7 +13078,10 @@ function onEvent(p) {
 		case "context:compact_failed":
 			compacting.value = false;
 			compactHintSeed.value = "";
-			notify(compactFailureCopy(p.reason), { type: "error" });
+			{
+				const o = compactOutcome(p.reason);
+				notify(o.text, { type: o.type });
+			}
 			break;
 		case "run:start":
 			// CDX-3: a stale-epoch run:start (a pump that lost the lease, or one that
@@ -12504,7 +13119,7 @@ function onEvent(p) {
 			statusPhase.value = "model";
 			store.streamingConvId = p.conversation_id || currentId.value;
 			// A new turn starting must not inherit the previous turn's morph
-			// latch or its pending hold-navigation (jarvis#884) — only THIS
+			// latch or a running hand-off countdown (jarvis#884) — only THIS
 			// turn's own complete goto block may light it again.
 			dropGotoMorph();
 			break;
@@ -12525,6 +13140,7 @@ function onEvent(p) {
 				// through the state->copy table (SUXI-7). Guarded by the chip check so
 				// the tab that itself clicked Cancel (chip already cleared) doesn't
 				// double-toast on top of its own optimistic "Cancelled.".
+				// raw-ok: the server's fixed cancel sentence (admission USER_CANCEL_REASON / AGE_OUT_REASON).
 				notify(p.reason || TURN_STATE_COPY.cancelled(), { type: "info" });
 			}
 			break;
@@ -12849,7 +13465,35 @@ function onEvent(p) {
 			// (browser notification moved to the app-scoped global notifier —
 			// AppShell attaches it, so it fires on every route, not just here)
 			recovering.value = null;
-			announceSR(`${brand.agentName} replied.`);
+			// jarvis#884: a ```jarvis-goto block on the turn that just ENDED, live, in THIS
+			// mounted view, auto-opens its page as gotoDecision (see lib/chatGoto.js)
+			// decides: the Dashboards builder, or - only for a turn this tab sent, with an
+			// empty composer and no queued turn, by a user who can open it - the Payment
+			// Calendar. It is a visible, cancellable countdown on the card now (see
+			// startGotoCountdown), not an immediate jump. Gated like markAnswerLanded above
+			// (never a stopped or errored row), plus the durable Dashboards stamp so a later
+			// revisit of the same transcript never re-fires it. Only the live socket
+			// terminal ever reaches this branch.
+			//
+			// jarvis#912 round 2: this check is READ-ONLY. The stamp itself is claimed
+			// inside gotoDashboards (via claimGotoFire - see lib/chatGoto.js) when the
+			// page opens, the one place a manual card click races through too.
+			//
+			// A repeat run:end (a legacy terminal with no pump_epoch, a higher epoch) for a
+			// message the countdown already holds or has handled does nothing in the goto branch:
+			// no second countdown, no ownership or latch change.
+			const goto = m ? gotoOf(m) : null;
+			const gotoRepeat = !!goto && gotoCd.isHandled(m.name);
+			const replayDuringCountdown = gotoRepeat && gotoCd.state()?.messageId === m.name;
+			const decision =
+				goto && !gotoRepeat ? gotoDecision(goto, gotoInputs(m, p.run_id)) : null;
+			const countdown =
+				decision && decision.autoOpen
+					? startGotoCountdown(m, goto, decision, p.run_id)
+					: null;
+			// The countdown's own announcement replaces "… replied." (one live message); a
+			// replay while it runs must not talk over it.
+			if (!countdown && !replayDuringCountdown) announceSR(`${brand.agentName} replied.`);
 			store.loadConversations();
 			// SUX-6 identical-skip (OARF-7): the streamed deltas already painted the
 			// final cumulative text, so on the normal path a full reload would just
@@ -12867,54 +13511,10 @@ function onEvent(p) {
 				scheduleMermaid(captureChatView(), 300);
 				scheduleMermaid(captureChatView(), 900);
 			}
-			// jarvis#884: a ```jarvis-goto block on the turn that just ENDED, live,
-			// in THIS mounted view, auto-redirects to the Dashboards builder exactly
-			// once. Gated the same way markAnswerLanded is above (never a stopped or
-			// errored row), plus a durable stamp so a later reload/revisit of the
-			// same transcript never re-fires it. Only the live socket terminal ever
-			// reaches this branch, so an old message opened again never gets here at
-			// all, but the stamp is the belt-and-braces the spec asks for.
-			//
-			// jarvis#912 round 2: this check is READ-ONLY. The stamp itself is
-			// claimed inside gotoDashboards (via claimGotoFire - see lib/chatGoto.js)
-			// now, the one place a manual card click races through too, so there is
-			// exactly one place a fresh build ever gets stamped. Left here, this
-			// still stops the morph from replaying for a message already handled.
-			//
-			// `redirected` tracks whether THIS run:end is the one that actually
-			// navigates, so the gotoMorph latch below can tell the two cases apart:
-			// the navigating path keeps the latch (it must survive the instant up to
-			// navigation — the whole point of the latch), while every other path
-			// that reaches run:end with the latch still set — a second tab that lost
-			// the race on the localStorage stamp, an errored/stopped terminal, or a
-			// was_recovered replacement whose final text dropped the goto block —
-			// must drop it, or the morph line would animate forever with no
-			// redirect coming.
-			let redirected = false;
-			if (m && !m.error && !m.stopped) {
-				const goto = gotoOf(m);
-				if (goto && !localStorage.getItem(gotoFiredKey(m.name))) {
-					redirected = true;
-					// Latch explicitly: when the block lands WITH the terminal, the
-					// streaming watcher never saw it, and the hold below is the
-					// morph line's only screen time.
-					gotoMorph.value = goto;
-					const reducedMotion =
-						window.matchMedia &&
-						window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-					if (reducedMotion) {
-						gotoDashboards(goto.prompt, m.name);
-					} else {
-						gotoNavTimer = setTimeout(() => {
-							gotoNavTimer = null;
-							// dropGotoMorph() clearing the latch (new turn, chat switch,
-							// unmount) is the cancel signal for this pending navigation.
-							if (gotoMorph.value) gotoDashboards(goto.prompt, m.name);
-						}, GOTO_MORPH_HOLD_MS);
-					}
-				}
-			}
-			if (!redirected) dropGotoMorph();
+			// No countdown for this run:end (refused for any reason, a tab nobody sees, a draft
+			// in the composer): see giveUpGotoAtRunEnd. A repeat does nothing here.
+			const nothingStarted = !countdown && !gotoRepeat;
+			if (nothingStarted) giveUpGotoAtRunEnd(p, goto);
 			break;
 		}
 		case "message:enriched": {
@@ -13018,7 +13618,7 @@ function onEvent(p) {
 			activeTools.value = [];
 			currentRunId.value = null;
 			store.streamingConvId = null;
-			dropGotoMorph(); // an errored turn never redirects — drop the latch and any pending hold-nav
+			dropGotoMorph(); // an errored turn never redirects — drop the latch and cancel any countdown
 			announceSR("That didn't go through. See the error in the chat.");
 			loadConversation(currentId.value);
 			break;
@@ -13081,7 +13681,7 @@ function stopRun() {
 	activeTools.value = [];
 	store.streamingConvId = null;
 	recovering.value = null;
-	dropGotoMorph(); // a stopped turn never redirects — drop the latch and any pending hold-nav
+	dropGotoMorph(); // a stopped turn never redirects — drop the latch and cancel any countdown
 	if (cid) api.stopRun(cid, rid).catch(() => {});
 	notify("Stopped.");
 }
@@ -13116,7 +13716,9 @@ async function cancelQueued() {
 			if (queuedTurn.value && queuedTurn.value.run_id === q.run_id) queuedTurn.value = null;
 			sending.value = true;
 			waiting.value = true;
-			notify((r && r.reason) || "That reply already started.", { type: "info" });
+			notify(rejectionCopy(r, brand.agentName, "That reply already started.").message, {
+				type: "info",
+			});
 		}
 	} catch (e) {
 		if (!queuedIsCurrent()) return;
@@ -13446,7 +14048,7 @@ const micRec = useDictationRecorder({
 	onError: (msg) => {
 		if (micState.value !== "recording") return;
 		micState.value = "idle";
-		notify(msg || "Recording failed. Try again.", { type: "error" });
+		notify(micErrorCopy(msg), { type: "error" });
 	},
 });
 
@@ -13475,7 +14077,7 @@ async function startMic() {
 	// voiceBusyCount then never returns to 0 and every send, voice or not, is refused.
 	const started = await micRec.start();
 	if (micRec.state === "error") {
-		notify(micRec.error || "Couldn't start the microphone.", { type: "error" });
+		notify(micErrorCopy(micRec.error, "Couldn't start the microphone."), { type: "error" });
 		return;
 	}
 	if (!started || micRec.state !== "recording") return;
@@ -13491,8 +14093,7 @@ async function stopMic() {
 	// Finalise: the recorder flushes its tail, assembles the take, and hands it to onDone for
 	// ONE transcription. The composer stays usable while that runs.
 	await micRec.stop();
-	if (micRec.state === "error")
-		notify(micRec.error || "Recording failed. Try again.", { type: "error" });
+	if (micRec.state === "error") notify(micErrorCopy(micRec.error), { type: "error" });
 }
 async function cancelMic() {
 	await micRec.cancel();
@@ -13796,7 +14397,9 @@ async function startNudgeMic() {
 	if (!nudge.value) return;
 	await nudgeRec.start();
 	if (nudgeRec.state === "error") {
-		notify(nudgeRec.error || "Couldn't start the microphone.", { type: "error" });
+		notify(micErrorCopy(nudgeRec.error, "Couldn't start the microphone."), {
+			type: "error",
+		});
 		return;
 	}
 	if (nudgeRec.state === "recording" && nudge.value) nudge.value.mode = "recording";
@@ -13807,8 +14410,7 @@ async function stopNudgeMic() {
 	const r = await nudgeRec.stop();
 	if (!r || !r.blob || !r.blob.size) {
 		if (nudge.value) nudge.value.mode = "idle";
-		if (nudgeRec.state === "error")
-			notify(nudgeRec.error || "Recording failed. Try again.", { type: "error" });
+		if (nudgeRec.state === "error") notify(micErrorCopy(nudgeRec.error), { type: "error" });
 		return;
 	}
 	await _nudgeTranscribe(r);
@@ -13983,10 +14585,10 @@ async function uploadOne(file) {
 		// Previously an empty catch: the file silently never appeared, which read
 		// as "the picker is broken" for anything the server refused (an oversize
 		// recording, a blocked extension, an expired session). Show it instead.
-		const why = errMessage(err) || "upload failed";
+		const why = uploadErrorCopy(err);
 		if (currentId.value === forConv) {
 			failedUploads.value = [...failedUploads.value, { id, name, error: why }];
-			notify(`Could not attach ${name}: ${why}`, { type: "error" });
+			notify(`Couldn't attach ${name}. ${why}`, { type: "error" });
 		}
 	} finally {
 		_inflightKeys.delete(key);
@@ -14229,6 +14831,7 @@ function browseConnectors() {
 // ---- mentions (@ user, / doctype·tool) ----
 let _mentionSeq = 0;
 function onInput() {
+	gotoCd.cancel("typing"); // the user is writing: the hand-off must not take the page away
 	dismissFeedback(); // starting the next query clears any pending feedback line
 	histIdx.value = null; // typing exits prompt-history navigation
 	const el = composerRef.value?.el;
@@ -14348,6 +14951,9 @@ async function checkSilentRun() {
 	}
 }
 function onVisibility() {
+	// A hand-off countdown only runs while the tab can be seen.
+	if (document.visibilityState === "visible") gotoCd.resume(PAUSE.HIDDEN);
+	else gotoCd.pause(PAUSE.HIDDEN);
 	if (document.visibilityState === "visible") onResync();
 	// Going to the background stops requestAnimationFrame, so anything mid-reveal
 	// would sit frozen until the user came back. Snap it instead.
@@ -14712,6 +15318,22 @@ onBeforeUnmount(() => {
 // Chat-surface keyboard handling (Esc closes overlays). Ctrl+Shift+O and
 // Ctrl+B are owned by the shell now (AppShell → useShortcuts, §3.1).
 function onGlobalKey(e) {
+	// Esc cancels a running hand-off countdown, when nothing else consumed it (the machine is
+	// asked too: a stale mirror must never swallow Esc): a dialog's
+	// own Esc closes the dialog and the countdown keeps running. No preventDefault, and the
+	// return keeps the mic / artifact branches below untouched.
+	if (
+		e.key === "Escape" &&
+		gotoCdState.value &&
+		gotoCd.state() &&
+		!e.defaultPrevented &&
+		!e.isComposing &&
+		!store.settingsOpen &&
+		!modalIsOpen(document)
+	) {
+		stayInChat(gotoCardHasFocus(), "esc");
+		return;
+	}
 	if (e.defaultPrevented) return;
 	// The shell SettingsDialog is a foreground modal with its OWN Escape handler
 	// on the same window target; stopPropagation can't suppress a sibling
@@ -15596,7 +16218,8 @@ onUnmounted(() => {
 /* visible keyboard focus (UX #15) */
 .jv-iconbtn:focus-visible,
 .jv-retry:focus-visible,
-.jv-modelpill:focus-visible {
+.jv-modelpill:focus-visible,
+.jv-macrocard-btn:focus-visible {
 	outline: 2px solid var(--cta);
 	outline-offset: 2px;
 }
@@ -17587,7 +18210,7 @@ onUnmounted(() => {
 	font-weight: 600;
 	color: var(--text);
 }
-/* save-as-macro card (in a message) */
+/* save-as-macro card (in a message); the hand-off card is components/chat/GotoCard.vue */
 .jv-macrocard {
 	display: flex;
 	align-items: center;
@@ -18230,7 +18853,10 @@ onUnmounted(() => {
 /* --- record draft panel --- */
 .jv-draft-panel {
 	position: relative;
-	max-width: 92vw;
+	/* Of the overlay (the chat column), never the viewport: a definite max-width
+	   also caps the flex item's automatic minimum, so a nowrap grid cannot hold
+	   the panel wider than the column and push it under the sidebar (#776). */
+	max-width: 92%;
 	display: flex;
 	flex-direction: column;
 }

@@ -650,7 +650,7 @@ class StageB:
 		rids: list = []
 		with (
 			self._pump_flags_on(),
-			patch.object(pump, "_idle_exit", lambda ctx: (_orig_idle(ctx) if stop.is_set() else False)),
+			patch.object(pump, "_idle_exit", lambda ctx: _orig_idle(ctx) if stop.is_set() else False),
 			patch.object(deps, "enqueue_finalize", lambda *a, **k: None),
 		):
 			self._lapse_lease()

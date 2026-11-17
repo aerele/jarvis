@@ -21,6 +21,7 @@ from jarvis.dev import (
 	reset_onboarding,
 )
 from jarvis.tests._role_guard import enforced_role_guards
+from jarvis.tests._settings_snapshot import JarvisSettingsSnapshot
 
 SETTINGS = "Jarvis Settings"
 
@@ -30,26 +31,6 @@ def _read(s, field):
 	if field in _PASSWORD_FIELDS:
 		return s.get_password(field, raise_exception=False) or ""
 	return s.get(field) or ""
-
-
-def _snapshot():
-	"""Snapshot every reset-affected field so tests run against a real site
-	(not test_site) don't trash the operator's actual onboarded state."""
-	s = frappe.get_single(SETTINGS)
-	defaults = (*_RESET_DEFAULT_FIELDS, *_RESET_LITERAL_DEFAULTS)
-	snap = {f: _read(s, f) for f in (*_RESET_CLEAR_FIELDS, *defaults)}
-	# Raw, not via _read: a NULL datetime must restore as NULL, not "". llm_auth_mode
-	# is reqd on the Single, so a blank one left behind makes the next full .save()
-	# anywhere in the shard die with MandatoryError.
-	snap.update({f: s.get(f) for f in (*_RESET_NULL_FIELDS, *_RESET_ZERO_FIELDS)})
-	return snap
-
-
-def _restore(snap):
-	s = frappe.get_single(SETTINGS)
-	for f, v in snap.items():
-		s.db_set(f, v)
-	frappe.db.commit()
 
 
 def _seed_onboarded_state():
@@ -66,13 +47,10 @@ def _seed_onboarded_state():
 	frappe.db.commit()
 
 
-class TestResetOnboarding(FrappeTestCase):
+class TestResetOnboarding(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
-		self._snap = _snapshot()
+		super().setUp()
 		_seed_onboarded_state()
-
-	def tearDown(self):
-		_restore(self._snap)
 
 	def test_clears_all_targeted_fields(self):
 		out = reset_onboarding()
@@ -116,13 +94,9 @@ class TestResetOnboarding(FrappeTestCase):
 		self.assertAlmostEqual(float(s.llm_temperature), 0.4)
 
 
-class TestResetOnboardingGuards(FrappeTestCase):
-	def setUp(self):
-		self._snap = _snapshot()
-
+class TestResetOnboardingGuards(JarvisSettingsSnapshot, FrappeTestCase):
 	def tearDown(self):
 		frappe.set_user("Administrator")
-		_restore(self._snap)
 
 	def test_rejects_when_non_system_manager(self):
 		# Use a Guest who lacks System Manager role.
@@ -131,11 +105,11 @@ class TestResetOnboardingGuards(FrappeTestCase):
 			reset_onboarding()
 
 
-class TestResetOnboardingWipe(FrappeTestCase):
+class TestResetOnboardingWipe(JarvisSettingsSnapshot, FrappeTestCase):
 	"""wipe_data=True (the CLI default) also factory-resets workspace content."""
 
 	def setUp(self):
-		self._snap = _snapshot()
+		super().setUp()
 		_seed_onboarded_state()
 		frappe.db.delete("Jarvis Macro", {"macro_name": "dev-reset-wipe"})
 		conv = frappe.get_doc({"doctype": "Jarvis Conversation", "title": "dev-reset-wipe"})
@@ -154,7 +128,6 @@ class TestResetOnboardingWipe(FrappeTestCase):
 		frappe.db.delete("Jarvis Conversation", {"title": "dev-reset-wipe"})
 		frappe.db.delete("Jarvis Macro", {"macro_name": "dev-reset-wipe"})
 		frappe.db.commit()
-		_restore(self._snap)
 
 	def test_wipe_data_deletes_content(self):
 		out = reset_onboarding(wipe_data=True)
@@ -188,21 +161,18 @@ class TestWipeCoversConversationLinks(FrappeTestCase):
 		self.assertLess(wipe.index("Jarvis Pending Action Waiter"), wipe.index("Jarvis Pending Action"))
 
 
-class TestResetUnpairsTheContainer(FrappeTestCase):
+class TestResetUnpairsTheContainer(JarvisSettingsSnapshot, FrappeTestCase):
 	"""The field wipe below clears this bench's device credentials, but the
 	PAIRING lives in the container: any surviving copy of that token would keep
 	chat access to a workspace the operator just reset."""
 
 	def setUp(self):
-		self._snap = _snapshot()
+		super().setUp()
 		_seed_onboarded_state()
 		for target in ("post_subscription_disconnect", "unpair_chat_devices"):
 			pt = patch(f"jarvis.admin_client.{target}")
 			self.addCleanup(pt.stop)
 			setattr(self, target, pt.start())
-
-	def tearDown(self):
-		_restore(self._snap)
 
 	def test_unpairs_while_the_bench_can_still_reach_admin(self):
 		"""Ordering: after the wipe the api credentials are gone, so the call must

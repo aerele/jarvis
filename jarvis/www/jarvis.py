@@ -62,6 +62,17 @@ def _support_state() -> str:
 	return state
 
 
+def cached_support_state() -> str | None:
+	"""The support state from the cache alone, or None when nothing has read it yet. Never calls
+	the control plane, for paths that must not block on it (every Desk load)."""
+	return frappe.cache().get_value(_SUPPORT_AVAILABLE_CACHE_KEY, expires=True) or None
+
+
+def warm_support_state() -> None:
+	"""Background job: fill the support-state cache so the next Desk load knows it."""
+	_support_state()
+
+
 def _support_available() -> bool:
 	"""Back-compat boolean: support is usable. Kept as its own name because other
 	surfaces (and the PWA) read the boot flag by that meaning."""

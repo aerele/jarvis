@@ -2,7 +2,7 @@
 
 from threading import Thread
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 from frappe.utils import add_days
@@ -104,6 +104,39 @@ class TestPaymentCalendarSnapshot(TestCase):
 
 		with patch.object(snapshot, "read_bank_balances", side_effect=bank), self.assertRaises(ScopeChanged):
 			snapshot.collect(scope, proof["fingerprint"])
+
+	def test_collect_stores_the_result_of_the_shared_builder_with_a_horizon(self):
+		update_safety_floor(self.fx.company, "20", 0)
+		frappe.db.commit()
+		scope = normalize_scope(self.fx.company, [self.fx.bank])
+		proof = authorize_scope(scope)
+		with patch.object(snapshot, "build_result", wraps=snapshot.build_result) as build:
+			result = snapshot.collect(scope, proof["fingerprint"])
+		build.assert_called_once()
+		self.assertEqual(result["schema"], snapshot.RESULT_SCHEMA)
+		self.assertEqual(len(result["horizon"]["days"]), 30)
+		self.assertEqual(result["horizon"]["start"], scope["anchor"])
+		self.assertEqual(result["horizon"]["lowest"]["date"], scope["anchor"])
+
+	def test_the_fiscal_year_contract_needs_the_source_view_to_have_read_fiscal_years(self):
+		self.assertTrue(snapshot.fiscal_years_read({("hget", "fiscal_years")}))
+		self.assertFalse(snapshot.fiscal_years_read({("get_value", "document_cache::Company::X")}))
+		self.assertFalse(snapshot.fiscal_years_read(set()))
+
+	def test_collect_logs_durations_and_row_counts_without_names(self):
+		scope = normalize_scope(self.fx.company, [self.fx.bank])
+		proof = authorize_scope(scope)
+		logger = MagicMock()
+		with patch.object(frappe, "logger", return_value=logger) as factory:
+			result = snapshot.collect(scope, proof["fingerprint"])
+		factory.assert_any_call("payment_calendar")
+		message = logger.info.call_args.args[0]
+		rows = {side: len(result["sources"][side]["rows"]) for side in ("Payable", "Receivable")}
+		self.assertGreaterEqual(rows["Payable"], 1)
+		self.assertRegex(message, r"^collect complete duration_ms=\d+ projections_ms=\d+ ")
+		self.assertIn(f"payable_rows={rows['Payable']} receivable_rows={rows['Receivable']}", message)
+		for private in (self.fx.company, scope["actor"], self.ap, self.ar):
+			self.assertNotIn(str(private), message)
 
 	def test_stale_shared_company_cache_is_neither_used_nor_overwritten(self):
 		doc = frappe.get_doc("Company", self.fx.company)

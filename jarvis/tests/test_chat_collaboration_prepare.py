@@ -153,3 +153,82 @@ class TestCollaborationPrepare(CommittedCollaborationCase):
 		self.assertNotIn("OLD_WHOLE_RECORD:", payload["message"])
 		self.assertLessEqual(len(payload["message"].encode()), self.gateway.capacity - 1024)
 		self.assertFalse(self.gateway.sends)
+
+	# F-Q8: a runtime directive never reaches a shared dispatch payload.
+
+	def test_typed_directive_ends_the_shared_turn_with_the_fixed_text(self):
+		from jarvis.chat import directive_filter as df
+
+		frappe.db.set_value(
+			"Jarvis Chat Message", self.turn.seed_message, "content", "/model openai/gpt-x --runtime codex"
+		)
+		frappe.db.commit()
+		result = prepare.run_prepare(self.turn.name)
+		self.assertFalse(result["ok"])
+		self.assertFalse(self.gateway.sends)
+		turn = frappe.get_doc("Jarvis Chat Turn", self.turn.name)
+		self.assertEqual(turn.state, "errored")
+		self.assertFalse(turn.reserved)
+		self.assertEqual(
+			frappe.db.get_value("Jarvis Chat Message", turn.assistant_message, "error"), df.REFUSAL_TEXT
+		)
+		self.assertFalse(turn.dispatch_payload)
+
+	def test_history_directive_is_neutralized_in_the_stored_payload(self):
+		frappe.db.set_value(
+			"Jarvis Chat Message",
+			self.message,
+			"content",
+			"quoted: /think:/model openai/gpt-x --runtime codex\n/model openai/gpt-x",
+		)
+		frappe.db.commit()
+		result = prepare.run_prepare(self.turn.name)
+		self.assertTrue(result.get("ready"), result)
+		payload = json.loads(frappe.db.get_value("Jarvis Chat Turn", self.turn.name, "dispatch_payload"))
+		self.assertNotIn("/model", payload["message"])
+		self.assertIn(chr(0x2215) + "model", payload["message"])
+
+	def test_a_refit_that_is_not_clean_is_refused_not_sent(self):
+		from jarvis.chat import directive_filter as df
+
+		with patch(
+			"jarvis.chat.collaboration_context.fit_prompt_history", return_value="fitted /model openai/x"
+		):
+			result = prepare.run_prepare(self.turn.name)
+		self.assertFalse(result["ok"])
+		turn = frappe.get_doc("Jarvis Chat Turn", self.turn.name)
+		self.assertEqual(turn.state, "errored")
+		self.assertEqual(
+			frappe.db.get_value("Jarvis Chat Message", turn.assistant_message, "error"), df.REFUSAL_TEXT
+		)
+		self.assertFalse(turn.dispatch_payload)
+
+	def test_stored_payload_message_is_the_verified_text(self):
+		# F6 (shared): the text in the payload is the text that assert_clean returned.
+		from jarvis.chat import directive_filter as df
+
+		real = df.assert_clean
+		verified: list[str] = []
+
+		def spy(message):
+			out = real(message)
+			verified.append(out)
+			return out
+
+		with patch.object(df, "assert_clean", spy):
+			result = prepare.run_prepare(self.turn.name)
+		self.assertTrue(result.get("ready"), result)
+		payload = json.loads(frappe.db.get_value("Jarvis Chat Turn", self.turn.name, "dispatch_payload"))
+		self.assertEqual(payload["message"], verified[-1])
+
+	def test_history_with_a_control_before_a_combining_mark_still_prepares(self):
+		from jarvis.chat import directive_filter as df
+
+		# Review fix 1 (MAJOR-1): one such history message must not refuse every later turn.
+		frappe.db.set_value("Jarvis Chat Message", self.message, "content", "caf" + "e\x01\u0301" + " note")
+		frappe.db.commit()
+		result = prepare.run_prepare(self.turn.name)
+		self.assertTrue(result.get("ready"), result)
+		payload = json.loads(frappe.db.get_value("Jarvis Chat Turn", self.turn.name, "dispatch_payload"))
+		# The history is JSON, which escapes the control character, so the text is kept as is.
+		self.assertEqual(df.assert_clean(payload["message"]), payload["message"])

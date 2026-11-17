@@ -60,3 +60,6 @@ logs/
 
 # Claude Code config, tooling, and workflow artifacts (kept local, not tracked)
 .claude/
+
+# Playwright output of the browser suites
+frontend/test-results/

@@ -117,14 +117,18 @@ def read_file(
 		not preview
 		and read_mode == "file-cursor-v1"
 		and (
-			ext in _PDF_EXT | _TABLE_EXT | _TEXT_EXT | {"docx"}
+			ext in _PDF_EXT | _TABLE_EXT | _TEXT_EXT | {"docx", "pptx"}
 			or (ext not in _IMAGE_EXT | {"xls"} and _looks_text(content))
 		)
 	):
+		if ext == "pptx":
+			return {**base, **_read_pptx(fdoc, content, max_chars, "file-cursor-v1", cursor, version)}
 		from jarvis.tools._file_sections import read_sections
 
 		return {**base, **read_sections(fdoc, content, sheet=sheet, cursor=cursor, version=version)}
 
+	if ext == "pptx":
+		return {**base, **_read_pptx(fdoc, content, max_chars, "preview", None, None)}
 	if ext == "docx":
 		from jarvis.tools._docx_preview import preview_docx
 
@@ -140,8 +144,81 @@ def read_file(
 	if ext in _TEXT_EXT or _looks_text(content):
 		return {**base, **_read_text(content, max_chars)}
 	if ext == "xls":
-		raise InvalidArgumentError("legacy .xls isn't supported; re-save as .xlsx and retry")
+		raise InvalidArgumentError(
+			"Legacy .xls files can't be read. Save the file as .xlsx and attach it again."
+		)
 	return {**base, "kind": "binary", "note": f"unsupported file type {ext!r}; cannot extract text"}
+
+
+def _read_pptx(fdoc, content: bytes, max_chars: int, read_mode: str, cursor, version) -> dict:
+	"""Preview text, or a file-cursor-v1 window (cursor `0:<slide>:<char offset>`, same shape as docx)."""
+	import hashlib
+
+	from jarvis.tools import _pptx_text
+	from jarvis.tools._file_scan import MAX_BYTES, parse_cursor
+
+	if len(content) > MAX_BYTES:
+		raise InvalidArgumentError("File exceeds the 10 MiB input limit. Split it into smaller files.")
+	digest = hashlib.sha256(b"pptx-v2\0" + content).hexdigest()
+	if cursor is not None and version != digest:
+		raise InvalidArgumentError("File changed or cursor invalid. Restart without cursor/version.")
+	source, start, offset = parse_cursor(cursor)
+	try:
+		data = _pptx_text.extract_pptx(content)
+	except _pptx_text.PptxError as e:
+		raise InvalidArgumentError(str(e)) from None
+	note = "PowerPoint slide text, tables and speaker notes only; images, charts, SmartArt and comments are not read."
+	if read_mode != "file-cursor-v1":
+		return {
+			"kind": "document",
+			"format": "pptx",
+			"text": data["text"][:max_chars],
+			"slide_count": data["slide_count"],
+			"truncated": data["truncated"] or len(data["text"]) > max_chars,
+			"coverage": {"complete": not data["truncated"] and len(data["text"]) <= max_chars},
+			"note": note + " This is a bounded preview.",
+		}
+	slides = data["slides"]
+	if source != 0 or (cursor is not None and not 1 <= start <= max(len(slides), 1)):
+		raise InvalidArgumentError("File cursor is outside the file. Restart this file read.")
+	try:
+		win = _pptx_text.window(slides, start, offset)
+	except _pptx_text.PptxError as e:
+		raise InvalidArgumentError(str(e)) from None
+	next_read = None
+	if win["next_unit"] is not None:
+		next_read = {
+			"file_url": fdoc.file_url,
+			"cursor": f"0:{win['next_unit']}:{win['next_offset']}",
+			"version": digest,
+		}
+	stop = None
+	if next_read is None and data["truncated"]:
+		stop = {"code": "slide_limit", "slides_read": len(slides), "slide_count": data["slide_count"]}
+	window_complete = stop is None
+	complete = cursor is None and next_read is None and window_complete
+	return {
+		"kind": "document",
+		"format": "pptx",
+		"records": win["records"],
+		"stop_reason": stop,
+		"source": {"filename": fdoc.file_name, "slide_count": data["slide_count"]},
+		"range": {"source": 0, "first": start, "last": win["last"]},
+		"read_contract": "file-cursor-v1",
+		"status": "partial" if not window_complete else "complete" if complete else "window",
+		"version": digest,
+		"cursor": cursor or "0:1:0",
+		"end_of_file": next_read is None,
+		"coverage": {
+			"complete": complete,
+			"window_complete": window_complete,
+			"issues": [] if window_complete else [dict(stop)],
+		},
+		"next_read": next_read,
+		"note": note + " This is one exact extraction window. Follow next_read only within the task budget; "
+		"stop after at most 20 windows or 100,000 returned characters and disclose unread ranges. "
+		"Retain coverage issues and stop_reason; a final window does not prove prior windows were read.",
+	}
 
 
 def _resolve_file(file_url: str | None, filename: str | None):

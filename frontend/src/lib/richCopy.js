@@ -154,6 +154,10 @@ export function prepareRich(html, doc = globalThis.document) {
 		a.removeAttribute("title");
 	}
 	for (const img of box.querySelectorAll("img[src]")) img.setAttribute("src", img.src);
+	// A code block's copy button (markdown ``copyCode``) is chat chrome, not part of
+	// the reply: drop it and unwrap its block so only the <pre> is pasted.
+	for (const b of box.querySelectorAll(".jv-code-copy")) b.remove();
+	for (const w of box.querySelectorAll(".jv-md-codeblock")) w.replaceWith(...w.childNodes);
 	const text = plainText(box);
 	// A diagram copies as its source, line breaks kept.
 	for (const m of box.querySelectorAll(".jv-mermaid")) {

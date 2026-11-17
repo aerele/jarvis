@@ -14,6 +14,7 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import strip_html
 
 from jarvis.chat.triggers_api import (
+	_shape_intake_row,
 	activity_stats,
 	create_trigger,
 	delete_trigger,
@@ -821,11 +822,10 @@ class TestGetActivityDetail(_TriggersApiTestCase):
 				get_activity_detail(blank)
 
 	def test_non_string_name_is_rejected_before_any_read(self):
-		# Frappe's whitelist type check (FrappeTypeError) is a no-op for this module:
-		# ``from __future__ import annotations`` makes the annotations strings, which
-		# frappe.utils.typing_validations skips. So the body must reject a non-str
-		# itself (ValidationError). Either error is accepted, as in test_pulse_feedback;
-		# call with keyword arguments and the request condition, as Frappe does.
+		# Frappe's whitelist type check (FrappeTypeError) runs on a request; a direct call
+		# skips it, so the body must reject a non-str itself (ValidationError). Either error
+		# is accepted, as in test_pulse_feedback; call with keyword arguments and the
+		# request condition, as Frappe does.
 		frappe.set_user(ADMIN_USER)
 		with patch.object(frappe, "in_test", True):
 			for bad in (None, 7, ["a"], {"a": 1}):
@@ -1108,3 +1108,176 @@ class TestDuplicateTriggers(_TriggersApiTestCase):
 		self.assertTrue(
 			any(m.get("indicator") == "orange" for m in map(frappe.parse_json, frappe.local.message_log))
 		)
+
+
+class TestIntakeRowFeedScope(_TriggersApiTestCase):
+	"""Intake rows belong to the uploader in the SPA feed too, even when another
+	user can read the row's target doc. Other action types keep the target rule."""
+
+	def _seed(self):
+		marker = f"intake-feed-{frappe.generate_hash(length=8)}"
+		todo = frappe.get_doc(
+			{"doctype": "ToDo", "description": "intake feed target", "allocated_to": PLAIN_USER}
+		).insert(ignore_permissions=True)
+		self._todos.append(todo.name)
+		rows = {}
+		for key, action, owner in (
+			("mine", "Intake", PLAIN_USER),
+			("theirs", "Intake", ADMIN_USER),
+			("llm", "LLM", ADMIN_USER),
+		):
+			name = self._insert_activity_row(
+				trigger=marker, action_type=action, target_doctype="ToDo", target_docname=todo.name
+			)
+			frappe.db.set_value(ACTIVITY, name, "owner", owner, update_modified=False)
+			rows[key] = name
+		return marker, rows
+
+	def test_non_manager_sees_only_own_intake_rows(self):
+		marker, rows = self._seed()
+		frappe.set_user(PLAIN_USER)
+		names = {
+			r["name"] for r in list_activity_page(filters=frappe.as_json({"trigger": marker}))["data"]["rows"]
+		}
+		self.assertIn(rows["mine"], names)
+		self.assertNotIn(rows["theirs"], names)
+		# Non-Intake rows keep today's rule: visible when the target is readable.
+		self.assertIn(rows["llm"], names)
+
+	def test_manager_sees_all_intake_rows(self):
+		marker, rows = self._seed()
+		frappe.set_user(ADMIN_USER)
+		names = {
+			r["name"] for r in list_activity_page(filters=frappe.as_json({"trigger": marker}))["data"]["rows"]
+		}
+		self.assertEqual(names, set(rows.values()))
+
+
+class TestIntakeListRowShape(FrappeTestCase):
+	"""The list shows an Intake rule's target doctype, source and Run when, not the blank
+	doctype and a doctype event it does not have."""
+
+	def _row(self, **kw):
+		row = frappe._dict(
+			action_type="Intake",
+			target_doctype="",
+			doc_event="before_save",
+			intake_source="Folder",
+			intake_folder="Home/Invoices",
+			intake_record_doctype="",
+			intake_record_event="",
+			intake_target_doctype="Purchase Invoice",
+		)
+		row.update(kw)
+		_shape_intake_row(row)
+		return row
+
+	def test_folder_rule(self):
+		row = self._row()
+		self.assertEqual(row.target_doctype, "Purchase Invoice")
+		self.assertEqual(row.doc_event, "Folder: Home/Invoices")
+		self.assertNotIn("intake_folder", row)
+
+	def test_record_rule_names_run_when(self):
+		row = self._row(
+			intake_source="Record", intake_record_doctype="Expense Claim", intake_record_event="On Submit"
+		)
+		self.assertEqual(row.doc_event, "Expense Claim: On Submit")
+
+	def test_record_rule_defaults_to_file_attached(self):
+		row = self._row(intake_source="Record", intake_record_doctype="Expense Claim")
+		self.assertEqual(row.doc_event, "Expense Claim: File attached")
+
+	def test_other_rules_keep_their_event(self):
+		row = self._row(action_type="LLM", target_doctype="ToDo", doc_event="on_update")
+		self.assertEqual((row.target_doctype, row.doc_event), ("ToDo", "on_update"))
+		self.assertNotIn("intake_source", row)
+
+
+class TestWhitelistTypeValidation(_TriggersApiTestCase):
+	"""Each endpoint through Frappe's own call path (``frappe.call`` runs the whitelist type
+	check on a request or in a test), with the payload shape the SPA sends (api/triggers.js and
+	api/listPageArgs.js): numbers as numbers, JSON as strings, and blank search text."""
+
+	API = "jarvis.chat.triggers_api."
+
+	def _call(self, method, **kwargs):
+		with patch.object(frappe, "in_test", True):
+			return frappe.call(self.API + method, **kwargs)
+
+	def _page_args(self, **extra):
+		args = {
+			"search": "",
+			"filters": "{}",
+			"sort_field": "",
+			"sort_dir": "",
+			"start": 0,
+			"page_length": 20,
+		}
+		args.update(extra)
+		return args
+
+	def test_list_triggers_page(self):
+		frappe.set_user(ADMIN_USER)
+		for args in (
+			self._page_args(),
+			self._page_args(filters='{"enabled": 1}', filters_v2="[]"),
+			# lenient shapes: an object, a numeric string, a null
+			self._page_args(filters={"enabled": 1}, start="0", page_length="20", search=None),
+		):
+			with self.subTest(args=args):
+				self.assertIn("rows", self._call("list_triggers_page", **args)["data"])
+
+	def test_list_activity_page(self):
+		frappe.set_user(ADMIN_USER)
+		for args in (self._page_args(), self._page_args(filters={"status": "Failed"}, start="0")):
+			with self.subTest(args=args):
+				self.assertIn("rows", self._call("list_activity_page", **args)["data"])
+
+	def test_get_activity_detail_and_get_trigger(self):
+		name = self._create_as_admin()
+		row = self._insert_activity_row(trigger=name)
+		self.assertEqual(self._call("get_activity_detail", name=row)["data"]["name"], row)
+		self.assertEqual(self._call("get_trigger", name=name)["data"]["name"], name)
+
+	def test_create_update_toggle_delete(self):
+		frappe.set_user(ADMIN_USER)
+		made = self._call("create_trigger", payload=frappe.as_json(self._llm_payload()))
+		name = made["data"]["name"]
+		self._triggers.append(name)
+		self._call("update_trigger", name=name, payload=frappe.as_json({"description": "x"}))
+		for enabled in (0, 1, True):
+			with self.subTest(enabled=enabled):
+				self._call("set_trigger_enabled", name=name, enabled=enabled)
+		self.assertEqual(self._call("delete_trigger", name=name)["data"], {"deleted": 1})
+
+	def test_delete_triggers_bulk(self):
+		name = self._create_as_admin()
+		frappe.set_user(ADMIN_USER)
+		res = self._call("delete_triggers_bulk", names=frappe.as_json([name]))
+		self.assertEqual(res["data"]["deleted"], 1)
+
+	def test_intake_pickers(self):
+		frappe.set_user(ADMIN_USER)
+		for txt in ("", "To", None):
+			with self.subTest(txt=txt):
+				self.assertIsInstance(self._call("search_intake_doctypes", txt=txt), list)
+		self.assertIn("fields", self._call("get_intake_field_options", doctype="ToDo"))
+
+	def test_intake_pickers_hide_access_granting_fields_and_tables(self):
+		frappe.set_user(ADMIN_USER)
+		res = self._call("get_intake_field_options", doctype="Customer")
+		self.assertNotIn("portal_users", [t["fieldname"] for t in res["tables"]])
+		self.assertNotIn("portal_users", [f["fieldname"] for f in res["fields"]])
+
+	def test_test_trigger_condition(self):
+		frappe.set_user(ADMIN_USER)
+		for condition, docname in (("", ""), ("doc.status == 'Open'", ""), (None, None)):
+			with self.subTest(condition=condition):
+				res = self._call(
+					"test_trigger_condition",
+					target_doctype="ToDo",
+					condition=condition,
+					docname=docname,
+				)
+				self.assertTrue(res["data"]["valid"])

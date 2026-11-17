@@ -451,6 +451,128 @@ def _estimated_output_tokens(row: dict, output_tokens: int, reply_chars: int | N
 	return output_tokens, False
 
 
+_RUN_CACHE_TAIL_LIMIT = 100
+
+
+def _run_seq_window(run_id: str | None) -> tuple[int, int | None] | None:
+	"""(min_seq, max_seq) of the run's slice of the gateway transcript, or None when it
+	cannot be bounded. Same fence turn recovery uses: ``agent_seq_watermark`` is the
+	transcript seq captured before the turn's chat.send, and the next turn's watermark
+	closes the window. A zero watermark is the empty transcript on a chat's first turn;
+	on any later turn it means "not stamped", so no guess."""
+	if not run_id:
+		return None
+	from jarvis.chat.seq_watermark import wm_term
+	from jarvis.chat.turn_recovery import _next_turn_watermark
+
+	turn = frappe.db.get_value(CHAT_TURN, run_id, ["conversation", "assistant_message"], as_dict=True)
+	if not turn or not turn.assistant_message:
+		return None
+	m = frappe.qb.DocType(CHAT_MESSAGE)
+	rows = (
+		frappe.qb.from_(m)
+		.select(m.seq, wm_term(m).as_("wm"))
+		.where(m.name == turn.assistant_message)
+		.run(as_dict=True)
+	)
+	if not rows:
+		return None
+	wm, seq = int(rows[0]["wm"] or 0), rows[0]["seq"]
+	if not wm and _has_earlier_reply(turn.conversation, seq):
+		return None
+	return wm, _next_turn_watermark(turn.conversation, seq)
+
+
+def _has_earlier_reply(conversation: str, seq: int) -> bool:
+	return bool(
+		frappe.db.exists(CHAT_MESSAGE, {"conversation": conversation, "role": "assistant", "seq": ["<", seq]})
+	)
+
+
+def sum_run_cache(messages: list, min_seq: int, max_seq: int | None = None) -> dict | None:
+	"""Sum ``cacheRead`` / ``cacheWrite`` over the assistant messages with transcript seq in
+	(min_seq, max_seq]. A tool-calling turn is several model calls, one ``usage`` each.
+	Messages without a ``usage`` dict are skipped. None when no message in the window
+	carried either key (nothing reported)."""
+	from jarvis.chat.runtime_profile import get_profile
+
+	meta_key = get_profile().message_metadata_key
+	totals = {"cacheRead": 0, "cacheWrite": 0}
+	reported = False
+	for m in messages or []:
+		if (m.get("role") or "").lower() != "assistant":
+			continue
+		seq = _msg_seq(m, meta_key)
+		if seq is None or seq <= min_seq or (max_seq is not None and seq > max_seq):
+			continue
+		u = m.get("usage")
+		if not isinstance(u, dict):
+			continue
+		for key in totals:
+			count = _token_count(u.get(key))
+			if count is not None:
+				totals[key] += count
+				reported = True
+	return totals if reported else None
+
+
+def fetch_run_cache(sess, session_key: str, run_id: str | None) -> dict | None:
+	"""This run's summed cache usage from the transcript tail (``sessions.get``), via the
+	already-checked-out ``sess``; ``{"cacheRead", "cacheWrite"}`` or None. Best-effort:
+	any failure, an unbounded run, or a tail too short to reach the run's start returns
+	None so the caller keeps the ``sessions.list`` values."""
+	try:
+		window = _run_seq_window(run_id)
+		if not window:
+			return None
+		min_seq, max_seq = window
+		messages = sess.get_session_messages(session_key, limit=_RUN_CACHE_TAIL_LIMIT)
+		if len(messages) >= _RUN_CACHE_TAIL_LIMIT and _tail_starts_after(messages, min_seq):
+			return None  # truncated: a partial sum would be a wrong number
+		return sum_run_cache(messages, min_seq, max_seq)
+	except Exception as e:
+		if txn.is_write_conflict(e):
+			raise
+		# Best-effort and per turn: a log line, not an Error Log row on every finalize.
+		frappe.logger("jarvis.usage").warning("run cache read failed for %s", session_key, exc_info=True)
+		return None
+
+
+def _tail_starts_after(messages: list, min_seq: int) -> bool:
+	"""The tail begins after the run's first message, so a sum would be partial. Messages
+	without a seq cannot place the tail; with none at all, assume it is cut."""
+	from jarvis.chat.runtime_profile import get_profile
+
+	meta_key = get_profile().message_metadata_key
+	seqs = [s for s in (_msg_seq(m, meta_key) for m in messages) if s is not None]
+	return not seqs or min(seqs) > min_seq + 1
+
+
+def _msg_seq(message: dict | None, meta_key: str) -> int | None:
+	"""The gateway transcript seq of one message, or None when absent or not a number."""
+	seq = ((message or {}).get(meta_key) or {}).get("seq")
+	return _token_count(seq) or None
+
+
+def _token_count(value) -> int | None:
+	"""A non-negative integer count, or None for a missing or malformed value."""
+	if value is None or isinstance(value, bool):
+		return None
+	try:
+		count = int(value)
+	except (TypeError, ValueError):
+		return None
+	return count if count >= 0 else None
+
+
+def with_run_cache(row: dict | None, cache: dict | None) -> dict | None:
+	"""``row`` with the run's cache totals laid over its (absent) ``cacheRead`` /
+	``cacheWrite``; the row itself when there are none."""
+	if not row or not cache:
+		return row
+	return {**row, **cache}
+
+
 def record_turn_usage(
 	session_key: str, row: dict | None, run_id: str | None = None, reply_chars: int | None = None
 ) -> str:
@@ -743,12 +865,12 @@ def _write_turn_usage_row(
 	deterministically discard the aggregate delta on the RECORDED path).
 
 	cache_read / cache_write / cache_reported are filled from the row's ``cacheRead`` /
-	``cacheWrite`` when present. They are ABSENT from ``sessions.list`` as of agent image 2026.9.3
-	(re-verified 2026-10-07; only the stored session entry has them), so today these stay
-	0 / 0 / unreported until the runtime exposes them. ``cache_reported`` is 1 when either
-	key is present (a real 0 reads as reported). They are NOT in the
-	accrued delta: ``tokens_in`` stays the row's ``inputTokens`` (uncached). Known limit: a
-	multi-call turn carries the last call's cache numbers.
+	``cacheWrite`` when present. ``sessions.list`` does NOT send them (agent image 2026.9.3), so
+	finalize overlays the run's real totals first (``fetch_run_cache`` / ``with_run_cache``: the
+	sum over every assistant message of the run, from the transcript's per-message ``usage``).
+	Without that overlay these stay 0 / 0 / unreported. ``cache_reported`` is 1 when either key
+	is present (a real 0 reads as reported). They are NOT in the accrued delta: ``tokens_in``
+	stays the row's ``inputTokens`` (uncached).
 
 	``tokens_out_estimated`` marks a ``tokens_out`` that is the reply-length estimate."""
 	try:

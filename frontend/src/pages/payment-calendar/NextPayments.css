@@ -1,0 +1,119 @@
+/* Next payments panel (template L100, L112-114, L765). A 3-column row grid under the
+   calendar; stacked on a phone. In-page, so widths are container queries. */
+.pcal-next {
+	min-width: 0;
+	overflow: hidden;
+	border: 1px solid var(--pc-border);
+	border-radius: var(--pc-radius-card);
+	background: var(--pc-card);
+}
+.pcal-next .aside-heading {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 5px;
+	padding: 14px 17px 0;
+}
+.pcal-next .aside-heading h2 {
+	margin: 0;
+	font-size: 14px;
+	font-weight: 600;
+}
+.pcal-next .aside-heading span {
+	font-size: 10px;
+	color: var(--pc-muted);
+}
+.pcal-next .next-list {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	column-gap: 22px;
+	padding: 3px 17px;
+}
+.pcal-next .upcoming {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	min-width: 0;
+	width: 100%;
+	padding: 12px 0;
+	border: 0;
+	background: none;
+	text-align: left;
+	color: inherit;
+	cursor: pointer;
+}
+.pcal-next .upcoming:hover .upcoming-date {
+	color: var(--pc-link);
+}
+.pcal-next .upcoming-date {
+	font-size: 13px;
+	font-weight: 550;
+}
+.pcal-next .upcoming small {
+	display: block;
+	margin-top: 3px;
+	font-size: 11px;
+	font-weight: 400;
+	color: var(--pc-muted);
+}
+.pcal-next .upcoming-amount {
+	font-size: 13px;
+	font-weight: 600;
+	white-space: nowrap;
+}
+.pcal-next .schedule-empty {
+	grid-column: 1 / -1;
+	margin: 0;
+	padding: 12px 0;
+	font-size: var(--pc-fs-small);
+	line-height: 1.7;
+	color: var(--pc-muted);
+}
+.pcal-next .aside-more {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	width: 100%;
+	padding: 12px 17px;
+	border: 0;
+	border-top: 1px solid var(--pc-border-soft);
+	background: none;
+	font-size: var(--pc-fs-small);
+	font-weight: 550;
+	color: var(--pc-link);
+	cursor: pointer;
+}
+.pcal-next .aside-more:disabled {
+	color: var(--pc-muted);
+	cursor: default;
+	opacity: 0.6;
+}
+@container (max-width: 1200px) {
+	.pcal-next .next-list {
+		column-gap: 14px;
+	}
+	.pcal-next .upcoming {
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+	.pcal-next .upcoming-amount {
+		font-size: var(--pc-fs-small);
+	}
+}
+@container (max-width: 540px) {
+	.pcal-next .next-list {
+		display: block;
+	}
+	.pcal-next .upcoming {
+		flex-wrap: nowrap;
+		border-bottom: 1px solid var(--pc-border-soft);
+	}
+	.pcal-next .upcoming:last-of-type {
+		border-bottom: 0;
+	}
+	.pcal-next .upcoming-amount {
+		font-size: 13px;
+	}
+}

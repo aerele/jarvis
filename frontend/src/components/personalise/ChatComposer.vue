@@ -163,6 +163,8 @@ import {
 	confirmDialog,
 } from "frappe-ui";
 import VoiceRecorder from "@/components/VoiceRecorder.vue";
+import { escapeHtml } from "@/lib/errors";
+import { uploadErrorCopy } from "@/lib/chatErrorCopy";
 import { session } from "@/data/session";
 import { brand } from "@/branding";
 
@@ -276,7 +278,7 @@ function onUpload(f) {
 	attachment.value = f || null;
 }
 function onUploadError(e) {
-	toast.error((e && e.message) || "Couldn't attach that file.");
+	toast.error(escapeHtml(uploadErrorCopy(e)));
 }
 function removeAttachment() {
 	attachment.value = null;
