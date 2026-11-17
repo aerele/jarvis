@@ -619,7 +619,9 @@ class TestReviewRoutes(_RealWorkflow):
 
 			cancel(BT, name, FIELD, "Draft")
 		self.assertEqual(self._row(name).docstatus, 1)
-		# What Desk sends (the current state) passes.
+		# What Desk sends (the current state) passes. On Frappe v15 cancel() appends the updated doc to
+		# frappe.response.docs, which a Desk request sets up and a test does not.
+		frappe.response["docs"] = []
 		with self._tool_call(APPROVER):
 			self._run(
 				"frappe.desk.form.save.cancel",
