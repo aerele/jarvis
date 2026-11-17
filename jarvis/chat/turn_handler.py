@@ -1501,6 +1501,7 @@ def _assemble_prompt(
 		msg_row.get("origin"),
 		live_draft_clause,
 		context=context,
+		armed_skill_note=armed_skill_run_clause,
 	)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
@@ -2940,7 +2941,9 @@ def _runs_without_cards(conv, binding) -> bool:
 	)
 
 
-def _drafting_clause(conv, binding, origin, live_draft_clause: str = "", *, context=None) -> str:
+def _drafting_clause(
+	conv, binding, origin, live_draft_clause: str = "", *, context=None, armed_skill_note: str = ""
+) -> str:
 	"""``DRAFTING_CLAUSE`` when the site flag ``jarvis_draft_cards`` is on and an agent call to
 	``create_doc`` / ``update_doc`` in this turn would park a draft card, else "".
 
@@ -2959,7 +2962,10 @@ def _drafting_clause(conv, binding, origin, live_draft_clause: str = "", *, cont
 	call the tool again only for a change, which agrees with "one draft at a time".
 
 	Also nothing on a turn with a connector focus (``context.focus_connector``: the gate refuses
-	``create_doc`` / ``update_doc`` then).
+	``create_doc`` / ``update_doc`` then) and on a turn whose message invokes an armed skill
+	(``armed_skill_note``, the armed-skill clause already built for it): the gate offers
+	"Approve & run" on that write's card, and only the ordinary card has that control, so the
+	write is not a draft card (``draft_card.wanted``, ``offers_run``).
 
 	Best-effort like the neighbouring clauses: a failure is logged and leaves the note out."""
 	from jarvis.chat import draft_card
@@ -2977,7 +2983,7 @@ def _drafting_clause(conv, binding, origin, live_draft_clause: str = "", *, cont
 
 		if conv.get("origin_page") in _BUILDER_ORIGINS:
 			return ""
-		if connector_focus.focus_of(context):
+		if connector_focus.focus_of(context) or armed_skill_note:
 			return ""
 		if _TYPED_CHANGE in live_draft_clause:
 			return ""

@@ -18,9 +18,11 @@ FOCUS = {"focus_connector": {"key": "gmail", "label": "Gmail"}}
 
 
 class TestDraftingClauseRule(unittest.TestCase):
-	def clause(self, conv=None, binding=None, origin="human", live="", flag=True, context=None):
+	def clause(self, conv=None, binding=None, origin="human", live="", flag=True, context=None, armed=""):
 		with patch(ENABLED, return_value=flag):
-			return _drafting_clause(conv or {}, binding, origin, live, context=context)
+			return _drafting_clause(
+				conv or {}, binding, origin, live, context=context, armed_skill_note=armed
+			)
 
 	def test_an_ordinary_turn_gets_the_note_and_the_flag_off_gets_nothing(self):
 		"""The site flag is the only switch for everyone else: if the helper ignored it, every
@@ -68,6 +70,14 @@ class TestDraftingClauseRule(unittest.TestCase):
 		A focus the prompt itself ignores (no label) is no focus."""
 		self.assertEqual(self.clause(context=FOCUS), "")
 		self.assertEqual(self.clause(context={"focus_connector": {"key": "gmail"}}), DRAFTING_CLAUSE)
+
+	def test_a_turn_that_invokes_an_armed_skill_gets_nothing(self):
+		"""The gate offers "Approve & run" on the first covered write of an armed skill's turn, and
+		only the ordinary card has that control: a draft card would lose it. The armed-skill note
+		the turn already carries is the signal, and it tells the agent to call the tool itself."""
+		note = "; armed skill: Approve & run available for /x: stage its first covered write"
+		self.assertEqual(self.clause(armed=note), "")
+		self.assertEqual(self.clause(armed=""), DRAFTING_CLAUSE)
 
 	def test_a_failure_leaves_the_note_out_and_never_fails_the_turn(self):
 		"""Every neighbouring clause is best-effort: a prompt line must never break a turn. With
