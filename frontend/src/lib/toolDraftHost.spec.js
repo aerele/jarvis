@@ -445,7 +445,25 @@ describe("toolPanelNotices: the lines above a server draft's form", () => {
 		expect(toolPanelNotices(own, true)).toEqual([
 			{ type: "error", text: "Couldn't save this: Gone." },
 		]);
-		expect(toolPanelNotices(own, false)).toEqual([]);
+	});
+	// Break: a refused save on a form that is kept while its card is STILL listed shows nothing (the
+	// note was shown only for a dead panel), or the note shows twice when the card is gone too.
+	it.each([
+		[
+			"note, card still listed",
+			"Couldn't save this: Closed.",
+			false,
+			["Couldn't save this: Closed."],
+		],
+		[
+			"note, card gone: once",
+			"Couldn't save this: Closed.",
+			true,
+			["Couldn't save this: Closed."],
+		],
+	])("a refused save: %s", (_, deadNote, dead, want) => {
+		const lines = toolPanelNotices(p({ deadNote }), dead).map((n) => n.text);
+		expect(lines).toEqual(want);
 	});
 	it("says nothing for a typed draft's panel or no panel", () => {
 		expect(toolPanelNotices({ saveBlocked: "x" }, true)).toEqual([]);
@@ -1134,6 +1152,19 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 		],
 	])
 		it(`closed note, ${name}`, async () => expect(await closedNote(reply)).toBe(want));
+
+	// Break: Save pressed again on a kept form whose card is still listed keeps the first refusal
+	// above the form while the new reply says something else (two causes at once).
+	it("a second save replaces the refusal the first one left", async () => {
+		const h = host();
+		const p = await openForm(h);
+		edit(p);
+		p.deadNote = "Couldn't save this: Old.";
+		h.state.reply = fixable([{ fieldname: "title", label: "title", message: "Bad" }]);
+		await saveToolDraft(p, h.d);
+		expect(p.deadNote).toBe("");
+		expect(toolPanelNotices(p, false)).toEqual([]);
+	});
 
 	// Break: the person pressed X while the save ran; the refusal marks a form nobody sees and says nothing.
 	it("fixable reply after the form was closed with the X: a toast with the server's message", async () => {

@@ -219,7 +219,11 @@ export function toolDeadText(panel) {
 export function toolPanelNotices(panel, dead) {
 	if (!panel || !panel.tool) return [];
 	const out = [];
-	if (dead) out.push({ type: "error", text: toolDeadText(panel) });
+	// The reason a save was refused is shown whether or not the card has left the list: a card that is
+	// still listed after a `closed` reply (its call is no longer a draft call) would otherwise say
+	// nothing. Once, whichever of the two is true. Save stays off only for a really dead card.
+	if (dead || (typeof panel.deadNote === "string" && panel.deadNote))
+		out.push({ type: "error", text: toolDeadText(panel) });
 	if (panel.saveBlocked) out.push({ type: "error", text: CANT_EDIT_TEXT });
 	if (panel.storedUnavailable) out.push({ type: "warning", text: STORED_UNAVAILABLE_TEXT });
 	return out;
@@ -400,6 +404,8 @@ export async function saveToolDraft(p, d) {
 	if (!Object.keys(values).length) return createFromForm(p, pa, view, d);
 	p.applying = true;
 	p.error = null;
+	// a refusal told by an earlier save is stale once the person saves again: the new reply says it
+	p.deadNote = "";
 	where.setBusy(pa, true);
 	where.setKind(pa, "save");
 	d.inflight.add(p.token);
