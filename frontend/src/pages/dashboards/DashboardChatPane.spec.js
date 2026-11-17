@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 
@@ -110,7 +112,19 @@ vi.mock("@/api", () => ({
 	})),
 }));
 const routerPush = vi.hoisted(() => vi.fn(async () => undefined));
-vi.mock("vue-router", () => ({ useRouter: () => ({ push: routerPush }) }));
+// resolve() is the real router's, over a copy of the Conversation route, so the href the pane
+// opens is built the way the app builds it (base "/jarvis", path "/c/:id").
+vi.mock("vue-router", async (importOriginal) => {
+	const actual = await importOriginal();
+	const real = actual.createRouter({
+		history: actual.createMemoryHistory("/jarvis"),
+		routes: [{ path: "/c/:id", name: "Conversation", component: { template: "<div />" } }],
+	});
+	return {
+		...actual,
+		useRouter: () => ({ push: routerPush, resolve: (to) => real.resolve(to) }),
+	};
+});
 
 import {
 	confirmTool,
@@ -1640,5 +1654,101 @@ describe("DashboardChatPane send", () => {
 			api.getDashboardConversation.mockReset();
 			api.getDashboardConversation.mockResolvedValue({ messages: [] });
 		}
+	});
+});
+
+describe("DashboardChatPane draft cards go to the full chat (jarvis_draft_cards)", () => {
+	const item = (over) => ({
+		token: "tok",
+		conversation: "conv1",
+		tool: "create_doc",
+		summary: "create_doc doctype=Timesheet",
+		preview: { would: { doctype: "Timesheet" } },
+		pending_card_safe: true,
+		...over,
+	});
+	const draftCard = {
+		kind: "create",
+		draft: { verb: "create", doctype: "Timesheet", title: "New Timesheet", values: {} },
+	};
+	const buttons = (wrapper) => wrapper.findAll("button").map((b) => b.text());
+	async function mountWith(items) {
+		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: items } });
+		const { wrapper } = mountPane();
+		await flushPromises();
+		return wrapper;
+	}
+	afterEach(() => {
+		listPendingConfirmations.mockReset();
+		listPendingConfirmations.mockResolvedValue({ ok: true, data: { pending: [] } });
+		vi.restoreAllMocks();
+	});
+
+	// Break: a draft is approved or dismissed here without its contents being shown (the blind
+	// Confirm this task removes), or it shows the raw tool name / the generic "Create Timesheet".
+	it("a draft item shows its title and one Review in full chat button, no Approve, no Dismiss", async () => {
+		const wrapper = await mountWith([
+			item({ preview: { would: { doctype: "Timesheet" }, card: draftCard } }),
+		]);
+		expect(wrapper.text()).toContain("Draft: New Timesheet");
+		expect(wrapper.text()).not.toContain("create_doc");
+		expect(wrapper.text()).not.toContain("Create Timesheet");
+		expect(buttons(wrapper)).not.toContain("Approve");
+		expect(buttons(wrapper)).not.toContain("Dismiss");
+		expect(buttons(wrapper).filter((b) => b === "Review in full chat")).toHaveLength(1);
+	});
+
+	// Break: the click replaces the dashboard being built (router.push) instead of opening the
+	// conversation in a new tab, or opens the wrong conversation, or opens without noopener.
+	it("Review in full chat opens that conversation in a new tab and does not navigate here", async () => {
+		const open = vi.spyOn(window, "open").mockReturnValue(null);
+		routerPush.mockClear();
+		const wrapper = await mountWith([
+			item({ conversation: "conv1", preview: { card: draftCard } }),
+		]);
+		await wrapper
+			.findAll("button")
+			.find((b) => b.text() === "Review in full chat")
+			.trigger("click");
+		expect(open).toHaveBeenCalledTimes(1);
+		expect(open).toHaveBeenCalledWith("/jarvis/c/conv1", "_blank", "noopener,noreferrer");
+		expect(routerPush).not.toHaveBeenCalled();
+		expect(confirmTool).not.toHaveBeenCalled();
+	});
+
+	// Break: the route the pane resolves is renamed or moved, so the link silently 404s.
+	it("the route the pane resolves is the app's Conversation route", () => {
+		const routes = fs.readFileSync(path.resolve(__dirname, "../../router/index.js"), "utf8");
+		expect(routes).toContain('{ path: "/c/:id", name: "Conversation"');
+	});
+
+	// Break: a card that is not a draft changes: a sensitive card (risk), a plain gated card, an
+	// unreadable draft handled wrongly, or the flag-off look.
+	it("a sensitive card and an ordinary item keep Approve and Dismiss; an unreadable draft does not", async () => {
+		const wrapper = await mountWith([
+			item({ token: "s", created_at: 1, preview: { card: { risk: "sensitive" } } }),
+			item({ token: "p", created_at: 2, summary: "create_doc doctype=ToDo", preview: {} }),
+			item({ token: "u", created_at: 3, preview: { card: { draft: "junk" } } }),
+		]);
+		expect(buttons(wrapper).filter((b) => b === "Approve")).toHaveLength(2);
+		expect(buttons(wrapper).filter((b) => b === "Dismiss")).toHaveLength(2);
+		expect(buttons(wrapper).filter((b) => b === "Review in full chat")).toHaveLength(1);
+		expect(wrapper.text()).toContain("Draft: Draft");
+	});
+
+	// Break: the draft branch swallows a sibling ordinary card's buttons (the v-if / v-else pair
+	// is wrong inside the loop), or Approve on it confirms the draft's token.
+	it("an ordinary card next to a draft still has its own Approve", async () => {
+		const wrapper = await mountWith([
+			item({ token: "d", created_at: 1, preview: { card: draftCard } }),
+			item({ token: "p", created_at: 2, preview: {} }),
+		]);
+		expect(buttons(wrapper).filter((b) => b === "Approve")).toHaveLength(1);
+		await wrapper
+			.findAll("button")
+			.find((b) => b.text() === "Approve")
+			.trigger("click");
+		await flushPromises();
+		expect(confirmTool).toHaveBeenCalledWith("p", "conv1");
 	});
 });
