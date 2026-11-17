@@ -13,8 +13,11 @@ from hashlib import sha256
 from inspect import signature
 
 import frappe
+from frappe.query_builder import Order
+from frappe.query_builder.functions import Count
 from frappe.utils import flt, getdate
 
+from jarvis.payment_calendar import compatibility, read_log
 from jarvis.payment_calendar.books import validate_obligation_books
 from jarvis.payment_calendar.compatibility import require_obligation_scope, source_profile
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
@@ -28,6 +31,12 @@ from jarvis.payment_calendar.reconciliation import InvoiceReconciler, check_allo
 
 MAX_LEDGER_ROWS = 100_000
 MAX_VOUCHERS = 10_000
+# Names per payment-schedule query; the same chunk size as the settled-in-window read.
+TERM_CHUNK = 500
+PARTY_CHUNK = 500
+# False once any speed override fell back to upstream in this process; it stays False until restart.
+FAST_PATH = True
+_warned_fallbacks = set()
 
 
 def money(value, precision: int) -> Decimal:
@@ -42,6 +51,10 @@ def money(value, precision: int) -> Decimal:
 
 def _key(row):
 	return row.party_account, row.voucher_type, row.voucher_no, row.party
+
+
+def _deep_dict(row):
+	return frappe._dict(deepcopy(row))
 
 
 def check_contract():
@@ -77,6 +90,152 @@ def _report_class():
 			super().__init__(filters)
 			self.window_start, self.window_end = getdate(window_start), getdate(window_end)
 			self.terms = {}
+			# Upstream creates the accumulator in get_data; batched reads scan it. None until then, so a
+			# renamed upstream accumulator makes build_data refuse instead of reading an empty one.
+			self.voucher_balance = None
+			# Shared with the shallow copy that `InvoiceReconciler.native` makes. The term order is
+			# fixed when a chunk is read, while upstream reads is_historical_report() on every call;
+			# a midnight crossing during one run is accepted.
+			self._term_cache = {}
+			self._company_currency = None
+
+		def get_payment_terms(self, row):
+			"""ERPNext's body, with the per-invoice schedule query batched per chunk of invoices.
+
+			Keep in sync with ERPNext accounts_receivable.py get_payment_terms; pinned in compatibility._SPEED_PINS.
+			"""
+			if not compatibility.upstream_matches("get_payment_terms"):
+				_speed_fallback("get_payment_terms")
+				return super().get_payment_terms(row)
+			details = self._schedule_rows(row.voucher_type, row.voucher_no)
+			original_row = frappe._dict(row)
+			row.payment_terms = []
+			# Cr Note's don't have Payment Terms
+			if not details:
+				return
+			if self._company_currency is None:
+				self._company_currency = frappe.get_value(
+					"Company", self.filters.get("company"), "default_currency"
+				)
+			company_currency = self._company_currency
+			# Advance allocated during invoicing is not considered in payment terms
+			row.paid -= self.get_advance_in_report_currency(details[0], company_currency)
+			if len(details) == 1 and details[0].payment_term:
+				self.append_payment_term(row, details[0], original_row, company_currency)
+				return
+			for d in details:
+				self.append_payment_term(row, d, frappe._dict(original_row), company_currency)
+
+		def _schedule_rows(self, voucher_type, voucher_no):
+			key = (voucher_type, voucher_no)
+			if key not in self._term_cache:
+				self._fetch_schedule_rows(voucher_type, voucher_no)
+			return self._term_cache[key]
+
+		def _fetch_schedule_rows(self, voucher_type, missed_name):
+			"""One query for the missed invoice and the next not-yet-read invoices of the same type."""
+			names = {missed_name: []}
+			# Every invoice of the engine, returns included: upstream allocates them too.
+			for entry in (self.voucher_balance or {}).values():
+				if len(names) >= TERM_CHUNK:
+					break
+				if (
+					entry.voucher_type == voucher_type
+					and entry.voucher_no not in names
+					and (voucher_type, entry.voucher_no) not in self._term_cache
+					and self.is_invoice(entry)
+				):
+					names[entry.voucher_no] = []
+			# MariaDB's IN matches letter case loosely, so a parent can come back in another case than the
+			# ledger's voucher_no. This folds letter case only; accent and trailing-space differences are
+			# not matched (theoretical for validated links). Postgres matches exactly.
+			folded = {name.casefold(): name for name in names} if frappe.db.db_type == "mariadb" else {}
+			for detail in self._schedule_query(voucher_type, list(names)).run(as_dict=True):
+				parent = detail.parent if detail.parent in names else folded[detail.parent.casefold()]
+				names[parent].append(detail)
+			for name, details in names.items():
+				self._term_cache[(voucher_type, name)] = details
+
+		def _schedule_query(self, voucher_type, names):
+			invoice, schedule = frappe.qb.DocType(voucher_type), frappe.qb.DocType("Payment Schedule")
+			query = (
+				frappe.qb.from_(invoice)
+				.join(schedule)
+				.on(invoice.name == schedule.parent)
+				.select(
+					invoice.name,
+					invoice.party_account_currency,
+					invoice.currency,
+					invoice.conversion_rate,
+					invoice.total_advance,
+					schedule.due_date,
+					schedule.payment_term,
+					schedule.payment_amount,
+					schedule.base_payment_amount,
+					schedule.description,
+					schedule.paid_amount,
+					schedule.base_paid_amount,
+					schedule.discounted_amount,
+					schedule.parent,
+				)
+				.where(
+					(schedule.parenttype == voucher_type)
+					& invoice.name.isin(names)
+					& (invoice.is_return == 0)
+				)
+				.orderby(schedule.parent)
+			)
+			if self.is_historical_report():
+				query = query.orderby(schedule.due_date)
+			else:
+				query = query.orderby(schedule.paid_amount, order=Order.desc).orderby(schedule.due_date)
+			return query.orderby(schedule.idx)
+
+		def prepare_ple_query(self):
+			super().prepare_ple_query()
+			# Upstream orders by (posting_date, party) only, so tied lines come back in an undefined
+			# order, and the last line of a tie wins the voucher's cost_center/project.
+			if source_profile().major == "16":
+				self.ple_query = self.ple_query.orderby(self.ple.name)
+
+		def _seed_party_details(self):
+			"""Fill `party_details` for every party of the ledger in one query per chunk of parties.
+
+			Reproduces ERPNext's get_party_details lookup (accounts_receivable.py): the doctype by account
+			type, the same fields, None for a missing party. Upstream then only reads the dict; if it
+			stops reading `party_details`, the seed is unused and upstream looks parties up itself.
+			"""
+			parties = list(
+				dict.fromkeys(
+					entry.party
+					for entry in self.voucher_balance.values()
+					if entry.party and entry.party not in self.party_details
+				)
+			)
+			if self.account_type == "Receivable":
+				doctype = "Customer"
+				fields = ["customer_name", "territory", "customer_group", "customer_primary_contact"]
+			else:
+				doctype, fields = "Supplier", ["supplier_name", "supplier_group"]
+			is_mariadb = frappe.db.db_type == "mariadb"
+			for start in range(0, len(parties), PARTY_CHUNK):
+				chunk = parties[start : start + PARTY_CHUNK]
+				found = {
+					record.pop("name"): record
+					for record in frappe.get_all(
+						doctype, filters={"name": ["in", chunk]}, fields=["name", *fields]
+					)
+				}
+				# MariaDB's get_value matches an id that differs only in letter case; Postgres does not.
+				# This folds letter case only; accent and trailing-space differences are not matched
+				# (theoretical for validated links).
+				folded = {name.casefold(): record for name, record in found.items()}
+				# None for a missing party, as upstream's get_value returns; it also stops a re-read.
+				for party in chunk:
+					record = found.get(party)
+					if record is None and is_mariadb:
+						record = folded.get(party.casefold())
+					self.party_details[party] = record
 
 		def append_payment_term(self, row, d, term, company_currency):
 			super().append_payment_term(row, d, term, company_currency)
@@ -84,21 +243,42 @@ def _report_class():
 
 		def allocate_outstanding_based_on_payment_terms(self, row):
 			super().allocate_outstanding_based_on_payment_terms(row)
-			self.terms[_key(row)] = deepcopy(row.payment_terms)
+			# build_data sets the gate once; allocate can also run before it, and native() clones share it.
+			fast = getattr(self, "_fast", None)
+			if fast is None:
+				fast = source_profile().major == "16"
+			if fast:
+				self.terms[_key(row)] = [frappe._dict(term) for term in row.payment_terms]
+			else:
+				self.terms[_key(row)] = deepcopy(row.payment_terms)
 
 		def build_data(self):
 			if not isinstance(self.voucher_balance, dict):
 				raise CalendarSourceUnavailable()
 			# The upstream accumulator also contains zero-invoiced Payment Entry
 			# placeholders. Only actual positive invoice obligations need an overlay.
+			fast = self._fast = source_profile().major == "16"
+			if fast:
+				# set_defaults (in run) already reset party_details; get_data fills voucher_balance, and
+				# super().build_data() below is the first reader of party_details.
+				self._seed_party_details()
+			if fast and isinstance(getattr(self, "err_journals", None), list):
+				# Only membership is used.
+				self.err_journals = set(self.err_journals)
+			# The entries hold scalars and dates only, so a flat copy is a full copy on v16.
+			copy_row = frappe._dict if fast else _deep_dict
 			self.pre = {
-				k: frappe._dict(deepcopy(r))
+				k: copy_row(r)
 				for k, r in self.voucher_balance.items()
 				if self.is_invoice(r) and r.invoiced > 0
 			}
 			if len(self.pre) > MAX_VOUCHERS:
 				raise CalendarSourceUnavailable("too_large")
-			self.metadata = deepcopy(self.invoice_details)
+			if fast:
+				# Per entry: upstream pops due_date from the source entries.
+				self.metadata = {k: frappe._dict(v) for k, v in self.invoice_details.items()}
+			else:
+				self.metadata = deepcopy(self.invoice_details)
 			self.ledger_residuals = {
 				_key(row): money(row.invoiced - row.paid - row.credit_note, self.currency_precision)
 				for row in self.voucher_balance.values()
@@ -123,6 +303,7 @@ def _report_class():
 				allocated[key] = allocated.get(key, Decimal(0)) + money(
 					row.outstanding, self.currency_precision
 				)
+			replacements = {}
 			for key, row in self.pre.items():
 				expected = money(row.invoiced - row.paid - row.credit_note, self.currency_precision)
 				if allocated.get(key, Decimal(0)) != expected:
@@ -131,8 +312,16 @@ def _report_class():
 						suppressed.add(key)
 						continue
 					replacement = reconciler.repair(row, expected)
-					self.data = [r for r in self.data if _key(r) != key] + [replacement]
+					if fast:
+						replacements[key] = replacement
+					else:
+						self.data = [r for r in self.data if _key(r) != key] + [replacement]
 					self.terms[key] = []
+			if replacements:
+				# Survivors in their order, then the replacements in pre order: today's result in one pass.
+				self.data = [r for r in self.data if _key(r) not in replacements] + list(
+					replacements.values()
+				)
 			for key, row in self.pre.items():
 				if (
 					self.is_invoice(row)
@@ -162,7 +351,7 @@ def _report_class():
 			}
 			in_window = self._settled_in_window(candidates)
 			for key in in_window:
-				row = frappe._dict(deepcopy(candidates[key]))
+				row = copy_row(candidates[key])
 				row.invoice_grand_total = row.invoiced
 				self.allocate_outstanding_based_on_payment_terms(row)
 				if any(money(term.outstanding, self.currency_precision) for term in row.payment_terms):
@@ -182,12 +371,12 @@ def _report_class():
 					continue
 				names = [k[2] for k in keys]
 				parents = set()
-				for offset in range(0, len(names), 500):
+				for offset in range(0, len(names), TERM_CHUNK):
 					parents.update(
 						frappe.get_all(
 							"Payment Schedule",
 							filters={
-								"parent": ["in", names[offset : offset + 500]],
+								"parent": ["in", names[offset : offset + TERM_CHUNK]],
 								"parenttype": doctype,
 								"due_date": ["between", [self.window_start, self.window_end]],
 							},
@@ -259,6 +448,24 @@ def read_obligations(company: str, account_type: str, as_of: str, window_start: 
 		raise CalendarSourceUnavailable() from exc
 
 
+def _ledger_rows_exceed(company, account_type, anchor, limit):
+	"""True when more than `limit` live ledger rows exist; reads at most `limit + 1` of them."""
+	ledger = frappe.qb.DocType("Payment Ledger Entry")
+	rows = (
+		frappe.qb.from_(ledger)
+		.select(1)
+		.where(
+			(ledger.company == company)
+			& (ledger.account_type == account_type)
+			& (ledger.delinked == 0)
+			& (ledger.posting_date <= anchor)
+		)
+		.limit(limit + 1)
+	)
+	(counted,) = frappe.qb.from_(rows.as_("ledger_rows")).select(Count("*")).run()[0]
+	return counted > limit
+
+
 def _read_obligations(company, account_type, as_of, window_start, window_end):
 	if not as_of or not window_start or not window_end:
 		raise frappe.ValidationError("The accounting date and calendar window are required.")
@@ -277,9 +484,14 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 	if start > end:
 		raise frappe.ValidationError("Invalid calendar window.")
 	company_values = require_company(company)
+	fast = source_profile().major == "16"
+	# On v16 a bounded probe goes first: a huge ledger must not pay for the full-history book scan.
+	if fast and _ledger_rows_exceed(company, account_type, anchor, MAX_LEDGER_ROWS):
+		raise CalendarSourceUnavailable("too_large")
 	validate_obligation_books(company, account_type, anchor)
 	if (
-		frappe.db.count(
+		not fast
+		and frappe.db.count(
 			"Payment Ledger Entry",
 			{"company": company, "account_type": account_type, "delinked": 0, "posting_date": ["<=", anchor]},
 		)
@@ -427,3 +639,23 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 		"scope_reasons": reasons,
 		"permission_columns": _permission_columns(engine.columns),
 	}
+
+
+def _speed_fallback(name: str) -> None:
+	"""A speed override met an unaudited upstream source and ran upstream instead; log once per name.
+
+	Nothing here may raise into the read: upstream already ran, or is about to.
+	"""
+	global FAST_PATH
+	FAST_PATH = False
+	try:
+		import erpnext
+
+		version = erpnext.__version__
+		# v15 has no pins by design: silent. Only an unknown v16 source needs an audit.
+		if version.split(".")[0] != "16" or name in _warned_fallbacks:
+			return
+		_warned_fallbacks.add(name)
+		read_log.speed_fallback(name, compatibility.installed_hash(name), version)
+	except Exception:
+		pass
