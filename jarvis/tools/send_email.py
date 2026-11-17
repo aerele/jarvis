@@ -107,6 +107,43 @@ def send_email(
 	}
 
 
+NO_OUTGOING_ACCOUNT_MESSAGE = (
+	"Email is not set up on this site: there is no enabled outgoing Email Account, so this "
+	"email cannot be sent. Nothing was sent. Do not draft or retry it until an administrator "
+	"adds an outgoing Email Account (Email Account settings)."
+)
+
+
+def require_outgoing_account(doctypes) -> None:
+	"""Refuse early when the send would fail for want of an outgoing Email Account.
+
+	Asks Frappe the exact question ``communication.email.make`` asks just before it
+	sends (``Communication.get_outgoing_email_account``): the account matching the
+	sender (the current user), else one whose Append To is the reference doctype,
+	else the default outgoing one, the site-config account, or the muted-mail dummy.
+	The confirmation gate calls this before showing a card, so a site without email
+	is told at once instead of after the user confirms (#834). One doctype without
+	an account refuses the whole call, like the batch itself. The send itself needs
+	no copy of this check: ``make`` raises ``OutgoingEmailError`` in the same case,
+	which the confirmed path already returns with the same code and hint."""
+	from frappe.email.doctype.email_account.email_account import EmailAccount
+	from frappe.utils import get_formatted_email
+
+	sender = get_formatted_email(frappe.session.user)
+	for doctype in dict.fromkeys(doctypes or [None]):
+		if not EmailAccount.find_outgoing(match_by_email=sender, match_by_doctype=doctype or None):
+			raise frappe.OutgoingEmailError(NO_OUTGOING_ACCOUNT_MESSAGE)
+
+
+def call_doctypes(args: dict) -> list:
+	"""The reference doctypes a ``send_email`` call would send about: each message's
+	in a batch (or an expanded merge), else the single call's."""
+	messages = args.get("messages")
+	if isinstance(messages, list) and messages:
+		return [m.get("doctype") if isinstance(m, dict) else None for m in messages]
+	return [args.get("doctype")]
+
+
 def _send_one(
 	recipients,
 	subject,
