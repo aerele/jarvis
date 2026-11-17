@@ -59,19 +59,31 @@ const emit = defineEmits(["close"]);
 </script>
 
 <style scoped>
-/* Each app's own palette: the desktop's (theme.js) is neutral, --cta being the
-   near-black / near-white CTA colour; the PWA (pwa/src/index.css) has no --cta and
-   falls back to its --accent, as its bubbles use. Both flip with the theme. */
+/* The Jarvis brand (--brand-1 / --brand-2 / --brand-grad, main.css and the PWA's
+   index.css): the gradient of the Jarvis mark, theme-invariant on purpose. The bar is
+   the gradient; the label is --brand-2; the card is the surface with a faint brand
+   tint. Text and the close button keep each app's own palette. */
 .jv-rq {
+	position: relative;
 	display: flex;
 	align-items: flex-start;
 	gap: 8px;
 	margin: 3px 2px 6px;
-	padding: 7px 6px 7px 10px;
+	padding: 7px 6px 7px 13px;
 	border: 1px solid var(--border);
-	border-left: 3px solid var(--cta, var(--accent));
 	border-radius: 9px;
 	background: var(--surface, var(--card));
+	background: color-mix(in srgb, var(--brand-2, #8b5cf6) 7%, var(--surface, var(--card)));
+	overflow: hidden;
+}
+.jv-rq::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: 3px;
+	background: var(--brand-grad, linear-gradient(135deg, #6e8bff, #8b5cf6));
 }
 .jv-rq-body {
 	flex: 1;
@@ -83,7 +95,7 @@ const emit = defineEmits(["close"]);
 	gap: 5px;
 	font-size: 12px;
 	font-weight: 600;
-	color: var(--text, var(--ink9));
+	color: var(--brand-2, #8b5cf6);
 	margin-bottom: 2px;
 }
 .jv-rq-text {

@@ -2319,8 +2319,8 @@ onUnmounted(() => {
 /* The quoted part of a Reply (aerele/jarvis#2191), above the question. */
 .jv-uquote {
 	margin: 0 0 7px;
-	padding: 6px 10px;
-	border-left: 3px solid var(--accent);
+	position: relative;
+	padding: 6px 10px 6px 13px;
 	border-radius: 8px;
 	background: var(--card);
 	color: var(--ink6);
@@ -2330,6 +2330,17 @@ onUnmounted(() => {
 	-webkit-line-clamp: 5;
 	-webkit-box-orient: vertical;
 	overflow: hidden;
+}
+/* The Jarvis brand bar (the mark's gradient), as on the Reply card. */
+.jv-uquote::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: 3px;
+	border-radius: 3px 0 0 3px;
+	background: var(--brand-grad, linear-gradient(135deg, #6e8bff, #8b5cf6));
 }
 .jv-msg-acts {
 	display: flex;
