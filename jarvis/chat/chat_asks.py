@@ -108,6 +108,50 @@ def _ask_items(parsed):
 	return [parsed] if _ask_text(parsed) or parsed.get("type") or parsed.get("kind") else None
 
 
+_OPTION_KEYS = ("label", "title", "text", "name", "value")
+
+
+def _scalar_text(v) -> str:
+	"""A JSON scalar as JavaScript's ``String(v)`` writes it, so the chat card
+	(chatAsk.js) and the Approval Board row show the same chip text: ``true``
+	not ``True``, ``1`` not ``1.0``."""
+	if isinstance(v, bool):
+		return "true" if v else "false"
+	if isinstance(v, float) and v.is_integer():
+		return str(int(v))
+	return str(v).strip()
+
+
+def _option_text(o) -> str:
+	"""An option's display text. The spec asks for plain strings, but a model also
+	writes ``{label, value}`` objects, which ``str()`` turns into a dict repr (#837).
+	Mirrors chatAsk.js ``optionText``: its readable text first, then its value; an
+	option with neither is ``""`` and dropped. Only the text is kept: the answer
+	sent back is that text, so a ``{label, value}`` option answers with its label."""
+	if o is None or isinstance(o, list):
+		return ""
+	if isinstance(o, dict):
+		for key in _OPTION_KEYS:
+			v = o.get(key)
+			if v is not None and not isinstance(v, (dict, list)) and _scalar_text(v):
+				return _scalar_text(v)
+		return ""
+	return _scalar_text(o)
+
+
+def _option_texts(options, cap: int) -> list[str]:
+	"""The first ``cap`` non-empty option texts. Stops at the cap instead of
+	reading every option; empty ones do not count toward it (as in chatAsk.js)."""
+	texts: list[str] = []
+	for o in options:
+		if len(texts) >= cap:
+			break
+		text = _option_text(o)
+		if text:
+			texts.append(text)
+	return texts
+
+
 def parse_ask(content: str | None) -> list[dict]:
 	"""Normalized questions ``[{q, type, options, doctype, fieldname}]`` from
 	the LAST ```jarvis-ask``` fence in ``content``, or ``[]``.
@@ -117,7 +161,7 @@ def parse_ask(content: str | None) -> list[dict]:
 	``q``/``question``/``label``/``title``/``prompt``, the type is ``type`` else
 	a known ``kind``, and a nested ``field: {doctype, fieldname}`` makes a
 	``field`` question; at most 6 questions; ``type`` normalized
-	("boolean" -> "yesno", unknown -> "single"); at most 8 string options
+	("boolean" -> "yesno", unknown -> "single"); at most 8 options as text (an object option shows its label, else its value)
 	(200 for ``select``, which with none degrades to ``text``); a ``field``
 	question needs a plain-identifier doctype and fieldname (else it degrades
 	to a ``text`` question labelled by the humanized fieldname) and may have an
@@ -148,7 +192,7 @@ def parse_ask(content: str | None) -> list[dict]:
 			qtype = "single"
 		cap = 200 if qtype == "select" else 8
 		options = q.get("options")
-		options = [str(o) for o in options[:cap]] if isinstance(options, list) else []
+		options = _option_texts(options, cap) if isinstance(options, list) else []
 		if qtype == "select" and not options:
 			qtype = "text"
 		text = _ask_text(q)
