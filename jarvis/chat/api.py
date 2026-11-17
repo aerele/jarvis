@@ -5319,8 +5319,9 @@ def _report_requests_unavailable(conversation: str, exc: Exception) -> None:
 	except Exception:
 		pass
 	try:
+		# expires=True: a key set with expires_in_sec is only readable that way on Frappe 15.
 		cache = frappe.cache()
-		if cache.get_value(_REQUESTS_ERROR_KEY):
+		if cache.get_value(_REQUESTS_ERROR_KEY, expires=True):
 			return
 		cache.set_value(_REQUESTS_ERROR_KEY, 1, expires_in_sec=86400)
 		frappe.log_error(title=_REQUESTS_ERROR_TITLE, message=detail)
