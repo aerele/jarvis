@@ -34,6 +34,7 @@ POST_ONLY = (
 	"jarvis.chat.approvals_api.decide_held_action",
 	"jarvis.chat.approvals_api.edit_and_create_held",
 	"jarvis.chat.actions_api.apply_action",
+	"jarvis.chat.actions_api.dismiss_draft",
 	"jarvis.chat.macros_api.run_macro",
 	"jarvis.chat.macros_admin_api.admin_list_macros",
 	"jarvis.chat.macros_admin_api.admin_macro_owners",
@@ -98,6 +99,7 @@ NESTED_REFUSED = {
 	"jarvis.chat.approvals_api.decide_held_action": {"name": "zz-no-pa", "action": "skip"},
 	"jarvis.chat.approvals_api.edit_and_create_held": {"name": "zz-no-pa", "values": "{}"},
 	"jarvis.chat.actions_api.apply_action": {"action": {"verb": "zz"}},
+	"jarvis.chat.actions_api.dismiss_draft": {"conversation": "zz-no-conv", "message": "zz-no-msg"},
 	"jarvis.chat.admission.cancel_queued_turn": {"run_id": "zz-no-run"},
 	"jarvis.chat.agents_api.take_finding_to_chat": {"finding": "zz-no-finding"},
 	"jarvis.chat.filebox.drop_file": {"file": "zz-no-file"},
@@ -253,6 +255,7 @@ class TestRunMethodDenylist(FrappeTestCase):
 	DENIED = (
 		("jarvis.chat.actions_api.confirm_tool", {"token": "zz"}),
 		("jarvis.chat.actions_api.dismiss_tool", {"token": "zz"}),
+		("jarvis.chat.actions_api.dismiss_draft", {"conversation": "zz", "message": "zz"}),
 		("jarvis.chat.approvals_api.decide", {"name": "zz", "decision": "yes"}),
 		("jarvis.chat.approvals_api.approve_wiki_write", {"name": "zz"}),
 		("jarvis.chat.approvals_api.decide_held_action", {"name": "zz", "action": "create"}),

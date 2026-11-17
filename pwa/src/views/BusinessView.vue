@@ -3,6 +3,7 @@ import { computed, defineAsyncComponent, onMounted, ref } from "vue";
 import AppBar from "../components/AppBar.vue";
 import * as api from "../api";
 import { relativeTime } from "../lib/time";
+import { statusAfterDelete } from "../lib/businessNotes";
 import { agentName } from "@/branding";
 
 // Business: what the agent knows about how YOUR company works. Notes captured
@@ -19,6 +20,8 @@ const saving = ref(false);
 const error = ref("");
 const voiceOpen = ref(false);
 const expanded = ref("");
+// notes with a delete in flight: a second tap on the same note does nothing
+const deleting = ref(new Set());
 
 const micEnabled = computed(() => !!status.value?.stt_enabled);
 
@@ -51,11 +54,32 @@ async function save() {
 }
 
 async function remove(name) {
+	if (deleting.value.has(name)) return;
+	deleting.value = new Set([...deleting.value, name]);
+	error.value = "";
 	try {
 		await api.deleteVoiceNote(name);
 		notes.value = notes.value.filter((n) => n.name !== name);
+		// The count is the status's, not the list's (#747): move it now, then take
+		// the server's own number. A failed delete changes neither.
+		status.value = statusAfterDelete(status.value);
+		refreshStatus();
 	} catch (e) {
-		error.value = e?.message || "Couldn't delete that note.";
+		error.value = e?.message || "Couldn't delete that note. Try again.";
+	} finally {
+		const left = new Set(deleting.value);
+		left.delete(name);
+		deleting.value = left;
+	}
+}
+
+// Best effort: the local count stays if this read fails.
+async function refreshStatus() {
+	try {
+		const st = await api.getBusinessStatus();
+		if (st) status.value = st;
+	} catch (e) {
+		/* keep the local count */
 	}
 }
 
@@ -138,7 +162,12 @@ onMounted(load);
 						{{ relativeTime(n.creation) }}
 					</div>
 				</button>
-				<button class="jv-note-x" aria-label="Delete note" @click="remove(n.name)">
+				<button
+					class="jv-note-x"
+					aria-label="Delete note"
+					:disabled="deleting.has(n.name)"
+					@click="remove(n.name)"
+				>
 					<svg
 						viewBox="0 0 24 24"
 						width="16"
@@ -321,5 +350,9 @@ onMounted(load);
 	background: transparent;
 	color: var(--ink4);
 	cursor: pointer;
+}
+.jv-note-x:disabled {
+	cursor: default;
+	opacity: 0.4;
 }
 </style>

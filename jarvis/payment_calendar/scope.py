@@ -32,7 +32,11 @@ def _account_ids(accounts):
 	return accounts
 
 
-def normalize_scope(company: str, accounts: list[str] | str | None, *, month: str | None = None) -> dict:
+def normalize_scope(
+	company: str, accounts: list[str] | str | None, *, month: str | None = None, check_accounts: bool = True
+) -> dict:
+	"""`check_accounts=False` is for a read of a stored snapshot: the fingerprint hashes the
+	account rows, so a changed account still refuses, and the gate runs once where it is due."""
 	if not isinstance(company, str) or not company.strip() or len(company) > 140:
 		raise frappe.ValidationError("Choose a company.")
 	accounts = _account_ids(accounts)
@@ -40,7 +44,12 @@ def normalize_scope(company: str, accounts: list[str] | str | None, *, month: st
 	require_company(company)
 	company = frappe.db.get_value("Company", company, "name")
 	try:
-		names = sorted(validate_bank_accounts(company, accounts)) if accounts else []
+		if not accounts:
+			names = []
+		elif check_accounts:
+			names = sorted(validate_bank_accounts(company, accounts))
+		else:
+			names = sorted(dict.fromkeys(accounts))
 	except PermissionDeniedError as exc:
 		raise frappe.PermissionError("Selected bank balances are outside your permitted scope.") from exc
 	anchor = nowdate()

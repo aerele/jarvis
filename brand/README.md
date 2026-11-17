@@ -20,6 +20,14 @@ and make the matching change in `frontend/src/main.css` and
 `frontend/src/components/JarvisMark.vue`. `jarvis/tests/test_brand_assets.py`
 fails if those three ever disagree.
 
+## Served copy
+
+`generate.py` also writes the tile variant to
+`jarvis/public/images/jarvis-logo.svg`. That is the copy the running app
+serves, at `/assets/jarvis/images/jarvis-logo.svg`, for the Desk home tile, the
+`/apps` screen and the About dialog. Nothing else in this folder is reachable
+from a browser.
+
 ## Variants
 
 | File | Use |

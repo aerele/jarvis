@@ -55,3 +55,36 @@ test("sendRefusalMessage: an unknown/empty reason -> the generic line, never bra
   assert.equal(sendRefusalMessage(undefined, "Aida"), generic);
   assert.equal(sendRefusalMessage(null, "Aida"), generic);
 });
+
+import { isKnownRefusal } from "./panel_send_copy.mjs";
+
+test("sendRefusalMessage: the desktop app's refusal codes read the same here", () => {
+  assert.equal(
+    sendRefusalMessage("usage_limit", "Aida", { limit_period: "Weekly" }),
+    "You've reached this week's usage limit. It resets on Sunday."
+  );
+  assert.equal(
+    sendRefusalMessage("usage_limit", "Aida"),
+    "You've reached your usage limit. Ask your Aida admin to raise it."
+  );
+  assert.match(
+    sendRefusalMessage("llm_not_configured"),
+    /No AI model is connected/
+  );
+  assert.match(sendRefusalMessage("subscription_suspended"), /Renew it/);
+  assert.match(
+    sendRefusalMessage("workspace_resetting", "Aida"),
+    /Aida is being reset/
+  );
+  assert.equal(
+    sendRefusalMessage("nonsense"),
+    "That couldn't be sent. Please try again."
+  );
+});
+
+test("isKnownRefusal: our copy outranks a server sentence only for known codes", () => {
+  assert.equal(isKnownRefusal("usage_limit"), true);
+  assert.equal(isKnownRefusal("maintenance"), true);
+  assert.equal(isKnownRefusal("release_update_required"), true);
+  assert.equal(isKnownRefusal("nonsense"), false);
+});

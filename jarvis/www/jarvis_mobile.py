@@ -3,7 +3,8 @@ from datetime import datetime, timezone
 import frappe
 
 from jarvis import announcement, maintenance_notice, release_notice
-from jarvis.permissions import has_jarvis_access, has_jarvis_admin_access
+from jarvis.permissions import has_jarvis_access, has_jarvis_admin_access, support_scope
+from jarvis.www.jarvis import SUPPORT_OK, _support_state
 
 no_cache = 1
 
@@ -63,6 +64,11 @@ def get_context(context):
 	context.boot["announcement"] = announcement.boot_payload()
 	context.boot["maintenance"] = maintenance_notice.boot_payload()
 	context.boot["holiday_touch"] = _holiday_touch()
+	# Report error on a failed chat turn: the same two flags the desktop SPA reads
+	# (jarvis/www/jarvis.py). A guest has neither, and never triggers the fleet call.
+	can_report = frappe.session.user != "Guest" and support_scope() is not None
+	context.boot["has_support_access"] = can_report
+	context.boot["support_available"] = can_report and _support_state() == SUPPORT_OK
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return context
 

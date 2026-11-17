@@ -4,6 +4,7 @@ import { boundedDelivery, settledSendResult } from "./lib/sendDelivery.js";
 // stay consistent across surfaces.
 import { call } from "frappe-ui";
 import { fetchToday } from "@jsshared/holiday/store.mjs";
+import { PAYMENT_CALENDAR_PAGE } from "@jsshared/goto_pages.mjs";
 import { firstServerMessage, messageText } from "./lib/errors.js";
 import { listPageArgs as _page } from "./api/listPageArgs";
 import { HISTORY_PAGE_SIZE } from "./lib/historyPaging.js";
@@ -376,6 +377,10 @@ export const ruleValues = (doctype, table, links) =>
 	call(AC + "rule_values", { doctype, table, links: JSON.stringify(links) });
 export const applyAction = (action) =>
 	call(AC + "apply_action", { action: JSON.stringify(action) });
+// Cancel an unsaved draft card for good: the server records a "discarded" receipt for
+// the DRAFT row's message, so the card stays gone after a reload and on the phone.
+export const dismissDraft = (conversation, message) =>
+	call(AC + "dismiss_draft", { conversation, message });
 // Park the confirm card for a create receipt's suggested next step (#621). Same
 // card the assistant's own submit/workflow call gets; nothing runs until Confirm.
 export const proposeNextAction = (conversation, step) =>
@@ -427,6 +432,14 @@ export const listPendingConfirmations = (conversation, source) =>
 		...(source ? { source } : {}),
 	});
 
+// The one handoff capability this client sends: exactly the list
+// [PAYMENT_CALENDAR_PAGE]. That is STRICTER than the server (chat.api.send_message
+// accepts a list that merely contains it and drops everything else), on purpose:
+// the only caller builds exactly that list, and a looser client rule would let a
+// future caller forward a list the server then trims without anyone noticing.
+const isPaymentCalendarHandoff = (pages) =>
+	Array.isArray(pages) && pages.length === 1 && pages[0] === PAYMENT_CALENDAR_PAGE;
+
 export async function sendMessage(
 	conversation,
 	message,
@@ -467,14 +480,16 @@ export async function sendMessage(
 	// "dashboards") that primes the agent for that surface's flow from the main
 	// chat, OR the composer's connector-focus pill ({key, label} of the one
 	// connector the user scoped this turn to; the bench limits the turn's tools
-	// to that connector). The backend re-applies the same allow-list
-	// (chat.api.send_message).
+	// to that connector), OR the payment-calendar hand-off capability
+	// (context.handoff_pages, see isPaymentCalendarHandoff). The backend
+	// re-applies the same allow-list (chat.api.send_message).
 	if (
 		context &&
 		(context.doctype ||
 			context.ground_wiki ||
 			context.page === "triggers" ||
 			context.page === "dashboards" ||
+			isPaymentCalendarHandoff(context.handoff_pages) ||
 			(context.focus_connector &&
 				context.focus_connector.key &&
 				context.focus_connector.label))
@@ -1142,6 +1157,9 @@ export const supportCreateTicket = (subject, body) =>
 export const supportGetThread = (ticket) => call("jarvis.support.api.get_thread", { ticket });
 export const supportReply = (ticket, body) => call("jarvis.support.api.reply", { ticket, body });
 export const supportCloseTicket = (ticket) => call("jarvis.support.api.close_ticket", { ticket });
+// A failed reply's error (secrets removed), model and run id, for the Report error ticket draft.
+export const getErrorReportDetails = (conversation, message) =>
+	call("jarvis.support.api.error_report_details", { conversation, message });
 export const supportAwaitingCount = () => call("jarvis.support.api.awaiting_count");
 
 // Same-origin GET so <img>/<a> resolve against the bench; session cookie authenticates.

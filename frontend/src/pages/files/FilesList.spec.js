@@ -6,7 +6,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 vi.mock("vue-router", async () => {
 	const { reactive } = await import("vue");
 	const route = reactive({ name: "FilesList", params: {}, query: {} });
-	return { useRoute: () => route, useRouter: () => ({ replace: vi.fn(), push: vi.fn() }) };
+	const router = { replace: vi.fn(), push: vi.fn() };
+	return { useRoute: () => route, useRouter: () => router };
 });
 vi.mock("@vueuse/core", async (importOriginal) => {
 	const actual = await importOriginal();
@@ -25,6 +26,7 @@ vi.mock("frappe-ui", () => ({
 	Dropdown: { template: "<div/>" },
 	FeatherIcon: { template: "<i/>" },
 	Tooltip: { template: "<span><slot/></span>" },
+	Select: { template: "<select/>" },
 	toast: {
 		success: vi.fn(),
 		error: vi.fn(),
@@ -36,7 +38,7 @@ vi.mock("frappe-ui", () => ({
 vi.mock("@/components/list/ListPage.vue", () => ({
 	default: {
 		props: ["rows"],
-		template: `<div><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-status" :row="row" /><slot name="cell-result" :row="row" /><slot name="cell-_rerun" :row="row" /></div></div>`,
+		template: `<div><div class="right"><slot name="right-header" /></div><slot name="banner" /><div v-for="row in rows" :key="row.name" class="row"><slot name="cell-status" :row="row" /><slot name="cell-result" :row="row" /><slot name="cell-_rerun" :row="row" /></div></div>`,
 	},
 }));
 vi.mock("@/components/FilePreview.vue", () => ({ default: { template: "<div/>" } }));
@@ -44,6 +46,14 @@ const shell = vi.hoisted(() => ({ refreshApprovalsCount: vi.fn() }));
 vi.mock("@/stores/shell", () => ({ useShellStore: () => shell }));
 vi.mock("@/utils/datetime", () => ({ timeAgo: () => "now", exactDate: () => "" }));
 vi.mock("@/branding", () => ({ brand: { agentName: "Jarvis" } }));
+vi.mock("@/pages/files/IntakeList.vue", () => ({
+	default: {
+		props: ["scope"],
+		emits: ["update:scope"],
+		template:
+			'<div class="intake-view" :data-scope="scope || \'mine\'"><button class="pick-all" @click="$emit(\'update:scope\', \'all\')"/></div>',
+	},
+}));
 vi.mock("@/api", () => ({
 	fileboxListPage: vi.fn(),
 	listCustomSkills: vi.fn(async () => []),
@@ -108,6 +118,120 @@ describe("FilesList: a sheet being applied", () => {
 		const settled = api.fileboxListPage.mock.calls.length;
 		await vi.advanceTimersByTimeAsync(15000);
 		expect(api.fileboxListPage.mock.calls.length).toBe(settled);
+	});
+});
+
+describe("FilesList: the Dropped / Intake switch", () => {
+	it("opens on Dropped and swaps to the Intake view and back", async () => {
+		const w = await mountList([applying]);
+		expect(w.find(".row").exists()).toBe(true);
+		expect(w.find(".intake-view").exists()).toBe(false);
+		await w.find('[role="tab"]:nth-of-type(2)').trigger("click");
+		expect(w.find(".intake-view").exists()).toBe(true);
+		expect(w.find(".row").exists()).toBe(false);
+		w.unmount();
+	});
+
+	it("keeps the chosen Whose files scope across a Dropped round trip", async () => {
+		const w = await mountList([applying]);
+		await w.find('[role="tab"]:nth-of-type(2)').trigger("click");
+		expect(w.find(".intake-view").attributes("data-scope")).toBe("mine");
+		await w.find(".pick-all").trigger("click"); // the admin picks All
+		await w.find('[role="tab"]:nth-of-type(1)').trigger("click");
+		await w.find('[role="tab"]:nth-of-type(2)').trigger("click");
+		expect(w.find(".intake-view").attributes("data-scope")).toBe("all");
+		w.unmount();
+	});
+
+	it("puts Dropped / Intake in a tabs row under the header, not in the header", async () => {
+		const w = await mountList([applying]);
+		const tabs = w.findAll('[role="tab"]');
+		expect(tabs.map((t) => t.text())).toEqual(["Dropped", "Intake"]);
+		expect(w.find('[role="tablist"]').exists()).toBe(true);
+		expect(tabs[0].attributes("aria-selected")).toBe("true");
+		expect(w.find(".right [role=tablist]").exists()).toBe(false);
+		expect(w.find(".right").text()).toContain("Add Files");
+		expect(w.find(".right").text()).not.toContain("Intake");
+		await tabs[1].trigger("click");
+		expect(w.findAll('[role="tab"]')[1].attributes("aria-selected")).toBe("true");
+		w.unmount();
+	});
+
+	it("keeps the tabs (and focus) in place across a switch", async () => {
+		const w = await mountList([applying]);
+		const before = w.findAll('[role="tab"]')[1].element;
+		await w.findAll('[role="tab"]')[1].trigger("click");
+		expect(w.findAll('[role="tab"]')[1].element).toBe(before);
+		w.unmount();
+	});
+
+	it("stops polling the Dropped list while the Intake view is shown", async () => {
+		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+		const w = await mountList([applying]);
+		await w.find('[role="tab"]:nth-of-type(2)').trigger("click");
+		const calls = api.fileboxListPage.mock.calls.length;
+		await vi.advanceTimersByTimeAsync(20000);
+		expect(api.fileboxListPage.mock.calls.length).toBe(calls);
+		w.unmount();
+		vi.useRealTimers();
+	});
+
+	it("opens on Intake from the ?view=intake link a bell carries", async () => {
+		const { useRoute } = await import("vue-router");
+		useRoute().query.view = "intake";
+		const w = await mountList([applying]);
+		expect(w.find(".intake-view").exists()).toBe(true);
+		delete useRoute().query.view;
+		w.unmount();
+	});
+
+	it("writes the tab and Whose files into the URL so Back from a detail page returns to them", async () => {
+		const { useRoute, useRouter } = await import("vue-router");
+		const router = useRouter();
+		router.replace.mockClear();
+		const w = await mountList([applying]);
+		try {
+			await w.find('[role="tab"]:nth-of-type(2)').trigger("click");
+			await flushPromises();
+			expect(router.replace).toHaveBeenLastCalledWith({ query: { view: "intake" } });
+			useRoute().query.view = "intake";
+			await w.find(".pick-all").trigger("click");
+			await flushPromises();
+			expect(router.replace).toHaveBeenLastCalledWith({
+				query: { view: "intake", scope: "all" },
+			});
+		} finally {
+			delete useRoute().query.view;
+			w.unmount();
+		}
+	});
+
+	it("opens Intake with Whose files from ?scope=all", async () => {
+		const { useRoute } = await import("vue-router");
+		useRoute().query.view = "intake";
+		useRoute().query.scope = "all";
+		const w = await mountList([applying]);
+		try {
+			expect(w.find(".intake-view").attributes("data-scope")).toBe("all");
+		} finally {
+			delete useRoute().query.view;
+			delete useRoute().query.scope;
+			w.unmount();
+		}
+	});
+
+	it("switches an open File Box when a bell link changes ?view=, keeping the scope", async () => {
+		const { useRoute } = await import("vue-router");
+		const w = await mountList([applying]);
+		expect(w.find(".intake-view").exists()).toBe(false);
+		useRoute().query.view = "intake";
+		await flushPromises();
+		expect(w.find(".intake-view").exists()).toBe(true);
+		useRoute().query.view = "dropped";
+		await flushPromises();
+		expect(w.find(".intake-view").exists()).toBe(false);
+		delete useRoute().query.view;
+		w.unmount();
 	});
 });
 

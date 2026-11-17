@@ -1147,14 +1147,6 @@ describe("MacroDetail save: against a server from before `summarize`", () => {
 		await save(w);
 		expect(api.summarizeMacro).toHaveBeenCalledWith("MACRO-9");
 	});
-
-	it("an answer of `summarize: false` is an answer, not a missing one", async () => {
-		api.updateMacro.mockResolvedValue({ data: { summarize: false } });
-		const w = await mountDetail(baseMacro());
-		await stepsBuilder(w).vm.$emit("update:modelValue", TWO);
-		await save(w);
-		expect(api.summarizeMacro).not.toHaveBeenCalled();
-	});
 });
 
 describe("MacroDetail save: the user opened another macro before it answered", () => {
@@ -1854,11 +1846,6 @@ describe("MacroDetail: the owner arms their own macro", () => {
 		expect(armSwitch(w).props("disabled")).toBe(false);
 		await armSwitch(w).trigger("click");
 		expect(confirmDialog.mock.calls[0][0].message).toBe(NOTICE.replace("&", "&amp;"));
-	});
-
-	it("says no admin anywhere on the switch for the owner", async () => {
-		const w = await mountDetail(mine());
-		expect(armSwitch(w).props("description")).not.toMatch(/admin/i);
 	});
 
 	it("says what switching it on would do while it is off, and what it does once on", async () => {

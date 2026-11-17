@@ -39,7 +39,15 @@ from dataclasses import dataclass, field
 import frappe
 
 from jarvis import compat
-from jarvis.chat import agent_session_pool, device, empty_reply_recovery, seq_watermark, txn, vision
+from jarvis.chat import (
+	agent_session_pool,
+	device,
+	directive_filter,
+	empty_reply_recovery,
+	seq_watermark,
+	txn,
+	vision,
+)
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.chat.filebox_source import SourceLost
@@ -1069,6 +1077,170 @@ def _persona_clause(chat_user: str) -> str:
 	return ""
 
 
+PAYMENT_CALENDAR_PAGE = "payment-calendar"
+# Cross-repo contract: this exact line is quoted in the persona skills
+# (jarvis-persona: skills/jarvis-chat-blocks/SKILL.md, skills/jarvis-dashboards/SKILL.md),
+# in AGENTS.md and in the eval fixture. Change the text here and there together.
+PAYMENT_CALENDAR_HINT = f'payment calendar page: available (jarvis-goto page "{PAYMENT_CALENDAR_PAGE}")'
+_PC_HANDOFF_FIELD = "payment_calendar_chat_handoff"
+_PC_HANDOFF_LOG_KIND = "payment_calendar_handoff:clause"
+_PC_HANDOFF_LOG_TITLE = f"{_PC_HANDOFF_LOG_KIND} — Payment Calendar chat hand-off clause failed"
+
+
+def payment_calendar_handoff_enabled(settings=None) -> bool:
+	"""The live ``payment_calendar_chat_handoff`` switch. A site that has not migrated yet has
+	no such field: that is OFF, quietly (no error, no log). ``settings`` is the Jarvis Settings
+	document the caller already loaded for this turn; ``frappe.get_single`` reads the Singles
+	table on every call (it is not a cached doc), so the value is fresh per turn. Without it
+	the value is read with ``cache=False``, because ``get_single_value`` keeps a per-request
+	value cache that a long-lived worker job could serve stale."""
+	if not frappe.get_meta("Jarvis Settings").has_field(_PC_HANDOFF_FIELD):
+		return False
+	if settings is not None:
+		return bool(frappe.utils.cint(settings.get(_PC_HANDOFF_FIELD)))
+	return bool(
+		frappe.utils.cint(frappe.db.get_single_value("Jarvis Settings", _PC_HANDOFF_FIELD, cache=False))
+	)
+
+
+def _payment_calendar_clause(
+	chat_user: str, conv, binding, context, seed_origin, settings, run_id: str | None = None
+) -> str:
+	"""Tell the agent the native Payment Calendar page exists, for THIS chat user, so a
+	per-day cash request can be handed to it with a ``jarvis-goto`` block. ``""`` unless
+	every gate below passes; ``"; <hint>"`` (like the sibling clauses) when it does.
+
+	Gates, in order (plan 4.2): (1) the live ``payment_calendar_chat_handoff`` switch, read
+	from the Jarvis Settings document this turn already loaded (``settings``) - off (or a
+	site that has not migrated the field yet) returns before anything else, visibility is
+	never evaluated and nothing is logged; (2) the client capability ``handoff_pages``
+	(allow-listed in send_message) - an old bundle, the PWA, the Desk widget and the native
+	app send none; (3) scope: an ordinary human turn of an ordinary conversation (no shared
+	binding, no builder origin page, no page context, a human or legacy-blank seed); (4) the
+	calendar is visible to ``chat_user`` himself, whichever identity the prompt is assembled
+	under (Administrator session, RQ job enqueued by someone else, pump worker).
+	Best-effort: any failure is ``""`` plus one rate-limited log. ``run_id`` only joins the
+	telemetry lines of one turn."""
+	try:
+		if not payment_calendar_handoff_enabled(settings):
+			return ""
+		if not _has_handoff_capability(context):
+			_record_pc_handoff("no_capability", chat_user, run_id)
+			return ""
+		if not _payment_calendar_in_scope(conv, binding, context, seed_origin):
+			return ""
+		if not _visible_as(chat_user):
+			_record_pc_handoff("not_visible", chat_user, run_id)
+			return ""
+		_record_pc_handoff("on", chat_user, run_id)
+		return f"; {PAYMENT_CALENDAR_HINT}"
+	except Exception:
+		_record_pc_handoff("error", chat_user, run_id)
+		try:
+			from jarvis.holiday_touch import report
+
+			report.report(kind=_PC_HANDOFF_LOG_KIND, title=_PC_HANDOFF_LOG_TITLE)
+		except Exception:
+			pass
+		return ""
+
+
+def _has_handoff_capability(context) -> bool:
+	pages = context.get("handoff_pages") if isinstance(context, dict) else None
+	return isinstance(pages, list) and PAYMENT_CALENDAR_PAGE in pages
+
+
+def _payment_calendar_in_scope(conv, binding, context, seed_origin) -> bool:
+	if binding is not None:
+		return False
+	if conv is not None and conv.get("origin_page"):
+		return False
+	if isinstance(context, dict) and context.get("page"):
+		return False
+	return (seed_origin or "") in ("human", "")
+
+
+_PC_VISIBLE_TTL_S = 60
+
+
+def _pc_visible_key(chat_user: str) -> str:
+	return f"jarvis:pc_handoff_visible:{chat_user}"
+
+
+def _visible_as(chat_user: str) -> bool:
+	"""The cached (60 s, per chat user) answer of :func:`_visible_as_uncached`. Measured p95
+	of the uncached check was above the plan's 10 ms line (A2), so it is cached here, after the
+	switch / capability / scope gates. Only a computed answer is stored (a raising check
+	propagates past the cache); a cache outage falls through to the live check.
+
+	Revocation lag: if the user loses access to the Payment Calendar, the hint can persist for
+	up to 60 s (the TTL). The data stays gated: the page and its API check access on their own,
+	and the hint only names the page. The reverse is also true: ``can_view_payment_calendar``
+	swallows its own errors and returns False, so a False answer (including an internal failure
+	of the check) is cached for up to 60 s. That is fail-closed: the hint stays off, nothing
+	leaks; it only delays the hint's return.
+
+	The TTL is the Redis expiry only. The read bypasses ``frappe.local.cache`` and the set
+	removes the local copy it makes, so a long pump hop cannot serve one stale answer for
+	longer than the TTL."""
+	key = _pc_visible_key(chat_user)
+	try:
+		hit = frappe.cache().get_value(key, expires=True, use_local_cache=False)
+	except Exception:
+		hit = None
+	if hit is not None:
+		return bool(hit)
+	visible = _visible_as_uncached(chat_user)
+	try:
+		cache = frappe.cache()
+		cache.set_value(key, 1 if visible else 0, expires_in_sec=_PC_VISIBLE_TTL_S)
+		# set_value also writes frappe.local.cache with no expiry; drop that copy.
+		frappe.local.cache.pop(cache.make_key(key), None)
+	except Exception:
+		pass
+	return visible
+
+
+def _visible_as_uncached(chat_user: str) -> bool:
+	"""``can_view_payment_calendar`` evaluated as ``chat_user``. ``frappe.set_user`` (inside
+	``impersonate``) replaces ``local.cache``/``form_dict``/``role_permissions`` with empty
+	ones and neither switch back restores them, which would cold-start the rest of the
+	prompt assembly (and drop what a shared-conversation ``actor_permissions`` put there).
+	Snapshot and put the same objects back; the shared ``impersonate`` seam stays as is."""
+	from jarvis._session import impersonate
+	from jarvis.payment_calendar.visibility import can_view_payment_calendar
+
+	local = frappe.local
+	cache, form_dict, role_permissions = local.cache, local.form_dict, local.role_permissions
+	try:
+		with impersonate(chat_user):
+			return bool(can_view_payment_calendar())
+	finally:
+		local.cache, local.form_dict, local.role_permissions = cache, form_dict, role_permissions
+
+
+def _record_pc_handoff_goto(final: dict, conversation: str | None = None, run_id: str | None = None) -> None:
+	"""Count-only Payment Calendar hand-off line for a finished legacy turn (``final`` is the
+	assistant row's content / error). Its own guarded call, so a failure here can never skip
+	``chat_asks.materialize_from_turn``. Skipped (no line) while the switch is off."""
+	try:
+		if final and not final.get("error") and payment_calendar_handoff_enabled():
+			from jarvis import telemetry
+
+			telemetry.record_pc_handoff_goto(final.get("content"), conversation, run_id)
+	except Exception:
+		pass
+
+
+def _record_pc_handoff(outcome: str, chat_user: str, run_id: str | None = None) -> None:
+	try:
+		from jarvis import telemetry
+
+		telemetry.record_pc_handoff_hint(outcome, chat_user, run_id)
+	except Exception:
+		pass
+
+
 def _advance_macro(
 	conversation_id: str, *, errored: bool, run_id: str | None = None, seed_message: str | None = None
 ) -> None:
@@ -1192,6 +1364,7 @@ def assemble_prompt(
 		context=context,
 		attachments=attachments,
 		user=user,
+		run_id=run_id,
 	)
 
 
@@ -1230,7 +1403,7 @@ def _assemble_prompt(
 	# the bracket and the tool-call's frappe.session.user stay in lock-
 	# step. Today these are equal for single-owner conversations; the
 	# distinction matters the moment we ship shared conversations.
-	msg_row = frappe.db.get_value(MSG, message_id, ["content", "owner"], as_dict=True) or {}
+	msg_row = frappe.db.get_value(MSG, message_id, ["content", "owner", "origin"], as_dict=True) or {}
 	user_message = msg_row.get("content")
 	chat_user = msg_row.get("owner") or user
 	if binding is not None:
@@ -1238,6 +1411,10 @@ def _assemble_prompt(
 
 		chat_user = binding.actor
 		user_message = scrub_for_share(user_message or "")
+	# F-Q8: the user's own words. A runtime directive (``/model ...``) typed here is refused
+	# before any attachment work; the same words are checked again on the finished prompt.
+	typed = user_message or ""
+	directive_filter.refuse_typed(typed)
 	# Prepend today's date AND the chat user's Frappe id as a context line so
 	# the agent (AGENTS.md tells it to treat the leading ``[Context: ...]``
 	# as system, not user) can (a) resolve relative time expressions
@@ -1313,6 +1490,9 @@ def _assemble_prompt(
 		if (binding is not None or conv.skill_autorun or conv.skip_confirmation)
 		else armed_skill_clause(user_message or "", chat_user, slugs=turn_invoked_slugs)
 	)
+	# An unsaved draft card is on the user's screen (``live_draft``): tell the agent once per
+	# turn, so it reminds the user instead of drafting again. Decides every skip itself.
+	live_draft_clause = _live_draft_clause(conv, binding)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
 	# agent applies them without depending on agent's undocumented auto-retrieval.
@@ -1359,6 +1539,11 @@ def _assemble_prompt(
 		custom_site_clause = customizations_clause() or ""
 	except Exception:
 		custom_site_clause = ""
+	# Payment Calendar hand-off hint ("" unless switch + capability + scope + the
+	# chat user can open the page). Evaluated for chat_user, never the ambient session.
+	payment_calendar_clause = _payment_calendar_clause(
+		chat_user, conv, binding, context, msg_row.get("origin"), settings, run_id
+	)
 	# Deferred agent-correction notes (e.g. a discarded action the agent's
 	# in-container memory still believes is pending): fold them into the TRUSTED
 	# [Context: ...] line so the correction reaches the agent on THIS turn without
@@ -1435,8 +1620,8 @@ def _assemble_prompt(
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
-		f"; conv: {conversation_id}{armed_run}{autorun_run}{auto_run}{armed_skill_run_clause}{skill_clause}{learned_clause}"
-		f"{wiki_notes_clause}{custom_site_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
+		f"; conv: {conversation_id}{armed_run}{autorun_run}{auto_run}{armed_skill_run_clause}{live_draft_clause}{skill_clause}{learned_clause}"
+		f"{wiki_notes_clause}{custom_site_clause}{payment_calendar_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"
 	)
@@ -1471,8 +1656,13 @@ def _assemble_prompt(
 		prefix, marker, suffix = user_message.partition(history_marker)
 		if not marker or history_marker in suffix:
 			frappe.throw("The shared request could not be assembled safely.")
+		# F-Q8 order rule: split at the marker FIRST (its U+0000 would refuse every shared
+		# turn), then clean each part. ``collaboration_workers`` fits ``shared_parts`` again
+		# and only verifies the result, so the parts must already be clean.
+		prefix, prior, suffix = (directive_filter.clean_added(part) for part in (prefix, prior, suffix))
 		shared_parts = (prefix, prior, suffix)
 		user_message = prefix + _fence_untrusted(prior, "shared transcript") + suffix
+	user_message = directive_filter.guard_turn_message(typed, user_message)
 	inlined_prompt_chars = max(0, len(user_message) - _prompt_chars_before_attachments)
 	return _PreparedPrompt(
 		settings=settings,
@@ -1661,6 +1851,7 @@ def handle_chat_send(payload: dict) -> None:
 			context=context,
 			attachments=attachments,
 			user=user,
+			run_id=run_id,
 		)
 		settings = _ap.settings
 		chat_user = _ap.chat_user
@@ -2141,6 +2332,7 @@ def handle_chat_send(payload: dict) -> None:
 		# so an away user finds the question. One PK read; skipped when the
 		# turn errored (a partial fence is not a real ask). Best-effort —
 		# never breaks the turn.
+		_final: dict = {}
 		try:
 			from jarvis.chat import chat_asks
 
@@ -2152,9 +2344,17 @@ def handle_chat_send(payload: dict) -> None:
 				title="chat asks: materialize_from_turn failed",
 				message=frappe.get_traceback(),
 			)
+		_record_pc_handoff_goto(_final, conversation_id, run_id)
 
 	except SourceLost as e:
 		_publish_run_error(str(e), changed_data=False, code="source_unavailable")
+		_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
+		_admission_settle(run_id, "errored", str(e))
+		return
+	except directive_filter.DirectiveRefusal as e:
+		# F-Q8: a runtime directive in the typed text. The assembly refuses before anything
+		# is sent, so nothing changed: show the fixed text and end the turn.
+		_publish_run_error(str(e), changed_data=False, code="directive_refused")
 		_advance_macro(conversation_id, errored=True, run_id=run_id, seed_message=message_id)
 		_admission_settle(run_id, "errored", str(e))
 		return
@@ -2694,6 +2894,73 @@ def _escape_untrusted_tag(match: "re.Match[str]") -> str:
 	)
 
 
+def _live_draft_clause(conv, binding) -> str:
+	"""The context clause for a waiting draft card, or "". Self-contained and best-effort:
+	every skip is decided here from the binding and the conversation's own flags, and any
+	failure (including the import) leaves the clause out rather than failing the turn.
+
+	Skipped for a shared chat, a File Box chat (its cards never reach a person), any run that
+	applies changes without a card (auto mode, an armed macro, an approved skill run, a typed
+	"confirm all"), a block that shows an error card, a draft hidden behind the last reply's
+	own card, and a draft the server turned into a gated confirmation card. Plain reads only:
+	prompt assembly takes no lock. The doctype is named only when it is a real DocType."""
+	try:
+		if binding is not None or not frappe.conf.get("jarvis_live_draft_context", 1):
+			return ""
+		if conv.get("file_box") or conv.get("auto_mode") or conv.get("skip_confirmation"):
+			return ""
+		if conv.get("skill_autorun") or conv.get("request_autorun"):
+			return ""
+		from jarvis.chat import live_draft
+
+		rows = live_draft.load_rows(conv.name)
+		draft = live_draft.pick(rows)
+		if not draft or draft["bad"]:
+			return ""  # a broken block shows an error card with no Create or Cancel to choose
+		if live_draft.tail_shows_its_own_card(rows, draft["message"]):
+			return ""  # the last reply's own card (an email, a gated verb) is at the tail
+		if _draft_parked(conv, draft["message"]):
+			return ""  # parked behind its own confirmation card: the clients show "waiting"
+		what = f"{draft['verb']} {live_draft.real_doctype(draft['doctype']) or 'a record'}"
+		button = "Save" if draft["verb"] == "update" else "Create"  # the card's own words
+		return (
+			f"; unsaved draft waiting: {what}, its card with {button} and Cancel is on the user's screen: "
+			"remind them in one line to choose, re-emit the block only for a change they ask for, "
+			"never say it is above"
+		)
+	except Exception:
+		frappe.log_error(title="live draft context failed", message=frappe.get_traceback())
+		return ""
+
+
+# A draft parks one gated card; a few more cover a batch waiting in the same chat.
+_PARKED_CARDS_READ = 20
+
+
+def _draft_parked(conv, message: str) -> bool:
+	"""Whether ``message``'s draft became a gated confirmation card (``actions_api.
+	_park_sensitive`` stamps ``from_draft`` on its preview, and on the card inside it). One
+	plain read of this chat's waiting cards, newest first, and no lock: the locking card
+	listing would hold site-wide close-fence rows through prompt assembly.
+
+	``get_all``: prompt assembly is system context for the conversation this turn runs in,
+	filtered to its owner, and the Pending Action DocType grants no user read at all."""
+	rows = frappe.get_all(
+		"Jarvis Pending Action",
+		filters={"kind": "chat", "conversation": conv.name, "owner_user": conv.owner, "status": "Pending"},
+		fields=["preview"],
+		order_by="creation desc",
+		limit=_PARKED_CARDS_READ,
+	)
+	for row in rows:
+		preview = frappe.parse_json(row.preview) if isinstance(row.preview, str) else row.preview
+		preview = preview if isinstance(preview, dict) else {}
+		card = preview.get("card") if isinstance(preview.get("card"), dict) else {}
+		if message in (preview.get("from_draft"), card.get("from_draft")):
+			return True
+	return False
+
+
 def _safe_label_name(name) -> str:
 	"""Sanitize an attacker-controllable name (attachment file name/URL)
 	before it is interpolated into a bench-authored label line that sits
@@ -2929,6 +3196,16 @@ def _prepare_attachments(user_message: str, attachments, vision_ok: bool):
 				"Follow next_read sequentially when supplied; check the returned contract and coverage before claiming a whole-file read. "
 				"Images, page layout and comments require the original document; do not claim those were read.]"
 			)
+		elif ext == "pptx":
+			blocks.append(
+				f"[Attached PowerPoint `{name}`: use jarvis__read_file with its attachment URL to read the slide text, tables and speaker notes. "
+				"Follow next_read sequentially when supplied; check the returned contract and coverage before claiming a whole-file read. "
+				"Images, charts and SmartArt are not read; do not claim they were.]"
+			)
+		elif ext == "xls":
+			blocks.append(
+				f"[Attached legacy Excel file `{name}` (.xls) can't be read. Tell the user to save it as .xlsx and attach it again.]"
+			)
 		elif ext in {"json", "md", "markdown", "txt"}:
 			try:
 				text = raw.decode("utf-8")
@@ -2997,12 +3274,12 @@ def _classify_error(err_text: str, exc=None) -> str:
 
 
 def _note_subscription_error(err_text: str, code: str) -> None:
-	"""Remember a dead chat sign-in seen at a run-error publish site (never inside the classifier,
-	which the pump's pre-ack paths also call). Never raises."""
-	if code == "subscription-expired":
-		from jarvis import subscription_health
+	"""Remember a dead chat sign-in or a model's usage cap seen at a run-error publish site (never
+	inside the classifier, which the pump's pre-ack paths also call). A failover error names one cause
+	per model, whatever its overall code, so every code is passed on. Never raises."""
+	from jarvis import subscription_health
 
-		subscription_health.note_turn_error(err_text, code)
+	subscription_health.note_turn_error(err_text, code)
 
 
 def _note_empty_reply(run_id: str, conversation: str, err_text: str, code: str) -> None:

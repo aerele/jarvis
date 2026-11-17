@@ -1407,9 +1407,22 @@ def _doc_grants(dt: str, view) -> bool:
 			)
 			if now != then:
 				return True
+		elif fieldname == "create_user_permission" and not _has_employee_user(view):
+			continue
 		elif view.changed(fieldname) and _filled(view.get(fieldname)):
 			return True
 	return dt == "Employee" and _toggles_login(view)
+
+
+def _has_employee_user(view) -> bool:
+	"""Whether an Employee save has a user for ``create_user_permission`` to act on.
+	ERPNext adds the Employee / Company User Permissions only for a linked
+	``user_id`` (``Employee.on_update``) or for the User that ``create_user_automatically``
+	makes after insert; with neither, the flag grants nothing. It defaults to 1, so
+	without this every new Employee would count as an access change at the save,
+	while the call that made it (which set none of these fields) got an ordinary
+	card: the confirmed create was then refused (Aerele-RnD/jarvis-admin-v2#749)."""
+	return _filled(view.get("user_id")) or _filled(view.get("create_user_automatically"))
 
 
 _FRAME_CODES = None

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import fs from "fs";
 import path from "path";
 
-import { normaliseAction } from "./chatAction";
+import { actionBlockState, normaliseAction } from "./chatAction";
 
 /**
  * The regression this module exists for: a jarvis-action block missing `kind`
@@ -76,15 +76,34 @@ describe("normaliseAction", () => {
 		expect(a.tables).toEqual([{ fieldname: "items", rows: [{ item_code: "X", qty: 2 }] }]);
 	});
 
-	it("drops a table whose rows cannot be read as a list rather than guessing", () => {
-		// A half-populated grid the user confirms believing it is the full set is
-		// worse than no grid at all.
+	it("marks a table whose rows cannot be read as a list unreadable, never drops it quietly", () => {
+		// A card that hid the bad table would let the user confirm believing the
+		// grid was the full set. The client shows its error view instead.
 		const a = normaliseAction({
 			verb: "create",
 			doctype: "Purchase Order",
 			tables: { items: { nonsense: true }, taxes: { rows: [{ rate: 18 }] } },
 		});
-		expect(a.tables).toEqual([{ fieldname: "taxes", rows: [{ rate: 18 }] }]);
+		expect(a.unreadable).toBe(true);
+		expect(Array.isArray(a.tables)).toBe(true);
+	});
+
+	it("marks a non-object tables value and non-object fields items unreadable", () => {
+		const t = normaliseAction({ verb: "create", doctype: "X", tables: "items" });
+		expect(t.unreadable).toBe(true);
+		expect(t.tables).toEqual([]);
+		const f = normaliseAction({
+			verb: "create",
+			doctype: "X",
+			fields: [null, { label: "a", value: 1 }],
+		});
+		expect(f.unreadable).toBe(true);
+		expect(f.fields).toEqual([{ label: "a", value: 1 }]);
+	});
+
+	it("lower-cases and trims the verb, and leaves a missing one missing", () => {
+		expect(normaliseAction({ doctype: "X", verb: " Create " }).verb).toBe("create");
+		expect(normaliseAction({ doctype: "X" }).verb).toBeUndefined();
 	});
 
 	it("normalises the second stranded block (Purchase Order, object fields AND tables)", () => {
@@ -144,6 +163,17 @@ describe("normaliseAction", () => {
 	});
 });
 
+describe("actionBlockState", () => {
+	const wrap = (b) => "x\n```jarvis-action\n" + b + "\n```";
+	it("separates none, ok and bad", () => {
+		expect(actionBlockState("prose")).toBe("none");
+		expect(actionBlockState('x\n```jarvis-action\n{"a"')).toBe("none");
+		expect(actionBlockState(wrap('{"a":1}'))).toBe("ok");
+		expect(actionBlockState(wrap("[1]"))).toBe("bad");
+		expect(actionBlockState(wrap('{"a"'))).toBe("bad");
+	});
+});
+
 describe("the two gates that disagreed stay mirrored", () => {
 	const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
 
@@ -157,6 +187,64 @@ describe("the two gates that disagreed stay mirrored", () => {
 		expect(src).not.toContain(
 			'if (!(a && a.kind === "doc" && (a.verb === "create" || a.verb === "update" || !a.verb)))'
 		);
+	});
+
+	it("a draft block error replaces the draft card and never renders beside it", () => {
+		// The live draft is switched off whenever the error text is set ...
+		expect(src).toContain("_cardMessage.value && !draftBlockErrorText.value");
+		// ... the error alert renders on that same text ...
+		expect(src).toMatch(/v-if="\s*draftBlockErrorText && actionAnchor === m\.name/);
+		expect(src).toContain("<span>{{ draftBlockErrorText }}</span>");
+		// ... and the summary card is the next link of the SAME chain, so the two
+		// can never both draw.
+		const err = src.indexOf("<span>{{ draftBlockErrorText }}</span>");
+		const head = src.indexOf('<template v-else-if="actionAnchor === m.name && activeAction">');
+		expect(head).toBeGreaterThan(err);
+		expect(src.slice(err, head)).not.toMatch(/<template v-if=|<div v-if=/);
+		// the error reads the live draft row, never only the last message
+		expect(src).toMatch(
+			/const draftBlockErrorText = computed\(\(\) => \{\s*const m = _cardMessage\.value;/
+		);
+	});
+
+	it("the card and the error are drawn under the last message, keyed by the draft row", () => {
+		expect(src).toMatch(
+			/const _liveDraft = computed\(\(\) => \{\s*const live = liveDraftMessage\(messages\.value,/
+		);
+		// a draft cancelled here whose card would still show stays hidden for the session
+		expect(src).toContain("return live && !hiddenDrafts.value.has(live.name) ? live : null;");
+		// ...judged by the rule on the loaded rows, so it also holds while a turn runs
+		expect(src).toContain(
+			"if (liveDraftRow(messages.value)?.name === key) hiddenDrafts.value.add(key);"
+		);
+		expect(src).toContain("const actionAnchor = computed(() =>");
+		expect(src).toContain('? _lastAssistant.value.name : ""');
+		// no template gate compares the draft row's own name any more
+		expect(src).not.toContain("actionFor === m.name");
+		// one card at the tail: the helper decides, and a kept draft yields to ask / confirm
+		expect(src).toContain("tailHasAsk: !!last && !!askOf(last)");
+		expect(src).toContain("tailHasOwnAction: !!_tailOwnAction.value");
+		expect(src).toContain("if (_tailOwnAction.value) return last;");
+		expect(src).toContain('return _tailCard.value === "draft" ? live : null;');
+		// Cancel sends the draft row's name
+		expect(src).toContain("api.dismissDraft(view.conversation, key)");
+	});
+
+	it("the panel's Discard cancels the draft like the card's Cancel, never by a message", () => {
+		expect(src).toMatch(
+			/function discardDraft\(\) \{\s*return cancelDraftFor\(draftPanel\.value\?\.messageKey \|\| actionFor\.value\);/
+		);
+		expect(src).toMatch(
+			/function cancelDraft\(\) \{\s*return cancelDraftFor\(actionFor\.value\);/
+		);
+		// ...and is off while the draft is parked behind its confirmation card
+		expect(src).toMatch(
+			/class="jv-action-discard"\s*:disabled="draftPanel\.applying \|\| !!draftPanel\.parked"\s*@click="discardDraft"\s*>\s*Discard\s*<\/button>/
+		);
+		expect(src).toContain(
+			"if (parkedNoteFor(parkedDrafts.value, key) || parkedByCard(pendingActions.value, key)) return;"
+		);
+		expect(src).not.toContain('send("No, cancel that.");');
 	});
 
 	it("never dumps raw dry-run JSON into a confirmation card body", () => {

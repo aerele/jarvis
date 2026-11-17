@@ -1,7 +1,9 @@
 """Worker-only coherent primary-database reads, with scoped cache bypasses."""
 
 from contextlib import ExitStack, contextmanager
-from datetime import datetime, timezone
+from datetime import date as Date
+from datetime import datetime, timedelta, timezone
+from time import monotonic
 
 import frappe
 
@@ -9,8 +11,13 @@ from jarvis.payment_calendar.access import authorize_scope
 from jarvis.payment_calendar.banks import read_bank_balances
 from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
-from jarvis.payment_calendar.projection import project_snapshot
+from jarvis.payment_calendar.projection import horizon_summary, project_snapshot
 from jarvis.payment_calendar.sources import read_obligations
+from jarvis.payment_calendar.store import RESULT_SCHEMA
+
+# `store.RESULT_SCHEMA` is stamped on every result; `store.split_result` refuses a result without it at
+# publish, and no reader accepts another shape. `horizon` is always stored, null only without `with_horizon`.
+HORIZON_DAYS = 30
 
 
 @contextmanager
@@ -104,6 +111,14 @@ def _source_caches():
 		yield hits
 
 
+def fiscal_years_read(hits) -> bool:
+	"""True when the source view read fiscal years itself instead of taking them from the shared cache.
+
+	Balance reads in the view must pass this check: a stale cached year would answer for the wrong books.
+	"""
+	return ("hget", "fiscal_years") in hits
+
+
 @contextmanager
 def consistent_read():
 	"""Pin a real repeatable read, refusing helper writes or transaction controls."""
@@ -150,9 +165,68 @@ def consistent_read():
 		db.rollback()
 
 
+def build_result(
+	scope,
+	sources,
+	bank,
+	bank_code,
+	unavailable,
+	*,
+	currency,
+	floor,
+	precision,
+	generated_at,
+	with_horizon=True,
+):
+	"""The stored result from fixed sources; the worker and the golden dataset both call this.
+
+	`with_horizon=False` stores a null horizon (Task 0 fallback: compute it for the current month only).
+	"""
+	projection = project_snapshot(
+		sources["Payable"],
+		sources["Receivable"],
+		bank["total"] if bank else None,
+		floor["safety_floor"],
+		scope["anchor"],
+		scope["window_start"],
+		scope["window_end"],
+		precision=precision,
+		month=scope.get("month"),
+	)
+	return {
+		"schema": RESULT_SCHEMA,
+		"sources": sources,
+		"projection": projection,
+		"horizon": _horizon(scope, sources, bank, floor, precision) if with_horizon else None,
+		"currency": currency,
+		"floor": floor,
+		"bank": bank,
+		"bank_code": bank_code,
+		"unavailable": unavailable,
+		"generated_at": generated_at,
+	}
+
+
+def _horizon(scope, sources, bank, floor, precision):
+	"""A second projection over the next 30 days, whatever month the snapshot shows."""
+	anchor = scope["anchor"]
+	end = (Date.fromisoformat(anchor) + timedelta(days=HORIZON_DAYS - 1)).isoformat()
+	projected = project_snapshot(
+		sources["Payable"],
+		sources["Receivable"],
+		bank["total"] if bank else None,
+		floor["safety_floor"],
+		anchor,
+		anchor,
+		end,
+		precision=precision,
+	)
+	return horizon_summary(projected)
+
+
 def collect(scope: dict, fingerprint: str) -> dict:
 	"""All financial sources share the fixed view; fresh policy also fences publish."""
-	profile = source_profile()
+	started, profile = monotonic(), source_profile()
 	with consistent_read() as hits:
 		cutoff = datetime.now(timezone.utc).isoformat()
 		proof = authorize_scope(scope, expected_fingerprint=fingerprint)
@@ -189,19 +263,7 @@ def collect(scope: dict, fingerprint: str) -> dict:
 			for source in sources.values()
 		):
 			raise CalendarSourceUnavailable("currency_reconciliation_unavailable")
-		projected = project_snapshot(
-			sources["Payable"],
-			sources["Receivable"],
-			bank["total"] if bank else None,
-			proof["floor"]["safety_floor"],
-			scope["anchor"],
-			scope["window_start"],
-			scope["window_end"],
-			precision=precision,
-		)
-		if scope.get("month"):
-			projected["month"] = scope["month"]
-		if bank and (("hget", "fiscal_years") not in hits or bank["precision"] != precision):
+		if bank and (not fiscal_years_read(hits) or bank["precision"] != precision):
 			raise CalendarSourceUnavailable("source_contract_unavailable")
 		if any(sources.values()) and (
 			profile.defaults_cache_hit not in hits
@@ -210,16 +272,33 @@ def collect(scope: dict, fingerprint: str) -> dict:
 			)
 		):
 			raise CalendarSourceUnavailable("source_contract_unavailable")
-		result = {
-			"sources": sources,
-			"projection": projected,
-			"currency": proof["currency"],
-			"floor": proof["floor"],
-			"bank": bank,
-			"bank_code": bank_code,
-			"unavailable": unavailable,
-			"generated_at": cutoff,
-		}
+		projecting = monotonic()
+		result = build_result(
+			scope,
+			sources,
+			bank,
+			bank_code,
+			unavailable,
+			currency=proof["currency"],
+			floor=proof["floor"],
+			precision=precision,
+			generated_at=cutoff,
+		)
+		projections_ms = elapsed_ms(projecting)
 	# Ends the source view before looking for revocations/settings changes.
 	authorize_scope(scope, expected_fingerprint=fingerprint, result=result)
+	_log_collected(started, projections_ms, sources)
 	return result
+
+
+def elapsed_ms(started):
+	return int((monotonic() - started) * 1000)
+
+
+def _log_collected(started, projections_ms, sources):
+	"""Timing and row counts only: no company, party or voucher text (B11)."""
+	counts = {side: len(source["rows"]) if source else 0 for side, source in sources.items()}
+	frappe.logger("payment_calendar").info(
+		f"collect complete duration_ms={elapsed_ms(started)} projections_ms={projections_ms} "
+		f"payable_rows={counts['Payable']} receivable_rows={counts['Receivable']}"
+	)

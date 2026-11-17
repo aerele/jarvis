@@ -1,0 +1,239 @@
+/* Headline KPI cards (template L117, L119, L240+). Container queries on .pcal-layout take the
+   place of the template's @media widths; amounts stay inside the card at any width. */
+.pcal-headlines {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 16px;
+	margin-bottom: 16px;
+}
+.headline-card {
+	--metric-ink: #526b5d;
+	--metric-accent: #b4c5b9;
+	--metric-fill: #f1f5f2;
+	position: relative;
+	min-width: 0;
+	overflow: hidden;
+	padding: 17px 19px 13px;
+	border: 1px solid var(--pc-border-soft);
+	border-radius: var(--pc-radius-kpi);
+	background: var(--pc-card);
+}
+.headline-card::before {
+	content: "";
+	position: absolute;
+	inset: 0 0 auto;
+	height: 3px;
+	background: var(--metric-accent);
+}
+.headline-card[data-state="green"],
+.headline-card[data-state="positive"] {
+	--metric-ink: #326b49;
+	--metric-accent: #83ad91;
+	--metric-fill: #edf5ef;
+}
+.headline-card[data-state="amber"] {
+	--metric-ink: #976e24;
+	--metric-accent: #d1b16d;
+	--metric-fill: #fcf6e8;
+}
+.headline-card[data-state="red"],
+.headline-card[data-state="negative"] {
+	--metric-ink: #b05d4a;
+	--metric-accent: #d8a093;
+	--metric-fill: #faf0ec;
+}
+.headline-card[data-state="unavailable"] {
+	--metric-ink: #87968c;
+	--metric-accent: #cfd8d1;
+	--metric-fill: #f3f5f4;
+}
+/* Dark: the Jarvis status variables, as the template maps them. */
+[data-theme="dark"] .headline-card {
+	--metric-ink: var(--pc-text-2);
+	--metric-accent: var(--pc-border-strong);
+	--metric-fill: var(--pc-surface-2);
+}
+[data-theme="dark"] .headline-card[data-state="green"],
+[data-theme="dark"] .headline-card[data-state="positive"] {
+	--metric-ink: var(--pc-positive);
+	--metric-accent: var(--pc-positive-bd);
+	--metric-fill: var(--pc-positive-bg);
+}
+[data-theme="dark"] .headline-card[data-state="amber"] {
+	--metric-ink: var(--pc-caution);
+	--metric-accent: var(--pc-caution-bd);
+	--metric-fill: var(--pc-caution-bg);
+}
+[data-theme="dark"] .headline-card[data-state="red"],
+[data-theme="dark"] .headline-card[data-state="negative"] {
+	--metric-ink: var(--pc-negative);
+	--metric-accent: var(--pc-negative-bd);
+	--metric-fill: var(--pc-negative-bg);
+}
+[data-theme="dark"] .headline-card[data-state="unavailable"] {
+	--metric-ink: var(--pc-muted);
+	--metric-accent: var(--pc-border-strong);
+	--metric-fill: var(--pc-surface-2);
+}
+.headline-title {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+.headline-title h2 {
+	margin: 0;
+	font-size: 11px;
+	font-weight: 650;
+	letter-spacing: 1px;
+	text-transform: uppercase;
+	color: var(--pc-muted);
+}
+.metric-state {
+	padding: 3px 7px;
+	border-radius: var(--pc-radius-tag);
+	background: var(--metric-fill);
+	color: var(--metric-ink);
+	font-size: var(--pc-fs-micro);
+	white-space: nowrap;
+}
+.metric-period {
+	font-size: var(--pc-fs-micro);
+	color: var(--pc-muted);
+	white-space: nowrap;
+}
+.headline-value {
+	display: block;
+	margin: 13px 0 7px;
+	color: var(--metric-ink);
+	font-size: var(--pc-fs-kpi);
+	font-weight: 650;
+	letter-spacing: -0.8px;
+	line-height: 1.2;
+	overflow-wrap: anywhere;
+}
+/* A quiet bar while the values load; the words are in the note. */
+.headline-value.skeleton {
+	width: 60%;
+	height: 1.2em;
+	border-radius: var(--pc-radius-tag);
+	background: var(--metric-fill);
+}
+.headline-note {
+	margin: 0;
+	font-size: var(--pc-fs-small);
+	color: var(--pc-muted);
+}
+.headline-foot {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	margin-top: 17px;
+}
+.headline-foot > span {
+	font-size: var(--pc-fs-micro);
+	color: var(--pc-muted);
+}
+.headline-foot button {
+	padding: 0;
+	border: 0;
+	background: none;
+	color: var(--metric-ink);
+	font-size: 11px;
+	font-weight: 600;
+	white-space: nowrap;
+	cursor: pointer;
+}
+.headline-foot button:hover:not(:disabled) {
+	text-decoration: underline;
+	text-underline-offset: 3px;
+}
+.headline-foot button:disabled {
+	color: var(--pc-muted);
+	opacity: 0.7;
+	cursor: default;
+}
+.metric-assumption {
+	display: block;
+	margin-top: 7px;
+	font-size: 9px;
+	color: var(--pc-muted);
+}
+
+@container (max-width: 1100px) {
+	.pcal-headlines {
+		gap: 11px;
+	}
+	.headline-card {
+		padding: 15px 14px 12px;
+	}
+	.headline-title {
+		gap: 6px;
+	}
+	.headline-title h2 {
+		font-size: 10px;
+		letter-spacing: 0.7px;
+	}
+	.metric-state {
+		padding: 3px 5px;
+		font-size: 9px;
+	}
+	.metric-period {
+		font-size: 9px;
+	}
+	.headline-value {
+		font-size: 29px;
+	}
+	.headline-foot {
+		flex-wrap: wrap;
+		gap: 7px;
+		margin-top: 14px;
+	}
+}
+@container (max-width: 540px) {
+	.pcal-headlines {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 9px;
+		margin-bottom: 13px;
+	}
+	.headline-card:first-child {
+		grid-column: 1 / -1;
+	}
+	.headline-card {
+		padding: 14px 12px 12px;
+		border-radius: var(--pc-radius-card);
+	}
+	.headline-title {
+		flex-wrap: wrap;
+		gap: 4px;
+	}
+	.headline-card:first-child .headline-title {
+		flex-wrap: nowrap;
+	}
+	.headline-title h2 {
+		letter-spacing: 0.6px;
+	}
+	.headline-value {
+		margin: 11px 0 7px;
+		font-size: 24px;
+	}
+	.headline-card:first-child .headline-value {
+		font-size: 33px;
+	}
+	.headline-note {
+		font-size: 11px;
+		line-height: 1.5;
+	}
+	.headline-foot {
+		gap: 7px;
+		margin-top: 12px;
+	}
+	.headline-foot > span {
+		font-size: 9px;
+		line-height: 1.5;
+	}
+	.headline-foot button {
+		font-size: var(--pc-fs-micro);
+	}
+}

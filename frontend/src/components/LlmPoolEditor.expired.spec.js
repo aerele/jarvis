@@ -262,3 +262,32 @@ describe("direct mode (lone OpenAI subscription, key direct:openai)", () => {
 		expect(api.beginPasteSignin).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("a model on its usage cap", () => {
+	it("gets an amber 'Usage limit reached' even beside another subscription row", async () => {
+		const claude = (ref, email) => ({ ...account(ref, email), upstream: "anthropic" });
+		pool.models = [
+			subModel("gpt-5.6-terra", 0, [account("A1", "a@x.com")]),
+			subModel("claude-opus-5", 1, [claude("C1", "c@x.com")]),
+		];
+		const until = Math.floor(Date.now() / 1000) + 2 * 86400;
+		const w = await mountEditor({ limitedModels: { "gpt-5.6-terra": until } });
+		const labels = w.findAll(".jv-pool-acct-health--warn");
+		expect(labels).toHaveLength(1);
+		expect(labels[0].text()).toBe("Usage limit reached");
+		expect(labels[0].attributes("title")).toBe("Resets in about 2 days.");
+		// The Claude row has no cap, and two subscription rows keep the pool verdict neutral.
+		expect(w.findAll(".jv-pool-dot--warn")).toHaveLength(1);
+	});
+
+	it("an expired sign-in on the same row still wins", async () => {
+		pool.models = [subModel("gpt-5.6-terra", 0, [account("A1", "a@x.com")])];
+		const until = Math.floor(Date.now() / 1000) + 3600;
+		const w = await mountEditor({
+			expiredEntries: [entry("A1")],
+			limitedModels: { "gpt-5.6-terra": until },
+		});
+		expect(badges(w)).toHaveLength(1);
+		expect(w.findAll(".jv-pool-acct-health--warn")).toHaveLength(0);
+	});
+});

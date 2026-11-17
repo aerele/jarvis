@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 
 vi.mock("frappe-ui", () => ({
-	FormControl: { template: "<input />" },
 	LoadingIndicator: { template: "<span>Loading</span>" },
 	Select: { template: "<select />" },
 }));
@@ -68,6 +67,35 @@ describe("contextual field-ask contract", () => {
 			expect(parseAsk(fence({ ...question, ...context })).questions[0].type).toBe("text");
 		}
 	);
+});
+
+describe("AskCard number field", () => {
+	// jarvis-admin-v2#806: the number control is the card's own .jv-ask-field
+	// (like date/text/link), not a frappe-ui FormControl, whose utility-class
+	// styling the chat surface's forms-plugin compensation reverts to a bare input.
+	it("draws a numeric field as a decimal .jv-ask-field and submits the typed number", async () => {
+		getDoctypeFields.mockResolvedValue({
+			ok: true,
+			fields: [{ fieldname: "rate", label: "Rate per Phone (INR)", fieldtype: "Currency" }],
+		});
+		const w = card({ ...question, q: "", fieldname: "rate" });
+		await flushPromises();
+		const field = w.get("input[placeholder='Type a number']");
+		expect(field.classes()).toContain("jv-ask-field");
+		expect(field.attributes("inputmode")).toBe("decimal");
+		expect(field.attributes("type")).toBe("text");
+		expect(w.get(".jv-ask-qt").text()).toContain("Rate per Phone (INR)");
+		expect(submit(w).element.disabled).toBe(true);
+		await field.setValue("abc");
+		expect(submit(w).element.disabled).toBe(true);
+		await field.setValue("1,250.50");
+		expect(submit(w).element.disabled).toBe(false);
+		await submit(w).trigger("click");
+		expect(w.emitted("submit")).toEqual([
+			["Here are my answers:\n1. Rate per Phone (INR) → 1,250.50"],
+		]);
+		w.unmount();
+	});
 });
 
 describe("AskCard field-backed Link search", () => {
@@ -504,5 +532,51 @@ describe("AskCard Link suggestions: keyboard and focus", () => {
 			await buttons(w)[0].trigger("mousedown");
 			expect(submit(w).element.disabled).toBe(false);
 		});
+	});
+});
+
+describe("optional questions (Aerele-RnD/jarvis-admin-v2#789)", () => {
+	const form = () =>
+		mount(AskCard, {
+			props: {
+				spec: parseAsk(
+					"```jarvis-ask\n" +
+						JSON.stringify([
+							{ q: "Email address", type: "text" },
+							{ q: "First name", type: "text" },
+							{ q: "Last name (optional)", type: "text" },
+							{ q: "Nickname", type: "text", optional: true },
+						]) +
+						"\n```"
+				),
+			},
+		});
+	const fields = (w) => w.findAll("input.jv-ask-field");
+
+	it("enables Submit once the required questions are answered, with the optional ones blank", async () => {
+		const w = form();
+		expect(submit(w).element.disabled).toBe(true);
+		expect(w.text()).toContain("Answer each required question to continue");
+		await fields(w)[0].setValue("user1@gmail.com");
+		expect(submit(w).element.disabled).toBe(true);
+		await fields(w)[1].setValue("Jarvis User");
+		expect(submit(w).element.disabled).toBe(false);
+		await submit(w).trigger("click");
+		expect(w.emitted("submit")).toEqual([
+			[
+				"Here are my answers:\n1. Email address → user1@gmail.com\n2. First name → Jarvis User\n3. Last name (optional) → (skipped)\n4. Nickname → (skipped)",
+			],
+		]);
+	});
+
+	it("labels a flag-marked optional question once, without touching a label that already says so", () => {
+		const w = form();
+		const labels = w.findAll(".jv-ask-qt").map((n) => n.text().replace(/\s+/g, " "));
+		expect(labels).toEqual([
+			"1Email address",
+			"2First name",
+			"3Last name (optional)",
+			"4Nickname (optional)",
+		]);
 	});
 });

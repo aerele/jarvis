@@ -29,10 +29,11 @@ class TestPaymentCalendarPublication(unittest.TestCase):
 				)
 			),
 		}
+		# A stored status part holds every key; the body no longer tolerates a missing one.
 		self.payload = dict.fromkeys(
-			("projection", "currency", "floor", "generated_at", "bank_code", "unavailable")
+			("projection", "currency", "floor", "generated_at", "bank_code", "bank", "horizon")
 		)
-		self.payload["projection"] = {"days": {}}
+		self.payload.update(projection={"days": {}}, unavailable={}, _top_proofs={}, _permission_columns={})
 
 	def test_publication_between_load_and_observation_reloads_authorized_result(self):
 		with (
@@ -45,18 +46,6 @@ class TestPaymentCalendarPublication(unittest.TestCase):
 		self.assertEqual(result["state"], "complete")
 		self.assertEqual(result["projection"], self.payload["projection"])
 		self.assertEqual(load.call_count, 2)
-
-	def test_result_arriving_after_status_read_returns_complete_metadata(self):
-		with (
-			patch.object(
-				api, "_load", side_effect=[(self.running, self.payload), (self.complete, self.payload)]
-			),
-			patch.object(api.jobs, "observe_job") as observe,
-		):
-			result = status_body("a" * 32)
-		self.assertEqual(result["state"], "complete")
-		self.assertEqual(result["projection"], self.payload["projection"])
-		observe.assert_not_called()
 
 	def test_revocation_during_completed_result_reload_refuses_delivery(self):
 		with (

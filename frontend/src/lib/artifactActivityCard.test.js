@@ -301,7 +301,10 @@ test("T5b: the standalone artifact card and the generic activity line are gone �
 test("the goto morph line latches on a complete streaming goto and survives run:end (does not derive from m.streaming)", () => {
 	assert.match(chatSrc, /const gotoMorph = ref\(null\);/);
 	const watchBody = fnBody(chatSrc, "watch(streamingGoto, (g) => {");
-	assert.match(watchBody, /if \(g\) gotoMorph\.value = g;/);
+	assert.match(
+		watchBody,
+		/gotoDecision\(g, gotoInputs\(streamingMessage\.value, currentRunId\.value\)\)\.autoOpen\)\s*gotoMorph\.value = \{ \.\.\.g, messageId: streamingMessage\.value\?\.name \};/
+	);
 	// T5b: the morph line's own markup (JarvisMark + jv-goto-morph) is gone —
 	// one box per turn now — but the latch and its navigation are untouched,
 	// and the exact copy is reused verbatim as boxViewFor's top-precedence
@@ -311,7 +314,7 @@ test("the goto morph line latches on a complete streaming goto and survives run:
 	const overrideFn = fnBody(chatSrc, "function overrideFor(m) {");
 	assert.match(
 		overrideFn,
-		/if \(gotoMorph\.value\) return \{ text: "Taking you to the Dashboards builder" \};/
+		/if \(gotoMorph\.value\) return \{ text: gotoPageInfo\(gotoMorph\.value\.page\)\.morph \};/
 	);
 	// cleared on the next turn / an error / a stop / leaving the conversation —
 	// deliberately NOT cleared in run:end, since surviving that instant (up to
@@ -323,12 +326,13 @@ test("the goto morph line latches on a complete streaming goto and survives run:
 	assert.notEqual(chatSrc.indexOf('case "run:start":'), -1);
 	assert.notEqual(chatSrc.indexOf('case "queue:position":'), -1);
 	// every clear site goes through dropGotoMorph(), which also cancels the
-	// pending hold-navigation timer - a cleared latch with a live timer would
-	// still redirect a user who moved on
-	const dropFn = fnBody(chatSrc, "function dropGotoMorph() {");
-	assert.match(dropFn, /clearTimeout\(gotoNavTimer\)/);
+	// running countdown - a cleared latch with a live countdown would still
+	// redirect a user who moved on
+	const dropFn = fnBody(chatSrc, 'function dropGotoMorph(reason = "switch") {');
+	assert.match(dropFn, /gotoCd\.cancel\(reason\);/);
 	assert.match(dropFn, /gotoMorph\.value = null;/);
-	assert.match(chatSrc, /onUnmounted\(dropGotoMorph\);/);
+	assert.match(chatSrc, /onUnmounted\(\(\) => dropGotoMorph\("unmount"\)\);/);
+	assert.doesNotMatch(chatSrc, /gotoNavTimer|GOTO_MORPH_HOLD_MS/);
 	assert.match(runStart, /dropGotoMorph\(\);/);
 	const runErrorStart = chatSrc.indexOf('case "run:error":');
 	assert.notEqual(runErrorStart, -1);
@@ -349,20 +353,24 @@ test("the goto morph line latches on a complete streaming goto and survives run:
 		chatSrc.indexOf('case "run:end": {'),
 		chatSrc.indexOf('case "message:enriched": {')
 	);
-	assert.match(runEnd, /let redirected = false;/);
+	assert.doesNotMatch(runEnd, /redirected/);
 	// the navigating terminal latches explicitly (the block can land WITH the
-	// terminal, unseen by the streaming watcher) and holds ~1s so the morph
-	// line gets real screen time - except under prefers-reduced-motion, where
-	// it navigates at once (there is no animation to show)
-	assert.match(runEnd, /redirected = true;/);
-	assert.match(runEnd, /gotoMorph\.value = goto;/);
-	assert.match(runEnd, /prefers-reduced-motion/);
-	assert.match(runEnd, /GOTO_MORPH_HOLD_MS/);
-	assert.match(runEnd, /if \(gotoMorph\.value\) gotoDashboards\(goto\.prompt, m\.name\);/);
-	assert.match(runEnd, /if \(!redirected\) dropGotoMorph\(\);/);
-	// the unconditional clear must come AFTER the redirect gate, not before it
+	// terminal, unseen by the streaming watcher) when it starts the visible
+	// countdown (the countdown, not a timed hold, now drives the navigation: the
+	// reduced-motion path no longer opens at once, it keeps the countdown)
+	const startFn = fnBody(chatSrc, "function startGotoCountdown(m, goto, decision, runId)");
+	assert.match(startFn, /gotoMorph\.value = \{ \.\.\.goto, messageId: m\.name \};/);
+	assert.doesNotMatch(runEnd, /prefers-reduced-motion/);
+	assert.match(runEnd, /startGotoCountdown\(m, goto, decision, p\.run_id\)/);
+	assert.match(chatSrc, /openGotoAction\(goto, action, state\.messageId, \{/);
+	// every other run:end still drops the latch (a repeat for a handled message does nothing)
+	assert.match(runEnd, /if \(nothingStarted\) giveUpGotoAtRunEnd\(p, goto\);/);
+	assert.match(fnBody(chatSrc, "function giveUpGotoAtRunEnd(p, goto)"), /dropGotoMorph\(\);/);
+	// no timed hold remains for a duplicate run:end to double up
+	assert.doesNotMatch(runEnd, /setTimeout\(|clearTimeout\(/);
+	// the tail (latch drop, ownership give-up) runs after the countdown start
 	assert.ok(
-		runEnd.indexOf("if (!redirected) dropGotoMorph();") > runEnd.indexOf("redirected = true;"),
-		"the redirected check must run after the redirect branch, not race it"
+		runEnd.indexOf("if (nothingStarted)") > runEnd.indexOf("startGotoCountdown("),
+		"the refusal tail must run after the countdown start, not race it"
 	);
 });

@@ -1,0 +1,129 @@
+/* Payment Calendar design tokens (#821). Literal values, so a teleported overlay (a child of
+   <body>, outside .pcal-root) reads the same palette. Light = the template's green-grey values.
+   Dark = the Jarvis DARK_VARS values as the template maps them (theme.js). */
+.pcal-root,
+.pcal-overlay {
+	/* palette */
+	--pc-bg: #f7f8fa;
+	--pc-card: #fff;
+	--pc-surface-2: #f1f4f5;
+	--pc-surface-3: #fff;
+	--pc-head: #f8f9fa;
+	--pc-hover: #edf5f0;
+	--pc-border: #e1e6e9;
+	--pc-border-soft: #e4e9e7;
+	--pc-border-strong: #dfe4e8;
+	--pc-text: #202a31;
+	--pc-text-2: #596961;
+	--pc-muted: #75818a;
+	--pc-primary: #285d4b;
+	--pc-primary-hover: #214d3d;
+	--pc-primary-fg: #fff;
+	--pc-link: #28644f;
+	--pc-focus: #276c57;
+	--pc-positive: #326e52;
+	--pc-positive-bg: #edf5ef;
+	--pc-positive-bd: #83ad91;
+	--pc-balance-total: #4b7357;
+	--pc-caution: #936b25;
+	--pc-caution-bg: #fcf6e8;
+	--pc-caution-bd: #eed8aa;
+	--pc-negative: #ad503f;
+	--pc-negative-bg: #faf0ec;
+	--pc-negative-bd: #d8a093;
+	--pc-toast: #293c32;
+	--pc-toast-fg: #fff;
+	/* the "Selected date & cash details" and "How balances are calculated" disclosures */
+	--pc-details-bg: #fbfcfb;
+	--pc-details-border: #e1e7e3;
+	--pc-details-rule: #e7ede8;
+	--pc-details-summary: #75897b;
+	--pc-details-method-summary: #65776b;
+	--pc-details-date: #9aa79e;
+	--pc-select-text: #5e7566;
+	/* overlays */
+	--pc-backdrop: #12271e62;
+	--pc-shadow-menu: 0 10px 34px #23312c23;
+	--pc-shadow-modal: 0 24px 80px #10231840;
+	--pc-shadow-preview: 0 14px 50px #1c3c2b27, 0 2px 8px #1c3c2b0a;
+	--pc-shadow-toast: none;
+	/* typography */
+	--pc-font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+	--pc-fs-body: 14px;
+	--pc-fs-h1: 26px;
+	--pc-fs-kpi: 34px;
+	--pc-fs-stat: 25px;
+	--pc-fs-modal-title: 19px;
+	--pc-fs-month-title: 17px;
+	--pc-fs-ledger-title: 16px;
+	--pc-fs-small: 12px;
+	--pc-fs-micro: 10px;
+	/* radii */
+	--pc-radius-card: 9px;
+	--pc-radius-kpi: 10px;
+	--pc-radius-modal: 12px;
+	--pc-radius-preview: 11px;
+	--pc-radius-button: 7px;
+	--pc-radius-chip: 6px;
+	--pc-radius-cell: 6px;
+	--pc-radius-tag: 4px;
+	--pc-radius-input: 5px;
+	font-family: var(--pc-font);
+	font-size: var(--pc-fs-body);
+	line-height: 1.45;
+	font-variant-numeric: tabular-nums;
+}
+
+[data-theme="dark"] .pcal-root,
+[data-theme="dark"] .pcal-overlay {
+	--pc-bg: #16161a;
+	--pc-card: #1d1d22;
+	--pc-surface-2: #26262d;
+	--pc-surface-3: #30303a;
+	--pc-head: #26262d;
+	--pc-hover: #26262d;
+	--pc-border: #2c2c34;
+	--pc-border-soft: #2c2c34;
+	--pc-border-strong: #3a3a45;
+	--pc-text: #ededf2;
+	--pc-text-2: #b6b6c0;
+	--pc-muted: #9a9aa5;
+	--pc-primary: #ececf0;
+	--pc-primary-hover: #ededf2;
+	--pc-primary-fg: #1c1c22;
+	--pc-link: #6e8bff;
+	--pc-focus: #6e8bff;
+	--pc-positive: #34d399;
+	--pc-positive-bg: #15271f;
+	--pc-positive-bd: #214b38;
+	--pc-balance-total: #b6b6c0;
+	--pc-caution: #fbbf24;
+	--pc-caution-bg: #2a2315;
+	--pc-caution-bd: #4a3d1f;
+	--pc-negative: #f87171;
+	--pc-negative-bg: #2a1818;
+	--pc-negative-bd: #4a2a2a;
+	--pc-toast: #ececf0;
+	--pc-toast-fg: #1c1c22;
+	--pc-details-bg: #1d1d22;
+	--pc-details-border: #2c2c34;
+	--pc-details-rule: #2c2c34;
+	--pc-details-summary: #6e8bff;
+	--pc-details-method-summary: #6e8bff;
+	--pc-details-date: #9a9aa5;
+	--pc-select-text: #b6b6c0;
+	--pc-backdrop: #0009;
+	--pc-shadow-menu: 0 14px 40px #0006;
+	--pc-shadow-modal: 0 24px 80px #0008;
+	--pc-shadow-preview: 0 14px 40px #0006;
+	--pc-shadow-toast: 0 4px 18px #0005;
+	color-scheme: dark;
+}
+
+/* The template's one focus ring: 2px, offset 4 (dark: the link colour). The app's own
+   input rules in index.css opt out of these roots, so nothing else draws a ring. */
+.pcal-root :is(button, a, input, select, textarea):focus-visible,
+.pcal-overlay :is(button, a, input, select, textarea):focus-visible {
+	outline: 2px solid var(--pc-focus);
+	outline-offset: 4px;
+}

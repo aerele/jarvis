@@ -1,0 +1,110 @@
+/* List view (template L103, L108): one row per date, sticky week labels. */
+.pcal-cal .list-view {
+	position: relative;
+	padding: 0 17px;
+}
+.pcal-cal .list-week-label {
+	position: sticky;
+	top: 0;
+	z-index: 2;
+	padding: 7px 8px;
+	border-bottom: 1px solid var(--pc-border-soft);
+	background: var(--pc-head);
+	font-size: 11px;
+	color: var(--pc-text-2);
+}
+.pcal-cal .date-row {
+	display: grid;
+	grid-template-columns: minmax(90px, 1fr) minmax(95px, 1fr) minmax(95px, 1fr) 90px;
+	align-items: center;
+	gap: 12px;
+	padding: 13px 4px;
+	border-bottom: 1px solid var(--pc-border-soft);
+}
+.pcal-cal .date-row.selected {
+	background: #f1f7f3;
+}
+[data-theme="dark"] .pcal-cal .date-row.selected {
+	background: var(--pc-surface-2);
+	border-bottom-color: var(--pc-link);
+}
+.pcal-cal .date-row-date {
+	padding: 0;
+	border: 0;
+	background: none;
+	color: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+.pcal-cal .date-row-date:disabled {
+	cursor: default;
+}
+.pcal-cal .date-row-date b {
+	font-size: 14px;
+	font-weight: 600;
+}
+.pcal-cal .date-row-date small {
+	display: block;
+	margin-top: 3px;
+	font-size: 11px;
+	color: var(--pc-muted);
+}
+.pcal-cal .date-row .list-amount {
+	display: flex;
+	flex-direction: column-reverse;
+	align-items: flex-end;
+	gap: 3px;
+	width: auto;
+	cursor: pointer;
+}
+.pcal-cal .date-row .list-amount:disabled {
+	cursor: default;
+}
+.pcal-cal .date-row .list-amount .label {
+	font-size: 10px;
+}
+.pcal-cal .date-row .list-amount b {
+	font-size: 13px;
+}
+.pcal-cal .list-net {
+	font-size: 11px;
+	text-align: right;
+	color: #5c8766;
+}
+.pcal-cal .list-net.negative {
+	color: #9e7060;
+}
+[data-theme="dark"] .pcal-cal .list-net {
+	color: var(--pc-positive);
+}
+[data-theme="dark"] .pcal-cal .list-net.negative {
+	color: var(--pc-negative);
+}
+
+@container (max-width: 1200px) {
+	.pcal-cal .date-row .list-amount b {
+		font-size: 12px;
+	}
+}
+@container (max-width: 540px) {
+	.pcal-cal .list-view {
+		max-height: 420px;
+		padding: 0 13px;
+		overflow: auto;
+	}
+	.pcal-cal .date-row {
+		position: relative;
+		grid-template-columns: 75px 1fr 1fr;
+		gap: 9px;
+		padding: 13px 0 23px;
+	}
+	.pcal-cal .date-row-date small {
+		font-size: 10px;
+	}
+	.pcal-cal .list-net {
+		position: absolute;
+		right: 0;
+		bottom: 5px;
+		font-size: 10px;
+	}
+}

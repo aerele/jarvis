@@ -33,7 +33,6 @@ describe("shared transcript presentation", () => {
 		"jarvis-action",
 		"confirm",
 		"jarvis-macro",
-		"jarvis-goto",
 		"jarvis-cards",
 		"jarvis-skill",
 	])("keeps %s as inert content", (tag) => {
@@ -46,6 +45,22 @@ describe("shared transcript presentation", () => {
 		expect(parts[0].type).toBe("summary");
 		expect(parts[0].text).toContain("INV-7");
 		expect(parts[0]).not.toHaveProperty("onClick");
+	});
+	// A hand-off has no meaning in a shared view: it is dropped, like in an export.
+	it("drops a jarvis-goto block and keeps the prose around it", () => {
+		const goto = '```jarvis-goto\n{"page":"dashboards","prompt":"Show the cash view"}\n```';
+		expect(sharedTranscript("Opening that.\n\n" + goto + "\n\nAnything else?")).toEqual([
+			{ type: "text", text: "Opening that." },
+			{ type: "text", text: "Anything else?" },
+		]);
+		expect(sharedTranscript(goto)).toEqual([]);
+		expect(sharedTranscript(goto.replace("dashboards", "payment-calendar"))).toEqual([]);
+		expect(sharedTranscript("```jarvis-goto\nnot json\n```")).toEqual([]);
+	});
+	it("shows nothing for a goto block still streaming in", () => {
+		expect(
+			sharedTranscript('Opening.\n```jarvis-goto\n{"page":"dashboards","pro', true)
+		).toEqual([{ type: "text", text: "Opening." }]);
 	});
 	it("contains malformed blocks and holds an incomplete streaming block", () => {
 		expect(() => sharedTranscript('```jarvis-chart\n{"series":[null]}\n```')).not.toThrow();

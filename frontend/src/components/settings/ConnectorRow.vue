@@ -35,7 +35,7 @@
 			v-else-if="rowState === 'not-connected'"
 			variant="subtle"
 			label="Sign in"
-			:loading="signingIn"
+			:loading="signingIn && !tabLooksClosed"
 			loading-text="Waiting…"
 			@click="doSignIn"
 		/>
@@ -74,7 +74,7 @@
 // Buttons) and PromotionStatusChip's Badge+Tooltip status idiom. Key rows and
 // OAuth rows (auth_method "OAuth") share one 5-state model (design:
 // RowStates.dc.html) - see rowState below.
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, ref } from "vue";
 import { Badge, Button, Switch, Tooltip, confirmDialog, toast } from "frappe-ui";
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 import { signIn } from "@/components/settings/oauthSignin";
@@ -181,34 +181,57 @@ const subtextClass = computed(() =>
 
 // ── connect / disconnect ─────────────────────────────────────────────────
 const signingIn = ref(false);
+// True once the vendor tab looks closed. The poll keeps running (a tab that
+// only navigated cross-origin reads closed too), so the button goes back to
+// "Sign in" and a press restarts the flow instead of leaving it stuck.
+const tabLooksClosed = ref(false);
 const disconnecting = ref(false);
+let currentSignIn = null;
+let signInGen = 0;
 
 async function doSignIn() {
-	if (signingIn.value) return;
+	if (signingIn.value && !tabLooksClosed.value) return;
+	if (currentSignIn) currentSignIn.cancel();
+	const gen = ++signInGen;
 	signingIn.value = true;
+	tabLooksClosed.value = false;
 	try {
-		// signIn() returns a promise (with a .cancel() this row never uses -
-		// there's no Cancel affordance here, only in AddConnectorDialog) that
-		// resolves once the flow has a verdict; passing the row's own name
-		// (not a factory) since the row already exists.
-		const result = await signIn(props.row.name, {
+		// signIn() returns a promise (with a .cancel()) that resolves once the
+		// flow has a verdict; passing the row's own name (not a factory) since
+		// the row already exists.
+		const pending = signIn(props.row.name, {
 			label: props.row.label,
 			agentName: brand.agentName,
+			onTabClosed: () => {
+				if (gen === signInGen) tabLooksClosed.value = true;
+			},
 		});
+		currentSignIn = pending;
+		const result = await pending;
+		if (gen !== signInGen) return; // replaced by a later press
 		if (result.status === "connected") {
 			emit("reload");
 		} else if (result.status === "error") {
 			toast.error(errHtml({ message: result.message }, "Could not sign in."));
-		} else if (result.status === "closed") {
-			toast.error("Sign-in window was closed.");
 		} else if (result.status === "timeout") {
 			toast.error("Sign-in took too long. Try again.");
 		}
 		// "navigated": this tab is leaving (popup was blocked) - nothing left to do.
 	} finally {
-		signingIn.value = false;
+		if (gen === signInGen) {
+			signingIn.value = false;
+			tabLooksClosed.value = false;
+			currentSignIn = null;
+		}
 	}
 }
+
+// The poll can run for up to 10 minutes; stop it (and keep its late verdict
+// from toasting or reloading) once the row is gone.
+onBeforeUnmount(() => {
+	signInGen++;
+	if (currentSignIn) currentSignIn.cancel();
+});
 
 function doDisconnect() {
 	confirmDialog({

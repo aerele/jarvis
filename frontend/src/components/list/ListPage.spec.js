@@ -67,6 +67,15 @@ describe("ListPage: a list that failed to load", () => {
 		expect(w.text()).toContain("No Macros Found");
 		expect(tryAgain(w)).toBeUndefined();
 	});
+
+	it("uses the same responsive width for the empty state as for the error state", () => {
+		const empty = mount(ListPage, { props: { rows: [], error: "" } });
+		const failed = mount(ListPage, { props: { rows: [], error: "No." } });
+		const box = (w) => w.find(".absolute.left-1\\/2");
+		expect(box(empty).classes()).toEqual(expect.arrayContaining(["w-9/12", "sm:w-4/12"]));
+		expect(box(empty).classes()).not.toContain("w-4/12");
+		expect(box(failed).classes()).toEqual(expect.arrayContaining(["w-9/12", "sm:w-4/12"]));
+	});
 });
 
 describe("ListPage: the selection bar", () => {
@@ -140,5 +149,21 @@ describe("ListPage: a select quick filter", () => {
 			.find((o) => o.text() === "All")
 			.trigger("click");
 		expect(w.emitted("update:filters").at(-1)[0]).toEqual({});
+	});
+});
+
+describe("ListPage: the toolbar at narrow widths", () => {
+	it("wraps, gives the quick filters a full row below sm, and drops the divider there", () => {
+		const w = mount(ListPage, {
+			props: { rows: [], quickFilters: [{ key: "search", label: "Search", type: "text" }] },
+		});
+		const bar = w.find(".px-5.py-4");
+		expect(bar.classes()).toContain("flex-wrap");
+		const filters = bar.element.children[0];
+		expect(filters.className).toContain("basis-full");
+		expect(filters.className).toContain("sm:flex-1");
+		expect(filters.className).toContain("min-w-0");
+		expect(bar.element.children[1].className).toContain("hidden");
+		expect(bar.element.children[1].className).toContain("sm:block");
 	});
 });

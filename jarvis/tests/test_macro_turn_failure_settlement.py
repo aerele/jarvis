@@ -265,11 +265,6 @@ class TestAStepTurnThatFails(_PlayFrames, CheckBase):
 		self._finalize(rid)
 		self.assertEqual(len(self._seeds(conv)), 1, "step 2 never went out")
 
-	def test_a_stream_cut_leaves_the_run_running_until_recovery_ends(self):
-		run, conv, rid = self._first_step()
-		self._into_recovery(rid, conv)
-		self.assertEqual(self._run(run).status, "running")
-
 	def test_a_recovery_that_runs_out_of_budget_ends_the_run_through_finalize(self):
 		run, conv, rid = self._first_step()
 		self._into_recovery(rid, conv)

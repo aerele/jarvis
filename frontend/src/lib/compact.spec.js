@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCompactCommand, compactFailureCopy } from "./compact.js";
+import { parseCompactCommand, compactFailureCopy, compactOutcome } from "./compact.js";
 
 describe("parseCompactCommand", () => {
 	it("returns null for normal text", () => {
@@ -25,6 +25,25 @@ describe("compactFailureCopy", () => {
 		expect(compactFailureCopy("conversation_busy")).toBe(
 			"A reply is in progress, try again in a moment"
 		);
+		expect(compactFailureCopy("bad_hint")).toBe("The hint cannot start with a slash");
+		expect(compactFailureCopy("directive_refused")).toBe(
+			"Model and runtime changes are not available in chat."
+		);
 		expect(compactFailureCopy("whatever")).toBe("Could not compact this chat");
+	});
+});
+
+describe("compactOutcome", () => {
+	it("shows no-op outcomes as info and everything else as error", () => {
+		expect(compactOutcome("runtime_declined")).toEqual({
+			text: "Nothing to compact yet",
+			type: "info",
+		});
+		expect(compactOutcome("nothing_to_compact").type).toBe("info");
+		expect(compactOutcome("runtime_failed").type).toBe("error");
+		expect(compactOutcome(undefined)).toEqual({
+			text: "Could not compact this chat",
+			type: "error",
+		});
 	});
 });

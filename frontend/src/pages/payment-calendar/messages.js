@@ -1,7 +1,3 @@
-export const riskLabel = (risk) =>
-	({ red: "Below zero", orange: "Below minimum cash", green: "At or above minimum" }[risk] ||
-	"Forecast unavailable");
-
 const messages = {
 	restricted_obligations:
 		"Your party or company restrictions cover only part of the outstanding balances. Whole-company cash colours are unavailable.",
@@ -16,14 +12,17 @@ const messages = {
 	multibook_unsupported:
 		"This company uses a finance-book scope that the calendar cannot combine. Use the ERPNext reports to review it.",
 	not_found_or_expired:
-		"This snapshot expired or was invalidated. Refresh to see current balances.",
+		"This calendar data expired or was replaced. Refresh to see current balances.",
 	invalid_request:
 		"The inputs could not be accepted. Check the selected values and company currency precision, then try again.",
 	worker_unavailable: "A calendar worker is unavailable. Refresh to try again.",
-	expired: "This snapshot expired. Refresh to see current balances.",
+	expired: "This calendar data expired. Refresh to see current balances.",
+	internal_error:
+		"Something went wrong while preparing the calendar. Try again. If it keeps happening, contact your administrator.",
 	forbidden:
 		"You no longer have access to this financial view. Ask your accounts administrator for access.",
 	scope_changed: "Access or company settings changed. Refresh to rebuild the calendar.",
+	recovery_limit: "The calendar keeps changing. Refresh to try again.",
 	settings_changed:
 		"The minimum was changed by another user. Review the current value before saving again.",
 	configuration_conflict:
@@ -46,3 +45,19 @@ const messages = {
 export const explain = (code) =>
 	messages[code] ||
 	"Complete financial data is unavailable for this scope. Check finance access and company configuration, then refresh.";
+
+// Account balances dialog: failure copy that matches its "Try again" button.
+const balancesMessages = {
+	too_large:
+		"This company has more than 500 bank and cash accounts. Choose accounts to see their balances.",
+	worker_busy: "Your calendar jobs are still running. Please wait, then try again.",
+	scope_changed: "Access or company settings changed. Try again to read the balances.",
+	job_lost: "The balances job stopped before it finished. Try again.",
+	timeout: "The balances took too long to load. Try again.",
+	network_error: "The server could not be reached. Check your connection and try again.",
+	forbidden: messages.forbidden,
+};
+export const explainBalances = (code) =>
+	balancesMessages[code] || "Account balances could not be loaded. Try again.";
+// A retry cannot fix these.
+export const balancesRetryable = (code) => !["too_large", "forbidden"].includes(code);
