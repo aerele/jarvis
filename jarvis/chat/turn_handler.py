@@ -1501,6 +1501,16 @@ def _assemble_prompt(
 	# An unsaved draft card is on the user's screen (``live_draft``): tell the agent once per
 	# turn, so it reminds the user instead of drafting again. Decides every skip itself.
 	live_draft_clause = _live_draft_clause(conv, binding)
+	# Site flag ``jarvis_draft_cards`` on: tell the agent to draft with the tool, on the turns
+	# where the gate would park a draft card. "" with the flag off, so the bytes are today's.
+	drafting_clause = _drafting_clause(
+		conv,
+		binding,
+		msg_row.get("origin"),
+		live_draft_clause,
+		context=context,
+		armed_skill_note=armed_skill_run_clause,
+	)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
 	# agent applies them without depending on agent's undocumented auto-retrieval.
@@ -1634,7 +1644,7 @@ def _assemble_prompt(
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{versions_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
-		f"; conv: {conversation_id}{armed_run}{autorun_run}{auto_run}{armed_skill_run_clause}{live_draft_clause}{skill_clause}{learned_clause}"
+		f"; conv: {conversation_id}{armed_run}{autorun_run}{auto_run}{armed_skill_run_clause}{drafting_clause}{live_draft_clause}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{payment_calendar_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"
@@ -2908,6 +2918,95 @@ def _escape_untrusted_tag(match: "re.Match[str]") -> str:
 	)
 
 
+# What the agent is told to do for a change to a waiting draft: a parked draft is its own tool
+# call, a typed one is a block. ``_drafting_clause`` reads the second to stay out of the way.
+_PARKED_CHANGE = "call the tool again"
+_TYPED_CHANGE = "re-emit the block"
+
+# Which user rows start a turn in which a person can be shown a draft card: a send from the
+# app, the follow-up turn after a decision, or a Board answer. A macro step, a system or
+# agent-run turn, a File Box drop and a delegated re-entry are not (a blank origin is a legacy
+# row, as in the Payment Calendar hint's scope).
+_DRAFT_TURN_ORIGINS = frozenset({"", "human", "continuation", "board_answer"})
+
+# The drafting note, the only text that tells the agent to draft with the tool. ONE constant: the
+# persona and the tests quote it. It is the whole clause, leading "; " included, like the
+# neighbours in the bracket, and a single line without backticks.
+DRAFTING_CLAUSE = (
+	"; drafts: to propose one new or changed record call create_doc or update_doc, "
+	"the site then shows the user a draft card to check, edit, save or cancel, "
+	"write no jarvis-action block for it, one draft at a time"
+)
+
+
+def _runs_without_cards(conv, binding) -> bool:
+	"""Whether this chat runs ``create_doc`` / ``update_doc`` with no card for a person to
+	read, or is not a plain one-owner chat: a shared chat, a File Box chat, auto mode, an
+	armed macro, an approved skill run, a typed "confirm all". These are the conversation
+	flags ``api._run_tool`` reads to skip or hold the park, so the waiting-draft reminder and
+	the drafting note skip on the same set."""
+	return bool(
+		binding is not None
+		or conv.get("file_box")
+		or conv.get("auto_mode")
+		or conv.get("skip_confirmation")
+		or conv.get("skill_autorun")
+		or conv.get("request_autorun")
+	)
+
+
+def _drafting_clause(
+	conv, binding, origin, live_draft_clause: str = "", *, context=None, armed_skill_note: str = ""
+) -> str:
+	"""``DRAFTING_CLAUSE`` when the site flag ``jarvis_draft_cards`` is on and an agent call to
+	``create_doc`` / ``update_doc`` in this turn would park a draft card, else "".
+
+	The gate (``api._run_tool``) parks a draft card for a single create / update unless the
+	chat runs it uncarded or holds it (see ``_runs_without_cards``), so those turns get
+	nothing, as does a turn another server path started (``_DRAFT_TURN_ORIGINS``) and any
+	builder chat (``origin_page`` in ``api._BUILDER_ORIGINS``). What the
+	gate decides per call cannot be known here and is left to it: a sensitive or structural
+	write, a batch or a ``Jarvis Dashboard`` write keeps its one-tap card (the clause says
+	"one new or changed record"), and a second call in a turn is refused. A continuation turn
+	of an ordinary chat gets the note: the agent stages its next step then.
+
+	A waiting TYPED draft (``live_draft_clause`` tells the agent to re-emit its block for a
+	change) gets nothing: the note forbids the block, the reminder asks for it, and the site
+	shows that one card either way. A waiting parked draft gets both: its reminder says to
+	call the tool again only for a change, which agrees with "one draft at a time".
+
+	Also nothing on a turn with a connector focus (``context.focus_connector``: the gate refuses
+	``create_doc`` / ``update_doc`` then) and on a turn whose message invokes an armed skill
+	(``armed_skill_note``, the armed-skill clause already built for it): the gate offers
+	"Approve & run" on that write's card, and only the ordinary card has that control, so the
+	write is not a draft card (``draft_card.wanted``, ``offers_run``).
+
+	Best-effort like the neighbouring clauses: a failure is logged and leaves the note out."""
+	from jarvis.chat import draft_card
+
+	if not draft_card.enabled():
+		return ""
+	try:
+		if _runs_without_cards(conv, binding) or (origin or "") not in _DRAFT_TURN_ORIGINS:
+			return ""
+		# A builder chat (the app's own ``_BUILDER_ORIGINS``: Dashboard Builder, Triggers) shows a
+		# draft card only as a title and a link to the full chat, so it keeps today's text. Imported
+		# here: the api module is where the set lives, and the import is lazy like this module's others.
+		from jarvis.chat import connector_focus
+		from jarvis.chat.api import _BUILDER_ORIGINS
+
+		if conv.get("origin_page") in _BUILDER_ORIGINS:
+			return ""
+		if connector_focus.focus_of(context) or armed_skill_note:
+			return ""
+		if _TYPED_CHANGE in live_draft_clause:
+			return ""
+		return DRAFTING_CLAUSE
+	except Exception:
+		frappe.log_error(title="drafting note failed", message=frappe.get_traceback())
+		return ""
+
+
 def _live_draft_clause(conv, binding) -> str:
 	"""The context clause for a waiting draft card, or "". Self-contained and best-effort:
 	every skip is decided here from the binding and the conversation's own flags, and any
@@ -2919,11 +3018,7 @@ def _live_draft_clause(conv, binding) -> str:
 	own card, and a draft the server turned into a gated confirmation card. Plain reads only:
 	prompt assembly takes no lock. The doctype is named only when it is a real DocType."""
 	try:
-		if binding is not None or not frappe.conf.get("jarvis_live_draft_context", 1):
-			return ""
-		if conv.get("file_box") or conv.get("auto_mode") or conv.get("skip_confirmation"):
-			return ""
-		if conv.get("skill_autorun") or conv.get("request_autorun"):
+		if not frappe.conf.get("jarvis_live_draft_context", 1) or _runs_without_cards(conv, binding):
 			return ""
 		from jarvis.chat import live_draft
 
@@ -2953,7 +3048,7 @@ def _draft_clause_text(what: str, button: str, parked: bool = False) -> str:
 	"""The clause for a waiting draft, typed or parked: ``what`` is "verb Doctype", ``button``
 	the card's own word for the save button. A parked card is the agent's own tool call, so
 	for it the agent is told to call the tool again for a change, not to re-emit a block."""
-	change = "call the tool again" if parked else "re-emit the block"
+	change = _PARKED_CHANGE if parked else _TYPED_CHANGE
 	return (
 		f"; unsaved draft waiting: {what}, its card with {button} and Cancel is on the user's screen: "
 		f"remind them in one line to choose, {change} only for a change they ask for, "
