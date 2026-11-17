@@ -76,3 +76,23 @@ test("a focused text control is scrolled to the middle after the keyboard opens;
 	later();
 	assert.deepEqual(scrolled, []);
 });
+
+// Break: the home-bar padding stays under a footer that the keyboard has lifted (dead space above
+// the keyboard), or it is not given back when the keyboard closes.
+test("the home-bar padding goes while the keyboard is up and comes back after", () => {
+	const el = fakeEl();
+	const win = fakeWindow({ offsetTop: 0, height: 844 });
+	win.innerHeight = 844;
+	const release = fitViewport(el, win);
+	assert.equal(el.get("--jv-kb-bottom"), undefined);
+	win.visualViewport.height = 520; // the keyboard opened
+	win.listeners.get("resize")();
+	assert.equal(el.get("--jv-kb-bottom"), "0px");
+	win.visualViewport.height = 844;
+	win.listeners.get("resize")();
+	assert.equal(el.get("--jv-kb-bottom"), undefined);
+	win.visualViewport.height = 520;
+	win.listeners.get("resize")();
+	release();
+	assert.equal(el.size(), 0);
+});

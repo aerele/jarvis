@@ -123,6 +123,8 @@ onBeforeUnmount(() => release?.());
 	height: 100%;
 	max-height: none;
 	padding-top: env(safe-area-inset-top);
+	/* no home-bar padding while the keyboard covers it (viewportFit sets --jv-kb-bottom) */
+	padding-bottom: var(--jv-kb-bottom, env(safe-area-inset-bottom));
 	border-radius: 0;
 	border-top: 0;
 }

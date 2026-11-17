@@ -10,19 +10,33 @@ import { computed, nextTick, ref, watch } from "vue";
 import DraftEditForm from "@shared/components/chat/DraftEditForm.vue";
 import DraftPreview from "@shared/components/doc/DraftPreview.vue";
 import { toolPrimaryLabel } from "@shared/lib/toolDraftPanel.js";
+import { DRAFT_STALE_TEXT } from "@shared/lib/toolDraftHost.js";
 import { draftPalette } from "../lib/draftTokens.js";
-import { errorLineOf, sheetTitle } from "../lib/draftSheetView.js";
+import { errorLineOf, footerStatus, sheetTitle } from "../lib/draftSheetView.js";
 import { scrollFocusedIntoView } from "../lib/viewportFit.js";
 import Sheet from "./Sheet.vue";
 
 const props = defineProps({ host: { type: Object, required: true } });
 // The host's state, unwrapped by the template.
-const { open, panel, preview, previewOff, confirming, notices, footer, link, setBody } =
-	props.host;
+const {
+	open,
+	panel,
+	preview,
+	previewNote,
+	previewOff,
+	confirming,
+	confirmingDiscard,
+	dead,
+	notices,
+	footer,
+	link,
+	setBody,
+} = props.host;
 const { draftLink, draftLinkError, onDraftLink, pickDraftLink, closeDraftLink } = link;
 const palette = draftPalette();
 
 const keepButton = ref(null);
+const keepDraftButton = ref(null);
 const title = computed(() => sheetTitle(panel.value));
 const errorLine = computed(() => errorLineOf(panel.value && panel.value.error));
 const label = computed(() =>
@@ -34,6 +48,20 @@ watch(confirming, async (asking) => {
 	await nextTick();
 	if (keepButton.value) keepButton.value.focus();
 });
+// the footer's one line: a failed Save or a dead card, said where the thumb is
+const status = computed(() =>
+	footerStatus({
+		errorLine: errorLine.value,
+		dead: dead.value,
+		deadText: DRAFT_STALE_TEXT,
+		marked: !!(panel.value && panel.value.error && (panel.value.error.fields || []).length),
+	})
+);
+watch(confirmingDiscard, async (asking) => {
+	if (!asking) return;
+	await nextTick();
+	if (keepDraftButton.value) keepDraftButton.value.focus();
+});
 // A field focused behind the virtual keyboard is scrolled into view.
 const onFocusIn = (event) => scrollFocusedIntoView(event.target);
 </script>
@@ -42,8 +70,11 @@ const onFocusIn = (event) => scrollFocusedIntoView(event.target);
 	<Sheet :open="open" full :label="label" @close="host.requestClose()">
 		<div class="jv-dsheet jv-draft-tokens" @focusin="onFocusIn">
 			<!-- The shared preview, drawn without its side-panel chrome. Create is the card's Create. -->
+			<p v-if="previewNote && !panel" class="jv-dsheet-note is-error" role="alert">
+				{{ previewNote }}
+			</p>
 			<DraftPreview
-				v-if="preview"
+				v-if="preview && !panel"
 				surface="phone"
 				:model="preview.model"
 				:confirm-label="toolPrimaryLabel(preview.model)"
@@ -138,9 +169,37 @@ const onFocusIn = (event) => scrollFocusedIntoView(event.target);
 							</button>
 						</div>
 					</div>
+					<div
+						v-else-if="confirmingDiscard"
+						class="jv-dsheet-ask"
+						role="group"
+						aria-label="Discard this draft?"
+					>
+						<p class="jv-dsheet-ask-text">Discard this draft?</p>
+						<div class="jv-dsheet-actions">
+							<button
+								ref="keepDraftButton"
+								type="button"
+								class="jv-btn is-primary"
+								@click="host.keepDraft()"
+							>
+								Keep draft
+							</button>
+							<button
+								type="button"
+								class="jv-btn is-ghost"
+								@click="host.discardDraft()"
+							>
+								Discard draft
+							</button>
+						</div>
+					</div>
 					<template v-else>
 						<p v-if="footer.primaryTitle" class="jv-dsheet-wait" role="status">
 							{{ footer.primaryTitle }}
+						</p>
+						<p v-else-if="status" class="jv-dsheet-wait is-error" role="status">
+							{{ status.text }}
 						</p>
 						<div class="jv-dsheet-actions">
 							<button
@@ -155,7 +214,7 @@ const onFocusIn = (event) => scrollFocusedIntoView(event.target);
 								type="button"
 								class="jv-btn is-ghost"
 								:disabled="footer.discardDisabled"
-								@click="host.discardDraft()"
+								@click="host.askDiscardDraft()"
 							>
 								Discard draft
 							</button>
@@ -266,6 +325,9 @@ const onFocusIn = (event) => scrollFocusedIntoView(event.target);
 	font-size: 13px;
 	color: var(--ink7);
 }
+.jv-dsheet-wait.is-error {
+	color: var(--red);
+}
 .jv-dsheet-ask-text {
 	margin: 0 0 8px;
 	font-size: 15px;
@@ -289,9 +351,10 @@ const onFocusIn = (event) => scrollFocusedIntoView(event.target);
 	font-weight: 600;
 	cursor: pointer;
 }
+/* the same fill as the Preview's primary (the draft token map's --cta pair), not white on the accent */
 .jv-btn.is-primary {
-	background: var(--accent-solid);
-	color: #fff;
+	background: var(--cta);
+	color: var(--cta-fg);
 }
 .jv-btn.is-ghost {
 	border: 1px solid var(--border2);

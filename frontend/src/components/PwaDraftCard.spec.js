@@ -75,6 +75,13 @@ describe("phoneDraftModel: what the chat draws for its pending list", () => {
 		["nothing", [], false],
 	])("parked: %s", (_, items, parked) => expect(model(items).parked).toBe(parked));
 
+	// Break: a typed draft card flashes between the thread and the pending list (the thread row says
+	// a draft card is pending before the list does), or flag-off phones lose their typed card.
+	it("holds the one-card rule for a draft the thread knows and the list does not", () => {
+		expect(model([], { holdsDraftRow: true }).parked).toBe(true);
+		expect(model([]).parked).toBe(false);
+	});
+
 	// Break: the phone card is drawn on the desktop surface (8 table rows, 28px buttons), or a button
 	// stays drawn off now that the Preview and Edit sheets open.
 	it("draws on the phone surface with every button live", () => {

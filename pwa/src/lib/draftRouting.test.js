@@ -105,9 +105,18 @@ test("the view mounts the edit sheet, resets it on a switch and on unmount, guar
 	assert.match(sw.slice(0, sw.indexOf("\n);")), /draftSheet\.reset\(\);/);
 	const gone = view.slice(view.indexOf("onUnmounted(() => {"));
 	assert.match(gone.slice(0, gone.indexOf("\n});")), /draftSheet\.reset\(\);/);
-	assert.match(view, /onBeforeRouteLeave\(\(\) => draftSheet\.guardLeave\(\)\);/);
+	// the guard gets the route change (it tells Back from another chat), and the sheet holds one
+	// history entry through the router (the real router is run in PwaDraftSheetBack.spec.js)
+	assert.match(
+		view,
+		/onBeforeRouteLeave\(\(to, from\) => draftSheet\.guardLeave\(to, from\)\);/
+	);
 	// a chat-to-chat change is an update of the same route record
-	assert.match(view, /onBeforeRouteUpdate\(\(\) => draftSheet\.guardLeave\(\)\);/);
+	assert.match(
+		view,
+		/onBeforeRouteUpdate\(\(to, from\) => draftSheet\.guardLeave\(to, from\)\);/
+	);
+	assert.match(view, /history: makeSheetHistory\(router\),/);
 	const make = view.slice(view.indexOf("const draftSheet = makeDraftSheet({"));
 	const io = make.slice(0, make.indexOf("\n});"));
 	assert.match(
@@ -129,4 +138,19 @@ test("the draft card decides a reply with the shared decision, not a phone copy"
 		assert.ok(host.includes(shared), shared);
 	assert.doesNotMatch(host, /keptCard|denyOutcome|draftCardDecision/);
 	assert.ok(!fs.existsSync(new URL("./draftCardDecision.js", import.meta.url)));
+});
+
+// Break: the view stops telling the one-card rule about a draft the thread knows (the typed draft
+// card flashes on open, and right after a decision, until the list is read), keeps the tile's note
+// for a draft card, or the legacy note's own markup changes.
+test("the view feeds the one-card rule from the thread and from a decision settling, and words the draft's note apart", () => {
+	assert.match(
+		view,
+		/holdsDraftRow:\s+rowsHoldPendingDraft\(olderPending\.value, messages\.value\)\s+\|\|\s+decisionsSettling\.value > 0,/
+	);
+	assert.match(view, /const showOlderCardsNote = computed\(\(\) => olderNotes\.value\.tile\);/);
+	assert.match(
+		view,
+		/<p v-if="showOlderDraftNote" class="jv-typehint">\s+An earlier draft is still waiting\. Use its buttons to create or cancel it\.\s+<\/p>/
+	);
 });

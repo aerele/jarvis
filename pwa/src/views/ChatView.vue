@@ -27,8 +27,9 @@ import { renderMarkdown } from "@shared/markdown.js";
 import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
 import { draftAnchor } from "../lib/draftAnchor.js";
-import { makeDraftUi } from "../lib/draftCardUi.js";
+import { makeDraftUi, olderCardNotes, rowsHoldPendingDraft } from "../lib/draftCardUi.js";
 import { makeDraftSheet } from "../lib/draftSheetHost.js";
+import { makeSheetHistory } from "../lib/sheetHistory.js";
 import { receiptLines } from "../lib/draftReceiptLines.js";
 import { hiddenSteps, proposeSubmitStep } from "../lib/draftReceiptHost.js";
 import { makeReceiptUi } from "../lib/receiptUi.js";
@@ -158,9 +159,17 @@ const typedApprovalHint = computed(() => hintFor(orderedPending.value));
 // Set when a typed yes/no bound no card (it went to Jarvis as a message); shown while
 // an older card is still here, cleared with the last one (decision 13).
 const olderCardsNote = ref(false);
-const showOlderCardsNote = computed(
-	() => olderCardsNote.value && orderedPending.value.some((p) => !isRecentCard(p))
+// A tile's note and a draft card's own: a draft card has its own buttons, so the tile's "Tap it"
+// line must not be shown for it (draftCardUi.olderCardNotes).
+const olderNotes = computed(() =>
+	olderCardNotes(orderedPending.value, {
+		note: olderCardsNote.value,
+		isDraft: isToolDraftItem,
+		isRecent: isRecentCard,
+	})
 );
+const showOlderCardsNote = computed(() => olderNotes.value.tile);
+const showOlderDraftNote = computed(() => olderNotes.value.draft);
 // A coarse clock for the "Proposed 3h ago" label on a card left waiting.
 const cardClock = ref(Date.now());
 let _cardClockTick = null;
@@ -351,6 +360,8 @@ const queuedTurn = computed(() => recoveryState.queued[convId.value]);
 // items, because loadPending replaces the item objects on every read. `draftModel` is what the
 // pending block draws for them: each card's ctx, the stack's typed hint line, the one-card flag.
 const draftUi = makeDraftUi(reactive);
+// How many draft-card decisions are settling (the card has left the list, the chat is being read).
+const decisionsSettling = ref(0);
 // The receipt lines of decided draft cards (draftReceiptLines.js): drawn only for a row the server
 // stamped as one; every other tool row draws nothing. Submit's busy state and note are kept by
 // record, outside the rows, because every reload replaces them.
@@ -361,6 +372,8 @@ const stepsHidden = computed(() => hiddenSteps(messages.value, receiptUi.goneKey
 // after a Save (a final draft starts no agent turn). Created here, in setup, because it owns a link
 // search that belongs to this component.
 const draftSheet = makeDraftSheet({
+	// one history entry while a sheet is open, so Back always reaches the guard below
+	history: makeSheetHistory(router),
 	ui: draftUi,
 	api,
 	items: () => orderedPending.value,
@@ -374,7 +387,8 @@ const draftSheet = makeDraftSheet({
 		settledTokens.value = withExcluded(settledTokens.value, [token]);
 	},
 	loadChat: () => load(),
-	loadPending: (source) => loadPending(source),
+	loadChatQuietly: () => loadQuietly(),
+	loadPending: (source, opts) => loadPending(source, opts),
 	refreshChats: () => store.loadConversations(),
 	showQueued: (q) => showQueuedContinuation(convId.value, q),
 	say: (text) => {
@@ -390,8 +404,8 @@ const draftSheet = makeDraftSheet({
 // The phone's back button: while a sheet is open it closes the sheet (or asks about unsaved edits)
 // and the chat stays. A change from one chat to another (/c/A to /c/B) is a route UPDATE, not a
 // leave, and would otherwise reset the sheet with its edits.
-onBeforeRouteLeave(() => draftSheet.guardLeave());
-onBeforeRouteUpdate(() => draftSheet.guardLeave());
+onBeforeRouteLeave((to, from) => draftSheet.guardLeave(to, from));
+onBeforeRouteUpdate((to, from) => draftSheet.guardLeave(to, from));
 const draftModel = computed(() =>
 	phoneDraftModel({
 		items: orderedPending.value,
@@ -400,7 +414,18 @@ const draftModel = computed(() =>
 		ui: draftUi,
 		editingToken: draftSheet.editingToken.value,
 		buildingToken: draftSheet.building.value,
+		// The thread arrives before the pending list: its row already says a draft card is pending.
+		// And while a decision on one settles (the card has left the list, the chat is being read
+		// again) no typed draft card may flash between the two.
+		holdsDraftRow:
+			rowsHoldPendingDraft(olderPending.value, messages.value) ||
+			decisionsSettling.value > 0,
 	})
+);
+// A card that left the list takes its error line with it.
+watch(
+	() => orderedPending.value.map((p) => p.token).join("\n"),
+	() => draftUi.prune(orderedPending.value.map((p) => p.token))
 );
 const savedDrafts = computed(() =>
 	recoveryState.parkedDrafts.filter((d) => d.conversation === convId.value)
@@ -772,6 +797,36 @@ async function scrollToBottom(force = false, stillCurrent = () => true) {
 }
 
 // ── loading ─────────────────────────────────────────────────────────────────
+// What a read of the newest page does to the rows on screen (shared by load() and the quiet read).
+function takeThreadPage(d, refresh) {
+	conversation.value = d?.conversation || null;
+	const page = mergeNewestPage(messages.value, historyPaging.value, d, refresh);
+	messages.value = page.messages;
+	historyPaging.value = page.paging;
+	olderPending.value = d?.older_pending || [];
+	observePassiveSafetyUpdates([...page.messages, ...olderPending.value]);
+	return page;
+}
+// A read of the newest page that changes nothing the person sees except the rows themselves: it does
+// not follow the thread to the bottom, scroll, show the loading state, write or clear the banner,
+// or run send recovery, and a failed read is silent. The edit sheet's poll uses it, once, when the
+// card being edited has left the server's pending list (its thread row may still say pending until
+// the thread is read again). A loud load() that started meanwhile wins.
+async function loadQuietly() {
+	const cid = convId.value;
+	const generation = viewGeneration;
+	const started = loadGeneration;
+	if (!cid) return;
+	try {
+		const refresh = refreshNames(messages.value);
+		const after = heldNewestSeq(messages.value, historyPaging.value);
+		const d = await api.getConversation(cid, { refresh, after });
+		if (!isCurrent(cid, generation) || loadGeneration !== started) return;
+		takeThreadPage(d, refresh);
+	} catch {
+		/* the next poll tick asks again */
+	}
+}
 async function load(force = false, staleRetry = true) {
 	const cid = convId.value;
 	const generation = viewGeneration;
@@ -790,12 +845,7 @@ async function load(force = false, staleRetry = true) {
 		if (!messages.value.length) olderArmed = false; // an open, not a resync
 		const d = await api.getConversation(cid, { refresh, after });
 		if (!current()) return;
-		conversation.value = d?.conversation || null;
-		const page = mergeNewestPage(messages.value, historyPaging.value, d, refresh);
-		messages.value = page.messages;
-		historyPaging.value = page.paging;
-		olderPending.value = d?.older_pending || [];
-		observePassiveSafetyUpdates([...page.messages, ...olderPending.value]);
+		const page = takeThreadPage(d, refresh);
 		sendRecovery.reconcile(cid, messages.value);
 		const row = store.conversations.find((c) => c.name === convId.value);
 		if (row) starred.value = !!row.starred;
@@ -911,7 +961,11 @@ async function recheckPending() {
 	await loadPending("menu");
 }
 
-async function loadPending(source) {
+// Reads the server's pending list and merges it with the thread's rows. Returns the set of tokens the
+// server listed, or null when that read did not answer cleanly (a blip: the screen is kept).
+// `quiet`: no transcript reload when a clean read drops a card (the edit sheet's poll reads the
+// thread itself, once, when its card is missing).
+async function loadPending(source, { quiet = false } = {}) {
 	const cid = convId.value;
 	const generation = viewGeneration;
 	if (!cid) return;
@@ -963,7 +1017,8 @@ async function loadPending(source) {
 	pending.value = next;
 	// A clean resync can be the first evidence of a passive close. Reload the
 	// transcript once so its terminal safety receipt gets the Done-only notice.
-	if (removedByCleanResync) load();
+	if (removedByCleanResync && !quiet) load();
+	return fromBackstop === null ? null : new Set(fromBackstop.map((p) => p.token));
 }
 
 // Auto-heal (layered design, phase 1): recover a card the live push dropped with NO user
@@ -1689,7 +1744,15 @@ function showQueuedContinuation(cid, q) {
 // Create / Cancel on an inline draft card. No window.confirm: the card's Cancel asks nothing more
 // than the desktop's does. A final draft starts no agent turn, so after either one the chat and the
 // pending list are reloaded here (runDraftDecision); the receipt line comes from the reloaded rows.
-function decideDraft(kind, pa) {
+async function decideDraft(kind, pa) {
+	decisionsSettling.value++;
+	try {
+		return await settleDraftDecision(kind, pa);
+	} finally {
+		decisionsSettling.value--;
+	}
+}
+function settleDraftDecision(kind, pa) {
 	const cid = convId.value;
 	const generation = viewGeneration;
 	return runDraftDecision(kind, pa, {
@@ -2163,6 +2226,9 @@ onUnmounted(() => {
 			</template>
 			<p v-if="showOlderCardsNote" class="jv-typehint">
 				An earlier action card is still waiting. Tap it to approve or discard.
+			</p>
+			<p v-if="showOlderDraftNote" class="jv-typehint">
+				An earlier draft is still waiting. Use its buttons to create or cancel it.
 			</p>
 		</div>
 		<!-- Both ways to approve, shown once under the stack. -->

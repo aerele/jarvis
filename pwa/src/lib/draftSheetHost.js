@@ -10,6 +10,7 @@
 // pure parts are in draftSheetView.js and draftCardUi.js. Relative imports only.
 import { computed, nextTick, ref, watch } from "vue";
 import { makeDraftModelBuilder } from "../../../frontend/src/lib/draftModel.js";
+import { errorLineOf } from "./draftSheetView.js";
 import { thrownActionError } from "../../../frontend/src/lib/chatErrorCopy.js";
 import { applyAutoOpen } from "../../../frontend/src/lib/draftTables.js";
 import {
@@ -37,11 +38,13 @@ import { useDraftLink } from "../../../frontend/src/lib/useDraftLink.js";
 //                       isCurrent(cid, generation)
 //   streaming()         a turn is running; agent() the assistant's name
 //   removePending(token)  take the card off the list and settle it (a stale read cannot bring it back)
-//   loadChat(), loadPending(source)   read the conversation; read the pending list. After a Save both
-//                       are read, chat first (a final draft starts no agent turn, so nothing else
-//                       will); the poll and the foreground read do the same, because a card decided
-//                       elsewhere still reads "pending" in the thread's rows until the thread is
-//                       read again, and the list is merged from those rows
+//   loadChat(), loadPending(source, {quiet})   read the conversation; read the pending list, which
+//                       resolves to the set of tokens the SERVER listed (null when the read did not
+//                       answer cleanly). After a Save both are read, chat first (a final draft starts
+//                       no agent turn, so nothing else will)
+//   loadChatQuietly()   read the conversation without scrolling, loading state or banner; the poll
+//                       uses it once, when the card being edited is missing from the server's list
+//                       (the thread's row still says pending, and the list is merged from the rows)
 //   refreshChats(), say(text) (the chat's banner), receiptShown(token), showQueued({run_id, position})
 //                       (a continuation turn is waiting for a slot)
 //   create(pa), discard(pa)   the card's Create and Cancel (runDraftDecision under their busy kind);
@@ -52,6 +55,8 @@ export function makeDraftSheet(io) {
 	const preview = ref(null); // { token, model }
 	const building = ref(""); // the token whose form or preview is being built
 	const confirming = ref(false); // the inline "Discard your changes?" is showing
+	const confirmingDiscard = ref(false); // the inline "Discard this draft?" is showing
+	const previewNote = ref(""); // why the form could not be built from the Preview (shown in it)
 	const bodyEl = ref(null); // the form's wrapper, where the first mark is found
 
 	const builder = makeDraftModelBuilder({
@@ -90,6 +95,7 @@ export function makeDraftSheet(io) {
 		panel: () => panel.value,
 		setPanel: (model) => {
 			confirming.value = false;
+			confirmingDiscard.value = false;
 			panel.value = model;
 		},
 		closePanel: () => closeNow(),
@@ -168,19 +174,51 @@ export function makeDraftSheet(io) {
 	);
 	// The filled calculated cells follow the person's edits: the shared watcher.
 	watchCalculatedCells(watch, () => panel.value);
+	// A Preview's note is about the Preview that is showing.
+	watch(preview, () => {
+		previewNote.value = "";
+	});
+	// The banner sits at the top of the form's scrolling body: when a message arrives that no field
+	// mark takes the person to (a failed call, an offline phone, a card that died), scroll it into
+	// view. A refusal that marks fields has its own scroll to the first mark (the shared door).
+	watch(
+		() => {
+			const p = panel.value;
+			const line = p && errorLineOf(p.error);
+			return line && !((p.error && p.error.fields) || []).length ? line.message : "";
+		},
+		(message) => {
+			if (message) d.afterMarks(null);
+		}
+	);
+	watch(
+		() => dead.value,
+		(isDead) => {
+			if (isDead) d.afterMarks(null);
+		}
+	);
 
 	// ---- while a form is open: the pending list is read again ------------------------------
 	// every few seconds, and when the app comes back to the foreground. A card that left the list by
 	// another route (cancelled or replaced elsewhere, confirmed by "go ahead") then shows the dead
-	// banner without waiting for the person.
+	// banner without waiting for the person. Each tick reads ONLY the server's pending list (and a
+	// failed read is silent). The list the phone shows is that read merged with the thread's rows,
+	// and a row still says "pending" until the thread is read again, so when the card being edited is
+	// missing from the SERVER's list the thread is read once, quietly (no scroll, no loading state,
+	// no banner), and the merge then drops the card: the banner shows.
 	let timer = null;
 	let refreshing = false;
 	const tick = async () => {
-		if (refreshing || !panel.value) return;
+		// a card already found dead stays dead: nothing more to read
+		if (refreshing || !panel.value || dead.value) return;
 		refreshing = true;
+		const token = panel.value.token;
 		try {
-			await io.loadChat();
-			await io.loadPending("auto");
+			const listed = await io.loadPending("auto", { quiet: true });
+			if (listed && !listed.has(token) && panel.value && panel.value.token === token) {
+				await io.loadChatQuietly();
+				await io.loadPending("auto", { quiet: true });
+			}
 		} catch {
 			/* a failed read keeps the screen as it is */
 		} finally {
@@ -200,6 +238,7 @@ export function makeDraftSheet(io) {
 		(token) => {
 			stopWatching();
 			confirming.value = false;
+			confirmingDiscard.value = false;
 			if (!token) return;
 			timer = setInterval(tick, TOOL_FORM_POLL_MS);
 			document.addEventListener("visibilitychange", onVisible);
@@ -210,6 +249,7 @@ export function makeDraftSheet(io) {
 	function closeNow() {
 		link.resetDraftLink();
 		confirming.value = false;
+		confirmingDiscard.value = false;
 		panel.value = null;
 	}
 	function closeLinkMenu() {
@@ -219,7 +259,7 @@ export function makeDraftSheet(io) {
 	// it did: "closed", "menu" (only the link menu closed), "asking" (the inline question is now
 	// showing), "kept" (the question was answered "keep editing" by closing it again), "none".
 	function requestClose() {
-		if (preview.value) {
+		if (preview.value && !panel.value) {
 			preview.value = null;
 			return "closed";
 		}
@@ -229,8 +269,14 @@ export function makeDraftSheet(io) {
 			closeLinkMenu();
 			return "menu";
 		}
+		// "Discard this draft?" is showing: closing it again means keep the draft
+		if (confirmingDiscard.value) {
+			confirmingDiscard.value = false;
+			return "kept";
+		}
 		if (confirming.value) {
 			confirming.value = false;
+			heldNavigation = null;
 			return "kept";
 		}
 		if (closeAsksFirst(p, { dead: dead.value })) {
@@ -250,12 +296,16 @@ export function makeDraftSheet(io) {
 		else io.say(text);
 	}
 
-	async function openEdit(pa) {
-		if (!pa || !pa.token) return "ignored";
+	async function buildEdit(pa) {
 		ui.setError(pa.token, "");
 		notes = [];
 		const result = await openToolDraftPanel(pa, d);
-		tellAbout(pa.token, lastError());
+		return { result, text: lastError() };
+	}
+	async function openEdit(pa) {
+		if (!pa || !pa.token) return "ignored";
+		const { result, text } = await buildEdit(pa);
+		tellAbout(pa.token, text);
 		return result;
 	}
 
@@ -291,6 +341,7 @@ export function makeDraftSheet(io) {
 	// The footer's "Discard draft": the card's Cancel (not "Discard changes", which only closes).
 	function discardDraft() {
 		const p = panel.value;
+		confirmingDiscard.value = false;
 		return p ? discardFromForm(p, d) : Promise.resolve("ignored");
 	}
 
@@ -299,26 +350,101 @@ export function makeDraftSheet(io) {
 		preview.value = null;
 		return pa ? io.create(pa) : undefined;
 	}
-	function editFromPreview() {
+	// Preview -> Edit in the SAME open sheet: the Preview stays until the form is built and set (the
+	// template shows the form as soon as it exists), so the sheet is never closed and reopened
+	// between the two (its fade, the focus handed back to the card and the scroll lock would all
+	// flicker). When the form cannot be built the Preview stays and says why.
+	async function editFromPreview() {
 		const pa = previewItem.value;
-		preview.value = null;
-		return pa ? openEdit(pa) : undefined;
+		if (!pa) return undefined;
+		previewNote.value = "";
+		const { result, text } = await buildEdit(pa);
+		if (result === "opened") {
+			preview.value = null;
+		} else if (result === "failed") {
+			previewNote.value = text || "Could not load this draft. Try again.";
+		}
+		return result;
 	}
 
-	// The router asks before leaving the chat (the phone's back button): while a sheet is open,
-	// back closes (or asks about) the sheet and the chat stays.
-	function guardLeave() {
+	// The footer's "Discard draft" asks first (a server cancel is not undone); the question's
+	// "Discard draft" is discardDraft(), its "Keep draft" closes the question.
+	function askDiscardDraft() {
+		if (!panel.value || footer.value.discardDisabled) return "ignored";
+		confirming.value = false;
+		confirmingDiscard.value = true;
+		return "asking";
+	}
+
+	// ---- the router's guard ------------------------------------------------------------------
+	// Called for every route change out of, or within, this chat (`to` and `from` are the router's).
+	// The sheet holds one history entry while it is open (lib/sheetHistory.js), so:
+	//   - the sheet's own push and pop of that entry pass;
+	//   - a pop to the same chat is the phone's Back: a clean sheet closes and the pop stands, a
+	//     dirty one asks inline and the guard refuses (the router puts the entry back);
+	//   - a change to ANOTHER chat (a notification tap): a clean sheet closes and the navigation
+	//     goes on; a dirty one asks inline, and "Discard changes" then continues that navigation.
+	let heldNavigation = null;
+	function guardLeave(to, from) {
+		if (io.history && io.history.own()) return true;
 		if (!open.value) return true;
-		requestClose();
-		return false;
+		const sameChat = !to || !from || to.path === from.path;
+		if (sameChat) {
+			const result = requestClose();
+			if (result !== "closed") return false;
+			if (io.history) io.history.consumed();
+			return true;
+		}
+		const p = panel.value;
+		if (p && closeAsksFirst(p, { dead: dead.value })) {
+			heldNavigation = to;
+			confirming.value = true;
+			return false;
+		}
+		// nothing to lose: the navigation goes on and the chat's reset closes the sheet
+		if (io.history) io.history.consumed();
+		return true;
+	}
+	// "Discard changes": close the sheet and keep going where the person was headed, if they were.
+	function discardChanges() {
+		const to = heldNavigation;
+		heldNavigation = null;
+		closeNow();
+		if (to && io.history) {
+			io.history.consumed();
+			io.history.navigate(to);
+		}
+	}
+	function keepEditing() {
+		heldNavigation = null;
+		confirming.value = false;
 	}
 
-	// A conversation switch or leaving the chat: nothing of this chat's forms may stay.
+	// The marker entry follows the sheet: pushed when it opens, popped when it closes by itself.
+	let resetting = false;
+	watch(
+		() => open.value,
+		(now, was) => {
+			if (!io.history || resetting) return;
+			if (now && !was) io.history.mark();
+			else if (was && !now) io.history.release();
+		}
+	);
+
+	// A conversation switch or leaving the chat: nothing of this chat's forms may stay (the marker
+	// entry, if any, stays in the history: it cannot be popped from another chat).
 	function reset() {
+		resetting = true;
+		heldNavigation = null;
+		if (io.history) io.history.consumed();
 		preview.value = null;
 		building.value = "";
 		closeNow();
 		stopWatching();
+		// the watcher above runs after this tick: it must not see this close as the sheet's own
+		Promise.resolve().then(() => {
+			resetting = false;
+		});
 	}
 
 	return {
@@ -327,6 +453,8 @@ export function makeDraftSheet(io) {
 		preview,
 		building,
 		confirming,
+		confirmingDiscard,
+		previewNote,
 		open,
 		editingToken,
 		dead,
@@ -346,10 +474,12 @@ export function makeDraftSheet(io) {
 		createFromPreview,
 		editFromPreview,
 		requestClose,
-		keepEditing: () => {
-			confirming.value = false;
+		keepEditing,
+		askDiscardDraft,
+		keepDraft: () => {
+			confirmingDiscard.value = false;
 		},
-		discardChanges: closeNow,
+		discardChanges,
 		closeLinkMenu,
 		guardLeave,
 		reset,

@@ -34,6 +34,13 @@ export function makeDraftUi(reactive = (x) => x) {
 		forget: (token) => {
 			if (token in state) delete state[token];
 		},
+		// The cards left the list (decided or replaced elsewhere): their error lines go with them.
+		// A card whose Create or Cancel is in flight keeps its entry (its reply decides what is left).
+		prune: (tokens) => {
+			const live = new Set(tokens || []);
+			for (const token of Object.keys(state))
+				if (!live.has(token) && !state[token].busyKind) delete state[token];
+		},
 		// A conversation switch: nothing of the previous chat's cards stays.
 		reset: () => {
 			for (const token of Object.keys(state)) delete state[token];
@@ -55,4 +62,27 @@ export function makeDraftUi(reactive = (x) => x) {
 		setBusy: () => {},
 	};
 	return ui;
+}
+
+// True when the thread's rows hold a draft card that is still pending (the server stamps
+// `draft_card: true` on that row, only while its site flag is on). The thread arrives before the
+// pending list does, so this is what keeps a typed draft card from flashing on screen in between.
+// With the flag off no row has it, so nothing changes.
+export function rowsHoldPendingDraft(...lists) {
+	return lists.some((rows) =>
+		(rows || []).some((m) => m && m.role === "tool" && m.draft_card === true)
+	);
+}
+
+// The two notes under the pending stack for cards that were parked before the person's last
+// message and wait. The legacy note ("Tap it to approve or discard") is for a tile only: a draft
+// card has its own buttons, so it gets its own line.
+//   note      the server said a typed yes/no bound no card
+//   isDraft   (item) -> is it a server draft card;  isRecent (item) -> parked after the last message
+export function olderCardNotes(items, { note, isDraft, isRecent }) {
+	const earlier = (items || []).filter((p) => !isRecent(p));
+	return {
+		tile: !!note && earlier.some((p) => !isDraft(p)),
+		draft: !!note && earlier.some((p) => isDraft(p)),
+	};
 }

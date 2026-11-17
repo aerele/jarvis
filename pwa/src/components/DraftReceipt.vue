@@ -108,7 +108,11 @@ defineEmits(["submit"]);
 .jv-receipt-open {
 	flex: none;
 	margin-left: auto;
-	padding: 8px 4px;
+	/* a touch target of at least 40px */
+	display: inline-flex;
+	align-items: center;
+	min-height: 40px;
+	padding: 0 8px;
 	color: var(--accent-solid);
 	font-weight: 600;
 	text-decoration: underline;

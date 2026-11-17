@@ -945,4 +945,8 @@ defineExpose({ parkedRegion });
 .jv-surface-phone :deep(.jv-rowform-label) {
 	font-size: 11.5px;
 }
+/* the read-only totals keep room for their lock glyph (the rule above gives every input 10px) */
+.jv-surface-phone .jv-draft-total-input {
+	padding-right: 28px;
+}
 </style>

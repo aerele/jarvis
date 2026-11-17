@@ -5,10 +5,11 @@
 // own runner (node --test) cannot import the shared host chain, hence vitest.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { defineComponent, h, nextTick, reactive, ref } from "vue";
+import { defineComponent, h, nextTick, reactive, ref, watch } from "vue";
 import DraftCard from "./chat/DraftCard.vue";
 import DraftSheet from "../../../pwa/src/components/DraftSheet.vue";
 import DraftEditForm from "./chat/DraftEditForm.vue";
+import DraftPreview from "./doc/DraftPreview.vue";
 import { makeDraftUi } from "../../../pwa/src/lib/draftCardUi.js";
 import {
 	keepBusyItems,
@@ -69,7 +70,7 @@ const item = (token, card, extra = {}) => ({
 
 // The host run inside a mounted component (it starts a link search that belongs to one), with
 // every outside thing a fake that records its calls.
-function harness({ meta = META, streaming = false } = {}) {
+function harness({ meta = META, streaming = false, card = timesheetCard() } = {}) {
 	const calls = {
 		meta: [],
 		save: [],
@@ -83,7 +84,7 @@ function harness({ meta = META, streaming = false } = {}) {
 		refreshChats: [],
 	};
 	const replies = { save: { ok: true, verb: "create", name: "TS-0001" }, confirm: { ok: true } };
-	const items = ref([item("t1", timesheetCard())]);
+	const items = ref([item("t1", card)]);
 	const ui = makeDraftUi(reactive);
 	const flags = reactive({ streaming, generation: 1, receipt: false });
 	const order = [];
@@ -96,6 +97,10 @@ function harness({ meta = META, streaming = false } = {}) {
 		saveGate: null,
 		beforeReply: null,
 		onDecideReload: null,
+		onQuiet: null,
+		confirmGate: null,
+		// the tokens the SERVER lists (null: the read did not answer); default = what the list holds
+		listed: undefined,
 	};
 	const api = {
 		getDoctypeFormMeta: async (doctype) => {
@@ -130,6 +135,7 @@ function harness({ meta = META, streaming = false } = {}) {
 			agent: "Jarvis",
 			confirm: async (...a) => {
 				calls.confirm.push(a);
+				if (state.confirmGate) await state.confirmGate;
 				return replies.confirm;
 			},
 			dismiss: async (...a) => {
@@ -162,10 +168,17 @@ function harness({ meta = META, streaming = false } = {}) {
 			order.push("chat");
 			if (state.onChat) state.onChat();
 		},
-		loadPending: async (source) => {
-			calls.list.push(source || "");
+		loadPending: async (source, opts) => {
+			calls.list.push([source || "", opts || null]);
 			order.push("list");
 			if (state.onList) state.onList();
+			return state.listed === null
+				? null
+				: new Set(state.listed ?? items.value.map((p) => p.token));
+		},
+		loadChatQuietly: async () => {
+			order.push("quiet");
+			if (state.onQuiet) state.onQuiet();
 		},
 		refreshChats: () => calls.refreshChats.push(1),
 		say: (t) => calls.say.push(t),
@@ -502,29 +515,84 @@ describe("the card keeps its spinner while a read replaces the list", () => {
 
 describe("a card that leaves the list while its form is open", () => {
 	const dead = (t) => t.host.dead.value;
-	// Break: the poll is not started, runs at another rate, reads only the list (the thread's own row
-	// still says pending, so the card never leaves it), or goes on after the sheet closed.
-	it("is found by the poll: banner, Save off, edits kept; the poll stops with the sheet", async () => {
+	// The server's list no longer has the card, but the phone's own list is that read merged with the
+	// thread's rows, and the thread's row still says pending until the thread is read again.
+	const goneFromServer = (t) => {
+		t.state.onList = () => {
+			t.state.listed = [];
+		};
+		t.state.onQuiet = () => {
+			t.items.value = []; // the thread's row is now decided: the merge drops the card
+		};
+	};
+	// Break: the poll is not started, runs at another rate, reads the whole thread on every tick
+	// (the cost this replaced), never reads it when the card is missing (the stale row keeps the
+	// card forever), or goes on after the sheet closed.
+	it("is found by the poll: list only while the card is listed, one quiet thread read when it is missing", async () => {
 		vi.useFakeTimers();
 		const t = await opened();
 		edit(t.host, "parent_project", "PROJ-0002");
 		await vi.advanceTimersByTimeAsync(4999);
 		expect(t.order).toEqual([]);
-		t.state.onList = () => {
-			t.items.value = []; // cancelled somewhere else
-		};
 		await vi.advanceTimersByTimeAsync(1);
-		expect(t.order).toEqual(["chat", "list"]);
-		expect(t.calls.list).toEqual(["auto"]);
+		// listed: only the list is read, quietly (no transcript reload of its own)
+		expect(t.order).toEqual(["list"]);
+		expect(t.calls.list).toEqual([["auto", { quiet: true }]]);
+		expect(dead(t)).toBe(false);
+		goneFromServer(t);
+		t.order.length = 0;
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(t.order).toEqual(["list", "quiet", "list"]);
 		expect(dead(t)).toBe(true);
 		expect(t.host.notices.value).toEqual([{ type: "error", text: DRAFT_STALE_TEXT }]);
 		expect(t.host.footer.value.primaryDisabled).toBe(true);
 		expect(t.host.footer.value.discardDisabled).toBe(true);
 		expect(valueOf(t.host, "parent_project")).toBe("PROJ-0002");
-		t.host.requestClose();
+		// a card found dead stays dead: the poll reads nothing more while the sheet is open
 		t.order.length = 0;
 		await vi.advanceTimersByTimeAsync(30000);
 		expect(t.order).toEqual([]);
+	});
+
+	// Break: the poll goes on after the sheet closed (a read every five seconds for nothing).
+	it("stops with the sheet", async () => {
+		vi.useFakeTimers();
+		const t = await opened();
+		t.host.requestClose();
+		await vi.advanceTimersByTimeAsync(30000);
+		expect(t.order).toEqual([]);
+	});
+
+	// Break: a tick that cannot reach the server (offline, a blip) reads the thread anyway, or
+	// takes the card for dead, or says something (the banner rewrite per tick this replaced).
+	it("a failed or unclean read is silent: no thread read, not dead, no banner", async () => {
+		vi.useFakeTimers();
+		const t = await opened();
+		t.state.listed = null;
+		await vi.advanceTimersByTimeAsync(20000);
+		expect(t.order).toEqual(["list", "list", "list", "list"]);
+		expect(dead(t)).toBe(false);
+		expect(t.calls.say).toEqual([]);
+		// a read that throws is silent too
+		t.io.loadPending = async () => {
+			throw new Error("offline");
+		};
+		await vi.advanceTimersByTimeAsync(10000);
+		expect(dead(t)).toBe(false);
+		expect(t.calls.say).toEqual([]);
+	});
+
+	// Break: the thread is read again while it still says pending (the contradiction waits for the
+	// next tick), or the card is marked dead on the list's word alone.
+	it("a card the thread still holds as pending is not dead yet", async () => {
+		vi.useFakeTimers();
+		const t = await opened();
+		t.state.onList = () => {
+			t.state.listed = [];
+		};
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(t.order).toEqual(["list", "quiet", "list"]);
+		expect(dead(t)).toBe(false);
 	});
 
 	// Break: coming back to the app does not look again (a card handled while the phone slept stays
@@ -538,15 +606,13 @@ describe("a card that leaves the list while its form is open", () => {
 			});
 			document.dispatchEvent(new Event("visibilitychange"));
 		};
-		t.state.onList = () => {
-			t.items.value = [];
-		};
+		goneFromServer(t);
 		set("hidden");
 		await flushPromises();
 		expect(t.order).toEqual([]);
 		set("visible");
 		await flushPromises();
-		expect(t.order).toEqual(["chat", "list"]);
+		expect(t.order).toEqual(["list", "quiet", "list"]);
 		expect(dead(t)).toBe(true);
 		t.host.requestClose();
 		t.order.length = 0;
@@ -667,9 +733,10 @@ describe("closing the sheet", () => {
 
 	// Break: the phone's back button leaves the chat (and its edits) with the sheet open, or
 	// blocks leaving when no sheet is open.
-	it("back closes (or asks about) the sheet and the chat stays; with no sheet it leaves", async () => {
+	it("back closes a clean sheet (the pop stands) or asks about a dirty one (refused); with no sheet it leaves", async () => {
 		const t = await opened();
-		expect(t.host.guardLeave()).toBe(false);
+		// a clean sheet: Back closes it and the pop it caused is accepted (it consumed the sheet's entry)
+		expect(t.host.guardLeave()).toBe(true);
 		expect(t.host.open.value).toBe(false);
 		expect(t.host.guardLeave()).toBe(true);
 		await t.host.openEdit(t.items.value[0]);
@@ -867,6 +934,172 @@ describe("DraftSheet: what the person sees", () => {
 	});
 });
 
+describe("DraftSheet: a message must be seen where the person tapped", () => {
+	// Break: a failed Save shows its words only in the banner at the top of the scrolling body (the
+	// person taps Save at the bottom and sees nothing change), the raw browser text ("Failed to
+	// fetch", "Load failed") is shown, or the banner is not scrolled into view.
+	it("a Save that could not reach the server says it in the footer, in plain words, and scrolls the banner into view", async () => {
+		const scroll = vi.fn();
+		Element.prototype.scrollIntoView = scroll;
+		const t = await opened();
+		const w = await mountSheet(t);
+		edit(t.host, "parent_project", "PROJ-0002");
+		t.state.throwSave = new TypeError("Load failed");
+		await byText(w, "Create").trigger("click");
+		await flushPromises();
+		const offline =
+			"Jarvis could not reach the server. Check your internet connection and try again.";
+		expect(t.host.panel.value.error.message).toBe(offline);
+		expect(w.find(".jv-dsheet-foot .jv-dsheet-wait").text()).toBe(offline);
+		expect(w.html()).not.toContain("Load failed");
+		expect(scroll).toHaveBeenCalledTimes(1);
+		expect(scroll.mock.contexts[0].getAttribute("role")).toBe("alert");
+		w.unmount();
+		delete Element.prototype.scrollIntoView;
+	});
+
+	// Break: the poll marks the card dead but the banner stays out of sight up the scrolled form, or
+	// the footer says nothing next to Save, which has just gone off.
+	it("a card found dead scrolls the banner into view and says so in the footer", async () => {
+		const scroll = vi.fn();
+		Element.prototype.scrollIntoView = scroll;
+		const t = await opened();
+		const w = await mountSheet(t);
+		t.items.value = [];
+		await flushPromises();
+		expect(w.find(".jv-dsheet-foot .jv-dsheet-wait").text()).toBe(DRAFT_STALE_TEXT);
+		expect(scroll).toHaveBeenCalled();
+		w.unmount();
+		delete Element.prototype.scrollIntoView;
+	});
+
+	// Break: a refusal that marks fields is also scrolled to the banner (it has its own scroll to the
+	// first mark), or says its first message in the footer instead of pointing at the marks.
+	it("a refusal that marks fields tells the footer to look at them", async () => {
+		const t = await opened();
+		const w = await mountSheet(t);
+		edit(t.host, "parent_project", "PROJ-0002");
+		t.replies.save = FIXABLE;
+		await byText(w, "Create").trigger("click");
+		await flushPromises();
+		expect(w.find(".jv-dsheet-foot .jv-dsheet-wait").text()).toBe(
+			"Fix the marked fields, then save again."
+		);
+		w.unmount();
+	});
+});
+
+// The payload through the REAL controls of the mounted form (not by writing into the model): what a
+// person types into the phone's inputs, selects, date and number fields becomes the `values` that
+// save_draft_card receives, and only the changes.
+describe("DraftSheet: what typing into the real controls sends", () => {
+	const TASK_META = {
+		ok: true,
+		title_field: "subject",
+		is_submittable: 0,
+		fields: [
+			F("subject", "Subject", "Data"),
+			F("status", "Status", "Select", { options: "Open\nWorking\nCompleted" }),
+			F("exp_end_date", "End Date", "Date"),
+			F("expected_time", "Expected Time (In Hours)", "Float"),
+			F("is_milestone", "Is Milestone", "Check"),
+			F("description", "Details", "Small Text"),
+		],
+		tables: {},
+	};
+	const taskCard = () => ({
+		kind: "create",
+		doctype: "Task",
+		name: null,
+		rows: [],
+		tables: [],
+		draft: {
+			verb: "create",
+			doctype: "Task",
+			name: "",
+			title: "New Task",
+			values: {
+				subject: "Review the plan",
+				status: "Open",
+				exp_end_date: "2026-12-08",
+				expected_time: 2,
+				is_milestone: 0,
+				description: "First look",
+			},
+			ignored: [],
+			dropped: [],
+			continue: false,
+		},
+	});
+	const control = (w, label, selector) =>
+		w
+			.findAll(".jv-draft-fld")
+			.find((f) => f.find("label").text().startsWith(label))
+			.find(selector);
+
+	// Break: a control writes to the wrong field or in the wrong form (a number as text, a date
+	// shifted, Yes/No as text), sends an untouched field (every drafted value written again), or
+	// sends nothing when a real control was used. No test that edits `panel.fields` sees any of it.
+	it("a typed Data field, a chosen Select option, a Date, a Number and a Check each reach save as the one change", async () => {
+		const t = harness({ meta: TASK_META, card: taskCard() });
+		// the server keeps the form open (busy), so every Save leaves it to type the next change
+		t.replies.save = {
+			ok: false,
+			error: { code: "DraftBusyError", message: "Busy.", fields: [] },
+		};
+		await t.host.openEdit(t.items.value[0]);
+		const w = await mountSheet(t);
+		expect(w.find("input[type=date]").element.value).toBe("2026-12-08");
+		expect(control(w, "Expected Time", "input").attributes("type")).toBe("number");
+		const sends = async (act) => {
+			t.calls.save.length = 0;
+			await act();
+			await byText(w, "Create").trigger("click");
+			await flushPromises();
+			return t.calls.save.map((c) => c[2]);
+		};
+		expect(
+			await sends(() => control(w, "Subject", "input").setValue("Review the budget"))
+		).toEqual([{ subject: "Review the budget" }]);
+		await control(w, "Subject", "input").setValue("Review the plan");
+		expect(await sends(() => control(w, "Status", "select").setValue("Working"))).toEqual([
+			{ status: "Working" },
+		]);
+		await control(w, "Status", "select").setValue("Open");
+		expect(await sends(() => control(w, "End Date", "input").setValue("2026-12-31"))).toEqual([
+			{ exp_end_date: "2026-12-31" },
+		]);
+		await control(w, "End Date", "input").setValue("2026-12-08");
+		expect(await sends(() => control(w, "Expected Time", "input").setValue("3.5"))).toEqual([
+			{ expected_time: 3.5 },
+		]);
+		await control(w, "Expected Time", "input").setValue("2");
+		expect(await sends(() => control(w, "Is Milestone", "select").setValue("Yes"))).toEqual([
+			{ is_milestone: 1 },
+		]);
+		await control(w, "Is Milestone", "select").setValue("No");
+		expect(
+			await sends(() => control(w, "Details", "textarea").setValue("Second look"))
+		).toEqual([{ description: "Second look" }]);
+		w.unmount();
+	});
+
+	// Break: two edits through real controls are sent as one field, or the untouched fields ride along.
+	it("two edits are sent together and nothing else", async () => {
+		const t = harness({ meta: TASK_META, card: taskCard() });
+		await t.host.openEdit(t.items.value[0]);
+		const w = await mountSheet(t);
+		await control(w, "Subject", "input").setValue("Review the budget");
+		await control(w, "Status", "select").setValue("Completed");
+		await byText(w, "Create").trigger("click");
+		await flushPromises();
+		expect(t.calls.save).toEqual([
+			["t1", "C1", { subject: "Review the budget", status: "Completed" }],
+		]);
+		w.unmount();
+	});
+});
+
 describe("DraftSheet: closing", () => {
 	// Break: the close control or the Sheet's own Escape closes a dirty sheet outright, the question
 	// is not inside the sheet, "Keep editing" does not take focus, or a clean sheet asks.
@@ -892,10 +1125,43 @@ describe("DraftSheet: closing", () => {
 		await flushPromises();
 		expect(w2.find(".jv-dsheet-ask-text").exists()).toBe(false);
 		expect(buttonsOf(w2)).toEqual(["Create", "Discard draft"]);
-		await byText(w2, "Discard draft").trigger("click");
+		w2.unmount();
+	});
+
+	// Break: "Discard draft" (a server cancel, not undone) happens on one tap with no question, the
+	// question steals focus from its safe answer, Escape or back answers it "discard", "Keep draft"
+	// cancels the card anyway, or it uses window.confirm.
+	it("Discard draft asks first: Keep draft is focused and safe, the second Discard draft cancels", async () => {
+		const confirmSpy = vi.spyOn(window, "confirm");
+		const t = await opened();
+		const w = await mountSheet(t);
+		await byText(w, "Discard draft").trigger("click");
+		await flushPromises();
+		expect(w.find(".jv-dsheet-ask-text").text()).toBe("Discard this draft?");
+		expect(buttonsOf(w)).toEqual(["Keep draft", "Discard draft"]);
+		expect(document.activeElement).toBe(byText(w, "Keep draft").element);
+		expect(t.calls.dismiss).toEqual([]);
+		// Escape (the Sheet's close) answers Keep draft
+		document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+		await flushPromises();
+		expect(w.find(".jv-dsheet-ask-text").exists()).toBe(false);
+		expect(t.host.open.value).toBe(true);
+		expect(t.calls.dismiss).toEqual([]);
+		// Keep draft closes the question and cancels nothing
+		await byText(w, "Discard draft").trigger("click");
+		await flushPromises();
+		await byText(w, "Keep draft").trigger("click");
+		await flushPromises();
+		expect(buttonsOf(w)).toEqual(["Create", "Discard draft"]);
+		expect(t.calls.dismiss).toEqual([]);
+		// the question's Discard draft is the card's Cancel
+		await byText(w, "Discard draft").trigger("click");
+		await flushPromises();
+		await byText(w, "Discard draft").trigger("click");
 		await flushPromises();
 		expect(t.calls.dismiss).toEqual([["t1", "C1"]]);
-		w2.unmount();
+		expect(confirmSpy).not.toHaveBeenCalled();
+		w.unmount();
 	});
 
 	// Break: "Discard changes" discards the draft too (the card is gone and the record never made).
@@ -1041,28 +1307,83 @@ describe("Preview of a draft card on the phone", () => {
 	it("Create is the card's Create: once on a double tap, and the sheet closes", async () => {
 		const t = await opensPreview();
 		const w = await mountSheet(t);
+		// the confirm call is held open, so the second tap lands while the first is in flight
+		let release;
+		t.state.confirmGate = new Promise((r) => (release = r));
 		const primary = w.find(".dp-foot .dp-btn-primary");
 		await primary.trigger("click");
 		await primary.trigger("click");
 		await flushPromises();
 		expect(t.calls.confirm).toEqual([["t1", "C1"]]);
+		expect(t.ui.busyKind("t1")).toBe("create");
 		expect(t.host.open.value).toBe(false);
+		release();
+		await flushPromises();
+		expect(t.calls.confirm).toEqual([["t1", "C1"]]);
 		expect(t.items.value).toEqual([]);
 		w.unmount();
 	});
 
-	// Break: Edit leaves the Preview open over the form, builds the form twice, or loses the card.
-	it("Edit closes the Preview and opens the edit sheet in the same sheet", async () => {
+	// Break: Edit closes the sheet and reopens it (its fade, the focus handed back to the card and the
+	// scroll lock would flicker), leaves the Preview over the form, builds the form twice, or loses
+	// the card.
+	it("Edit hands over to the edit form in the SAME open sheet: it never closes in between", async () => {
 		const t = await opensPreview();
 		const w = await mountSheet(t);
+		const seen = [];
+		watch(
+			() => t.host.open.value,
+			(v) => seen.push(v),
+			{ flush: "sync" }
+		);
 		await w.find(".dp-foot .dp-btn:not(.dp-btn-primary)").trigger("click");
 		await flushPromises();
+		expect(seen).toEqual([]); // `open` never changed: it was never false
+		expect(t.host.open.value).toBe(true);
 		expect(t.host.preview.value).toBeNull();
 		expect(t.host.panel.value.token).toBe("t1");
 		expect(w.find(".dp-panel").exists()).toBe(false);
 		expect(w.find(".jv-dsheet-title").text()).toBe("New Timesheet");
 		expect(t.calls.confirm).toEqual([]);
 		w.unmount();
+	});
+
+	// Break: a form that cannot be built closes the Preview (the person loses their place) or says
+	// the reason under the card, behind the sheet, where nobody sees it.
+	it("when the form cannot be built the Preview stays and says why in the sheet", async () => {
+		const t = await opensPreview();
+		const w = await mountSheet(t);
+		// the card was replaced by one the form cannot read
+		t.items.value[0].preview.card = { title: "x", draft: { verb: "nothing" } };
+		await w.find(".dp-foot .dp-btn:not(.dp-btn-primary)").trigger("click");
+		await flushPromises();
+		expect(t.host.open.value).toBe(true);
+		expect(t.host.preview.value).not.toBeNull();
+		expect(t.host.panel.value).toBeNull();
+		expect(w.find(".jv-dsheet > .jv-dsheet-note").text()).toBe(
+			"Couldn't open this draft. Ask Jarvis to send it again."
+		);
+		expect(w.find(".dp-panel").exists()).toBe(true);
+		// the note belongs to that Preview
+		t.host.requestClose();
+		await flushPromises();
+		expect(t.host.previewNote.value).toBe("");
+		w.unmount();
+	});
+
+	// Break: the phone's Preview slides in from the side like the desktop's panel (an animation with
+	// nothing to slide from inside a full-screen sheet), or the desktop's loses its slide. The name
+	// has no other trace in the DOM than the transition's own attribute.
+	it("names its transition dp-still on the phone and dp-slide on the desktop", async () => {
+		const t = await opensPreview();
+		const model = t.host.preview.value.model;
+		const name = (surface) =>
+			mount(DraftPreview, { props: { model, ...(surface ? { surface } : {}) } })
+				.find("transition-stub")
+				.attributes("name");
+		expect(name("phone")).toBe("dp-still");
+		expect(name()).toBe("dp-slide");
+		expect(name("desktop")).toBe("dp-slide");
 	});
 
 	// Break: Create stays live while a turn runs (the server refuses it silently) or while the card
@@ -1102,7 +1423,7 @@ describe("Preview of a draft card on the phone", () => {
 		await t.host.openPreview(t.items.value[0]);
 		expect(t.host.requestClose()).toBe("closed");
 		await t.host.openPreview(t.items.value[0]);
-		expect(t.host.guardLeave()).toBe(false);
+		expect(t.host.guardLeave()).toBe(true);
 		expect(t.host.open.value).toBe(false);
 		expect(t.host.confirming.value).toBe(false);
 		w.unmount();

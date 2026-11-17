@@ -29,6 +29,8 @@ export { cardOfItem, isToolDraftItem };
 //   ui          the token-keyed store (draftCardUi.makeDraftUi)
 //   editingToken  the card whose edit sheet is open (it shows "Editing")
 //   buildingToken the card whose sheet is being built (every draft card is locked meanwhile)
+//   holdsDraftRow a draft card is known pending though the list has not said so (the thread's row
+//                 says it, or a decision on one is still settling): no typed draft card is live
 export function phoneDraftModel({
 	items,
 	streaming,
@@ -36,6 +38,7 @@ export function phoneDraftModel({
 	ui,
 	editingToken = "",
 	buildingToken = "",
+	holdsDraftRow = false,
 }) {
 	const list = Array.isArray(items) ? items : [];
 	const ctxMap = toolDraftCtxMap({
@@ -56,7 +59,7 @@ export function phoneDraftModel({
 		last && isToolDraftItem(last)
 			? orphanStackHint({ items: list, ctxMap, stackHint })
 			: stackHint || "";
-	return { ctxMap, hintLine, parked: hasParkedDraft(list) };
+	return { ctxMap, hintLine, parked: hasParkedDraft(list) || !!holdsDraftRow };
 }
 
 // loadPending replaces the list on every read. A card whose Create or Cancel is in flight stays

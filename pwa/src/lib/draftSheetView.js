@@ -18,3 +18,19 @@ export function errorLineOf(error) {
 	if (!message) return null;
 	return { message, hint: typeof error.hint === "string" ? error.hint.trim() : "" };
 }
+
+// The one line in the sticky footer, next to the button the person just pressed. The banner that
+// carries the message sits at the top of a body that scrolls, so after a failed Save it can be out
+// of sight; this line says it where the thumb is. null when there is nothing to say.
+//   errorLine  errorLineOf(panel.error);  dead  the card is no longer pending
+//   deadText   the words of the dead banner
+// A message that marks fields has its own scroll to the first mark and says "Fix the marked fields".
+export function footerStatus({ errorLine, dead, deadText, marked = false }) {
+	if (dead) return { text: deadText, tone: "error" };
+	if (errorLine)
+		return {
+			text: marked ? "Fix the marked fields, then save again." : errorLine.message,
+			tone: "error",
+		};
+	return null;
+}

@@ -3,13 +3,20 @@
 // ends up under the keyboard. Android Chrome (interactive-widget=resizes-content) shrinks both,
 // and the numbers agree. The element gets two CSS variables, `--jv-vv-top` and `--jv-vv-height`
 // (its stylesheet falls back to 0 and 100dvh when they are not set, as on a browser with no
-// visualViewport). `win` is the window; pure otherwise, so node can run it with a fake one.
+// visualViewport). With the keyboard up (the visual viewport is much shorter than the window, with
+// its bottom above the window's) the element also gets `--jv-kb-bottom: 0px`: the home-bar padding
+// at the foot would be dead space between the footer and the keyboard. `win` is the window; pure
+// otherwise, so node can run it with a fake one.
+const KEYBOARD_MIN_PX = 120;
 export function fitViewport(el, win) {
 	const vv = win && win.visualViewport;
 	if (!el || !vv) return null;
 	const apply = () => {
 		el.style.setProperty("--jv-vv-top", `${Math.max(0, Math.round(vv.offsetTop))}px`);
 		el.style.setProperty("--jv-vv-height", `${Math.round(vv.height)}px`);
+		const covered = (win.innerHeight || vv.height) - vv.height - vv.offsetTop;
+		if (covered > KEYBOARD_MIN_PX) el.style.setProperty("--jv-kb-bottom", "0px");
+		else el.style.removeProperty("--jv-kb-bottom");
 	};
 	apply();
 	vv.addEventListener("resize", apply);
@@ -19,6 +26,7 @@ export function fitViewport(el, win) {
 		vv.removeEventListener("scroll", apply);
 		el.style.removeProperty("--jv-vv-top");
 		el.style.removeProperty("--jv-vv-height");
+		el.style.removeProperty("--jv-kb-bottom");
 	};
 }
 
