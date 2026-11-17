@@ -57,6 +57,8 @@ NOT_RENAMABLE = (
 	"MCP OAuth Client",
 	"Jarvis Pending OAuth Capture",
 	"Jarvis Agent Write",
+	"Jarvis Activity Event",
+	"Jarvis Activity Daily",
 	"Jarvis Agent Provenance Event",
 	"Jarvis App Learning Run",
 	"Jarvis Connector Log",
