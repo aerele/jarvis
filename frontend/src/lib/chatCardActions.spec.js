@@ -6,6 +6,8 @@ import {
 	chatRefusalMessage,
 	chatSettledReason,
 	chatStatusLine,
+	confirmReplyOutcome,
+	dismissReplyOutcome,
 	isChatSettled,
 	keepsChatCard,
 	nextStepActedKeys,
@@ -148,17 +150,14 @@ describe("ChatView direct safety-update decisions", () => {
 		return src.slice(start, next === -1 ? undefined : next);
 	};
 
-	it("makes safety_update terminal before any retryable card branch", () => {
-		const helper = src.slice(
-			src.indexOf("function settleSafetyUpdate(token, response)"),
-			src.indexOf("function confirmationStorageUnavailable(response)")
-		);
-		expect(helper).toContain('response?.reason_code !== "safety_update"');
-		expect(helper).toContain("settleSafetyUpdateNotice");
-		const notice = src.slice(
-			src.indexOf("function settleSafetyUpdateNotice(token, message)"),
-			src.indexOf("function settleSafetyUpdate(token, response)")
-		);
+	// The notice slice ends at a comment the view keeps: a missing marker would make the slice the
+	// rest of the file and the checks below would pass for the wrong reason.
+	it("settles a safety update by its token only, and says it once", () => {
+		const start = src.indexOf("function settleSafetyUpdateNotice(token, message)");
+		const end = src.indexOf("// A direct Confirm, Approve & run, or Discard can race");
+		expect(start).toBeGreaterThan(-1);
+		expect(end).toBeGreaterThan(start);
+		const notice = src.slice(start, end);
 		expect(notice).toContain("safetySettledTokens.value");
 		expect(notice).toContain("removePending(token)");
 		expect(notice).toContain("if (!seen)");
@@ -168,14 +167,35 @@ describe("ChatView direct safety-update decisions", () => {
 		expect(src).toContain(
 			"pendingActions.value = pendingActions.value.filter((x) => x.token !== token)"
 		);
+	});
 
-		for (const fn of ["confirmPending", "approveAndRunPending", "discardPending"]) {
-			const body = actionBody(fn);
-			const safety = body.indexOf("settleSafetyUpdate(token, r)");
-			const kept = body.indexOf("keepsChatCard(r)");
-			expect(safety, fn).toBeGreaterThan(-1);
-			expect(kept, fn).toBeGreaterThan(safety);
-		}
+	// Break: the ladder takes a safety update for a retryable refusal (it is terminal: the card is
+	// spent), or reads it after the storage and keep branches. The rows are executed here; the
+	// effects the desktop does with `safety` are in chatCardDoors.spec.js.
+	it("makes safety_update terminal before any retryable card branch", () => {
+		const withStorageShape = {
+			ok: false,
+			reason_code: "safety_update",
+			error: { type: "ConfirmationUnavailableError", message: "m" },
+		};
+		expect(confirmReplyOutcome(withStorageShape).safety).toEqual({ message: "m" });
+		expect(dismissReplyOutcome(withStorageShape).safety).toEqual({ message: "m" });
+		expect(confirmReplyOutcome(withStorageShape).fate).toBe("gone");
+	});
+
+	it("applies a safety outcome by settling the notice, before any other branch", () => {
+		const body = src.slice(
+			src.indexOf("async function applyCardOutcome("),
+			src.indexOf("async function confirmPending(")
+		);
+		expect(body.indexOf("out.safety")).toBeGreaterThan(-1);
+		expect(
+			body.indexOf("settleSafetyUpdateNotice(token, out.safety.message)")
+		).toBeGreaterThan(-1);
+		expect(body.indexOf("out.safety")).toBeLessThan(body.indexOf('out.fate === "kept"'));
+		expect(body.indexOf('out.fate === "kept"')).toBeLessThan(
+			body.indexOf("removePending(token)")
+		);
 	});
 
 	it("captures the view, conversation and token before every direct decision", () => {
@@ -189,20 +209,47 @@ describe("ChatView direct safety-update decisions", () => {
 			expect(body, fn).toContain("pa.conversation !== view.conversation");
 			expect(body, fn).toContain(rpc);
 			expect(body, fn).toContain("if (!pendingActionIsCurrent(view)) return;");
-			expect(body, fn).toContain("if (!chatViewIsCurrent(view)) return;");
 		}
+		// after the reload the outcome's host checks the view again, before it refreshes the list
+		const apply = actionBody("applyCardOutcome");
+		expect(apply.indexOf("await loadConversation(view.conversation)")).toBeLessThan(
+			apply.indexOf("if (!chatViewIsCurrent(view)) return;")
+		);
+		expect(apply.indexOf("if (!chatViewIsCurrent(view)) return;")).toBeLessThan(
+			apply.indexOf("store.loadConversations()")
+		);
 	});
 });
 
-describe("ChatView keeps a refused card", () => {
+// Break: a handler decides a reply itself again (a second ladder beside the shared one: the two
+// drift, as the phone's copy did), or reads the wrong door's decision. What each reply does is
+// executed in chatCardDoors.spec.js (the effects) and chatCardDecision.spec.js (the table).
+describe("ChatView's handlers use the shared decision and nothing else", () => {
 	const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
-	for (const fn of ["confirmPending", "approveAndRunPending", "discardPending"]) {
-		it(`${fn} checks keepsChatCard before it removes the card`, () => {
-			const start = src.indexOf(`async function ${fn}(`);
-			const body = src.slice(start, src.indexOf("\nasync function ", start + 1));
-			const kept = body.indexOf("keepsChatCard(r)");
-			expect(kept).toBeGreaterThan(-1);
-			expect(kept).toBeLessThan(body.indexOf("removePending(token)"));
+	const body = (fn) => {
+		const start = src.indexOf(`async function ${fn}(`);
+		return src.slice(start, src.indexOf("\nasync function ", start + 1));
+	};
+	for (const [fn, decide, thrownDoor] of [
+		["confirmPending", "confirmReplyOutcome(r,", "confirm"],
+		["approveAndRunPending", "confirmReplyOutcome(r,", "approve"],
+		["discardPending", "dismissReplyOutcome(r)", "dismiss"],
+	]) {
+		it(`${fn} applies ${decide} and reads a thrown call with thrownCardError(e, "${thrownDoor}")`, () => {
+			const text = body(fn);
+			expect(text).toContain(`applyCardOutcome(`);
+			expect(text).toContain(decide);
+			expect(text).toContain(`thrownCardError(e, "${thrownDoor}")`);
+			for (const own of [
+				"keepsChatCard(",
+				"chatSettledReason(",
+				"chatRefusalMessage(",
+				"confirmationStorageUnavailable(",
+				"r.ok === false",
+				"r.error",
+				"thrownActionError(",
+			])
+				expect(text, own).not.toContain(own);
 		});
 	}
 });
@@ -261,7 +308,7 @@ describe("chatSettledReason", () => {
 
 describe("ChatView shows the specific reason on a settled card", () => {
 	const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
-	for (const fn of ["confirmPending", "approveAndRunPending", "onTypedConfirmResolved"]) {
+	for (const fn of ["onTypedConfirmResolved"]) {
 		it(`${fn} checks chatSettledReason in its InvalidConfirmation branch`, () => {
 			const start = src.indexOf(`async function ${fn}(`);
 			const body = src.slice(start, src.indexOf("\nasync function ", start + 1));

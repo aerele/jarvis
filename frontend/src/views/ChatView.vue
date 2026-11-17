@@ -4264,20 +4264,15 @@
 					<div v-else class="jv-draft-foot">
 						<button
 							class="jv-action-primary"
-							:disabled="
-								draftPanel.applying ||
-								!!draftPanel.saveBlocked ||
-								draftPanelDead ||
-								convStreaming
-							"
-							:title="convStreaming ? 'Waiting for the current reply to finish' : ''"
+							:disabled="toolFoot.primaryDisabled"
+							:title="toolFoot.primaryTitle"
 							@click="saveToolDraft()"
 						>
-							{{ draftPanel.applying ? "Saving…" : toolPrimaryLabel(draftPanel) }}
+							{{ toolFoot.primaryLabel }}
 						</button>
 						<button
 							class="jv-action-discard"
-							:disabled="draftPanel.applying || draftPanelDead"
+							:disabled="toolFoot.discardDisabled"
 							@click="discardToolPanel()"
 						>
 							Discard
@@ -4302,7 +4297,12 @@
 			ref="toolPreviewRef"
 			:model="toolPreview.model"
 			:confirm-label="toolPrimaryLabel(toolPreview.model)"
-			:disabled="convStreaming || !!(toolPreviewItem && toolPreviewItem.busy)"
+			:disabled="
+				previewPrimaryDisabled({
+					streaming: convStreaming,
+					busy: toolPreviewItem && toolPreviewItem.busy,
+				})
+			"
 			@close="toolPreview = null"
 			@edit="onToolPreviewEdit"
 			@confirm="onToolPreviewConfirm"
@@ -4592,7 +4592,13 @@ import {
 	toolPanelNotices,
 	withBusyKind,
 } from "@/lib/toolDraftHost";
-import { focusFirstMark, settleCalculatedCells, toolPrimaryLabel } from "@/lib/toolDraftPanel";
+import { focusFirstMark, toolPrimaryLabel } from "@/lib/toolDraftPanel";
+import {
+	TOOL_FORM_POLL_MS,
+	previewPrimaryDisabled,
+	toolFooterState,
+	watchCalculatedCells,
+} from "@/lib/toolDraftSheet";
 import {
 	firstEditable,
 	openerButton,
@@ -4600,13 +4606,15 @@ import {
 	toolPanelKeyAction,
 } from "@/lib/toolDraftKeys";
 import {
-	chatRefusalMessage,
 	chatSettledReason,
-	keepsChatCard,
+	confirmReplyOutcome,
+	confirmationStorageUnavailable,
+	dismissReplyOutcome,
 	nextStepActedKeys,
 	nextStepRefusal,
 	receiptRecord,
 	shouldHideNextStep,
+	thrownCardError,
 } from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo, showsRawReason } from "@/lib/errors";
 import {
@@ -8660,18 +8668,10 @@ function settleSafetyUpdateNotice(token, message) {
 
 // A direct Confirm, Approve & run, or Discard can race a close migration. The
 // endpoint then returns the same terminal safety_update envelope as a durable
-// receipt. Treat it as that receipt immediately: exclude only its token, drop
-// only its card, and give the person the one Done-only explanation. A later
-// transcript reload sees the exclusion and cannot add a duplicate notice.
-function settleSafetyUpdate(token, response) {
-	if (!token || response?.reason_code !== "safety_update") return false;
-	settleSafetyUpdateNotice(token, response?.error?.message || SAFETY_UPDATE_COPY);
-	return true;
-}
-function confirmationStorageUnavailable(response) {
-	const type = response && response.error && response.error.type;
-	return type === "ConfirmationUnavailableError" || type === "ConfirmationOutcomeUnknownError";
-}
+// receipt (lib/chatCardActions outcome.safety). Treat it as that receipt
+// immediately: exclude only its token, drop only its card, and give the person
+// the one Done-only explanation. A later transcript reload sees the exclusion
+// and cannot add a duplicate notice.
 // Enqueue a parked confirmation, deduped by token (a resync + a live event can
 // both carry the same card).
 // PR-1: build a confirm-card queue item from a durable pending action-row (a
@@ -8747,6 +8747,40 @@ function enqueuePending(card) {
 	});
 }
 
+// Applies what lib/chatCardActions decided for a card's Confirm / Approve & run / Discard answer
+// (confirmReplyOutcome, dismissReplyOutcome): the safety-update notice, a kept card with its error
+// and toast, or a spent card taken off the list (with its toast, or a reload of the chat, and the
+// queued chip of a continuation that is waiting for a slot).
+async function applyCardOutcome(out, { token, view, cardById }) {
+	if (out.safety) {
+		settleSafetyUpdateNotice(token, out.safety.message);
+		return;
+	}
+	if (out.fate === "kept") {
+		const card = cardById();
+		if (card) card.error = out.cardError;
+		notify(out.message, { type: "error" });
+		return;
+	}
+	removePending(token);
+	if (out.toast) {
+		notify(out.message, { type: "error" });
+		return;
+	}
+	if (out.reload) {
+		await loadConversation(view.conversation);
+		if (!chatViewIsCurrent(view)) return;
+		store.loadConversations();
+	}
+	// SUX-3/SUXI-2: the continuation turn queued (all slots taken). Show the
+	// standard queued chip + lock the composer so the card doesn't vanish into
+	// silence after the "Change saved" ack clears (mirrors send()'s r.queued).
+	if (out.queued) {
+		queuedTurn.value = out.queued;
+		sending.value = true;
+	}
+}
+
 async function confirmPending(pa) {
 	if (!pa || pa.busy) return;
 	// Defense in depth behind the disabled button: never dispatch a continuation
@@ -8770,70 +8804,17 @@ async function confirmPending(pa) {
 	try {
 		const r = await api.confirmTool(token, view.conversation);
 		if (!pendingActionIsCurrent(view)) return;
-		if (r && r.ok === false) {
-			if (settleSafetyUpdate(token, r)) return;
-			if (confirmationStorageUnavailable(r)) {
-				const card = cardById();
-				if (card) card.error = r.error;
-				notify(r.error.message, { type: "error" });
-				return;
-			}
-			if (keepsChatCard(r)) {
-				// Not settled (busy, already running, identity refused, a stopping armed run): keep it.
-				const card = cardById();
-				if (card) card.error = { message: chatRefusalMessage(r) };
-				notify(chatRefusalMessage(r), { type: "error" });
-				return;
-			}
-			// Token gone/expired/used, or the executed tool reported failure. Either
-			// way the card is spent - surface a brief note and dismiss.
-			if (r.error && r.error.type === "InvalidConfirmation") {
-				removePending(token);
-				// A settled card (isChatSettled) still carrying a specific reason_code
-				// (stale/target_missing/tampered/unverifiable, …) says why. Only a
-				// bare legacy token (no reason_code at all) gets the opaque guess:
-				// use the card's own wall-clock expiry for the right one (F15).
-				const settledReason = chatSettledReason(r, { draft: isToolDraftItem(pa) });
-				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
-				notify(
-					settledReason ||
-						(expired
-							? "This confirmation expired. Tell me the action again to retry it."
-							: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again."),
-					{ type: "error" }
-				);
-				return;
-			}
-			// The token was consumed and the tool failed; confirm_tool already
-			// persisted a durable "failed" receipt chip. Drop the card and reload
-			// so the chip shows in the thread instead of a lingering spent card.
-			removePending(token);
-			await loadConversation(view.conversation);
-			if (!chatViewIsCurrent(view)) return;
-			store.loadConversations();
-			return;
-		}
-		// Success - the executed result surfaces via the turn's normal tool/stream
-		// events; reload to be sure the transcript reflects it (same as applyDraft).
-		removePending(token);
-		await loadConversation(view.conversation);
-		if (!chatViewIsCurrent(view)) return;
-		store.loadConversations();
-		// SUX-3/SUXI-2: the continuation turn queued (all slots taken). Show the
-		// standard queued chip + lock the composer so the card doesn't vanish into
-		// silence after the "Change saved" ack clears (mirrors send()'s r.queued).
-		if (r && r.queued) {
-			queuedTurn.value = {
-				run_id: r.run_id,
-				message_id: r.message_id,
-				position: r.queued_position || null,
-			};
-			sending.value = true;
-		}
+		await applyCardOutcome(
+			confirmReplyOutcome(r, {
+				draft: isToolDraftItem(pa),
+				expired: pendingExpiry(pa.expires_at, Date.now()).expired,
+			}),
+			{ token, view, cardById }
+		);
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = thrownActionError(e, "Could not confirm this action.");
+		if (card) card.error = thrownCardError(e, "confirm");
 	} finally {
 		// The switch watcher already dropped this view's in-flight token. Do not
 		// delete a same-token action started by a later A view after A → B → A.
@@ -8849,9 +8830,9 @@ async function confirmPending(pa) {
 // which both confirms this card's step 1 AND opens the armed skill's
 // uninterrupted run (D-RUN) - covered writes after this one then execute with
 // receipts instead of parking their own cards. Same {ok,...}/
-// InvalidConfirmation/storage-unavailable envelope as confirm_tool, so the
-// {ok:false} handling below mirrors confirmPending's verbatim - the two must
-// not drift in what a failure looks like to the user. Only reachable from this
+// InvalidConfirmation/storage-unavailable envelope as confirm_tool, so it reads
+// the reply with the same confirmReplyOutcome - the two must not drift in what a
+// failure looks like to the user. Only reachable from this
 // card's own "Approve & run" button - never from the typed go-ahead path.
 async function approveAndRunPending(pa) {
 	if (!pa || pa.busy) return;
@@ -8872,62 +8853,17 @@ async function approveAndRunPending(pa) {
 	try {
 		const r = await api.approveAndRun(token, view.conversation);
 		if (!pendingActionIsCurrent(view)) return;
-		if (r && r.ok === false) {
-			if (settleSafetyUpdate(token, r)) return;
-			if (confirmationStorageUnavailable(r)) {
-				const card = cardById();
-				if (card) card.error = r.error;
-				notify(r.error.message, { type: "error" });
-				return;
-			}
-			if (keepsChatCard(r)) {
-				const card = cardById();
-				if (card) card.error = { message: chatRefusalMessage(r) };
-				notify(chatRefusalMessage(r), { type: "error" });
-				return;
-			}
-			if (r.error && r.error.type === "InvalidConfirmation") {
-				removePending(token);
-				// Mirrors confirmPending's InvalidConfirmation branch: a settled card
-				// carrying a specific reason_code says why, not the opaque guess.
-				const settledReason = chatSettledReason(r, { draft: isToolDraftItem(pa) });
-				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
-				notify(
-					settledReason ||
-						(expired
-							? "This confirmation expired. Tell me the action again to retry it."
-							: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again."),
-					{ type: "error" }
-				);
-				return;
-			}
-			// The token was consumed and step 1 failed - approve_and_run never opens
-			// the run on a failed first step (§3.4), so this is exactly confirmPending's
-			// spent-card path: a durable "failed" receipt chip is already persisted.
-			removePending(token);
-			await loadConversation(view.conversation);
-			if (!chatViewIsCurrent(view)) return;
-			store.loadConversations();
-			return;
-		}
-		// Success - the run's own writes surface via the turn's normal tool/stream
-		// events as they happen; reload to be sure the transcript reflects step 1.
-		removePending(token);
-		await loadConversation(view.conversation);
-		if (!chatViewIsCurrent(view)) return;
-		store.loadConversations();
-		if (r && r.queued) {
-			queuedTurn.value = {
-				run_id: r.run_id,
-				message_id: r.message_id,
-				position: r.queued_position || null,
-			};
-			sending.value = true;
-		}
+		await applyCardOutcome(
+			confirmReplyOutcome(r, {
+				draft: isToolDraftItem(pa),
+				expired: pendingExpiry(pa.expires_at, Date.now()).expired,
+			}),
+			{ token, view, cardById }
+		);
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = thrownActionError(e, "Could not start the run.");
+		if (card) card.error = thrownCardError(e, "approve");
 	} finally {
 		// See confirmPending: this continuation must not clear a later view's
 		// matching token when the user leaves and returns while it is in flight.
@@ -9009,28 +8945,12 @@ async function discardPending(pa) {
 	try {
 		const r = await api.dismissTool(token, view.conversation);
 		if (!pendingActionIsCurrent(view)) return;
-		if (settleSafetyUpdate(token, r)) return;
-		if (r && r.ok === false && confirmationStorageUnavailable(r)) {
-			const card = cardById();
-			if (card) card.error = r.error;
-			notify(r.error.message, { type: "error" });
-			return;
-		}
-		if (keepsChatCard(r)) {
-			const card = cardById();
-			if (card) card.error = { message: chatRefusalMessage(r) };
-			notify(chatRefusalMessage(r), { type: "error" });
-			return;
-		}
-		removePending(token);
-		// Re-fetch so the durable "discarded" chip shows in the thread.
-		await loadConversation(view.conversation);
-		if (!chatViewIsCurrent(view)) return;
-		store.loadConversations();
+		// Re-fetch (applyCardOutcome) so the durable "discarded" chip shows in the thread.
+		await applyCardOutcome(dismissReplyOutcome(r), { token, view, cardById });
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = thrownActionError(e, "Could not discard this action.");
+		if (card) card.error = thrownCardError(e, "dismiss");
 	} finally {
 		// A stale direct dismissal must leave a later view's in-flight guard
 		// untouched. The synchronous switch reset owns the old guard instead.
@@ -9130,6 +9050,14 @@ const draftPanelDead = computed(() =>
 	toolPanelDead(draftPanel.value, visiblePendingActions.value)
 );
 const toolNotices = computed(() => toolPanelNotices(draftPanel.value, draftPanelDead.value));
+// The footer of the form of a server draft: the primary's words and which buttons are off
+// (lib/toolDraftSheet.js, shared with the phone's sheet).
+const toolFoot = computed(() =>
+	toolFooterState(draftPanel.value, {
+		dead: draftPanelDead.value,
+		streaming: convStreaming.value,
+	})
+);
 // What the lib doors need from this view.
 const toolDeps = {
 	find: (token, conversation) =>
@@ -9298,7 +9226,6 @@ function focusAfterFailedOpen() {
 // While the form is open its card can be replaced, confirmed or cancelled elsewhere: the pending
 // list is re-read every few seconds, so the dead-draft banner shows without waiting for a focus
 // event. Nothing is polled while no form is open.
-const TOOL_FORM_POLL_MS = 5000;
 let _toolFormPoll = null;
 function stopToolFormPoll() {
 	if (_toolFormPoll) clearInterval(_toolFormPoll);
@@ -9318,16 +9245,7 @@ onBeforeUnmount(stopToolFormPoll);
 
 // The cells the card shows and the draft left blank (Hrs on a Timesheet) follow the person's edits:
 // blank while their row is edited, the card's number while it is as drafted (see settleCalculatedCells).
-watch(
-	() => {
-		const p = draftPanel.value;
-		return p && p.tool && Array.isArray(p.calc) && p.calc.length ? p.tables : null;
-	},
-	(tables) => {
-		if (tables) settleCalculatedCells(draftPanel.value);
-	},
-	{ deep: true }
-);
+watchCalculatedCells(watch, () => draftPanel.value);
 
 // Resync (R3 fix for #3): re-fetch the current conversation's live parked
 // confirmations so a reload / reconnect re-surfaces the cards that a realtime

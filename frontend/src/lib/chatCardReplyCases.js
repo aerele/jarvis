@@ -531,3 +531,150 @@ export function thrownError(spec) {
 }
 
 export const rowsOf = (door) => REPLY_ROWS.filter((r) => r.doors.includes(door));
+
+// ---- what the decision must say for each row ---------------------------------------------------
+//
+// Written by hand from the product's rules (the desktop's texts are the source of truth), NOT
+// generated from the code: chatCardDoors.golden.json says what the old handlers did, this says what
+// the shared decision (lib/chatCardActions.js) must return. Both the desktop and the phone apply it.
+//   fate      "gone" (take the card off) or "kept" (it is still pending; `message` shows with it)
+//   message   the words for the person; "" when the receipt in the reloaded thread speaks
+//   toast     the desktop also shows `message` as an error toast
+//   reload    the desktop reloads the chat after taking the card off (the phone always does)
+//   cardError "$error" = the reply's own error object (a storage reply), "$message" = { message },
+//             null = none
+//   queued / safety  as chatCardActions documents them
+//   draft     what differs for a server draft card
+// A thrown row has `thrown` = { message } (a plain message) or { internal: true } (the door's
+// fallback, on an object that carries InternalError).
+const T = {
+	busy: "This action is being handled right now. Try again in a moment.",
+	executing: "This action is already running.",
+	identity: "This action can no longer run as the user it was proposed for. Nothing ran.",
+	armed: "This macro run is stopping; the action was withdrawn and nothing ran.",
+	notRunnable: "This card no longer offers Approve & run. Use Confirm instead.",
+	notArmed:
+		"The skill this would run is no longer armed, or was switched off. Use Confirm instead.",
+	ownConfirm:
+		"This action must be confirmed on its own, not run automatically. Use Confirm instead.",
+	notFound: "This action is no longer waiting.",
+	handled: "This action was already handled.",
+	stale: "The record changed after this was proposed. Nothing ran.",
+	draftStale: "This record changed after the draft was made. Nothing was saved.",
+	missing: "The record this targets no longer exists. Nothing ran.",
+	tampered: "This action failed an integrity check. Nothing ran.",
+	unverifiable: "This action can no longer be verified on this site. Nothing ran.",
+	otherTab:
+		"Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again.",
+	expired: "This confirmation expired. Tell me the action again to retry it.",
+	safety: SAFETY_TEXT,
+	own: "Something the server says in its own words.",
+};
+const goes = (extra = {}) => ({
+	fate: "gone",
+	message: "",
+	toast: false,
+	reload: true,
+	cardError: null,
+	queued: null,
+	safety: null,
+	...extra,
+});
+const spent = (message, extra = {}) => goes({ message, toast: true, reload: false, ...extra });
+const safe = (message) => goes({ reload: false, safety: { message } });
+const keeps = (message) => ({
+	fate: "kept",
+	message,
+	toast: true,
+	reload: false,
+	cardError: "$message",
+	queued: null,
+	safety: null,
+});
+const storage = (message) => ({ ...keeps(message), cardError: "$error" });
+
+export const EXPECTED = {
+	ok: goes(),
+	"ok, the continuation turn queued (a draft that continues)": goes({
+		queued: { run_id: "run-1", message_id: "msg-1", position: 2 },
+	}),
+	"ok, queued with no position": goes({
+		queued: { run_id: "run-2", message_id: "msg-2", position: null },
+	}),
+	"no reply at all": goes(),
+	"failed after the card was spent (the tool refused)": goes(),
+	"partly applied": goes(),
+	"the execute call crashed (no reason_code)": goes(),
+	"safety update (a pending action)": safe(T.safety),
+	"safety update (a revoked legacy token)": safe(T.safety),
+	"safety update with no message": safe(T.safety),
+	"storage unavailable (confirm_tool)": storage(STORAGE_UNAVAILABLE.error.message),
+	"storage outcome unknown (confirm_tool)": storage(STORAGE_UNKNOWN.error.message),
+	"storage unavailable (approve_and_run adds a reason_code)": storage(
+		STORAGE_UNAVAILABLE.error.message
+	),
+	"storage outcome unknown (approve_and_run adds a reason_code)": storage(
+		STORAGE_UNKNOWN.error.message
+	),
+	"storage unavailable with no message": storage(undefined),
+	"busy (the row is locked)": keeps(T.busy),
+	"busy (a guarded structure form is locked)": keeps(T.busy),
+	"already executing": keeps(T.executing),
+	"identity refused": keeps(T.identity),
+	"an armed macro run is stopping": keeps(T.armed),
+	"approve and run offered no more (not_runnable)": keeps(T.notRunnable),
+	"approve and run: the skill is not armed": keeps(T.notArmed),
+	"approve and run: the step needs its own confirmation": keeps(T.ownConfirm),
+	"a refusal code the client does not know": keeps(T.own),
+	"not found (the token is gone)": spent(T.notFound),
+	"already handled elsewhere (confirmed)": spent(T.handled),
+	"already handled elsewhere (discarded)": spent(T.handled),
+	"stale: the record changed after it was proposed": {
+		...spent(T.stale),
+		draft: spent(T.draftStale),
+	},
+	"target missing: the record is gone": spent(T.missing),
+	tampered: spent(T.tampered),
+	unverifiable: spent(T.unverifiable),
+	"a used legacy token, the card has no expiry": spent(T.otherTab),
+	"a used legacy token, the card's expiry has passed": spent(T.expired),
+	"a used legacy token, the card's expiry is ahead": spent(T.otherTab),
+	"an armed run withdrew the confirmation (no reason_code)": spent(T.otherTab),
+	"a body that says ok:true but names a failure code": goes(),
+
+	discarded: goes(),
+	"already handled (discard of a spent card)": goes(),
+	"no reply at all (discard)": goes(),
+	"discard refused: busy": keeps(T.busy),
+	"discard refused: already executing": keeps(T.executing),
+	"discard: storage unavailable": storage(STORAGE_UNAVAILABLE.error.message),
+	"discard: storage outcome unknown": storage(STORAGE_UNKNOWN.error.message),
+	"discard: safety update": safe(T.safety),
+	"discard: ok:true that carries the safety code": safe(T.safety),
+	"discard: a refusal with no reason_code": goes(),
+	"discard: not found (raw)": goes(),
+	"discard: a refusal code the client does not know": keeps(T.own),
+
+	"thrown: a plain error": { thrown: { internal: true } },
+	"thrown: the server said why (417)": { thrown: { message: "Due Date is required." } },
+	"thrown: the server said why but it was a 500": { thrown: { internal: true } },
+	"thrown: offline": {
+		thrown: {
+			message:
+				"Jarvis could not reach the server. Check your internet connection and try again.",
+		},
+	},
+	"thrown: the session expired": {
+		thrown: { message: "Your session has expired. Please sign in again." },
+	},
+	// no session cookie in the test page, so a 403 reads as an expired session
+	"thrown: a refused permission on a live session": {
+		thrown: { message: "Your session has expired. Please sign in again." },
+	},
+};
+// The door's fallback for a thrown call that carries nothing a person can read.
+export const THROWN_FALLBACK = {
+	confirm: "Could not confirm this action.",
+	approve: "Could not start the run.",
+	dismiss: "Could not discard this action.",
+};

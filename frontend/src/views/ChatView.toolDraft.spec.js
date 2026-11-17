@@ -495,8 +495,9 @@ describe("a server draft card's edit form in the panel", () => {
 		const foot = squash(TOOL_FOOT);
 		expect(foot).toContain('@click="saveToolDraft()"');
 		expect(foot).toContain('@click="discardToolPanel()"');
-		expect(foot).toContain("toolPrimaryLabel(draftPanel)");
-		expect(foot).toContain('draftPanel.applying ? "Saving…"');
+		// the words and the disabled rules are lib/toolDraftSheet.toolFooterState (a table and the
+		// template reads in toolDraftSheet.spec.js)
+		expect(foot).toContain("{{ toolFoot.primaryLabel }}");
 		for (const gone of [
 			"applyDraft",
 			"discardDraft",
@@ -514,33 +515,6 @@ describe("a server draft card's edit form in the panel", () => {
 			"draftCta",
 		])
 			expect(typed, kept).toContain(kept);
-	});
-
-	// Break: Save stays live on a blocked form, a dead card, a form that is saving, or while a
-	// turn runs (confirm would return silently).
-	it("disables the save on a blocked form, a dead card, a saving form and a running turn", () => {
-		const primary = squash(
-			slice(
-				'class="jv-action-primary"',
-				"</button>",
-				src.indexOf('<div v-else class="jv-draft-foot">')
-			)
-		);
-		for (const off of [
-			"draftPanel.applying",
-			"draftPanel.saveBlocked",
-			"draftPanelDead",
-			"convStreaming",
-		])
-			expect(primary, off).toContain(off);
-		const discard = squash(
-			slice(
-				'class="jv-action-discard"',
-				"</button>",
-				src.indexOf('<div v-else class="jv-draft-foot">')
-			)
-		);
-		expect(discard).toContain("draftPanel.applying || draftPanelDead");
 	});
 
 	// Break: the notices (dead card, blocked save, unloaded record) are not drawn, or below the form.

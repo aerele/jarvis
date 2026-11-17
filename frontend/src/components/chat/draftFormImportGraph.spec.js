@@ -9,6 +9,13 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 const SRC = path.resolve(__dirname, "../..");
+// The one tree outside src/ that the phone resolves too: pwa/src/api.js already imports its
+// chat_failure_copy.mjs by relative path (and the phone has an `@jsshared` alias for it). The
+// failed-call text (lib/errors.js) reads it, so a file in the graph may reach it, and what that
+// tree imports is walked like any other file.
+const JS_SHARED = path.resolve(SRC, "../../jarvis/public/js");
+const insideAllowed = (file) =>
+	[SRC, JS_SHARED].some((root) => !path.relative(root, file).startsWith(".."));
 const here = (...p) => path.resolve(__dirname, ...p);
 
 // The form the phone will mount, then each of its parts on its own (so a part stays clean even
@@ -38,6 +45,8 @@ const ENTRIES = [
 	here("../../lib/toolDraftSheet.js"),
 	here("../../lib/draftSurface.js"),
 	here("../../lib/draftTables.js"),
+	// What the phone's Create and Cancel share with the desktop: the decision over a server reply.
+	here("../../lib/chatCardActions.js"),
 ];
 // The only package a file in the graph may import.
 const ALLOWED_PACKAGES = new Set(["vue"]);
@@ -93,7 +102,7 @@ function walk(entries) {
 					continue;
 				}
 				const fromSrc = path.relative(SRC, target);
-				if (fromSrc.startsWith("..")) {
+				if (!insideAllowed(target)) {
 					problems.push(`${rel}: "${spec}" leaves src/`);
 				} else if (FORBIDDEN_AREAS.some((re) => re.test(fromSrc))) {
 					problems.push(`${rel}: "${spec}" reaches an app singleton (${fromSrc})`);
@@ -151,6 +160,23 @@ describe("the draft edit form imports nothing the phone cannot resolve", () => {
 			expect(problems.join("\n")).toMatch(/package "frappe-ui"/);
 			expect(problems.join("\n")).toMatch(/package "vue-router"/);
 			expect(problems.join("\n")).toMatch(/package "pinia"/);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+	it("lets a file reach the shared js tree the phone resolves, and nothing else outside src/", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "import-graph-"));
+		try {
+			const rel = (target) => path.relative(dir, target);
+			const outside = path.join(dir, "outside.js");
+			fs.writeFileSync(outside, `import "${rel(path.resolve(SRC, "../package.json"))}";\n`);
+			const shared = path.join(dir, "shared.js");
+			fs.writeFileSync(
+				shared,
+				`import "${rel(path.join(JS_SHARED, "shared/chat_failure_copy.mjs"))}";\n`
+			);
+			expect(walk([shared]).problems).toEqual([]);
+			expect(walk([outside]).problems.join("\n")).toMatch(/leaves src\//);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

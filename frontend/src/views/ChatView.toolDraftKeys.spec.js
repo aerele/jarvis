@@ -16,7 +16,8 @@ import {
 	tabWrapTarget,
 	toolPanelKeyAction,
 } from "../lib/toolDraftKeys.js";
-import { prepareToolModel, settleCalculatedCells } from "../lib/toolDraftPanel.js";
+import { prepareToolModel } from "../lib/toolDraftPanel.js";
+import { TOOL_FORM_POLL_MS, watchCalculatedCells } from "../lib/toolDraftSheet.js";
 
 const src = fs.readFileSync(path.resolve(__dirname, "ChatView.vue"), "utf8");
 function cut(from, to) {
@@ -268,7 +269,7 @@ describe("focus goes into a panel and returns to the card button that opened it"
 });
 
 describe("the pending list is re-read every 5 seconds while a form is open, and only then", () => {
-	const code = cut("const TOOL_FORM_POLL_MS = 5000;", "onBeforeUnmount(stopToolFormPoll);");
+	const code = cut("let _toolFormPoll = null;", "onBeforeUnmount(stopToolFormPoll);");
 	it("starts on open, stops on close, never polls for a typed panel", async () => {
 		vi.useFakeTimers();
 		try {
@@ -278,6 +279,7 @@ describe("the pending list is re-read every 5 seconds while a form is open, and 
 				code,
 				{
 					watch,
+					TOOL_FORM_POLL_MS,
 					toolFormOpen: computed(() => !!draftPanel.value && !!draftPanel.value.tool),
 					draftPanel,
 					currentId: ref("c1"),
@@ -313,15 +315,17 @@ describe("the pending list is re-read every 5 seconds while a form is open, and 
 });
 
 describe("the filled cells follow the person's edits through the real form model", () => {
+	// The view wires the shared watcher (lib/toolDraftSheet.watchCalculatedCells): the cut is that
+	// one line, run with the real function, so a different source or depth in the lib shows here.
 	const code = cut(
-		"watch(\n\t() => {\n\t\tconst p = draftPanel.value;\n\t\treturn p && p.tool && Array.isArray(p.calc)",
+		"watchCalculatedCells(watch, () => draftPanel.value);",
 		"// Resync (R3 fix for #3)"
 	);
 	// Break: the watcher misses a write made by a v-model on a cell (a deep write), so Hrs keeps its
 	// number beside an edit; or it re-runs forever.
 	it("a cell edit blanks that row's Hrs; undoing it gives the number back; nothing is sent for it", async () => {
 		const draftPanel = ref(null);
-		run(code, { watch, draftPanel, settleCalculatedCells }, []);
+		run(code, { watch, draftPanel, watchCalculatedCells }, []);
 		const card = timesheetCard();
 		const model = timesheetModel();
 		prepareToolModel(model, {
@@ -352,14 +356,23 @@ describe("the filled cells follow the person's edits through the real form model
 		expect(draftIsDirty(draftPanel.value)).toBe(false);
 	});
 
-	it("does nothing for a typed panel", async () => {
+	it("watches nothing for a typed panel", async () => {
 		const draftPanel = ref(null);
-		const settle = vi.fn();
-		run(code, { watch, draftPanel, settleCalculatedCells: settle }, []);
+		const sources = [];
+		// the view's `watch`, noting what its source function returns
+		const spyWatch = (source, ...rest) =>
+			watch(() => {
+				const value = source();
+				sources.push(value);
+				return value;
+			}, ...rest);
+		run(code, { watch: spyWatch, draftPanel, watchCalculatedCells }, []);
 		draftPanel.value = reactive({ tables: [{ rows: [{ a: 1 }] }], calc: [{}] });
+		await nextTick();
 		draftPanel.value.tables[0].rows[0].a = 2;
 		await nextTick();
-		expect(settle).not.toHaveBeenCalled();
+		expect(sources.length).toBeGreaterThan(0);
+		expect(sources.every((value) => value === null)).toBe(true);
 	});
 });
 
