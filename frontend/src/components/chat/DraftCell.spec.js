@@ -1,10 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
-// frappe-ui's pickers do not load under jsdom; DateControl's own logic is lib/dateControl.
-vi.mock("frappe-ui", () => ({
-	DatePicker: { name: "DatePicker", template: "<input />" },
-	DateTimePicker: { name: "DateTimePicker", template: "<input />" },
-	TimePicker: { name: "TimePicker", template: "<input />" },
-}));
+// frappe-ui's pickers do not load under jsdom. These stand-ins are shaped like them:
+// a Popover root that keeps no attrs, with the <input> inside (see DateControl.spec).
+vi.mock("frappe-ui", () => {
+	const picker = (name) => ({
+		name,
+		inheritAttrs: false,
+		props: ["modelValue", "disabled", "placeholder"],
+		template: '<div class="popover-root"><input :value="modelValue" /></div>',
+	});
+	return {
+		DatePicker: picker("DatePicker"),
+		DateTimePicker: picker("DateTimePicker"),
+		TimePicker: picker("TimePicker"),
+	};
+});
 import { mount } from "@vue/test-utils";
 import { reactive } from "vue";
 import DraftCell from "./DraftCell.vue";
@@ -125,6 +134,31 @@ describe("one editable value of a child row", () => {
 		expect(
 			cell(F("q", "Data"), row, { controlId: "id-q" }).find("input").attributes("id")
 		).toBe("id-q");
+	});
+
+	it("a Date / Datetime / Time cell puts its id and aria attributes on the picker's input", () => {
+		const row = reactive({ d: "2026-01-02", dt: "", t: "" });
+		for (const f of [F("d", "Date"), F("dt", "Datetime"), F("t", "Time")]) {
+			const input = cell(f, row, {
+				label: "When",
+				controlId: `id-${f.fieldname}`,
+				describedby: `was-${f.fieldname}`,
+				required: true,
+			}).find("input");
+			expect({
+				id: input.attributes("id"),
+				label: input.attributes("aria-label"),
+				describedby: input.attributes("aria-describedby"),
+				required: input.attributes("aria-required"),
+				stateClass: input.classes().includes("jv-action-input"),
+			}).toEqual({
+				id: `id-${f.fieldname}`,
+				label: "When",
+				describedby: `was-${f.fieldname}`,
+				required: "true",
+				stateClass: true,
+			});
+		}
 	});
 
 	it("reports link search, blur and pick, and the pick writes into the row", async () => {

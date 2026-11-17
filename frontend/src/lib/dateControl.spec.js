@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { toDate, toTime, toPickerDatetime, fromPickerDatetime } from "./dateControl";
+import {
+	fromPickerDatetime,
+	inputAttrsFor,
+	inputClassesFor,
+	toDate,
+	toPickerDatetime,
+	toTime,
+} from "./dateControl";
 
 // DateControl (#833) swaps the native inputs for frappe-ui pickers but must speak the
 // strings those inputs did, or the card's dirty check and save path would change.
@@ -24,5 +31,34 @@ describe("DateControl value adapters", () => {
 	it("datetime comes back as the card's YYYY-MM-DDTHH:mm", () => {
 		expect(fromPickerDatetime("2026-11-10 14:30:00")).toBe("2026-11-10T14:30");
 		expect(fromPickerDatetime("")).toBe("");
+	});
+});
+
+describe("inputAttrsFor", () => {
+	it("takes id and aria-* from the caller, the aria-label prop first; blank is removed", () => {
+		expect(
+			inputAttrsFor(
+				{ id: "f", "aria-label": "attr", "aria-describedby": "", "aria-required": "true" },
+				"Prop label"
+			)
+		).toEqual({
+			id: "f",
+			"aria-label": "Prop label",
+			"aria-describedby": null,
+			"aria-required": "true",
+		});
+		expect(inputAttrsFor({}, "")).toEqual({
+			id: null,
+			"aria-label": null,
+			"aria-describedby": null,
+			"aria-required": null,
+		});
+	});
+});
+
+describe("inputClassesFor", () => {
+	it("is the look's input class plus the extra ones, de-duplicated", () => {
+		expect(inputClassesFor("card", "")).toEqual(["jv-action-input"]);
+		expect(inputClassesFor("ask", "a  b jv-ask-field")).toEqual(["jv-ask-field", "a", "b"]);
 	});
 });

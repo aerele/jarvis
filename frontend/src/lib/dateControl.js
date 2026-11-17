@@ -29,3 +29,26 @@ export function fromPickerDatetime(v) {
 	const m = String(v == null ? "" : v).match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2})/);
 	return m ? `${m[1]}T${m[2]}` : "";
 }
+
+// The attributes DateControl moves onto the picker's <input>: the caller's id and
+// aria-* (passed as fallthrough attrs) and the aria-label prop. null removes one.
+export const INPUT_ATTRS = ["id", "aria-label", "aria-describedby", "aria-required"];
+export function inputAttrsFor(attrs, ariaLabel) {
+	const out = {};
+	for (const name of INPUT_ATTRS) {
+		let v = name === "aria-label" ? ariaLabel || (attrs && attrs[name]) : attrs && attrs[name];
+		if (v === false || v === "" || v === undefined) v = null;
+		out[name] = v == null ? null : String(v);
+	}
+	return out;
+}
+
+// The input's own classes: the look's input class (so the callers' state rules
+// reach it) plus any extra ones, as a de-duplicated list.
+export function inputClassesFor(look, extra) {
+	const base = look === "ask" ? "jv-ask-field" : "jv-action-input";
+	const more = String(extra || "")
+		.split(/\s+/)
+		.filter(Boolean);
+	return [...new Set([base, ...more])];
+}

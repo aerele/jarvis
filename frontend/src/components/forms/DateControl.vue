@@ -11,45 +11,48 @@
      field (.jv-action-input), `look="ask"` a question-card field (.jv-ask-field). -->
 <template>
 	<!-- The wrapper carries the scoped style hook: frappe-ui's picker root does not. -->
-	<div :class="['jv-datectl', `jv-datectl--${look}`]">
+	<div ref="root" :class="['jv-datectl', `jv-datectl--${look}`]">
 		<DatePicker
 			v-if="kind === 'date'"
-			v-bind="$attrs"
 			:modelValue="value"
 			:disabled="disabled"
 			:placeholder="placeholder || 'Pick a date'"
-			:inputClass="inputClass"
-			:aria-label="ariaLabel || undefined"
 			@update:modelValue="(v) => emit('update:modelValue', toDate(v))"
 		/>
 		<DateTimePicker
 			v-else-if="kind === 'datetime'"
-			v-bind="$attrs"
 			:modelValue="toPickerDatetime(value)"
 			:disabled="disabled"
 			:placeholder="placeholder || 'Pick a date and time'"
-			:inputClass="inputClass"
-			:aria-label="ariaLabel || undefined"
 			@update:modelValue="(v) => emit('update:modelValue', fromPickerDatetime(v))"
 		/>
 		<TimePicker
 			v-else
-			v-bind="$attrs"
 			:modelValue="toTime(value)"
 			:disabled="disabled"
 			:placeholder="placeholder || 'Pick a time'"
-			:aria-label="ariaLabel || undefined"
 			@update:modelValue="(v) => emit('update:modelValue', toTime(v))"
 		/>
 	</div>
 </template>
 
 <script setup>
-import { computed } from "vue";
+import { computed, normalizeClass, onMounted, onUpdated, ref, useAttrs } from "vue";
 import { DatePicker, DateTimePicker, TimePicker } from "frappe-ui";
-import { toDate, toTime, toPickerDatetime, fromPickerDatetime } from "@/lib/dateControl";
+import {
+	fromPickerDatetime,
+	inputAttrsFor,
+	inputClassesFor,
+	toDate,
+	toPickerDatetime,
+	toTime,
+} from "@/lib/dateControl";
 
-// id / aria-* go on the picker, not the wrapper
+// id / aria-* belong on the picker's <input>, not on the wrapper. They cannot be
+// passed to the picker either: its root is frappe-ui's Popover (inheritAttrs:false,
+// keeps only class and style), and `inputClass` lands on TextInput's wrapper div,
+// not the input (TimePicker has no inputClass at all). So they are set on the real
+// input after every render (applyToInput below).
 defineOptions({ inheritAttrs: false });
 const props = defineProps({
 	// "date" | "datetime" | "time"
@@ -57,13 +60,39 @@ const props = defineProps({
 	modelValue: { type: String, default: "" },
 	disabled: { type: Boolean, default: false },
 	placeholder: { type: String, default: "" },
+	// extra classes for the input, besides the look's own class
 	inputClass: { type: [String, Array, Object], default: "" },
 	ariaLabel: { type: String, default: "" },
-	// "card" | "ask": which neighbouring input to look like
+	// "card" | "ask": which neighbouring input to look like. The input also gets
+	// that input's class (.jv-action-input / .jv-ask-field), so the callers'
+	// state rules (.missing, .invalid, .changed) reach it.
 	look: { type: String, default: "card" },
 });
 const emit = defineEmits(["update:modelValue"]);
 const value = computed(() => (props.modelValue == null ? "" : String(props.modelValue)));
+
+const root = ref(null);
+const attrs = useAttrs();
+// The classes this control added last time, so a dropped one is removed again.
+let added = [];
+
+function applyToInput() {
+	const input = root.value && root.value.querySelector("input");
+	if (!input) return;
+	// attrs is not reactive: read it here, on every render, never in a computed.
+	for (const [name, val] of Object.entries(inputAttrsFor(attrs, props.ariaLabel))) {
+		if (val == null) input.removeAttribute(name);
+		else input.setAttribute(name, val);
+	}
+	const classes = inputClassesFor(props.look, normalizeClass(props.inputClass));
+	for (const c of added) if (!classes.includes(c)) input.classList.remove(c);
+	input.classList.add(...classes);
+	added = classes;
+}
+// onUpdated runs after the picker's own patch, so a re-render that rewrites the
+// input's class (a disabled toggle) is followed by putting ours back.
+onMounted(applyToInput);
+onUpdated(applyToInput);
 </script>
 
 <style scoped>
