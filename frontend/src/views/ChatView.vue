@@ -830,6 +830,7 @@
 							v-else-if="m.role === 'user'"
 							variant="bubble"
 							:text="m.content"
+							quotes
 							:attachments="m.canvas"
 							:timestamp="msgTime(m)"
 							:timestampFull="msgTimeFull(m)"
@@ -2007,6 +2008,48 @@
 											:title="msgTimeFull(m)"
 											>{{ msgTime(m) }}</span
 										>
+										<!-- read the reply aloud with the device's own voice -->
+										<button
+											v-if="reader.supported && canCopyReply(m)"
+											class="jv-msgbtn"
+											:class="{ 'jv-msgbtn-on': speakingId === m.name }"
+											@click="reader.toggle(m.name, replyBodyText($event))"
+											:title="
+												speakingId === m.name
+													? 'Stop reading'
+													: 'Read aloud'
+											"
+											:aria-label="
+												speakingId === m.name
+													? 'Stop reading'
+													: 'Read aloud'
+											"
+										>
+											<svg
+												v-if="speakingId === m.name"
+												width="14"
+												height="14"
+												viewBox="0 0 24 24"
+												fill="currentColor"
+											>
+												<rect x="6" y="6" width="12" height="12" rx="2" />
+											</svg>
+											<svg
+												v-else
+												width="14"
+												height="14"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.8"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<path d="M11 5 6 9H2v6h4l5 4z" />
+												<path d="M15.5 8.5a5 5 0 0 1 0 7" />
+												<path d="M19 5a10 10 0 0 1 0 14" />
+											</svg>
+										</button>
 										<!-- hidden (not removed) while streaming so the bar keeps its
 										     height; copying half a reply would be wrong -->
 										<button
@@ -2760,6 +2803,14 @@
 						@remove-attachment="removeAttachment"
 						@preview-attachment="openUserFile"
 					>
+						<template #inside-top>
+							<ReplyQuote
+								v-if="replyQuote"
+								:text="replyQuote"
+								:who="brand.agentName"
+								@close="clearReplyQuote(true)"
+							/>
+						</template>
 						<template #above>
 							<!-- Create menu "Create a trigger": trigger-build mode. While this marker
 							     is up every send carries {page:"triggers"} so the agent stays in
@@ -4342,6 +4393,25 @@
 		     maybeCheckSessionFeedback below, following the same shared-ref
 		     pattern as WhatsNewDialog/noticeGate. -->
 		<SessionFeedbackDialog />
+		<!-- aerele/jarvis#2191: the bar over text selected in a reply -->
+		<SelectionActions
+			:root="rootEl"
+			selector=".jv-amsg .jv-md-body"
+			:actions="selectionActions"
+			@action="onSelectionAction"
+		/>
+		<!-- a selection being read has no button of its own to stop it from -->
+		<button
+			v-if="speakingId === 'selection'"
+			type="button"
+			class="jv-readstop"
+			@click="reader.stop()"
+		>
+			<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+				<rect x="6" y="6" width="12" height="12" rx="2" />
+			</svg>
+			Stop reading
+		</button>
 		<!-- Periodic business-pulse survey: opened by maybeOpenPulseFeedback,
 		     checked once per genuine chat-open event. -->
 		<PulseFeedbackDialog />
@@ -4501,6 +4571,10 @@ import PendingCard from "@/components/PendingCard.vue";
 import DraftCard from "@/components/chat/DraftCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
+import SelectionActions from "@/components/chat/SelectionActions.vue";
+import { cleanQuote, quoteMarkdown } from "@jsshared/reply_quote.mjs";
+import ReplyQuote from "@/components/chat/ReplyQuote.vue";
+import { createReader } from "@jsshared/read_aloud.mjs";
 import {
 	newSendRequestId,
 	observeDelivery,
@@ -9567,6 +9641,53 @@ function showCopied(id) {
 		copiedId.value = "";
 	}, 1300);
 }
+// aerele/jarvis#2191: Reply, offered on text selected in a reply, shows that text as a
+// quote card in the composer (WhatsApp / Claude style); the message carries it as a
+// leading Markdown blockquote, so the agent gets the exact text and the history keeps
+// it, and the user bubble draws it as a quote. A new Reply replaces an unsent quote.
+// Read aloud reads the selection; a floating Stop reading chip stops it.
+// Computed: read lazily, after `reader` below exists.
+const selectionActions = computed(() => [
+	{ key: "reply", label: "Reply" },
+	...(reader.supported ? [{ key: "read", label: "Read aloud" }] : []),
+]);
+function onSelectionAction(key, text) {
+	if (key === "reply") replyWith(text);
+	else if (key === "read") reader.speak("selection", text);
+}
+// The quote the next message replies to: shown as a card in the composer (ReplyQuote),
+// sent as a leading Markdown blockquote. Cleared on send, on its close button and on a
+// chat switch.
+const replyQuote = ref("");
+watch(currentId, () => (replyQuote.value = ""));
+// Read aloud, under each reply: the browser's own voice (shared/read_aloud.mjs); no
+// button where the browser has none. One reading at a time; it stops on a chat switch,
+// on leaving and on Escape.
+const reader = createReader(window);
+const speakingId = ref(null);
+reader.subscribe((id) => (speakingId.value = id));
+watch(currentId, () => reader.stop());
+onBeforeUnmount(() => reader.stop());
+function stopReadingOnEscape(e) {
+	if (e.key === "Escape" && speakingId.value) reader.stop();
+}
+document.addEventListener("keydown", stopReadingOnEscape);
+onBeforeUnmount(() => document.removeEventListener("keydown", stopReadingOnEscape));
+// The reply as it reads on screen (tables, lists and links as text, no Markdown).
+function replyBodyText(e) {
+	const body = e?.currentTarget?.closest?.(".jv-amsg")?.querySelector?.(".jv-md-body");
+	return body ? body.innerText : "";
+}
+function replyWith(text) {
+	const quote = cleanQuote(text);
+	if (!quote) return;
+	replyQuote.value = quote;
+	nextTick(() => composerRef.value?.focusInput?.());
+}
+function clearReplyQuote(focus = false) {
+	replyQuote.value = "";
+	if (focus) nextTick(() => composerRef.value?.focusInput?.());
+}
 function editCommand(m) {
 	if (!messageActionIsCurrent(captureChatView(m?.name || ""))) return;
 	input.value = m.content || "";
@@ -11948,7 +12069,7 @@ async function send(textArg, resendAck) {
 	)
 		return;
 	const fromMain = !retryBubble && typeof textArg !== "string";
-	const text = retryBubble
+	let text = retryBubble
 		? retryBubble.sendRequest.text
 		: (fromMain ? input.value : textArg).trim();
 	const compactCmd = parseCompactCommand(text);
@@ -12022,6 +12143,10 @@ async function send(textArg, resendAck) {
 		? pendingFiles.value.slice()
 		: [];
 	if ((!text && !attachments.length) || sending.value) return;
+	// aerele/jarvis#2191: a Reply's quote rides in front of the typed question (only a
+	// main-composer message with words of its own; the history keeps just the question).
+	const typedText = text;
+	if (fromMain && text && replyQuote.value) text = quoteMarkdown(replyQuote.value) + text;
 	// canSend already darkens the Send button, but Enter routes here directly (onKey
 	// preventDefaults and calls send()), and a programmatic send never sees the button
 	// at all. With no model connected the turn can only fail at the agent, so refuse it
@@ -12038,8 +12163,8 @@ async function send(textArg, resendAck) {
 		);
 		return;
 	}
-	if (text && promptHistory.value[promptHistory.value.length - 1] !== text) {
-		promptHistory.value.push(text); // for Up/Down recall
+	if (typedText && promptHistory.value[promptHistory.value.length - 1] !== typedText) {
+		promptHistory.value.push(typedText); // for Up/Down recall
 	}
 	histIdx.value = null;
 	histDraft.value = "";
@@ -12052,6 +12177,7 @@ async function send(textArg, resendAck) {
 	}
 	if (fromMain) {
 		input.value = "";
+		replyQuote.value = "";
 		pendingFiles.value = [];
 		failedUploads.value = [];
 		mention.value = { ...mention.value, open: false };
@@ -15258,6 +15384,31 @@ onUnmounted(() => {
 	margin-top: 0;
 	font-size: 11px;
 	color: var(--text-3);
+}
+/* aerele/jarvis#2191: the reply being read keeps its bar (and Stop) in view. */
+.jv-msgbtn-on {
+	color: var(--cta) !important;
+}
+:deep(.jv-msgbar:has(.jv-msgbtn-on)) {
+	opacity: 1 !important;
+}
+.jv-readstop {
+	position: fixed;
+	left: 50%;
+	bottom: 132px;
+	transform: translateX(-50%);
+	z-index: 60;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 12px;
+	font-size: 13px;
+	color: var(--text);
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+	cursor: pointer;
 }
 .jv-metabar {
 	display: flex;

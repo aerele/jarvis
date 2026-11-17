@@ -79,7 +79,16 @@ def _claim(key: str) -> bool:
 
 def record(session_key: str) -> bool:
 	"""True only the first time an unknown session key is seen in 24 h. Never raises."""
-	return _record(_KEY_PREFIX + _digest(session_key), session_key, skip_known=True)
+	first = _record(_KEY_PREFIX + _digest(session_key), session_key, skip_known=True)
+	if first:
+		# Activity event (plan 4.3(5)): already de-duplicated to one per key per 24 h by
+		# the claim above. No actor (the key is not ours) and no key in the row.
+		from jarvis import activity_log
+
+		activity_log.record(
+			"foreign_session", actor="", outcome="denied", code="unknown_session", channel="chat"
+		)
+	return first
 
 
 def record_instance_mismatch(session_key: str) -> bool:

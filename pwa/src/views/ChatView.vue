@@ -84,6 +84,10 @@ import ExportCard from "@shared/components/chat/ExportCard.vue";
 import { exportSummary } from "@shared/lib/exportJobs.js";
 import ReportScope from "../components/ReportScope.vue";
 import Composer from "../components/Composer.vue";
+import { cleanQuote, quoteMarkdown, splitQuote } from "@jsshared/reply_quote.mjs";
+import SelectionActions from "@shared/components/chat/SelectionActions.vue";
+import ReplyQuote from "@shared/components/chat/ReplyQuote.vue";
+import { createReader } from "@jsshared/read_aloud.mjs";
 import {
 	boundedDelivery,
 	newSendRequestId,
@@ -335,6 +339,46 @@ const starred = ref(false);
 
 const scroller = ref(null);
 const composer = ref(null);
+
+// aerele/jarvis#2191: Reply, offered on text selected in a reply, shows that text as a
+// quote card at the top of the composer (WhatsApp style); the message carries it as a
+// leading Markdown blockquote (the agent gets the exact text, the history keeps it, the
+// bubble draws it as a quote). A new Reply replaces an unsent quote; it clears on send,
+// on its close button and on a chat switch. Listen reads the selection aloud.
+const quoteOf = (content) => splitQuote(content);
+function replyBodyText(e) {
+	const body = e?.currentTarget?.closest?.(".jv-msg-agent")?.querySelector?.(".jv-md");
+	return body ? body.innerText : "";
+}
+const replyQuote = ref("");
+function replyWith(text) {
+	const quote = cleanQuote(text);
+	if (!quote) return;
+	replyQuote.value = quote;
+	nextTick(() => composer.value?.focusEnd?.());
+}
+function clearReplyQuote() {
+	replyQuote.value = "";
+	nextTick(() => composer.value?.focusEnd?.());
+}
+function onSelectionAction(key, text) {
+	if (key === "reply") replyWith(text);
+	else if (key === "read") reader.speak("selection", text);
+}
+// Listen: the phone's own voice (shared/read_aloud.mjs); no chip where it has none.
+// One reading at a time; it stops on a chat switch and on leaving the chat.
+const reader = createReader(window);
+const speakingId = ref(null);
+reader.subscribe((id) => (speakingId.value = id));
+watch(convId, () => {
+	reader.stop();
+	replyQuote.value = "";
+});
+const selectionActions = computed(() => [
+	{ key: "reply", label: "Reply" },
+	...(reader.supported ? [{ key: "read", label: "Listen" }] : []),
+]);
+onUnmounted(() => reader.stop());
 // An action card is a live offer, not history: only the newest assistant turn
 // may still be applied. Scrolling back to last week's proposal and tapping
 // Create would write a record the user has long since moved on from.
@@ -1105,7 +1149,8 @@ async function send() {
 	try {
 		request = sendRecovery.stage(
 			cid,
-			input.value,
+			// aerele/jarvis#2191: a Reply's quote rides in front of the typed question.
+			text && replyQuote.value ? quoteMarkdown(replyQuote.value) + input.value : input.value,
 			ready,
 			orderedPending.value.map((p) => p.token)
 		);
@@ -1115,6 +1160,7 @@ async function send() {
 	}
 	if (!cid) Object.assign(request, recoveryState.newChatPicks);
 	input.value = "";
+	replyQuote.value = "";
 	composer.value?.reset();
 	// The preserved request uses durable file URLs; release only local thumbnails.
 	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
@@ -1937,7 +1983,13 @@ onUnmounted(() => {
 
 		<template v-for="it in items" :key="it.key">
 			<div v-if="it.type === 'user'" class="jv-msg-user">
-				<div v-if="it.msg.content" class="jv-bubble-user">{{ it.msg.content }}</div>
+				<div v-if="it.msg.content" class="jv-bubble-user">
+					<template v-if="quoteOf(it.msg.content).quote">
+						<div class="jv-uquote">{{ quoteOf(it.msg.content).quote }}</div>
+						<span>{{ quoteOf(it.msg.content).rest }}</span>
+					</template>
+					<template v-else>{{ it.msg.content }}</template>
+				</div>
 				<MessageMedia
 					:items="it.msg.canvas"
 					:message-name="it.msg.name"
@@ -1967,6 +2019,44 @@ onUnmounted(() => {
 					     exists to fix. Gated only on `stopped`, it shows for both the
 					     partial and the empty stop. -->
 					<div v-if="it.msg.stopped" class="jv-stopped">You stopped this reply.</div>
+					<!-- aerele/jarvis#2191: Listen under each finished reply (Reply is offered
+					     on text selected in it, by the selection bar below) -->
+					<div
+						v-if="reader.supported && it.view.html && !exportSummary(it.msg)"
+						class="jv-msg-acts"
+					>
+						<button
+							type="button"
+							class="jv-msg-act"
+							:class="{ 'jv-msg-act-on': speakingId === it.key }"
+							:aria-pressed="speakingId === it.key"
+							@click="reader.toggle(it.key, replyBodyText($event))"
+						>
+							<svg
+								v-if="speakingId === it.key"
+								viewBox="0 0 24 24"
+								fill="currentColor"
+								aria-hidden="true"
+							>
+								<rect x="6" y="6" width="12" height="12" rx="2" />
+							</svg>
+							<svg
+								v-else
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.8"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<path d="M11 5 6 9H2v6h4l5 4z" />
+								<path d="M15.5 8.5a5 5 0 0 1 0 7" />
+								<path d="M19 5a10 10 0 0 1 0 14" />
+							</svg>
+							{{ speakingId === it.key ? "Stop" : "Listen" }}
+						</button>
+					</div>
 					<ActionCard
 						v-if="showsDraftCard(it)"
 						:action="anchor.action"
@@ -2272,6 +2362,26 @@ onUnmounted(() => {
 		</button>
 	</div>
 
+	<!-- aerele/jarvis#2191: Reply on text selected in a reply, under the selection -->
+	<SelectionActions
+		:root="scroller"
+		selector=".jv-msg-agent .jv-md"
+		:actions="selectionActions"
+		below
+		@action="onSelectionAction"
+	/>
+	<!-- a selection being read has no chip of its own to stop it from -->
+	<button
+		v-if="speakingId === 'selection'"
+		type="button"
+		class="jv-readstop"
+		@click="reader.stop()"
+	>
+		<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+			<rect x="6" y="6" width="12" height="12" rx="2" />
+		</svg>
+		Stop
+	</button>
 	<Composer
 		ref="composer"
 		v-model="input"
@@ -2286,7 +2396,16 @@ onUnmounted(() => {
 		@remove="removeAttachment"
 		@preview="onPreviewPending"
 		@mic="voiceOpen = true"
-	/>
+	>
+		<template #top>
+			<ReplyQuote
+				v-if="replyQuote"
+				:text="replyQuote"
+				:who="agentName"
+				@close="clearReplyQuote"
+			/>
+		</template>
+	</Composer>
 
 	<!-- chat options -->
 	<Sheet :open="menuOpen" @close="(menuOpen = false), (renaming = false)">
@@ -2439,6 +2558,75 @@ onUnmounted(() => {
 }
 .jv-msg-agent {
 	min-width: 0;
+}
+.jv-readstop {
+	position: fixed;
+	left: 50%;
+	bottom: calc(96px + env(safe-area-inset-bottom));
+	transform: translateX(-50%);
+	z-index: 60;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 14px;
+	font-size: 14px;
+	color: var(--ink9);
+	background: var(--card);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+}
+/* The quoted part of a Reply (aerele/jarvis#2191), above the question. */
+.jv-uquote {
+	margin: 0 0 7px;
+	position: relative;
+	padding: 6px 10px 6px 13px;
+	border-radius: 8px;
+	background: var(--card);
+	color: var(--ink6);
+	font-size: 13px;
+	white-space: pre-line;
+	display: -webkit-box;
+	-webkit-line-clamp: 5;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+/* The Jarvis brand bar (the mark's gradient), as on the Reply card. */
+.jv-uquote::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: 3px;
+	border-radius: 3px 0 0 3px;
+	background: var(--brand-grad, linear-gradient(135deg, #6e8bff, #8b5cf6));
+}
+.jv-msg-acts {
+	display: flex;
+	gap: 6px;
+	margin-top: 6px;
+}
+.jv-msg-act {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	min-height: 32px;
+	padding: 4px 10px;
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	background: transparent;
+	color: var(--ink5);
+	font-size: 12.5px;
+	-webkit-tap-highlight-color: transparent;
+}
+.jv-msg-act-on {
+	color: var(--ink9);
+	border-color: var(--ink5);
+}
+.jv-msg-act svg {
+	width: 14px;
+	height: 14px;
 }
 /* The activity card sits above the prose it produced; give it room. (Scoped
    styles reach a child component's root element, which is what .jv-tools is.) */
