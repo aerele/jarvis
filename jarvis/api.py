@@ -4979,6 +4979,18 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			except (JarvisError, frappe.PermissionError, frappe.ValidationError) as e:
 				frappe.clear_messages()
 				return _preview_error(e)
+		# #834: a send that can only fail for want of an outgoing Email Account is
+		# refused here, before the card, with the same code and hint the confirmed
+		# send would have returned. Otherwise the user drafts, reviews and confirms
+		# an email that dies on the click.
+		if tool == "send_email" and isinstance(args, dict):
+			from jarvis.tools.send_email import call_doctypes, require_outgoing_account
+
+			try:
+				require_outgoing_account(call_doctypes(args))
+			except frappe.OutgoingEmailError as e:
+				frappe.clear_messages()
+				return _translate_write_error(e, _msglog_mark(), is_write=True)
 		# Validate BEFORE parking. For a create/update (build-from-args) write,
 		# run the real call in the rollback sandbox now: a deterministic failure
 		# (missing mandatory field, bad link, no create permission) means the
