@@ -936,6 +936,21 @@ class TestArmedSkillFirstWriteContext(FrappeTestCase):
 		prompt = self._assembled(doc, "/ctxarmed-plain do it")
 		self.assertIn("armed skill: Approve & run available for custom-ctxarmed-plain", prompt)
 
+	def test_with_draft_cards_on_the_armed_turn_has_the_armed_note_and_no_drafting_note(self):
+		"""The armed-skill note says to stage the first write as a direct tool call so the card
+		can offer Approve & run, and that write keeps its ordinary card. A drafting note beside it
+		would promise a draft card (which has no such control): the turn's bracket must carry the
+		armed note only. The plain turn in the same chat keeps the drafting note, so the absence
+		is down to the armed skill and not to the flag."""
+		_make_skill(TEST_USER, armed=True, name="ctxarmed-drafts")
+		doc = frappe.get_doc(CONV, _make_conv(TEST_USER))
+		with patch.dict(frappe.conf, {"jarvis_draft_cards": 1}):
+			armed = self._assembled(doc, "/ctxarmed-drafts do it")
+			plain = self._assembled(frappe.get_doc(CONV, _make_conv(TEST_USER)), "just a question")
+		self.assertIn("armed skill: Approve & run available for custom-ctxarmed-drafts", armed)
+		self.assertNotIn("; drafts:", armed)
+		self.assertIn("; drafts:", plain)
+
 	def test_clause_absent_when_a_run_is_already_approved(self):
 		"""The existing "approved skill run" clause already tells the agent to
 		call every covered write directly - stacking the armed-skill clause on
@@ -1483,6 +1498,43 @@ class TestApproveRunOfferThroughRunTool(FrappeTestCase):
 		self.assertIsNone(rec.get("skill_docname"))
 		card = (rec.get("preview") or {}).get("card")
 		self.assertIsInstance(card, dict)
+		self.assertNotIn("approve_run", card)
+
+	def test_with_draft_cards_on_an_armed_skill_write_keeps_the_ordinary_card(self):
+		"""With ``jarvis_draft_cards`` on, an armed skill's create still parks the ORDINARY card
+		(the long ``preview`` result, no ``draft``) that carries the Approve & run control. If the
+		gate's card decision stopped passing ``offers_run`` it would park a draft card, which has
+		no such control, and the armed skill's offer would be lost with every other test green."""
+		docname = _make_skill(TEST_USER, armed=True, name="draftarmed")
+		conv = self._bound_conv("/draftarmed make a todo")
+		with patch.dict(frappe.conf, {"jarvis_draft_cards": 1}):
+			r = self._park_create_todo(conv, "jarvis-approverun-draft-armed-001")
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		self.assertIn("preview", r["data"], "the ordinary result, not the short draft result")
+		self.assertNotIn("draft", r["data"])
+		rec = self._token_record(conv)
+		self.assertEqual(rec.get("skill_docname"), docname)
+		card = (rec.get("preview") or {}).get("card")
+		self.assertIsInstance(card, dict)
+		self.assertNotIn("draft", card)
+		self.assertTrue(card.get("approve_run"))
+
+	def test_with_draft_cards_on_an_unarmed_write_is_a_draft_card(self):
+		"""The control for the test above: the same park with the flag on and no armed skill IS a
+		draft card (a ``draft`` on the card, the short result, no Approve & run), so that test
+		fails only because of the armed skill's offer and not because drafts never happen here."""
+		_make_skill(TEST_USER, armed=False, name="draftunarmed")
+		conv = self._bound_conv("/draftunarmed make a todo")
+		with patch.dict(frappe.conf, {"jarvis_draft_cards": 1}):
+			r = self._park_create_todo(conv, "jarvis-approverun-draft-unarmed-001")
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		self.assertIn("draft", r["data"])
+		self.assertNotIn("preview", r["data"])
+		rec = self._token_record(conv)
+		self.assertIsNone(rec.get("skill_docname"))
+		card = (rec.get("preview") or {}).get("card")
+		self.assertIsInstance(card, dict)
+		self.assertIsInstance(card.get("draft"), dict)
 		self.assertNotIn("approve_run", card)
 
 	def test_never_tool_first_write_gets_no_offer(self):
