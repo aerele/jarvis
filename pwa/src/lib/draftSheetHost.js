@@ -221,8 +221,12 @@ export function makeDraftSheet(io) {
 	let refreshing = false;
 	// At most ONE quiet thread read per "the card is missing from the server's list" episode: if that
 	// read did not drop the card, reading the thread every tick would not either. The next episode starts
-	// when the card is listed again (or another form opens). A read that did not land does not count.
+	// when the card is listed again (or another form opens). A read that did not land does not count,
+	// but only three in a row are tried: then it waits for the card to be listed again or for the
+	// app to come back to the foreground (a phone that is offline is not asked every five seconds).
+	const QUIET_READ_TRIES = 3;
 	let quietReadDone = false;
+	let quietFails = 0;
 	const tick = async () => {
 		// a card already found dead stays dead: nothing more to read
 		if (refreshing || !panel.value || dead.value) return;
@@ -230,11 +234,20 @@ export function makeDraftSheet(io) {
 		const token = panel.value.token;
 		try {
 			const listed = await io.loadPending("auto", { quiet: true });
-			if (listed && listed.has(token)) quietReadDone = false;
-			else if (listed && !quietReadDone && panel.value && panel.value.token === token) {
+			if (listed && listed.has(token)) {
+				quietReadDone = false;
+				quietFails = 0;
+			} else if (
+				listed &&
+				!quietReadDone &&
+				quietFails < QUIET_READ_TRIES &&
+				panel.value &&
+				panel.value.token === token
+			) {
 				// a read that did not land (offline, overtaken by a loud load) does not count: the next
-				// tick asks again
+				// tick asks again, up to QUIET_READ_TRIES in a row
 				quietReadDone = (await io.loadChatQuietly()) !== false;
+				quietFails = quietReadDone ? 0 : quietFails + 1;
 				await io.loadPending("auto", { quiet: true });
 			}
 		} catch {
@@ -244,7 +257,9 @@ export function makeDraftSheet(io) {
 		}
 	};
 	const onVisible = () => {
-		if (document.visibilityState === "visible") tick();
+		if (document.visibilityState !== "visible") return;
+		quietFails = 0;
+		tick();
 	};
 	function stopWatching() {
 		if (timer) clearInterval(timer);
@@ -256,6 +271,7 @@ export function makeDraftSheet(io) {
 		(token) => {
 			stopWatching();
 			quietReadDone = false;
+			quietFails = 0;
 			confirming.value = false;
 			confirmingDiscard.value = false;
 			if (!token) return;

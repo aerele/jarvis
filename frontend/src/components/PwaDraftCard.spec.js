@@ -216,8 +216,6 @@ describe("runDraftDecision: what each real server reply does on the phone's card
 		"Couldn't confirm. It may have been handled somewhere else. Refresh, or ask me to try again.";
 	const PHONE_TEXT = {
 		"a used legacy token, the card has no expiry": SOMEWHERE_ELSE,
-		"a used legacy token, the card's expiry is ahead": SOMEWHERE_ELSE,
-		"an armed run withdrew the confirmation (no reason_code)": SOMEWHERE_ELSE,
 	};
 	// ONE case per effect class of the phone (what it DOES with an outcome), not one per server reply:
 	// the shared decision maps every reply of the table to an outcome (chatCardDecision.spec.js, and the

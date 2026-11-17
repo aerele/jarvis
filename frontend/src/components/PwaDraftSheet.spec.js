@@ -562,6 +562,26 @@ describe("a card that leaves the list while its form is open", () => {
 		expect(t.order).toEqual([]);
 	});
 
+	// Break: a thread read that keeps failing (offline) is retried every five seconds for as long as the
+	// sheet is open, or the cap is never lifted when the app returns to the foreground.
+	it("stops the quiet thread read after three failures in a row, and tries again on the foreground", async () => {
+		vi.useFakeTimers();
+		const t = await opened();
+		t.state.onList = () => {
+			t.state.listed = [];
+		};
+		let reads = 0;
+		t.io.loadChatQuietly = async () => {
+			reads += 1;
+			return false; // did not land
+		};
+		await vi.advanceTimersByTimeAsync(5000 * 6);
+		expect(reads).toBe(3);
+		document.dispatchEvent(new Event("visibilitychange"));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(reads).toBe(4);
+	});
+
 	// Break: the poll goes on after the sheet closed (a read every five seconds for nothing).
 	it("stops with the sheet", async () => {
 		vi.useFakeTimers();

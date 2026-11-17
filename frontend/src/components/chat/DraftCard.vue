@@ -638,6 +638,18 @@ function press(button) {
 		grid-column: 1 / -1;
 	}
 }
+/* Exactly THREE buttons (e.g. Save changes, Cancel, Discard, or a create's Create, Edit, Discard)
+   never leave one alone under two: three equal columns while the card is wide enough, else one
+   column of three. Two and four are as above. */
+.dc-phone .dc-buttons:has(> .dc-btn:nth-child(3):last-child) {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+@container (max-width: 359px) {
+	.dc-phone .dc-buttons:has(> .dc-btn:nth-child(3):last-child) {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
 /* A table wider than the card scrolls inside it: a fade on the edge that has more, gone at the end of
    the scroll (the cover gradients scroll with the content, the shades stay at the edges). */
 .dc-phone .dc-scroll {
