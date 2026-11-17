@@ -321,6 +321,24 @@ describe("a navigation to another chat while the sheet is open (a notification t
 		router.back();
 		await settle();
 		expect(where()).toBe("/c/A");
+		// and no dead marker behind it: the next Back leaves the chat, not a second "/c/A"
+		router.back();
+		await settle();
+		expect(where()).toBe("/");
+	});
+
+	// Break: a notification tap for the chat that is ALREADY open (a push to the same path) is let through
+	// and lands on top of the marker, so the next Back shows a dead "#editing" and needs another.
+	it("a push to the same chat closes a clean sheet and leaves no marker: one Back leaves the chat", async () => {
+		await openChat();
+		await openSheet();
+		await router.push("/c/A").catch(() => {});
+		await settle();
+		expect(wrapper.find(".jv-dsheet-title").exists()).toBe(false);
+		expect(where()).toBe("/c/A");
+		router.back();
+		await settle();
+		expect(where()).toBe("/");
 	});
 });
 

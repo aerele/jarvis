@@ -63,6 +63,22 @@ export function makeSheetHistory(router) {
 			entry = false;
 			await run(() => router.back());
 		},
+		// Is this navigation a PUSH (a link, a notification tap) rather than a pop (the phone's Back)? The
+		// router's history already holds the target of a pop while the guards run, and still holds the
+		// current entry for a push. false when the router cannot say (then it is treated as a pop).
+		isPush(to) {
+			const loc =
+				router &&
+				router.options &&
+				router.options.history &&
+				router.options.history.location;
+			return (
+				typeof loc === "string" &&
+				!!to &&
+				typeof to.fullPath === "string" &&
+				loc !== to.fullPath
+			);
+		},
 		// The pop or the navigation that is happening already took the entry (or the chat is left
 		// with it still in the history: it cannot be popped from another chat).
 		consumed() {

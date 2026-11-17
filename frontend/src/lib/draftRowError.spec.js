@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { hasFlaggedRow, markRowFromMessage, rowNamedBy } from "./draftRowError.js";
-import { draftCardValues, snapshotDraftModel } from "./draftCardValues.js";
+import { draftCardDirty, draftCardValues, snapshotDraftModel } from "./draftCardValues.js";
+import { blankRow, sentRows } from "./draftTables.js";
+import { timesheetCard, timesheetModel } from "./timesheetDraftFixture.js";
 
 const cols = (...labels) =>
 	labels.map((label) => ({ fieldname: label.toLowerCase().replace(/ /g, "_"), label }));
@@ -102,5 +104,36 @@ describe("markRowFromMessage: the mark on the form", () => {
 		const before = JSON.stringify(draftCardValues(m, snap, card));
 		markRowFromMessage(m, OVERLAP);
 		expect(JSON.stringify(draftCardValues(m, snap, card))).toBe(before);
+	});
+});
+
+describe("the row number the server counts is the row the form marks", () => {
+	// Break: the mark lands one row off when a blank row sits above the named one (the form counts it, the
+	// payload does not: the server's "Row 2" is the SECOND row SENT), or a flag makes the form look edited.
+	it("with a blank row above, Row 2 is the second row the payload sends", () => {
+		const m = timesheetModel();
+		const card = timesheetCard();
+		const snap = snapshotDraftModel(m, card);
+		const table = m.tables[0];
+		table.rows.splice(1, 0, blankRow(table)); // [r1, blank, r2, r3]
+		table.rows[3].description = "Fixes, changed"; // touch the table so it is sent
+		const sent = draftCardValues(m, snap, card).time_logs;
+		expect(sent).toHaveLength(3);
+		expect(sentRows(table, "create")).toHaveLength(sent.length);
+		// the second row sent is the drafted row 1 (_draft_row), which is the form's third row
+		expect(sent[1]._draft_row).toBe(1);
+		expect(rowNamedBy("Row 2: From Time overlaps", m).row).toBe(table.rows[2]);
+		expect(rowNamedBy("Row 3: From Time overlaps", m).row).toBe(table.rows[3]);
+		expect(rowNamedBy("Row 4: From Time overlaps", m)).toBeNull();
+	});
+
+	it("a flagged row does not make an untouched form look edited", () => {
+		const m = timesheetModel();
+		const card = timesheetCard();
+		const snap = snapshotDraftModel(m, card);
+		expect(draftCardDirty(m, snap, card)).toBe(false);
+		markRowFromMessage(m, "Row 2: From Time overlaps");
+		expect(m.tables[0].rows[1].__flag).toBe(true);
+		expect(draftCardDirty(m, snap, card)).toBe(false);
 	});
 });

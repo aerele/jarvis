@@ -422,6 +422,9 @@ export function makeDraftSheet(io) {
 		if (sameChat) {
 			const result = requestClose();
 			if (result !== "closed") return false;
+			// a PUSH to this same chat (a notification tap for the chat already open) has nothing to add:
+			// the sheet closed and its own release pops the marker, which lands on the same URL
+			if (io.history && io.history.isPush(to)) return false;
 			if (io.history) io.history.consumed();
 			return true;
 		}
