@@ -266,14 +266,9 @@ def list_triggers_page(
 
 	total = list_filters.bounded_sql(f"SELECT COUNT(*) FROM `tabJarvis Trigger` WHERE {where}", params)[0][0]
 	rows = list_filters.bounded_sql(
-<<<<<<< HEAD
-		f"""SELECT name, trigger_name, enabled, target_doctype, doc_event,
+		f"""SELECT name, trigger_name, enabled, target_doctype, doc_event, doc_events,
 		action_type, description, modified, owner,
 		intake_source, intake_folder, intake_record_doctype, intake_record_event, intake_target_doctype
-=======
-		f"""SELECT name, trigger_name, enabled, target_doctype, doc_event, doc_events,
-		action_type, description, modified, owner
->>>>>>> 7b89a96 (feat(triggers): one trigger can run on several doc events)
 		FROM `tabJarvis Trigger`
 		WHERE {where}
 		ORDER BY {order}
@@ -300,11 +295,13 @@ def list_triggers_page(
 		r["last_activity_at"] = str(s["last_activity_at"]) if s and s["last_activity_at"] else ""
 		r["activity_24h"] = cint(s["activity_24h"]) if s else 0
 		r["modified"] = str(r["modified"])
-<<<<<<< HEAD
+		# An Intake rule has no doc events; its list label is built from its source.
+		r["doc_events"] = (
+			[]
+			if r.get("action_type") == "Intake"
+			else trigger_events(r.get("doc_events"), r.get("doc_event"))
+		)
 		_shape_intake_row(r)
-=======
-		r["doc_events"] = trigger_events(r.get("doc_events"), r.get("doc_event"))
->>>>>>> 7b89a96 (feat(triggers): one trigger can run on several doc events)
 
 	return {
 		"ok": True,
@@ -346,7 +343,7 @@ def _trigger_detail(doc, *, can_manage: bool = True) -> dict:
 		"enabled": cint(doc.enabled),
 		"target_doctype": doc.target_doctype,
 		"doc_event": doc.doc_event,
-		"doc_events": trigger_events(doc.doc_events, doc.doc_event),
+		"doc_events": [] if doc.action_type == "Intake" else trigger_events(doc.doc_events, doc.doc_event),
 		"action_type": doc.action_type,
 		"server_script": doc.server_script or "",
 		"llm_daily_cap": cint(doc.llm_daily_cap),

@@ -1037,7 +1037,6 @@ class TestDuplicateTriggers(_TriggersApiTestCase):
 		)
 
 
-<<<<<<< HEAD
 class TestSetEnabledUnsafeAttributes(_TriggersApiTestCase):
 	"""Turning a trigger ON re-checks its stored code (#818): a body or condition
 	that was saved before the check existed must not be re-armed. set_trigger_enabled
@@ -1109,6 +1108,35 @@ class TestSetEnabledUnsafeAttributes(_TriggersApiTestCase):
 		frappe.db.set_value(TRIGGER, name, "enabled", 0)
 		frappe.set_user(ADMIN_USER)
 		self.assertEqual(set_trigger_enabled(name, 1)["data"]["enabled"], 1)
+
+
+class TestMultipleEvents(_TriggersApiTestCase):
+	"""jarvis-admin-v2#825: create/update/read a trigger with several doc events."""
+
+	def test_create_with_a_list_returns_every_event(self):
+		name = self._create_as_admin(doc_event=None, doc_events=["on_trash", "on_update"])
+		detail = get_trigger(name)["data"]
+		self.assertEqual(detail["doc_events"], ["on_update", "on_trash"])
+		self.assertEqual(detail["doc_event"], "on_update")
+
+	def test_update_doc_events_from_the_form(self):
+		name = self._create_as_admin()
+		r = update_trigger(name, frappe.as_json({"doc_events": "after_insert\non_update"}))
+		self.assertEqual(r["data"]["doc_events"], ["after_insert", "on_update"])
+
+	def test_list_rows_carry_the_events_and_the_filter_matches_any_of_them(self):
+		name = self._create_as_admin(doc_event=None, doc_events=["on_update", "on_trash"])
+		for event in ("on_update", "on_trash"):
+			rows = list_triggers_page(filters=frappe.as_json({"doc_event": event}))["data"]["rows"]
+			self.assertIn(name, [r["name"] for r in rows], event)
+		row = next(
+			r
+			for r in list_triggers_page(filters=frappe.as_json({"doc_event": "on_trash"}))["data"]["rows"]
+			if r["name"] == name
+		)
+		self.assertEqual(row["doc_events"], ["on_update", "on_trash"])
+		rows = list_triggers_page(filters=frappe.as_json({"doc_event": "after_insert"}))["data"]["rows"]
+		self.assertNotIn(name, [r["name"] for r in rows])
 
 
 class TestIntakeRowFeedScope(_TriggersApiTestCase):
@@ -1284,32 +1312,3 @@ class TestWhitelistTypeValidation(_TriggersApiTestCase):
 					docname=docname,
 				)
 				self.assertTrue(res["data"]["valid"])
-=======
-class TestMultipleEvents(_TriggersApiTestCase):
-	"""jarvis-admin-v2#825: create/update/read a trigger with several doc events."""
-
-	def test_create_with_a_list_returns_every_event(self):
-		name = self._create_as_admin(doc_event=None, doc_events=["on_trash", "on_update"])
-		detail = get_trigger(name)["data"]
-		self.assertEqual(detail["doc_events"], ["on_update", "on_trash"])
-		self.assertEqual(detail["doc_event"], "on_update")
-
-	def test_update_doc_events_from_the_form(self):
-		name = self._create_as_admin()
-		r = update_trigger(name, frappe.as_json({"doc_events": "after_insert\non_update"}))
-		self.assertEqual(r["data"]["doc_events"], ["after_insert", "on_update"])
-
-	def test_list_rows_carry_the_events_and_the_filter_matches_any_of_them(self):
-		name = self._create_as_admin(doc_event=None, doc_events=["on_update", "on_trash"])
-		for event in ("on_update", "on_trash"):
-			rows = list_triggers_page(filters=frappe.as_json({"doc_event": event}))["data"]["rows"]
-			self.assertIn(name, [r["name"] for r in rows], event)
-		row = next(
-			r
-			for r in list_triggers_page(filters=frappe.as_json({"doc_event": "on_trash"}))["data"]["rows"]
-			if r["name"] == name
-		)
-		self.assertEqual(row["doc_events"], ["on_update", "on_trash"])
-		rows = list_triggers_page(filters=frappe.as_json({"doc_event": "after_insert"}))["data"]["rows"]
-		self.assertNotIn(name, [r["name"] for r in rows])
->>>>>>> 7b89a96 (feat(triggers): one trigger can run on several doc events)

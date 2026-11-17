@@ -4,6 +4,7 @@ A trigger can now run on several doc events, listed in ``doc_events``. Rows save
 before the field existed have it blank; the engine and the controller already fall
 back to ``doc_event`` for those, so this only makes the stored value say what the
 trigger does (the list filter and the Desk form read it). Safe to run again.
+Intake rules run from uploads, not doc events, and are left alone.
 """
 
 import frappe
@@ -15,5 +16,6 @@ def execute():
 	frappe.db.sql(
 		"""UPDATE `tabJarvis Trigger`
 		SET doc_events = doc_event
-		WHERE (doc_events IS NULL OR doc_events = '') AND doc_event IS NOT NULL AND doc_event != ''"""
+		WHERE (doc_events IS NULL OR doc_events = '') AND doc_event IS NOT NULL AND doc_event != ''
+		AND COALESCE(action_type, '') != 'Intake'"""
 	)

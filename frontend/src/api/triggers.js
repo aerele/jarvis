@@ -35,18 +35,12 @@ export const listTriggersPage = (p) => call(TR + "list_triggers_page", _page(p))
 // llm_daily_cap, llm_allow_lookups, server_script, source_conversation
 export const getTrigger = (name) => call(TR + "get_trigger", { name }).then(unwrap);
 
-<<<<<<< HEAD
-// payload fields: trigger_name, enabled, target_doctype, doc_event, condition,
+// payload fields: trigger_name, enabled, target_doctype, doc_events (a list, or
+// one per line; or the older single doc_event), condition,
 // action_type ('Script'|'LLM'|'Intake'), script_body, llm_instruction, llm_daily_cap,
 // llm_allow_lookups, description, source_conversation, and for Intake: intake_source,
 // intake_folder, intake_record_doctype, intake_target_doctype, intake_spec (JSON string),
 // intake_instructions, allow_incomplete_drafts, intake_status_field, intake_link_field - JSON-encoded (dict arg). -> full detail
-=======
-// payload fields: trigger_name, enabled, target_doctype, doc_events (a list, or
-// one per line; or the older single doc_event), condition,
-// action_type ('Script'|'LLM'), script_body, llm_instruction, llm_daily_cap,
-// llm_allow_lookups, description, source_conversation - JSON-encoded (dict arg). -> full detail
->>>>>>> 7b89a96 (feat(triggers): one trigger can run on several doc events)
 export const createTrigger = (payload = {}) =>
 	call(TR + "create_trigger", { payload: JSON.stringify(payload) }).then(unwrap);
 export const updateTrigger = (name, payload = {}) =>
