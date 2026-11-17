@@ -1427,37 +1427,14 @@ def _assemble_prompt(
 	# all (issue #477: the container has a single role-blind custom_skills dir).
 	from jarvis.chat.custom_skills import invoked_skill_clause, learned_skill_clause
 
-<<<<<<< HEAD
-	skill_clause = invoked_skill_clause(msg_row.get("content") or "") if binding is None else ""
-=======
-	# Resolve invoked_skill_slugs ONCE under chat_user (the message's actual
-	# sender, not frappe.session.user - which can be a pump worker's exec
-	# identity in managed-pump mode) and hand the SAME set to both clauses
-	# below (code review on #580): before this fix invoked_skill_clause
-	# resolved its own set under the ambient session user while
-	# armed_skill_clause resolved under chat_user, so the two could disagree
-	# on identity, and each paid for its own table scan.
 	# A chat decision resuming a card (jarvis-admin-v2#793) is a message the BENCH wrote: no user
-	# typed a /slug in it. A "/daily-timesheet-reminder" inside the question, the lead-in, the
-	# title, the decision or the actor's name must not become a trusted "the user invoked these
-	# skills" clause (nor an armed-skill one). File Box routing answers use the same origin and
-	# keep today's behaviour.
-	if msg_row.get("origin") == "board_answer" and not conv.file_box:
-		turn_invoked_slugs = set()
+	# typed a /slug in it, so a "/slug" inside the question, the lead-in, the title, the decision or
+	# the actor's name must not become a trusted "the user invoked these skills" clause. File Box
+	# routing answers use the same origin and keep today's behaviour.
+	if binding is not None or (msg_row.get("origin") == "board_answer" and not conv.file_box):
+		skill_clause = ""
 	else:
-		turn_invoked_slugs = invoked_skill_slugs(user_message or "", user=chat_user)
-	skill_clause = invoked_skill_clause(user_message or "", chat_user, slugs=turn_invoked_slugs)
-	# Armed-skill first-write fix (issue #580, found on live e2e): silent once a
-	# run is already approved (autorun_run above takes over) or an armed macro
-	# is already running (armed_run above already tells the agent to call every
-	# write tool directly, create/update included) - only meaningful BEFORE
-	# either kind of run has opened.
-	armed_skill_run_clause = (
-		""
-		if (binding is not None or conv.skill_autorun or conv.skip_confirmation)
-		else armed_skill_clause(user_message or "", chat_user, slugs=turn_invoked_slugs)
-	)
->>>>>>> 18f9c09 (fix(chat): a board decision names the task it belongs to (Aerele-RnD/jarvis-admin-v2#793))
+		skill_clause = invoked_skill_clause(msg_row.get("content") or "")
 	# An unsaved draft card is on the user's screen (``live_draft``): tell the agent once per
 	# turn, so it reminds the user instead of drafting again. Decides every skip itself.
 	live_draft_clause = _live_draft_clause(conv, binding)
