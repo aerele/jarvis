@@ -1427,7 +1427,14 @@ def _assemble_prompt(
 	# all (issue #477: the container has a single role-blind custom_skills dir).
 	from jarvis.chat.custom_skills import invoked_skill_clause, learned_skill_clause
 
-	skill_clause = invoked_skill_clause(msg_row.get("content") or "") if binding is None else ""
+	# A chat decision resuming a card (jarvis-admin-v2#793) is a message the BENCH wrote: no user
+	# typed a /slug in it, so a "/slug" inside the question, the lead-in, the title, the decision or
+	# the actor's name must not become a trusted "the user invoked these skills" clause. File Box
+	# routing answers use the same origin and keep today's behaviour.
+	if binding is not None or (msg_row.get("origin") == "board_answer" and not conv.file_box):
+		skill_clause = ""
+	else:
+		skill_clause = invoked_skill_clause(msg_row.get("content") or "")
 	# An unsaved draft card is on the user's screen (``live_draft``): tell the agent once per
 	# turn, so it reminds the user instead of drafting again. Decides every skip itself.
 	live_draft_clause = _live_draft_clause(conv, binding)
@@ -1457,6 +1464,12 @@ def _assemble_prompt(
 		from jarvis.chat.custom_skills import personal_skill_clause
 
 		personal_clause = (personal_skill_clause(chat_user) or "") if binding is None else ""
+		# A decision resuming a chat (jarvis-admin-v2#793) continues the task its card came
+		# from; "N personal skills saved, search with find_skills" invited a search that
+		# ended in an unrelated write. File Box routing answers also use `board_answer`
+		# (filebox_skills.py), and keep the nudge.
+		if msg_row.get("origin") == "board_answer" and not conv.file_box:
+			personal_clause = ""
 	except Exception:
 		personal_clause = ""
 	try:
