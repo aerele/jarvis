@@ -113,14 +113,14 @@ test("an item that is not a draft keeps exactly the keys and summary it had", ()
 
 // The panel itself has no mount test, so pin its wiring. Break: a draft item gets Confirm back
 // (the button's v-if loses draft_title), another control starts resolvePending, the typed hint
-// returns for a stack with a draft, or a builder is inlined back into Panel.vue without the title.
+// line loses the draft-aware visibleTypedHint, or a builder is inlined back into Panel.vue without the title.
 const panel = fs.readFileSync(
   fileURLToPath(new URL("./Panel.vue", import.meta.url)),
   "utf8"
 );
 const squash = (t) => t.replace(/\s+/g, " ").trim();
 
-test("Panel.vue: a draft item has no Confirm, one solid Review in full chat, and no typed hint", () => {
+test("Panel.vue: a draft item has no Confirm, one solid Review in full chat, and the hint line renders from the visibleTypedHint computed", () => {
   const row = panel.slice(panel.indexOf('v-for="(p, pi) in orderedPending"'));
   const acts = squash(
     row.slice(
