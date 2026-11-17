@@ -4,7 +4,9 @@
   passes the actions it offers and handles them (`@action="(key, text) => ..."`).
 
   It shows on mouseup / keyup (not while a drag is still selecting) and hides when the
-  selection collapses, the page scrolls or Escape is pressed. Its buttons take the
+  selection collapses, leaves the screen or Escape is pressed. When the page scrolls
+  or resizes it follows the selection: the chat itself may scroll a moment after the
+  mouseup (the composer resizing as it loses focus), which must not hide it. Its buttons take the
   click on mousedown.prevent so pressing one does not clear the selection first.
   On a touch screen (the PWA passes `below`) it shows once a long-press selection
   settles, sits BELOW the selection (the phone's own Copy menu is above it), and a tap
@@ -66,6 +68,7 @@ function place() {
 	if (!t) return hide();
 	const rect = sel.getRangeAt(0).getBoundingClientRect();
 	if (!rect || (!rect.width && !rect.height)) return hide();
+	if (rect.bottom < 0 || rect.top > window.innerHeight) return hide(); // scrolled away
 	text = t;
 	const above = rect.top - 44;
 	const under = rect.bottom + (props.below ? 14 : 8);
@@ -112,6 +115,14 @@ function onSelectionChange() {
 	if (touching) schedule(450);
 }
 
+// Follow the selection on a scroll or resize (once per frame), only while shown.
+let frame = 0;
+function follow() {
+	if (!pos.value) return;
+	cancelAnimationFrame(frame);
+	frame = requestAnimationFrame(place);
+}
+
 function onKeydown(e) {
 	if (e.key === "Escape" && pos.value) hide();
 }
@@ -130,19 +141,20 @@ onMounted(() => {
 	document.addEventListener("touchend", onTouchEnd, { passive: true });
 	document.addEventListener("selectionchange", onSelectionChange);
 	document.addEventListener("keydown", onKeydown);
-	window.addEventListener("scroll", hide, true);
-	window.addEventListener("resize", hide);
+	window.addEventListener("scroll", follow, true);
+	window.addEventListener("resize", follow);
 });
 onBeforeUnmount(() => {
 	clearTimeout(timer);
+	cancelAnimationFrame(frame);
 	document.removeEventListener("mouseup", onPointerUp);
 	document.removeEventListener("keyup", onKeyUp);
 	document.removeEventListener("touchstart", onTouchStart);
 	document.removeEventListener("touchend", onTouchEnd);
 	document.removeEventListener("selectionchange", onSelectionChange);
 	document.removeEventListener("keydown", onKeydown);
-	window.removeEventListener("scroll", hide, true);
-	window.removeEventListener("resize", hide);
+	window.removeEventListener("scroll", follow, true);
+	window.removeEventListener("resize", follow);
 });
 
 defineExpose({ hide });
