@@ -63,9 +63,14 @@ def is_draft_call(tool: str, args, *, must_card: bool) -> bool:
 	)
 
 
-def wanted(tool: str, args, *, must_card: bool) -> bool:
-	"""Whether this park builds a draft card: the flag is on and the call is one."""
-	return enabled() and is_draft_call(tool, args, must_card=must_card)
+def wanted(tool: str, args, *, must_card: bool, offers_run: bool = False) -> bool:
+	"""Whether this park builds a draft card: the flag is on and the call is one.
+
+	``offers_run``: the park will offer "Approve & run" (the gate stamped an armed skill on it,
+	``api._resolve_approve_run_offer``). Only the ordinary confirmation card has that control: no
+	draft card does, so such a write keeps the ordinary card, as with the flag off. Such a card has
+	no ``draft``, which is also why ``draft_save`` (it needs one) never edits it."""
+	return enabled() and not offers_run and is_draft_call(tool, args, must_card=must_card)
 
 
 def is_pending_draft_row(row) -> bool:

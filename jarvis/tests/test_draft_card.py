@@ -194,6 +194,18 @@ def _sales_order_draft():
 	)
 
 
+class TestWantedPure(unittest.TestCase):
+	def test_a_write_that_offers_approve_and_run_is_not_a_draft(self):
+		"""Only the ordinary confirmation card has the Approve & run control; a draft card has
+		none, so an armed skill's first write must keep the ordinary card even with the flag on."""
+		from unittest.mock import patch
+
+		todo = {"doctype": "ToDo", "values": {"description": "x"}}
+		with patch("jarvis.chat.draft_card.enabled", return_value=True):
+			self.assertTrue(draft_card.wanted("create_doc", todo, must_card=False))
+			self.assertFalse(draft_card.wanted("create_doc", todo, must_card=False, offers_run=True))
+
+
 class TestShortResultPure(unittest.TestCase):
 	def test_shape_has_identity_and_ignored_fields_and_no_preview(self):
 		"""A parked draft's model result is the short envelope: identity from the card's
@@ -607,6 +619,8 @@ if FrappeTestCase is not None:
 			with patch.dict(frappe.conf, {FLAG: 1}):
 				self.assertFalse(draft_card.wanted("create_doc", dash, must_card=False))
 				self.assertTrue(draft_card.wanted("create_doc", todo, must_card=False))
+				# a write that will offer Approve & run keeps the ordinary card, which has the control
+				self.assertFalse(draft_card.wanted("create_doc", todo, must_card=False, offers_run=True))
 
 		def test_create_card_has_draft_and_no_trial_name_and_keeps_its_title(self):
 			"""A draft create card is titled "New ToDo" inside `draft`, drops the name the trial

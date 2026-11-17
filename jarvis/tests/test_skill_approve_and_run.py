@@ -1188,6 +1188,43 @@ class TestApproveRunOfferThroughRunTool(FrappeTestCase):
 		self.assertIsInstance(card, dict)
 		self.assertNotIn("approve_run", card)
 
+	def test_with_draft_cards_on_an_armed_skill_write_keeps_the_ordinary_card(self):
+		"""With ``jarvis_draft_cards`` on, an armed skill's create still parks the ORDINARY card
+		(the long ``preview`` result, no ``draft``) that carries the Approve & run control. If the
+		gate's card decision stopped passing ``offers_run`` it would park a draft card, which has
+		no such control, and the armed skill's offer would be lost with every other test green."""
+		docname = _make_skill(TEST_USER, armed=True, name="draftarmed")
+		conv = self._bound_conv("/draftarmed make a todo")
+		with patch.dict(frappe.conf, {"jarvis_draft_cards": 1}):
+			r = self._park_create_todo(conv, "jarvis-approverun-draft-armed-001")
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		self.assertIn("preview", r["data"], "the ordinary result, not the short draft result")
+		self.assertNotIn("draft", r["data"])
+		rec = self._token_record(conv)
+		self.assertEqual(rec.get("skill_docname"), docname)
+		card = (rec.get("preview") or {}).get("card")
+		self.assertIsInstance(card, dict)
+		self.assertNotIn("draft", card)
+		self.assertTrue(card.get("approve_run"))
+
+	def test_with_draft_cards_on_an_unarmed_write_is_a_draft_card(self):
+		"""The control for the test above: the same park with the flag on and no armed skill IS a
+		draft card (a ``draft`` on the card, the short result, no Approve & run), so that test
+		fails only because of the armed skill's offer and not because drafts never happen here."""
+		_make_skill(TEST_USER, armed=False, name="draftunarmed")
+		conv = self._bound_conv("/draftunarmed make a todo")
+		with patch.dict(frappe.conf, {"jarvis_draft_cards": 1}):
+			r = self._park_create_todo(conv, "jarvis-approverun-draft-unarmed-001")
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		self.assertIn("draft", r["data"])
+		self.assertNotIn("preview", r["data"])
+		rec = self._token_record(conv)
+		self.assertIsNone(rec.get("skill_docname"))
+		card = (rec.get("preview") or {}).get("card")
+		self.assertIsInstance(card, dict)
+		self.assertIsInstance(card.get("draft"), dict)
+		self.assertNotIn("approve_run", card)
+
 	def test_never_tool_first_write_gets_no_offer(self):
 		"""I4: even under an armed-skill turn, a _SKILL_AUTORUN_NEVER first write
 		(create_custom_skill) must NOT be stamped with the run offer - approve_and_run
@@ -2427,13 +2464,13 @@ class TestApprovedRunContextClause(FrappeTestCase):
 			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
-	def _assembled(self, conv_doc) -> str:
+	def _assembled(self, conv_doc, content: str = "hello") -> str:
 		"""Run the shared, read-only assemble_prompt (the ONE place the [Context:]
 		bracket is built) for a real user message on conv_doc; return the prompt."""
 		from jarvis.chat.turn_handler import assemble_prompt
 
 		msg = frappe.get_doc(
-			{"doctype": MSG, "conversation": conv_doc.name, "seq": 1, "role": "user", "content": "hello"}
+			{"doctype": MSG, "conversation": conv_doc.name, "seq": 1, "role": "user", "content": content}
 		).insert(ignore_permissions=True)
 		frappe.db.commit()
 		ap = assemble_prompt(
@@ -2463,6 +2500,20 @@ class TestApprovedRunContextClause(FrappeTestCase):
 		prompt = self._assembled(doc)
 		self.assertNotIn("approved skill run", prompt)
 		self.assertIn("; chat user:", prompt)  # assembly sanity
+
+	def test_with_draft_cards_on_an_armed_skill_turn_has_no_drafting_note(self):
+		"""The gate offers Approve & run on the first covered write of an armed skill's turn, and
+		only the ordinary card has that control: a drafting note ("the site shows a draft card")
+		would promise a card without it. The plain turn in the same site keeps the note, so the
+		absence is down to the armed skill and not to the flag."""
+		self.addCleanup(lambda: (frappe.db.delete(SKILL, {"owner": TEST_USER}), frappe.db.commit()))
+		_make_skill(TEST_USER, armed=True, name="ctxarmed-drafts")
+		with patch.dict(frappe.conf, {"jarvis_draft_cards": 1}):
+			armed = self._assembled(frappe.get_doc(CONV, _make_conv(TEST_USER)), "/ctxarmed-drafts do it")
+			plain = self._assembled(frappe.get_doc(CONV, _make_conv(TEST_USER)), "just a question")
+		self.assertIn("; chat user:", armed)
+		self.assertNotIn("; drafts:", armed)
+		self.assertIn("; drafts:", plain)
 
 
 # --------------------------------------------------------------------------- #
