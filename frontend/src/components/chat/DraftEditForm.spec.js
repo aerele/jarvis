@@ -7,6 +7,7 @@ import { computed, defineComponent, h, nextTick, reactive, ref } from "vue";
 import DraftEditForm from "./DraftEditForm.vue";
 import { panelField } from "../../lib/docFields";
 import { buildDraftTable } from "../../lib/draftTables";
+import { DRAFT_DATE_CONTROL } from "../../lib/draftSurface";
 
 beforeAll(() => {
 	// DraftLinkMenu places itself with these; jsdom has neither.
@@ -118,6 +119,19 @@ describe("the form body renders the model", () => {
 		expect(flds[6].classes()).toContain("missing"); // a blank required value
 		expect(wrapper.find(".jv-draft-body select.jv-action-sel").exists()).toBe(true);
 		expect(wrapper.find('.jv-draft-body input[type="date"]').element.value).toBe("2026-01-02");
+	});
+
+	// Break: a header Date field ignores the host's picker (the desktop loses #833 in the draft form).
+	it("draws a main Date field with the host's picker when it provides one", () => {
+		const Picker = { name: "HostPicker", props: ["kind", "modelValue"], template: "<i />" };
+		wrapper = mount(DraftEditForm, {
+			props: { model: makeModel(), draftLink: linkState() },
+			attachTo: document.body,
+			global: { stubs: { teleport: true }, provide: { [DRAFT_DATE_CONTROL]: Picker } },
+		});
+		const pick = wrapper.findComponent(Picker);
+		expect([pick.props("kind"), pick.props("modelValue")]).toEqual(["date", "2026-01-02"]);
+		expect(wrapper.find('input[type="date"]').exists()).toBe(false);
 	});
 
 	it("is the single root the panel's flex column and the e2e selectors rely on", () => {

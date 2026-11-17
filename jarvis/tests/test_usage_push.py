@@ -294,3 +294,31 @@ class TestNormalizeProfile(FrappeTestCase):
 			result = usage_push._normalize_profile("not-a-role-id!")
 		self.assertEqual(result, "full")
 		mock_logger.return_value.warning.assert_called_once()
+
+
+class TestAdminGate(FrappeTestCase):
+	"""The shared gate itself, with no admin URL set anywhere."""
+
+	def setUp(self):
+		was = frappe.db.get_single_value("Jarvis Settings", "jarvis_admin_url")
+		frappe.db.set_single_value("Jarvis Settings", "jarvis_admin_url", "")
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+		self.addCleanup(frappe.clear_document_cache, "Jarvis Settings", "Jarvis Settings")
+		self.addCleanup(frappe.db.set_single_value, "Jarvis Settings", "jarvis_admin_url", was or "")
+		no_config_url = patch.dict(frappe.conf, {"jarvis_admin_url": ""})
+		no_config_url.start()
+		self.addCleanup(no_config_url.stop)
+
+	def test_onboarded_bench_on_the_default_url_is_configured(self):
+		from jarvis import installed_apps_sync
+
+		with patch("jarvis.admin_client.has_credentials", return_value=True):
+			self.assertTrue(usage_push._admin_configured())
+			self.assertTrue(installed_apps_sync._admin_configured())
+
+	def test_un_onboarded_bench_is_not_configured(self):
+		from jarvis import installed_apps_sync
+
+		with patch("jarvis.admin_client.has_credentials", return_value=False):
+			self.assertFalse(usage_push._admin_configured())
+			self.assertFalse(installed_apps_sync._admin_configured())

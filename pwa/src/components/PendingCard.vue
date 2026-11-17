@@ -324,7 +324,13 @@ function tableNote(t) {
 					</div>
 				</details>
 			</div>
-			<div v-if="card.extra > 0" class="jv-pc-more">
+			<!-- a merge from a query (send_email recipients_from) can hold hundreds:
+			     every address Confirm will email, readable before confirming -->
+			<details v-if="card.all_recipients?.length" class="jv-pc-expand">
+				<summary>All {{ card.all_recipients.length }} recipients</summary>
+				<pre class="jv-pc-body">{{ card.all_recipients.join("\n") }}</pre>
+			</details>
+			<div v-else-if="card.extra > 0" class="jv-pc-more">
 				+{{ card.extra }} more · full list in Details
 			</div>
 		</template>
