@@ -10,9 +10,9 @@ import { computed, nextTick, ref, watch } from "vue";
 import DraftEditForm from "@shared/components/chat/DraftEditForm.vue";
 import DraftPreview from "@shared/components/doc/DraftPreview.vue";
 import { toolPrimaryLabel } from "@shared/lib/toolDraftPanel.js";
-import { DRAFT_STALE_TEXT } from "@shared/lib/toolDraftHost.js";
+import { toolDeadText } from "@shared/lib/toolDraftHost.js";
 import { draftPalette } from "../lib/draftTokens.js";
-import { errorLineOf, footerStatus, sheetTitle } from "../lib/draftSheetView.js";
+import { bannerVisible, errorLineOf, footerStatus, sheetTitle } from "../lib/draftSheetView.js";
 import { scrollFocusedIntoView } from "../lib/viewportFit.js";
 import Sheet from "./Sheet.vue";
 
@@ -30,6 +30,7 @@ const {
 	notices,
 	footer,
 	link,
+	bodyEl,
 	setBody,
 } = props.host;
 const { draftLink, draftLinkError, onDraftLink, pickDraftLink, closeDraftLink } = link;
@@ -53,9 +54,27 @@ const status = computed(() =>
 	footerStatus({
 		errorLine: errorLine.value,
 		dead: dead.value,
-		deadText: DRAFT_STALE_TEXT,
+		deadText: toolDeadText(panel.value),
 		marked: !!(panel.value && panel.value.error && (panel.value.error.fields || []).length),
 	})
+);
+// The banner at the top of the body and the footer's line say the same thing: the footer says it only
+// while the banner is out of sight (scrolled away). Measured after the message changes and whenever
+// the body scrolls.
+const bannerSeen = ref(false);
+function measureBanner() {
+	const area = bodyEl.value;
+	const banner = area && area.querySelector ? area.querySelector(".jv-dsheet-notes") : null;
+	bannerSeen.value =
+		!!banner && bannerVisible(banner.getBoundingClientRect(), area.getBoundingClientRect());
+}
+watch(
+	() => [notices.value.map((n) => n.text).join("|"), errorLine.value && errorLine.value.message],
+	async () => {
+		await nextTick();
+		measureBanner();
+	},
+	{ flush: "post" }
 );
 watch(confirmingDiscard, async (asking) => {
 	if (!asking) return;
@@ -110,7 +129,7 @@ const onFocusIn = (event) => scrollFocusedIntoView(event.target);
 						</svg>
 					</button>
 				</header>
-				<div :ref="setBody" class="jv-dsheet-body">
+				<div :ref="setBody" class="jv-dsheet-body" @scroll.capture="measureBanner">
 					<DraftEditForm
 						surface="phone"
 						:model="panel"
@@ -198,7 +217,11 @@ const onFocusIn = (event) => scrollFocusedIntoView(event.target);
 						<p v-if="footer.primaryTitle" class="jv-dsheet-wait" role="status">
 							{{ footer.primaryTitle }}
 						</p>
-						<p v-else-if="status" class="jv-dsheet-wait is-error" role="status">
+						<p
+							v-else-if="status && !bannerSeen"
+							class="jv-dsheet-wait is-error"
+							role="status"
+						>
 							{{ status.text }}
 						</p>
 						<div class="jv-dsheet-actions">

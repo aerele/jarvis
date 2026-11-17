@@ -34,3 +34,12 @@ export function footerStatus({ errorLine, dead, deadText, marked = false }) {
 		};
 	return null;
 }
+
+// Is the banner inside the area the person is looking at? `banner` and `area` are the rects of the
+// banner and of the form's scrolling area (getBoundingClientRect). An element with no height (not
+// laid out, jsdom) is "not known to be in view": the footer then keeps saying the message, which is
+// the safe side. Used to say a message once: the footer repeats it only while the banner is out of sight.
+export function bannerVisible(banner, area) {
+	if (!banner || !area || !(banner.height > 0) || !(area.height > 0)) return false;
+	return banner.top >= area.top - 1 && banner.bottom <= area.bottom + 1;
+}

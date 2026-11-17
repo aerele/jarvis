@@ -324,7 +324,8 @@ export function makeDraftSheet(io) {
 	// Save in the form. What each reply does is the shared door's (saveToolDraft / settleSave); the
 	// words it wanted to say are placed by its result:
 	//   closed-open, keep-closed  the card is still waiting: its error line
-	//   closed-dead               the form stays with the dead banner: the words go in its banner
+	//   closed-dead               the form stays with its dead banner, which already carries the words
+	//                             (the shared door put them on the panel): nothing more to place
 	//   closed                    the card is gone: the chat banner, unless the reloaded thread
 	//                             already holds the receipt that says it
 	async function save() {
@@ -335,9 +336,7 @@ export function makeDraftSheet(io) {
 		const text = lastError();
 		if (!text) return result;
 		if (result === "closed-open" || result === "keep-closed") tellAbout(p.token, text);
-		else if (result === "closed-dead") {
-			if (panel.value === p) p.error = { message: text };
-		} else if (result === "closed" && !io.receiptShown(p.token)) io.say(text);
+		else if (result === "closed" && !io.receiptShown(p.token)) io.say(text);
 		return result;
 	}
 

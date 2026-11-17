@@ -376,7 +376,9 @@ describe("what each reply of Save does on screen", () => {
 				result: "closed-dead",
 				open: true,
 				card: false,
-				panelError:
+				// ONE message, with the server's own reason: the dead banner carries it, and the form
+				// has no second error line
+				deadText:
 					"Couldn't save this: The record changed. The reply in the chat explains what to do.",
 				say: [],
 			},
@@ -410,6 +412,10 @@ describe("what each reply of Save does on screen", () => {
 		expect(t.calls.say).toEqual(want.say);
 		if ("cardError" in want) expect(t.ui.error("t1")).toBe(want.cardError);
 		if ("panelError" in want) expect(t.host.panel.value.error.message).toBe(want.panelError);
+		if ("deadText" in want) {
+			expect(t.host.notices.value.map((n) => n.text)).toEqual([want.deadText]);
+			expect(t.host.panel.value.error).toBeFalsy();
+		}
 		expect(t.ui.busyKind("t1")).toBe("");
 		// the card is spent in these: both lists were read again, the chat first (P4)
 		if (!want.card) expect(t.order.filter((x) => x !== "remove")).toEqual(["chat", "list"]);
@@ -435,7 +441,7 @@ describe("what each reply of Save does on screen", () => {
 		edit(t.host, "parent_project", "PROJ-0002");
 		t.replies.save = CLOSED(extra);
 		await t.host.save();
-		const text = t.host.panel.value.error.message;
+		const text = t.host.notices.value[0].text;
 		expect(text).toBe(`Couldn't save this: The record changed.${tail ? " " + tail : ""}`);
 	});
 
@@ -967,8 +973,30 @@ describe("DraftSheet: a message must be seen where the person tapped", () => {
 		const w = await mountSheet(t);
 		t.items.value = [];
 		await flushPromises();
-		expect(w.find(".jv-dsheet-foot .jv-dsheet-wait").text()).toBe(DRAFT_STALE_TEXT);
+		// a card found dead by another route has no reply of its own: the generic line, once. The footer
+		// repeats it while the banner is out of sight and stops when the banner is in view.
+		const reason = DRAFT_STALE_TEXT;
+		expect(w.findAll(".jv-dsheet-notes .jv-dsheet-note").map((n) => n.text())).toEqual([
+			reason,
+		]);
+		expect(w.find(".jv-dsheet-foot .jv-dsheet-wait").text()).toBe(reason);
 		expect(scroll).toHaveBeenCalled();
+		const area = w.find(".jv-dsheet-body");
+		area.element.getBoundingClientRect = () => ({ top: 0, bottom: 400, height: 400 });
+		w.find(".jv-dsheet-notes").element.getBoundingClientRect = () => ({
+			top: 10,
+			bottom: 60,
+			height: 50,
+		});
+		await area.trigger("scroll");
+		expect(w.find(".jv-dsheet-foot .jv-dsheet-wait").exists()).toBe(false);
+		w.find(".jv-dsheet-notes").element.getBoundingClientRect = () => ({
+			top: -80,
+			bottom: -30,
+			height: 50,
+		});
+		await area.trigger("scroll");
+		expect(w.find(".jv-dsheet-foot .jv-dsheet-wait").text()).toBe(reason);
 		w.unmount();
 		delete Element.prototype.scrollIntoView;
 	});
@@ -1004,7 +1032,7 @@ describe("DraftSheet: a message must be seen where the person tapped", () => {
 		expect(scroll.mock.contexts[0].getAttribute("role")).toBe("alert");
 
 		// 2. the save's reply says the card is gone while the form holds edits ("closed-dead":
-		// the host sets panel.error): the component shows the footer line and the banner scrolls
+		// the dead banner carries the server's reason): the banner scrolls into view and the footer line follows it
 		scroll.mockClear();
 		const dead = await opened();
 		const w = await mountSheet(dead);
@@ -1012,7 +1040,15 @@ describe("DraftSheet: a message must be seen where the person tapped", () => {
 		dead.replies.save = CLOSED();
 		await byText(w, "Create").trigger("click");
 		await flushPromises();
-		expect(w.find(".jv-dsheet-foot .jv-dsheet-wait").text()).toBe(DRAFT_STALE_TEXT);
+		// ONE message with the server's reason: not the generic "changed while you were editing" (the
+		// wrong cause) and not a second error line
+		const reason =
+			"Couldn't save this: The record changed. The reply in the chat explains what to do.";
+		expect(w.findAll(".jv-dsheet-notes .jv-dsheet-note").map((n) => n.text())).toEqual([
+			reason,
+		]);
+		expect(w.html()).not.toContain(DRAFT_STALE_TEXT);
+		expect(w.find(".jv-dsheet-foot .jv-dsheet-wait").text()).toBe(reason);
 		expect(scroll).toHaveBeenCalled();
 		w.unmount();
 		delete Element.prototype.scrollIntoView;

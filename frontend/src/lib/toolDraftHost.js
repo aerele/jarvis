@@ -206,11 +206,19 @@ export function toolPanelDead(panel, items) {
 	);
 }
 
+// What a dead form says. A card that ended through the form's OWN save carries the reason the server
+// gave (`deadNote`, set by settleSave: "Couldn't save this: ..."), which is the right cause and the
+// only line; the generic "changed while you were editing" is for a card found dead by another route
+// (the poll or a foreground read) when no such reply exists.
+export function toolDeadText(panel) {
+	return (panel && typeof panel.deadNote === "string" && panel.deadNote) || DRAFT_STALE_TEXT;
+}
+
 // The lines above the form, in order: what to tell the person and in which style.
 export function toolPanelNotices(panel, dead) {
 	if (!panel || !panel.tool) return [];
 	const out = [];
-	if (dead) out.push({ type: "error", text: DRAFT_STALE_TEXT });
+	if (dead) out.push({ type: "error", text: toolDeadText(panel) });
 	if (panel.saveBlocked) out.push({ type: "error", text: CANT_EDIT_TEXT });
 	if (panel.storedUnavailable) out.push({ type: "warning", text: STORED_UNAVAILABLE_TEXT });
 	return out;
@@ -332,7 +340,10 @@ async function settleSave(p, view, r, outcome, d) {
 	const keepForm =
 		outcome.kind === "closed" && r.outcome !== "partial" && d.panel() === p && draftIsDirty(p);
 	if (!keepForm) closeForm();
-	if (outcome.kind === "closed") d.notify(outcome.note, { type: "error" });
+	// A kept form says why itself (its dead banner carries the server's reason): a toast or a second
+	// line would say it twice, and the generic banner would give the wrong cause.
+	if (keepForm) p.deadNote = outcome.note;
+	else if (outcome.kind === "closed") d.notify(outcome.note, { type: "error" });
 	d.removePending(p.token);
 	await d.reload(view.conversation);
 	if (!d.chatCurrent(view)) return "stale";

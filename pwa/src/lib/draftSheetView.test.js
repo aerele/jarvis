@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { errorLineOf, footerStatus, sheetTitle } from "./draftSheetView.js";
+import { bannerVisible, errorLineOf, footerStatus, sheetTitle } from "./draftSheetView.js";
 
 // Break: the header names the draft differently from the desktop panel ("New Timesheet", an update
 // with its record name), or a model with no doctype prints "undefined".
@@ -49,4 +49,21 @@ test("the footer's one line", () => {
 		text: "Dead.",
 		tone: "error",
 	});
+});
+
+// Break: the footer repeats a message the person can already see in the banner (it says it twice),
+// or an element with no layout counts as seen and the footer never says it.
+test("the banner counts as seen only when it is inside the area on screen", () => {
+	const area = { top: 100, bottom: 500, height: 400 };
+	const rect = (top, bottom) => ({ top, bottom, height: bottom - top });
+	for (const [name, banner, want] of [
+		["inside", rect(120, 180), true],
+		["scrolled off the top", rect(-50, 10), false],
+		["below the area", rect(480, 540), false],
+		["partly cut off", rect(80, 140), false],
+		["not laid out", rect(0, 0), false],
+		["no banner", null, false],
+	])
+		assert.equal(bannerVisible(banner, area), want, name);
+	assert.equal(bannerVisible(rect(120, 180), { top: 0, bottom: 0, height: 0 }), false);
 });

@@ -438,6 +438,15 @@ describe("toolPanelNotices: the lines above a server draft's form", () => {
 			},
 		]);
 	});
+	// Break: a card found dead by another route (no reply of its own) loses the generic line, or a
+	// form that died in its own save shows the generic (wrong) cause instead of the server's reason.
+	it("a dead form says the server's reason when its own save found the card gone, else the generic line", () => {
+		const own = p({ deadNote: "Couldn't save this: Gone." });
+		expect(toolPanelNotices(own, true)).toEqual([
+			{ type: "error", text: "Couldn't save this: Gone." },
+		]);
+		expect(toolPanelNotices(own, false)).toEqual([]);
+	});
 	it("says nothing for a typed draft's panel or no panel", () => {
 		expect(toolPanelNotices({ saveBlocked: "x" }, true)).toEqual([]);
 		expect(toolPanelNotices(null, true)).toEqual([]);
@@ -1006,7 +1015,7 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 		expect(h.state.items).toHaveLength(0);
 		expect(h.state.log).toEqual([
 			'save:{"title":"Edited"}',
-			expect.stringMatching(/^notify:Couldn't save this: This record changed/),
+			// no toast: the dead form says the reason itself
 			"removePending",
 			"reload",
 			"refreshChats",
@@ -1015,6 +1024,13 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 		// not dead during its own save, dead once the save is over
 		expect(h.state.deadAt).toEqual([false, false]);
 		expect(toolPanelDead(p, h.state.items)).toBe(true);
+		// ONE message, the server's own reason (the generic line would give the wrong cause)
+		expect(toolPanelNotices(p, true)).toEqual([
+			{
+				type: "error",
+				text: "Couldn't save this: This record changed after the draft was made. The reply in the chat explains what to do.",
+			},
+		]);
 	});
 
 	// Break: a partial reply (part of the edits may already be saved) keeps the form with the banner
@@ -1069,24 +1085,26 @@ describe("saveToolDraft: the replies of the edit form's Save", () => {
 			...reply,
 		};
 		await saveToolDraft(p, h.d);
-		return h.state.log.find((l) => l.startsWith("notify:"));
+		// the edited form stays, and its dead banner carries the note (no toast)
+		expect(h.state.log.find((l) => l.startsWith("notify:"))).toBeUndefined();
+		return p.deadNote;
 	};
 	for (const [name, reply, want] of [
 		[
 			"told: the reply in the chat is promised",
 			{ assistant_told: true },
-			"notify:Couldn't save this: Gone. The reply in the chat explains what to do.",
+			"Couldn't save this: Gone. The reply in the chat explains what to do.",
 		],
 		[
 			"not told: the person is asked to say it in the chat",
 			{ assistant_told: false },
-			"notify:Couldn't save this: Gone. Jarvis could not be told about it, so ask in the chat.",
+			"Couldn't save this: Gone. Jarvis could not be told about it, so ask in the chat.",
 		],
-		["no flag: neither is said", {}, "notify:Couldn't save this: Gone."],
+		["no flag: neither is said", {}, "Couldn't save this: Gone."],
 		[
 			"told by a note only: no reply is promised",
 			{ assistant_told: true, assistant_replies: false },
-			"notify:Couldn't save this: Gone.",
+			"Couldn't save this: Gone.",
 		],
 	])
 		it(`closed note, ${name}`, async () => expect(await closedNote(reply)).toBe(want));
