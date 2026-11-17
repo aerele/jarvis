@@ -69,8 +69,9 @@ import ExportCard from "@shared/components/chat/ExportCard.vue";
 import { exportSummary } from "@shared/lib/exportJobs.js";
 import ReportScope from "../components/ReportScope.vue";
 import Composer from "../components/Composer.vue";
-import { splitQuote, withQuote } from "@jsshared/reply_quote.mjs";
+import { cleanQuote, quoteMarkdown, splitQuote } from "@jsshared/reply_quote.mjs";
 import SelectionActions from "@shared/components/chat/SelectionActions.vue";
+import ReplyQuote from "@shared/components/chat/ReplyQuote.vue";
 import { createReader } from "@jsshared/read_aloud.mjs";
 import {
 	boundedDelivery,
@@ -314,26 +315,44 @@ const starred = ref(false);
 const scroller = ref(null);
 const composer = ref(null);
 
-// aerele/jarvis#2191: Reply, offered on text selected in a reply, quotes it at the top
-// of the composer (a Markdown blockquote: the agent gets the exact text, the history
-// keeps it, the bubble draws it as a quote). An unsent quote is replaced.
+// aerele/jarvis#2191: Reply, offered on text selected in a reply, shows that text as a
+// quote card at the top of the composer (WhatsApp style); the message carries it as a
+// leading Markdown blockquote (the agent gets the exact text, the history keeps it, the
+// bubble draws it as a quote). A new Reply replaces an unsent quote; it clears on send,
+// on its close button and on a chat switch. Listen reads the selection aloud.
 const quoteOf = (content) => splitQuote(content);
 function replyBodyText(e) {
 	const body = e?.currentTarget?.closest?.(".jv-msg-agent")?.querySelector?.(".jv-md");
 	return body ? body.innerText : "";
 }
+const replyQuote = ref("");
 function replyWith(text) {
-	const next = withQuote(input.value, text);
-	if (next === input.value) return;
-	input.value = next;
+	const quote = cleanQuote(text);
+	if (!quote) return;
+	replyQuote.value = quote;
 	nextTick(() => composer.value?.focusEnd?.());
+}
+function clearReplyQuote() {
+	replyQuote.value = "";
+	nextTick(() => composer.value?.focusEnd?.());
+}
+function onSelectionAction(key, text) {
+	if (key === "reply") replyWith(text);
+	else if (key === "read") reader.speak("selection", text);
 }
 // Listen: the phone's own voice (shared/read_aloud.mjs); no chip where it has none.
 // One reading at a time; it stops on a chat switch and on leaving the chat.
 const reader = createReader(window);
 const speakingId = ref(null);
 reader.subscribe((id) => (speakingId.value = id));
-watch(convId, () => reader.stop());
+watch(convId, () => {
+	reader.stop();
+	replyQuote.value = "";
+});
+const selectionActions = computed(() => [
+	{ key: "reply", label: "Reply" },
+	...(reader.supported ? [{ key: "read", label: "Listen" }] : []),
+]);
 onUnmounted(() => reader.stop());
 // An action card is a live offer, not history: only the newest assistant turn
 // may still be applied. Scrolling back to last week's proposal and tapping
@@ -982,7 +1001,8 @@ async function send() {
 	try {
 		request = sendRecovery.stage(
 			cid,
-			input.value,
+			// aerele/jarvis#2191: a Reply's quote rides in front of the typed question.
+			text && replyQuote.value ? quoteMarkdown(replyQuote.value) + input.value : input.value,
 			ready,
 			orderedPending.value.map((p) => p.token)
 		);
@@ -992,6 +1012,7 @@ async function send() {
 	}
 	if (!cid) Object.assign(request, recoveryState.newChatPicks);
 	input.value = "";
+	replyQuote.value = "";
 	composer.value?.reset();
 	// The preserved request uses durable file URLs; release only local thumbnails.
 	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
@@ -2086,10 +2107,22 @@ onUnmounted(() => {
 	<SelectionActions
 		:root="scroller"
 		selector=".jv-msg-agent .jv-md"
-		:actions="[{ key: 'reply', label: 'Reply' }]"
+		:actions="selectionActions"
 		below
-		@action="(key, text) => key === 'reply' && replyWith(text)"
+		@action="onSelectionAction"
 	/>
+	<!-- a selection being read has no chip of its own to stop it from -->
+	<button
+		v-if="speakingId === 'selection'"
+		type="button"
+		class="jv-readstop"
+		@click="reader.stop()"
+	>
+		<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+			<rect x="6" y="6" width="12" height="12" rx="2" />
+		</svg>
+		Stop
+	</button>
 	<Composer
 		ref="composer"
 		v-model="input"
@@ -2104,7 +2137,16 @@ onUnmounted(() => {
 		@remove="removeAttachment"
 		@preview="onPreviewPending"
 		@mic="voiceOpen = true"
-	/>
+	>
+		<template #top>
+			<ReplyQuote
+				v-if="replyQuote"
+				:text="replyQuote"
+				:who="agentName"
+				@close="clearReplyQuote"
+			/>
+		</template>
+	</Composer>
 
 	<!-- chat options -->
 	<Sheet :open="menuOpen" @close="(menuOpen = false), (renaming = false)">
@@ -2257,13 +2299,33 @@ onUnmounted(() => {
 .jv-msg-agent {
 	min-width: 0;
 }
+.jv-readstop {
+	position: fixed;
+	left: 50%;
+	bottom: calc(96px + env(safe-area-inset-bottom));
+	transform: translateX(-50%);
+	z-index: 60;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 14px;
+	font-size: 14px;
+	color: var(--ink9);
+	background: var(--card);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+}
 /* The quoted part of a Reply (aerele/jarvis#2191), above the question. */
 .jv-uquote {
 	margin: 0 0 7px;
-	padding: 1px 0 1px 9px;
-	border-left: 3px solid var(--border);
-	color: var(--ink5);
-	font-size: 12.5px;
+	padding: 6px 10px;
+	border-left: 3px solid var(--accent);
+	border-radius: 8px;
+	background: var(--card);
+	color: var(--ink6);
+	font-size: 13px;
+	white-space: pre-line;
 	display: -webkit-box;
 	-webkit-line-clamp: 5;
 	-webkit-box-orient: vertical;
