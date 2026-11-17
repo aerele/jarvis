@@ -100,6 +100,37 @@ describe("SelectionActions", () => {
 		expect(wrapper.emitted("action")).toEqual([["reply", "Row 3: Acme, 1,200"]]);
 	});
 
+	test("a scroll moves the bar with the selection; scrolled off screen it hides", async () => {
+		select("a");
+		await release();
+		expect(wrapper.find(".jv-selbar").attributes("style")).toContain("top: 156px");
+		// The chat scrolls by itself a moment later (the composer resizing): still shown,
+		// at the selection's new place.
+		Range.prototype.getBoundingClientRect = () => ({
+			top: 168,
+			bottom: 188,
+			left: 100,
+			width: 120,
+			height: 20,
+		});
+		window.dispatchEvent(new Event("scroll"));
+		vi.advanceTimersByTime(32); // the next animation frame (faked with the timers)
+		await nextTick();
+		expect(wrapper.find(".jv-selbar").exists()).toBe(true);
+		expect(wrapper.find(".jv-selbar").attributes("style")).toContain("top: 124px");
+		Range.prototype.getBoundingClientRect = () => ({
+			top: -80,
+			bottom: -60,
+			left: 100,
+			width: 120,
+			height: 20,
+		});
+		window.dispatchEvent(new Event("scroll"));
+		vi.advanceTimersByTime(32);
+		await nextTick();
+		expect(wrapper.find(".jv-selbar").exists()).toBe(false);
+	});
+
 	test("Escape and a collapsed selection hide the bar", async () => {
 		select("a");
 		await release();
