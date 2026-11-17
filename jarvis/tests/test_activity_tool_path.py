@@ -176,20 +176,22 @@ class TestReads(ActivityCase):
 		api._record_read_failure("get_list", {}, {"ok": False, "error": {"code": code}})
 		self.assertEqual([r.code for r in _new(self.before, method="get_list")], [code])
 
-	def test_connector_read_that_returns_its_own_failure_is_a_failed_read(self):
-		# A4: call_connector dispatched (outer ok) but answered {ok: false} in its own
-		# envelope (the safe-read carve-out runs it as a read).
+	def test_a_dispatched_read_answering_its_own_failure_is_ok_on_this_branch(self):
+		# The hotfix branches have no envelope_ok / _ENVELOPE_TOOLS machinery (the
+		# connector-envelope feature is develop-only, and call_connector is not a registered
+		# tool here, so the method would be `unknown_tool`): a dispatched call is `ok`,
+		# consistent with the Agent Write row recorded "applied" on this branch.
 		with patch("jarvis.api.dispatch", return_value={"ok": False, "error": "blocked"}):
-			env = api._dispatch_and_wrap("call_connector", {"connector": "c", "action": "a"}, is_write=False)
+			env = api._dispatch_and_wrap("get_list", {"doctype": "ToDo"}, is_write=False)
 		self.assertTrue(env["ok"])  # the outer envelope: the tool did dispatch
-		new = _new(self.before, method="call_connector")
-		self.assertEqual([(r.event, r.outcome) for r in new], [("read", "failed")])
+		new = _new(self.before, method="get_list")
+		self.assertEqual([(r.event, r.outcome) for r in new], [("read", "ok")])
 
-	def test_connector_read_that_succeeds_is_an_ok_read(self):
+	def test_a_dispatched_read_that_succeeds_is_an_ok_read(self):
 		with patch("jarvis.api.dispatch", return_value={"ok": True, "data": []}):
-			api._dispatch_and_wrap("call_connector", {"connector": "c", "action": "a"}, is_write=False)
+			api._dispatch_and_wrap("get_list", {"doctype": "ToDo"}, is_write=False)
 		self.assertEqual(
-			[(r.event, r.outcome) for r in _new(self.before, method="call_connector")], [("read", "ok")]
+			[(r.event, r.outcome) for r in _new(self.before, method="get_list")], [("read", "ok")]
 		)
 
 	def test_activity_target_is_the_one_place_the_privacy_rule_lives(self):

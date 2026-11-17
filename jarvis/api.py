@@ -3350,9 +3350,10 @@ def _activity_target(tool: str, args) -> tuple[str, str]:
 def _record_tool_activity(tool: str, args, data, *, is_write: bool) -> None:
 	"""One ``read`` event per completed non-write tool call, and one ``export`` event
 	per delivered export (an export tool is a write, so it also keeps its Agent Write
-	row). Introspection tools are not logged (plan E4). A tool that dispatched but
-	answered ``{ok: false}`` in its OWN envelope (``_ENVELOPE_TOOLS``) is a `failed`
-	read, not an `ok` one. Never raises, never commits."""
+	row). Introspection tools are not logged (plan E4). This branch has no
+	envelope_ok / _ENVELOPE_TOOLS machinery (the connector-envelope feature is not on
+	the hotfix branches), so a dispatched call is ``ok``, consistent with the
+	Agent Write row recorded "applied" above. Never raises, never commits."""
 	from jarvis import activity_log
 
 	if is_write:
@@ -3370,7 +3371,7 @@ def _record_tool_activity(tool: str, args, data, *, is_write: bool) -> None:
 		method=method,
 		ref_doctype=ref_doctype,
 		row_count=activity_log.row_count_of(tool, data),
-		outcome="ok" if envelope_ok(tool, {"ok": True, "data": data}) else "failed",
+		outcome="ok",
 	)
 
 
@@ -3592,23 +3593,9 @@ def _dispatch_and_wrap(
 			provenance=provenance,
 			provenance_name=provenance_name,
 		)
-<<<<<<< HEAD
-=======
 	# Activity events (plan 4.3(1)): after the savepoint release, so they ride the
 	# envelope's commit like the Agent Write row above.
 	_record_tool_activity(tool, args, data, is_write=is_write)
-	if not envelope_ok(tool, {"ok": True, "data": data}):
-		# A connector call that dispatched but answered {ok: false} inside its own
-		# envelope: the agent got a failure under an outer ok:true, so no failure
-		# branch above saw it.
-		from jarvis import api_errors
-
-		api_errors.record_tool_failure(
-			tool,
-			_app_learning_safe_error(tool, data.get("error") if isinstance(data, dict) else None),
-		)
-		frappe.local.jarvis_tool_failure_recorded = True
->>>>>>> 38ab11c (feat(activity): Jarvis User Activity report and per-user activity log)
 	return {"ok": True, "data": data}
 
 
