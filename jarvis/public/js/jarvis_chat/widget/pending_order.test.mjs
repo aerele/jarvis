@@ -458,17 +458,35 @@ test("Desk queues passive safety receipts so each Done reveals the next one", ()
   assert.match(direct, /settleSafetyUpdate\(\{ token, message: settled \}\)/);
 });
 
-// Break: the typed hint is printed under a stack that holds a draft card, inviting a typed
-// "go ahead" that creates a draft the panel never showed.
-test("visibleTypedHint: no hint while any card of the stack is a draft; otherwise the usual hint", () => {
-  const plain = { token: "a" };
-  const draft = { token: "b", draft_title: "New Timesheet" };
-  assert.equal(visibleTypedHint([draft]), "");
-  assert.equal(visibleTypedHint([plain, draft]), "");
-  assert.equal(visibleTypedHint([plain]), 'or type "go ahead"');
-  assert.equal(
-    visibleTypedHint([plain, { token: "c" }]),
-    'or type "confirm all", or "confirm 1 and 2"'
-  );
-  assert.equal(visibleTypedHint([]), "");
+// Break: a draft in the stack hides (or wrongly widens) the hint for the ordinary cards.
+// No draft: the old hint, byte for byte. A draft: only numbered hints, for the ordinary
+// cards, at their real position; never a bare or stack-wide phrase.
+const P = (token) => ({ token });
+const D = (token) => ({ token, draft_title: "New Timesheet" });
+const HINT_CASES = [
+  [[P("a")], 'or type "go ahead"'],
+  [[P("a"), P("b")], 'or type "confirm all", or "confirm 1 and 2"'],
+  [[P("a"), P("b"), P("c")], 'or type "confirm all", or "confirm 1 and 3"'],
+  [[], ""],
+  [[D("a")], ""],
+  [[D("a"), D("b")], ""],
+  [[P("a"), D("b")], 'or type "confirm 1"'],
+  [[D("a"), P("b")], 'or type "confirm 2"'],
+  [[P("a"), D("b"), P("c")], 'or type "confirm 1" or "confirm 3"'],
+  [[D("a"), P("b"), D("c")], 'or type "confirm 2"'],
+];
+for (const [cards, want] of HINT_CASES) {
+  test(`visibleTypedHint: ${cards.map((c) => (c.draft_title ? "D" : "P")).join("") || "empty"}`, () => {
+    assert.equal(visibleTypedHint(cards), want);
+  });
+}
+
+test("visibleTypedHint without a draft is exactly typedApprovalHint", () => {
+  for (const cards of [
+    [P("a")],
+    [P("a"), { token: "b", recent: false }],
+    [{ token: "a", recent: false }],
+    [P("a"), P("b"), P("c")],
+  ])
+    assert.equal(visibleTypedHint(cards), typedApprovalHint(cards));
 });

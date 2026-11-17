@@ -1140,8 +1140,8 @@ function observePassiveSafetyUpdates(rows) {
 	}
 }
 // Typed approval works in the widget too. An "Earlier" card never gets the
-// bare-phrase hint: only its number binds it, and a stack holding a draft card gets no hint
-// at all (pending_order.mjs visibleTypedHint).
+// bare-phrase hint: only its number binds it, and a stack holding a draft card gets only the
+// numbered hints of its ordinary cards (pending_order.mjs visibleTypedHint).
 const typedApprovalHint = computed(() => hintFor(orderedPending.value));
 const lastSent = ref("");
 // Prompt recall, matching the full chat: Up walks back through prompts sent from
