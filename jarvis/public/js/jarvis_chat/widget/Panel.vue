@@ -570,7 +570,11 @@
 					<div class="jvp-pending-txt">
 						<b v-if="orderedPending.length > 1"
 							>{{ pi + 1 }} of {{ orderedPending.length }}: </b
-						>{{ p.summary || "Jarvis wants to make a change." }}
+						>{{
+							p.draft_title
+								? `Draft: ${p.draft_title}`
+								: p.summary || "Jarvis wants to make a change."
+						}}
 						<!-- Parked before the user's latest message: only its number binds it. -->
 						<span v-if="!isRecentCard(p)" class="jvp-pending-earlier">Earlier</span>
 					</div>
@@ -582,15 +586,20 @@
 						     see the plan or the Approve & run choice. Deflect to the full
 						     chat instead, and make that deflect the PRIMARY action so it
 						     reads as the thing to do, not a secondary escape hatch. -->
+						<!-- A server draft card (draft_title) gets the same treatment, for the same
+						     reason: this panel cannot show what the draft holds, so it never
+						     offers Confirm for it. -->
 						<button
-							:class="p.approve_run ? 'jvp-btn-solid' : 'jvp-btn-subtle'"
+							:class="
+								p.approve_run || p.draft_title ? 'jvp-btn-solid' : 'jvp-btn-subtle'
+							"
 							type="button"
 							@click="$emit('open-full')"
 						>
 							Review in full chat
 						</button>
 						<button
-							v-if="!p.approve_run"
+							v-if="!p.approve_run && !p.draft_title"
 							class="jvp-btn-solid"
 							type="button"
 							:disabled="resolving === p.token"
@@ -601,7 +610,7 @@
 					</div>
 				</div>
 				<!-- Both ways to approve, shown once under the stack. -->
-				<div v-if="orderedPending.length" class="jvp-typehint">
+				<div v-if="typedApprovalHint" class="jvp-typehint">
 					{{ typedApprovalHint }}
 				</div>
 			</div>
@@ -850,13 +859,7 @@ import { failureCopy, failureKind, uploadFailureCopy } from "../../shared/chat_f
 import { openErrorReport, showReportError } from "../../shared/support_error_report.mjs";
 import { advanceViewGeneration, isViewCurrent } from "./view_generation.mjs";
 import { maintenance, foldSend, startPollIfHeld } from "./maintenance_state.mjs";
-import {
-	emptyStream,
-	applyEvent,
-	applyEventEx,
-	visibleMessages,
-	pendingApproveRun,
-} from "./chat_stream.mjs";
+import { emptyStream, applyEvent, applyEventEx, visibleMessages } from "./chat_stream.mjs";
 import {
 	discardedTokens,
 	dropDiscarded,
@@ -867,10 +870,11 @@ import {
 	settledReasonMessage,
 	safetyUpdateTransition,
 	sortPendingCards,
-	typedApprovalHint as hintFor,
+	visibleTypedHint as hintFor,
 	withExcluded,
 	withoutTokens,
 } from "./pending_order.mjs";
+import { listPendingItem, rowPendingItem } from "./pending_items.mjs";
 import { ONBOARDING_URL } from "./config.mjs";
 import {
 	listConversations,
@@ -1135,7 +1139,8 @@ function observePassiveSafetyUpdates(rows) {
 	}
 }
 // Typed approval works in the widget too. An "Earlier" card never gets the
-// bare-phrase hint: only its number binds it (pending_order.mjs).
+// bare-phrase hint: only its number binds it, and a stack holding a draft card gets no hint
+// at all (pending_order.mjs visibleTypedHint).
 const typedApprovalHint = computed(() => hintFor(orderedPending.value));
 const lastSent = ref("");
 // Prompt recall, matching the full chat: Up walks back through prompts sent from
@@ -1572,20 +1577,7 @@ async function resyncPending(source) {
 					m.pending_card_safe === true &&
 					m.tool_call_id
 			)
-			.map((m) => ({
-				token: m.tool_call_id,
-				tool: m.tool_name || "",
-				summary: m.tool_name || "",
-				// The row has no dedicated created_at field; its own creation
-				// timestamp is stamped in the same request as the mint and is close
-				// enough for ordering (the comparator falls back to expires_at
-				// anyway when this is missing).
-				created_at: toEpoch(m.creation),
-				expires_at: toEpoch(m.expires_at),
-				approve_run: !!(m.pending_card && m.pending_card.approve_run),
-				recent: m.recent !== false,
-				pending_card_safe: true,
-			}));
+			.map((m) => rowPendingItem(m, toEpoch));
 		const pc = await listPendingConfirmations(cid, source);
 		// A resync in flight across a startNewChat / conversation switch must not write the
 		// previous conversation's cards onto the new one. The generation matters when a
@@ -1597,18 +1589,7 @@ async function resyncPending(source) {
 		// blip on open must still show a parked card's durable row). Mirrors the PWA.
 		const clean = !!(pc && pc.ok !== false && Array.isArray(pc.data?.pending));
 		const backstop = clean
-			? pc.data.pending
-					.filter((r) => r?.pending_card_safe === true)
-					.map((r) => ({
-						token: r.token,
-						tool: r.tool || "",
-						summary: r.summary || r.preview || "",
-						created_at: r.created_at ?? null,
-						expires_at: r.expires_at ?? null,
-						approve_run: pendingApproveRun(r.preview),
-						recent: r.recent !== false,
-						pending_card_safe: true,
-					}))
+			? pc.data.pending.filter((r) => r?.pending_card_safe === true).map(listPendingItem)
 			: [];
 		const base = clean ? [] : stream.value.pending || [];
 		const byToken = new Map();

@@ -15,6 +15,7 @@ import {
   settledReasonMessage,
   sortPendingCards,
   typedApprovalHint,
+  visibleTypedHint,
   withExcluded,
   withoutTokens,
 } from "./pending_order.mjs";
@@ -451,4 +452,19 @@ test("Desk queues passive safety receipts so each Done reveals the next one", ()
   );
   const direct = src.slice(src.indexOf("async function resolvePending("));
   assert.match(direct, /settleSafetyUpdate\(\{ token, message: settled \}\)/);
+});
+
+// Break: the typed hint is printed under a stack that holds a draft card, inviting a typed
+// "go ahead" that creates a draft the panel never showed.
+test("visibleTypedHint: no hint while any card of the stack is a draft; otherwise the usual hint", () => {
+  const plain = { token: "a" };
+  const draft = { token: "b", draft_title: "New Timesheet" };
+  assert.equal(visibleTypedHint([draft]), "");
+  assert.equal(visibleTypedHint([plain, draft]), "");
+  assert.equal(visibleTypedHint([plain]), 'or type "go ahead"');
+  assert.equal(
+    visibleTypedHint([plain, { token: "c" }]),
+    typedApprovalHint([plain, { token: "c" }])
+  );
+  assert.equal(visibleTypedHint([]), "");
 });

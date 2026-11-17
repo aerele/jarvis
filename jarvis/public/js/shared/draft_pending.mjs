@@ -56,10 +56,3 @@ export function draftTitleOfItem(item) {
     ? `${doctype} ${text(draft.name)}`.trim()
     : `New ${doctype}`;
 }
-
-// `{draft_title}` for a pending item that is a draft, `{}` for every other, so an item that is
-// not a draft keeps exactly the keys it had before (spread it into the item).
-export function draftTitleProp(item) {
-  const title = draftTitleOfItem(item);
-  return title ? { draft_title: title } : {};
-}

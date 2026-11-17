@@ -6,7 +6,6 @@ import assert from "node:assert/strict";
 import {
   cardOfPendingItem,
   draftTitleOfItem,
-  draftTitleProp,
   isDraftPendingItem,
 } from "./draft_pending.mjs";
 
@@ -125,15 +124,4 @@ test("the card's own title is never used", () => {
     draft: { verb: "update", doctype: "Customer", name: "CUST-1", values: {} },
   };
   assert.equal(draftTitleOfItem(viaList(card)), "Customer CUST-1");
-});
-
-// Break: an item that is not a draft gets a key, so a surface routes it as a draft (or a flag-off
-// item changes shape).
-test("draftTitleProp: the key only on a draft item", () => {
-  assert.deepEqual(draftTitleProp(viaList(draft())), {
-    draft_title: "New Timesheet",
-  });
-  assert.deepEqual(draftTitleProp({ draft: { verb: "create" } }), {});
-  assert.deepEqual(draftTitleProp(viaList({ kind: "create" })), {});
-  assert.deepEqual(draftTitleProp(null), {});
 });
