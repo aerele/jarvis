@@ -275,6 +275,14 @@ describe("a navigation to another chat while the sheet is open (a notification t
 		await settle();
 		expect(router.currentRoute.value.path).toBe("/c/B");
 		expect(wrapper.find(".jv-dsheet-title").exists()).toBe(false);
+		// the sheet's marker entry went away with the navigation: ONE Back reaches the chat it left
+		// (with the marker left behind it would land on "/c/A#editing", and need a second Back)
+		router.back();
+		await settle();
+		expect(where()).toBe("/c/A");
+		router.back();
+		await settle();
+		expect(where()).toBe("/");
 	});
 
 	// Break: a dirty sheet is navigated away from without asking, the question never continues the
@@ -296,5 +304,48 @@ describe("a navigation to another chat while the sheet is open (a notification t
 		await settle();
 		expect(router.currentRoute.value.path).toBe("/c/B");
 		expect(wrapper.find(".jv-dsheet-title").exists()).toBe(false);
+		// the same history as a clean sheet: one Back lands on the chat it left, with no marker
+		router.back();
+		await settle();
+		expect(where()).toBe("/c/A");
+	});
+
+	// Break: a notification tap for the SAME chat or a route to the chat list leaves the marker behind
+	// too (any navigation that leaves the sheet's chat while the sheet is open).
+	it("leaving to the chat list replaces the marker: one Back returns to the chat", async () => {
+		await openChat();
+		await openSheet();
+		await router.push("/");
+		await settle();
+		expect(where()).toBe("/");
+		router.back();
+		await settle();
+		expect(where()).toBe("/c/A");
+	});
+});
+
+describe("a page reloaded with the sheet's marker in its URL", () => {
+	// Break: the dead marker stays (the URL keeps "#editing" and one Back lands on the same chat), or
+	// cleaning it adds a history entry (the Back would then land on the chat again).
+	it("is cleaned in place: no hash, and one Back leaves the chat", async () => {
+		router = createRouter({
+			history: createMemoryHistory(),
+			routes: [
+				{ path: "/", component: Home },
+				{ path: "/c/:id", component: ChatView, props: true },
+			],
+		});
+		await router.push("/");
+		await router.push("/c/A#editing");
+		wrapper = mount(defineComponent({ render: () => h(RouterView) }), {
+			attachTo: document.body,
+			global: { plugins: [router], provide: { $socket: { on: vi.fn(), off: vi.fn() } } },
+		});
+		await settle();
+		expect(where()).toBe("/c/A");
+		expect(wrapper.find(".jv-dsheet-title").exists()).toBe(false);
+		router.back();
+		await settle();
+		expect(where()).toBe("/");
 	});
 });

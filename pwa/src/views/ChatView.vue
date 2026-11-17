@@ -371,9 +371,10 @@ const stepsHidden = computed(() => hiddenSteps(messages.value, receiptUi.goneKey
 // save and discard. It reads the pending list as drawn and reloads the chat and the list itself
 // after a Save (a final draft starts no agent turn). Created here, in setup, because it owns a link
 // search that belongs to this component.
+const sheetHistory = makeSheetHistory(router);
 const draftSheet = makeDraftSheet({
 	// one history entry while a sheet is open, so Back always reaches the guard below
-	history: makeSheetHistory(router),
+	history: sheetHistory,
 	ui: draftUi,
 	api,
 	items: () => orderedPending.value,
@@ -1824,6 +1825,9 @@ watch(
 );
 
 onMounted(async () => {
+	// a reload with the sheet's marker in the URL: the sheet is gone, so the marker must not stay (it
+	// would cost one extra Back); the hash is taken off in place, no history entry added
+	sheetHistory.clearStale();
 	refreshQueue();
 	queuePoll = setInterval(() => {
 		if (queuedTurn.value) refreshQueue();

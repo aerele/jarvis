@@ -116,7 +116,11 @@ test("the view mounts the edit sheet, resets it on a switch and on unmount, guar
 		view,
 		/onBeforeRouteUpdate\(\(to, from\) => draftSheet\.guardLeave\(to, from\)\);/
 	);
-	assert.match(view, /history: makeSheetHistory\(router\),/);
+	assert.match(view, /const sheetHistory = makeSheetHistory\(router\);/);
+	assert.match(view, /history: sheetHistory,/);
+	// a reload with the marker in the URL is cleaned when the view mounts
+	const mounted = view.slice(view.indexOf("onMounted(async () => {"));
+	assert.match(mounted.slice(0, 400), /sheetHistory\.clearStale\(\);/);
 	const make = view.slice(view.indexOf("const draftSheet = makeDraftSheet({"));
 	const io = make.slice(0, make.indexOf("\n});"));
 	assert.match(

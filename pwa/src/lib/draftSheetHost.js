@@ -405,19 +405,23 @@ export function makeDraftSheet(io) {
 			confirming.value = true;
 			return false;
 		}
-		// nothing to lose: the navigation goes on and the chat's reset closes the sheet
+		// nothing to lose. With the marker entry on top the navigation is held back and continued as a
+		// replace of that entry (no stale entry left behind); with none it goes on as it is, and the
+		// chat's reset closes the sheet.
+		if (io.history && io.history.hasEntry()) {
+			io.history.leaveTo(to);
+			return false;
+		}
 		if (io.history) io.history.consumed();
 		return true;
 	}
-	// "Discard changes": close the sheet and keep going where the person was headed, if they were.
+	// "Discard changes": close the sheet and keep going where the person was headed, if they were
+	// (replacing the marker entry, as above).
 	function discardChanges() {
 		const to = heldNavigation;
 		heldNavigation = null;
+		if (to && io.history) io.history.leaveTo(to);
 		closeNow();
-		if (to && io.history) {
-			io.history.consumed();
-			io.history.navigate(to);
-		}
 	}
 	function keepEditing() {
 		heldNavigation = null;
