@@ -253,6 +253,17 @@ const routes = [
 		name: "Billing",
 		component: () => import("@/pages/billing/BillingPage.vue"),
 	},
+	// User activity: who did what through Jarvis, with red flags (the in-app twin of the
+	// Desk "Jarvis User Activity" report). Reached from Settings > Administration and from
+	// the report's "Open in Jarvis" button.
+	//
+	// No beforeEnter role guard, as /billing above: the endpoint is require_jarvis_admin()
+	// gated server-side, and a non-admin who deep-links in sees the load error.
+	{
+		path: "/admin/activity",
+		name: "UserActivity",
+		component: () => import("@/pages/activity/UserActivityPage.vue"),
+	},
 	// Legacy round-2 tab routes — static, registered BEFORE :slug (§9). Point at
 	// the current hash-tabs (mine→Installed, activity→Activity); admin is now a
 	// per-agent detail tab, so it falls back to the catalog.
