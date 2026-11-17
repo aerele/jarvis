@@ -163,6 +163,11 @@ def _deliver(item: dict) -> None:
 	# (seal, stale, interrupted) and so has no stored result.
 	result = with_reference(item["result"], item["name"]) if item["status"] == FAILED else item["result"]
 	result = _with_next_step(item, result)
+	# The decided row keeps no card: leave it a marker that this one was a draft card, so the
+	# apps word its receipt as a draft's (``draft_card.decided_mark`` reads it back).
+	from jarvis.chat import draft_card
+
+	result = draft_card.with_receipt_mark(result, item.get("draft"), item["reason_code"])
 	api.persist_tool_receipt(
 		conv,
 		item["tool"] or "",

@@ -1253,7 +1253,12 @@ def _stamp_draft_cards(rows: list) -> None:
 	With the draft cards feature on, every tool row gets the boolean. With the site flag off,
 	only a row that IS a pending draft card gets it (true: a draft card parked while the flag
 	was on, still waiting, must still retire a typed draft) and every other row keeps exactly
-	the keys it had."""
+	the keys it had.
+
+	``draft_receipt`` (true, with ``draft_receipt_reason`` for a record that changed or went
+	missing) marks a DECIDED row that was a draft card, read from the marker settlement left
+	in its ``tool_result`` (``draft_card.decided_mark``). Only with the flag on: with it off
+	no row carries the key. A sensitive card or a plain receipt never has one."""
 	from jarvis.chat import draft_card
 
 	on = draft_card.enabled()
@@ -1263,6 +1268,8 @@ def _stamp_draft_cards(rows: list) -> None:
 		is_draft = draft_card.is_pending_draft_row(row)
 		if on or is_draft:
 			row["draft_card"] = is_draft
+		if on:
+			row.update(draft_card.decided_mark(row))
 
 
 def _pending_recency(conversation: str, messages: list) -> None:

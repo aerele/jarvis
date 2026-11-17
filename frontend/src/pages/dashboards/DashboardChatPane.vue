@@ -3,7 +3,7 @@
 		class="flex h-full min-h-0 min-w-0 flex-col overflow-x-hidden overflow-y-auto bg-surface-white"
 	>
 		<!-- header: this pane stays dashboard-native; it never hands the thread to
-		     the general chat surface. -->
+		     the general chat surface (only a draft card links out, to be reviewed). -->
 		<div
 			class="flex min-h-[56px] shrink-0 items-center justify-between gap-2 border-b px-4 py-2"
 		>
@@ -228,34 +228,57 @@
 					<Button variant="subtle" label="Done" @click="dismissSafetyUpdateNotice" />
 				</div>
 			</div>
-			<div
-				v-for="pa in orderedCards"
-				:key="pa.token"
-				class="flex flex-col gap-2 rounded-md p-3 ring-1 ring-outline-gray-modals"
-			>
-				<!-- human headline (+ detail line from the dry-run preview), never
-				     the raw "create_doc doctype=…" tool string -->
-				<div class="flex min-w-0 flex-col gap-0.5">
-					<span class="text-sm font-medium text-ink-gray-8">{{ cardTitle(pa) }}</span>
-					<span v-if="cardMeta(pa)" class="text-xs text-ink-gray-6">{{
-						cardMeta(pa)
-					}}</span>
+			<template v-for="pa in orderedCards" :key="pa.token">
+				<!-- A server draft card (flag jarvis_draft_cards): this pane cannot show what it
+				     holds, so it never offers Approve or Dismiss for it. Its title and one
+				     button to the full chat, in a new tab so an unsaved dashboard stays. -->
+				<div
+					v-if="isDraftPendingItem(pa)"
+					class="flex flex-col gap-2 rounded-md p-3 ring-1 ring-outline-gray-modals"
+				>
+					<div class="flex min-w-0 flex-col gap-0.5">
+						<span class="break-words text-sm font-medium text-ink-gray-8">{{
+							draftLineOfItem(pa)
+						}}</span>
+					</div>
+					<div class="flex items-center gap-2">
+						<Button
+							variant="subtle"
+							label="Review in full chat"
+							@click="openInFullChat(pa)"
+						/>
+					</div>
 				</div>
-				<div class="flex items-center gap-2">
-					<Button
-						variant="solid"
-						label="Approve"
-						:loading="pa.busy"
-						@click="approve(pa)"
-					/>
-					<Button
-						variant="ghost"
-						label="Dismiss"
-						:disabled="pa.busy"
-						@click="dismiss(pa)"
-					/>
+				<div
+					v-else
+					class="flex flex-col gap-2 rounded-md p-3 ring-1 ring-outline-gray-modals"
+				>
+					<!-- human headline (+ detail line from the dry-run preview), never
+					     the raw "create_doc doctype=…" tool string -->
+					<div class="flex min-w-0 flex-col gap-0.5">
+						<span class="text-sm font-medium text-ink-gray-8">{{
+							cardTitle(pa)
+						}}</span>
+						<span v-if="cardMeta(pa)" class="text-xs text-ink-gray-6">{{
+							cardMeta(pa)
+						}}</span>
+					</div>
+					<div class="flex items-center gap-2">
+						<Button
+							variant="solid"
+							label="Approve"
+							:loading="pa.busy"
+							@click="approve(pa)"
+						/>
+						<Button
+							variant="ghost"
+							label="Dismiss"
+							:disabled="pa.busy"
+							@click="dismiss(pa)"
+						/>
+					</div>
 				</div>
-			</div>
+			</template>
 		</div>
 
 		<!-- composer: autosizing textarea + voice + send.
@@ -438,6 +461,10 @@ import {
 } from "@/api";
 import { useRouter } from "vue-router";
 import { supportErrorDraft } from "../../../../jarvis/public/js/shared/support_error_draft.mjs";
+import {
+	draftLineOfItem,
+	isDraftPendingItem,
+} from "../../../../jarvis/public/js/shared/draft_pending.mjs";
 import { brand } from "@/branding";
 import { escapeHtml, turnErrorInfo, showsRawReason } from "@/lib/errors";
 import { chatRefusalMessage, keepsChatCard } from "@/lib/chatCardActions";
@@ -1032,6 +1059,14 @@ async function refreshPending() {
 	} catch {
 		// transient - the next frame retries
 	}
+}
+
+// A draft card is reviewed (and created, edited or cancelled) only in the full chat. Open that
+// conversation in a NEW tab: a plain push would throw away an unsaved dashboard here.
+function openInFullChat(pa) {
+	if (!pa || !pa.conversation) return;
+	const { href } = router.resolve({ name: "Conversation", params: { id: pa.conversation } });
+	window.open(href, "_blank", "noopener,noreferrer");
 }
 
 function removeCard(token) {

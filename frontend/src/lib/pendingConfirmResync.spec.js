@@ -92,7 +92,7 @@ describe("parked confirmations resync from durable state at every terminal", () 
 		expect(observe).toContain("settleSafetyUpdateNotice(notice.token, notice.message)");
 		const settle = src.slice(
 			src.indexOf("function settleSafetyUpdateNotice(token, message)"),
-			src.indexOf("function settleSafetyUpdate(token, response)")
+			src.indexOf("// A direct Confirm, Approve & run, or Discard can race")
 		);
 		expect(settle).toContain("removePending(token)");
 		expect(settle).toContain("if (!seen)");

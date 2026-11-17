@@ -188,7 +188,7 @@ class DraftSave:
 
 		_execute._fail_unrun(locked, self.approver, reason, binding)
 		row = get_row(self.token)
-		return _closed(code, message, told=bool(row and row.settled))
+		return _closed(code, message, told=bool(row and row.settled), replies=_reply_follows(row))
 
 	def _is_draft_call(self, tool: str, args: dict) -> bool:
 		from jarvis.chat import draft_card, live_draft
@@ -327,7 +327,13 @@ class DraftSave:
 		message = message or REASON_TEXT.get(row.reason_code or "") or REASON_TEXT["failed"]
 		partial = outcome_for(row.status, row.reason_code, row.tool) in ("partial", "unknown")
 		# Told when the failure's continuation turn is seeded: it marks the row settled.
-		return _closed(row.reason_code or "failed", message, told=bool(row.settled), partial=partial)
+		return _closed(
+			row.reason_code or "failed",
+			message,
+			told=bool(row.settled),
+			replies=_reply_follows(row),
+			partial=partial,
+		)
 
 	def _decided(self, row) -> dict:
 		"""The reply for a card that is no longer Pending (a retry, a second device)."""
@@ -339,15 +345,16 @@ class DraftSave:
 		# The agent is told when the row settles, so a settled row's closed reply says so
 		# (the desktop adds "Jarvis could not be told" only when this is False).
 		told = bool(row.settled)
+		replies = _reply_follows(row)
 		if row.status == EXECUTED:
 			if row.edited and row.decided_by == self.approver:
 				return self._saved(row)  # this person's save already went through
-			return _closed(CLOSED, _(_ALREADY_SAVED), told=told)
+			return _closed(CLOSED, _(_ALREADY_SAVED), told=told, replies=replies)
 		if row.status == FAILED:
 			if outcome_for(row.status, row.reason_code, row.tool) in ("partial", "unknown"):
-				return _closed(CLOSED, _(_UNFINISHED), told=told, partial=True)
-			return _closed(CLOSED, _(_NOT_SAVED), told=told)
-		return _closed(CLOSED, _(_CLOSED), told=told)
+				return _closed(CLOSED, _(_UNFINISHED), told=told, replies=replies, partial=True)
+			return _closed(CLOSED, _(_NOT_SAVED), told=told, replies=replies)
+		return _closed(CLOSED, _(_CLOSED), told=told, replies=replies)
 
 	def _saved(self, row) -> dict:
 		"""``apply_action``'s success shape (queued fields when a continuation queued)."""
@@ -403,13 +410,38 @@ class DraftSave:
 		return envelope
 
 
+def _reply_follows(row) -> bool:
+	"""``_reply_follows_from`` for a stored row (the final-draft test is ``on_chat_settled``'s)."""
+	if not row or not row.settled:
+		return False
+	from jarvis.chat.actions_api import _is_final_draft
+	from jarvis.chat.pending_actions._settle import _item
+
+	item = _item(row)
+	return draft_values.reply_follows(row.status, True, _is_final_draft(item["conversation"], [item]))
+
+
 def _closed(
-	code: str, message: str, *, told: bool = False, partial: bool = False, card_open: bool = False
+	code: str,
+	message: str,
+	*,
+	told: bool = False,
+	replies: bool = False,
+	partial: bool = False,
+	card_open: bool = False,
 ) -> dict:
 	"""A save no retry fixes: the form closes. Both apps drop the card (``draftFailureOf``)
 	unless ``card_open`` is set: the card is still Pending and valid, so only the form
-	closes and the card stays where it is."""
-	out = {"ok": False, "closed": True, "assistant_told": told, "error": {"code": code, "message": message}}
+	closes and the card stays where it is. ``assistant_told``: the agent knows how the card
+	ended; ``assistant_replies``: a reply is really coming in the chat, the only case the
+	form may promise one."""
+	out = {
+		"ok": False,
+		"closed": True,
+		"assistant_told": told,
+		"assistant_replies": replies,
+		"error": {"code": code, "message": message},
+	}
 	if partial:
 		out["outcome"] = "partial"
 	if card_open:

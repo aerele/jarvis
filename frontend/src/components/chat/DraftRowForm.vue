@@ -4,9 +4,9 @@
 // siblings evaluated as the row changes (lib/rowForm.js). The grid shows a few
 // columns; this shows the rest, so nothing the record would save is out of reach.
 import { computed, reactive } from "vue";
-import DraftCell from "@/components/chat/DraftCell.vue";
-import { allRowFields, toPanelRow } from "@/lib/draftApply";
-import { changeDisplay, clipText, rowFormLayout } from "@/lib/rowForm";
+import DraftCell from "./DraftCell.vue";
+import { allRowFields, toPanelRow } from "../../lib/draftApply";
+import { changeDisplay, clipText, rowFormLayout } from "../../lib/rowForm";
 
 const props = defineProps({
 	table: { type: Object, required: true },
