@@ -635,14 +635,13 @@ doc_events = {
 doc_events["Error Log"] = {"before_insert": "jarvis.api_errors.tag_error_log_origin"}
 after_request = ["jarvis.api_errors.capture_failed_request"]
 
-<<<<<<< HEAD
 # Generic RPCs must use the same source gate as dedicated LCV tools. The
 # handler is a no-op outside the scoped tool call, including ordinary Desk.
 doc_events["Landed Cost Voucher"] = {
 	"before_validate": "jarvis.tools._lcv_tool_writes.guard_tool_document",
 	"before_submit": "jarvis.tools._lcv_tool_writes.guard_tool_document",
 }
-=======
+
 # User-activity report, direct SPA/PWA actions (jarvis.activity_actions). The pair is one
 # feature: before_request snapshots the method name and the ORIGINAL form_dict (because
 # frappe.set_user, which jarvis._session.impersonate calls on entry and exit, REPLACES
@@ -651,7 +650,6 @@ doc_events["Landed Cost Voucher"] = {
 # back and commits its own row; both never raise.
 before_request = ["jarvis.activity_actions.capture_request"]
 after_request.append("jarvis.activity_actions.record_request")
->>>>>>> 01dbc13 (feat(activity): log Jarvis app actions and add the admin User activity page)
 
 # Org-scope wiki pages are mirrored as markdown into the tenant container
 # workspace; every page write/delete enqueues a debounced mirror sync (the
