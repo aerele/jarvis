@@ -122,11 +122,13 @@ def locked_state(doc, user: str | None = None) -> tuple[str, list[str]] | None:
 
 
 def _locked_error(doc, state: str, roles: list[str]) -> PermissionDeniedError:
-	who = f"only {' or '.join(roles)} may edit" if roles else "nobody may edit"
+	if roles:
+		who = f"only {' or '.join(roles)} may edit. Ask someone with that role to make the change, or"
+	else:
+		who = "nobody may edit (the workflow gives no role edit rights there). You can"
 	return PermissionDeniedError(
-		f"{doc.doctype} {doc.name} is in the workflow state '{state}', which {who}. Ask someone "
-		"with that role to make the change, or move it on with one of the workflow's actions if "
-		f"one is open to you. {_USE}"
+		f"{doc.doctype} {doc.name} is in the workflow state '{state}', which {who} move it on with "
+		f"one of the workflow's actions if one is open to you. {_USE}"
 	)
 
 
@@ -485,37 +487,46 @@ def _deny(e: PermissionDeniedError, doctype, name, why: str) -> None:
 
 
 def _stored_doc(doctype, name):
-	if not isinstance(doctype, str) or not doctype or name in (None, ""):
+	if not isinstance(doctype, str) or not doctype:
+		return None
+	if not isinstance(name, str | int) or isinstance(name, bool) or name == "":
 		return None
 	if not get_workflow_name(doctype) or not frappe.db.exists(doctype, name):
 		return None
 	return frappe.get_doc(doctype, name)
 
 
-def _judge_stored(doctype, name, action: str, new: dict | None = None) -> None:
-	stored = _stored_doc(doctype, name)
-	if stored is None:
-		return
+def _judge_doc(stored, action: str, new: dict | None = None) -> None:
 	found = judge(stored, action, frappe._dict({**stored.as_dict(), **(new or {})}))
 	if found:
-		_deny(found[0], doctype, name, found[1])
+		_deny(found[0], stored.doctype, stored.name, found[1])
 
 
-def _judge_payload(doc, method: str | None = None) -> None:
+def _judge_stored(doctype, name, action: str, new: dict | None = None) -> None:
+	stored = _stored_doc(doctype, name)
+	if stored is not None:
+		_judge_doc(stored, action, new)
+
+
+def _judge_payload(doc, method: str | None = None, name_key: str = "name") -> None:
 	"""A document payload (``frappe.client.save``, ``run_doc_method`` docs, a
 	bulk_update row): refused when it cancels with any other change, or changes a
-	document whose state the user may not edit, or moves its state."""
+	document whose state the user may not edit, or moves its state. ``name_key``: the
+	key naming the stored document (``docname`` for ``frappe.client.bulk_update``)."""
 	doc = _loads(doc)
 	if not isinstance(doc, dict):
 		return
-	stored = _stored_doc(doc.get("doctype"), doc.get("name"))
+	stored = _stored_doc(doc.get("doctype"), doc.get(name_key))
 	if stored is None:
 		return
+	if name_key != "name" and doc.get("name") not in (None, "", stored.name):
+		# bulk_update sets ``name`` on the loaded document too: that is the record saved.
+		_judge_payload({**doc, "name": doc.get("name")}, method)
 	changes = payload_changes(stored, doc)
 	dt, name = stored.doctype, stored.name
 	cancels = method == "cancel" or (method is None and cint(doc.get("docstatus")) == 2)
 	if cancels or method in ("submit", "discard"):
-		_judge_stored(dt, name, method or "cancel", doc)
+		_judge_doc(stored, method or "cancel", doc)
 		if changes:
 			_deny(
 				PermissionDeniedError(
@@ -529,15 +540,21 @@ def _judge_payload(doc, method: str | None = None) -> None:
 			)
 		return
 	if method is None and cint(doc.get("docstatus")) == 1 and stored.docstatus == 0:
-		_judge_stored(dt, name, "submit", doc)
+		_judge_doc(stored, "submit", doc)
 	if changes:
-		_judge_stored(dt, name, "save" if stored.docstatus == 0 else "update_after_submit", doc)
+		_judge_doc(stored, "save" if stored.docstatus == 0 else "update_after_submit", doc)
+
+
+def _dict(value) -> dict:
+	value = _loads(value)
+	return value if isinstance(value, dict) else {}
 
 
 def check_run_method(paths, args: dict | None, doctype=None, name=None, method=None) -> None:
 	"""Refuse a ``run_method`` call the workflow of its document would refuse, before
 	anything runs. ``paths``: the dotted paths the call goes by; or ``doctype`` /
-	``name`` / ``method`` for a controller method."""
+	``name`` / ``method`` for a controller method. Each route is read the way Frappe
+	reads its arguments."""
 	args = args if isinstance(args, dict) else {}
 	if doctype is not None:
 		if method in ("cancel", "submit", "discard", "rename"):
@@ -558,34 +575,35 @@ def check_run_method(paths, args: dict | None, doctype=None, name=None, method=N
 	if paths & {"frappe.model.rename_doc.update_document_title"}:
 		_judge_stored(args.get("doctype"), args.get("docname"), "rename")
 	if paths & {"frappe.desk.form.save.savedocs"}:
-		doc = _loads(args.get("doc")) or {}
-		if lower == "cancel":
-			_judge_stored(doc.get("doctype"), doc.get("name"), "cancel")
-		elif lower == "submit":
-			_judge_stored(doc.get("doctype"), doc.get("name"), "submit")
+		doc = _dict(args.get("doc"))
+		if lower in ("cancel", "submit"):
+			_judge_stored(doc.get("doctype"), doc.get("name"), lower)
 		else:
 			_judge_payload(doc)
 	if paths & {"frappe.client.save", "frappe.client.submit"}:
 		_judge_payload(args.get("doc"), "submit" if "frappe.client.submit" in paths else None)
 	if paths & {"frappe.client.bulk_update"}:
-		for doc in _loads(args.get("docs")) or []:
-			_judge_payload(doc)
+		docs = _loads(args.get("docs"))
+		for doc in docs if isinstance(docs, list) else []:
+			# Frappe loads each row by its ``docname`` (frappe/client.py bulk_update).
+			_judge_payload(doc, name_key="docname")
 	if paths & {"frappe.client.set_value"}:
 		values = _loads(args.get("fieldname"))
 		values = values if isinstance(values, dict) else {args.get("fieldname"): args.get("value")}
-		_judge_payload({"doctype": args.get("doctype"), "name": args.get("name"), **values})
+		_judge_payload({**values, "doctype": args.get("doctype"), "name": args.get("name")})
 	if paths & {"frappe.handler.run_doc_method", "frappe.desk.form.run_method.runserverobj"}:
-		docs = _loads(args.get("docs"))
-		if isinstance(docs, dict):
-			_judge_payload(docs, str(args.get("method") or "") or None)
-		elif args.get("dt") and args.get("dn"):
-			check_run_method((), args.get("args"), args.get("dt"), args.get("dn"), args.get("method"))
+		# As frappe.handler.run_doc_method: with ``dt`` the document is (dt, dn or dt)
+		# and ``docs`` is ignored; only without ``dt`` is ``docs`` the document.
+		call = str(args.get("method") or "") or None
+		if args.get("dt"):
+			check_run_method((), None, args.get("dt"), args.get("dn") or args.get("dt"), call)
+		else:
+			_judge_payload(args.get("docs"), call)
 	if paths & {"frappe.desk.doctype.bulk_update.bulk_update.submit_cancel_or_update_docs"}:
-		names = _loads(args.get("docnames")) or []
-		action = {"update": None}.get(lower, lower)
+		names = _loads(args.get("docnames"))
+		data = _dict(args.get("data"))
 		for docname in names if isinstance(names, list) else []:
-			if action in ("cancel", "submit"):
-				_judge_stored(args.get("doctype"), docname, action)
+			if lower in ("cancel", "submit"):
+				_judge_stored(args.get("doctype"), docname, lower)
 			else:
-				data = _loads(args.get("data")) or {}
-				_judge_payload({"doctype": args.get("doctype"), "name": docname, **data})
+				_judge_payload({**data, "doctype": args.get("doctype"), "name": docname})

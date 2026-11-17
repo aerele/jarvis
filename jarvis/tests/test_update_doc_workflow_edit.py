@@ -36,6 +36,12 @@ EDITOR, APPROVER = "wf2506-editor@example.com", "wf2506-approver@example.com"
 HANDLER = "jarvis.tools._workflow_edit.guard_doc_event"
 
 
+def _transition(doc, action):
+	"""Frappe's transition: run_workflow_transition (Frappe 15/16 since
+	frappe/frappe#45939), else apply_workflow on an older Frappe."""
+	return getattr(fw, "run_workflow_transition", fw.apply_workflow)(doc, action)
+
+
 # --------------------------------------------------------------------------- #
 # The edit rule, against Desk's is_read_only (mocked workflow)
 # --------------------------------------------------------------------------- #
@@ -282,10 +288,12 @@ class TestApproverWhoIsNotAnEditor(_RealWorkflow):
 			self.assertEqual((self._row(name)[FIELD], self._row(name).docstatus), ("Approved", 1), name)
 
 	def test_run_workflow_transition_directly(self):
+		if not hasattr(fw, "run_workflow_transition"):
+			self.skipTest("run_workflow_transition arrived with frappe/frappe#45939")
 		# What _bulk_workflow_action and the emailed action's confirm_action call.
 		name = self._make("Pending")
 		with self._tool_call(APPROVER):
-			fw.run_workflow_transition(frappe.get_doc(BT, name), "Approve")
+			_transition(frappe.get_doc(BT, name), "Approve")
 		self.assertEqual(self._row(name)[FIELD], "Approved")
 
 	def test_emailed_confirm_action(self):
@@ -303,7 +311,7 @@ class TestApproverWhoIsNotAnEditor(_RealWorkflow):
 	def test_frappe_still_refuses_a_transition_the_user_lacks(self):
 		name = self._make("Pending")
 		with self.assertRaises(fw.WorkflowTransitionError), self._tool_call(EDITOR):
-			fw.run_workflow_transition(frappe.get_doc(BT, name), "Approve")
+			_transition(frappe.get_doc(BT, name), "Approve")
 		self.assertEqual(self._row(name)[FIELD], "Pending")
 
 
@@ -513,7 +521,7 @@ class TestCancelWithACancelStep(_RealWorkflow):
 	def test_the_cancel_action_passes(self):
 		name = self._make("Approved")
 		with self._tool_call(APPROVER):
-			fw.run_workflow_transition(frappe.get_doc(BT, name), "Reject")
+			_transition(frappe.get_doc(BT, name), "Reject")
 		self.assertEqual((self._row(name)[FIELD], self._row(name).docstatus), ("Cancelled", 2))
 
 
@@ -562,7 +570,7 @@ class TestSubmissionQueue(_RealWorkflow):
 	def test_the_approval_queues_and_its_job_submits(self):
 		name = self._make("Pending")
 		with self._tool_call(APPROVER):
-			fw.run_workflow_transition(frappe.get_doc(BT, name), "Approve")
+			_transition(frappe.get_doc(BT, name), "Approve")
 		[entry_name] = self._entries(name)
 		self.assertEqual(self._row(name).docstatus, 0)  # queued, not yet submitted
 		# The worker side (Frappe's execute_action unlocks, then runs the job), inside
@@ -700,6 +708,73 @@ class TestCancelIsJudgedBeforeItsHooks(_RealWorkflow):
 		self.assertEqual(ran, [])  # an e-invoice / e-way bill cancel would have run here
 		self.assertEqual(self._row(name).docstatus, 1)
 
+	def _refused_before_hooks(self, user, method, args):
+		from erpnext.accounts.doctype.bank_transaction.bank_transaction import BankTransaction
+
+		from jarvis.tools.run_method import run_method
+
+		ran = []
+		with (
+			patch.object(BankTransaction, "before_cancel", lambda self: ran.append(self.name), create=True),
+			self.assertRaises(PermissionDeniedError),
+			self._tool_call(user),
+		):
+			run_method(method, args)
+		self.assertEqual(ran, [])
+
+	def test_run_doc_method_by_dt_and_dn_is_judged_not_its_docs(self):
+		# Frappe ignores docs when dt is given (frappe.handler.run_doc_method). It is
+		# not whitelisted, so run_method cannot reach it today; the pre-check still
+		# reads it the way Frappe does, in case a site or a later Frappe exposes it.
+		from jarvis.tools import _workflow_edit as we
+
+		name = self._make("Approved")
+		frappe.set_user(APPROVER)
+		try:
+			for docs in ({}, "{}", None):
+				args = {"dt": BT, "dn": name, "method": "cancel"}
+				if docs is not None:
+					args["docs"] = docs
+				with self.assertRaises(PermissionDeniedError) as cm:
+					we.check_run_method({"frappe.handler.run_doc_method"}, args)
+				self.assertIn("its own cancel action", str(cm.exception))
+		finally:
+			frappe.set_user("Administrator")
+		self._refused_before_hooks(
+			APPROVER, "frappe.handler.run_doc_method", {"dt": BT, "dn": name, "method": "cancel", "docs": {}}
+		)
+		self.assertEqual(self._row(name).docstatus, 1)
+
+	def test_bulk_update_rows_are_read_by_docname(self):
+		approved, pending = self._make("Approved"), self._make("Pending")
+		row = {"doctype": BT, "docname": approved, "docstatus": 2}
+		self._refused_before_hooks(APPROVER, "frappe.client.bulk_update", {"docs": json.dumps([row])})
+		self.assertEqual(self._row(approved).docstatus, 1)
+		# An edit of a locked document is refused before Frappe's bulk_update, which
+		# would otherwise swallow the refusal into failed_docs.
+		from jarvis.tools.run_method import run_method
+
+		edit = {"doctype": BT, "docname": pending, "description": "after"}
+		with self.assertRaises(PermissionDeniedError), self._tool_call(EDITOR):
+			run_method("frappe.client.bulk_update", {"docs": json.dumps([edit])})
+		self.assertEqual(self._row(pending).description, "before")
+
+	def test_malformed_payloads_are_left_to_frappe(self):
+		from jarvis.tools import _workflow_edit as we
+
+		for paths, args in (
+			({"frappe.desk.form.save.savedocs"}, {"doc": "[1, 2]", "action": "Save"}),
+			({"frappe.client.bulk_update"}, {"docs": '{"a": 1}'}),
+			({"frappe.client.bulk_update"}, {"docs": "[1, null]"}),
+			(
+				{"frappe.desk.doctype.bulk_update.bulk_update.submit_cancel_or_update_docs"},
+				{"docnames": "[1]", "data": "[3]", "action": "update"},
+			),
+			({"frappe.client.cancel"}, {"doctype": BT, "name": ["x"]}),
+			({"frappe.handler.run_doc_method"}, {"docs": "not json", "method": "cancel"}),
+		):
+			we.check_run_method(paths, args)  # no AttributeError / TypeError
+
 
 class TestThroughTheToolGate(_RealWorkflow):
 	"""The whole Jarvis tool path (``api._run_tool``: parse, gate, card, savepoint,
@@ -807,11 +882,11 @@ class TestEdgeCases(_RealWorkflow):
 		frappe.clear_cache(doctype=BT)
 		name = self._make("Pending")
 		with self._tool_call(EDITOR):
-			fw.run_workflow_transition(frappe.get_doc(BT, name), "Check")
+			_transition(frappe.get_doc(BT, name), "Check")
 		with self.assertRaises(PermissionDeniedError), self._tool_call(EDITOR):
 			self._client_save(name, description="after")  # Checked: only the lead edits
 		with self._tool_call(APPROVER):
-			fw.run_workflow_transition(frappe.get_doc(BT, name), "Approve")
+			_transition(frappe.get_doc(BT, name), "Approve")
 		self.assertEqual((self._row(name)[FIELD], self._row(name).docstatus), ("Approved", 1))
 
 	def test_a_record_from_before_the_workflow_has_an_empty_state(self):
@@ -848,7 +923,7 @@ class TestEdgeCases(_RealWorkflow):
 	def test_amend_after_a_cancel_starts_a_new_draft(self):
 		name = self._make("Approved")
 		with self._tool_call(APPROVER):
-			fw.run_workflow_transition(frappe.get_doc(BT, name), "Reject")
+			_transition(frappe.get_doc(BT, name), "Reject")
 		frappe.set_user(EDITOR)
 		amended = frappe.copy_doc(frappe.get_doc(BT, name))
 		amended.amended_from = name
@@ -861,14 +936,14 @@ class TestEdgeCases(_RealWorkflow):
 		self.assertEqual(self._row(amended.name)[FIELD], "Draft")
 		with self._tool_call(EDITOR):
 			self._client_save(amended.name, description="amended")
-			fw.run_workflow_transition(frappe.get_doc(BT, amended.name), "Review")
+			_transition(frappe.get_doc(BT, amended.name), "Review")
 		self.assertEqual(self._row(amended.name)[FIELD], "Pending")
 
 	def test_frappe_still_refuses_self_approval(self):
 		name = self._make("Pending")
 		frappe.get_doc("User", EDITOR).add_roles(APPROVER_ROLE)  # the editor made it
 		with self.assertRaises(frappe.ValidationError), self._tool_call(EDITOR):
-			fw.run_workflow_transition(frappe.get_doc(BT, name), "Approve")
+			_transition(frappe.get_doc(BT, name), "Approve")
 		self.assertEqual(self._row(name)[FIELD], "Pending")
 
 	def test_a_lead_edits_locked_states_including_after_submit(self):
