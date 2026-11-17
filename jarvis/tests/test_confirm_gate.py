@@ -187,7 +187,8 @@ class TestGateParks(FrappeTestCase):
 
 	def test_send_email_parks_described_not_sent(self):
 		patcher, captured = _spy_mint()
-		with patch("jarvis.api.dispatch") as disp, patcher:
+		# The site has email (#834 refuses the card on one that does not).
+		with patch(_FIND_OUTGOING, return_value=object()), patch("jarvis.api.dispatch") as disp, patcher:
 			r = api._run_tool(
 				"send_email",
 				{
@@ -330,6 +331,74 @@ class TestDryRunOnParkInvariant(FrappeTestCase):
 
 	def test_dry_run_on_park_is_subset_of_previewable(self):
 		self.assertTrue(api._DRY_RUN_ON_PARK.issubset(api._PREVIEWABLE))
+
+
+_FIND_OUTGOING = "frappe.email.doctype.email_account.email_account.EmailAccount.find_outgoing"
+
+
+class TestSendEmailNeedsAnOutgoingAccount(FrappeTestCase):
+	"""#834: with no outgoing Email Account the send can only fail, so the gate says so
+	before the card instead of after the user confirms it."""
+
+	_SINGLE = {"recipients": "nobody@example.com", "subject": "hi", "content": "body", "doctype": "ToDo"}
+
+	def _park(self, args, find_outgoing):
+		patcher, captured = _spy_mint()
+		with (
+			patch(_FIND_OUTGOING, side_effect=find_outgoing) as find,
+			patch("jarvis.chat.events.publish_to_user") as pub,
+			patch("jarvis.api.dispatch") as disp,
+			patcher,
+		):
+			r = api._run_tool("send_email", args)
+		return r, captured, pub, disp, find
+
+	def test_no_account_refuses_before_the_card(self):
+		r, captured, pub, disp, _ = self._park(self._SINGLE, lambda **kw: None)
+		self.assertFalse(r["ok"])
+		self.assertEqual(r["error"]["code"], "OutgoingEmailError")
+		self.assertIn("Email is not set up", r["error"]["message"])
+		self.assertIn("Nothing was sent", r["error"]["message"])
+		# The same "ask your administrator" hint the confirmed send carries.
+		self.assertIn("outgoing Email Account", r["error"]["hint"])
+		self.assertIsNone(captured.get("token"))
+		self.assertFalse(pub.called, "no card for an email that cannot be sent")
+		self.assertFalse(disp.called)
+
+	def test_batch_is_refused_when_any_doctype_has_no_account(self):
+		args = {
+			"messages": [
+				{**self._SINGLE, "doctype": "ToDo", "name": "a"},
+				{**self._SINGLE, "doctype": "Note", "name": "b"},
+			]
+		}
+		r, captured, _, _, find = self._park(
+			args, lambda **kw: None if kw.get("match_by_doctype") == "Note" else object()
+		)
+		self.assertEqual(r["error"]["code"], "OutgoingEmailError")
+		self.assertIsNone(captured.get("token"))
+		self.assertEqual({c.kwargs["match_by_doctype"] for c in find.call_args_list}, {"ToDo", "Note"})
+
+	def test_with_an_account_it_still_parks(self):
+		r, captured, _, disp, find = self._park(self._SINGLE, lambda **kw: object())
+		self.assertEqual(r["data"]["status"], "pending_confirmation")
+		self.assertIsNotNone(captured.get("token"))
+		self.assertFalse(disp.called)
+		# Asked exactly as Frappe's send asks: the sender's address and the doctype.
+		kw = find.call_args.kwargs
+		self.assertEqual(kw["match_by_doctype"], "ToDo")
+		self.assertIn(frappe.session.user, kw["match_by_email"])
+
+	def test_a_merge_is_checked_on_its_expanded_messages(self):
+		from jarvis.tools.send_email import call_doctypes
+
+		self.assertEqual(call_doctypes({"doctype": "ToDo"}), ["ToDo"])
+		self.assertEqual(
+			call_doctypes({"messages": [{"doctype": "Customer"}, {"doctype": "Supplier"}]}),
+			["Customer", "Supplier"],
+		)
+		# A call with no doctype is still checked (Frappe falls back to the default account).
+		self.assertEqual(call_doctypes({}), [None])
 
 
 class TestGatePreValidatesBeforePark(FrappeTestCase):
