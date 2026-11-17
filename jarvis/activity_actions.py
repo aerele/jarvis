@@ -112,6 +112,7 @@ CLASSIFICATION = {
 	"jarvis.chat.actions_api.load_doc": ("LOGGED", "name", "read", "@doctype", 1),
 	"jarvis.chat.actions_api.propose_next_action": ("SKIPPED", "tool_path"),
 	"jarvis.chat.actions_api.rule_values": ("SKIPPED", "read"),
+	"jarvis.chat.actions_api.save_draft_card": ("SKIPPED", "tool_path"),
 	"jarvis.chat.admission.active_turn_for_conversation": ("SKIPPED", "poll"),
 	"jarvis.chat.admission.cancel_queued_turn": ("SKIPPED", "chat"),
 	"jarvis.chat.admission.pump_cutover_execute": ("LOGGED", None, "action", None, 0),
