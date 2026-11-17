@@ -973,6 +973,51 @@ describe("DraftSheet: a message must be seen where the person tapped", () => {
 		delete Element.prototype.scrollIntoView;
 	});
 
+	// Break: a failure that is not a thrown call (the values of the form could not be read; the card
+	// found dead by the reply of the save itself) leaves the banner out of sight and the footer
+	// silent. Both end in the form's `error` (toolDraftHost.saveToolDraft / the host's save).
+	it("a form whose values cannot be read, and a save that finds the card dead, scroll the banner into view and say it in the footer", async () => {
+		const scroll = vi.fn();
+		Element.prototype.scrollIntoView = scroll;
+		// 1. draftCardValues throws (saveToolDraft sets panel.error = "Could not save your changes."):
+		// the host is run without the component, with a body that holds the banner element
+		const t = await opened();
+		const body = document.createElement("div");
+		body.innerHTML = '<div class="jv-draft-body"><p role="alert">banner</p></div>';
+		document.body.appendChild(body);
+		t.host.setBody(body);
+		// a field the payload cannot read
+		t.host.panel.value.fields = [
+			new Proxy(
+				{},
+				{
+					get() {
+						throw new Error("unreadable field");
+					},
+				}
+			),
+		];
+		expect(await t.host.save()).toBe("error");
+		await nextTick();
+		expect(t.host.panel.value.error.message).toBe("Could not save your changes.");
+		expect(scroll).toHaveBeenCalledTimes(1);
+		expect(scroll.mock.contexts[0].getAttribute("role")).toBe("alert");
+
+		// 2. the save's reply says the card is gone while the form holds edits ("closed-dead":
+		// the host sets panel.error): the component shows the footer line and the banner scrolls
+		scroll.mockClear();
+		const dead = await opened();
+		const w = await mountSheet(dead);
+		edit(dead.host, "parent_project", "PROJ-0002");
+		dead.replies.save = CLOSED();
+		await byText(w, "Create").trigger("click");
+		await flushPromises();
+		expect(w.find(".jv-dsheet-foot .jv-dsheet-wait").text()).toBe(DRAFT_STALE_TEXT);
+		expect(scroll).toHaveBeenCalled();
+		w.unmount();
+		delete Element.prototype.scrollIntoView;
+	});
+
 	// Break: a refusal that marks fields is also scrolled to the banner (it has its own scroll to the
 	// first mark), or says its first message in the footer instead of pointing at the marks.
 	it("a refusal that marks fields tells the footer to look at them", async () => {
@@ -1345,6 +1390,24 @@ describe("Preview of a draft card on the phone", () => {
 		expect(w.find(".dp-panel").exists()).toBe(false);
 		expect(w.find(".jv-dsheet-title").text()).toBe("New Timesheet");
 		expect(t.calls.confirm).toEqual([]);
+		w.unmount();
+	});
+
+	// Break: a second tap on Edit while the form is still being built shows "Could not load this
+	// draft" (the build the first tap started has not landed), builds twice, or Create stays live
+	// beside the build.
+	it("a second tap on Edit during the build is ignored, says nothing, and Create is off meanwhile", async () => {
+		const t = await opensPreview();
+		const w = await mountSheet(t);
+		t.host.building.value = "t1"; // the first tap's build is in flight
+		await nextTick();
+		expect(await t.host.editFromPreview()).toBe("ignored");
+		expect(t.host.previewNote.value).toBe("");
+		expect(t.host.createFromPreview()).toBeUndefined();
+		expect(t.host.previewOff.value).toBe(true);
+		expect(w.find(".dp-btn-primary").attributes("disabled")).toBeDefined();
+		expect(t.calls.confirm).toEqual([]);
+		expect(t.host.preview.value).not.toBeNull();
 		w.unmount();
 	});
 

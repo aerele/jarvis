@@ -157,11 +157,14 @@ export function makeDraftSheet(io) {
 	const previewItem = computed(() =>
 		preview.value ? io.items().find((x) => x.token === preview.value.token) : undefined
 	);
-	const previewOff = computed(() =>
-		previewPrimaryDisabled({
-			streaming: io.streaming(),
-			busy: !!(previewItem.value && ui.busyKind(previewItem.value.token)),
-		})
+	// Create in the Preview is off while a turn runs, the card is busy, or a form is being built from
+	// this Preview (the Preview stays up meanwhile).
+	const previewOff = computed(
+		() =>
+			previewPrimaryDisabled({
+				streaming: io.streaming(),
+				busy: !!(previewItem.value && ui.busyKind(previewItem.value.token)),
+			}) || !!building.value
 	);
 
 	// A preview holds no edits: it closes when its card goes (confirmed, discarded, replaced, chat
@@ -347,6 +350,7 @@ export function makeDraftSheet(io) {
 
 	function createFromPreview() {
 		const pa = previewItem.value;
+		if (building.value) return undefined;
 		preview.value = null;
 		return pa ? io.create(pa) : undefined;
 	}
@@ -356,7 +360,8 @@ export function makeDraftSheet(io) {
 	// flicker). When the form cannot be built the Preview stays and says why.
 	async function editFromPreview() {
 		const pa = previewItem.value;
-		if (!pa) return undefined;
+		// a build is already running (a second tap): the first one decides, nothing is said
+		if (!pa || building.value) return "ignored";
 		previewNote.value = "";
 		const { result, text } = await buildEdit(pa);
 		if (result === "opened") {

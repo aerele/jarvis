@@ -31,7 +31,11 @@ describe("every real reply has a decision", () => {
 });
 
 describe("Create / Confirm / Approve & run", () => {
-	const rows = REPLY_ROWS.filter((r) => r.doors.includes("confirm") && !r.thrown);
+	// both buttons answer in the same envelopes; the approve-only rows (the storage reply that carries
+	// a reason_code, the refusals only approve_and_run sends) are asserted in full too
+	const rows = REPLY_ROWS.filter(
+		(r) => (r.doors.includes("confirm") || r.doors.includes("approve")) && !r.thrown
+	);
 	// Break: any change in whether a reply keeps the card, what it says, whether the desktop
 	// toasts or reloads, the queued chip, the safety notice, or the card error object.
 	for (const row of rows) {
@@ -47,15 +51,6 @@ describe("Create / Confirm / Approve & run", () => {
 			expect(draftOut).toEqual(want(row, expected.draft || expected));
 		});
 	}
-
-	// Approve & run answers in the same envelopes: the one function serves both buttons.
-	it("reads the approve-and-run rows too", () => {
-		for (const row of REPLY_ROWS.filter((r) => r.doors.includes("approve") && !r.thrown)) {
-			expect(confirmReplyOutcome(row.reply, { expired: row.expires === "past" }).fate).toBe(
-				EXPECTED[row.id].fate
-			);
-		}
-	});
 });
 
 describe("Cancel / Discard", () => {
