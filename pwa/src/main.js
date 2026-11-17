@@ -1,3 +1,6 @@
+// FIRST: marks every same-origin /api/ request X-Jarvis-Client: pwa (shared shim, see
+// frontend/src/lib/clientHeader.js).
+import "./lib/clientHeaderPwa";
 import { createApp } from "vue";
 import { setConfig, frappeRequest, resourcesPlugin } from "frappe-ui";
 

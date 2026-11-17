@@ -54,6 +54,8 @@ NOT_RENAMABLE = (
 	"Jarvis Chat Session",
 	"Jarvis Pending OAuth Capture",
 	"Jarvis Agent Write",
+	"Jarvis Activity Event",
+	"Jarvis Activity Daily",
 	"Jarvis Agent Provenance Event",
 	"Jarvis App Learning Run",
 	"Jarvis Learned Pattern",
