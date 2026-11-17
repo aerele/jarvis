@@ -1187,16 +1187,30 @@ describe("DashboardChatPane Retry on a failed reply", () => {
 				(p) => p.resolve({ ok: false, reason: "maintenance" }),
 				"Jarvis is temporarily unavailable for maintenance. Try again shortly.",
 			],
-			["error", (p) => p.reject(new Error("Network down")), "Network down"],
+			[
+				"error: never the raw exception text",
+				(p) => p.reject(new Error("Network down")),
+				"Couldn&#39;t retry that. Try again in a moment.",
+			],
+			[
+				"offline: plain sentence, not Failed to fetch",
+				(p) => p.reject(new TypeError("Failed to fetch")),
+				"Couldn&#39;t retry that. Jarvis could not reach the server. Check your internet connection and try again.",
+			],
 			[
 				"markup only in an error: its own sentence",
 				(p) => p.reject(new Error("<img src=x onerror=1>")),
-				"Couldn&#39;t retry that.",
+				"Couldn&#39;t retry that. Try again in a moment.",
 			],
 			[
 				"markup beside text in an error",
-				(p) => p.reject(new Error("Rate <b>limit</b> hit: a < b")),
-				"Rate limit hit: a &lt; b",
+				(p) =>
+					p.reject(
+						Object.assign(new Error("x"), {
+							messages: ["Rate <b>limit</b> hit: a < b"],
+						})
+					),
+				"Couldn&#39;t retry that: Rate limit hit: a &lt; b. Try again.",
 			],
 		]) {
 			toast.error.mockClear();

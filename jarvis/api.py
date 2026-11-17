@@ -1413,12 +1413,13 @@ def _persist_and_publish_tool_call(
 
 
 def _locked_insert_chat_message(
-	conv_name: str, fields: dict, *, dedupe_filters: dict | None = None
+	conv_name: str, fields: dict, *, dedupe_filters: dict | None = None, only_if=None
 ) -> str | None:
 	"""Allocate the next ``seq`` for ``conv_name`` UNDER a ``Jarvis Conversation``
 	``FOR UPDATE`` lock and insert one ``Jarvis Chat Message`` with ``fields`` merged
 	onto ``{conversation, seq}``. Returns the message name, or ``None`` when
-	``dedupe_filters`` already matches a row (nothing inserted).
+	``dedupe_filters`` already matches a row, or ``only_if()`` is false under the lock
+	(nothing inserted).
 
 	MUST be called inside an ``impersonate(conv_owner)`` block that has already
 	``commit``ed, so this ``FOR UPDATE`` is the first statement of the transaction
@@ -1432,6 +1433,10 @@ def _locked_insert_chat_message(
 		{"c": conv_name},
 	)
 	if dedupe_filters and frappe.db.exists("Jarvis Chat Message", dedupe_filters):
+		return None
+	# ``only_if``: a check that must hold UNDER the lock (a Cancel racing a Create re-reads
+	# the conversation here, after the other writer has committed and released it).
+	if only_if is not None and not only_if():
 		return None
 	seq = (
 		frappe.db.sql(
@@ -1459,7 +1464,8 @@ def persist_tool_receipt(
 	flip_token: str | None = None,
 	overwrite_outcomes: tuple = (),
 	require_pending_flip: bool = False,
-) -> None:
+	only_if=None,
+) -> bool:
 	"""Write a role=tool Jarvis Chat Message receipt into ``conv_name`` and
 	publish the realtime tool:result event, running as the conversation owner so
 	DocType perms allow the insert. Shared by the inline model-write path
@@ -1498,7 +1504,11 @@ def persist_tool_receipt(
 
 	``require_pending_flip``: do not use the normal fallback insert when a matching
 	pending row is absent. Close-fence cleanup uses this mode so an unseen or
-	already-settled legacy token cannot manufacture a new terminal receipt."""
+	already-settled legacy token cannot manufacture a new terminal receipt.
+
+	``only_if``: a no-argument check run under the conversation lock just before the
+	fallback insert; when false nothing is written. Returns True when a row was written
+	or flipped, False when nothing was (a duplicate, a failed ``only_if``, a lost flip)."""
 	from jarvis.tools import _private_output
 
 	# Preserve the execution name only long enough to classify a source result.
@@ -1646,7 +1656,7 @@ def persist_tool_receipt(
 			# Release the conversation lock without manufacturing a new receipt. A
 			# concurrent terminal writer won this card, or it was never displayed.
 			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release flip-only lock
-			return
+			return False
 		if msg_name is None:
 			msg_name = _locked_insert_chat_message(
 				conv_name,
@@ -1672,11 +1682,12 @@ def persist_tool_receipt(
 					if (tool_call_id or flip_token)
 					else None
 				),
+				only_if=only_if,
 			)
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist receipt before reply
 		if msg_name is None:
 			# Duplicate callback for the same tool call — already recorded (R-6 idempotent).
-			return
+			return False
 		if tool_call_id and not flip_token:
 			_bind_callback_tool(conv_name, tool_call_id)
 		publish_realtime_tool_result(
@@ -1696,6 +1707,7 @@ def persist_tool_receipt(
 		# same surface the agent's own canvas files use.
 		if not redacted_delegate:
 			_maybe_attach_artifact(conv_name, conv_owner, result)
+	return True
 
 
 def persist_pending_action(
@@ -4200,7 +4212,10 @@ def _single_flight_error() -> dict:
 		"a confirmation card for a previous action is still awaiting the user in this "
 		"conversation. Only one runs at a time - do NOT retry this call; stop and end "
 		"your turn now. The card does not expire: the user confirms or discards it, and "
-		"once they confirm you'll get a follow-up turn to continue with the next step.",
+		"once they confirm you'll get a follow-up turn to continue with the next step. "
+		"If the waiting card is not what the user asked for, tell them it is wrong and ask "
+		"them to discard it (Discard in the full chat, Deny on the phone); do not ask a "
+		"yes/no question in that reply.",
 	)
 
 
@@ -4785,6 +4800,20 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			)
 		if conversation_pending:
 			return _single_flight_error()
+		# send_email(recipients_from=...): the bench runs the query and writes one message
+		# per row NOW, so the card shows the real recipients and Confirm sends exactly
+		# them (send_email re-runs the query and refuses a changed list). The model never
+		# types the addresses (jarvis.tools._email_merge). From here on the call IS its
+		# expanded form, like a structure card's canonical args below.
+		_merge_note = None
+		if tool == "send_email" and isinstance(args, dict) and args.get("recipients_from") is not None:
+			from jarvis.tools import _email_merge
+
+			try:
+				args, _merge_note = _email_merge.expand(args)
+			except (JarvisError, frappe.PermissionError, frappe.ValidationError) as e:
+				frappe.clear_messages()
+				return _preview_error(e)
 		# Validate BEFORE parking. For a create/update (build-from-args) write,
 		# run the real call in the rollback sandbox now: a deterministic failure
 		# (missing mandatory field, bad link, no create permission) means the
@@ -4878,6 +4907,10 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				frappe.clear_messages()
 				return refusal
 			preview["card"] = card
+			if _merge_note and isinstance(card, dict):
+				# What the merge left out (rows with no valid address, repeated addresses,
+				# the query's own limit), on the card's one warning line.
+				card["warning"] = {**(card.get("warning") or {}), "merge": _merge_note}
 			if tool == "create_doc" and isinstance(card, dict) and _risk != "sensitive" and not _guarded:
 				# The ORIGINAL proposal's identity: saving a draft card of the very same
 				# proposal retires this card (#777, jarvis.chat.one_approval). Not on a

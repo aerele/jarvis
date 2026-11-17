@@ -864,6 +864,7 @@
 							:timestampFull="msgTimeFull(m)"
 							:copied="copiedId === m.name"
 							@copy="copyReplyMsg(m.name, m.content)"
+							@code-copy="announceCodeCopy"
 							@open-attachment="openArtifact(m, $event)"
 						>
 							<template #avatar>
@@ -1195,11 +1196,7 @@
 							<template #below-body>
 								<!-- a draft block we cannot show: the error card INSTEAD of any draft card -->
 								<div
-									v-if="
-										draftBlockErrorText &&
-										_lastAssistant &&
-										_lastAssistant.name === m.name
-									"
+									v-if="draftBlockErrorText && actionAnchor === m.name"
 									class="jv-action jv-summary"
 								>
 									<div role="alert" class="jv-summary-body jv-summary-err">
@@ -1222,7 +1219,7 @@
 									</div>
 								</div>
 								<!-- rich action card the agent emits (doc confirm / email draft) -->
-								<template v-else-if="actionFor === m.name && activeAction">
+								<template v-else-if="actionAnchor === m.name && activeAction">
 									<!-- email draft -->
 									<div v-if="activeAction.kind === 'email'" class="jv-email">
 										<div class="jv-email-head">
@@ -1492,7 +1489,11 @@
 											v-if="summaryState.model && summaryState.model.error"
 											style="margin: 0 14px 10px"
 										>
-											<ActionError :error="summaryState.model.error" />
+											<ActionError
+												:error="summaryState.model.error"
+												:can-report="!!supportOn"
+												@report="openActionErrorSupport"
+											/>
 										</div>
 
 										<div
@@ -1502,13 +1503,26 @@
 										>
 											{{ activeParkedNote }}
 										</div>
-										<template v-else-if="!summaryState.error">
+										<div v-else-if="summaryState.error" class="jv-action-foot">
+											<button
+												class="jv-action-2nd"
+												:disabled="
+													(cardModel && cardModel.applying) ||
+													cancellingDraft
+												"
+												@click="cancelDraft"
+											>
+												Cancel
+											</button>
+										</div>
+										<template v-else>
 											<div class="jv-action-foot">
 												<button
 													class="jv-action-primary"
 													:disabled="
 														!cardModel ||
 														cardModel.applying ||
+														cancellingDraft ||
 														convStreaming
 													"
 													:title="
@@ -1544,6 +1558,16 @@
 													"
 												>
 													Edit
+												</button>
+												<button
+													class="jv-action-2nd"
+													:disabled="
+														(cardModel && cardModel.applying) ||
+														cancellingDraft
+													"
+													@click="cancelDraft"
+												>
+													Cancel
 												</button>
 											</div>
 											<div class="jv-summary-hint">
@@ -2294,7 +2318,11 @@
 							</template>
 						</div>
 						<div v-if="pa.error" style="margin: 0 14px 10px">
-							<ActionError :error="pa.error" />
+							<ActionError
+								:error="pa.error"
+								:can-report="!!supportOn"
+								@report="openActionErrorSupport"
+							/>
 						</div>
 						<!-- What the amber button covers, as text: a title is invisible on
 						     touch and to anyone who does not hover. -->
@@ -2382,6 +2410,35 @@
 					</div>
 				</div>
 			</div>
+
+			<!-- Jump-to-latest: a real strip between the thread and the composer, NOT an
+			     overlay, so it can never sit on top of a message's buttons (export Cancel
+			     at 375/320 did). Jumps the thread to the newest message. -->
+			<transition name="jv-sd">
+				<div v-if="showScrollDown && !showWelcome && !booting" class="jv-jump-strip">
+					<button
+						type="button"
+						class="jv-scrolldown"
+						@click="jumpToBottom"
+						title="Jump to latest"
+						aria-label="Jump to latest message"
+					>
+						<svg
+							width="18"
+							height="18"
+							viewBox="0 0 24 24"
+							fill="none"
+							stroke="currentColor"
+							stroke-width="2.2"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						>
+							<path d="M12 5v14" />
+							<path d="m19 12-7 7-7-7" />
+						</svg>
+					</button>
+				</div>
+			</transition>
 
 			<!-- ===== COMPOSER ===== -->
 			<div
@@ -2637,30 +2694,6 @@
 					</template>
 				</Banner>
 
-				<!-- floats just above the composer; jumps the thread to the newest message -->
-				<transition name="jv-sd">
-					<button
-						v-if="showScrollDown && !showWelcome && !booting"
-						class="jv-scrolldown"
-						@click="jumpToBottom"
-						title="Jump to latest"
-						aria-label="Jump to latest message"
-					>
-						<svg
-							width="18"
-							height="18"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="2.2"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-						>
-							<path d="M12 5v14" />
-							<path d="m19 12-7 7-7-7" />
-						</svg>
-					</button>
-				</transition>
 				<div style="max-width: 1280px; margin: 0 auto">
 					<!-- DO NOT REMOVE `@submit="send()"`: the Send BUTTON's click is
 					     `emit('submit')` inside Composer, so this binding is the
@@ -4391,7 +4424,11 @@
 							</p>
 						</div>
 						<div v-if="draftPanel.error" style="margin-top: 10px">
-							<ActionError :error="draftPanel.error" />
+							<ActionError
+								:error="draftPanel.error"
+								:can-report="!!supportOn"
+								@report="openActionErrorSupport"
+							/>
 						</div>
 						<!-- Always present, so a screen reader announces the note when it fills. -->
 						<div
@@ -4422,7 +4459,15 @@
 						>
 							{{ draftPanel.applying ? "Saving…" : draftCta }}
 						</button>
-						<button class="jv-action-discard" @click="discardDraft">Discard</button>
+						<!-- A parked draft already became a confirmation card: Discard would record
+						     "nothing was saved" while that card stays confirmable. -->
+						<button
+							class="jv-action-discard"
+							:disabled="draftPanel.applying || !!draftPanel.parked"
+							@click="discardDraft"
+						>
+							Discard
+						</button>
 					</div>
 				</aside>
 			</div>
@@ -4547,6 +4592,8 @@ import { myUsage, loadMyUsage, takeUsage } from "@/stores/usage";
 import CompactDialog from "@/components/chat/CompactDialog.vue";
 import { parseCompactCommand, compactOutcome } from "@/lib/compact";
 import { isShowCardRequest } from "@/lib/showCardRequest";
+import { isDraftRow, liveDraftRow } from "@/lib/liveDraft";
+import { tailCard } from "@/lib/tailCard";
 import { autoModeView, AUTO_MODE_COPY } from "@/lib/autoMode";
 import { retryLabel, retryTargetIndex } from "@/lib/retryTarget";
 import { isReceiptEcho } from "@/lib/receiptEcho";
@@ -4586,7 +4633,7 @@ import { useConfirm } from "@/composables/useConfirm";
 import { promptSupportCopy } from "@/composables/useSupportCopyPrompt";
 import { useSupportStore } from "@/stores/support";
 import { formatRecentMessagesForSupport } from "@/lib/supportCopyFormat";
-import { supportErrorDraft } from "@/lib/supportErrorDraft";
+import { supportErrorDraft } from "../../../jarvis/public/js/shared/support_error_draft.mjs";
 import {
 	supportPillLabel as supportPillLabelFor,
 	supportAwaitingPhrase,
@@ -4660,7 +4707,7 @@ import {
 } from "@/maintenanceGate";
 import { onLlmSwitch } from "@/llmSwitch";
 import { parseAsk } from "@/lib/chatAsk";
-import { sendRejectionCopy } from "@/lib/sendRejectionCopy";
+import { rejectionCopy } from "@/lib/sendRejectionCopy";
 import { shouldHideActivityTool, isCustomerFacingTool } from "@/lib/activityTools";
 import {
 	parseGoto,
@@ -4738,6 +4785,14 @@ import {
 	shouldHideNextStep,
 } from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo, showsRawReason } from "@/lib/errors";
+import {
+	actionErrorCopy,
+	causeOf,
+	micErrorCopy,
+	nextStepOf,
+	thrownActionError,
+	uploadErrorCopy,
+} from "@/lib/chatErrorCopy";
 import { __ } from "@/lib/i18n";
 import { conversationLoadFailure } from "@/lib/conversationLoadFailure";
 import { openChatShare } from "@/composables/useChatSharing";
@@ -5532,6 +5587,24 @@ async function openErrorSupport(m) {
 		openSupportInFlight.value = false;
 	}
 }
+// Report error on a failed action card (confirm, run, discard, save): the same ticket
+// draft as a failed turn, with the card's failure reference as the message reference.
+async function openActionErrorSupport({ reference } = {}) {
+	if (openSupportInFlight.value || !supportOn) return;
+	openSupportInFlight.value = true;
+	try {
+		const draft = supportErrorDraft({
+			code: "internal",
+			conversation: currentId.value,
+			message: reference || "",
+		});
+		if (draft) await router.push({ name: "SupportNew", query: draft });
+	} catch {
+		notify(__("Could not open Support. Try again."), { type: "error" });
+	} finally {
+		openSupportInFlight.value = false;
+	}
+}
 // Waiting-reply count pill (header headphones button). awaiting_count is a
 // cheap poll-driven number (stores/support.js's refreshAwaiting, already run
 // by UserMenu's 60s poll timer - no second poller started here); reading
@@ -5918,7 +5991,7 @@ async function rerunFromHistory(run) {
 			status: "running",
 		};
 	} catch (e) {
-		notify(errMessage(e), { type: "error" });
+		notify(actionErrorCopy("Couldn't run that again", e), { type: "error" });
 	}
 }
 async function stopRunFromHistory(run) {
@@ -5927,7 +6000,7 @@ async function stopRunFromHistory(run) {
 		run.status = "stopped"; // optimistic patch
 		loadMacroRunStats();
 	} catch (e) {
-		notify(errMessage(e), { type: "error" });
+		notify(actionErrorCopy("Couldn't stop that run", e), { type: "error" });
 	}
 }
 
@@ -6068,7 +6141,7 @@ async function runCompact(hint) {
 		compactDialogOpen.value = false;
 	} catch (e) {
 		if (chatViewIsCurrent(view))
-			notify(errMessage(e) || compactOutcome().text, { type: "error" });
+			notify(actionErrorCopy("Couldn't compact this chat", e), { type: "error" });
 	} finally {
 		if (chatViewIsCurrent(view)) compactSubmitting.value = false;
 	}
@@ -6947,7 +7020,12 @@ async function clearAllHistory() {
 	} catch (e) {
 		// The server deletes chat by chat: some may be gone although the request
 		// failed, so say so and show the list as it now is.
-		notify(clearHistoryFailedNotice(errMessage(e)), { type: "error" });
+		notify(
+			[clearHistoryFailedNotice(causeOf(e) || "Couldn't delete your history"), nextStepOf(e)]
+				.filter(Boolean)
+				.join(" "),
+			{ type: "error" }
+		);
 		store.loadConversations();
 	} finally {
 		clearingHistory.value = false;
@@ -7702,7 +7780,11 @@ function render(text, streaming = false) {
 	const key = (streaming ? "S:" : "F:") + text;
 	const hit = _renderCache.get(key);
 	if (hit !== undefined) return hit;
-	const out = linkifyDocs(renderMarkdown(stripBlocks(text, streaming)));
+	// copyCode: each settled code block gets a copy button, handled by Message.vue
+	// (#2170). Not while streaming: the block may still be growing.
+	const out = linkifyDocs(
+		renderMarkdown(stripBlocks(text, streaming), { copyCode: !streaming })
+	);
 	if (_renderCache.size >= 800) _renderCache.clear();
 	_renderCache.set(key, out);
 	return out;
@@ -7795,19 +7877,52 @@ const _lastAssistant = computed(() => {
 	}
 	return last && last.role === "assistant" && !last.streaming ? last : null;
 });
-// The draft whose save failed on a value the person is fixing in the panel (its
-// message name). The assistant's "I'll wait" reply to that failure must not retire the
-// draft's card, or closing the panel would leave no Edit to reopen it.
-const fixingDraft = ref("");
-watch(currentId, () => {
-	fixingDraft.value = "";
+// The newest unsaved draft row (lib/liveDraft, the one rule the phone and the server
+// share): kept through later replies until it is saved, cancelled or replaced. Null
+// whenever _lastAssistant is, so nothing shows mid-turn. It reads the loaded rows as the
+// server counts them (`messages`: every role, every tool row), never visibleMessages,
+// which drops the tool rows that have no receipt chip. A draft cancelled here whose card
+// would still show (the server answered `already`, or the reload failed) stays hidden for
+// this session (hiddenDrafts, keyed by the draft row's name).
+const hiddenDrafts = ref(new Set());
+const _liveDraft = computed(() => {
+	const live = liveDraftMessage(messages.value, _lastAssistant.value);
+	return live && !hiddenDrafts.value.has(live.name) ? live : null;
 });
-// The message that owns the live draft card: the last assistant message, or the draft
-// being fixed when only the assistant's replies follow it (lib/draftSave).
-const _cardMessage = computed(() =>
-	liveDraftMessage(visibleMessages.value, _lastAssistant.value, fixingDraft.value, (m) =>
-		Boolean(actionOf(m))
-	)
+// The last message's own action block that is not a draft (an email draft, a gated verb's
+// legacy note, an unknown verb's error card). It wins the tail over a kept draft.
+const _tailOwnAction = computed(() => {
+	const last = _lastAssistant.value;
+	return last && !isDraftRow(last) && actionOf(last) ? last : null;
+});
+// One card at the tail (lib/tailCard): the last message's own card (action block, ask or
+// confirm strip) hides a KEPT draft card until it is answered. A draft in the last
+// message itself still wins.
+const _tailCard = computed(() => {
+	const last = _lastAssistant.value;
+	return tailCard({
+		tailHasOwnAction: !!_tailOwnAction.value,
+		hasDraft: !!_liveDraft.value,
+		draftIsTail: !!last && !!_liveDraft.value && _liveDraft.value.name === last.name,
+		tailHasAsk: !!last && !!askOf(last),
+		tailHasConfirm: !!last && !!confirmLabel(last),
+	});
+});
+// The message that owns the card: the last message when it has its own action block (as
+// before this rule), else the live draft row. Every save and cancel
+// names THIS row; the card is drawn under actionAnchor.
+const _cardMessage = computed(() => {
+	const last = _lastAssistant.value;
+	if (!last) return null;
+	const live = _liveDraft.value;
+	if (live && live.name === last.name) return live;
+	if (_tailOwnAction.value) return last;
+	return _tailCard.value === "draft" ? live : null;
+});
+// The message the card and the draft error alert are drawn under: always the last
+// assistant message, so the card sits at the bottom of the thread.
+const actionAnchor = computed(() =>
+	_cardMessage.value && _lastAssistant.value ? _lastAssistant.value.name : ""
 );
 // `messages` intentionally stays visible while a different conversation loads.
 // Do not let its old action card remain actionable in that new view. A raw action
@@ -7816,7 +7931,7 @@ const _cardMessage = computed(() =>
 // verb) gets ONE red error card and no live draft: _rawActiveAction is null for it,
 // so the summary card, the model build watcher and the edit panel never start.
 const draftBlockErrorText = computed(() => {
-	const m = _lastAssistant.value;
+	const m = _cardMessage.value;
 	if (!m) return "";
 	return draftBlockError(m.content || "", actionOf(m), brand.agentName);
 });
@@ -8495,7 +8610,13 @@ async function confirmSummary() {
 		model?.messageKey || actionFor.value,
 		model?.actionKey || (a ? draftActionKey(a) : "")
 	);
-	if (!model || model.applying || convStreaming.value || !draftModelViewIsCurrent(view, model))
+	if (
+		!model ||
+		model.applying ||
+		cancellingDraft.value ||
+		convStreaming.value ||
+		!draftModelViewIsCurrent(view, model)
+	)
 		return;
 	// The panel is open on this draft: Confirm saves what the person sees there (their
 	// edits, not the card's copy), and a failure marks the fields in that same panel.
@@ -8537,7 +8658,6 @@ function resetDraftActionState() {
 	draftPanel.value = null;
 	summaryState.value = blankSummaryState();
 	previewOpen.value = false;
-	fixingDraft.value = "";
 	parkedDrafts.value = new Map();
 }
 function previewSummary() {
@@ -8629,7 +8749,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 			// the chat explains (or the note says to ask, when it could not be sent).
 			closeDraftPanel();
 			notify(outcome.note, { type: "error" });
-			fixingDraft.value = "";
 			await loadConversation(view.conversation);
 			if (!chatViewIsCurrent(view)) return;
 			store.loadConversations();
@@ -8641,8 +8760,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 			// detail + hint, and nothing was saved) instead of throwing a raw Frappe
 			// 403/417. Keep the panel open so the values are editable (R2-9: the
 			// assistant is only told the user is fixing it here).
-			// The panel's draft stays live through the assistant's acknowledgement.
-			if (p.editable) fixingDraft.value = draftKey;
 			p.applying = false;
 			p.error = outcome.error;
 			markMissing(p, p.error.fields, (_formMetaCache[p.doctype] || {}).fields);
@@ -8654,7 +8771,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 		// draft so it can't park a second card.
 		if (outcome.kind === "parked") {
 			const parked = outcome.note;
-			fixingDraft.value = "";
 			p.applying = false;
 			p.parked = parked;
 			parkedDrafts.value = markParked(parkedDrafts.value, draftKey, parked);
@@ -8665,7 +8781,6 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 			await loadConversation(view.conversation);
 			return;
 		}
-		fixingDraft.value = "";
 		closeDraftPanel();
 		await loadConversation(view.conversation);
 		if (!chatViewIsCurrent(view)) return;
@@ -8674,7 +8789,7 @@ async function applyDraft(submitFlag, model = draftPanel.value, capturedView = n
 	} catch (e) {
 		if (!draftStillCurrent()) return;
 		p.applying = false;
-		p.error = { message: errMessage(e, "Could not save. Check the values.") };
+		p.error = thrownActionError(e, "Could not save your changes.");
 	}
 }
 
@@ -8690,9 +8805,64 @@ function showQueuedContinuation(r) {
 	sending.value = true;
 }
 
+// Cancel on the draft card: the server records it (a "discarded" receipt), so the card
+// is gone on both apps and after a reload. Always the DRAFT row's name (actionFor), never
+// the tail's. One click at a time, and not while a save is running.
+const cancellingDraft = ref(false);
+function cancelDraft() {
+	return cancelDraftFor(actionFor.value);
+}
+// The edit panel's Discard is the same Cancel. The panel names the draft it was opened on
+// (stamped then), so it still names it while a turn runs.
 function discardDraft() {
-	closeDraftPanel();
-	send("No, cancel that.");
+	return cancelDraftFor(draftPanel.value?.messageKey || actionFor.value);
+}
+async function cancelDraftFor(key) {
+	if (!key || cancellingDraft.value || cardModel.value?.applying || draftPanel.value?.applying)
+		return;
+	// Parked (its confirmation card waits, perhaps parked from another device while this panel
+	// was open): cancelling the draft would say nothing was saved while that card stays live.
+	if (parkedNoteFor(parkedDrafts.value, key) || parkedByCard(pendingActions.value, key)) return;
+	const view = captureDraftActionView(activeAction.value, key);
+	cancellingDraft.value = true;
+	try {
+		try {
+			await api.dismissDraft(view.conversation, key);
+		} catch {
+			if (chatViewIsCurrent(view)) {
+				notify("Couldn't cancel this draft. Try again.", { type: "error" });
+			}
+			return;
+		}
+		// Cancelled for good on the server. A reload that fails now is not a failed cancel.
+		if (!chatViewIsCurrent(view)) return;
+		closeDraftPanel();
+		previewOpen.value = false;
+		try {
+			await loadConversation(view.conversation);
+		} catch (e) {
+			console.warn("Jarvis: could not reload after cancelling a draft", e);
+		}
+		if (!chatViewIsCurrent(view)) return;
+		// Still the live draft (the server answered `already`, or the reload failed): hide
+		// it here for this session, so Cancel never looks dead. The rule itself, on the loaded
+		// rows: _liveDraft is null while a turn runs (a panel Discard mid-turn).
+		if (liveDraftRow(messages.value)?.name === key) hiddenDrafts.value.add(key);
+		store.loadConversations();
+	} finally {
+		cancellingDraft.value = false;
+	}
+}
+
+// Drafts a typed "show it" already took the person to: the next one is sent as a message.
+const draftsShownOnRequest = new Set();
+// The draft card, or its error card, is the one `.jv-action.jv-summary` in the thread.
+function scrollDraftCardIntoView() {
+	const el = threadEl.value?.querySelector(".jv-action.jv-summary");
+	if (!el) return scrollBottom(true);
+	const reduced =
+		window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+	el.scrollIntoView?.({ block: "nearest", behavior: reduced ? "auto" : "smooth" });
 }
 
 // --- action:pending confirm card (write-safety gate, issue #186) ---
@@ -9050,7 +9220,7 @@ async function confirmPending(pa) {
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = { message: errMessage(e, "Could not confirm.") };
+		if (card) card.error = thrownActionError(e, "Could not confirm this action.");
 	} finally {
 		// The switch watcher already dropped this view's in-flight token. Do not
 		// delete a same-token action started by a later A view after A → B → A.
@@ -9144,7 +9314,7 @@ async function approveAndRunPending(pa) {
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = { message: errMessage(e, "Could not start the run.") };
+		if (card) card.error = thrownActionError(e, "Could not start the run.");
 	} finally {
 		// See confirmPending: this continuation must not clear a later view's
 		// matching token when the user leaves and returns while it is in flight.
@@ -9247,7 +9417,7 @@ async function discardPending(pa) {
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = { message: errMessage(e, "Could not discard.") };
+		if (card) card.error = thrownActionError(e, "Could not discard this action.");
 	} finally {
 		// A stale direct dismissal must leave a later view's in-flight guard
 		// untouched. The synchronous switch reset owns the old guard instead.
@@ -9294,7 +9464,7 @@ async function proposeNext(m, step) {
 		if (!messageActionIsCurrent(view) || nextBusyKey.value !== view.token) return;
 	} catch (e) {
 		if (!messageActionIsCurrent(view) || nextBusyKey.value !== view.token) return;
-		notify(errMessage(e, "Could not open that step."), { type: "error" });
+		notify(actionErrorCopy("Couldn't open that step", e), { type: "error" });
 		hideNextStep(step);
 	} finally {
 		if (messageActionIsCurrent(view) && nextBusyKey.value === view.token)
@@ -9585,6 +9755,11 @@ function copyReplyMsg(id, content) {
 				conversation: currentId.value,
 			}),
 	});
+}
+// A code block's copy button (Message.vue) has no text of its own to change, so
+// its result is read out through the same live region as the reply Copy.
+function announceCodeCopy(ok) {
+	announceSR(ok ? "Code copied." : "Couldn't copy the code. Select it and copy it instead.");
 }
 function replyCopyLabel(id) {
 	if (copiedId.value === id) return "Copied";
@@ -11451,9 +11626,7 @@ async function selectConversation(id) {
 // the extracted reason so a non-string Frappe error payload can't throw inside the
 // caller's catch and re-swallow the very failure we're trying to report.
 function notifyActionError(prefix, e) {
-	notify(`${prefix}: ${String(errMessage(e)).replace(/\.$/, "")}. Try again.`, {
-		type: "error",
-	});
+	notify(actionErrorCopy(prefix, e), { type: "error" });
 }
 // Promote the unsaved new-chat composer to a real conversation id via the shared voiceSendGlue
 // helper: migrate the sentinel draft, the active recording take scope (_micConvId), and every
@@ -11620,7 +11793,9 @@ async function retry(messageId) {
 				recheckMaintenance();
 			} else {
 				// e.g. the single-flight guard ("a reply is already in progress").
-				notify(r.reason || "Couldn't retry that.", { type: "error" });
+				notify(rejectionCopy(r, brand.agentName, "Couldn't retry that.").message, {
+					type: "error",
+				});
 			}
 		}
 		if (r && r.ok !== false) {
@@ -11777,7 +11952,7 @@ async function settleRecoveredSend(m, r, view) {
 	if (r.ok === false && !r.confirmed) {
 		m.deliveryState = "rejected";
 		m.failed = true;
-		m.deliveryNote = r.message || sendRejectionCopy(r.reason, brand.agentName, r).message;
+		m.deliveryNote = rejectionCopy(r, brand.agentName).message;
 		return;
 	}
 	if (r.ok !== false && r.run_id) rememberOwnRun(r.run_id);
@@ -11996,6 +12171,18 @@ async function send(textArg, resendAck) {
 		if (chatViewIsCurrent(_typedView) && visiblePendingActions.value.length > before) {
 			input.value = "";
 			notify("Found a pending confirmation.", { type: "success" });
+			return;
+		}
+		// No pending card, but the card at the tail is a kept draft's (lib/tailCard): take
+		// them to that card, once per draft, and say so. A card of the last message's own,
+		// or a second "show it" for the same draft, goes to the agent as a normal message.
+		const shownDraft = _tailCard.value === "draft" ? _liveDraft.value?.name : "";
+		if (chatViewIsCurrent(_typedView) && shownDraft && !draftsShownOnRequest.has(shownDraft)) {
+			draftsShownOnRequest.add(shownDraft);
+			input.value = "";
+			notify("Your draft is at the bottom.", { type: "info" });
+			await nextTick();
+			scrollDraftCardIntoView();
 			return;
 		}
 	}
@@ -12263,8 +12450,7 @@ async function send(textArg, resendAck) {
 		// those lines, and a second copy above the rejection block moves the anchor).
 		if (r && r.ok === false && !r.confirmed) {
 			_optBubble.deliveryState = "rejected";
-			_optBubble.deliveryNote =
-				r.message || sendRejectionCopy(r.reason, brand.agentName, r).message;
+			_optBubble.deliveryNote = rejectionCopy(r, brand.agentName).message;
 			// Decide from the full request identity, not an id-only lookup: an
 			// A → B → A return must not let A's rejected request remove B's cards
 			// or unlock B's composer.
@@ -12349,9 +12535,7 @@ async function send(textArg, resendAck) {
 				// "usage_limit" fires from BOTH the aggregate cap and the still-monthly
 				// per-model cap; the envelope names the window (limit_period) only for
 				// the former, so the copy stays period-neutral for the latter.
-				r.reason === "usage_limit"
-					? sendRejectionCopy(r.reason, brand.agentName, r).message
-					: r.message || r.reason || "Couldn't send your message.",
+				rejectionCopy(r, brand.agentName).message,
 				{ type: "error" }
 			);
 			return;
@@ -12636,6 +12820,7 @@ function onEvent(p) {
 			// CDX-3: a stale-epoch (or post-terminal) recovering banner is ignored.
 			if (pumpFenceReject(p)) break;
 			pumpFenceAccept(p, false);
+			// raw-ok: an internal key ("compacting" | "interrupted") recoveringLabel maps to copy.
 			recovering.value = { message_id: p.message_id, reason: p.reason || "interrupted" };
 			waiting.value = false;
 			sending.value = false;
@@ -12742,6 +12927,7 @@ function onEvent(p) {
 				// through the state->copy table (SUXI-7). Guarded by the chip check so
 				// the tab that itself clicked Cancel (chip already cleared) doesn't
 				// double-toast on top of its own optimistic "Cancelled.".
+				// raw-ok: the server's fixed cancel sentence (admission USER_CANCEL_REASON / AGE_OUT_REASON).
 				notify(p.reason || TURN_STATE_COPY.cancelled(), { type: "info" });
 			}
 			break;
@@ -13317,7 +13503,9 @@ async function cancelQueued() {
 			if (queuedTurn.value && queuedTurn.value.run_id === q.run_id) queuedTurn.value = null;
 			sending.value = true;
 			waiting.value = true;
-			notify((r && r.reason) || "That reply already started.", { type: "info" });
+			notify(rejectionCopy(r, brand.agentName, "That reply already started.").message, {
+				type: "info",
+			});
 		}
 	} catch (e) {
 		if (!queuedIsCurrent()) return;
@@ -13647,7 +13835,7 @@ const micRec = useDictationRecorder({
 	onError: (msg) => {
 		if (micState.value !== "recording") return;
 		micState.value = "idle";
-		notify(msg || "Recording failed. Try again.", { type: "error" });
+		notify(micErrorCopy(msg), { type: "error" });
 	},
 });
 
@@ -13676,7 +13864,7 @@ async function startMic() {
 	// voiceBusyCount then never returns to 0 and every send, voice or not, is refused.
 	const started = await micRec.start();
 	if (micRec.state === "error") {
-		notify(micRec.error || "Couldn't start the microphone.", { type: "error" });
+		notify(micErrorCopy(micRec.error, "Couldn't start the microphone."), { type: "error" });
 		return;
 	}
 	if (!started || micRec.state !== "recording") return;
@@ -13692,8 +13880,7 @@ async function stopMic() {
 	// Finalise: the recorder flushes its tail, assembles the take, and hands it to onDone for
 	// ONE transcription. The composer stays usable while that runs.
 	await micRec.stop();
-	if (micRec.state === "error")
-		notify(micRec.error || "Recording failed. Try again.", { type: "error" });
+	if (micRec.state === "error") notify(micErrorCopy(micRec.error), { type: "error" });
 }
 async function cancelMic() {
 	await micRec.cancel();
@@ -13997,7 +14184,9 @@ async function startNudgeMic() {
 	if (!nudge.value) return;
 	await nudgeRec.start();
 	if (nudgeRec.state === "error") {
-		notify(nudgeRec.error || "Couldn't start the microphone.", { type: "error" });
+		notify(micErrorCopy(nudgeRec.error, "Couldn't start the microphone."), {
+			type: "error",
+		});
 		return;
 	}
 	if (nudgeRec.state === "recording" && nudge.value) nudge.value.mode = "recording";
@@ -14008,8 +14197,7 @@ async function stopNudgeMic() {
 	const r = await nudgeRec.stop();
 	if (!r || !r.blob || !r.blob.size) {
 		if (nudge.value) nudge.value.mode = "idle";
-		if (nudgeRec.state === "error")
-			notify(nudgeRec.error || "Recording failed. Try again.", { type: "error" });
+		if (nudgeRec.state === "error") notify(micErrorCopy(nudgeRec.error), { type: "error" });
 		return;
 	}
 	await _nudgeTranscribe(r);
@@ -14184,10 +14372,10 @@ async function uploadOne(file) {
 		// Previously an empty catch: the file silently never appeared, which read
 		// as "the picker is broken" for anything the server refused (an oversize
 		// recording, a blocked extension, an expired session). Show it instead.
-		const why = errMessage(err) || "upload failed";
+		const why = uploadErrorCopy(err);
 		if (currentId.value === forConv) {
 			failedUploads.value = [...failedUploads.value, { id, name, error: why }];
-			notify(`Could not attach ${name}: ${why}`, { type: "error" });
+			notify(`Couldn't attach ${name}. ${why}`, { type: "error" });
 		}
 	} finally {
 		_inflightKeys.delete(key);
@@ -15008,16 +15196,23 @@ onUnmounted(() => {
 	background: var(--surface-2);
 	color: var(--text);
 }
-/* jump-to-latest arrow — floats just above the composer, centered.
-   It lives in .jv-composer-wrap (this view), NOT inside <Composer>, so it and
-   its .jv-sd-* transition stay here. */
+/* jump-to-latest arrow: a strip that takes real layout space between the thread
+   scroller and .jv-composer-wrap (both flex items of <main>; the scroller is flex: 1,
+   so it gets 48px shorter while the strip shows and the composer does not move).
+   It used to be an absolute overlay on the composer's top edge, which put it over
+   whatever thread row was at the bottom: at 375/320 px it covered an export card's
+   Cancel and swallowed the click. Keep it out of the scroller's box: no position,
+   no negative margin, no z-index. It lives in this view, NOT inside <Composer>, so
+   it and its .jv-sd-* transition stay here. The fade is opacity only: animating
+   height would resize the scroller on every frame. */
+.jv-jump-strip {
+	flex: none;
+	height: 48px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
 .jv-scrolldown {
-	position: absolute;
-	left: 50%;
-	bottom: 100%;
-	margin-bottom: 12px;
-	transform: translateX(-50%);
-	z-index: 20;
 	width: 38px;
 	height: 38px;
 	display: flex;
@@ -15036,20 +15231,19 @@ onUnmounted(() => {
 .jv-scrolldown:hover {
 	color: var(--text);
 	border-color: var(--text-3);
-	transform: translateX(-50%) translateY(-2px);
+	transform: translateY(-2px);
 	box-shadow: 0 9px 24px rgba(20, 20, 30, 0.22);
 }
 .jv-scrolldown:active {
-	transform: translateX(-50%) scale(0.92);
+	transform: scale(0.92);
 }
 .jv-sd-enter-active,
 .jv-sd-leave-active {
-	transition: opacity 0.18s ease, transform 0.18s ease;
+	transition: opacity 0.18s ease;
 }
 .jv-sd-enter-from,
 .jv-sd-leave-to {
 	opacity: 0;
-	transform: translateX(-50%) translateY(10px);
 }
 /* response metrics (tools · time) */
 .jv-skillused {

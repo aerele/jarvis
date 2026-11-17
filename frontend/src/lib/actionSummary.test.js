@@ -665,6 +665,28 @@ test("cardWarningOf: nothing for no warning, an old card or bad values", () => {
 	}
 });
 
+test("cardWarningOf: what an email merge left out", () => {
+	assert.equal(
+		cardWarningOf({
+			warning: { merge: { rows: 175, no_email: 3, duplicate: 1, limited: false } },
+		}),
+		"3 rows have no valid email and are left out. 1 repeated address gets one email."
+	);
+	assert.equal(
+		cardWarningOf({
+			warning: { merge: { rows: 50, no_email: 1, duplicate: 2, limited: true } },
+		}),
+		"1 row has no valid email and is left out. 2 repeated addresses get one email. " +
+			"The query's own limit left more rows out."
+	);
+	// a clean merge says nothing
+	assert.equal(
+		cardWarningOf({ warning: { merge: { rows: 171, no_email: 0, duplicate: 0 } } }),
+		""
+	);
+	assert.equal(cardWarningOf({ warning: { merge: { no_email: "3", duplicate: -1 } } }), "");
+});
+
 test("diffLineView: one line of a sensitive update's line diff", () => {
 	assert.deepEqual(diffLineView({ op: "+", text: "B" }), { kind: "add", text: "+ B" });
 	assert.deepEqual(diffLineView({ op: "-", text: "b" }), { kind: "del", text: "- b" });

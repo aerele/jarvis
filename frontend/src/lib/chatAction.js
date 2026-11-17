@@ -96,17 +96,27 @@ function normaliseTables(a) {
 const CLOSED_ACTION_RE = /```jarvis-action[ \t]*\n([\s\S]*?)```/;
 
 /**
+ * The raw body of the FIRST closed jarvis-action fence, or null when there is none.
+ * @param {string} content
+ * @returns {string|null}
+ */
+export function closedActionBody(content) {
+	if (!content || !content.includes("jarvis-action")) return null;
+	const mt = content.match(CLOSED_ACTION_RE);
+	return mt ? mt[1] : null;
+}
+
+/**
  * Tells a closed jarvis-action fence whose body is not a JSON object ("bad")
  * from no closed fence at all ("none", including one still streaming in).
  * @param {string} content
  * @returns {"none"|"ok"|"bad"}
  */
 export function actionBlockState(content) {
-	if (!content || !content.includes("jarvis-action")) return "none";
-	const mt = content.match(CLOSED_ACTION_RE);
-	if (!mt) return "none";
+	const body = closedActionBody(content);
+	if (body === null) return "none";
 	try {
-		const a = JSON.parse(mt[1].trim());
+		const a = JSON.parse(body.trim());
 		return isPlainObject(a) ? "ok" : "bad";
 	} catch {
 		return "bad";

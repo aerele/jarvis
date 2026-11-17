@@ -25,6 +25,7 @@ import { useRouter } from "vue-router";
 import { renderMarkdown } from "@shared/markdown.js";
 import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
+import { draftAnchor } from "../lib/draftAnchor.js";
 import { isShowCardRequest } from "../lib/showCardRequest.js";
 import { isImeKey } from "../lib/composerEnter.js";
 import { advanceViewGeneration, isViewCurrent } from "../lib/viewGeneration.js";
@@ -79,6 +80,15 @@ import DecisionCard from "../components/DecisionCard.vue";
 import DecisionSheet from "../components/DecisionSheet.vue";
 import FilePreviewSheet from "../components/FilePreviewSheet.vue";
 import { turnErrorInfo, showsRawReason } from "../../../jarvis/public/js/turn_errors.mjs";
+import {
+	cancelCopy,
+	failureCopy,
+	uploadFailureCopy,
+} from "../../../jarvis/public/js/shared/chat_failure_copy.mjs";
+import {
+	openErrorReport,
+	showReportError,
+} from "../../../jarvis/public/js/shared/support_error_report.mjs";
 import MessageMedia from "../components/MessageMedia.vue";
 import RecordCards from "../components/RecordCards.vue";
 import Sheet from "../components/Sheet.vue";
@@ -515,6 +525,34 @@ function errorNote(m) {
 	});
 }
 
+// Report error: only where Aerele support is the one who can fix the failure, and only for a
+// user who can raise a ticket (page boot flags set by jarvis/www/jarvis_mobile.py).
+const supportOn = !!(window.support_available && window.has_support_access);
+const reportingFor = ref("");
+function canReport(err) {
+	return showReportError(err, supportOn);
+}
+async function reportError(m, err) {
+	if (reportingFor.value || !canReport(err)) return;
+	reportingFor.value = m.name;
+	try {
+		const opened = await openErrorReport({
+			info: err,
+			conversation: convId.value,
+			message: m.name,
+			at: m.modified || m.creation,
+			fetchDetails: api.getErrorReportDetails,
+			openTab: (url, target) => window.open(url, target),
+			navigate: (url) => window.location.assign(url),
+		});
+		if (!opened) errorBanner.value = "Couldn't open Support. Try again.";
+	} catch {
+		errorBanner.value = "Couldn't open Support. Try again.";
+	} finally {
+		reportingFor.value = "";
+	}
+}
+
 // ── thread assembly ─────────────────────────────────────────────────────────
 // Tool rows BELONG to the assistant turn that ran them. The worker creates the
 // assistant placeholder first and appends each tool row after it, so in `seq`
@@ -565,20 +603,53 @@ const items = computed(() => {
 // Report receipts bound to their answer by tool_call_ids, never by position.
 const reportToolsByTurn = computed(() => reportToolsByAssistant(messages.value));
 
-const lastAssistantKey = computed(() => {
-	const assistants = items.value.filter((i) => i.type === "assistant" && i.msg);
-	return assistants.length ? assistants[assistants.length - 1].key : "";
-});
+// The card at the tail (draftAnchor.js): the last message's own action block when it has
+// one that is not a draft (`own`), else the newest unsaved draft (liveDraft.js), drawn
+// under the LAST assistant message so it is always at the bottom. While a reply streams
+// the tail is about to change, so the card is hidden until the turn settles.
+const rawAnchor = computed(() => draftAnchor(messages.value, items.value));
+const anchor = computed(() => (live.value ? null : rawAnchor.value));
 
-// The draft card (or its error view) shows only on the newest assistant message
-// and until it is dismissed; every other message falls back to its prose or the
-// "didn't return a reply" line, so a broken block never leaves a blank gap.
+// True for the item that carries the tail's card (or its error view), unless it was
+// dismissed. A draft's own message is only the anchor when it is the last one.
 function showsDraftCard(it) {
+	const a = anchor.value;
 	return !!(
-		(it.view.action || it.view.actionBad) &&
-		it.key === lastAssistantKey.value &&
-		!dismissedActions.value.has(it.key)
+		a &&
+		(a.action || a.bad) &&
+		it.key === a.anchorKey &&
+		!dismissedActions.value.has(a.draftKey)
 	);
+}
+
+// A broken block that is the live draft shows the error card wherever it is drawn,
+// so its own message must not also say "didn't return a reply".
+function carriesLiveBrokenDraft(it) {
+	const a = rawAnchor.value;
+	return !!(a && a.bad && a.draftKey === it.key && !dismissedActions.value.has(a.draftKey));
+}
+
+// Cancel: record it on the server so it stays gone on reload and on the web app. A
+// second tap while the call is in flight is ignored. If the call fails, or the card
+// would still show after it (the server answered `already`, or the reload failed: load()
+// keeps the old rows), hide the card for this session only.
+let dismissing = false;
+async function onDraftDismissed() {
+	const a = anchor.value;
+	if (!a || a.own || dismissing) return;
+	const cid = convId.value;
+	dismissing = true;
+	try {
+		await api.dismissDraft(cid, a.draftKey);
+		await load();
+		if (convId.value === cid && rawAnchor.value?.draftKey === a.draftKey)
+			dismissedActions.value.add(a.draftKey);
+	} catch (e) {
+		console.error("Jarvis PWA: could not record the cancel", e);
+		dismissedActions.value.add(a.draftKey);
+	} finally {
+		dismissing = false;
+	}
 }
 
 // The write leaves a receipt in the conversation (a closed failure, the assistant's
@@ -672,6 +743,11 @@ async function load(force = false, staleRetry = true) {
 		if (page.stale.length && staleRetry) load(false, false);
 	} catch (e) {
 		console.error("Jarvis PWA: failed to load conversation", e);
+		if (current())
+			errorBanner.value = failureCopy(
+				e,
+				"Couldn't load this chat. Check your connection, then reopen it."
+			);
 	} finally {
 		if (current()) {
 			loading.value = false;
@@ -870,6 +946,10 @@ async function send() {
 			return;
 		}
 		if (input.value.trim() !== text || attachments.value.length) return;
+		// Nothing new to show: the words go to the agent, also while a draft card waits at
+		// the tail. This view has no notice to say a message was held back, so it never
+		// holds one: the send below scrolls to the bottom, where the new message lands just
+		// under that card.
 	}
 	if ((!text && !ready.length) || sending.value) return;
 	errorBanner.value = "";
@@ -1233,8 +1313,7 @@ async function attach(files) {
 					if (target[index].preview) URL.revokeObjectURL(target[index].preview);
 					target.splice(index, 1);
 				}
-				if (isCurrent(cid, generation))
-					errorBanner.value = e?.message || `Couldn't upload ${a.name}.`;
+				if (isCurrent(cid, generation)) errorBanner.value = uploadFailureCopy(e, a.name);
 			}
 		})
 	);
@@ -1300,7 +1379,10 @@ async function saveRename() {
 		menuOpen.value = false;
 	} catch (e) {
 		if (!isCurrent(cid, generation)) return;
-		menuError.value = e?.message || "Couldn't rename this chat.";
+		menuError.value = failureCopy(
+			e,
+			"Couldn't rename this chat. Check your connection and try again."
+		);
 	}
 }
 
@@ -1339,7 +1421,7 @@ function onEvent(p) {
 		queuedTurn.value.position = p.position;
 	}
 	if (p.kind === "turn:cancelled") {
-		errorBanner.value = p.reason || "The waiting request was cancelled.";
+		errorBanner.value = cancelCopy(p.reason);
 		load();
 	}
 
@@ -1652,7 +1734,12 @@ onUnmounted(() => {
 					<ReportScope :tools="reportToolsByTurn[it.key] || []" />
 					<ExportCard v-if="exportSummary(it.msg)" :summary="exportSummary(it.msg)" />
 					<div v-else-if="it.view.html" class="jv-md" v-html="it.view.html" />
-					<div v-else-if="it.view.empty && !showsDraftCard(it)" class="jv-msg-error">
+					<div
+						v-else-if="
+							it.view.empty && !showsDraftCard(it) && !carriesLiveBrokenDraft(it)
+						"
+						class="jv-msg-error"
+					>
 						{{ agentName }} didn't return a reply for this turn. Try asking again.
 					</div>
 					<!-- SIBLING of the chain above, not a v-else-if in it: a partial stop
@@ -1663,14 +1750,17 @@ onUnmounted(() => {
 					<div v-if="it.msg.stopped" class="jv-stopped">You stopped this reply.</div>
 					<ActionCard
 						v-if="showsDraftCard(it)"
-						:action="it.view.action"
+						:action="anchor.action"
 						:conversation="convId"
-						:parked-note="parkedActions.get(it.key) || parkedByCard(pending, it.key)"
-						:message-key="it.key"
+						:parked-note="
+							parkedActions.get(anchor.draftKey) ||
+							parkedByCard(pending, anchor.draftKey)
+						"
+						:message-key="anchor.draftKey"
 						@applied="onActionApplied"
 						@failed="onActionApplied"
-						@parked="(n) => parkedActions.set(it.key, n)"
-						@dismissed="dismissedActions.add(it.key)"
+						@parked="(n) => parkedActions.set(anchor.draftKey, n)"
+						@dismissed="onDraftDismissed"
 					/>
 					<RecordCards v-if="it.view.cards" :data="it.view.cards" />
 					<ChartCard v-for="(c, ci) in it.view.charts" :key="ci" :spec="c" />
@@ -1749,6 +1839,15 @@ onUnmounted(() => {
 								<span aria-hidden="true">&#8599;</span></a
 							>
 						</p>
+						<button
+							v-if="canReport(it.err)"
+							class="jv-err-link"
+							type="button"
+							:disabled="!!reportingFor"
+							@click="reportError(it.msg, it.err)"
+						>
+							Report error
+						</button>
 						<pre
 							v-if="showsRawReason(it.err) && it.msg.error"
 							class="jv-msg-error-raw"
