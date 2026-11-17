@@ -106,6 +106,18 @@ describe("SelectionActions", () => {
 		document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
 		await nextTick();
 		expect(wrapper.find(".jv-selbar").exists()).toBe(false);
+		// Releasing Escape does not bring it back (the text is still selected).
+		document.dispatchEvent(new KeyboardEvent("keyup", { key: "Escape" }));
+		vi.runAllTimers();
+		await nextTick();
+		expect(wrapper.find(".jv-selbar").exists()).toBe(false);
+		// A keyboard selection still shows it on key release.
+		document.dispatchEvent(new KeyboardEvent("keyup", { key: "ArrowRight", shiftKey: true }));
+		vi.runAllTimers();
+		await nextTick();
+		expect(wrapper.find(".jv-selbar").exists()).toBe(true);
+		window.getSelection().removeAllRanges();
+		document.dispatchEvent(new Event("selectionchange"));
 		select("a");
 		await release();
 		window.getSelection().removeAllRanges();
