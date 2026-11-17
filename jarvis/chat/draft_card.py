@@ -375,7 +375,13 @@ def row_diff(stored: list, final: list, cells) -> dict:
 def _differs(a, b, df) -> bool:
 	"""Whether saving ``b`` over the stored ``a`` changes the cell: ``same_value``'s casts
 	(dates, numbers), plus a Time compared as a time (a call sends "11:00", the row holds
-	11:00:00). ``same_value`` itself is left as it is for its other callers."""
+	11:00:00).
+
+	Kept beside ``same_value`` (jarvis/chat/_record_summary.py) on purpose: ``same_value`` has no
+	Time cast, so it compares a Time with ``cstr`` and calls "11:00" against a stored 11:00:00 a
+	CHANGE. Its other callers (the ordinary update card in confirm_card.py and the post-save
+	check in pending_actions/_verify.py) show or verify that as a change today; teaching it the
+	Time case would silently change those cards' diffs, so the Time case lives here only."""
 	from jarvis.chat._record_summary import same_value
 
 	if getattr(df, "fieldtype", None) == "Time":

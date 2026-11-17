@@ -1739,6 +1739,19 @@ if FrappeTestCase is not None:
 			self.assertFalse(draft_card._differs("11:00:00", "11:00", clock))
 			self.assertTrue(draft_card._differs(timedelta(hours=11), "11:30", clock))
 
+		def test_same_value_still_reads_a_time_as_text(self):
+			"""Pins why `_differs` is not just `same_value`: the ordinary update card's
+			comparison has no Time cast ("11:00" vs 11:00:00 is a change there). If this
+			flips, those cards' diffs changed; revisit `_differs`."""
+			from datetime import timedelta
+
+			from jarvis.chat._record_summary import same_value
+
+			clock = SimpleNamespace(fieldtype="Time")
+			self.assertFalse(draft_card._differs(timedelta(hours=11), "11:00", clock))
+			self.assertFalse(same_value(timedelta(hours=11), "11:00", clock))
+			self.assertTrue(same_value("11:00:00", "11:00:00", clock))
+
 		def test_a_key_the_call_set_is_shown_even_as_the_ninth_column(self):
 			"""With ten list-view fields, the field the call edited comes first so the cap of 8
 			columns cannot hide it."""
