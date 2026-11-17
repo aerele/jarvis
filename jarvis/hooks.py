@@ -1146,21 +1146,12 @@ has_permission.update(
 # wiped them: the cache never held, and an error logged on every tick instead of once an hour. The cache is invalidated by rotating ``gen``
 # (``after_migrate`` and ``doc_events`` after commit), never by deleting keys (``delete_keys``
 # is a ``KEYS`` scan); answers expire by TTL (2 h at most, 10 min for an error).
-<<<<<<< HEAD
-=======
-#
-# jarvis:pump:steps:, jarvis:pump:step_lines:, jarvis:pump:preambles: (2026-11-01, #2367): a
-# running turn's recorded step text (``pump._append_run_step`` and its siblings). A pump hop
-# re-seeds the next lane from it, and settlement strips the saved reply and saves the step
-# list from it. Without it the watchdog tick wiped a long turn's steps mid-turn, so the saved
-# reply kept the narration and showed no steps. Every key keeps its one-hour TTL.
 #
 # jarvis:admin_oauth_grant_refused (2026-11-06): ``admin_client``'s "the admin refused the
 # password grant, use api_key:api_secret for an hour" marker. Without it the watchdog tick
 # wiped the marker, so on a Frappe 16.35+ control plane every */5 admin call
 # (``reconcile_pending_llm_sync``) re-sent the doomed grant and logged an
 # "oauth token request rejected" Error Log row every five minutes. Its one-hour TTL still applies.
->>>>>>> a3f54f8 (fix(admin_client): keep the password-grant refusal across the watchdog cache clear)
 persistent_cache_keys = [
 	"jarvis:pairing_proof:",  # One-time site-proof nonces: 600 s TTL must survive watchdog clears.
 	"jarvis:key_resync:",  # The 10-minute stale-key self-heal throttle must survive the 5-minute clear.
