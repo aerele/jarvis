@@ -24,6 +24,10 @@ Safety bounds enforced here (on top of Frappe's standard validation):
   dedicated tools, not raw field writes
 - Empty ``changes`` dict is refused so the agent doesn't accidentally
   call this with no-op intent
+- A document in a Workflow state the user may not edit (the state's "Only
+  Allow Edit For" roles) is refused, as Desk shows it read-only, and so is a
+  change of its workflow state, which moves only through a workflow action
+  (``_workflow_edit``, aerele/jarvis#2506)
 """
 
 import frappe
@@ -36,6 +40,7 @@ from jarvis.tools._delegate_write_caps import enforce_update
 from jarvis.tools._doc_parts import check_write_fields, refuse_fields_with_batch, write_result
 from jarvis.tools._field_values import cast_numbers, check_values
 from jarvis.tools._sandbox_attrs import check_sandbox_code
+from jarvis.tools._workflow_edit import require_no_state_move, require_workflow_edit
 from jarvis.tools.create_doc import refused_field_names
 
 # Fields Frappe maintains itself or that govern DocType identity. An LLM
@@ -83,6 +88,12 @@ def _update_one(doctype: str, name: str, changes: dict) -> "frappe.model.documen
 	doc = frappe.get_doc(doctype, name)  # raises DoesNotExistError if missing
 	if not frappe.has_permission(doctype, ptype="write", doc=doc):
 		raise PermissionDeniedError(f"no write permission on {doctype} '{name}'")
+	# aerele/jarvis#2506: a document in a workflow state the user may not edit is
+	# read-only in Desk, but Frappe never checks that on save. Same pristine-doc rule
+	# as the check above: decided before any change is set. Nor may the changes move
+	# the workflow state: that is a workflow action (apply_workflow_action).
+	require_workflow_edit(doc)
+	require_no_state_move(doc, changes)
 
 	# R2-3: a value Frappe would store as 0 or the database would refuse is rejected
 	# naming the field, before anything is set (``_field_values``).
