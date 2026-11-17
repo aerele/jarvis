@@ -13,6 +13,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_to_date, now_datetime
 
+from jarvis import activity_actions
 from jarvis import activity_report as ar
 from jarvis.activity_log import EVENTS, EXPORT_TOOLS
 from jarvis.agent_audit import AGENT_WRITE_FIELDS
@@ -442,6 +443,23 @@ class TestSummaryCounts(ReportTestCase):
 		order = [p["user"] for p in self.summary()["people"]]
 		self.assertEqual(order, [C, A, B])
 
+	def test_people_are_capped_flagged_first_and_say_so(self):
+		# D8: a site with thousands of users must not ship (and render) all of them.
+		self.assertEqual(ar.PEOPLE_CAP, 500)
+		for _ in range(5):
+			ev(actor=A)  # busiest, unflagged
+		ev(actor=B)
+		ev(at(3), actor=C)  # flagged, least busy
+		self.assertFalse(self.summary()["people_truncated"])
+		with mock.patch.object(ar, "PEOPLE_CAP", 2):
+			res = self.summary()
+		self.assertEqual([p["user"] for p in res["people"]], [C, A])  # the flagged person is kept
+		self.assertTrue(res["people_truncated"])
+		with mock.patch.object(ar, "PEOPLE_CAP", 3):
+			res = self.summary()
+		self.assertEqual(len(res["people"]), 3)
+		self.assertFalse(res["people_truncated"])  # exactly at the cap is not truncated
+
 	def test_first_event_at_per_source(self):
 		self.assertEqual(ar.summary(RANGE)["first_event_at"], {"agent": None, "app": None})
 		ev(at(9), event="action", method="m.a")
@@ -503,6 +521,84 @@ class TestSummaryCounts(ReportTestCase):
 			ev(now, event=kind, outcome="denied" if kind != "read" else "ok")
 			h = ar.summary(RANGE)["logging_health"]
 			self.assertEqual((h["warn"], h["events_24h"]), (False, 1), kind)
+
+	# ---- D6: the app-action logger has its own check (the agent check above stays separate:
+	# an admin clicking around writes app rows and must not mask a broken tool-path logger).
+	def _app_health(self):
+		frappe.cache().delete_keys(activity_actions.SEEN_PREFIX)
+		self.addCleanup(frappe.cache().delete_keys, activity_actions.SEEN_PREFIX)
+
+	def test_app_actions_seen_but_none_written_warns(self):
+		self._app_health()
+		activity_actions._note("seen")
+		h = ar.summary(RANGE)["logging_health"]
+		self.assertTrue(h["app_warn"])
+		self.assertEqual((h["app_seen_24h"], h["app_actions_24h"], h["app_failures_24h"]), (1, 0, 0))
+		self.assertIn(ar.app_warn_note(), ar.health_notes(h))
+		self.assertEqual(
+			ar.app_warn_note(),
+			"Jarvis app actions are not being recorded. Ask your system administrator to check the activity log.",
+		)
+
+	def test_app_actions_seen_and_written_is_healthy(self):
+		self._app_health()
+		activity_actions._note("seen")
+		ev(now_datetime(), event="action", method="jarvis.chat.macros_api.create_macro")
+		h = ar.summary(RANGE)["logging_health"]
+		self.assertFalse(h["app_warn"])
+		self.assertEqual((h["app_seen_24h"], h["app_actions_24h"]), (1, 1))
+		self.assertNotIn(ar.app_warn_note(), ar.health_notes(h))
+
+	def test_the_app_rows_check_is_an_existence_check(self):
+		# N5: "any app row in 24 h?" must not read a pile of rows to answer.
+		self._app_health()
+		activity_actions._note("seen")
+		for i in range(3):
+			ev(now_datetime(), event="action", method=f"jarvis.x.y{i}")
+		h = ar.summary(RANGE)["logging_health"]
+		self.assertEqual(h["app_actions_24h"], 1)
+		self.assertFalse(h["app_warn"])
+
+	def test_dropped_rows_are_reported_as_data_and_raise_no_warning(self):
+		self._app_health()
+		activity_actions._note("dropped")
+		activity_actions._note("dropped")
+		ev(now_datetime(), event="action", method="jarvis.x.y")
+		h = ar.summary(RANGE)["logging_health"]
+		self.assertEqual(h["app_dropped_24h"], 2)
+		self.assertFalse(h["app_warn"])
+		self.assertNotIn(ar.app_warn_note(), ar.health_notes(h))  # data only: no note of its own
+
+	def test_a_quiet_app_is_not_a_warning(self):
+		self._app_health()
+		h = ar.summary(RANGE)["logging_health"]
+		self.assertEqual((h["app_warn"], h["app_seen_24h"], h["app_failures_24h"]), (False, 0, 0))
+
+	def test_failures_with_nothing_written_warn_even_if_nothing_was_seen(self):
+		# a snapshot failure happens before a request is "seen": it must still raise the alarm
+		self._app_health()
+		activity_actions._note("failures")
+		h = ar.summary(RANGE)["logging_health"]
+		self.assertTrue(h["app_warn"])
+		self.assertEqual(h["app_failures_24h"], 1)
+
+	def test_tool_path_rows_do_not_count_as_app_actions(self):
+		self._app_health()
+		activity_actions._note("seen")
+		ev(now_datetime(), event="read", method="get_list")  # a tool name has no dot
+		self.assertTrue(ar.summary(RANGE)["logging_health"]["app_warn"])
+
+	def test_an_old_app_row_does_not_count(self):
+		self._app_health()
+		activity_actions._note("seen")
+		ev(add_to_date(now_datetime(), hours=-30), event="action", method="jarvis.x.y")
+		self.assertTrue(ar.summary(RANGE)["logging_health"]["app_warn"])
+
+	def test_an_unreadable_counter_store_never_fails_the_summary_or_warns(self):
+		self._app_health()
+		with mock.patch.object(activity_actions, "_cache", side_effect=ConnectionError("down")):
+			h = ar.summary(RANGE)["logging_health"]
+		self.assertEqual((h["app_warn"], h["app_seen_24h"], h["app_failures_24h"]), (False, 0, 0))
 
 	def test_agent_events_are_every_kind_but_action(self):
 		self.assertEqual(set(ar._AGENT_EVENTS), set(EVENTS) - {"action"})
@@ -752,6 +848,7 @@ class TestGateAndAllowlists(ReportTestCase):
 			set(res),
 			{
 				"people",
+				"people_truncated",
 				"first_event_at",
 				"logging_health",
 				"thresholds",
@@ -767,7 +864,18 @@ class TestGateAndAllowlists(ReportTestCase):
 		self.assertEqual(set(res["first_event_at"]), {"agent", "app"})
 		self.assertEqual(
 			set(res["logging_health"]),
-			{"warn", "tool_calls_24h", "events_24h", "rollup_lag_days", "scheduler_disabled"},
+			{
+				"warn",
+				"tool_calls_24h",
+				"events_24h",
+				"rollup_lag_days",
+				"scheduler_disabled",
+				"app_warn",
+				"app_seen_24h",
+				"app_actions_24h",
+				"app_failures_24h",
+				"app_dropped_24h",
+			},
 		)
 		blob = repr(res) + repr(ar.events(RANGE))
 		for forbidden in (

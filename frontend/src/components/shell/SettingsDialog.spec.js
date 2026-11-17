@@ -87,16 +87,25 @@ vi.mock("@/lib/subscriptionNotice", async () => {
 	};
 });
 
+import { routerKey } from "vue-router";
 import SettingsDialog from "./SettingsDialog.vue";
 import { subscriptionNotice } from "@/lib/subscriptionNotice";
 
-async function mountDialog({ isSM = false, isAdmin = false, section = "general" } = {}) {
+async function mountDialog({
+	isSM = false,
+	isAdmin = false,
+	section = "general",
+	router = null,
+} = {}) {
 	window.is_system_manager = isSM;
 	window.is_jarvis_admin = isAdmin;
 	shell.settingsOpen = true;
 	shell.settingsSection = section;
 	shell.settingsApplying = false;
-	const w = mount(SettingsDialog);
+	const w = mount(
+		SettingsDialog,
+		router ? { global: { provide: { [routerKey]: router } } } : {}
+	);
 	mounted.push(w);
 	await flushPromises();
 	return w;
@@ -180,6 +189,67 @@ describe("SettingsDialog Administration group", () => {
 		expect(railLabels(w)).not.toContain("Macros");
 		expect(railLabels(w)).not.toContain("User usage");
 		expect(w.find(".pane-marker").text()).toBe("GeneralPane");
+	});
+});
+
+describe("SettingsDialog User activity entry", () => {
+	const railLabels = (w) => w.findAll("button").map((b) => b.text());
+
+	it("shows a Jarvis Admin the entry in the Administration group", async () => {
+		const w = await mountDialog({ isAdmin: true });
+		expect(railLabels(w)).toContain("User activity");
+	});
+
+	it("hides it from an ordinary member and from a System Manager who is not a Jarvis Admin", async () => {
+		for (const opts of [
+			{ isSM: false, isAdmin: false },
+			{ isSM: true, isAdmin: false },
+		]) {
+			const w = await mountDialog(opts);
+			expect(railLabels(w)).not.toContain("User activity");
+		}
+	});
+
+	it("gives it its own icon and an arrow showing it opens a page (E3)", async () => {
+		const w = await mountDialog({ isAdmin: true });
+		const entry = w.findAll("button").find((b) => b.text() === "User activity");
+		const icons = entry.findAllComponents({ name: "FeatherIcon" }).map((c) => c.props("name"));
+		// not the Workspace "Activity" pane's icon, and not the User usage entry's
+		expect(icons[0]).not.toBe("activity");
+		expect(icons[0]).not.toBe("users");
+		expect(icons).toContain("arrow-up-right");
+		expect(entry.attributes("aria-label")).toBe("User activity (opens a page)");
+		// a pane entry has no arrow and keeps its own name
+		const pane = w.findAll("button").find((b) => b.text() === "User usage");
+		expect(
+			pane.findAllComponents({ name: "FeatherIcon" }).map((c) => c.props("name"))
+		).not.toContain("arrow-up-right");
+		expect(pane.attributes("aria-label")).toBeUndefined();
+	});
+
+	it("closes the dialog and opens the page instead of switching pane", async () => {
+		const router = { push: vi.fn() };
+		const w = await mountDialog({ isAdmin: true, router });
+		await w
+			.findAll("button")
+			.find((b) => b.text() === "User activity")
+			.trigger("click");
+		expect(router.push).toHaveBeenCalledWith({ name: "UserActivity" });
+		expect(shell.settingsOpen).toBe(false);
+		expect(w.find(".pane-marker").text()).toBe("GeneralPane");
+	});
+
+	it("does nothing while a settings apply is in flight", async () => {
+		const router = { push: vi.fn() };
+		const w = await mountDialog({ isAdmin: true, router });
+		shell.settingsApplying = true;
+		await flushPromises();
+		await w
+			.findAll("button")
+			.find((b) => b.text() === "User activity")
+			.trigger("click");
+		expect(router.push).not.toHaveBeenCalled();
+		expect(shell.settingsOpen).toBe(true);
 	});
 });
 

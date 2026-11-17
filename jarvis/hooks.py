@@ -635,12 +635,23 @@ doc_events = {
 doc_events["Error Log"] = {"before_insert": "jarvis.api_errors.tag_error_log_origin"}
 after_request = ["jarvis.api_errors.capture_failed_request"]
 
+<<<<<<< HEAD
 # Generic RPCs must use the same source gate as dedicated LCV tools. The
 # handler is a no-op outside the scoped tool call, including ordinary Desk.
 doc_events["Landed Cost Voucher"] = {
 	"before_validate": "jarvis.tools._lcv_tool_writes.guard_tool_document",
 	"before_submit": "jarvis.tools._lcv_tool_writes.guard_tool_document",
 }
+=======
+# User-activity report, direct SPA/PWA actions (jarvis.activity_actions). The pair is one
+# feature: before_request snapshots the method name and the ORIGINAL form_dict (because
+# frappe.set_user, which jarvis._session.impersonate calls on entry and exit, REPLACES
+# local.form_dict, so after_request alone would lose `cmd` and the id parameter);
+# record_request then writes the event. Appended AFTER capture_failed_request, which rolls
+# back and commits its own row; both never raise.
+before_request = ["jarvis.activity_actions.capture_request"]
+after_request.append("jarvis.activity_actions.record_request")
+>>>>>>> 01dbc13 (feat(activity): log Jarvis app actions and add the admin User activity page)
 
 # Org-scope wiki pages are mirrored as markdown into the tenant container
 # workspace; every page write/delete enqueues a debounced mirror sync (the
@@ -1159,6 +1170,12 @@ has_permission.update(
 # ``activity_rollup.rollup_days`` from interleaving (``_redis_lock.claim``). Unlike
 # ``redis_lock`` it takes a SITE-prefixed key (``cache.make_key``), so a full clear would
 # drop it mid-run and let a second run start on the same day. 10-minute TTL.
+#
+# jarvis:activity_flood: and jarvis:activity_seen: (2026-11-17, user-activity report): the
+# direct-action hook's flood control (``activity_actions._flood_allows``: identical-call dedupe,
+# per-person per-minute cap) and the hourly counters behind ``logging_health.app_warn``. Without
+# them the watchdog's 5-minute full clear resets the dedupe window mid-flood and wipes the 24 h
+# health counters, so the warning could never fire. All keys carry their own TTL (<= 26 h).
 persistent_cache_keys = [
 	"jarvis:pairing_proof:",  # One-time site-proof nonces: 600 s TTL must survive watchdog clears.
 	"jarvis:key_resync:",  # The 10-minute stale-key self-heal throttle must survive the 5-minute clear.
@@ -1176,6 +1193,8 @@ persistent_cache_keys = [
 	"jarvis:foreign_session:",  # Once-a-day throttles must survive the 5-minute watchdog cache clear.
 	"jarvis:admin_oauth_grant_refused",  # The password-grant refusal must hold for its hour.
 	"jarvis:activity_rollup",  # The rollup's run claim (600 s TTL) must survive any full cache clear.
+	"jarvis:activity_flood:",  # App-action dedupe (5 min) and per-person cap (1 min) must survive the clear.
+	"jarvis:activity_seen:",  # The 24 h app-action health counters (activity_actions) must survive it too.
 ]
 
 # Durable background export state is owner-scoped, including direct REST reads.

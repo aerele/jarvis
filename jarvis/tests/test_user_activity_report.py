@@ -310,10 +310,54 @@ class TestReportFolders(FrappeTestCase):
 		self.assertEqual(spec["module"], "Jarvis")
 		self.assertEqual({r["role"] for r in spec["roles"]}, {"System Manager", "Jarvis Admin"})
 
+	def test_a_prepared_report_cannot_bypass_the_export_limit(self):
+		# D9: a prepared report runs ``execute`` once in a background job and serves the saved
+		# rows to every export, so the 50,000-row ceiling (and the per-request admin gate) would
+		# be skipped. The report is never prepared.
+		spec = _json()
+		self.assertEqual(spec["disable_prepared_report"], 1)
+		self.assertEqual(spec["prepared_report"], 0)
+
+	def test_the_report_has_no_private_scope_line_alias(self):
+		# D7: one name for the scope line, ``activity_report.scope_line``.
+		from jarvis import activity_report
+		from jarvis.jarvis.report.jarvis_user_activity import jarvis_user_activity as report
+
+		self.assertFalse(hasattr(report, "_scope_line"))
+		self.assertTrue(callable(activity_report.scope_line))
+
+	def test_the_auto_email_report_method_the_export_signal_relies_on_still_exists(self):
+		# D7: ``_from_auto_email_report`` looks for this method name in this file in the call
+		# stack. A Frappe upgrade that renames or moves it would silently turn a scheduled mail
+		# into a 500-row screen export; this fails the build instead.
+		import inspect
+
+		from frappe.email.doctype.auto_email_report.auto_email_report import AutoEmailReport
+
+		from jarvis.jarvis.report.jarvis_user_activity import jarvis_user_activity as report
+
+		method = getattr(AutoEmailReport, report._AUTO_EMAIL_METHOD, None)
+		self.assertTrue(callable(method), "AutoEmailReport.get_report_content is gone")
+		code = inspect.unwrap(method).__code__
+		self.assertEqual(code.co_name, report._AUTO_EMAIL_METHOD)
+		self.assertTrue(code.co_filename.replace("\\", "/").endswith(report._AUTO_EMAIL_FILE))
+
 	def test_no_em_dash_in_report_files(self):
 		for fn in ("jarvis_user_activity.json", "jarvis_user_activity.py", "jarvis_user_activity.js"):
 			with open(os.path.join(_report_dir("jarvis_user_activity"), fn)) as f:
 				self.assertNotIn("—", f.read(), fn)
+
+	def test_every_translation_call_in_the_filter_script_is_a_literal(self):
+		# Translation extraction reads string literals: __(variable) is invisible to it.
+		import re
+
+		with open(os.path.join(_report_dir("jarvis_user_activity"), "jarvis_user_activity.js")) as f:
+			src = f.read()
+		calls = re.findall(r"__\(([^)]*)\)", re.sub(r"//[^\n]*", "", src))
+		self.assertGreater(len(calls), 30)
+		for arg in calls:
+			self.assertRegex(arg, r'^"[^"]+"$')
+		self.assertIn("Open in Jarvis", src)
 
 
 class TestReportExecute(FrappeTestCase):
@@ -404,6 +448,7 @@ class TestReportExecute(FrappeTestCase):
 		self.assertIn(f"{SCOPE} No agent activity recorded yet. App actions are not recorded yet.", message)
 
 	def test_each_scope_line_case_is_one_translatable_sentence_template(self):
+		from jarvis import activity_report
 		from jarvis.jarvis.report.jarvis_user_activity import jarvis_user_activity as report
 
 		seen = []
@@ -420,8 +465,8 @@ class TestReportExecute(FrappeTestCase):
 		)
 		for first, args in cases:
 			seen.clear()
-			with mock.patch.object(report, "_", marked):
-				line = report._scope_line(first)
+			with mock.patch.object(activity_report, "_", marked):
+				line = activity_report.scope_line(first)
 			self.assertEqual(len(seen), 1, first)  # one template, not fragments to join
 			self.assertTrue(seen[0].startswith("Covers actions taken in Jarvis only (not Desk). "))
 			self.assertEqual(sum(f"{{{i}}}" in seen[0] for i in range(2)), args, first)
@@ -474,6 +519,58 @@ class TestReportExecute(FrappeTestCase):
 		finally:
 			del frappe.local.job
 		self.assertFalse(report._is_export())
+
+	def test_an_auto_email_report_gets_the_export_limit_and_the_truncation_message(self):
+		# Frappe hands a script report nothing but the filters (no cmd, no job), so the
+		# mail used to get the 500-row screen cut with no hint. Drive the real method.
+		frappe.set_user("Administrator")
+		# The report row may have been wiped by a patch test earlier in the run.
+		frappe.reload_doc("jarvis", "report", "jarvis_user_activity", force=True)
+		doc = frappe.new_doc("Auto Email Report")
+		doc.update(
+			{
+				"report": "Jarvis User Activity",
+				"report_type": "Script Report",
+				"user": "Administrator",
+				"format": "HTML",
+				"filters": json.dumps({"view": "Events"}),
+				"no_of_rows": 10,
+			}
+		)
+		page = {"rows": [], "next_cursor": "x", "truncated": True}
+		seen = {}
+
+		def run(*a, **kw):
+			seen["limit"] = kw["limit"]
+			return page
+
+		with mock.patch("jarvis.activity_report.events", side_effect=run):
+			doc.get_report_content()
+		self.assertEqual(seen["limit"], 50_000)
+
+		from jarvis.jarvis.report.jarvis_user_activity import jarvis_user_activity as report
+
+		self.assertFalse(report._from_auto_email_report())  # not on that call path
+		with mock.patch("jarvis.activity_report.events", side_effect=run):
+			_c, _d, message = self._execute({})
+		self.assertEqual(seen["limit"], 500)
+		self.assertIn("Showing the newest 500 events", message)
+
+	def test_the_auto_email_signal_is_that_method_in_that_file_only(self):
+		from jarvis.jarvis.report.jarvis_user_activity import jarvis_user_activity as report
+
+		def under(filename, name):
+			ns = {}
+			exec(
+				compile(f"def {name}(cb):\n\treturn cb()\n", filename, "exec"),
+				ns,
+			)
+			return ns[name](report._from_auto_email_report)
+
+		here = "/x/frappe/email/doctype/auto_email_report/auto_email_report.py"
+		self.assertTrue(under(here, "get_report_content"))
+		self.assertFalse(under(here, "send"))
+		self.assertFalse(under("/x/other/report.py", "get_report_content"))
 
 	def test_the_screen_limit_and_the_export_limit_on_real_rows(self):
 		import datetime as dt

@@ -15,6 +15,7 @@ day rolls back to its own savepoint. The clock the rollup and the summary share
 
 import datetime as dt
 import itertools
+import unittest
 from unittest import mock
 
 import frappe
@@ -31,7 +32,7 @@ ROLLUP = "Jarvis Activity Rollup"
 A, B = base.A, base.B
 GHOST = "act-ghost@example.com"  # a user with no User record: named from the snapshot
 GHOST2 = "act-ghost2@example.com"
-TODAY = dt.date.today()
+TODAY = None  # set per test by RollupCase.setUp (ar.today()), never at import
 
 
 def d(n):
@@ -1516,6 +1517,15 @@ class TestFailureVisibility(RollupCase):
 			self.assertEqual(ru.rollup_days(), [])
 		self.log_error.assert_called_once()  # it tried; the failure stayed inside
 
+	def test_a_failed_error_log_insert_does_not_spend_the_days_entry(self):
+		self.short_horizon(3)
+		self.log_error.side_effect = [RuntimeError("Error Log insert failed"), None]
+		with self.failing():
+			ru.rollup_days()  # the insert fails: nothing written, the claim is given back
+			ru.rollup_days()  # the next hourly run may still write the day's entry
+			ru.rollup_days()  # and now it is spent
+		self.assertEqual(self.log_error.call_count, 2)
+
 	def test_the_error_log_is_written_after_the_rollback(self):
 		# An Error Log insert before the rollback would be undone with the failed day.
 		self.short_horizon(3)
@@ -1551,3 +1561,25 @@ class TestPartialRollStart(RollupCase):
 		ru.rollup_days()
 		self.assertIn(TODAY, calls)  # H = 01:00: [00:00, 01:00) is rolled
 		self.assertEqual({r.through for r in daily_rows(day=TODAY)}, {tm(TODAY, 1)})
+
+
+class TestClockIsNotReadAtImport(unittest.TestCase):
+	"""D10: a runner that stays up across midnight imports this module once; a day computed
+	at import would then be wrong for every later run."""
+
+	def test_no_module_level_assignment_calls_the_clock(self):
+		import ast
+		import inspect
+
+		tree = ast.parse(inspect.getsource(inspect.getmodule(self)))
+		clock_calls = []
+		for node in tree.body:
+			if isinstance(node, ast.Assign | ast.AnnAssign) and node.value is not None:
+				for sub in ast.walk(node.value):
+					if (
+						isinstance(sub, ast.Call)
+						and isinstance(sub.func, ast.Attribute)
+						and sub.func.attr in ("today", "now", "utcnow")
+					):
+						clock_calls.append(ast.unparse(node))
+		self.assertEqual(clock_calls, [])
