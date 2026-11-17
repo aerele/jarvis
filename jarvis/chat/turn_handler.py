@@ -2908,6 +2908,11 @@ _TYPED_CHANGE = "re-emit the block"
 # row, as in the Payment Calendar hint's scope).
 _DRAFT_TURN_ORIGINS = frozenset({"", "human", "continuation", "board_answer"})
 
+# Builder panes whose chat shows a draft card only as a title and a link to the full chat (no
+# Preview, no Edit): the Dashboard Builder saves with one tap, so its chat keeps today's text.
+# Same ``origin_page`` field the Payment Calendar hint's scope reads.
+_NO_DRAFT_PAGES = frozenset({"dashboards"})
+
 # The drafting note, the only text that tells the agent to draft with the tool. ONE constant: the
 # persona and the tests quote it. It is the whole clause, leading "; " included, like the
 # neighbours in the bracket, and a single line without backticks.
@@ -2940,7 +2945,8 @@ def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
 
 	The gate (``api._run_tool``) parks a draft card for a single create / update unless the
 	chat runs it uncarded or holds it (see ``_runs_without_cards``), so those turns get
-	nothing, as does a turn another server path started (``_DRAFT_TURN_ORIGINS``). What the
+	nothing, as does a turn another server path started (``_DRAFT_TURN_ORIGINS``) and the
+	Dashboard Builder pane (``_NO_DRAFT_PAGES``). What the
 	gate decides per call cannot be known here and is left to it: a sensitive or structural
 	write, a batch or a ``Jarvis Dashboard`` write keeps its one-tap card (the clause says
 	"one new or changed record"), and a second call in a turn is refused. A continuation turn
@@ -2955,6 +2961,8 @@ def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
 	if not draft_card.enabled():
 		return ""
 	if _runs_without_cards(conv, binding) or (origin or "") not in _DRAFT_TURN_ORIGINS:
+		return ""
+	if conv.get("origin_page") in _NO_DRAFT_PAGES:
 		return ""
 	if _TYPED_CHANGE in live_draft_clause:
 		return ""
