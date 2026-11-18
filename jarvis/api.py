@@ -4990,6 +4990,29 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# preview_doc). Every other gated write (submit/cancel/delete/amend since
 		# R2-2, send_email/run_method/create_custom_skill/update_wiki) parks a
 		# described-intent card via _pending_preview: nothing runs until Confirm.
+		#
+		# Resolved HERE, before the trial run, because a write that offers "Approve & run" is
+		# not a draft card (``draft_card.wanted`` below and in the refusal path).
+		# "Approve & run" offer (skill "Approve & run the plan", design §3.3): if the
+		# turn was triggered by a message invoking exactly one live-armed custom skill
+		# - resolved forgery-proof under the MESSAGE OWNER via the turn->message
+		# binding - stamp that skill's docname on the token so a later approve_and_run
+		# can authorize off it, and flag the card so the frontend can show the
+		# affordance (P0 = just the flag; the plan outline is a later task). Best-effort
+		# + fail-safe: no offer on any doubt, and it NEVER sets the run flag or
+		# auto-runs (that is a later task) - it only decorates this park.
+		#
+		# Offer ONLY on a _SKILL_AUTORUN_COVERED first write (I4): a destructive /
+		# create_custom_skill park is a _SKILL_AUTORUN_NEVER tool that approve_and_run
+		# refuses to run as step 1, so stamping it would dangle an unusable offer and
+		# invite an approve-a-NEVER-tool click. A NEVER first write parks as an ordinary
+		# card with no run offer.
+		# Never on a structure card: confirming it must not also open an approved run.
+		skill_docname, skill_slug = (
+			_resolve_approve_run_offer(conv)
+			if tool in _SKILL_AUTORUN_COVERED and not _guarded and not shared_permit
+			else (None, None)
+		)
 		_structure_lines = None
 		if tool == "run_import":
 			# run_import cannot be sandbox-run (staging + a background job), so it has its
@@ -5023,7 +5046,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				refused = _preview_error(e)
 				from jarvis.chat import draft_card
 
-				if draft_card.wanted(tool, args, must_card=_must_card):
+				if draft_card.wanted(tool, args, must_card=_must_card, offers_run=bool(skill_docname)):
 					# A draft the trial refused for a missing value names the fields.
 					fields = draft_card.refusal(e, tool, args)
 					if fields and isinstance(refused.get("error"), dict):
@@ -5044,26 +5067,6 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# it for ALL of _run_tool and break the read path's perf_counter.
 		from jarvis.chat import confirm_card
 
-		# "Approve & run" offer (skill "Approve & run the plan", design §3.3): if the
-		# turn was triggered by a message invoking exactly one live-armed custom skill
-		# - resolved forgery-proof under the MESSAGE OWNER via the turn->message
-		# binding - stamp that skill's docname on the token so a later approve_and_run
-		# can authorize off it, and flag the card so the frontend can show the
-		# affordance (P0 = just the flag; the plan outline is a later task). Best-effort
-		# + fail-safe: no offer on any doubt, and it NEVER sets the run flag or
-		# auto-runs (that is a later task) - it only decorates this park.
-		#
-		# Offer ONLY on a _SKILL_AUTORUN_COVERED first write (I4): a destructive /
-		# create_custom_skill park is a _SKILL_AUTORUN_NEVER tool that approve_and_run
-		# refuses to run as step 1, so stamping it would dangle an unusable offer and
-		# invite an approve-a-NEVER-tool click. A NEVER first write parks as an ordinary
-		# card with no run offer.
-		# Never on a structure card: confirming it must not also open an approved run.
-		skill_docname, skill_slug = (
-			_resolve_approve_run_offer(conv)
-			if tool in _SKILL_AUTORUN_COVERED and not _guarded and not shared_permit
-			else (None, None)
-		)
 		draft_for_model = None
 		if isinstance(preview, dict):
 			# A draft-panel write turned into this card (actions_api._park_sensitive):
@@ -5074,7 +5077,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 			# Dark behind the site flag: a single create / update parks as a draft card.
 			from jarvis.chat import draft_card
 
-			as_draft = draft_card.wanted(tool, args, must_card=_must_card)
+			as_draft = draft_card.wanted(tool, args, must_card=_must_card, offers_run=bool(skill_docname))
 			card, refusal = _build_park_card(
 				tool,
 				args,
