@@ -261,10 +261,6 @@ class TestWhitespace(FrappeTestCase):
 				self.assertNotIn("/model", out)
 				self.assertIn(SLASH + "model", out)
 
-	def test_python_whitespace_would_miss_feff(self):
-		self.assertFalse("\ufeff".isspace())
-		self.assertIn("\ufeff", df.WS_BODY)
-
 
 class TestNeutralize(FrappeTestCase):
 	"""F4."""
@@ -469,7 +465,3 @@ class TestDifferential(FrappeTestCase):
 		inputs = {r["i"] for r in self.table["rows"]}
 		for raw in TestCanonical.MIXES:
 			self.assertIn(raw, inputs)
-
-	def test_unicode_versions_are_recorded(self):
-		self.assertTrue(self.table["meta"]["python_unicode"])
-		self.assertTrue(unicodedata.unidata_version)

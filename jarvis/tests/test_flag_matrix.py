@@ -237,19 +237,6 @@ class TestBothOff(_FlagMatrixCase):
 
 
 class TestAdmissionOnly(_FlagMatrixCase):
-	def test_admission_only_is_phase0(self):
-		conv = self._mk_conv()
-		rid = "fm_b"
-		with self._flags(pump_active=False, draining=False, admission_on=True, configured=False):
-			self.assertTrue(admission.turn_machine_enabled())
-			r = self._send(conv, rid)
-		self.assertEqual(r["route"], "machine")
-		self.assertTrue(r["res"]["dispatched"], "first turn admits with a free credit (Phase 0)")
-		self.assertFalse(r["res"].get("pump"), "NOT the pump branch")
-		self.assertEqual(self._state(rid), "dispatching", "Phase-0 admit CAS queued->dispatching")
-		self.assertEqual(r["legacy"].count, 1, "Phase-0 dispatches via the LEGACY worker after commit")
-		self.assertEqual(int(self._val(rid, "reserved")), 1, "the dispatching row IS the reservation")
-
 	def test_explicit_zero_kill_switch_inert_over_phase0_rows(self):
 		"""OARF-1 regression guard, re-based on the default-ON inversion (cells b/c):
 		an EXPLICIT ``jarvis_pump_enabled=0`` is the kill switch. Driven through the
@@ -273,6 +260,7 @@ class TestAdmissionOnly(_FlagMatrixCase):
 			self.assertTrue(admission.turn_machine_enabled(), "admission on + pump off ⇒ Phase-0")
 			r = self._send(conv, rid)
 			self.assertEqual(r["route"], "machine")
+			self.assertTrue(r["res"]["dispatched"], "first turn admits with a free credit (Phase 0)")
 			self.assertFalse(r["res"].get("pump"), "explicit-0: NOT the pump branch")
 			self.assertEqual(self._state(rid), "dispatching", "Phase-0 admit CAS queued->dispatching")
 			self.assertEqual(r["legacy"].count, 1, "Phase-0 dispatches via the LEGACY worker")

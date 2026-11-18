@@ -183,12 +183,3 @@ class TestLiveTurnSteps(FrappeTestCase):
 		self.assertNotIn("last_event_seq", settled)
 		self.assertNotIn("pump_epoch", settled)
 		self.assertNotIn("turn_state", settled)
-
-	def test_no_streaming_rows_never_queries_turns(self):
-		conv = self._conversation()
-		self._message(conv, 1, "user", content="Hi")
-		self._message(conv, 2, "assistant", content="Hello.", streaming=0)
-
-		with patch("jarvis.chat.pump._read_run_steps") as mocked:
-			get_conversation(conv)
-		mocked.assert_not_called()

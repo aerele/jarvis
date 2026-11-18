@@ -1,0 +1,716 @@
+"""Unit tests for ``jarvis.connectors.catalog``, the connector provider data
+module. Plain ``unittest``; the module is frappe-free, so this runs with no
+bench: ``python3 -m unittest jarvis.tests.test_connector_catalog``.
+"""
+
+from __future__ import annotations
+
+import json
+import unittest
+from dataclasses import replace
+from pathlib import Path
+
+from jarvis.connectors import catalog
+
+# The Jarvis Connector DocType's own JSON. Read as a file rather than through
+# frappe.get_meta so this stays bench-free.
+_CONNECTOR_JSON = (
+	Path(catalog.__file__).resolve().parents[1]
+	/ "jarvis"
+	/ "doctype"
+	/ "jarvis_connector"
+	/ "jarvis_connector.json"
+)
+
+# The four presets already shipping in ``jarvis.chat.connectors_api`` before
+# this catalog existed. These literals are copied from
+# ``_PRESET_BASE_URLS``/``_PRESET_KEYS`` there and from
+# ``frontend/src/components/settings/connectorHelp.js``'s ``CONNECTOR_HELP``,
+# not imported (``connectors_api`` pulls in frappe, which this test suite must
+# not need).
+_LEGACY_BASE_URLS = {
+	"GitHub": "https://api.githubcopilot.com/mcp/",
+	"Atlassian": "https://mcp.atlassian.com/v2/mcp",
+	"Linear": "https://mcp.linear.app/mcp",
+	"Stripe": "https://mcp.stripe.com/",
+}
+_LEGACY_KEYS = {
+	"GitHub": "github",
+	"Atlassian": "atlassian",
+	"Linear": "linear",
+	"Stripe": "stripe",
+}
+# GitHub is deliberately absent: it moved onto the sign-in engine as a
+# bring-your-own-app static provider, so its help_url now points at GitHub's
+# app-creation page, not the old personal-access-token page. Its new copy is
+# asserted in TestCatalogEndpointFields instead. The other three are unchanged.
+_LEGACY_HELP_URLS = {
+	"Atlassian": "https://id.atlassian.com/manage-profile/security/api-tokens",
+	"Linear": "https://linear.app/settings/account/security",
+	"Stripe": "https://dashboard.stripe.com/apikeys",
+}
+_STRIPE_HINT = (
+	"Needs a restricted API key with only the permissions this connector should use, not a full secret key."
+)
+# The token guidance the SPA shipped before this catalog existed, copied from the
+# same CONNECTOR_HELP map. A sign-in preset still shows it: the "Use a token
+# instead" fallback is exactly the case where a user needs to be told WHICH
+# token, so losing these strings would leave that path unexplained.
+_LEGACY_HINTS = {
+	"Atlassian": (
+		"Needs an Atlassian API token for your account. Your organization admin may "
+		"need to enable API tokens for Jira and Confluence first."
+	),
+	"Linear": "Needs a personal API key from your Linear workspace's Security & access settings.",
+	"Stripe": _STRIPE_HINT,
+}
+
+
+class TestCatalogShape(unittest.TestCase):
+	def test_auth_class_counts_match_probe_sweep(self):
+		counts = {}
+		for provider in catalog.PROVIDERS:
+			counts[provider.auth] = counts.get(provider.auth, 0) + 1
+		self.assertEqual(
+			counts,
+			{
+				catalog.AUTH_DCR: 24,
+				catalog.AUTH_STATIC: 15,
+				catalog.AUTH_TOKEN: 6,
+				catalog.AUTH_OPEN: 3,
+			},
+		)
+
+	def test_unlisted_vendors_stay_out(self):
+		# Twilio's only hosted server indexes public docs (no account data);
+		# QuickBooks' endpoint answered an Akamai 403 from every egress tried, so
+		# its auth class is unknown and guessing one into the allowlist is wrong;
+		# LinkedIn has no first-party server (Zapier covers it, Taplio is a
+		# third-party host). See CONNECTOR_PROVIDERS.md.
+		names = {p.name for p in catalog.PROVIDERS}
+		for excluded in ("Twilio", "QuickBooks", "LinkedIn", "Taplio"):
+			self.assertNotIn(excluded, names)
+
+	def test_custom_url_constant_is_not_a_provider(self):
+		names = {p.name for p in catalog.PROVIDERS}
+		self.assertNotIn(catalog.CUSTOM_URL, names)
+		self.assertEqual(catalog.CUSTOM_URL, "Custom URL")
+
+
+class TestLegacyPresetsUnchanged(unittest.TestCase):
+	def test_base_urls_and_keys_exact(self):
+		for name, base_url in _LEGACY_BASE_URLS.items():
+			provider = catalog.by_name(name)
+			self.assertIsNotNone(provider, name)
+			self.assertEqual(provider.base_url, base_url, name)
+			self.assertEqual(provider.key, _LEGACY_KEYS[name], name)
+
+	def test_help_urls_carried_over(self):
+		for name, help_url in _LEGACY_HELP_URLS.items():
+			self.assertEqual(catalog.by_name(name).help_url, help_url, name)
+
+	def test_atlassian_and_linear_are_dcr(self):
+		self.assertEqual(catalog.by_name("Atlassian").auth, catalog.AUTH_DCR)
+		self.assertEqual(catalog.by_name("Linear").auth, catalog.AUTH_DCR)
+
+	def test_legacy_token_hints_are_carried_over_verbatim(self):
+		for name, hint in _LEGACY_HINTS.items():
+			self.assertEqual(catalog.by_name(name).hint, hint, name)
+
+
+class TestAccessors(unittest.TestCase):
+	def test_by_name_unknown_returns_none(self):
+		self.assertIsNone(catalog.by_name("Nonexistent Provider"))
+
+	def test_preset_names_excludes_disabled(self):
+		names = catalog.preset_names()
+		self.assertIn("Razorpay", names)
+		self.assertNotIn("Plaid", names)  # shipped disabled, see catalog.py
+
+	def test_preset_names_is_catalog_order_and_matches_enabled_count(self):
+		enabled = [p.name for p in catalog.PROVIDERS if p.enabled]
+		self.assertEqual(list(catalog.preset_names()), enabled)
+
+	def test_base_urls_and_keys_include_disabled_entries(self):
+		# Unfiltered: an existing saved connector row must still resolve its
+		# endpoint even for a preset no longer offered to new connectors.
+		self.assertIn("Plaid", catalog.base_urls())
+		self.assertIn("Plaid", catalog.keys())
+
+	def test_all_names_is_catalog_order_including_disabled(self):
+		self.assertEqual(list(catalog.all_names()), [p.name for p in catalog.PROVIDERS])
+		self.assertIn("Plaid", catalog.all_names())
+
+	def test_auth_of_known_and_unknown(self):
+		self.assertEqual(catalog.auth_of("Stripe"), catalog.AUTH_TOKEN)
+		self.assertIsNone(catalog.auth_of("Nonexistent Provider"))
+
+
+class TestToPublic(unittest.TestCase):
+	def test_only_allowed_fields_exposed(self):
+		allowed = {
+			"name",
+			"key",
+			"auth",
+			"category",
+			"logo",
+			"help_url",
+			"hint",
+			"description",
+			"token_hint",
+			"token_help_url",
+			"guide_url",
+			"accepts_key",
+		}
+		for row in catalog.to_public():
+			self.assertEqual(set(row), allowed)
+			self.assertNotIn("base_url", row)
+			self.assertNotIn("enabled", row)
+
+	def test_excludes_disabled_entries(self):
+		public_names = {row["name"] for row in catalog.to_public()}
+		self.assertNotIn("Plaid", public_names)
+		self.assertIn("Razorpay", public_names)
+
+	def test_count_matches_enabled_providers(self):
+		enabled_count = sum(1 for p in catalog.PROVIDERS if p.enabled)
+		self.assertEqual(len(catalog.to_public()), enabled_count)
+
+	def test_every_public_entry_ships_a_non_empty_description(self):
+		# The SPA renders one line under each name; a blank one would look broken.
+		for row in catalog.to_public():
+			self.assertTrue((row["description"] or "").strip(), row["name"])
+
+
+class TestDocTypeSelectOptionsDrift(unittest.TestCase):
+	"""The ``preset`` Select on Jarvis Connector is a COPY of the catalog, and
+	Frappe validates a Select value against those options server-side. A catalog
+	entry added without regenerating the JSON would therefore be offered by the
+	SPA and then rejected on save, so the drift has to fail here instead."""
+
+	def _preset_field(self) -> dict:
+		fields = json.loads(_CONNECTOR_JSON.read_text())["fields"]
+		for field in fields:
+			if field.get("fieldname") == "preset":
+				return field
+		raise AssertionError("Jarvis Connector has no 'preset' field")
+
+	def test_options_match_the_catalog_exactly(self):
+		expected = "\n".join([*catalog.all_names(), "Custom URL"])
+		self.assertEqual(
+			self._preset_field()["options"],
+			expected,
+			"regenerate jarvis_connector.json's preset options from the catalog",
+		)
+
+	def test_disabled_entries_stay_in_the_options(self):
+		# Frappe validates this Select on EVERY save, so a name dropped from the
+		# options freezes every row already on it - no relabel, no disable, not
+		# even a credential change. Disabling belongs in the picker
+		# (``to_public``) and the create allowlist (``preset_names``), not here.
+		options = self._preset_field()["options"].split("\n")
+		disabled = [p.name for p in catalog.PROVIDERS if not p.enabled]
+		self.assertTrue(disabled, "this test needs at least one disabled entry to mean anything")
+		for name in disabled:
+			self.assertIn(name, options, name)
+			self.assertNotIn(name, catalog.preset_names(), name)
+			self.assertNotIn(name, {row["name"] for row in catalog.to_public()}, name)
+
+
+class TestValidate(unittest.TestCase):
+	def test_shipped_catalog_passes(self):
+		catalog.validate(catalog.PROVIDERS)  # must not raise
+
+	def test_duplicate_key_raises(self):
+		dup = replace(catalog.PROVIDERS[0], name="A Different Name")
+		with self.assertRaises(ValueError):
+			catalog.validate((*catalog.PROVIDERS, dup))
+
+	def test_duplicate_name_raises(self):
+		dup = replace(catalog.PROVIDERS[0], key="a-different-key")
+		with self.assertRaises(ValueError):
+			catalog.validate((*catalog.PROVIDERS, dup))
+
+	def test_non_https_base_url_raises(self):
+		bad = replace(catalog.PROVIDERS[0], name="Bad", key="bad", base_url="http://example.com/mcp")
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+	def test_bad_auth_raises(self):
+		bad = replace(catalog.PROVIDERS[0], name="Bad", key="bad", auth="magic")
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+	def test_bad_category_raises(self):
+		bad = replace(catalog.PROVIDERS[0], name="Bad", key="bad", category="nope")
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+	def test_bad_key_slug_raises(self):
+		bad = replace(catalog.PROVIDERS[0], name="Bad", key="Not A Slug!")
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+	def test_blank_description_raises(self):
+		bad = replace(catalog.PROVIDERS[0], name="Bad", key="bad", description="  ")
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+
+class TestApplyOverlay(unittest.TestCase):
+	def test_disable_existing_entry(self):
+		result = catalog.apply_overlay([{"name": "Razorpay", "enabled": False}])
+		self.assertEqual(len(result), len(catalog.PROVIDERS))
+		self.assertNotIn("Razorpay", catalog.preset_names(providers=result))
+		# The base catalog itself is untouched.
+		self.assertIn("Razorpay", catalog.preset_names())
+
+	def test_add_new_entry(self):
+		overlay = [
+			{
+				"name": "Acme",
+				"key": "acme",
+				"base_url": "https://mcp.acme.example/mcp",
+				"auth": catalog.AUTH_TOKEN,
+				"category": "data",
+				"hint": "Paste an Acme API key.",
+				"description": "Widgets and orders",
+			}
+		]
+		result = catalog.apply_overlay(overlay)
+		self.assertEqual(len(result), len(catalog.PROVIDERS) + 1)
+		added = catalog.by_name("Acme", providers=result)
+		self.assertIsNotNone(added)
+		self.assertEqual(added.base_url, "https://mcp.acme.example/mcp")
+		self.assertTrue(added.enabled)
+		# Not leaked into the unmodified base catalog.
+		self.assertIsNone(catalog.by_name("Acme"))
+
+	def test_rejects_base_url_change_on_existing_entry(self):
+		overlay = [{"name": "Razorpay", "base_url": "https://evil.example/mcp"}]
+		with self.assertRaises(ValueError):
+			catalog.apply_overlay(overlay)
+
+	def test_rejects_auth_change_on_existing_entry(self):
+		overlay = [{"name": "Razorpay", "auth": catalog.AUTH_TOKEN}]
+		with self.assertRaises(ValueError):
+			catalog.apply_overlay(overlay)
+
+	def test_missing_name_raises(self):
+		with self.assertRaises(ValueError):
+			catalog.apply_overlay([{"enabled": False}])
+
+	def test_result_is_revalidated(self):
+		# A "new" entry that collides on key with an existing one must fail
+		# the same way a bad shipped catalog would.
+		overlay = [
+			{
+				"name": "Acme",
+				"key": "razorpay",
+				"base_url": "https://mcp.acme.example/mcp",
+				"auth": catalog.AUTH_TOKEN,
+				"category": "data",
+			}
+		]
+		with self.assertRaises(ValueError):
+			catalog.apply_overlay(overlay)
+
+
+class TestCatalogEndpointFields(unittest.TestCase):
+	"""The metadata-less-static seam: a static provider whose sign-in service
+	publishes no discovery document may pin its own sign-in endpoints so its
+	client can be seeded without discovery."""
+
+	def test_github_declares_its_pinned_endpoints_and_scopes(self):
+		github = catalog.by_name("GitHub")
+		self.assertEqual(github.auth, catalog.AUTH_STATIC)
+		self.assertEqual(github.issuer, "https://github.com/login/oauth")
+		self.assertEqual(github.authorization_endpoint, "https://github.com/login/oauth/authorize")
+		self.assertEqual(github.token_endpoint, "https://github.com/login/oauth/access_token")
+		self.assertEqual(github.scopes, "repo read:org")
+
+	def test_github_ships_bring_your_own_app_help_and_hint(self):
+		github = catalog.by_name("GitHub")
+		self.assertEqual(github.help_url, "https://github.com/settings/applications/new")
+		self.assertEqual(github.hint, "Register your own GitHub app, then paste its details here.")
+
+	def test_every_static_provider_guides_the_customer_to_register_its_own_app(self):
+		# Every static provider is bring-your-own-app: the customer registers their
+		# own vendor app, so each must ship a help link and a one-line hint.
+		for provider in catalog.PROVIDERS:
+			if provider.auth == catalog.AUTH_STATIC:
+				self.assertTrue(provider.help_url, provider.name)
+				self.assertTrue(provider.hint, provider.name)
+
+	# The static providers whose sign-in cannot go through discovery: GitHub's
+	# service publishes no metadata, and the others answer an unauthenticated
+	# initialize with something other than 401 (Google 200, Shopify and Docusign
+	# 403), which the discovery gate refuses. Every other static provider (Slack,
+	# Box, HubSpot, Xero, Zoom, ...) publishes metadata and keeps the discovery
+	# path, so it declares no endpoints.
+	PINNED = frozenset(
+		{
+			"GitHub",
+			"Shopify",
+			"Docusign",
+			"Gmail",
+			"Google Calendar",
+			"Google Drive",
+			"Google Sheets",
+			"Google Docs",
+		}
+	)
+
+	def test_only_gate_blocked_providers_seed_from_pinned_endpoints(self):
+		for provider in catalog.PROVIDERS:
+			if provider.name in self.PINNED:
+				self.assertEqual(provider.auth, catalog.AUTH_STATIC, provider.name)
+				self.assertTrue(provider.issuer, provider.name)
+				self.assertTrue(provider.authorization_endpoint, provider.name)
+				self.assertTrue(provider.token_endpoint, provider.name)
+			else:
+				self.assertIsNone(provider.issuer, provider.name)
+				self.assertIsNone(provider.authorization_endpoint, provider.name)
+				self.assertIsNone(provider.token_endpoint, provider.name)
+
+	def test_endpoints_rejected_on_a_dcr_provider(self):
+		# A self-registering provider gets its endpoints from discovery, never from
+		# the catalog: declaring them here is a category error the allowlist blocks.
+		bad = replace(catalog.by_name("Linear"), issuer="https://as.linear.example")
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+	def test_non_https_endpoint_rejected(self):
+		bad = replace(catalog.by_name("GitHub"), token_endpoint="http://insecure.example/token")
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+	def test_partial_endpoint_declaration_rejected(self):
+		# All three endpoints together or none: a client seeded from a
+		# half-declared provider would have a hole discovery would otherwise fill.
+		bad = replace(catalog.by_name("GitHub"), token_endpoint=None)
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+	def test_scopes_rejected_on_a_non_signin_provider(self):
+		# A token preset has no sign-in to scope, so a `scopes` on one is a mistake.
+		bad = replace(catalog.by_name("Stripe"), scopes="read")
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+	def test_scopes_allowed_on_a_dcr_provider(self):
+		# A self-registering preset passes its scope through to registration, so a
+		# scope on one is legitimate and must NOT be rejected.
+		ok = replace(catalog.by_name("Linear"), scopes="read")
+		catalog.validate((ok,))  # must not raise
+
+
+class TestTokenGuidanceFields(unittest.TestCase):
+	"""`token_hint` / `token_help_url` carry the paste-a-token guidance for the
+	"use a token instead" fallback, kept separate from `hint` / `help_url` because
+	those now guide registering your own app on a sign-in preset."""
+
+	def test_github_ships_paste_a_token_guidance_verbatim(self):
+		github = catalog.by_name("GitHub")
+		self.assertEqual(
+			github.token_hint,
+			"Needs a fine-grained token scoped to the repos you want connected, with "
+			"Contents (read) and Pull requests (read and write) permissions.",
+		)
+		self.assertEqual(github.token_help_url, "https://github.com/settings/personal-access-tokens/new")
+
+	def test_to_public_exposes_both_token_fields_for_github(self):
+		github_row = next(row for row in catalog.to_public() if row["name"] == "GitHub")
+		self.assertEqual(
+			github_row["token_hint"],
+			"Needs a fine-grained token scoped to the repos you want connected, with "
+			"Contents (read) and Pull requests (read and write) permissions.",
+		)
+		self.assertEqual(
+			github_row["token_help_url"], "https://github.com/settings/personal-access-tokens/new"
+		)
+
+	def test_token_help_url_must_be_https(self):
+		bad = replace(catalog.by_name("GitHub"), token_help_url="http://insecure.example/token")
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+	def test_token_hint_is_allowed_on_any_auth_class(self):
+		# A plain hint string carries no endpoint, so it is display copy allowed on a
+		# token / open preset the same as a static one.
+		ok = replace(catalog.by_name("Microsoft Learn"), token_hint="Paste a token.")
+		catalog.validate((ok,))  # must not raise
+
+	def test_overlay_adds_a_metadata_less_static_provider(self):
+		overlay = [
+			{
+				"name": "Acme SSO",
+				"key": "acme_sso",
+				"base_url": "https://mcp.acme.example/mcp",
+				"auth": catalog.AUTH_STATIC,
+				"category": "data",
+				"issuer": "https://auth.acme.example",
+				"authorization_endpoint": "https://auth.acme.example/authorize",
+				"token_endpoint": "https://auth.acme.example/token",
+				"scopes": "read write",
+				"description": "Widgets and orders",
+			}
+		]
+		result = catalog.apply_overlay(overlay)
+		added = catalog.by_name("Acme SSO", providers=result)
+		self.assertIsNotNone(added)
+		self.assertEqual(added.issuer, "https://auth.acme.example")
+		self.assertEqual(added.authorization_endpoint, "https://auth.acme.example/authorize")
+		self.assertEqual(added.token_endpoint, "https://auth.acme.example/token")
+		self.assertEqual(added.scopes, "read write")
+		# Not leaked into the unmodified base catalog.
+		self.assertIsNone(catalog.by_name("Acme SSO"))
+
+	def test_overlay_rejects_changing_an_endpoint_on_an_existing_entry(self):
+		overlay = [{"name": "GitHub", "issuer": "https://evil.example/login/oauth"}]
+		with self.assertRaises(ValueError):
+			catalog.apply_overlay(overlay)
+
+
+class TestGuideUrl(unittest.TestCase):
+	"""`guide_url` is an optional vendor setup guide shown as its own "Setup guide"
+	link, separate from `help_url` (step 2's app-settings page)."""
+
+	_GOOGLE = ("Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs")
+	_GUIDE = "https://developers.google.com/workspace/guides/configure-mcp-servers"
+
+	def test_to_public_ships_the_google_guide(self):
+		for row in catalog.to_public():
+			if row["name"] in self._GOOGLE:
+				self.assertEqual(row["guide_url"], self._GUIDE, row["name"])
+
+	def test_every_enabled_static_preset_has_an_https_guide(self):
+		static = [p for p in catalog.PROVIDERS if p.enabled and p.auth == catalog.AUTH_STATIC]
+		self.assertTrue(static)
+		for provider in static:
+			self.assertTrue(
+				(provider.guide_url or "").startswith("https://"), f"{provider.name} lacks a guide_url"
+			)
+
+	def test_guide_url_must_be_https(self):
+		bad = replace(catalog.by_name("Gmail"), guide_url="http://insecure.example/guide")
+		with self.assertRaises(ValueError):
+			catalog.validate((bad,))
+
+	def test_overlay_may_not_change_it(self):
+		overlay = [{"name": "Gmail", "guide_url": "https://evil.example/guide"}]
+		with self.assertRaises(ValueError):
+			catalog.apply_overlay(overlay)
+
+	def test_overlay_new_entry_carries_it(self):
+		overlay = [
+			{
+				"name": "Acme Docs",
+				"key": "acme_docs",
+				"base_url": "https://mcp.acme.example/mcp",
+				"auth": catalog.AUTH_OPEN,
+				"category": "docs",
+				"description": "Product documentation",
+				"guide_url": "https://docs.acme.example/mcp",
+			}
+		]
+		added = catalog.by_name("Acme Docs", providers=catalog.apply_overlay(overlay))
+		self.assertEqual(added.guide_url, "https://docs.acme.example/mcp")
+
+
+if __name__ == "__main__":
+	unittest.main()
+
+
+class TestAuthorizeParams(unittest.TestCase):
+	"""`authorize_params` are a provider's fixed additions to the authorize
+	request. Google needs them (no refresh token otherwise); nothing else does."""
+
+	def test_google_presets_ask_for_offline_access_and_consent(self):
+		for name in ("Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs"):
+			self.assertEqual(
+				catalog.authorize_params_of(name),
+				{"access_type": "offline", "prompt": "consent"},
+				name,
+			)
+
+	def test_every_google_preset_is_a_pinned_static_provider(self):
+		# Google answers an unauthenticated initialize with 200, which the discovery
+		# gate refuses, so each Google preset must seed its client from pinned
+		# endpoints or it could never be connected.
+		for name in ("Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs"):
+			provider = catalog.by_name(name)
+			self.assertEqual(provider.auth, catalog.AUTH_STATIC, name)
+			self.assertEqual(provider.issuer, "https://accounts.google.com", name)
+			self.assertEqual(
+				provider.authorization_endpoint, "https://accounts.google.com/o/oauth2/v2/auth", name
+			)
+			self.assertEqual(provider.token_endpoint, "https://oauth2.googleapis.com/token", name)
+			self.assertTrue(provider.scopes, name)
+			self.assertEqual(provider.help_url, "https://console.cloud.google.com/apis/credentials", name)
+			self.assertEqual(
+				provider.guide_url,
+				"https://developers.google.com/workspace/guides/configure-mcp-servers",
+				name,
+			)
+			self.assertIn("Developer Preview", provider.hint, name)
+
+	def test_only_google_declares_authorize_params(self):
+		declaring = {p.name for p in catalog.PROVIDERS if p.authorize_params}
+		self.assertEqual(
+			declaring, {"Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs"}
+		)
+
+	def test_unknown_or_custom_preset_has_no_params(self):
+		self.assertEqual(catalog.authorize_params_of("GitHub"), {})
+		self.assertEqual(catalog.authorize_params_of(catalog.CUSTOM_URL), {})
+		self.assertEqual(catalog.authorize_params_of(""), {})
+
+	def test_params_are_rejected_on_a_token_or_open_provider(self):
+		for base in ("Stripe", "Microsoft Learn"):
+			bad = replace(catalog.by_name(base), name="Bad", key="bad", authorize_params=(("a", "b"),))
+			with self.assertRaises(ValueError):
+				catalog.validate((bad,))
+
+	def test_reserved_names_are_rejected(self):
+		github = catalog.by_name("GitHub")
+		for reserved in sorted(catalog._RESERVED_AUTHORIZE_PARAMS):
+			bad = replace(github, authorize_params=((reserved, "x"),))
+			with self.assertRaises(ValueError, msg=reserved):
+				catalog.validate((bad,))
+
+	def test_malformed_pairs_are_rejected(self):
+		github = catalog.by_name("GitHub")
+		for bad_params in ((("a",),), (("", "b"),), (("a", ""),), ((1, "b"),)):
+			with self.assertRaises(ValueError, msg=repr(bad_params)):
+				catalog.validate((replace(github, authorize_params=bad_params),))
+
+	def test_reserved_set_is_the_flow_module_s_own(self):
+		# The catalog validates at import, the flow guards at request time; the
+		# catalog imports the flow's set rather than copying it, so they are one
+		# object and cannot drift.
+		from jarvis.connectors.mcp_oauth import flow
+
+		self.assertIs(catalog._RESERVED_AUTHORIZE_PARAMS, flow.RESERVED_AUTHORIZE_PARAMS)
+
+	def test_overlay_may_not_change_params_but_may_repeat_them(self):
+		with self.assertRaises(ValueError):
+			catalog.apply_overlay([{"name": "Gmail", "authorize_params": {"prompt": "none"}}])
+		# The same params, in either JSON shape, are not a change.
+		same = catalog.apply_overlay(
+			[{"name": "Gmail", "authorize_params": {"access_type": "offline", "prompt": "consent"}}]
+		)
+		self.assertEqual(
+			catalog.authorize_params_of("Gmail", providers=same), catalog.authorize_params_of("Gmail")
+		)
+		same = catalog.apply_overlay(
+			[{"name": "Gmail", "authorize_params": [["access_type", "offline"], ["prompt", "consent"]]}]
+		)
+		self.assertEqual(
+			catalog.authorize_params_of("Gmail", providers=same), catalog.authorize_params_of("Gmail")
+		)
+
+	def test_overlay_new_entry_carries_params(self):
+		added = catalog.apply_overlay(
+			[
+				{
+					"name": "Acme",
+					"key": "acme",
+					"base_url": "https://mcp.acme.example/mcp",
+					"auth": catalog.AUTH_DCR,
+					"category": "data",
+					"description": "Acme things",
+					"authorize_params": {"prompt": "consent"},
+				}
+			]
+		)
+		self.assertEqual(catalog.authorize_params_of("Acme", providers=added), {"prompt": "consent"})
+
+
+class TestAcceptsKey(unittest.TestCase):
+	"""`accepts_key=False` hides "Use a key instead" and refuses a key row for a
+	sign-in preset whose server takes only its own sign-in tokens."""
+
+	GOOGLE = {"Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs"}
+
+	def test_only_google_refuses_a_key(self):
+		self.assertEqual({p.name for p in catalog.PROVIDERS if not p.accepts_key}, self.GOOGLE)
+
+	def test_accepts_key_of(self):
+		self.assertFalse(catalog.accepts_key_of("Google Drive"))
+		self.assertTrue(catalog.accepts_key_of("GitHub"))
+		self.assertTrue(catalog.accepts_key_of("Stripe"))
+		# Nothing is known about a Custom URL server, so a key stays on offer.
+		self.assertTrue(catalog.accepts_key_of(catalog.CUSTOM_URL))
+
+	def test_to_public_ships_the_flag(self):
+		public = {row["name"]: row["accepts_key"] for row in catalog.to_public()}
+		self.assertFalse(public["Google Drive"])
+		self.assertTrue(public["GitHub"])
+
+	def test_only_a_sign_in_preset_may_refuse_a_key(self):
+		for base in ("Stripe", "Microsoft Learn"):
+			bad = replace(catalog.by_name(base), name="Bad", key="bad", accepts_key=False)
+			with self.assertRaises(ValueError):
+				catalog.validate((bad,))
+
+	def test_overlay_may_not_change_it(self):
+		with self.assertRaises(ValueError):
+			catalog.apply_overlay([{"name": "Gmail", "accepts_key": True}])
+		same = catalog.apply_overlay([{"name": "Gmail", "accepts_key": False}])
+		self.assertFalse(catalog.accepts_key_of("Gmail", providers=same))
+
+
+class TestGapAnalysisEntries(unittest.TestCase):
+	"""The 2026-09-07 additions: shapes that the probe sweep pinned down."""
+
+	def test_shopify_ships_switched_off(self):
+		self.assertFalse(catalog.by_name("Shopify").enabled)
+		self.assertNotIn("Shopify", catalog.preset_names())
+
+	def test_pipedrive_ships_switched_off(self):
+		# Its sign-in service registers only a fixed list of return hosts, never a
+		# tenant's (probed 2026-10-18).
+		self.assertFalse(catalog.by_name("Pipedrive").enabled)
+		self.assertNotIn("Pipedrive", catalog.preset_names())
+
+	def test_intercom_hint_warns_the_token_is_checked_on_first_use(self):
+		# Intercom accepts any token until a tool runs, so the Test passes with a
+		# wrong one; the key card has to say so.
+		self.assertIn("checked only when an action runs", catalog.by_name("Intercom").hint)
+
+	def test_docusign_requests_only_the_esignature_floor(self):
+		self.assertEqual(catalog.by_name("Docusign").scopes, "signature")
+
+	def test_origin_level_servers_keep_their_bare_origin(self):
+		# HubSpot and Calendly serve MCP at the origin itself; a `/mcp` suffix is 404.
+		self.assertEqual(catalog.by_name("HubSpot").base_url, "https://mcp.hubspot.com")
+		self.assertEqual(catalog.by_name("Calendly").base_url, "https://mcp.calendly.com/")
+
+
+class TestWhatsAppBusinessEntry(unittest.TestCase):
+	"""Meta's own server: listed, but off because its registration refuses every client."""
+
+	def test_entry_shape(self):
+		provider = catalog.by_name("WhatsApp Business")
+		self.assertEqual(provider.key, "whatsapp_business")
+		self.assertEqual(provider.base_url, "https://mcp.facebook.com/whatsapp_business_tools")
+		self.assertEqual(provider.auth, catalog.AUTH_DCR)
+		self.assertEqual(provider.category, "communication")
+		self.assertEqual(
+			provider.scopes,
+			"business_management whatsapp_business_management whatsapp_business_messaging",
+		)
+		self.assertTrue(provider.guide_url.startswith("https://developers.facebook.com/"))
+
+	def test_sits_in_the_communication_group(self):
+		names = list(catalog.all_names())
+		index = names.index("WhatsApp Business")
+		self.assertEqual(catalog.by_name(names[index - 1]).category, "communication")
+
+	def test_ships_switched_off(self):
+		self.assertFalse(catalog.by_name("WhatsApp Business").enabled)
+		self.assertNotIn("WhatsApp Business", catalog.preset_names())
+		self.assertNotIn("WhatsApp Business", [row["name"] for row in catalog.to_public()])
+		# A disabled entry still resolves its pinned endpoint for any saved row.
+		self.assertIn("WhatsApp Business", catalog.base_urls())
