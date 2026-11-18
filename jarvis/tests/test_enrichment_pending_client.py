@@ -17,7 +17,8 @@ source-fences ChatView so the old unbounded Set surgery cannot come back.
 
 This subprocess-runs it with ``node --test`` (non-zero exit on any failed assertion)
 so the client contract is enforced by the backend shards too, not only by the separate
-frontend CI job. Unlike the other client tests it also pins a minimum pass count.
+frontend CI job. It is the one wrapper kept: it also pins a minimum pass count,
+which the frontend job does not check.
 """
 
 import os
