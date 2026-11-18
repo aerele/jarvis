@@ -2845,10 +2845,11 @@ def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
 	shows that one card either way. A waiting parked draft gets both: its reminder says to
 	call the tool again only for a change, which agrees with "one draft at a time".
 
-	A turn whose message invokes an armed skill still gets the note on this line: the gate then
-	offers "Approve & run" on that write's card and parks the ordinary card (``draft_card.wanted``,
-	``offers_run``), which is what the skill wants; this line has no armed-skill clause to read
-	in order to skip the note.
+	Also nothing on a turn whose message invokes exactly one armed skill: the gate offers "Approve
+	& run" on that write's card, and only the ordinary card has that control, so the write is not a
+	draft card (``draft_card.wanted``, ``offers_run``). The signal is the gate's own,
+	``api._resolve_approve_run_offer`` (the turn's bound message, one read, none unless the
+	message holds a ``/slug``), run last so the cheap skips come first.
 
 	Best-effort like the neighbouring clauses: a failure is logged and leaves the note out."""
 	from jarvis.chat import draft_card
@@ -2866,6 +2867,10 @@ def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
 		if conv.get("origin_page") in _BUILDER_ORIGINS:
 			return ""
 		if _TYPED_CHANGE in live_draft_clause:
+			return ""
+		from jarvis import api
+
+		if api._resolve_approve_run_offer(conv.get("name"))[0]:
 			return ""
 		return DRAFTING_CLAUSE
 	except Exception:
