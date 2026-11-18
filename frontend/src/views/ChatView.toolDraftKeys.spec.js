@@ -17,7 +17,7 @@ import {
 	toolPanelKeyAction,
 } from "../lib/toolDraftKeys.js";
 import { prepareToolModel } from "../lib/toolDraftPanel.js";
-import { TOOL_FORM_POLL_MS, watchCalculatedCells } from "../lib/toolDraftSheet.js";
+import { TOOL_FORM_POLL_MS, closeAsksFirst, watchCalculatedCells } from "../lib/toolDraftSheet.js";
 
 const src = fs.readFileSync(path.resolve(__dirname, "ChatView.vue"), "utf8");
 function cut(from, to) {
@@ -388,5 +388,66 @@ describe("the template", () => {
 		expect(src).toContain(
 			'<div v-if="orphanHint" class="jv-stack-hint">{{ orphanHint }}</div>'
 		);
+	});
+});
+
+describe("the X button of the form", () => {
+	const code = cut("let draftCloseAsking = false;", "\nconst draftCta");
+	const make = (panel, answer) => {
+		const closed = [];
+		const draftPanel = ref(panel);
+		const confirm = vi.fn(answer);
+		const { onDraftCloseClick } = run(
+			code,
+			{
+				draftPanel,
+				draftPanelDead: ref(false),
+				closeAsksFirst,
+				confirm,
+				closeDraftPanel: () => closed.push(1),
+			},
+			["onDraftCloseClick"]
+		);
+		return { draftPanel, confirm, closed, click: onDraftCloseClick };
+	};
+
+	// Break: the X drops edits without asking, asks for a clean form, closes after "Keep editing",
+	// asks twice for a double press, or closes a different form that opened while the dialog was up.
+	it("asks only for a dirty server form, once, and closes only the same panel on Discard", async () => {
+		// A real form model: dirty means one edited field (see closeAsksFirst's own table).
+		const m = timesheetModel();
+		prepareToolModel(m, {
+			token: "t1",
+			conversation: "c1",
+			card: timesheetCard(),
+			fill: { readOnly: true },
+		});
+		const clean = make(m, async () => true);
+		await clean.click();
+		expect([clean.confirm.mock.calls.length, clean.closed.length]).toEqual([0, 1]);
+
+		m.fields.find((f) => f.fieldname === "parent_project").value = "PROJ-0002";
+		const keep = make(m, async () => false);
+		await keep.click();
+		expect(keep.confirm.mock.calls[0][0]).toMatchObject({
+			title: "Discard your changes?",
+			confirmLabel: "Discard",
+			cancelLabel: "Keep editing",
+		});
+		expect(keep.closed.length).toBe(0);
+
+		let answer;
+		const twice = make(m, () => new Promise((r) => (answer = r)));
+		const first = twice.click();
+		await twice.click();
+		expect(twice.confirm.mock.calls.length).toBe(1);
+		twice.draftPanel.value = { tool: true, other: true };
+		answer(true);
+		await first;
+		expect(twice.closed.length).toBe(0);
+
+		const yes = make(m, async () => true);
+		await yes.click();
+		expect(yes.closed.length).toBe(1);
 	});
 });
