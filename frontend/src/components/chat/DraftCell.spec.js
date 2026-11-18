@@ -18,6 +18,7 @@ import { mount } from "@vue/test-utils";
 import { reactive } from "vue";
 import DraftCell from "./DraftCell.vue";
 import DateControl from "@/components/forms/DateControl.vue";
+import { DRAFT_DATE_CONTROL } from "../../lib/draftSurface";
 
 const F = (fieldname, fieldtype, extra = {}) => ({
 	fieldname,
@@ -34,9 +35,13 @@ const DraftLinkMenu = {
 	props: ["anchor", "items", "palette"],
 	template: "<div />",
 };
-const cell = (field, row, props = {}) =>
+// The desktop host provides its picker under DRAFT_DATE_CONTROL; the phone provides none.
+const cell = (field, row, props = {}, provideDate = true) =>
 	mount(DraftCell, {
-		global: { stubs: { DraftLinkMenu } },
+		global: {
+			stubs: { DraftLinkMenu },
+			provide: provideDate ? { [DRAFT_DATE_CONTROL]: DateControl } : {},
+		},
 		props: { field, row, cellKey: "t:0:0:" + field.fieldname, draftLink: link(), ...props },
 	});
 
@@ -134,6 +139,18 @@ describe("one editable value of a child row", () => {
 		expect(
 			cell(F("q", "Data"), row, { controlId: "id-q" }).find("input").attributes("id")
 		).toBe("id-q");
+	});
+
+	// Break: the shared cell imports the desktop picker, which the phone cannot load, or the phone
+	// (no provider) loses its date inputs.
+	it("with no host picker (the phone) a Date / Datetime / Time cell is the browser's own input", () => {
+		const row = reactive({ d: "2026-01-02", dt: "", t: "" });
+		const types = ["Date", "Datetime", "Time"].map((t, i) =>
+			cell(F(["d", "dt", "t"][i], t), row, {}, false)
+				.find("input")
+				.attributes("type")
+		);
+		expect(types).toEqual(["date", "datetime-local", "time"]);
 	});
 
 	it("a Date / Datetime / Time cell puts its id and aria attributes on the picker's input", () => {

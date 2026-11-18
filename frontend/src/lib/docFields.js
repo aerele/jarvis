@@ -1,6 +1,6 @@
 // Pure field-control helpers shared by ChatView's record draft panel and the
 // standalone DocFieldsForm (moved out of ChatView.vue; behaviour unchanged).
-import { checkToYesNo, normDateVal } from "@/lib/draftApply";
+import { checkToYesNo, normDateVal } from "./draftApply";
 
 // Map a Frappe fieldtype → the edit control to render + its options payload.
 export function controlFor(fieldtype, options) {

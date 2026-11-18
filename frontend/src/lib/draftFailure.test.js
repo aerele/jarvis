@@ -101,3 +101,99 @@ test("a message without a full stop still reads as two sentences", () => {
 		"Part of this may already be saved: Half saved! Check the record before trying again."
 	);
 });
+
+test("card_open: the form closes, the card stays, and the note says nothing about the chat", () => {
+	// the server sends assistant_told: false here because nothing is sent to the chat
+	const f = draftFailureOf(
+		{
+			ok: false,
+			closed: true,
+			card_open: true,
+			assistant_told: false,
+			error: { message: "Busy." },
+		},
+		"Jarvis"
+	);
+	assert.equal(f.cardOpen, true);
+	assert.equal(f.note, "Couldn't save this: Busy.");
+	// even if told were true, no promise of a reply in the chat
+	const told = draftFailureOf({
+		ok: false,
+		closed: true,
+		card_open: true,
+		error: { message: "Busy." },
+	});
+	assert.equal(told.note, "Couldn't save this: Busy.");
+});
+
+test("without card_open the old notes are unchanged and cardOpen is false", () => {
+	const closed = draftFailureOf({
+		ok: false,
+		closed: true,
+		assistant_told: false,
+		error: { message: "No." },
+	});
+	assert.equal(closed.cardOpen, false);
+	assert.equal(
+		closed.note,
+		"Couldn't save this: No. Jarvis could not be told about it, so ask in the chat."
+	);
+	// card_open on a reply that is not closed is not a card-open close
+	assert.equal(
+		draftFailureOf({ ok: false, card_open: true, error: { message: "x" } }).cardOpen,
+		false
+	);
+});
+
+// Break: the typed panel and the phone (no option) stop promising the chat's reply for a reply that
+// carries no `assistant_told`, or a server draft card's save (strictTold) promises it without being
+// told so, or says "could not be told" about a reply that says nothing.
+for (const [flag, plain, strict] of [
+	[undefined, "reply", "none"],
+	[true, "reply", "reply"],
+	[false, "untold", "untold"],
+]) {
+	test(`closed, assistant_told ${flag}: typed ${plain}, server draft ${strict}`, () => {
+		const r = {
+			ok: false,
+			closed: true,
+			...(flag === undefined ? {} : { assistant_told: flag }),
+			error: { message: "Gone." },
+		};
+		const said = (note) =>
+			note.includes("The reply in the chat explains what to do.")
+				? "reply"
+				: note.includes("could not be told")
+				? "untold"
+				: "none";
+		assert.equal(said(draftFailureOf(r).note), plain);
+		assert.equal(said(draftFailureOf(r, "Jarvis", { strictTold: true }).note), strict);
+	});
+}
+
+// Break: a server draft card's save on a discarded / superseded / cancelled card (the agent got a note
+// and no reply is coming) promises "The reply in the chat explains what to do", or says "could not be
+// told" about an agent that was told; the typed panel and the phone ignore `assistant_replies`.
+for (const [told, replies, strict, plain] of [
+	[true, false, "none", "reply"],
+	[true, true, "reply", "reply"],
+	[false, false, "untold", "untold"],
+]) {
+	test(`closed, told ${told}, assistant_replies ${replies}: server draft ${strict}, typed ${plain}`, () => {
+		const r = {
+			ok: false,
+			closed: true,
+			assistant_told: told,
+			assistant_replies: replies,
+			error: { message: "Gone." },
+		};
+		const said = (note) =>
+			note.includes("The reply in the chat explains what to do.")
+				? "reply"
+				: note.includes("could not be told")
+				? "untold"
+				: "none";
+		assert.equal(said(draftFailureOf(r, "Jarvis", { strictTold: true }).note), strict);
+		assert.equal(said(draftFailureOf(r).note), plain);
+	});
+}
