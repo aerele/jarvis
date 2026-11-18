@@ -1,19 +1,28 @@
 <script setup>
 import { ref, computed, onBeforeUnmount, onMounted } from "vue";
-import { isRequiredBlank, lineItemSummary } from "@/lib/actionSummary";
-import { draftParentDoc } from "@/lib/draftApply";
-import { AUTO_OPEN_MAX, savedRowsByName } from "@/lib/draftTables";
-import { changeDisplay, clipText, rowExtraValues } from "@/lib/rowForm";
+import { isRequiredBlank, lineItemSummary } from "../../lib/actionSummary";
+import { draftParentDoc } from "../../lib/draftApply";
+import { AUTO_OPEN_MAX, savedRowsByName } from "../../lib/draftTables";
+import { changeDisplay, clipText, rowExtraValues } from "../../lib/rowForm";
+import { draftBadgeText } from "../../lib/draftBadge";
 
 const props = defineProps({
 	model: { type: Object, required: true },
 	headline: { type: String, default: "" },
 	disabled: { type: Boolean, default: false },
+	// The confirm button's words, when the host's own are not "Confirm create" / "Confirm update"
+	// (a server draft card's Preview says what its card says: "Create" / "Save changes").
+	confirmLabel: { type: String, default: "" },
+	// "desktop" (the default: the resizable side panel, exactly as before) or "phone" (the content
+	// of a full-screen sheet the host draws: no side-panel chrome, no resize handle, no width
+	// storage, 44px buttons; see the end of the style).
+	surface: { type: String, default: "desktop" },
 });
 const emit = defineEmits(["close", "edit", "confirm"]);
+const phone = computed(() => props.surface === "phone");
 
 const isUpdate = computed(() => props.model.verb === "update");
-const badge = computed(() => (isUpdate.value ? "Pending change" : "Draft - not saved"));
+const badge = computed(() => draftBadgeText(isUpdate.value, props.surface));
 const docTitle = computed(() => {
 	const m = props.model;
 	return `${isUpdate.value ? "Update" : "New"} ${m.doctype}${
@@ -92,7 +101,8 @@ const hostWidth = () => panelEl.value?.parentElement?.clientWidth || window.inne
 const maxWidth = () => Math.min(1100, Math.round(hostWidth() * 0.92));
 const clampWidth = (w) => Math.min(maxWidth(), Math.max(MIN_WIDTH, w));
 
-const stored = Number(localStorage.getItem(STORAGE_KEY));
+// The phone's panel is the sheet's width: nothing to read (and localStorage can throw there).
+const stored = props.surface === "phone" ? 0 : Number(localStorage.getItem(STORAGE_KEY));
 const panelWidth = ref(clampWidth(stored || DEFAULT_WIDTH));
 const resizing = ref(false);
 let panelRight = 0;
@@ -142,8 +152,13 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-	<transition name="dp-slide" appear>
-		<div class="dp-overlay" @mousedown="onOverlayDown" @click.self="onOverlayClick">
+	<transition :name="phone ? 'dp-still' : 'dp-slide'" appear>
+		<div
+			class="dp-overlay"
+			:class="{ 'dp-surface-phone': phone }"
+			@mousedown="onOverlayDown"
+			@click.self="onOverlayClick"
+		>
 			<aside
 				ref="panelEl"
 				class="dp-panel"
@@ -152,6 +167,7 @@ onBeforeUnmount(() => {
 				tabindex="-1"
 			>
 				<div
+					v-if="!phone"
 					class="dp-resizer"
 					:class="{ 'dp-resizer-active': resizing }"
 					title="Drag to resize"
@@ -289,7 +305,7 @@ onBeforeUnmount(() => {
 						:disabled="disabled"
 						@click="emit('confirm')"
 					>
-						{{ isUpdate ? "Confirm update" : "Confirm create" }}
+						{{ confirmLabel || (isUpdate ? "Confirm update" : "Confirm create") }}
 					</button>
 					<button class="dp-btn" @click="emit('edit')">Edit</button>
 					<button class="dp-btn" @click="emit('close')">Close</button>
@@ -545,6 +561,7 @@ onBeforeUnmount(() => {
 }
 .dp-foot {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	gap: 8px;
 	padding: 11px 14px;
@@ -553,10 +570,17 @@ onBeforeUnmount(() => {
 	flex: none;
 }
 .dp-btn {
-	padding: 8px 14px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	height: 28px;
+	padding: 0 10px;
+	line-height: 1;
+	white-space: nowrap;
+	flex: 0 0 auto;
 	border-radius: 8px;
 	font-size: 13px;
-	font-weight: 600;
+	font-weight: 500;
 	border: 1px solid var(--border);
 	background: var(--surface);
 	color: var(--text);
@@ -592,5 +616,72 @@ onBeforeUnmount(() => {
 .dp-slide-enter-from .dp-panel,
 .dp-slide-leave-to .dp-panel {
 	transform: translateX(100%);
+}
+/* ---- surface="phone" (appended; the desktop rules above are untouched) -----------------------
+   The host draws this inside a full-screen sheet, so the overlay is just a column that fills it:
+   no backdrop, no side-panel border or shadow, no resize handle (not rendered), no slide. Fields
+   stack label over value; the foot buttons are 44px. */
+.dp-overlay.dp-surface-phone {
+	position: static;
+	z-index: auto;
+	flex: 1;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+	background: none;
+}
+.dp-surface-phone .dp-panel {
+	width: 100% !important;
+	max-width: none;
+	height: auto;
+	flex: 1;
+	min-height: 0;
+	border-left: 0;
+	box-shadow: none;
+}
+.dp-surface-phone .dp-head {
+	padding: 10px 8px 10px 16px;
+}
+.dp-surface-phone .dp-close {
+	min-width: 40px;
+	min-height: 40px;
+	align-items: center;
+	justify-content: center;
+}
+.dp-surface-phone .dp-fields {
+	grid-template-columns: 1fr;
+	gap: 2px;
+}
+.dp-surface-phone .dp-fields dd {
+	margin-bottom: 10px;
+	font-size: 15px;
+}
+.dp-surface-phone .dp-body {
+	overscroll-behavior: contain;
+	padding-bottom: 24px;
+}
+.dp-surface-phone .dp-rowmore summary {
+	min-height: 40px;
+	display: flex;
+	align-items: center;
+}
+.dp-surface-phone .dp-foot {
+	flex-wrap: nowrap;
+	gap: 8px;
+	padding: 10px 12px;
+}
+.dp-surface-phone .dp-btn {
+	height: 44px;
+	flex: 1 1 0;
+	font-size: 15px;
+	font-weight: 600;
+}
+.dp-surface-phone .dp-btn-primary {
+	flex: 2 1 0;
+}
+/* the badge reads as the edit sheet's does: as written, not capitals */
+.dp-surface-phone .dp-badge {
+	text-transform: none;
+	letter-spacing: 0.02em;
 }
 </style>

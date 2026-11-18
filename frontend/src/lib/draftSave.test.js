@@ -144,3 +144,45 @@ test("the live draft keeps its card through later replies, and only then", () =>
 	);
 	assert.equal(liveDraftMessage([draft, ack], null), null, "a turn is running");
 });
+
+test("the four reply kinds of a server draft card's save", () => {
+	// saved (a repeat Save returns the same envelope)
+	assert.deepEqual(
+		draftSaveOutcome({ ok: true, verb: "create", name: "TS-1", doc_url: "/app/ts/TS-1" }),
+		{
+			kind: "saved",
+		}
+	);
+	// fixable: the form stays open with the field marks; busy has no fields
+	const fixable = draftSaveOutcome({
+		ok: false,
+		error: {
+			code: "Invalid",
+			message: "Hours is wrong.",
+			fields: [{ fieldname: "hours", idx: 2 }],
+		},
+	});
+	assert.equal(fixable.kind, "keep");
+	assert.deepEqual(fixable.error.fields, [{ fieldname: "hours", idx: 2 }]);
+	const busy = draftSaveOutcome({
+		ok: false,
+		error: { code: "DraftBusyError", message: "This draft is being handled.", fields: [] },
+	});
+	assert.equal(busy.kind, "keep");
+	// closed, the card is gone: no cardOpen key at all (the old shape, exactly)
+	assert.deepEqual(draftSaveOutcome({ ok: false, closed: true, error: { message: "Gone." } }), {
+		kind: "closed",
+		note: "Couldn't save this: Gone. The reply in the chat explains what to do.",
+	});
+	// closed, the card is still pending: keep it, and no sentence about the chat
+	assert.deepEqual(
+		draftSaveOutcome({
+			ok: false,
+			closed: true,
+			card_open: true,
+			assistant_told: false,
+			error: { message: "Too big." },
+		}),
+		{ kind: "closed", note: "Couldn't save this: Too big.", cardOpen: true }
+	);
+});

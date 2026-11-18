@@ -11,6 +11,7 @@ import { readFileSync } from "node:fs";
 const ROOT = new URL("../../../", import.meta.url);
 const CHAT_SURFACES = [
 	"frontend/src/views/ChatView.vue",
+	"frontend/src/lib/useDraftLink.js",
 	"frontend/src/pages/dashboards/DashboardChatPane.vue",
 	"frontend/src/components/ActionError.vue",
 	"frontend/src/components/personalise/ChatComposer.vue",

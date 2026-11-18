@@ -153,3 +153,42 @@ describe("ReceiptChip next step (#621)", () => {
 		expect(w.find(".jv-receipt-next").exists()).toBe(false);
 	});
 });
+
+describe("ReceiptChip draft receipt wording", () => {
+	const discarded = {
+		role: "tool",
+		tool_name: "create_doc",
+		tool_args: JSON.stringify({ doctype: "ToDo" }),
+		tool_result: null,
+		action_outcome: "discarded",
+	};
+	const failed = {
+		role: "tool",
+		tool_name: "update_doc",
+		tool_args: JSON.stringify({ doctype: "ToDo", name: "TD-1" }),
+		tool_result: JSON.stringify({ ok: false, error: { message: "It changed." } }),
+		action_outcome: "failed",
+	};
+	// Break: a row that is not a server draft card (no prop, or the shared chat) reads differently than
+	// it always has, or a draft receipt replaces more than the words (its icon, tone, why toggle).
+	it("without the prop the chip is exactly what receiptView draws", () => {
+		const w = mount(ReceiptChip, { props: { message: discarded } });
+		expect(w.find(".jv-receipt-title").text()).toBe("Discarded, did not create a ToDo");
+		const none = mount(ReceiptChip, { props: { message: discarded, draftReceipt: null } });
+		expect(none.html()).toBe(w.html());
+	});
+
+	it("a draft receipt replaces the words only: tone, icon and the reason behind 'why' stay", () => {
+		const plain = mount(ReceiptChip, { props: { message: failed } });
+		const draft = mount(ReceiptChip, {
+			props: { message: failed, draftReceipt: { text: "Not saved", tone: "error" } },
+		});
+		expect(draft.find(".jv-receipt-title").text()).toBe("Not saved");
+		expect(plain.find(".jv-receipt-title").text()).toBe("Failed, ToDo TD-1 was not updated");
+		expect(draft.classes()).toEqual(plain.classes());
+		expect(draft.find(".jv-receipt-toggle").exists()).toBe(true);
+		expect(draft.html().replace("Not saved", "X")).toBe(
+			plain.html().replace("Failed, ToDo TD-1 was not updated", "X")
+		);
+	});
+});

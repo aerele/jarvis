@@ -127,7 +127,7 @@ export function coerceRow(table, row, verb) {
 	return out;
 }
 
-function coerceCell(column, v) {
+export function coerceCell(column, v) {
 	if (["Int", "Float", "Currency", "Percent"].includes(column.fieldtype)) {
 		// "1,250.5" is NaN to Number() and would go out as null, clearing the cell:
 		// send it as written for the server's field check to read or refuse.

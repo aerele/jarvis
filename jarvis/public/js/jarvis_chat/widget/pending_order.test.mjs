@@ -15,6 +15,7 @@ import {
   settledReasonMessage,
   sortPendingCards,
   typedApprovalHint,
+  visibleTypedHint,
   withExcluded,
   withoutTokens,
 } from "./pending_order.mjs";
@@ -283,7 +284,11 @@ test("Panel.vue wires the recency helpers into the hint, the send and the resync
     confirmed > -1 && marked > confirmed,
     "after the confirmed early return"
   );
-  assert.match(src, /keepEarlier\(\s*\[\.\.\.byToken\.values\(\)\]/);
+  // the merged list (first item per token, pending_items.test.mjs) is what keepEarlier reads
+  assert.match(
+    src,
+    /keepEarlier\(\s*mergePendingByToken\(base, rowItems, backstop\)/
+  );
   assert.match(src, /v-if="!isRecentCard\(p\)"[^>]*>Earlier</);
 });
 
@@ -451,4 +456,130 @@ test("Desk queues passive safety receipts so each Done reveals the next one", ()
   );
   const direct = src.slice(src.indexOf("async function resolvePending("));
   assert.match(direct, /settleSafetyUpdate\(\{ token, message: settled \}\)/);
+});
+
+// Break: a draft in the stack hides (or wrongly widens) the hint for the ordinary cards.
+// No draft: the old hint, byte for byte. A draft: only numbered hints, for the ordinary
+// cards, at their real position; never a bare or stack-wide phrase.
+const P = (token) => ({ token });
+const D = (token) => ({ token, draft_title: "New Timesheet" });
+const HINT_CASES = [
+  [[P("a")], 'or type "go ahead"'],
+  [[P("a"), P("b")], 'or type "confirm all", or "confirm 1 and 2"'],
+  [[P("a"), P("b"), P("c")], 'or type "confirm all", or "confirm 1 and 3"'],
+  [[], ""],
+  [[D("a")], ""],
+  [[D("a"), D("b")], ""],
+  [[P("a"), D("b")], 'or type "confirm 1"'],
+  [[D("a"), P("b")], 'or type "confirm 2"'],
+  [[P("a"), D("b"), P("c")], 'or type "confirm 1" or "confirm 3"'],
+  [[D("a"), P("b"), D("c")], 'or type "confirm 2"'],
+];
+for (const [cards, want] of HINT_CASES) {
+  test(`visibleTypedHint: ${
+    cards.map((c) => (c.draft_title ? "D" : "P")).join("") || "empty"
+  }`, () => {
+    assert.equal(visibleTypedHint(cards), want);
+  });
+}
+
+// Break: a no-draft stack's hint drifts from its literal text, including the Earlier rows
+// (recent: false drops the bare phrases). A literal table, not a delegation to the function.
+const E = (token) => ({ token, recent: false });
+const NO_DRAFT_CASES = [
+  [[P("a"), E("b")], 'or type "confirm 1 and 2"'],
+  [[E("a")], 'or type "confirm 1"'],
+  [[E("a"), E("b"), E("c")], 'or type "confirm 1 and 3"'],
+  [[P("a"), P("b"), P("c")], 'or type "confirm all", or "confirm 1 and 3"'],
+];
+test("visibleTypedHint without a draft keeps the old hint text, Earlier cards included", () => {
+  for (const [cards, want] of NO_DRAFT_CASES)
+    assert.equal(visibleTypedHint(cards), want);
+});
+
+// Break: a printed "confirm N" no longer names the card at position N of approval_tokens (the list
+// the widget sends and the server binds N to), so a typed confirm approves a different record, or a
+// draft. visibleTypedHint is only tested on a ready-made array above; this builds the array the way
+// Panel.vue's orderedPending does (sortPendingCards of stream.value.pending, then drop settled
+// tokens; nothing is settled here) and ties the printed numbers to the SENT token list.
+// Input order is deliberately NOT mint order, so the sort matters. `sent` and `printed` are literal.
+const C = (token, created_at, extra = {}) => ({ token, created_at, ...extra });
+const DR = (token, created_at) =>
+  C(token, created_at, { draft_title: "New Timesheet" });
+const ORDER_CASES = [
+  ["draft, plain", [C("p", 2), DR("d", 1)], ["d", "p"], [2]],
+  ["plain, draft", [C("p", 1), DR("d", 2)], ["p", "d"], [1]],
+  [
+    "plain, draft, plain",
+    [C("q", 3), DR("d", 2), C("p", 1)],
+    ["p", "d", "q"],
+    [1, 3],
+  ],
+  [
+    "draft, draft, plain",
+    [C("p", 3), DR("e", 2), DR("d", 1)],
+    ["d", "e", "p"],
+    [3],
+  ],
+  [
+    "plain, plain, draft",
+    [DR("d", 3), C("q", 2), C("p", 1)],
+    ["p", "q", "d"],
+    [1, 2],
+  ],
+  [
+    "earlier plain, draft",
+    [DR("d", 2), C("p", 1, { recent: false })],
+    ["p", "d"],
+    [1],
+  ],
+  ["draft alone", [DR("d", 1)], ["d"], []],
+  // No draft: the old hint, 'confirm 1 and 2'; only the "confirm 1" part parses as `confirm N`.
+  ["no draft, two (contrast)", [C("q", 2), C("p", 1)], ["p", "q"], [1]],
+];
+test("every printed confirm N names an ordinary card in the sent token order", () => {
+  for (const [name, input, sent, printed] of ORDER_CASES) {
+    const ordered = sortPendingCards(input);
+    const tokens = ordered.map((p) => p.token);
+    assert.deepEqual(tokens, sent, `${name}: sent order`);
+    const hint = visibleTypedHint(ordered);
+    const nums = [...hint.matchAll(/confirm (\d+)/g)].map((m) => Number(m[1]));
+    const hasDraft = ordered.some((c) => c.draft_title);
+    assert.deepEqual(nums, printed, `${name}: printed numbers`);
+    if (hasDraft) {
+      assert.doesNotMatch(hint, /go ahead|confirm all|\band\b/, name);
+      const plain = ordered.filter((c) => !c.draft_title).map((c) => c.token);
+      assert.deepEqual(
+        nums.map((n) => tokens[n - 1]),
+        plain,
+        `${name}: every ordinary card is numbered, in the sent order`
+      );
+    }
+    for (const n of nums) {
+      assert.ok(tokens[n - 1] !== undefined, `${name}: confirm ${n} exists`);
+      const card = ordered.find((c) => c.token === tokens[n - 1]);
+      assert.ok(!card.draft_title, `${name}: confirm ${n} is not a draft`);
+    }
+  }
+});
+
+// Break: someone filters drafts out of the sent list (the numbers then slip), or sorts it
+// differently from the stack the cards and the hint read. The send, the hint and the card loop
+// must all read the one orderedPending computed.
+test("Panel.vue sends approval_tokens from the same orderedPending the hint and cards read", () => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const src = fs.readFileSync(path.join(here, "Panel.vue"), "utf8");
+  assert.match(
+    src,
+    /const approvalTokens = orderedPending\.value\.map\(\(p\) => p\.token\);/
+  );
+  assert.match(
+    src,
+    /const typedApprovalHint = computed\(\(\) =>\s*hintFor\(orderedPending\.value\)\s*\)/
+  );
+  assert.match(src, /v-for="\(p, pi\) in orderedPending"/);
+  assert.match(
+    src,
+    /const orderedPending = computed\(\(\) => \{\s*const cards = sortPendingCards\(/
+  );
 });

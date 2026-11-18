@@ -3,10 +3,11 @@
 // field of the row's full form (DraftRowForm). Moved out of ChatView's grid so the
 // two render every fieldtype the same way; the link search stays in ChatView, which
 // owns the one shared popup, so this only reports focus/typing and the pick.
-import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
-import DateControl from "@/components/forms/DateControl.vue";
-import { cellOptions } from "@/lib/docFields";
-import { checkToYesNo } from "@/lib/draftApply";
+import { inject } from "vue";
+import DraftLinkMenu from "./DraftLinkMenu.vue";
+import { DRAFT_DATE_CONTROL } from "../../lib/draftSurface";
+import { cellOptions } from "../../lib/docFields";
+import { checkToYesNo } from "../../lib/draftApply";
 
 const props = defineProps({
 	field: { type: Object, required: true },
@@ -32,6 +33,9 @@ const props = defineProps({
 });
 const emit = defineEmits(["link-search", "link-blur", "link-pick", "link-close"]);
 
+// The host's picker for these (the desktop's DateControl); none (the phone) keeps the browser inputs.
+const dateControl = inject(DRAFT_DATE_CONTROL, null);
+const DATE_KINDS = ["Date", "Datetime", "Time"];
 const NUMBER = ["Int", "Float", "Currency", "Percent", "Rating"];
 const LONG_TEXT = [
 	"Small Text",
@@ -128,11 +132,32 @@ function search(ev) {
 		:aria-required="required ? 'true' : undefined"
 		v-model="row[field.fieldname]"
 	/>
-	<DateControl
-		v-else-if="['Date', 'Datetime', 'Time'].includes(field.fieldtype)"
+	<component
+		:is="dateControl"
+		v-else-if="dateControl && DATE_KINDS.includes(field.fieldtype)"
 		:kind="field.fieldtype.toLowerCase()"
 		:ariaLabel="label || ''"
 		:id="controlId || undefined"
+		:aria-describedby="describedby || undefined"
+		:aria-required="required ? 'true' : undefined"
+		v-model="row[field.fieldname]"
+	/>
+	<input
+		v-else-if="field.fieldtype === 'Datetime' || field.fieldtype === 'Time'"
+		:type="field.fieldtype === 'Datetime' ? 'datetime-local' : 'time'"
+		class="jv-action-input"
+		:id="controlId || undefined"
+		:aria-label="label || undefined"
+		:aria-describedby="describedby || undefined"
+		:aria-required="required ? 'true' : undefined"
+		v-model="row[field.fieldname]"
+	/>
+	<input
+		v-else-if="field.fieldtype === 'Date'"
+		type="date"
+		class="jv-action-input"
+		:id="controlId || undefined"
+		:aria-label="label || undefined"
 		:aria-describedby="describedby || undefined"
 		:aria-required="required ? 'true' : undefined"
 		v-model="row[field.fieldname]"

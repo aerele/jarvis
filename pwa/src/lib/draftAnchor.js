@@ -12,9 +12,11 @@ import { parseAction, actionBlockState } from "./blocks.js";
 /**
  * @param {Array<object>} rows the conversation's messages in order
  * @param {Array<object>} items the thread items built from them
+ * @param {{parkedDraft?: boolean}} [options] `parkedDraft`: a server draft card is pending, so it
+ *   is the one card and no typed draft is live (liveDraft.js liveDraftRow)
  * @returns {{anchorKey: string, draftKey: string, action: object|null, bad: boolean, own: boolean}|null}
  */
-export function draftAnchor(rows, items) {
+export function draftAnchor(rows, items, { parkedDraft = false } = {}) {
 	let anchor = null;
 	for (let i = (items || []).length - 1; i >= 0; i--) {
 		if (items[i].type === "assistant" && items[i].msg) {
@@ -32,7 +34,7 @@ export function draftAnchor(rows, items) {
 			own: true,
 		};
 	}
-	const draft = liveDraftRow(rows);
+	const draft = liveDraftRow(rows, { parkedDraft });
 	if (!draft) return null;
 	return {
 		anchorKey: anchor.key,

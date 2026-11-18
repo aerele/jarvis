@@ -352,18 +352,25 @@ def _report_structure_failure(row, args: dict, structure: _Structure, result, no
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist the log
 
 
-def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None, bool, str]:
+def _dispatch(
+	row, args: dict, *, user: str | None = None, allow_risky: bool = True, savepoint: bool = False
+) -> tuple[dict | None, bool, str]:
 	"""Run the sealed call as ``exec_user`` (or ``user``: an Edit & create runs as the
 	approver). Returns ``(result, interfered, crash_tb)``.
 
 	``interfered``: the transaction was not ours start to finish (a mid-dispatch commit
 	such as ``run_import`` or DDL, or a mid-dispatch full rollback), so a failure may
-	have left part of the write behind (``jarvis._commit_watch``)."""
+	have left part of the write behind (``jarvis._commit_watch``).
+
+	``allow_risky=False``: the call is a person's own edited values, not the card they
+	were shown, so the write-risk guard admits no sensitive record. ``savepoint``: also
+	see a commit the sentinel cannot (a raw COMMIT), as ``apply_action`` does."""
 	from jarvis import api
 
-	watch = CommitWatch().arm()
+	watch = CommitWatch().arm(savepoint=savepoint)
 	crash_tb = ""
 	result = None
+	deadlock = False
 	try:
 		with impersonate(user or row.exec_user):
 			# allow_risky: a human approved this row, so the write-risk guard admits
@@ -373,12 +380,14 @@ def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None,
 				args,
 				provenance=_PROVENANCE[row.kind],
 				provenance_name=row.name if row.kind != "chat" else "",
-				allow_risky=True,
+				allow_risky=allow_risky,
 			)
 			api._apply_run_method_read_filter(row.tool, result)
-	except Exception:
+	except Exception as e:
+		# InnoDB's own rollback after a deadlock drops the savepoint too: not a commit.
+		deadlock = isinstance(e, frappe.QueryDeadlockError)
 		crash_tb = frappe.get_traceback() or "dispatch raised"
-	return result, watch.disarm(), crash_tb
+	return result, watch.disarm(probe=savepoint and not deadlock), crash_tb
 
 
 def _record_failed_write(

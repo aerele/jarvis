@@ -3825,5 +3825,279 @@
 			}
 		],
 		"live": null
+	},
+	{
+		"id": "typed-draft-then-parked-tool-draft",
+		"note": "a parked tool draft after a typed draft retires it: the tool card is the one card",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t1",
+				"draft_card": true
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "typed-draft-then-sensitive-park-from-it",
+		"note": "a pending tool row with no draft_card (a sensitive park from the typed draft) leaves the typed draft live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t1"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "parked-tool-draft-only",
+		"note": "a parked tool draft and no typed draft: nothing is live",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t1",
+				"draft_card": true
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "typed-draft-then-tool-draft-cancelled",
+		"note": "a tool draft that was cancelled keeps the old typed draft retired",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> cancelled",
+				"tool_name": "create_doc",
+				"tool_status": "",
+				"tool_call_id": "call-t1",
+				"action_outcome": "cancelled",
+				"draft_card": false
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "typed-draft-then-tool-draft-confirmed",
+		"note": "a tool draft that was confirmed keeps the old typed draft retired",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> confirmed",
+				"tool_name": "create_doc",
+				"tool_status": "",
+				"tool_call_id": "call-t1",
+				"action_outcome": "confirmed",
+				"draft_card": false
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "typed-draft-then-tool-draft-superseded-by-edit",
+		"note": "a tool draft superseded by an edit keeps the old typed draft retired",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> superseded",
+				"tool_name": "create_doc",
+				"tool_status": "",
+				"tool_call_id": "call-t1",
+				"action_outcome": "superseded",
+				"draft_card": false
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t2",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t2",
+				"draft_card": true
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "typed-block-and-tool-draft-same-turn",
+		"note": "the reply holds a typed block and its own turn's tool rows (after it, in seq order) include a parked tool draft: the tool card is the one card",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-t0"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t1",
+				"draft_card": true
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "parked-tool-draft-then-typed-draft-next-turn",
+		"note": "a Pending draft card from an earlier turn: the typed block of the next turn is not live (one card)",
+		"rows": [
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t1",
+				"draft_card": true
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m2",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"parked_draft": true,
+		"live": null
+	},
+	{
+		"id": "typed-draft-with-old-parked-card-outside-loaded-rows",
+		"note": "the Pending card's row is not among the loaded rows: the flag alone hides the typed draft",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"parked_draft": true,
+		"live": null
+	},
+	{
+		"id": "typed-draft-after-parked-card-was-decided",
+		"note": "a decided card before a NEW typed draft does not hide it",
+		"rows": [
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> confirmed",
+				"tool_name": "create_doc",
+				"tool_status": "",
+				"tool_call_id": "call-t1",
+				"action_outcome": "confirmed",
+				"draft_card": false
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m2",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"parked_draft": false,
+		"live": "m2"
 	}
 ]
