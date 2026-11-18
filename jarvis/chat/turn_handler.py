@@ -1445,8 +1445,6 @@ def _assemble_prompt(
 		binding,
 		msg_row.get("origin"),
 		live_draft_clause,
-		message=user_message,
-		chat_user=chat_user,
 	)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
@@ -2830,24 +2828,7 @@ def _runs_without_cards(conv, binding) -> bool:
 	)
 
 
-def _invokes_armed_skill(conv, binding, origin, message, chat_user) -> bool:
-	"""Whether this turn's message invokes EXACTLY ONE custom skill that is live-armed for
-	"Approve & run" (the same test the gate's ``_resolve_approve_run_offer`` makes), in a turn
-	where that offer can still be made: not a shared chat, not a board answer, and not once a run
-	is already approved or confirmations are skipped."""
-	from jarvis.chat.custom_skills import invoked_skill_slugs, resolve_armed_skill_docname
-
-	if binding is not None or conv.get("skill_autorun") or conv.get("skip_confirmation"):
-		return False
-	if origin == "board_answer" and not conv.get("file_box"):
-		return False
-	slugs = invoked_skill_slugs(message or "", user=chat_user)
-	return len(slugs) == 1 and bool(resolve_armed_skill_docname(next(iter(slugs)), chat_user))
-
-
-def _drafting_clause(
-	conv, binding, origin, live_draft_clause: str = "", *, message: str = "", chat_user: str = ""
-) -> str:
+def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
 	"""``DRAFTING_CLAUSE`` when the site flag ``jarvis_draft_cards`` is on and an agent call to
 	``create_doc`` / ``update_doc`` in this turn would park a draft card, else "".
 
@@ -2865,9 +2846,11 @@ def _drafting_clause(
 	shows that one card either way. A waiting parked draft gets both: its reminder says to
 	call the tool again only for a change, which agrees with "one draft at a time".
 
-	Also nothing on a turn whose message invokes an armed skill (``_invokes_armed_skill``): the
-	gate offers "Approve & run" on that write's card, and only the ordinary card has that
-	control, so the write is not a draft card (``draft_card.wanted``, ``offers_run``).
+	Also nothing on a turn whose message invokes exactly one armed skill: the gate offers "Approve
+	& run" on that write's card, and only the ordinary card has that control, so the write is not a
+	draft card (``draft_card.wanted``, ``offers_run``). The signal is the gate's own,
+	``api._resolve_approve_run_offer`` (the turn's bound message, one read, none unless the
+	message holds a ``/slug``), run last so the cheap skips come first.
 
 	Best-effort like the neighbouring clauses: a failure is logged and leaves the note out."""
 	from jarvis.chat import draft_card
@@ -2886,7 +2869,9 @@ def _drafting_clause(
 			return ""
 		if _TYPED_CHANGE in live_draft_clause:
 			return ""
-		if _invokes_armed_skill(conv, binding, origin, message, chat_user):
+		from jarvis import api
+
+		if api._resolve_approve_run_offer(conv.get("name"))[0]:
 			return ""
 		return DRAFTING_CLAUSE
 	except Exception:

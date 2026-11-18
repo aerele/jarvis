@@ -2464,7 +2464,7 @@ class TestApprovedRunContextClause(FrappeTestCase):
 			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
-	def _assembled(self, conv_doc, content: str = "hello") -> str:
+	def _assembled(self, conv_doc, content: str = "hello", bind: bool = False) -> str:
 		"""Run the shared, read-only assemble_prompt (the ONE place the [Context:]
 		bracket is built) for a real user message on conv_doc; return the prompt."""
 		from jarvis.chat.turn_handler import assemble_prompt
@@ -2473,6 +2473,10 @@ class TestApprovedRunContextClause(FrappeTestCase):
 			{"doctype": MSG, "conversation": conv_doc.name, "seq": 1, "role": "user", "content": content}
 		).insert(ignore_permissions=True)
 		frappe.db.commit()
+		if bind:
+			# What handle_chat_send / run_prepare do before assembling: the drafting note asks the
+			# gate's own resolver, which reads this binding.
+			turn_message_binding.bind_turn_message(conv_doc.name, msg.name)
 		ap = assemble_prompt(
 			conv_doc,
 			message_id=msg.name,
@@ -2509,8 +2513,10 @@ class TestApprovedRunContextClause(FrappeTestCase):
 		self.addCleanup(lambda: (frappe.db.delete(SKILL, {"owner": TEST_USER}), frappe.db.commit()))
 		_make_skill(TEST_USER, armed=True, name="ctxarmed-drafts")
 		with patch.dict(frappe.conf, {"jarvis_draft_cards": 1}):
-			armed = self._assembled(frappe.get_doc(CONV, _make_conv(TEST_USER)), "/ctxarmed-drafts do it")
-			plain = self._assembled(frappe.get_doc(CONV, _make_conv(TEST_USER)), "just a question")
+			armed = self._assembled(
+				frappe.get_doc(CONV, _make_conv(TEST_USER)), "/ctxarmed-drafts do it", bind=True
+			)
+			plain = self._assembled(frappe.get_doc(CONV, _make_conv(TEST_USER)), "just a question", bind=True)
 		self.assertIn("; chat user:", armed)
 		self.assertNotIn("; drafts:", armed)
 		self.assertIn("; drafts:", plain)

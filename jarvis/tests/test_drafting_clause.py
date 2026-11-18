@@ -1,10 +1,9 @@
 """The drafting note in the per-turn ``[Context: ...]`` bracket: which turns get it.
 
 ``turn_handler._drafting_clause`` decides from the site flag, the conversation's own flags,
-the binding, the origin of the turn's user row and the turn's context, so the rule runs
-without a site. What needs a site (the origin read from the stored row, the one bracket, the
-order, byte-identity with the flag off) is in ``test_live_draft`` (``TestDraftingClause``,
-``TestParkedToolDraft``).
+the binding and the origin of the turn's user row, so the rule runs without a site. What needs
+a site (the origin read from the stored row, the one bracket, the order, byte-identity with
+the flag off) is in ``test_live_draft`` (``TestDraftingClause``, ``TestParkedToolDraft``).
 """
 
 import unittest
@@ -14,13 +13,14 @@ from jarvis.chat import turn_handler
 from jarvis.chat.turn_handler import DRAFTING_CLAUSE, _drafting_clause
 
 ENABLED = "jarvis.chat.draft_card.enabled"
-ARMED = "jarvis.chat.turn_handler._invokes_armed_skill"
+OFFER = "jarvis.api._resolve_approve_run_offer"
 
 
 class TestDraftingClauseRule(unittest.TestCase):
-	def clause(self, conv=None, binding=None, origin="human", live="", flag=True, armed=False):
-		with patch(ENABLED, return_value=flag), patch(ARMED, return_value=armed):
-			return _drafting_clause(conv or {}, binding, origin, live, message="hi", chat_user="a@b.c")
+	def clause(self, conv=None, binding=None, origin="human", live="", flag=True, armed=None):
+		"""``armed`` is the docname the gate's Approve & run offer resolves to (None: no offer)."""
+		with patch(ENABLED, return_value=flag), patch(OFFER, return_value=(armed, None)):
+			return _drafting_clause(conv or {}, binding, origin, live)
 
 	def test_an_ordinary_turn_gets_the_note_and_the_flag_off_gets_nothing(self):
 		"""The site flag is the only switch for everyone else: if the helper ignored it, every
@@ -62,23 +62,33 @@ class TestDraftingClauseRule(unittest.TestCase):
 				self.assertEqual(self.clause(conv={"origin_page": page}), "")
 		self.assertEqual(self.clause(conv={"origin_page": ""}), DRAFTING_CLAUSE)
 
-	def test_a_turn_that_invokes_an_armed_skill_gets_nothing(self):
-		"""The gate offers "Approve & run" on the first covered write of an armed skill's turn, and
-		only the ordinary card has that control: a draft card would lose it. Whether the turn
-		invokes an armed skill is decided by ``_invokes_armed_skill`` (a site test in
-		``test_skill_approve_and_run`` runs it for real)."""
-		self.assertEqual(self.clause(armed=True), "")
-		self.assertEqual(self.clause(armed=False), DRAFTING_CLAUSE)
+	def test_a_turn_that_offers_approve_and_run_gets_nothing(self):
+		"""The gate offers "Approve & run" on the first covered write of an armed skill's turn and
+		parks the ordinary card, the only one with that control: the note would promise a draft
+		card that never comes. It asks the gate's own resolver about this conversation, so the two
+		cannot disagree, and the plain turn beside it keeps the note, so the absence is down to
+		the armed skill and not to the flag."""
+		conv = {"name": "CHAT-1"}
+		with patch(ENABLED, return_value=True), patch(OFFER, return_value=("custom-x", "x")) as offer:
+			self.assertEqual(_drafting_clause(conv, None, "human", ""), "")
+		offer.assert_called_once_with("CHAT-1")
+		self.assertEqual(self.clause(conv=conv, armed=None), DRAFTING_CLAUSE)
+		self.assertEqual(self.clause(conv=conv, armed="custom-x"), "")
+
+	def test_the_flag_off_never_asks_the_gate(self):
+		"""The offer is a database read: with the site flag off the prompt must cost nothing."""
+		with patch(ENABLED, return_value=False), patch(OFFER) as offer:
+			self.assertEqual(_drafting_clause({"name": "CHAT-1"}, None, "human", ""), "")
+		offer.assert_not_called()
 
 	def test_a_failure_leaves_the_note_out_and_never_fails_the_turn(self):
 		"""Every neighbouring clause is best-effort: a prompt line must never break a turn. With
 		the flag on, a dependency that raises gives no note and one log line, not an error."""
 		with (
-			patch(ARMED, side_effect=RuntimeError("boom")),
-			patch(ENABLED, return_value=True),
+			patch("jarvis.chat.turn_handler._runs_without_cards", side_effect=RuntimeError("boom")),
 			patch("frappe.log_error") as log,
 		):
-			self.assertEqual(_drafting_clause({}, None, "human", message="hi", chat_user="a@b.c"), "")
+			self.assertEqual(self.clause(), "")
 		log.assert_called_once()
 
 	def test_a_waiting_typed_draft_is_not_told_to_stop_writing_blocks(self):
