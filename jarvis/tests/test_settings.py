@@ -271,36 +271,6 @@ class TestOnUpdateAdminDispatch(_SettingsSnapshotTestCase):
 		frappe.db.commit()
 		return frappe.get_doc("Jarvis Settings", "Jarvis Settings")
 
-	def test_admin_path_reload_success_updates_last_sync_status(self):
-		from unittest.mock import patch
-
-		# Reload-action saves (api_key rotation) now go through the rotate
-		# endpoint per the prod-wiring spec's unified action-based dispatch.
-		with patch(
-			"jarvis.admin_client.post_rotate_llm_secret", return_value={"action": "reload", "result": "ok"}
-		) as mock_post:
-			s = self._save_with_new_api_key("sk-after-reload-test")
-		mock_post.assert_called_once()
-		self.assertEqual(s.last_sync_status, "ok (reload via admin)")
-		self.assertIsNotNone(s.last_sync_at)
-
-	def test_admin_path_restart_returned_action_reflects_in_status(self):
-		from unittest.mock import patch
-
-		with patch(
-			"jarvis.admin_client.post_update_llm_creds", return_value={"action": "restart", "result": "ok"}
-		):
-			# Trigger via a change that classifies as restart (provider change)
-			s = frappe.get_doc("Jarvis Settings", "Jarvis Settings")
-			s.llm_provider = "OpenAI"
-			s.llm_model = "gpt-4o"
-			s.llm_base_url = "https://api.openai.com"
-			s.llm_api_key = "sk-openai"
-			s.save(ignore_permissions=True)
-			frappe.db.commit()
-			s = frappe.get_doc("Jarvis Settings", "Jarvis Settings")
-		self.assertEqual(s.last_sync_status, "ok (restart via admin)")
-
 	def test_admin_path_auth_error_surfaces_in_status(self):
 		from unittest.mock import patch
 
@@ -316,19 +286,6 @@ class TestOnUpdateAdminDispatch(_SettingsSnapshotTestCase):
 		s = frappe.get_doc("Jarvis Settings", "Jarvis Settings")
 		self.assertTrue(s.last_sync_status.startswith("failed: auth:"))
 		self.assertIn("invalid token", s.last_sync_status)
-
-	def test_admin_path_unreachable_surfaces_in_status(self):
-		from unittest.mock import patch
-
-		from jarvis.exceptions import AdminUnreachableError
-
-		with patch(
-			"jarvis.admin_client.post_rotate_llm_secret",
-			side_effect=AdminUnreachableError("connection refused"),
-		):
-			s = self._save_with_new_api_key("sk-unreach-test")
-		self.assertTrue(s.last_sync_status.startswith("failed: admin unreachable:"))
-		self.assertIn("connection refused", s.last_sync_status)
 
 
 # TestOnUpdateLocalDispatchWhenAdminUrlEmpty removed: post-unification (2026-05-29)

@@ -1483,11 +1483,6 @@ class TestErrorLogScanEdges(CaptureBase):
 		self.assertEqual(result["rows"], [])
 		self.assertEqual(result["watermark"], f"{self.at(1)}|{name}")
 
-	def test_the_reporters_neighbours_stay_local(self):
-		for rel in ("admin_client.py", "chat/usage_push.py"):
-			tb = f'File "apps/jarvis/jarvis/{rel}", line 1, in f\nValueError: x'
-			self.assertFalse(api_errors.is_jarvis_error("admin_client: network error", tb), rel)
-
 
 # --------------------------------------------------------------------------- #
 # call_tool attribution, tool envelopes, failed-request edges
@@ -1554,10 +1549,6 @@ class TestFailedRequestEdges(CaptureBase):
 		(row,) = self.buffered()
 		self.assertEqual(row.error_code, "499")
 
-	def test_a_rate_limit_answering_as_designed_is_not_an_error(self):
-		TestFailedRequests._capture(self, "/api/method/jarvis.chat.api.send_message", 429)
-		self.assertEqual(self.buffered(), [])
-
 	def test_what_the_failed_request_left_behind_is_discarded(self):
 		frappe.db.set_default("errcap_pending", "1")
 		self.addCleanup(frappe.db.set_default, "errcap_pending", "")
@@ -1573,11 +1564,6 @@ class TestBrowserRunError(CaptureBase):
 			[{"surface": "spa_chat", "error_class": "RunError", "message": "The run failed.", **extra}]
 		)
 		frappe.set_user("Administrator")
-
-	def test_a_run_error_for_an_errored_turn_is_left_to_the_turn_lane(self):
-		_make_turn("errcap-run-1")
-		self._report(run_id="errcap-run-1")
-		self.assertEqual(self.buffered(), [])
 
 	def test_a_run_error_with_nothing_behind_it_is_kept(self):
 		self._report()

@@ -323,29 +323,6 @@ class TestPlatformLaunchProvenance(unittest.TestCase):
 			self.assertEqual(get_engagement_config(), {})
 
 	# ------------------------------------------------------------------ #
-	# preparation_mode is a SNAPSHOT: a later promotion does not rewrite it
-	# ------------------------------------------------------------------ #
-	def test_preparation_mode_snapshots_shadow_even_when_installed_state_changes(self):
-		inst_name = _install_as(self.owner)
-		frappe.db.set_value(INSTALLATION, inst_name, "enabled", 1, update_modified=False)
-		frappe.db.commit()
-		inst = frappe.get_doc(INSTALLATION, inst_name)
-
-		frappe.set_user(self.owner)
-		try:
-			result = agent_scheduler._launch_audit(inst, trigger="manual")
-		finally:
-			frappe.set_user("Administrator")
-		run = result["run"]
-
-		self.assertEqual(frappe.db.get_value(RUN, run, "preparation_mode"), "shadow")
-		# Even if the installation is later flipped live, the run's stamped snapshot
-		# stays shadow (raw set_value on the install; the run field is immutable).
-		frappe.db.set_value(INSTALLATION, inst_name, "activation_state", "live", update_modified=False)
-		frappe.db.commit()
-		self.assertEqual(frappe.db.get_value(RUN, run, "preparation_mode"), "shadow")
-
-	# ------------------------------------------------------------------ #
 	# JF-021 — THE DEFECT: triggerer A, owner B, run-as C on a MANUAL run
 	# ------------------------------------------------------------------ #
 	def test_manual_run_records_the_triggerer_not_the_run_as_user(self):

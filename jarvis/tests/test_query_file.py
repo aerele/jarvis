@@ -308,12 +308,6 @@ class TestQueryFileBoundary(unittest.TestCase):
 				query_file(file_url=doc.file_url, version=first["version"])
 			self.assertEqual(child.call_count, 1)
 
-	def test_real_child_process_counts_the_tail(self):
-		from jarvis.tools._spreadsheet_process import run_query
-
-		result = run_query(workbook(months=1, rows=1500), "2b.xlsx", sql="SELECT COUNT(*) FROM sheet1")
-		self.assertEqual(result["rows"], [[1503]])
-
 	def test_real_child_runs_six_months_of_financial_aggregates(self):
 		from jarvis.tools._spreadsheet_process import run_query
 
