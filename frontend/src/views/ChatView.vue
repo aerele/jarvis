@@ -4106,8 +4106,8 @@
 						}}</span>
 						<button
 							class="jv-art-close"
-							@click="closeDraftPanel"
-							title="Close (draft stays in chat)"
+							@click="onDraftCloseClick"
+							title="Close"
 							aria-label="Close"
 						>
 							<svg
@@ -4549,6 +4549,7 @@ import {
 import { focusFirstMark, toolPrimaryLabel } from "@/lib/toolDraftPanel";
 import {
 	TOOL_FORM_POLL_MS,
+	closeAsksFirst,
 	previewPrimaryDisabled,
 	toolFooterState,
 	watchCalculatedCells,
@@ -7984,6 +7985,30 @@ function dismissDraftPanel() {
 function closeDraftPanel() {
 	draftPanel.value = null;
 	resetDraftLink();
+}
+// The X button only (every other way out calls closeDraftPanel and stays silent): a server
+// draft's form with edits asks first, the way the phone's sheet does. The ask is one at a time,
+// and the form closes only if it is still the same panel when the person answers.
+let draftCloseAsking = false;
+async function onDraftCloseClick() {
+	const panel = draftPanel.value;
+	if (draftCloseAsking) return;
+	if (!closeAsksFirst(panel, { dead: draftPanelDead.value })) {
+		closeDraftPanel();
+		return;
+	}
+	draftCloseAsking = true;
+	try {
+		const ok = await confirm({
+			title: "Discard your changes?",
+			confirmLabel: "Discard",
+			cancelLabel: "Keep editing",
+			danger: true,
+		});
+		if (ok && draftPanel.value === panel) closeDraftPanel();
+	} finally {
+		draftCloseAsking = false;
+	}
 }
 
 const draftCta = computed(() => {
