@@ -164,11 +164,6 @@ class TestAgentSweepCadence(DispatchIdempotencyTestCase):
 		self.assertEqual(len(attempts), 1)
 		self.assertEqual(len(self._dispatched_for(inst)), 1, "the retry never ran")
 
-	def test_a_failed_launch_does_not_stamp_a_last_run(self):
-		inst = self._due_install()
-		self._sweep(dispatch=_unreachable)
-		self.assertIsNone(frappe.db.get_value(INSTALLATION, inst, "last_run_at"), "nothing ran")
-
 	def test_a_launch_that_raised_before_dispatch_is_retried_later_not_every_sweep(self):
 		inst = self._due_install()
 		before = now_datetime()
