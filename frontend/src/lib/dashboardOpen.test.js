@@ -1309,6 +1309,16 @@ test("a promotion that would cost the user something confirms first", () => {
 	assert.match(fnBody(pageSrc, "function settleDiscard("), /discardCopy\.value = DISCARD_COPY;/);
 });
 
+test("that confirm never offers an escape into general chat", () => {
+	const promote = fnBody(pageSrc, "async function promoteFromChat(");
+	assert.doesNotMatch(promote, /offerChat/);
+	assert.doesNotMatch(pageSrc, /const discardOfferChat/);
+	assert.doesNotMatch(pageSrc, /label: "Open its chat"/);
+	assert.doesNotMatch(pageSrc, /router\.push\("\/c\//);
+	const confirm = fnBody(pageSrc, "function confirmDiscard(");
+	assert.doesNotMatch(confirm, /offerChat/);
+});
+
 test("the query is stripped once the promotion settles, both ways", () => {
 	// The ?edit= lesson: clearing the seed before the confirm resolves lets a
 	// restore land mid-dialog. Same rule here — the route write happens on the
