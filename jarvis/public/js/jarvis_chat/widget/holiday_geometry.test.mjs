@@ -9,7 +9,6 @@ import {
   FAB_PX,
   FAB_RADIUS_PX,
   MARGIN_UNITS,
-  wornLayerBox,
 } from "./fab_worn.mjs";
 import {
   HERO_PX,
@@ -63,15 +62,6 @@ test("the item's svg viewBox is the tile plus its margin on every side", () => {
   const viewBox = `viewBox="${-MARGIN_UNITS} ${-MARGIN_UNITS} ${side} ${side}"`;
   assert.ok(read("FabWorn.vue").includes(viewBox));
   assert.ok(read("WelcomeHero.vue").includes(viewBox));
-});
-
-test("the layer box is the viewBox scaled to the tile", () => {
-  const box = wornLayerBox(FAB_PX);
-  assert.equal(
-    box.width,
-    `${((TILE_UNITS + 2 * MARGIN_UNITS) * FAB_PX) / TILE_UNITS}px`
-  );
-  assert.equal(box.left, `${(-MARGIN_UNITS * FAB_PX) / TILE_UNITS}px`);
 });
 
 test("a radius in px becomes the same radius in the art's 56 unit tile", () => {

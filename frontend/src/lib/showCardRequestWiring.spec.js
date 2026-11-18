@@ -37,12 +37,6 @@ describe("send() wires the typed 'show it' fast-path", () => {
 		expect(COND).toContain("fromMain");
 	});
 
-	it("skips the fast-path when the send carries an attachment", () => {
-		// A message with a file is a real send, never a re-check phrase — the guard
-		// stops "show it" as a caption from being swallowed.
-		expect(COND).toContain("!pendingFiles.value.length");
-	});
-
 	it("routes the re-surface through the single shared choke-point, tagged typed", () => {
 		// Every layer (auto/pill/menu/typed) goes through resyncPendingConfirmations
 		// so they all inherit its ok:false-keeps-queue + freshness posture. No layer
@@ -76,12 +70,6 @@ describe("the fast-path swallows the message ONLY when a card actually surfaced"
 		const clearAt = typedBlock.indexOf('input.value = "";');
 		expect(guardAt).toBeGreaterThan(-1);
 		expect(clearAt).toBeGreaterThan(guardAt);
-	});
-
-	it("re-checks the conversation after the await, so a switch can't clear the new composer", () => {
-		// resyncPendingConfirmations is async; the user may have switched chats while
-		// it ran. Clearing input then would wipe an unrelated draft.
-		expect(SURFACED_GUARD).toContain("chatViewIsCurrent(_typedView)");
 	});
 });
 

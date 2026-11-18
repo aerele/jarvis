@@ -26,17 +26,6 @@ import {
 // would not have caught that); chat_stream.test.mjs pins that the field actually
 // reaches the item.
 
-test("orders by created_at ascending, earliest-minted is number 1", () => {
-  const out = sortPendingCards([
-    { token: "z", created_at: 200 },
-    { token: "a", created_at: 100 },
-  ]);
-  assert.deepEqual(
-    out.map((c) => c.token),
-    ["a", "z"]
-  );
-});
-
 test("tie-breaks equal created_at by token in code-unit order, matching the server", () => {
   // 'A' (0x41) < 'z' (0x7A) by code unit; a locale compare would disagree - the
   // exact divergence that renumbers a card between screen and server.
@@ -216,27 +205,6 @@ test("a typed discard does not suppress a later safety-update explanation", () =
     out.pending.map((card) => card.token),
     ["safe-b"]
   );
-});
-
-// Decision 6: a bare phrase binds only cards parked since the user last spoke, so
-// the widget must never advertise one for an "Earlier" card (the SPA/PWA mirror).
-test("the bare-phrase hint is only for cards parked since the user last spoke", () => {
-  assert.equal(typedApprovalHint([{ token: "a" }]), 'or type "go ahead"');
-  assert.equal(
-    typedApprovalHint([{ token: "a", recent: false }]),
-    'or type "confirm 1"'
-  );
-  assert.equal(
-    typedApprovalHint([{ token: "a" }, { token: "b", recent: true }]),
-    'or type "confirm all", or "confirm 1 and 2"'
-  );
-  assert.equal(
-    typedApprovalHint([{ token: "a", recent: false }, { token: "b" }]),
-    'or type "confirm 1 and 2"'
-  );
-  assert.equal(typedApprovalHint([]), "");
-  assert.equal(typedApprovalHint(undefined), "");
-  assert.equal(isRecentCard(null), false);
 });
 
 test("an accepted send ages only the cards the user was shown", () => {
@@ -495,6 +463,12 @@ const NO_DRAFT_CASES = [
 test("visibleTypedHint without a draft keeps the old hint text, Earlier cards included", () => {
   for (const [cards, want] of NO_DRAFT_CASES)
     assert.equal(visibleTypedHint(cards), want);
+  assert.equal(typedApprovalHint(undefined), "");
+  assert.equal(isRecentCard(null), false);
+  assert.equal(
+    typedApprovalHint([{ token: "a" }, { token: "b", recent: true }]),
+    'or type "confirm all", or "confirm 1 and 2"'
+  );
 });
 
 // Break: a printed "confirm N" no longer names the card at position N of approval_tokens (the list

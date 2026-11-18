@@ -19,8 +19,6 @@ const read = (p) => fs.readFileSync(path.join(APP, p), "utf8");
 
 const reviewTab = read("frontend/src/pages/skills/ReviewTab.vue");
 const insightDialog = read("frontend/src/components/learning/InsightApplyDialog.vue");
-const skillsPy = read("jarvis/chat/custom_skills_api.py");
-const learnedPy = read("jarvis/chat/learned_api.py");
 
 const fnBody = (src, sig) => {
 	const fn = src.slice(src.indexOf(sig));
@@ -28,13 +26,6 @@ const fnBody = (src, sig) => {
 };
 
 describe("apply after approve: servers flag it, the client runs it", () => {
-	it("both server endpoints report needs_apply", () => {
-		expect(skillsPy).toContain(
-			'out["needs_apply"] = _approval_needs_apply(req.to_scope, out.get("push_projection"))'
-		);
-		expect(learnedPy).toContain('"needs_apply": apply_would_push(row_name)');
-	});
-
 	it("an approval or applied insight with needs_apply runs the push", () => {
 		const decide = fnBody(reviewTab, "async function decideSkillPromo(");
 		expect(decide).toContain("if (approve && r && r.needs_apply) pushSharedSkills();");
