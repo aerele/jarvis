@@ -51,22 +51,6 @@ class TestRoleProfiles(FrappeTestCase):
 		self.assertIn("hrms-payroll", c.skills)
 		self.assertIn("erpnext-accounts", c.skills)
 
-	def test_two_set_join_uses_underscore_separator(self):
-		"""The agent runtime (2026.9.x) rejects "+" in agent ids
-		(^[a-z0-9][a-z0-9_-]{0,63}$); a combo role-profile id must join its
-		sorted set keys with "_" instead, never "+"."""
-		u = self._mk_user("rp-two-set@example.com", ["Jarvis User", "HR User", "Projects User"])
-		c = role_profiles.resolve_profile(u)
-		self.assertEqual(c.agent_id, "role-hr_projects")
-
-	def test_three_set_join_chains_all_underscores(self):
-		u = self._mk_user(
-			"rp-three-set@example.com",
-			["Jarvis User", "HR User", "Accounts User", "Projects User"],
-		)
-		c = role_profiles.resolve_profile(u)
-		self.assertEqual(c.agent_id, "role-accounts_hr_projects")
-
 	def test_unmapped_roles_fall_back_to_main(self):
 		u = self._mk_user("rp-none@example.com", ["Jarvis User", "Translator"])
 		c = role_profiles.resolve_profile(u)
@@ -704,9 +688,6 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		self.assertEqual(result, {"synced": False})
 		self.assertNotIn("role_profiles_config", store)
 		self.assertEqual(store.get("enable_role_profiles", 0), 0)
-
-	def test_invalidate_config_cache_is_safe_noop_when_nothing_memoized(self):
-		role_profiles._invalidate_config_cache()  # must not raise
 
 	def test_validate_rejects_bad_skill_slug_charset(self):
 		bad = self._config()

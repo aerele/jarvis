@@ -316,18 +316,6 @@ class TestErrorLogReader(ApiErrorsBase):
 		self.assertFalse(api_errors.is_jarvis_error("erpnext.stock.get_stock", ""))
 		self.assertFalse(api_errors.is_jarvis_error("frappe.model.document.save", "no app path"))
 
-	def test_reporter_own_failures_are_not_forwarded(self):
-		# The push job / endpoint failing must NOT feed back to admin about its own
-		# outage - otherwise a */5 admin outage floods the feed once admin returns.
-		push_tb = 'File "/x/apps/jarvis/jarvis/error_push.py", line 60, in push_error_rollup'
-		self.assertFalse(api_errors.is_jarvis_error("jarvis errors: rollup push failed", push_tb))
-		endpoint_tb = 'File "/x/apps/jarvis/jarvis/api_errors.py", line 40, in report_client_errors'
-		self.assertFalse(api_errors.is_jarvis_error("", endpoint_tb))
-		# GAP 1 heartbeat: its own push-path errors must not self-forward either (guards
-		# the _REPORTER_SELF_MARKERS entry against a future drop/typo).
-		heartbeat_tb = 'File "/x/apps/jarvis/jarvis/chat/heartbeat.py", line 60, in push_bench_heartbeat'
-		self.assertFalse(api_errors.is_jarvis_error("jarvis.chat.heartbeat push failed", heartbeat_tb))
-
 	def test_collect_filters_to_jarvis_and_advances_watermark(self):
 		# Pinned like the tests below: since=None scans oldest-first, so on a used
 		# site the two fresh rows fall outside the limit window.

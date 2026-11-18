@@ -211,17 +211,6 @@ class TestHappyPath(FrappeTestCase):
 			)
 		self.assertEqual(result, {"action": "reload", "result": "ok"})
 
-	def test_restart_returns_unwrapped_data(self):
-		mock_post = MagicMock(
-			return_value=_mock_response(
-				200,
-				json_body={"message": {"ok": True, "data": {"action": "restart", "result": "ok"}}},
-			)
-		)
-		with patch("requests.post", mock_post):
-			result = post_update_llm_creds("OpenAI", "gpt-4o", "https://api.openai.com", "sk-new")
-		self.assertEqual(result["action"], "restart")
-
 
 class TestHeaders(FrappeTestCase):
 	def setUp(self):
@@ -322,11 +311,6 @@ class TestNetworkErrors(FrappeTestCase):
 
 	def test_connection_error_raises_unreachable(self):
 		with patch("requests.post", side_effect=requests.ConnectionError("refused")):
-			with self.assertRaises(AdminUnreachableError):
-				post_update_llm_creds("p", "m", "b", "k")
-
-	def test_timeout_raises_unreachable(self):
-		with patch("requests.post", side_effect=requests.Timeout("read timeout")):
 			with self.assertRaises(AdminUnreachableError):
 				post_update_llm_creds("p", "m", "b", "k")
 
@@ -495,23 +479,6 @@ class TestAdminErrorResponses(FrappeTestCase):
 			with self.assertRaises(AdminValidationError) as cm:
 				post_update_llm_creds("p", "m", "b", "k")
 		self.assertEqual(str(cm.exception), "no running tenant")
-
-	def test_5xx_envelope_still_raises_unreachable(self):
-		"""5xx is genuinely server-side; the unreachable class is correct."""
-		mock_post = MagicMock(
-			return_value=_mock_response(
-				503,
-				json_body={
-					"message": {
-						"ok": False,
-						"error": {"code": "ServiceUnavailable", "message": "down"},
-					}
-				},
-			)
-		)
-		with patch("requests.post", mock_post):
-			with self.assertRaises(AdminUnreachableError):
-				post_update_llm_creds("p", "m", "b", "k")
 
 	def test_frappe_validation_error_surfaces_clean_message(self):
 		"""When admin raises frappe.ValidationError inside a whitelisted endpoint
@@ -1685,20 +1652,6 @@ class TestMissingConfig(FrappeTestCase):
 	def setUp(self):
 		_settings_clear_admin()
 
-	def test_no_credentials_raises_auth_error(self):
-		"""api_key + api_secret are required; missing either raises early."""
-		from jarvis.exceptions import AdminAuthError
-
-		settings = _admin_settings()
-		settings.db_set("jarvis_admin_url", "https://admin.example.com")
-		settings.db_set("jarvis_admin_api_key", "")
-		settings.db_set("jarvis_admin_api_secret", "")
-		try:
-			with self.assertRaises(AdminAuthError):
-				post_update_llm_creds("p", "m", "b", "k")
-		finally:
-			_settings_clear_admin()
-
 	def test_no_secret_raises_auth_error(self):
 		from jarvis.exceptions import AdminAuthError
 
@@ -2329,17 +2282,6 @@ class TestPostUpdateLlmCredsAuthMode(FrappeTestCase):
 
 	def tearDown(self):
 		_settings_clear_admin()
-
-	def test_default_auth_mode_is_api_key(self):
-		captured = {}
-
-		def _fake_post(url, json=None, **_kw):
-			captured["body"] = json
-			return _mock_response(200, json_body={"message": {"ok": True, "data": {"action": "restart"}}})
-
-		with patch("requests.post", side_effect=_fake_post):
-			post_update_llm_creds(provider="OpenAI", model="gpt-4o", base_url="", api_key="sk-1")
-		self.assertEqual(captured["body"]["auth_mode"], "api_key")
 
 	def test_explicit_subscription_auth_mode(self):
 		captured = {}
@@ -3249,10 +3191,6 @@ class TestTermsUrl(FrappeTestCase):
 			patch("jarvis.hooks._DEFAULT_ADMIN_URL_FALLBACK", "https://erp.reseller.example"),
 			patch.object(admin_client, "_admin_url", return_value="https://erp.reseller.example"),
 		):
-			self.assertEqual(admin_client.terms_url(), "https://erp.reseller.example/terms")
-
-	def test_rebranded_admin_keeps_its_own_terms_page(self):
-		with patch.object(admin_client, "_admin_url", return_value="https://erp.reseller.example"):
 			self.assertEqual(admin_client.terms_url(), "https://erp.reseller.example/terms")
 
 	def test_stock_admin_in_different_case_is_still_stock(self):

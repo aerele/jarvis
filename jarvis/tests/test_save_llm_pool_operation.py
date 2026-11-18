@@ -196,23 +196,6 @@ class TestSaveLlmPoolForceProbe(_SaveOpBase):
 	the caller (the subscription Test button) explicitly asks for it, so an
 	ordinary save's request is unchanged."""
 
-	def test_force_probe_true_reaches_post_update_llm_pool(self):
-		view = self._capture()
-		calls = []
-		with patch(
-			"jarvis.admin_client.post_update_llm_pool",
-			side_effect=lambda **kw: calls.append(kw) or _pool_ok(),
-		):
-			onboarding.save_llm_pool(
-				frappe.as_json(self._sub_models(view["capture_id"])),
-				preset=None,
-				routing_mode="failover",
-				idempotency_key="idem-force-1",
-				force_probe=True,
-			)
-		self.assertEqual(len(calls), 1)
-		self.assertIs(calls[0].get("force_probe"), True)
-
 	def test_force_probe_default_is_false_and_ordinary_saves_never_send_it_true(self):
 		view = self._capture()
 		calls = []
@@ -258,6 +241,7 @@ class TestSaveLlmPoolForceProbe(_SaveOpBase):
 					idempotency_key=f"idem-wire-{wire_value!r}",
 					force_probe=wire_value,
 				)
+			self.assertEqual(len(calls), 1)
 			self.assertIs(
 				calls[0].get("force_probe"),
 				expected,

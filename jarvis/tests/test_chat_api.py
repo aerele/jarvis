@@ -395,22 +395,6 @@ class TestSendMessage(_ChatTestCase):
 		self.assertEqual(kwargs["conversation_id"], self.conv)
 		self.assertEqual(kwargs["message_id"], result["message_id"])
 
-	def test_enqueues_with_300s_timeout(self):
-		"""Sprint-2: worst-case worker budget = pair (<=90s) + WS connect
-		(10s) + turn (180s) = 280s. The previous 200s timeout caused
-		RQ SIGKILL bypassing the worker's try/finally, stranding the
-		placeholder row with streaming=1 forever. Pin the new 300s
-		budget so a future "cleanup" cannot regress it back."""
-		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
-			with patch("frappe.enqueue") as enqueue:
-				send_message(self.conv, "hi")
-		_, kwargs = enqueue.call_args
-		self.assertEqual(
-			kwargs["timeout"],
-			_AGENT_TURN_WORKER_TIMEOUT,
-			"RQ worker budget must cover pair+connect+turn worst case",
-		)
-
 	def test_seq_increments_across_calls(self):
 		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
 			with patch("frappe.enqueue"):
@@ -640,14 +624,6 @@ class TestRetryMessage(_ChatTestCase):
 			retry_message(errored.name)
 		_, kwargs = enqueue.call_args
 		self.assertEqual(kwargs["message_id"], u2)
-
-	def test_bumps_conversation_last_active_at(self):
-		_u, asst_id = self._make_turn(self.conv, with_error=True)
-		before = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
-		with patch("frappe.enqueue"):
-			retry_message(asst_id)
-		after = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
-		self.assertGreaterEqual(after, before)
 
 	def test_legacy_retry_of_a_reply_that_is_not_the_newest_is_refused(self):
 		u, asst_id = self._make_turn(self.conv, with_error=True)

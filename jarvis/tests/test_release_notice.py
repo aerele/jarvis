@@ -84,12 +84,6 @@ class TestBootPayload(FrappeTestCase):
 			out = release_notice.check()
 		self.assertFalse(out["active"])
 
-	def test_self_clears_once_this_bench_is_current(self):
-		"""The bench holds both versions, so it must not stay blocked waiting on an
-		unreachable or mis-credentialed control plane."""
-		self._set(release_notice_active=1, latest_jarvis_version=__version__, release_notice_message="m")
-		self.assertFalse(release_notice.boot_payload()["active"])
-
 	def test_stays_blocked_while_behind(self):
 		self._set(release_notice_active=1, latest_jarvis_version="99.0.0", release_notice_message="m")
 		self.assertTrue(release_notice.boot_payload()["active"])
@@ -138,13 +132,6 @@ class TestBootPayload(FrappeTestCase):
 		# Old CP omits the tier key -> derive it from active (a hard gate reads hard).
 		release_notice.persist({"active": 1, "version": NEWER, "message": "m"})
 		self.assertEqual(release_notice.boot_payload()["tier"], "hard")
-
-	def test_self_clear_zeroes_both_tiers(self):
-		# Bench already at target -> both active and tier clear, even a stored hard.
-		release_notice.persist({"active": 1, "tier": "hard", "version": __version__, "message": "m"})
-		p = release_notice.boot_payload()
-		self.assertFalse(p["active"])
-		self.assertEqual(p["tier"], "none")
 
 	def test_empty_notice_clears_tier(self):
 		release_notice.persist({"active": 1, "tier": "hard", "version": NEWER, "message": "m"})

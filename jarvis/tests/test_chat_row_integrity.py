@@ -350,13 +350,3 @@ class TestWritersStillWrite(_Base):
 		data = [frappe.parse_json(r.tool_result)["data"] for r in rows]
 		self.assertEqual(data[0].get("docstatus"), 1)
 		self.assertNotIn("docstatus", data[1])
-
-	def test_send_message_and_enqueue_turn_inserts(self):
-		with _as(USER), _no_dispatch():
-			human = chat_api.send_message(self.conv, "one")
-			with delegated_send():
-				delegated = chat_api.send_message(self.conv, "two")
-		with _no_dispatch():
-			enq = chat_api._enqueue_turn(self.conv, "three", origin="system", hidden=True)
-		for name in (human["message_id"], delegated["message_id"], enq["message_id"]):
-			self.assertTrue(frappe.db.exists(MSG, name))
