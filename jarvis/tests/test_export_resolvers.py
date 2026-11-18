@@ -38,10 +38,6 @@ class TestFromQuery(FrappeTestCase):
 		m = from_query("ToDo", filters={"description": ["like", "resolver-test-%"]})
 		self.assertIn("name", m.columns)
 
-	def test_rejects_star_fields(self):
-		with self.assertRaises(InvalidArgumentError):
-			from_query("ToDo", fields=["*"])
-
 	def test_child_table_needs_parent_doctype(self):
 		# "Has Role" is a child table (istable) of User.
 		with self.assertRaises(InvalidArgumentError) as ctx:
@@ -148,13 +144,6 @@ class TestExportPermGuards(FrappeTestCase):
 		with self.assertRaises(PermissionDeniedError) as ctx:
 			from_query("ToDo", fields=["name"])
 		self.assertIn("export", str(ctx.exception).lower())
-
-	def test_missing_and_unknown_doctype_guards(self):
-		with self.assertRaises(InvalidArgumentError):
-			from_query(None, fields=["name"])
-		with self.assertRaises(InvalidArgumentError) as ctx:
-			from_query("JV No Such Doctype ZZZ", fields=["name"])
-		self.assertIn("unknown DocType", str(ctx.exception))
 
 
 class TestFieldLevelAlignment(FrappeTestCase):

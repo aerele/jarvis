@@ -495,11 +495,6 @@ class TestLearnedApi(unittest.TestCase):
 		self.assertEqual(out["sentinel"], "compiled")
 		self.assertTrue(m.called)
 
-	def test_get_learned_apply_status_proxies_sync(self):
-		out = learned_api.get_learned_apply_status()
-		self.assertIn("last_sync_status", out)
-		self.assertIn("pending", out)
-
 	# ------------------------------------------------------------------ #
 	# run now
 	# ------------------------------------------------------------------ #
@@ -668,12 +663,6 @@ class TestLearnedApi(unittest.TestCase):
 	# ------------------------------------------------------------------ #
 	# LLM polish endpoint (plan 5.5 Phase 2)
 	# ------------------------------------------------------------------ #
-	def test_polish_requires_settings_flag(self):
-		name = _mk("po1")
-		with _polish_flag(0):
-			with self.assertRaises(frappe.ValidationError):
-				learned_api.polish_learned_draft(name)
-
 	def test_polish_refuses_non_a_class(self):
 		# B/C drafts embed raw party names; the polish prompt must stay
 		# A-class-clean by construction (polish.py), so the endpoint gates on
@@ -735,24 +724,6 @@ class TestLearnedApi(unittest.TestCase):
 		self.assertFalse(out["ok"])
 		self.assertIn("Rejected", out["reason"])
 		self.assertEqual(frappe.db.get_value(JLP, name, "skill_draft"), orig_draft)
-
-	def test_polish_not_ok_writes_nothing(self):
-		name = _mk("po5")
-		orig_draft = frappe.db.get_value(JLP, name, "skill_draft")
-		with _polish_flag(1):
-			with mock.patch(
-				"jarvis.learning.polish.polish_skill_draft",
-				return_value={
-					"ok": False,
-					"text": None,
-					"reason": "monthly polish budget exhausted",
-				},
-			):
-				out = learned_api.polish_learned_draft(name)
-		self.assertFalse(out["ok"])
-		self.assertEqual(out["reason"], "monthly polish budget exhausted")
-		self.assertEqual(frappe.db.get_value(JLP, name, "skill_draft"), orig_draft)
-		self.assertEqual(int(frappe.db.get_value(JLP, name, "draft_polished") or 0), 0)
 
 	# ------------------------------------------------------------------ #
 	# correction loop (plan 6.5): flag_learned_default

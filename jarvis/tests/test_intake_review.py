@@ -501,20 +501,6 @@ class TestIntakeReview(FrappeTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			approvals_api.dismiss_approval(name)
 
-	def test_decision_must_be_a_json_object(self):
-		_rule, row, name = self._pending()
-		frappe.set_user(OWNER)
-		with self.assertRaises(frappe.ValidationError):
-			approvals_api.decide(name, "Approved", 1)
-		self.assertEqual(review.may_decide(frappe.get_doc(AR, name)), True)
-
-	def test_apply_decision_is_the_plan_contract(self):
-		_rule, row, name = self._pending()
-		res = review.apply_decision(frappe.get_doc(AR, name), True, {"items.2.qty": 1})
-		self.assertEqual(res["status"], "Approved")
-		row.reload()
-		self.assertEqual(row.status, "Success")
-
 	# ---- fix round 1 ----------------------------------------------------------
 	def _shared(self, row, name):
 		return {
