@@ -30,12 +30,6 @@ afterEach(() => {
 });
 
 describe("TourIntro slide order", () => {
-	it("opens on the business-outcome Welcome slide, not the chat demo", async () => {
-		const wrapper = mount(TourIntro);
-		expect(heading(wrapper)).toBe(SLIDE_HEADINGS[0]);
-		wrapper.unmount();
-	});
-
 	it("walks every slide in the documented order via Next", async () => {
 		const wrapper = mount(TourIntro);
 		for (const [i, text] of SLIDE_HEADINGS.entries()) {

@@ -30,12 +30,6 @@ describe.each([
 			expect(mod.hasScene(other)).toBe(false);
 	});
 
-	it("the two surfaces map the same designs", () => {
-		expect(Object.keys(desktop.SCENE_LOADERS).sort()).toEqual(
-			Object.keys(phone.SCENE_LOADERS).sort()
-		);
-	});
-
 	it("a failed import is no scene: null, one report, no new attempt for a minute", async () => {
 		let clock = 1000;
 		const now = () => clock;

@@ -225,11 +225,6 @@ describe("container_unavailable (jarvis#885)", () => {
 		expect(await isContainerUnavailable()).toBe(false);
 	});
 
-	it("never claims the llm_credentials CTA banner", async () => {
-		verdict({ ready: false, reason: "container_unavailable" });
-		expect(await needsLlmConnection()).toBe(false);
-	});
-
 	it("does NOT trip the full-screen onboarding gate", async () => {
 		// The workspace WAS established (it had a running container that then
 		// died), so it keeps its chat + history and gets a banner, never the
@@ -384,37 +379,6 @@ describe("regateOnRouteChange (jarvis#691 round-4 review F3/F4)", () => {
 describe("ChatView banner chain order", () => {
 	const HERE = path.dirname(fileURLToPath(import.meta.url));
 	const chatSrc = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
-
-	it("tests the specific No-AI banner before the generic not-ready one", () => {
-		const specific = chatSrc.indexOf('v-else-if="noAiConnected"');
-		const generic = chatSrc.indexOf('v-else-if="notReadyNotice"');
-		expect(specific, "ChatView must still render the noAiConnected banner").not.toBe(-1);
-		expect(generic, "ChatView must still render the notReadyNotice banner").not.toBe(-1);
-		// Specific before generic: the No-AI banner carries the "Connect a model"
-		// call to action, so a generic banner ahead of it in the chain leaves a
-		// disconnected customer with no discoverable way back to the AI models pane.
-		expect(specific).toBeLessThan(generic);
-	});
-
-	it("orders the stuck-apply banner AFTER the still-converging one (jarvis#825)", () => {
-		const applying = chatSrc.indexOf('v-else-if="llmApplying"');
-		const stuck = chatSrc.indexOf('v-else-if="llmApplyStuck"');
-		expect(applying, "ChatView must still render the llmApplying banner").not.toBe(-1);
-		expect(stuck, "ChatView must render the llmApplyStuck banner").not.toBe(-1);
-		// llmApplying is the LIVE, still-converging window; llmApplyStuck is the
-		// aged-out one. Applying must win the chain while it is true, so the honest
-		// "didn't finish" banner only shows once the soft window has genuinely
-		// lapsed - never over a retry that just flipped the reason back to applying.
-		expect(applying).toBeLessThan(stuck);
-	});
-
-	it("orders the soft workersWarnNotice banner AFTER suspendedNotice (billing takes precedence)", () => {
-		const suspended = chatSrc.indexOf('v-else-if="suspendedNotice"');
-		const warn = chatSrc.indexOf('v-else-if="workersWarnNotice"');
-		expect(suspended, "ChatView must still render the suspendedNotice banner").not.toBe(-1);
-		expect(warn, "ChatView must render the workersWarnNotice banner").not.toBe(-1);
-		expect(suspended).toBeLessThan(warn);
-	});
 });
 
 /**

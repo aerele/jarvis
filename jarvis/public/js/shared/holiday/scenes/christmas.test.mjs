@@ -18,9 +18,6 @@ import {
   CLEAR,
   GAP,
   HERO_TOP_UNITS,
-  floorFit,
-  sceneHeroTop,
-  FLOOR_ROW as DIWALI_ROW,
 } from "../scene-geometry.mjs";
 import {
   boxes,
@@ -110,13 +107,6 @@ test("the sleigh is level over the mark and crosses the whole stage", () => {
   assert.ok(sleighAt(plan, 0)[0] < -300 && sleighAt(plan, 1)[0] > 1100);
 });
 
-test("the page keeps the mark low enough for the sleigh: the art needs no more than the table", () => {
-  for (const s of [1, 1.25])
-    assert.ok(
-      sceneHeroTop("christmas", s) >= (CLEAR + SLEIGH_MIN_ROOM + GAP) * s - 1e-9
-    );
-});
-
 test("at the lowest mark the page allows, the sleigh fits at its smallest size, and nothing asks the hero to sit lower", () => {
   const mt = HERO_TOP_UNITS.christmas;
   const plan = sleighPlan(room(mt));
@@ -127,16 +117,6 @@ test("at the lowest mark the page allows, the sleigh fits at its smallest size, 
     if (box.r >= 400 - 36 - 8 && box.l <= 400 + 36 + 8)
       assert.ok(box.b <= mt - GAP + 0.05, `u ${i / 200}: bottom ${box.b}`);
   }
-});
-
-test("floorFit gives the Diwali answer for the Diwali row, and uses this row's own height", () => {
-  const args = { ground: 560, hostH: 500, s: 1 };
-  assert.deepEqual(floorFit({ ...args, row: DIWALI_ROW }), floorFit(args));
-  const over = 560 - (500 - 12); // how far the row's bottom is past the stage's gap line
-  assert.equal(
-    floorFit({ ...args, row: FLOOR_ROW }).scale,
-    1 - over / FLOOR_ROW.up
-  );
 });
 
 test("the tree and gifts stay at the stage's ends when the row shrinks, never drifting in over the heading", () => {

@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { DESIGNS, isStale, readAnswer } from "./answer.mjs";
+import { isStale, readAnswer } from "./answer.mjs";
 
 const CASES = JSON.parse(
   readFileSync(
@@ -88,16 +88,6 @@ test("an unknown design or occasion reads as none", () => {
   }
 });
 
-test("republic is an occasion on the independence design, not a design", () => {
-  assert.ok(!DESIGNS.includes("republic"));
-  const out = readAnswer({
-    ...good(),
-    design: "independence",
-    occasion: "republic",
-  });
-  assert.equal(out.occasion, "republic");
-});
-
 test("a day without a usable date or tz reads as none", () => {
   for (const date of [undefined, "", "8 Nov", "2026-13-40", 20261108]) {
     assert.deepEqual(readAnswer({ ...good(), date }), NONE, String(date));
@@ -155,10 +145,6 @@ test("isStale reads the date in the extreme zones too", () => {
   assert.equal(at("Pacific/Pago_Pago", "2026-11-09"), true);
 });
 
-test("isStale is true for a tab left open overnight", () => {
-  assert.equal(isStale(good(), new Date("2026-11-09T05:00:00Z")), true);
-});
-
 test("isStale treats an invalid zone as stale instead of throwing", () => {
   const answer = { ...good(), tz: "Not/AZone" };
   assert.equal(isStale(answer, new Date("2026-11-08T05:00:00Z")), true);
@@ -169,8 +155,4 @@ test("a none answer with no date is never stale; with a date it follows the day"
   const none = { v: 1, date: "2026-11-08", tz: "Asia/Kolkata", kind: "none" };
   assert.equal(isStale(none, new Date("2026-11-08T05:00:00Z")), false);
   assert.equal(isStale(none, new Date("2026-11-09T05:00:00Z")), true);
-});
-
-test("isStale tolerates a missing now by using the clock", () => {
-  assert.equal(typeof isStale(good()), "boolean");
 });

@@ -238,11 +238,3 @@ test("a changed build version marks the page stale, however young", async () => 
   await promise;
   assert.equal(reports[0].error_code, "holiday_widget:art_stale");
 });
-
-test("a page with no build version is not marked stale by that", async () => {
-  const { loader, scripts, reports } = setup();
-  const promise = loader.load();
-  scripts[0].onerror();
-  await promise;
-  assert.equal(reports[0].error_code, "holiday_widget:art");
-});

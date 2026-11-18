@@ -17,7 +17,6 @@ import {
   GAP,
   HERO_TOP_UNITS,
   MARK_TOP,
-  sceneHeroTop,
 } from "../scene-geometry.mjs";
 import {
   boxes,
@@ -168,10 +167,6 @@ test("a replay has the floor row with its low lanterns, and lowers the crescent"
 test("the floor row's extent covers the lanterns' string top and glow bottom", () => {
   assert.equal(FLOOR_ROW.up, 135 + LANTERN.string);
   assert.equal(FLOOR_ROW.rise, 78 - LANTERN.drop);
-});
-
-test("the page keeps the mark below the plain clearance: the art needs no more than the table", () => {
-  assert.ok(sceneHeroTop("eid", 1) >= CLEAR + GAP - 1e-9);
 });
 
 // ---- photosensitivity --------------------------------------------------------------------

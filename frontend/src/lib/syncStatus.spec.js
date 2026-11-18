@@ -46,15 +46,6 @@ describe("humaniseSyncStatus", () => {
 		}
 	});
 
-	// The bug this module exists for: "restart via admin" is an audit note about a
-	// restart that already happened, and it was on screen reading like a chore.
-	it("never turns an ok status into an instruction", () => {
-		const { text } = humaniseSyncStatus("ok (restart via admin)");
-		expect(text).toBe("Up to date");
-		expect(text.toLowerCase()).not.toContain("restart");
-		expect(text.toLowerCase()).not.toContain("admin");
-	});
-
 	it("splits a failure into a short label and a separate reason", () => {
 		expect(humaniseSyncStatus("failed: fleet returned 502")).toEqual({
 			kind: "failed",

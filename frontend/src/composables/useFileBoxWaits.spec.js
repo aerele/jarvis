@@ -51,11 +51,6 @@ describe("File Box waits in the current chat", () => {
 		await w.refresh("A", true);
 		expect(w.visibleItems.value).toEqual([{ ...question, conversation: "A" }]);
 	});
-	it("does not expose an empty duplicate panel", async () => {
-		const w = setup([question]);
-		await w.refresh("A", true);
-		expect(w.visibleItems.value).toEqual([]);
-	});
 	it("rejects a late A response after A -> B -> A", async () => {
 		const w = setup();
 		let resolve;

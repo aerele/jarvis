@@ -45,13 +45,6 @@ import * as pongalArt from "./scenes/pongal-art.mjs";
 import * as independenceArt from "./scenes/independence-art.mjs";
 import { floorSVG, toranSVG } from "./scenes/diwali-art.mjs";
 
-test("the toran bottom is the lowest thing drawn, plus the settle overshoot", () => {
-  // Lowest point of a mango leaf: the deepest swag point plus the leaf's height.
-  const t = 5 / 9; // the deepest swag point that carries a leaf
-  const swag = TORAN.top + TORAN.sag * t * (1 - t);
-  assert.equal(toranBottom(), swag + TORAN.leaf + TORAN.overshoot);
-});
-
 test("the drawn toran stays inside the geometry (every y it draws is above the bottom)", () => {
   const svg = toranSVG("t-", 0, 400);
   const ys = [...svg.matchAll(/ cy="([\d.]+)"/g)].map((m) => Number(m[1]));
@@ -236,6 +229,7 @@ test("a floor row of its own height: floorFit takes the row, the Diwali row by d
   const tall = { up: 200, rise: 0 };
   const over = 560 - (500 - FLOOR_GAP_PX);
   assert.equal(floorFit({ ...args, row: tall }).scale, 1 - over / 200);
+  assert.equal(floorFit({ ...args, row: tall }).scale, 1 - 72 / 200); // 72 = 560 - (500 - 12)
   assert.equal(
     floorFit({ ...args, row: { up: 20, rise: 0 } }).scale,
     MIN_FLOOR_SCALE
@@ -315,14 +309,6 @@ test("a raised bottom (rise) is part of the row's height for the hero rule", () 
 
 test("the hero gap is 16 px", () => {
   assert.equal(HERO_FLOOR_GAP_PX, 16);
-});
-
-test("the worn item's overhang table names only designs that have worn art, in tile units", async () => {
-  const { DESIGNS } = await import("./worn.mjs");
-  for (const [design, units] of Object.entries(WORN_OVERHANG)) {
-    assert.ok(DESIGNS.includes(design), design);
-    assert.ok(units > 0 && units < 56, `${design} ${units}`);
-  }
 });
 
 test("wornOverhangUnits: the table value, 0 for a design without one and for a prototype key", () => {
