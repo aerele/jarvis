@@ -438,7 +438,10 @@ class TestFileToolsBlankArgs(FrappeTestCase):
 		import uuid
 		import zipfile
 
-		from frappe.core.doctype.file.file import FILE_ENCODING_OPTIONS
+		try:
+			from frappe.core.doctype.file.file import FILE_ENCODING_OPTIONS
+		except ImportError:  # Frappe v15 has no such constant: the encodings v16 tries
+			FILE_ENCODING_OPTIONS = ("utf-8-sig", "utf-8", "windows-1250", "windows-1252")
 		from frappe.utils.file_manager import save_file
 
 		# Frappe's File reads saved content as text when any of FILE_ENCODING_OPTIONS
