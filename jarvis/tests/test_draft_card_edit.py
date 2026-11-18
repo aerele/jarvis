@@ -1044,11 +1044,17 @@ if FrappeTestCase is not None:
 		def test_a_field_above_the_users_level_is_marked_not_reset(self):
 			"""Frappe would reset a value above the writer's permission level without a word;
 			the save must refuse it with a mark instead."""
+			from frappe.custom.doctype.property_setter.property_setter import make_property_setter
+
 			conv, token = self.todo_draft()
 			before = self.sealed(token)
-			df = frappe.get_meta("ToDo").get_field("priority")
-			with patch.object(df, "permlevel", 1):
-				out = self.save(token, conv, {"description": f"{MARK} level", "priority": "High"})
+			# A real Property Setter, not a patch on one cached DocField: ``save`` runs as OWNER,
+			# and on Frappe 15 ``set_user`` empties the request-local Meta cache, so the save reads
+			# a fresh copy of the meta and a patched field object never reaches it.
+			ps = make_property_setter("ToDo", "priority", "permlevel", 1, "Int")
+			self.addCleanup(frappe.clear_cache, doctype="ToDo")
+			self.addCleanup(frappe.delete_doc, "Property Setter", ps.name, force=True)
+			out = self.save(token, conv, {"description": f"{MARK} level", "priority": "High"})
 			self.assertEqual([f["fieldname"] for f in out["error"]["fields"]], ["priority"])
 			self.assert_untouched(token, before)
 
