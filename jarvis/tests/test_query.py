@@ -688,6 +688,32 @@ class TestQueryV02Additions(FrappeTestCase):
 		# string form is NOT present (with the surrounding quotes).
 		self.assertNotIn("'dt.name'", sql)
 
+	def test_exists_subspec_rejects_select(self):
+		"""SELECT in a sub-spec is rejected - subqueries auto-select 1."""
+		with (
+			patch("frappe.has_permission", return_value=True),
+			patch("frappe.database.query.Engine") as fake_engine,
+		):
+			fake_engine.return_value.get_permission_conditions.return_value = None
+			with self.assertRaises(InvalidArgumentError) as cm:
+				query(
+					{
+						"from": "DocType",
+						"alias": "dt",
+						"where": [
+							{
+								"op": "exists",
+								"value": {
+									"from": "DocField",
+									"alias": "df",
+									"select": ["df.fieldname"],  # not allowed
+								},
+							}
+						],
+					}
+				)
+			self.assertIn("select", str(cm.exception).lower())
+
 	def test_exists_recursion_depth_capped(self):
 		"""Two levels of nesting (outer + one EXISTS) is the cap;
 		three levels raises."""
