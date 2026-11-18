@@ -206,7 +206,8 @@ export function draftValues(p) {
 	for (const f of p.fields) {
 		if (!isFieldWritable(f, p.verb)) continue;
 		const changed = String(f.value) !== String(f.orig);
-		if (p.verb === "create" ? String(f.value).trim() !== "" : changed)
+		// A field that is on the form only for its mandatory rule goes out only once changed.
+		if (p.verb === "create" && !f.ruleAdded ? String(f.value).trim() !== "" : changed)
 			values[f.fieldname] = coerceOut(f);
 	}
 	for (const t of p.tables) {

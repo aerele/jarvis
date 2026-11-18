@@ -367,12 +367,12 @@
 // is a state machine the host owns: it is driven through the `link-*` events (the same
 // signatures DraftCell and DraftRowBlock emit) and shown from the read-only `draftLink`.
 // Relative imports only (see draftFormImportGraph.spec.js): the phone resolves `@/` elsewhere.
-import { computed, inject, onMounted, onUpdated, provide, ref, toRef } from "vue";
+import { computed, inject, onMounted, onUpdated, provide, ref, toRef, watch } from "vue";
 import DraftCell from "./DraftCell.vue";
 import DraftLinkMenu from "./DraftLinkMenu.vue";
 import DraftRowBlock from "./DraftRowBlock.vue";
 import { isFieldMissing, readonlyDisplay, removedSavedRows } from "../../lib/draftApply";
-import { mainRuleStates } from "../../lib/mainRules";
+import { mainRuleStates, revealKey, revealRuleFields } from "../../lib/mainRules";
 import { blankRow, openChangedRows, toggleLabel, toggleParts } from "../../lib/draftTables";
 import { draftTotals as totalsOf } from "../../lib/draftTotals";
 import { DRAFT_DATE_CONTROL, DRAFT_SURFACE } from "../../lib/draftSurface";
@@ -402,6 +402,15 @@ const props = defineProps({
 // adds the star and the missing cue (nothing blocks a save on it); one that cannot be evaluated
 // here (state null) only says "May be required" while the field is editable and empty.
 const ruleStates = computed(() => mainRuleStates(props.model));
+// A field whose rule an edit makes true later joins the form (mainRules.revealRuleFields). The
+// key is null, so nothing runs, for a model with no such candidate; a reveal takes its field out
+// of the candidates, so the key settles after one more run.
+watch(
+	() => revealKey(props.model),
+	(key) => {
+		if (key !== null) revealRuleFields(props.model);
+	}
+);
 const ruleRequired = (f) => ruleStates.value[f.fieldname] === true;
 const mayBeRequired = (f) =>
 	ruleStates.value[f.fieldname] === null &&
