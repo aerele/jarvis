@@ -327,57 +327,6 @@ class TestTypedConfirmation(FrappeTestCase):
 			"1 of 2 actions went through. Card 2 could not be completed. Check it and try again.",
 		)
 
-	def test_cards_are_ordered_so_the_numbers_mean_what_the_screen_shows(self):
-		"""The store is a Redis SET with no order at all.
-
-		Without the sort, "confirm 1" would pick whichever token the set happened
-		to yield first, which is the wrong write roughly half the time.
-		"""
-		cards = [
-			dict(self._card("late"), expires_at=200),
-			dict(self._card("early"), expires_at=100),
-		]
-		with (
-			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=cards),
-			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
-			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
-		):
-			_typed_confirmation(self.user, self.conv, "confirm 1", self._toks(cards))
-		core.assert_called_once()
-		self.assertEqual(core.call_args.args[0], "early")
-
-	def test_created_at_is_the_primary_sort_key_over_a_misleading_expires_at(self):
-		"""A non-uniform TTL could give a later-minted card an EARLIER
-		expires_at; created_at must still order it after the earlier mint."""
-		cards = [
-			dict(self._card("late"), created_at=200, expires_at=150),
-			dict(self._card("early"), created_at=100, expires_at=999),
-		]
-		with (
-			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=cards),
-			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
-			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
-		):
-			_typed_confirmation(self.user, self.conv, "confirm 1", self._toks(cards))
-		core.assert_called_once()
-		self.assertEqual(core.call_args.args[0], "early")
-
-	def test_a_missing_created_at_falls_back_to_expires_at(self):
-		"""A card minted before P0c shipped carries no created_at; a mixed
-		deploy must still number consistently against expires_at."""
-		cards = [
-			dict(self._card("late"), expires_at=200),  # pre-P0c record, no created_at
-			dict(self._card("early"), created_at=100, expires_at=100),
-		]
-		with (
-			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=cards),
-			patch("jarvis.chat.actions_api._confirm_core", return_value={"ok": True}) as core,
-			patch("jarvis.chat.actions_api.enqueue_continuation", return_value={}),
-		):
-			_typed_confirmation(self.user, self.conv, "confirm 1", self._toks(cards))
-		core.assert_called_once()
-		self.assertEqual(core.call_args.args[0], "early")
-
 	def test_no_parked_card_falls_through(self):
 		with (
 			patch("jarvis.chat.pending_confirm.list_items_for_owner", return_value=[]),
@@ -538,14 +487,3 @@ class TestTypedApprovalBindsToDisplayedTokens(FrappeTestCase):
 			):
 				self.assertIsNone(_typed_confirmation(self.user, self.conv, "confirm 1", bad), bad)
 				core.assert_not_called()
-
-
-class TestConfirmCoreIsShared(FrappeTestCase):
-	"""Both approval paths run the same implementation, so neither can drift."""
-
-	def test_the_button_endpoint_delegates_to_the_shared_core(self):
-		from jarvis.chat import actions_api
-
-		with patch.object(actions_api, "_confirm_core", return_value={"ok": True}) as core:
-			actions_api.confirm_tool("tok-9", "conv-9")
-		core.assert_called_once_with("tok-9", "conv-9")

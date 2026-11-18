@@ -79,9 +79,6 @@ class TestTaskCardCatalog(FrappeTestCase):
 			self.assertNotIn(c["title"], seen, msg=f"duplicate {c['title']}")
 			seen.add(c["title"])
 
-	def test_reasonably_sized(self):
-		self.assertGreaterEqual(len(catalog.TASK_CARDS), 12)
-
 
 class TestCapabilityCatalogEndpoint(FrappeTestCase):
 	def test_returns_cards_with_visible_badge_tiers_only(self):

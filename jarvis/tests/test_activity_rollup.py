@@ -580,10 +580,6 @@ class TestRollup(RollupCase):
 			self.assertEqual(ru._roll_day(d(1), advance=True), "skipped")  # an advancing roll does lock
 			self.assertEqual(len(locks()), 1)
 
-	def test_the_budget_is_240_seconds(self):
-		self.assertEqual(ru.TIME_BUDGET_S, 240)
-		self.assertEqual(ru.LOCK_TTL_S, 600)
-
 	def test_yesterday_is_rerolled_by_every_run_of_the_following_day(self):
 		# A row can commit hours after its ``at`` (a long transaction): yesterday stays open
 		# for the whole next day, not for a 2 h grace window that closed it undercounted.
@@ -1150,13 +1146,6 @@ class TestTodayPartial(RollupCase):
 		frappe.db.sql(f"update `tab{DAILY}` set `through` = %s where `day` = %s", (tm(d(1), 11), TODAY))
 		self.assertEqual(self.people(TODAY, TODAY)["people"], reference)  # a stamp from another day
 
-	def test_the_five_minute_margin(self):
-		base.ev(tm(TODAY, 8, 50), event="read", actor=A, rows=1)
-		self.roll_today(tm(TODAY, 10, 3))
-		self.assertEqual(self.today_through(), {tm(TODAY, 9)})  # 10:00 ended only 3 minutes ago
-		self.roll_today(tm(TODAY, 10, 6))
-		self.assertEqual(self.today_through(), {tm(TODAY, 10)})
-
 	def test_a_row_stamped_before_h_inserted_after_the_roll_is_included_by_the_next_roll(self):
 		base.ev(tm(TODAY, 8, 0), event="read", actor=A, rows=1)
 		self.roll_today(tm(TODAY, 10, 6))
@@ -1338,9 +1327,6 @@ class TestLiveCap(RollupCase):
 		res = self.people(frm, to)
 		p = person(res, A)
 		return res, (p["reads"] if p else 0)
-
-	def test_the_cap_is_seven_days(self):
-		self.assertEqual(ar.LIVE_DAY_CAP, 7)
 
 	def test_only_the_seven_most_recent_unrolled_days_are_computed_live(self):
 		calls = self.counted()

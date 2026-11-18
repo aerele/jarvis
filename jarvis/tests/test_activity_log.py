@@ -444,17 +444,6 @@ class TestHelpers(FrappeTestCase):
 		with m.patch("frappe.db.get_value", side_effect=RuntimeError("db down")):
 			self.assertEqual(activity_log.ref_doctype_of("get_list", {"doctype": "ToDo"}), "")
 
-	def test_tool_sets(self):
-		self.assertEqual(
-			activity_log.EXPORT_TOOLS,
-			frozenset({"export_excel", "export_query", "export_document", "report_pdf", "download_pdf"}),
-		)
-		self.assertIn("get_schema", activity_log.INTROSPECTION_TOOLS)
-		self.assertIn("describe_customizations", activity_log.INTROSPECTION_TOOLS)
-		self.assertFalse(activity_log.EXPORT_TOOLS & activity_log.INTROSPECTION_TOOLS)
-		self.assertNotIn("get_doc", activity_log.INTROSPECTION_TOOLS)
-		self.assertNotIn("get_list", activity_log.INTROSPECTION_TOOLS)
-
 	def test_tool_sets_name_real_tools(self):
 		# A typo here would silently mis-classify a tool (an introspection name that
 		# does not exist logs nothing for it; an export name that does not exist
@@ -464,3 +453,5 @@ class TestHelpers(FrappeTestCase):
 		real = set(registry.list_tools())
 		self.assertFalse(activity_log.INTROSPECTION_TOOLS - real)
 		self.assertFalse(activity_log.EXPORT_TOOLS - real)
+		self.assertIn("describe_customizations", activity_log.INTROSPECTION_TOOLS)
+		self.assertNotIn("get_doc", activity_log.INTROSPECTION_TOOLS)

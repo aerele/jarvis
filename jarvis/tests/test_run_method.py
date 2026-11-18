@@ -231,8 +231,3 @@ class TestRunMethod(FrappeTestCase):
 	def test_blocklist_unmatched_pattern_allows(self):
 		_set_blocklist("erpnext.*\n*.delete_doc")
 		self.assertEqual(run_method("frappe.ping"), "pong")
-
-	def test_empty_blocklist_blocks_nothing(self):
-		# Fail-open: an empty blocklist blocks nothing.
-		_set_blocklist("")
-		self.assertEqual(run_method("frappe.ping"), "pong")

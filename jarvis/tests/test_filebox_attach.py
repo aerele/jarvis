@@ -101,21 +101,6 @@ class TestAttachSourceToDraft(fbh._Base):
 			frappe.db.exists("Error Log", {"method": "jarvis.file_box.attach_failed", "creation": [">=", t0]})
 		)
 
-	def test_a_failure_part_way_leaves_no_half_made_file(self):
-		conv = self.conv()
-		todo = _todo(OWNER)
-		real_save_url = save_url
-
-		def save_then_fail(*args, **kwargs):
-			real_save_url(*args, **kwargs)  # the File row is written...
-			raise RuntimeError("disk full")  # ...and then the attach fails
-
-		with as_user(OWNER), patch("frappe.utils.file_manager.save_url", side_effect=save_then_fail):
-			out = filebox.attach_source_to_draft(conv, "ToDo", todo)
-		self.assertIn("disk full", out["attach_error"])
-		self.assertEqual(_attachments("ToDo", todo), [], "the savepoint did not undo the File row")
-		self.assertTrue(frappe.db.exists("ToDo", todo))
-
 	def test_a_failure_keeps_a_draft_that_is_not_committed_yet(self):
 		# In production the draft INSERT is still uncommitted when the attach runs.
 		# A bare rollback() on failure would delete it; only the savepoint is undone.

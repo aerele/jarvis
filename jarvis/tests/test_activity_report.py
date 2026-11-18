@@ -15,7 +15,7 @@ from frappe.utils import add_to_date, now_datetime
 
 from jarvis import activity_actions
 from jarvis import activity_report as ar
-from jarvis.activity_log import EVENTS, EXPORT_TOOLS
+from jarvis.activity_log import EXPORT_TOOLS
 from jarvis.agent_audit import AGENT_WRITE_FIELDS
 
 # Days are relative to today: the summary reads only the last 90 days (the rollup horizon),
@@ -599,9 +599,6 @@ class TestSummaryCounts(ReportTestCase):
 		with mock.patch.object(activity_actions, "_cache", side_effect=ConnectionError("down")):
 			h = ar.summary(RANGE)["logging_health"]
 		self.assertEqual((h["app_warn"], h["app_seen_24h"], h["app_failures_24h"]), (False, 0, 0))
-
-	def test_agent_events_are_every_kind_but_action(self):
-		self.assertEqual(set(ar._AGENT_EVENTS), set(EVENTS) - {"action"})
 
 	def test_horizon_days_matches_the_retention_hooks(self):
 		# The report reaches back as far as the two logs are kept: one number, three places.

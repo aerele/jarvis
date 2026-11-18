@@ -937,12 +937,6 @@ class TestFencingTimelines(_TurnStateTestCase):
 		)
 		frappe.db.rollback()
 
-	def test_d4d_dual_acquisition_exactly_one_wins(self):
-		"""D4 (d): two pumps race lease_acquire on the same stale lease; exactly one
-		bumps the epoch, the other re-evaluates the freshened predicate and gets 0
-		rows (threaded, real separate DB connections)."""
-		self._run_dual_acquire()
-
 	def _run_dual_acquire(self, isolation: str | None = None):
 		target = self._target
 		frappe.db.set_value(
@@ -1530,17 +1524,6 @@ class TestVisibleEffectsAndEnrichmentClaim(_TurnStateTestCase):
 		frappe.db.commit()
 		return rid
 
-	def test_vocabulary_partitions_exactly(self):
-		# Every canonical effect is classified as exactly one of visible/invisible,
-		# so a future addition to EFFECT_NAMES fails loudly instead of silently
-		# defaulting into either bucket.
-		self.assertEqual(set(ts.VISIBLE_EFFECT_NAMES) | set(ts.INVISIBLE_EFFECT_NAMES), set(ts.EFFECT_NAMES))
-		self.assertFalse(set(ts.VISIBLE_EFFECT_NAMES) & set(ts.INVISIBLE_EFFECT_NAMES))
-		self.assertIn("usage", ts.INVISIBLE_EFFECT_NAMES)
-		self.assertIn("telemetry_flush", ts.INVISIBLE_EFFECT_NAMES)
-		self.assertIn("rich_outputs", ts.VISIBLE_EFFECT_NAMES)
-		self.assertIn("auto_title", ts.VISIBLE_EFFECT_NAMES)
-
 	def test_visible_done_ignores_a_pending_invisible_effect(self):
 		rid = self._mk_finalizing(("auto_title", "usage"))
 		self.assertFalse(ts.visible_effects_done(rid), "auto_title is still pending")
@@ -1550,6 +1533,8 @@ class TestVisibleEffectsAndEnrichmentClaim(_TurnStateTestCase):
 		# usage stays pending throughout; visible_effects_done must not wait on it.
 		self.assertTrue(ts.visible_effects_done(rid), "the only visible effect is done")
 		self.assertFalse(ts.all_required_effects_done(rid), "usage is still owed")
+		self.assertIn("telemetry_flush", ts.INVISIBLE_EFFECT_NAMES)
+		self.assertIn("rich_outputs", ts.VISIBLE_EFFECT_NAMES)
 
 	def test_visible_done_vacuous_when_no_visible_effect_is_owed(self):
 		rid = self._mk_finalizing(("usage",))

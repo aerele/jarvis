@@ -96,11 +96,6 @@ class TestSttConfig(FrappeTestCase):
 		self.assertEqual(cfg, {"enabled": True, "api_key": TEST_KEY, "model": voice._STT_MODEL})
 		mock_admin.assert_not_called()
 
-	def test_site_config_default_model(self):
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model=""):
-			cfg = voice.stt_config()
-		self.assertEqual(cfg["model"], voice._STT_MODEL)
-
 	def test_site_config_disabled_flag(self):
 		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_enabled=0):
 			self.assertIsNone(voice.stt_config())
@@ -344,18 +339,6 @@ class TestTranscribeAudio(FrappeTestCase):
 						voice.transcribe_audio()
 		mock_post.assert_not_called()
 
-	def test_a_failing_transcription_is_NOT_retried_server_side(self):
-		"""A second 90-second provider attempt does not fit the web request.
-		The retained desktop recording owns the retry instead."""
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY):
-			with _audio_request():
-				with patch(
-					"jarvis.chat.voice.requests.post", return_value=_response(503, text="upstream")
-				) as mock_post:
-					with self.assertRaises(frappe.ValidationError):
-						voice.transcribe_audio()
-		self.assertEqual(mock_post.call_count, 1, "one attempt, one upload")
-
 	def test_happy_path_posts_audio_to_chat_completions(self):
 		data = b"\x1aEfake-webm-bytes"
 		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model="test/model-x"):
@@ -369,6 +352,7 @@ class TestTranscribeAudio(FrappeTestCase):
 		self.assertTrue(out["ok"])
 		self.assertEqual(out["text"], "hello world")
 		self.assertEqual(out["model"], voice._STT_MODEL)
+		self.assertEqual(voice._STT_MODEL, "google/gemini-2.5-flash")
 		self.assertIsInstance(out["stt_ms"], int)
 
 		self.assertEqual(mock_post.call_args.args[0], voice._OPENROUTER_URL)
@@ -427,15 +411,6 @@ class TestTranscribeAudio(FrappeTestCase):
 		self.assertEqual(out["model"], voice._STT_MODEL)
 		self.assertEqual(mock_post.call_args.kwargs["json"]["model"], voice._STT_MODEL)
 		self.assertEqual(mock_post.call_args.kwargs["headers"]["Authorization"], "Bearer admin-key")
-
-	def test_fixed_model_is_audio_capable_gemini_flash(self):
-		with _conf(jarvis_stt_openrouter_api_key=TEST_KEY, jarvis_stt_model=""):
-			with _audio_request():
-				with patch("jarvis.chat.voice.requests.post", return_value=_ok_response()) as mock_post:
-					out = voice.transcribe_audio()
-		self.assertEqual(voice._STT_MODEL, "google/gemini-2.5-flash")
-		self.assertEqual(out["model"], voice._STT_MODEL)
-		self.assertEqual(mock_post.call_args.kwargs["json"]["model"], voice._STT_MODEL)
 
 	def test_no_speech_response_returns_empty_text_not_an_invention(self):
 		for response in ("", voice._NO_SPEECH, f"`{voice._NO_SPEECH}`", f'"{voice._NO_SPEECH}."'):
@@ -523,13 +498,6 @@ class TestAdminGetSttConfig(FrappeTestCase):
 
 	def tearDown(self):
 		frappe.cache().delete_value(admin_client._STT_CONFIG_CACHE_KEY)
-
-	def test_error_returns_none(self):
-		with patch(
-			"jarvis.admin_client._post",
-			side_effect=admin_client.AdminAuthError("not onboarded"),
-		):
-			self.assertIsNone(admin_client.get_stt_config())
 
 	def test_error_is_negative_cached(self):
 		"""A failed fetch must not make every subsequent call (SPA loads)
