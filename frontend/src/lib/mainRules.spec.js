@@ -169,20 +169,33 @@ describe("a rule that turns true after the build", () => {
 describe("a rule that reads a table", () => {
 	const ADDR = F("first_name", "Data", { mandatory_depends_on: "eval:!doc.links?.length" });
 	const LINKS_F = F("links", "Table", { options: "Dynamic Link" });
+	const meta = { metaTables: { links: LINKS } };
+	const withRows = (rows) => ({ ...meta, tables: [{ fieldname: "links", rows }] });
 
-	// Break: the rule's doc holds no table, so a rule on its rows is always "no rows" (or cannot
-	// be read), whatever the grid holds.
-	it("is true with no rows and false with one", async () => {
-		const meta = { metaTables: { links: LINKS } };
+	// Break: the build reads the agent's raw rows and the live form the grid's, so the same rows
+	// answer differently; or a blank placeholder grid row counts as a row; or a row is not a row
+	// until it has a value in it.
+	it("counts only real rows, the same at build and after an edit", async () => {
 		const none = await build([NAME, ADDR, LINKS_F], undefined, meta);
-		expect(field(none, "first_name")).toBeTruthy();
 		expect(mainRuleStates(none).first_name).toBe(true);
-		const one = await build([NAME, ADDR, LINKS_F], undefined, {
-			...meta,
-			tables: [{ fieldname: "links", rows: [{ link_name: "X" }] }],
-		});
+		// the grid's own blank placeholder row (buildDraftTable adds one) is not a row
+		const blank = await build([NAME, ADDR, LINKS_F], undefined, withRows([]));
+		expect(blank.tables[0].rows).toHaveLength(1);
+		expect(field(blank, "first_name")).toBeTruthy();
+		expect(mainRuleStates(blank).first_name).toBe(true);
+		const one = await build([NAME, ADDR, LINKS_F], undefined, withRows([{ link_name: "X" }]));
 		expect(field(one, "first_name")).toBeUndefined();
-		none.tables = [{ fieldname: "links", rows: [{ link_name: "Y", __key: "k" }] }];
-		expect(mainRuleStates(none).first_name).toBe(false);
+		// the person fills the placeholder row: the live answer is the one the build gives
+		blank.tables[0].rows[0].link_name = "X";
+		expect(mainRuleStates(blank).first_name).toBe(false);
+	});
+
+	// Break: every form walks its tables for every rule, or a table is put in the doc that no rule
+	// names.
+	it("keeps the table names on the model only when a rule names one", async () => {
+		const named = await build([NAME, ADDR, LINKS_F], undefined, meta);
+		expect(named.ruleTables).toEqual(["links"]);
+		const other = await build([NAME, SALES, HSN, LINKS_F], undefined, meta);
+		expect(other.ruleTables).toBeUndefined();
 	});
 });
