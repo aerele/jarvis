@@ -36,7 +36,7 @@ from jarvis.permissions import (
 	refuse_in_tool_dispatch,
 )
 from jarvis.tools._result_guard import enforce_result_budget
-from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
+from jarvis.tools.registry import _ACCEPTED_PARAMS, _OPTIONAL_PARAMS, dispatch
 
 _REGISTERED_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 _PRIVATE_INPUT_RECOVERY_BODY = b"{}"
@@ -2089,68 +2089,30 @@ def _is_blank(value) -> bool:
 	return isinstance(value, list | dict) and not value
 
 
-# Optional args of read-only tools that a strict-schema customer model fills with a
-# blank (``""``, ``[]``, ``{}``) when it does not use them. These tools read
-# ``is not None`` as "supplied", so a blank raised, misrouted the call, or the tool
-# already treated it as missing (``x or None``); ``export_query`` counted
-# ``doctype=""`` as a second source.
-# Per tool, so a blank that means something elsewhere is never dropped.
-# Only top-level values are checked. Nested values are kept on purpose: a blank
-# filter value can mean "is empty", so ``filters={"status": ""}`` keeps its shape.
-# Adding an optional param to one of these tools? List it here - the key-set test
-# pins the map.
-_BLANK_AS_ABSENT: dict[str, frozenset[str]] = {
-	"export_query": frozenset(
-		{
-			"doctype",
-			"spec",
-			"result_id",
-			"report_name",
-			"filters",
-			"fields",
-			"order_by",
-			"parent_doctype",
-			"highlights",
-			"format",
-			"title",
-		}
-	),
-	"query_file": frozenset(
-		{
-			"file_url",
-			"filename",
-			"file_id",
-			"sql",
-			"sheets",
-			"version",
-			"members",
-			"archive_version",
-			"payload_format",
-		}
-	),
-	"read_file": frozenset(
-		{
-			"file_url",
-			"filename",
-			"file_id",
-			"sheet",
-			"read_mode",
-			"cursor",
-			"version",
-			"member",
-			"archive_version",
-			"payload_format",
-		}
-	),
-	"query_report": frozenset({"sql", "version"}),
-	"report_pdf": frozenset({"filters", "orientation", "title"}),
-}
+# A strict-schema model (gpt-5.6-terra in the 2026-11 transcript) sends EVERY
+# argument and fills the ones it does not use with "", [] or {}. Most tools read
+# ``x is not None`` as "the caller chose x", so a blank raised (export_query,
+# run_method, export_excel, preview_landed_cost_voucher), took the wrong branch
+# (send_email's recipients_from) or overwrote data (update_wiki's replace_body_md
+# wiped the page body). So ``_parse_args`` drops a blank value of every OPTIONAL
+# parameter (one with a default in the tool's signature, ``_OPTIONAL_PARAMS``)
+# for every tool: one rule, so a new tool or parameter cannot miss it. Required
+# parameters keep their blank and get the tool's own error. Only top-level values
+# are checked: a blank inside a value can mean "is empty" (``filters={"status": ""}``).
+#
+# Exceptions, where a blank optional value is a real answer:
+# - record_agent_run: the payroll-deposit writeback grammar is exact. ``findings=[]``
+#   means "zero findings" (None fails as malformed), and an explicit value of a
+#   ``_MISSING``-sentinel parameter must fail closed, not read as omitted.
+# - get_my_access: ``docs=[]`` / ``doctypes=[]`` is a "nothing to check" query that
+#   answers ``can_doc: []`` (the P0d exemption, test_empty_batch_normalization).
+_BLANK_IS_A_VALUE: frozenset[str] = frozenset({"get_my_access", "record_agent_run"})
 
 
 def _parse_args(args: dict | str | None, tool: str | None = None) -> dict:
 	"""Decode the args input into a dict + strip legacy identity markers +
-	normalise an empty batch array for a dual-form tool (P0d) + drop blank
-	optional args of the tools in ``_BLANK_AS_ABSENT``.
+	normalise an empty batch array for a dual-form tool (P0d) + drop a blank
+	value of any optional parameter of the tool (see ``_BLANK_IS_A_VALUE``).
 
 	Raises ``InvalidArgumentError`` (a JarvisError subclass) on JSON
 	parse failure - that mirrors what tools raise for malformed input
@@ -2191,9 +2153,10 @@ def _parse_args(args: dict | str | None, tool: str | None = None) -> dict:
 				# anyway, but this keeps the persisted/audited args honest).
 				if key in tool_params and _is_blank(args.get(key)):
 					del args[key]
-		for key in _BLANK_AS_ABSENT.get(tool, ()):
-			if key in args and _is_blank(args[key]):
-				del args[key]
+		if tool not in _BLANK_IS_A_VALUE:
+			for key in _OPTIONAL_PARAMS.get(tool, ()) & args.keys():
+				if _is_blank(args[key]):
+					del args[key]
 	return args
 
 

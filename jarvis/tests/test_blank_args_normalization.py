@@ -1,13 +1,14 @@
-"""Blank optional args are treated as absent for the listed read-only tools.
+"""A blank optional argument is treated as absent, for every tool.
 
-Customer models with a strict tool schema (gpt-5.6-terra) fill every optional
-argument they do not use with a blank (``""``, ``[]``, ``{}``). The tools read
+Customer models with a strict tool schema (gpt-5.6-terra) send every argument and
+fill the ones they do not use with a blank (``""``, ``[]``, ``{}``). The tools read
 ``is not None`` as "supplied", so ``export_query(report_name=..., doctype="",
-spec={}, result_id="", ...)`` failed 11 times with "Pass exactly one of ...".
+spec={}, result_id="", ...)`` failed 11 times with "Pass exactly one of ...", and
+other tools raised, took the wrong branch or (update_wiki) erased a page body.
 
-``api._parse_args`` now drops a blank value for the keys named in
-``api._BLANK_AS_ABSENT`` (per tool, so a blank that carries meaning elsewhere is
-never touched). ``0``, ``False`` and ``"0"`` are real values and stay. A direct
+``api._parse_args`` drops a blank value of every optional parameter of every tool
+(``registry._OPTIONAL_PARAMS``), except the tools in ``api._BLANK_IS_A_VALUE``.
+Required parameters, nested values, ``0``, ``False`` and ``"0"`` are kept. A direct
 Python call is unchanged: ``export_query`` itself stays strict.
 """
 
@@ -22,7 +23,11 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.exceptions import InvalidArgumentError
 from jarvis.tests.test_run_report import INLINE_REPORT, _ensure_report
+from jarvis.tools.export_excel import export_excel
 from jarvis.tools.export_query import export_query
+from jarvis.tools.registry import _OPTIONAL_PARAMS
+from jarvis.tools.run_method import run_method
+from jarvis.tools.update_wiki import update_wiki
 
 BLANKS = ("", "  ", "\t\n", {}, [])
 
@@ -42,78 +47,33 @@ TRANSCRIPT_ARGS = {
 }
 
 
-def _blank_cases():
-	for tool, keys in sorted(api._BLANK_AS_ABSENT.items()):
-		for key in sorted(keys):
-			yield tool, key
+def _covered_tools():
+	return sorted(set(api._ACCEPTED_PARAMS) - api._BLANK_IS_A_VALUE)
 
 
-class TestBlankAsAbsentContract(FrappeTestCase):
-	def test_the_map_names_only_params_the_tool_accepts(self):
-		# Derived from the registry's accepted-params map, so a renamed or removed
-		# tool parameter fails here instead of leaving a dead entry.
-		for tool, keys in api._BLANK_AS_ABSENT.items():
+def _required(tool):
+	return sorted(api._ACCEPTED_PARAMS[tool] - _OPTIONAL_PARAMS[tool])
+
+
+class TestOptionalParamsMap(FrappeTestCase):
+	def test_every_registered_tool_has_an_entry(self):
+		self.assertEqual(set(_OPTIONAL_PARAMS), set(api._ACCEPTED_PARAMS))
+
+	def test_optional_params_are_accepted_params(self):
+		for tool, keys in _OPTIONAL_PARAMS.items():
 			with self.subTest(tool=tool):
-				self.assertIn(tool, api._ACCEPTED_PARAMS)
 				self.assertLessEqual(keys, api._ACCEPTED_PARAMS[tool])
 
-	def test_the_exact_key_set_per_tool_is_pinned(self):
-		# Literal sets: removing or adding a key must be a deliberate edit here too.
-		self.assertEqual(
-			api._BLANK_AS_ABSENT,
-			{
-				"export_query": frozenset(
-					{
-						"doctype",
-						"spec",
-						"result_id",
-						"report_name",
-						"filters",
-						"fields",
-						"order_by",
-						"parent_doctype",
-						"highlights",
-						"format",
-						"title",
-					}
-				),
-				"query_file": frozenset(
-					{
-						"file_url",
-						"filename",
-						"file_id",
-						"sql",
-						"sheets",
-						"version",
-						"members",
-						"archive_version",
-						"payload_format",
-					}
-				),
-				"read_file": frozenset(
-					{
-						"file_url",
-						"filename",
-						"file_id",
-						"sheet",
-						"read_mode",
-						"cursor",
-						"version",
-						"member",
-						"archive_version",
-						"payload_format",
-					}
-				),
-				"query_report": frozenset({"sql", "version"}),
-				"report_pdf": frozenset({"filters", "orientation", "title"}),
-			},
-		)
+	def test_it_follows_the_signature_defaults(self):
+		self.assertIn("doctype", _OPTIONAL_PARAMS["export_query"])
+		self.assertIn("format", _OPTIONAL_PARAMS["export_query"])  # default "xlsx"
+		self.assertIn("replace_body_md", _OPTIONAL_PARAMS["update_wiki"])
+		self.assertNotIn("slug", _OPTIONAL_PARAMS["update_wiki"])  # required
+		self.assertNotIn("method", _OPTIONAL_PARAMS["run_method"])  # required
 
-	def test_the_covered_tools_are_the_read_only_ones_from_the_plan(self):
-		self.assertEqual(
-			set(api._BLANK_AS_ABSENT),
-			{"export_query", "query_file", "read_file", "query_report", "report_pdf"},
-		)
+	def test_the_exception_list_is_pinned(self):
+		# A new exception must be a deliberate edit here, with its reason in api.py.
+		self.assertEqual(api._BLANK_IS_A_VALUE, frozenset({"get_my_access", "record_agent_run"}))
 
 
 class TestIsBlank(FrappeTestCase):
@@ -129,53 +89,45 @@ class TestIsBlank(FrappeTestCase):
 
 
 class TestParseArgsBlankAsAbsent(FrappeTestCase):
-	def test_every_mapped_key_drops_every_blank_form(self):
-		for tool, key in _blank_cases():
-			for blank in BLANKS:
-				with self.subTest(tool=tool, key=key, blank=blank):
-					out = api._parse_args({key: blank, "other": "kept"}, tool)
-					self.assertNotIn(key, out)
-					self.assertEqual(out["other"], "kept")
+	def test_every_optional_param_of_every_tool_drops_every_blank_form(self):
+		for tool in _covered_tools():
+			for key in sorted(_OPTIONAL_PARAMS[tool]):
+				for blank in BLANKS:
+					with self.subTest(tool=tool, key=key, blank=blank):
+						out = api._parse_args({key: blank, "not_a_param": "kept"}, tool)
+						self.assertNotIn(key, out)
+						self.assertEqual(out["not_a_param"], "kept")
 
-	def test_a_non_blank_value_is_kept(self):
-		samples = ("abc", ["a"], {"a": 1}, 5)
-		for tool, key in _blank_cases():
-			for value in samples:
-				with self.subTest(tool=tool, key=key, value=value):
-					out = api._parse_args({key: value}, tool)
-					self.assertEqual(out[key], value)
+	def test_a_required_param_keeps_its_blank(self):
+		# The tool's own error ("slug is required") is clearer than a missing argument.
+		for tool in _covered_tools():
+			for key in _required(tool):
+				with self.subTest(tool=tool, key=key):
+					self.assertEqual(api._parse_args({key: ""}, tool), {key: ""})
 
-	def test_zero_false_and_string_zero_are_real_values(self):
-		for tool, key in _blank_cases():
-			for value in (0, False, "0"):
-				with self.subTest(tool=tool, key=key, value=value):
-					out = api._parse_args({key: value}, tool)
-					self.assertIn(key, out)
-					self.assertEqual(out[key], value)
-					self.assertIs(type(out[key]), type(value))
+	def test_real_values_are_kept(self):
+		for tool in _covered_tools():
+			for key in sorted(_OPTIONAL_PARAMS[tool]):
+				for value in ("abc", ["a"], {"a": 1}, 5, 0, False, "0"):
+					with self.subTest(tool=tool, key=key, value=value):
+						out = api._parse_args({key: value}, tool)
+						self.assertEqual(out[key], value)
+						self.assertIs(type(out[key]), type(value))
 
-	def test_a_key_the_map_does_not_list_is_kept(self):
-		# max_rows is a real tool param but not mapped: untouched even when blank.
-		for tool in api._BLANK_AS_ABSENT:
-			with self.subTest(tool=tool):
-				out = api._parse_args({"max_rows": "", "not_a_param": []}, tool)
-				self.assertEqual(out, {"max_rows": "", "not_a_param": []})
+	def test_a_key_the_tool_does_not_accept_is_kept(self):
+		self.assertEqual(api._parse_args({"not_a_param": []}, "export_query"), {"not_a_param": []})
 
-	def test_an_unlisted_tool_is_untouched(self):
-		args = {"doctype": "", "spec": {}, "filters": {}, "sql": "", "report_name": ""}
-		for tool in ("run_report", "get_list", "create_doc", "run_method", "export_excel", None):
-			with self.subTest(tool=tool):
-				out = api._parse_args(dict(args), tool)
-				self.assertEqual(out, args)
+	def test_record_agent_run_keeps_its_blanks(self):
+		# Payroll deposit: findings=[] means "zero findings", and None fails as malformed.
+		args = {"findings": [], "coverage": {}, "report_sha256": "", "dashboard": ""}
+		self.assertEqual(api._parse_args(dict(args), "record_agent_run"), args)
 
-	def test_a_blank_filters_for_a_tool_that_lists_it_only(self):
-		# export_query and report_pdf list filters; read_file / query_report do not.
-		for tool in ("export_query", "report_pdf"):
-			with self.subTest(tool=tool):
-				self.assertNotIn("filters", api._parse_args({"filters": {}}, tool))
-		for tool in ("read_file", "query_report"):
-			with self.subTest(tool=tool):
-				self.assertIn("filters", api._parse_args({"filters": {}}, tool))
+	def test_get_my_access_keeps_its_empty_query_lists(self):
+		args = {"docs": [], "doctypes": []}
+		self.assertEqual(api._parse_args(dict(args), "get_my_access"), args)
+
+	def test_without_a_tool_nothing_is_dropped(self):
+		self.assertEqual(api._parse_args({"doctype": "", "spec": {}}, None), {"doctype": "", "spec": {}})
 
 	def test_nested_blank_values_are_kept(self):
 		out = api._parse_args({"filters": {"status": "", "tags": []}, "report_name": "R"}, "export_query")
@@ -183,12 +135,12 @@ class TestParseArgsBlankAsAbsent(FrappeTestCase):
 
 	def test_idempotent_it_runs_twice_per_call(self):
 		# api.py parses once at the agent gate and again in _run_tool.
-		for tool, key in _blank_cases():
-			with self.subTest(tool=tool, key=key):
-				args = {key: [], "report_name": "R", "max_rows": 5}
+		for tool in _covered_tools():
+			with self.subTest(tool=tool):
+				args = {key: [] for key in _OPTIONAL_PARAMS[tool]}
+				args.update({key: "x" for key in _required(tool)})
 				once = dict(api._parse_args(args, tool))
-				twice = api._parse_args(args, tool)
-				self.assertEqual(once, twice)
+				self.assertEqual(api._parse_args(args, tool), once)
 
 	def test_mutates_in_place_so_every_reader_agrees(self):
 		args = {"doctype": "", "report_name": "R"}
@@ -212,14 +164,31 @@ class TestParseArgsBlankAsAbsent(FrappeTestCase):
 			},
 		)
 
-	def test_the_batch_strip_still_applies_and_now_covers_empty_objects(self):
+	def test_the_batch_strip_still_applies_and_covers_empty_objects(self):
 		out = api._parse_args({"doctype": "ToDo", "name": "x", "names": []}, "get_doc")
 		self.assertNotIn("names", out)
-		# `{}` is blank for the dual-form strip as well (it is not a batch).
 		out = api._parse_args({"doctype": "ToDo", "values": {}, "docs": {}}, "create_doc")
 		self.assertNotIn("docs", out)
 		out = api._parse_args({"doctype": "ToDo", "names": ["a"]}, "get_doc")
 		self.assertEqual(out["names"], ["a"])
+
+	def test_the_other_tools_that_broke_on_blanks(self):
+		# Each of these raised or took the wrong branch on the blank before.
+		cases = {
+			"run_method": ({"method": "frappe.ping", "args": {}, "doctype": "", "name": ""}, {"method"}),
+			"export_excel": ({"rows": [["a"]], "sheets": [], "charts": [], "highlights": []}, {"rows"}),
+			"send_email": (
+				{"recipients": "a@example.com", "subject": "s", "recipients_from": {}, "messages": []},
+				{"recipients", "subject"},
+			),
+			"preview_landed_cost_voucher": (
+				{"company": "C", "receipts": ["PR-1"], "existing_draft": "", "posting_date": ""},
+				{"company", "receipts"},
+			),
+		}
+		for tool, (args, kept) in cases.items():
+			with self.subTest(tool=tool):
+				self.assertEqual(set(api._parse_args(dict(args), tool)), kept)
 
 	def test_direct_export_query_stays_strict(self):
 		# The normalisation lives at the dispatch seam, not in the tool.
@@ -227,6 +196,78 @@ class TestParseArgsBlankAsAbsent(FrappeTestCase):
 			export_query(report_name=INLINE_REPORT, format="csv", highlights=[])
 		with self.assertRaises(InvalidArgumentError):
 			export_query(report_name=INLINE_REPORT, doctype="")
+
+
+class TestBlankArgsReachTheRealTools(FrappeTestCase):
+	"""The parsed args, run through the real tool: what a strict model's call now does."""
+
+	SLUG = "org--wikitest-blank-args"
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self._wiki_was = frappe.db.get_single_value("Jarvis Settings", "wiki_enabled")
+		frappe.db.set_single_value("Jarvis Settings", "wiki_enabled", 1, update_modified=False)
+		frappe.db.delete("Jarvis Wiki Page", {"slug": self.SLUG})
+
+	def tearDown(self):
+		frappe.db.delete("Jarvis Wiki Page", {"slug": self.SLUG})
+		frappe.db.set_single_value("Jarvis Settings", "wiki_enabled", self._wiki_was, update_modified=False)
+
+	def _strict_wiki_call(self, **real):
+		blanks = dict.fromkeys(
+			(
+				"title",
+				"page_type",
+				"ref_doctype",
+				"ref_name",
+				"summary",
+				"append_md",
+				"replace_body_md",
+				"scope",
+			),
+			"",
+		)
+		return dict(blanks, slug=self.SLUG, **real)
+
+	def _page(self):
+		return frappe.db.get_value(
+			"Jarvis Wiki Page", {"slug": self.SLUG}, ["body_md", "summary"], as_dict=True
+		)
+
+	def test_update_wiki_blank_replace_body_no_longer_erases_the_page(self):
+		update_wiki(slug=self.SLUG, title="T", page_type="Org", summary="S", replace_body_md="Original body")
+		update_wiki(**api._parse_args(self._strict_wiki_call(append_md="Added"), "update_wiki"))
+		page = self._page()
+		self.assertEqual(page.body_md, "Original body\n\nAdded")
+		self.assertEqual(page.summary, "S")
+
+	def test_update_wiki_blanks_called_directly_still_erase_the_body(self):
+		# Documents the bug the dispatch seam now prevents: the tool itself is unchanged.
+		update_wiki(slug=self.SLUG, title="T", page_type="Org", replace_body_md="Original body")
+		blank_call = {k: v for k, v in self._strict_wiki_call().items() if k != "scope"}
+		update_wiki(**blank_call)
+		self.assertEqual(self._page().body_md, "")
+
+	def test_run_method_with_blank_doctype_runs_the_method(self):
+		args = {"method": "frappe.ping", "args": {}, "doctype": "", "name": ""}
+		with self.assertRaises(InvalidArgumentError):
+			run_method(**args)
+		self.assertEqual(run_method(**api._parse_args(dict(args), "run_method")), "pong")
+
+	def test_export_excel_with_blank_sheets_exports_the_rows(self):
+		args = {
+			"rows": [{"Item": "Widget", "Qty": 2}],
+			"sheets": [],
+			"charts": [],
+			"highlights": [],
+			"title": "",
+		}
+		with self.assertRaises(InvalidArgumentError):
+			export_excel(**args)
+		with patch("frappe.utils.file_manager.save_file") as save:
+			save.return_value = frappe._dict(name="F-1", file_url="/private/files/x.xlsx", file_name="x.xlsx")
+			export_excel(**api._parse_args(dict(args), "export_excel"))
+		save.assert_called_once()
 
 
 class TestAgentGateParsesBlanks(FrappeTestCase):
@@ -393,16 +434,29 @@ class TestFileToolsBlankArgs(FrappeTestCase):
 		self.assertEqual(r["data"]["sheets"][0]["row_count"], 6)  # header + 5 rows
 
 	def _save_zip(self):
+		import io
 		import uuid
+		import zipfile
 
+		from frappe.core.doctype.file.file import FILE_ENCODING_OPTIONS
 		from frappe.utils.file_manager import save_file
 
-		# The shared deflated helper, like the other archive tests: CI's Python writes
-		# stored members that the strict local-header check rejects.
-		from jarvis.tests.test_archive_sources import archive
+		# Frappe's File reads saved content as text when any of FILE_ENCODING_OPTIONS
+		# decodes it, and a later write re-encodes that text as UTF-8. A small zip
+		# (its bytes vary with the zip timestamp) can decode as windows-1250 and is
+		# then damaged on disk: ArchiveIntegrityError, on some runs only. Byte 0x81
+		# in the zip comment is invalid in all four encodings, so the zip stays bytes.
+		buffer = io.BytesIO()
+		with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as book:
+			book.writestr("a.csv", "Item,Qty\nx,1\n")
+			book.comment = b"\x81"
+		content = buffer.getvalue()
+		for encoding in FILE_ENCODING_OPTIONS:
+			with self.assertRaises(UnicodeDecodeError, msg=encoding):
+				content.decode(encoding)
 
 		name = f"blank-args-members-{uuid.uuid4().hex[:10]}.zip"
-		doc = save_file(name, archive([("a.csv", "Item,Qty\nx,1\n")]), None, None, is_private=1)
+		doc = save_file(name, content, None, None, is_private=1)
 		self.addCleanup(self._remove_file, doc, name)
 		return doc
 
