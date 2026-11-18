@@ -6108,7 +6108,7 @@ const currentMsgId = ref(null); // in-flight assistant row id (from run:start) �
 const errorMeta = ref({}); // { [message_id]: { code, changed_data } } from a live run:error (not persisted; a refresh falls back to classifying the error string)
 // Pump streaming (Relay Pump) end-to-end epoch/seq fence (CDX-3 + CDX-12). The pure fence
 // logic lives in @/utils/eventFence.js (extracted so it is unit-tested by a real node test
-// — jarvis/tests/test_event_fence_client.py runs frontend/src/utils/eventFence.test.js).
+// — see frontend/src/utils/eventFence.test.js).
 // The fence is RUN-SCOPED — ONE entry per run_id — and is applied to EVERY pump event type
 // (deltas, run:start/recovering/error/end, and ALL tool events incl. jarvis__*). CDX-12:
 // the FIRST terminal at the current epoch is accepted on seq equality (it shares the delta
