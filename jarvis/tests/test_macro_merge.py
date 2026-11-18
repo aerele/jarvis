@@ -205,6 +205,23 @@ class TestUpdateMacroSummary(_MacroMergeBase):
 		self.assertEqual(frappe.db.get_value("Jarvis Macro", m.name, "merged_prompt") or "", "")
 		self.assertEqual(frappe.db.get_value("Jarvis Macro", m.name, "merge_status") or "", "")
 
+	def test_update_steps_clears_stale_summary(self):
+		from jarvis.chat.macros_api import get_macro
+
+		m = _mk_macro([{"prompt": "p1"}, {"prompt": "p2"}])
+		self.addCleanup(
+			lambda: frappe.delete_doc("Jarvis Macro", m.name, force=True, ignore_permissions=True)
+		)
+		update_macro(m.name, merged_prompt="the summary")
+		# steps replaced without a merged_prompt in the same call → summary is stale → cleared
+		update_macro(m.name, steps=frappe.as_json([{"prompt": "p1 changed"}, {"prompt": "p2"}]))
+		self.assertEqual(get_macro(m.name)["merged_prompt"], "")
+		# but sending merged_prompt alongside keeps/sets it
+		update_macro(
+			m.name, steps=frappe.as_json([{"prompt": "p1"}, {"prompt": "p2"}]), merged_prompt="edited summary"
+		)
+		self.assertEqual(get_macro(m.name)["merged_prompt"], "edited summary")
+
 
 class TestMergeApplyHook(_MacroMergeBase):
 	"""The worker-side apply: advance_after_turn lands the summary on the macro
