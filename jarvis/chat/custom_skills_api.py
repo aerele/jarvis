@@ -30,6 +30,7 @@ from jarvis.chat.custom_skills import (
 	pushable_org_skill_count,
 	role_scoped_skill_rows,
 )
+from jarvis.chat.wiki_permissions import refuse_jarvis_app_roles
 from jarvis.permissions import has_jarvis_admin_access, refuse_in_tool_dispatch, require_jarvis_user
 
 SKILL = "Jarvis Custom Skill"
@@ -1031,6 +1032,10 @@ def request_skill_promotion(
 	to_scope = (to_scope or "").strip()
 	if to_scope not in ("Role", "Org"):
 		frappe.throw(_("Promotion target must be Role or Org."))
+	# #800: Jarvis's own roles are refused up front, before any lookup or row lock below.
+	roles = _normalize_promotion_roles(target_roles, target_role)
+	if to_scope == "Role":
+		refuse_jarvis_app_roles(roles)
 	if _SCOPE_RANK.get(to_scope, 0) <= _SCOPE_RANK.get(from_scope, 0):
 		frappe.throw(_("Promotion can only widen a skill's scope."))
 	# #595: ``from_scope`` above is only the SOURCE row's own scope column, which
@@ -1063,7 +1068,6 @@ def request_skill_promotion(
 	# full requested audience is ``target_roles``. Only roles the requester may
 	# actually target are accepted - never trust the client's list (this is the
 	# server-side gate the old single-role path lacked).
-	roles = _normalize_promotion_roles(target_roles, target_role)
 	if to_scope == "Role":
 		if not roles:
 			frappe.throw(_("Promoting to Role scope needs a target role."))
