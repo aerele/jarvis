@@ -671,6 +671,15 @@ class TestLogging(_Harness):
 		self.assertTrue(self.info_lines)
 		self.assert_no_key_anywhere()
 
+	def test_repair_values_are_stable_strings(self):
+		self.assertEqual(
+			{r.value for r in Repair},
+			{"skipped", "healthy", "absent", "restored", "unrepairable", "refused", "failsoft"},
+		)
+		self.assertEqual(Repair.UNREPAIRABLE, "unrepairable")
+		self.assertFalse(hasattr(Repair, "RESET"))
+		self.assertFalse(hasattr(session_repair, "CONTEXT_LOST_LINE"))
+
 
 class TestWireOrder(_Harness):
 	"""Through a real AgentSession over the scripted websocket: the frames the
