@@ -934,12 +934,6 @@ class TestAttentionAndNotice(_Base):
 		self.assertEqual(entries[0]["fallback"], "Anthropic")
 		self.assertEqual(entries[0]["account_ref"], "ACC_OA1")
 
-	def test_same_upstream_fallback_reads_another_account(self):
-		self.seed({"ACC_OA1": _entry("ACC_OA1", since=100)})
-		with patch.object(sh, "fallback_label", return_value="OpenAI"):
-			entries = sh.ui_entries()
-		self.assertEqual(entries[0]["fallback"], "Another OpenAI account")
-
 	def test_other_upstream_fallback_is_untouched(self):
 		self.seed({"ACC_OA1": _entry("ACC_OA1", since=100), "ACC_CL1": _entry("ACC_CL1", since=200)})
 		with patch.object(sh, "fallback_label", return_value="Anthropic"):

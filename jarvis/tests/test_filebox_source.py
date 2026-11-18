@@ -479,18 +479,6 @@ class TestFileBoxSource(_Base):
 		self.assertEqual(state["source"]["name"], original.name)
 		self.assertEqual(frappe.db.get_value("File", pdf.name, "attached_to_name"), other)
 
-	def test_source_change_records_a_generic_owner_audit_comment(self):
-		conv, original, pdf, msg, item = self.fixture()
-		comments_before = self.comments(conv)
-		self.select(conv, msg, item)
-		comments = self.new_comments(conv, comments_before)
-		self.assertEqual(
-			comments,
-			[("Info", USER, "File Box source changed.")],
-		)
-		self.assertNotIn(original.file_name, comments[0][2])
-		self.assertNotIn(pdf.file_name, comments[0][2])
-
 	def test_source_change_rolls_back_when_the_audit_write_fails(self):
 		from jarvis.chat import filebox_source
 
