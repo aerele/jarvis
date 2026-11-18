@@ -13,9 +13,7 @@ Python call is unchanged: ``export_query`` itself stays strict.
 
 from __future__ import annotations
 
-import io
 import os
-import zipfile
 from unittest.mock import patch
 
 import frappe
@@ -394,20 +392,24 @@ class TestFileToolsBlankArgs(FrappeTestCase):
 		self.assertEqual(r["data"]["format"], "csv")
 		self.assertEqual(r["data"]["sheets"][0]["row_count"], 6)  # header + 5 rows
 
-	def _save_zip(self, name):
+	def _save_zip(self):
+		import uuid
+
 		from frappe.utils.file_manager import save_file
 
-		buffer = io.BytesIO()
-		with zipfile.ZipFile(buffer, "w") as book:
-			book.writestr("a.csv", "Item,Qty\nx,1\n")
-		doc = save_file(name, buffer.getvalue(), None, None, is_private=1)
+		# The shared deflated helper, like the other archive tests: CI's Python writes
+		# stored members that the strict local-header check rejects.
+		from jarvis.tests.test_archive_sources import archive
+
+		name = f"blank-args-members-{uuid.uuid4().hex[:10]}.zip"
+		doc = save_file(name, archive([("a.csv", "Item,Qty\nx,1\n")]), None, None, is_private=1)
 		self.addCleanup(self._remove_file, doc, name)
 		return doc
 
 	def test_an_archive_with_blank_members_gets_the_inventory_manifest(self):
 		# members=[] is dropped, so no archive scope is claimed: with archive reading
 		# on, the archive feature answers with its own inventory (no member selected).
-		doc = self._save_zip("blank-args-members.zip")
+		doc = self._save_zip()
 		with patch.dict(frappe.conf, {"jarvis_archive_reading_enabled": True}):
 			r = api._run_tool("query_file", {"file_id": doc.name, "members": [], "sql": ""})
 		self.assertTrue(r["ok"], r)
