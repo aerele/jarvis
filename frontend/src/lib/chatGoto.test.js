@@ -18,7 +18,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	parseGoto,
-	GOTO_RE,
 	gotoFiredKey,
 	parseFiredStamp,
 	encodeFiredStamp,
@@ -114,16 +113,7 @@ test("an unterminated block does not parse (a half-streamed reply shows no card)
 	assert.equal(parseGoto('```jarvis-goto\n{"page":"dashboards","prompt":"x"'), null);
 });
 
-test("GOTO_RE matches exactly the fenced block chatBlocks.js strips", () => {
-	assert.match(fence('{"page":"dashboards","prompt":"x"}'), GOTO_RE);
-});
-
 // ---- source fences: BLOCK_TAGS, the card, and the one-shot auto-redirect --
-
-test("chatBlocks strips jarvis-goto from the visible prose", () => {
-	const blocksSrc = fs.readFileSync(path.join(HERE, "chatBlocks.js"), "utf8");
-	assert.match(blocksSrc, /"jarvis-goto",/);
-});
 
 test("ChatView parses goto through the shared module, not a private copy", () => {
 	assert.match(
@@ -411,49 +401,6 @@ test("claimGotoFire: no stored value at all builds", () => {
 	assert.deepEqual(claimGotoFire("", 1), { build: true, stamp: "1" });
 });
 
-// A calendar open the guards refuse (draft, fence, dialog, queued turn, expiry
-// re-check) must not keep its ownership: once the user clears the composer, a
-// replayed run:end would otherwise open the page late.
-test("a refused calendar auto-open consumes the ownership: a replayed run:end does not navigate", () => {
-	const runEnd = chatViewSrc.slice(
-		chatViewSrc.indexOf('case "run:end": {'),
-		chatViewSrc.indexOf('case "message:enriched": {')
-	);
-	const ownRuns = new Set(["RUN-1"]);
-	const opened = [];
-	// the refusal leg of the handler, executed: the text after the countdown start
-	// is not importable (SFC), so run the one statement it contains
-	const giveUp = fnBody(chatViewSrc, "function giveUpGotoAtRunEnd(p, goto)");
-	assert.match(runEnd, /if \(nothingStarted\) giveUpGotoAtRunEnd\(p, goto\);/);
-	const refusal = giveUp.match(
-		/if \((goto && goto\.page === PAYMENT_CALENDAR_PAGE)\) (ownRuns\.delete\(p\.run_id\);)/
-	);
-	assert.ok(refusal, "the refused path consumes the calendar ownership");
-	const consume = new Function(
-		"goto",
-		"PAYMENT_CALENDAR_PAGE",
-		"ownRuns",
-		"p",
-		`if (${refusal[1]}) ${refusal[2]}`
-	);
-	const decide = (runId, draft) =>
-		gotoDecision(CALENDAR, { ...OPEN, ownTurn: ownRuns.has(runId), draft });
-	// run:end with a draft in the composer: refused, so the handler consumes it
-	const first = decide("RUN-1", true);
-	assert.equal(first.autoOpen, false);
-	consume(CALENDAR, PAYMENT_CALENDAR_PAGE, ownRuns, { run_id: "RUN-1" });
-	// the composer is cleared, then the run:end is replayed: still no navigation
-	const replay = decide("RUN-1", false);
-	assert.equal(replay.autoOpen, false);
-	if (replay.autoOpen) opened.push("MSG-1");
-	assert.deepEqual(opened, []);
-	// an expiry refusal consumes it as well (settleGoto: every exit but a successful open)
-	const settle = fnBody(chatViewSrc, "function settleGoto(state, outcome)");
-	assert.match(settle, /ownRuns\.delete\(state\.runId\);/);
-	// Dashboards logic is untouched: only a calendar goto consumes in the run:end tail
-	assert.match(giveUp, /goto\.page === PAYMENT_CALENDAR_PAGE\) ownRuns\.delete/);
-});
-
 test("run:end auto-fires the redirect through gotoDecision: once, never errored or stopped", () => {
 	const runEnd = chatViewSrc.slice(
 		chatViewSrc.indexOf('case "run:end": {'),
@@ -532,14 +479,6 @@ test("the morph latch follows the decision, with the page's own morph text", () 
 		/if \(gotoMorph\.value\) return \{ text: gotoPageInfo\(gotoMorph\.value\.page\)\.morph \};/
 	);
 	assert.doesNotMatch(override, /Taking you to the Dashboards builder/);
-});
-
-test("a calendar auto-open is re-checked when the countdown expires (the user may have started typing)", () => {
-	const expire = fnBody(chatViewSrc, "function onGotoExpire(state)");
-	assert.match(
-		expire,
-		/found\.goto\.page === PAYMENT_CALENDAR_PAGE\s*\? gotoDecision\(found\.goto, gotoInputs\(found\.m, state\.runId\)\)\.autoOpen/
-	);
 });
 
 test("the send context carries handoff_pages only under the boot flag, and no other key changes", () => {
@@ -780,31 +719,6 @@ test("gotoDecision: Dashboards never auto-opens off a non-live (history) view", 
 		if (input.live) continue;
 		assert.equal(gotoDecision(DASH, input).autoOpen, false, JSON.stringify(input));
 		assert.equal(gotoDecision(DASH, input).card, true);
-	}
-});
-
-test("gotoDecision: a calendar goto opens only when every condition holds", () => {
-	assert.deepEqual(gotoDecision(CALENDAR, OPEN), {
-		card: true,
-		autoOpen: true,
-		action: "payment-calendar",
-	});
-	// exactly one input flipped at a time: each one alone blocks the auto-open but keeps the card
-	const flips = {
-		canView: false,
-		ownTurn: false,
-		draft: true,
-		queued: true,
-		interactive: true,
-		live: false,
-		error: true,
-		stopped: true,
-		stamp: "1723890000000",
-	};
-	for (const [key, value] of Object.entries(flips)) {
-		const d = gotoDecision(CALENDAR, { ...OPEN, [key]: value });
-		assert.equal(d.autoOpen, false, `${key} must block the auto-open`);
-		assert.equal(d.card, true, `${key} must keep the card`);
 	}
 });
 

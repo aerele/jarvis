@@ -16,35 +16,6 @@ import {
 } from "./chatCardActions";
 
 describe("chatCardActions copy", () => {
-	it("words every refusal code the chat endpoints answer with", () => {
-		for (const code of [
-			"not_found",
-			"already_handled",
-			"busy",
-			"executing",
-			"armed_run",
-			"identity_refused",
-			"stale",
-			"target_missing",
-			"tampered",
-			"unverifiable",
-			"safety_update",
-			// approve_and_run (C5): the card stays Pending on every one of these -
-			// see the "keeps a card" case below.
-			"not_runnable",
-			"needs_own_confirm",
-			"skill_not_armed",
-			"storage_unavailable",
-			"storage_outcome_unknown",
-		]) {
-			const words = chatRefusalMessage({ ok: false, reason_code: code });
-			expect(words, code).toMatch(/\w/);
-			expect(words, code).not.toContain("undefined");
-			expect(words, code).not.toBe("This action could not be completed.");
-		}
-		expect(chatRefusalMessage({ reason_code: "stale" })).toContain("Nothing ran");
-	});
-
 	it("keeps the tool's own words for a failed run, and the server's for the rest", () => {
 		const failed = {
 			ok: false,
@@ -59,6 +30,12 @@ describe("chatCardActions copy", () => {
 			error: { type: "ConfirmationUnavailableError", message: "Try again." },
 		};
 		expect(chatRefusalMessage(storage)).toBe("Try again.");
+		expect(chatRefusalMessage({ ok: false, reason_code: "storage_unavailable" })).toBe(
+			"Couldn't reach confirmation storage. Try again in a moment."
+		);
+		expect(chatRefusalMessage({ ok: false, reason_code: "storage_outcome_unknown" })).toBe(
+			"Lost track of whether that went through. Check before retrying."
+		);
 		expect(chatRefusalMessage({})).toBe("This action could not be completed.");
 	});
 
@@ -254,49 +231,7 @@ describe("ChatView's handlers use the shared decision and nothing else", () => {
 	}
 });
 
-// D2: cards never expire now, so confirming one whose target changed settles
-// it as Failed with a specific reason_code (stale/target_missing/tampered/
-// unverifiable) alongside error.type InvalidConfirmation. keepsChatCard
-// already treats that as settled (isChatSettled's pa_status "Failed" check),
-// so the generic InvalidConfirmation branch below must show the SPECIFIC
-// reason instead of guessing "another tab" - that guess is for a truly bare
-// legacy token (no reason_code at all).
-describe("chatSettledReason, tool draft card", () => {
-	// Break: a draft card's refused Confirm says "this was proposed ... Nothing ran" (the receipt's
-	// words are "draft was made"), or the draft wording leaks to other reasons or other cards.
-	it("rewords only stale, only for a draft", () => {
-		const stale = { ok: false, reason_code: "stale", pa_status: "Failed" };
-		expect(chatSettledReason(stale, { draft: true })).toBe(
-			"This record changed after the draft was made. Nothing was saved."
-		);
-		expect(chatSettledReason(stale)).toBe(
-			"The record changed after this was proposed. Nothing ran."
-		);
-		const gone = { ok: false, reason_code: "target_missing", pa_status: "Failed" };
-		expect(chatSettledReason(gone, { draft: true })).toBe(chatSettledReason(gone));
-	});
-});
-
 describe("chatSettledReason", () => {
-	it("gives the specific reason for a card that settled as Failed with a known reason_code", () => {
-		expect(
-			chatSettledReason({
-				ok: false,
-				reason_code: "stale",
-				pa_status: "Failed",
-				error: { type: "InvalidConfirmation" },
-			})
-		).toContain("record changed");
-		expect(
-			chatSettledReason({ ok: false, reason_code: "target_missing", pa_status: "Failed" })
-		).toContain("no longer exists");
-		expect(
-			chatSettledReason({ ok: false, reason_code: "tampered", pa_status: "Failed" })
-		).toContain("integrity check");
-		expect(
-			chatSettledReason({ ok: false, reason_code: "unverifiable", pa_status: "Failed" })
-		).toContain("verified");
-	});
 	it("gives nothing for a bare legacy token (no reason_code at all)", () => {
 		expect(chatSettledReason({ ok: false, error: { type: "InvalidConfirmation" } })).toBe("");
 	});

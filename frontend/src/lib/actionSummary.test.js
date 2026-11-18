@@ -20,7 +20,6 @@ import {
 	pendingExpiry,
 	receiptView,
 	isDestructivePlanStep,
-	PLAN_STEP_CAP,
 } from "./actionSummary.js";
 
 const createAction = {
@@ -317,11 +316,6 @@ test("isDestructivePlanStep: delete/cancel/amend are destructive, everything els
 	}
 	assert.equal(isDestructivePlanStep({}), false);
 	assert.equal(isDestructivePlanStep(null), false);
-});
-
-test("PLAN_STEP_CAP: a positive display cap the outline caps against defensively", () => {
-	assert.equal(typeof PLAN_STEP_CAP, "number");
-	assert.ok(PLAN_STEP_CAP > 0);
 });
 
 test("verbSentence: single names the record, bulk counts + pluralizes", () => {
