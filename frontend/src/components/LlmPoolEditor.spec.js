@@ -1742,3 +1742,129 @@ describe("first load never waits forever", () => {
 		expect(api.getLlmSyncStatus.mock.calls.length).toBeGreaterThan(1);
 	});
 });
+
+/**
+ * #809: the edit panel's action footer is ONE row in every state. While the
+ * paste-back sign-in spine is up it owns the only action row (Cancel + Connect);
+ * the panel footer's Close used to render on a second row under it.
+ */
+describe("edit panel footer layout (#809)", () => {
+	const claude = (order = 1) =>
+		subModel("claude-opus-5", order, [
+			{ upstream: "anthropic", account_ref: "CLAUDE_stored", label: "Claude subscription" },
+		]);
+	const codex = () => subModel("gpt-5.6-terra", 0, [account("SUB_stored", "test@example.com")]);
+
+	// Every action button inside the open panel, grouped by the row container it
+	// sits in, so "one row" is asserted structurally and not by pixel position.
+	function actionRows(w) {
+		const panel = w.find(".jv-cfgpanel");
+		const rows = panel.findAll(".jv-cn-acts, .jv-cfgpanel-acts");
+		return rows.map((r) => r.findAll("button").map((b) => b.text()));
+	}
+
+	it("Chat subscription sign-in: Cancel and Connect share one row, no lone Close", async () => {
+		setPool([codex(), claude()]);
+		const w = await mountEditor();
+		w.vm.quickReconnect(1);
+		await idle();
+
+		expect(w.text()).toContain("Edit model");
+		expect(actionRows(w)).toEqual([["Cancel", "Connect"]]);
+		expect(w.find(".jv-cfgpanel-acts").exists()).toBe(false);
+	});
+
+	it("Cancel steps back to the account list, where Close is the footer's only button", async () => {
+		setPool([codex(), claude()]);
+		const w = await mountEditor();
+		w.vm.quickReconnect(1);
+		await idle();
+
+		const cancel = w.find(".jv-cn-acts").findAll("button")[0];
+		await cancel.trigger("click");
+		await idle();
+
+		expect(w.vm.panel.open).toBe(true);
+		const footer = w.find(".jv-cfgpanel-acts");
+		expect(footer.findAll("button").map((b) => b.text())).toContain("Close");
+		expect(w.find(".jv-cn-acts").exists()).toBe(false);
+	});
+
+	it("Connect stays disabled until a code is pasted", async () => {
+		setPool([codex(), claude()]);
+		const w = await mountEditor();
+		w.vm.quickReconnect(1);
+		await idle();
+
+		const connect = w
+			.find(".jv-cn-acts")
+			.findAll("button")
+			.find((b) => b.text() === "Connect");
+		expect(connect.attributes("disabled")).toBeDefined();
+	});
+
+	it("API key tab keeps a single footer row: Close + Save and apply", async () => {
+		setPool([keyModel("openai", "gpt-4o", 0)]);
+		const w = await mountEditor();
+		w.vm.openEdit(0);
+		await idle();
+
+		expect(actionRows(w)).toEqual([["Close", "Save and apply"]]);
+		// Same button size across the row (Close used to be a small button next to a
+		// regular-size primary, so the two never lined up on the bottom edge).
+		const footer = w.find(".jv-cfgpanel-acts");
+		for (const b of footer.findAll("button")) expect(b.classes()).not.toContain("jv-btn--sm");
+	});
+
+	it("Chat subscription with a connected account keeps Close + Save and apply", async () => {
+		setPool([codex()]);
+		const w = await mountEditor();
+		w.vm.openEdit(0);
+		await idle();
+
+		expect(actionRows(w)).toEqual([["Close", "Save and apply"]]);
+	});
+
+	// The device-code flow (Kimi) has a spine Cancel but no Connect to pair it with,
+	// so the footer's Close/Cancel must keep rendering. Widening spineCancelPaired
+	// to cover it would leave the panel with no way to close itself.
+	it.each([
+		["edit", "Close"],
+		["add", "Cancel"],
+	])("device-code flow in %s mode keeps the footer %s", async (mode, label) => {
+		if (mode === "edit") {
+			setPool([codex(), claude()]);
+			const w = await mountEditor();
+			w.vm.quickReconnect(1);
+			await idle();
+			w.vm.panelRow._connect.deviceFlow = true;
+			await idle();
+			expect(w.vm.panel.mode).toBe("edit");
+			expect(w.vm.spineCancelPaired).toBe(false);
+			const footer = w.find(".jv-cfgpanel-acts");
+			expect(footer.exists()).toBe(true);
+			expect(footer.findAll("button").map((b) => b.text())).toContain(label);
+		} else {
+			setPool([]);
+			const w = await mountEditor();
+			w.vm.openAdd();
+			await idle();
+			w.vm.panelRow._connect.deviceFlow = true;
+			await idle();
+			expect(w.vm.panel.mode).toBe("add");
+			expect(w.vm.spineCancelPaired).toBe(false);
+			const footer = w.find(".jv-cfgpanel-acts");
+			expect(footer.exists()).toBe(true);
+			expect(footer.findAll("button").map((b) => b.text())).toContain(label);
+		}
+	});
+
+	it("add mode still pairs Connect + Cancel on one row with no second footer", async () => {
+		setPool([]);
+		const w = await mountEditor();
+		w.vm.openAdd();
+		await idle();
+
+		expect(actionRows(w)).toEqual([["Connect", "Cancel"]]);
+	});
+});
