@@ -36,6 +36,20 @@ repos:
       - id: check-yaml
       - id: debug-statements
 
+  # Conflict markers anywhere on a line. The `check-merge-conflict` hook above returns early unless
+  # git is mid-merge (MERGE_HEAD) and matches column 0 only, so in CI it checks nothing. #2526
+  # shipped markers that prettier had indented (v16.8.0, fixed by #2629); prettier can also fold
+  # them into the middle of a line of template text. Only the open and close markers are matched:
+  # every conflict has both, and a lone ======= is a valid markdown heading.
+  # A file that must hold markers on purpose (a test fixture) goes in this hook's `exclude:`.
+  - repo: local
+    hooks:
+      - id: conflict-markers
+        name: "Block git conflict markers (indented or mid-line too)"
+        language: pygrep
+        entry: '(^|[ \t])(<<<<<<<|>>>>>>>)([ \t\r]|$)'
+        types: [text]
+
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.10
     hooks:
