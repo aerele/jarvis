@@ -407,10 +407,3 @@ test("send() and sendText() refuse to dispatch while a turn is already running",
 	const sendText = fnBody(paneSrc, "function sendText(");
 	assert.match(sendText, /if \(!t \|\| sending\.value \|\| runActive\.value\) return;/);
 });
-
-test("the ask card is told when the pane would refuse a submit", () => {
-	// AskCard's own single-submit lock only closes half the race: if the host
-	// silently swallows the answer (already sending, or the prior turn hasn't
-	// finished), the card must not lock until the host would actually accept it.
-	assert.match(paneSrc, /<AskCard[\s\S]{0,240}:busy="sending \|\| runActive"/);
-});

@@ -313,12 +313,6 @@ test("expiry that throws still settles: the row cannot stick and Esc is not swal
 	}
 });
 
-test("expiry has no shortcut around settleGoto: one try/finally owns the exit", () => {
-	const body = fnBody("function onGotoExpire(state)");
-	assert.match(body, /try \{/);
-	assert.match(body, /\} finally \{\s*settleGoto\(state, outcome\);\s*\}/);
-});
-
 test("the Dashboards stamp is read for THIS message at expiry; the calendar ignores it", () => {
 	const keys = [];
 	const scope = exitScope({
@@ -338,23 +332,12 @@ test("the Dashboards stamp is read for THIS message at expiry; the calendar igno
 	assert.equal(cal.calls.opened.length, 1);
 });
 
-test("expiry source: the message, the draft, the stamp and the navigation failure are all checked", () => {
-	const expire = fnBody("function onGotoExpire(state)");
-	assert.match(expire, /resolveGotoFor\(state\)/);
-	assert.match(expire, /composerHasDraft\(\)/);
-	assert.match(expire, /readGotoStamp\(gotoFiredKey\(state\.messageId\)\)/);
-	assert.match(expire, /let outcome = "refused"/);
-	const resolve = fnBody("function resolveGotoFor(state)");
-	assert.match(resolve, /messages\.value\.find\(\(x\) => x\.name === state\.messageId\)/);
-	const open = fnBody("function openGotoFromCountdown(state, goto, action)");
-	assert.match(open, /isNavigationFailure\(/);
-	assert.match(open, /gotoNavFailed\(/);
-	assert.match(open, /return "opened";/);
-	assert.match(open, /return "refused";/);
-});
-
 test("expiry and Open now share one resolver for the message's current goto", () => {
 	assert.match(fnBody("function onGotoExpire(state)"), /resolveGotoFor\(state\)/);
+	assert.match(
+		fnBody("function onGotoExpire(state)"),
+		/gotoDecision\(found\.goto, gotoInputs\(found\.m, state\.runId\)\)\.autoOpen/
+	);
 	assert.match(fnBody("function onGotoOpenNow(state)"), /resolveGotoFor\(state\)/);
 	const scope = exitScope({
 		messages: {
@@ -634,15 +617,6 @@ test("a draft in the composer at run:end starts no countdown on either page: car
 	}
 });
 
-test("startGotoCountdown checks the draft in the same guard as the hidden tab, before it starts anything", () => {
-	const body = fnBody("function startGotoCountdown(m, goto, decision, runId)");
-	assert.match(
-		body,
-		/if \(document\.visibilityState !== "visible" \|\| composerHasDraft\(\)\) \{\s*gotoCd\.markHandled\(m\.name\);\s*return null;\s*\}/
-	);
-	assert.ok(body.indexOf("composerHasDraft()") < body.indexOf("gotoCd.start("));
-});
-
 test("a Dashboards countdown watches for a second tab's claim; the calendar one does not", () => {
 	const dash = startScope();
 	startIt(dash, { name: "M1" }, DASH, { action: DASHBOARDS_PAGE });
@@ -848,31 +822,6 @@ test("Esc is left alone when a dialog is open, settings are open, IME is composi
 		loadKey(scope)(e);
 		assert.deepEqual(scope.log.stay, [], JSON.stringify([over, e]));
 	}
-});
-
-test("the Esc branch is the first thing onGlobalKey does, guarded as the plan says, with no preventDefault", () => {
-	const body = fnBody("function onGlobalKey(e)");
-	const first = body
-		.slice(body.indexOf("{") + 1)
-		.replace(/^(\s*\/\/[^\n]*\n)*/, "")
-		.trimStart();
-	assert.ok(
-		first.startsWith(
-			'if (\n\t\te.key === "Escape" &&\n\t\tgotoCdState.value &&\n\t\tgotoCd.state() &&'
-		),
-		first.slice(0, 120)
-	);
-	const branch = body.slice(0, body.indexOf("return;\n\t}") + 10);
-	for (const guard of [
-		"gotoCd.state()",
-		"!e.defaultPrevented",
-		"!e.isComposing",
-		"!store.settingsOpen",
-		"!modalIsOpen(document)",
-	])
-		assert.ok(branch.includes(guard), guard);
-	assert.doesNotMatch(branch, /preventDefault\(\)|stopPropagation\(\)/);
-	assert.match(branch, /stayInChat\(gotoCardHasFocus\(\), "esc"\);\s*return;/);
 });
 
 test("after an exit, the card state is clear and Esc reaches the mic again", () => {

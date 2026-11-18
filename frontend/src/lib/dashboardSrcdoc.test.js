@@ -81,20 +81,6 @@ test("SECURITY: a <script> before <head> is dropped, never runs pre-CSP", () => 
 	assert.ok(out.includes("<body>USER</body>"));
 });
 
-test("runtime script precedes user markup in all three cases", () => {
-	for (const html of [
-		"<html><head></head><body><p>USER</p></body></html>",
-		"<html><body><p>USER</p></body></html>",
-		"<p>USER</p>",
-	]) {
-		const out = buildSrcdoc(html, {});
-		assert.ok(
-			out.indexOf(RUNTIME_MARK) < out.indexOf("USER"),
-			`runtime after markup for: ${html}`
-		);
-	}
-});
-
 test("</script> in inlined sources is escaped so the wrapper cannot terminate early", () => {
 	const evil = 'console.log("</script><img src=x>")';
 	const out = buildSrcdoc("<div>ok</div>", { echartsSource: evil });

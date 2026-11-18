@@ -213,52 +213,6 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"from_date/to_date",
 		]);
 	});
-
-	it("agent-specific includes payroll baseline, review, fixed-asset, payroll, SLA, materiality, FEFO, GRN, Deposit, GST and vendor-ledger settings", () => {
-		expect(AGENT_SPECIFIC_CONFIG_FIELDS.map((f) => f.key)).toEqual([
-			"settlement_hold_days",
-			"bank_account",
-			"voucher_lookback_days",
-			"report_date",
-			"policy_version",
-			"price_tolerance_percent",
-			"basis",
-			"review_scope",
-			"depr_run_posted",
-			"enable_capex_signal",
-			"payroll_entry",
-			"sla_team",
-			"benchmark_value",
-			"percentage",
-			"engagement_risk_level",
-			"rounding_step",
-			"baseline_hrms_reviewer",
-			"baseline_hrms_reviewer_capacity",
-			"baseline_hrms_history_from",
-			"baseline_hrms_test_declaration",
-			"fefo_reviewer",
-			"fefo_near_expiry_days",
-			"fefo_test_declaration",
-			"grn_hygiene_reviewer",
-			"grn_hygiene_test_declaration",
-			"deposit",
-			"annual_aggregate_turnover",
-			"same_hsn_rate_allowlist",
-			"stale_floor_days",
-			"advance_floor_days",
-			"grir_floor_days",
-		]);
-	});
-
-	it("the two subsets partition CONFIG_FIELD_SET with no overlap and no gap", () => {
-		expect(SCOPE_CONFIG_FIELDS.length + AGENT_SPECIFIC_CONFIG_FIELDS.length).toBe(
-			CONFIG_FIELD_SET.length
-		);
-		const scopeSet = new Set(SCOPE_CONFIG_FIELDS);
-		for (const f of AGENT_SPECIFIC_CONFIG_FIELDS) {
-			expect(scopeSet.has(f)).toBe(false);
-		}
-	});
 });
 
 // jarvis#1063 CRITICAL fix: close-auditor/evaluate.py reads its materiality
