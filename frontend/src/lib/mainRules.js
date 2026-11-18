@@ -6,48 +6,78 @@
 // A field that is on the form only because of its rule is marked `ruleAdded`: it is sent only
 // when the person changed it (draftApply.draftValues, draftCardValues), never for the value it
 // was shown with. Pure, relative imports only (the phone shares it).
-import { checkToYesNo } from "./draftApply.js";
-import { normCell } from "./draftCardValues.js";
+import { allRowFields, checkToYesNo } from "./draftApply.js";
+import { isReal, normCell } from "./draftCardValues.js";
 import { panelField } from "./docFields.js";
 import { parentDefaults } from "./draftTables.js";
 import { ruleHolds, ruleState, typed } from "./rowForm.js";
 
+// The tables a rule of this form reads: a `doc.<table>` (or `doc["<table>"]`) in the
+// mandatory_depends_on or depends_on of a main field that has a mandatory rule. Only these tables
+// go into the rule doc, so a form whose rules name none never walks a row.
+const DOC_REF = /\bdoc\s*(?:\??\.\s*([A-Za-z_]\w*)|\[\s*["']([^"']+)["']\s*\])/g;
+export function ruleTableNames(metaFields) {
+	const tables = new Set(
+		(metaFields || []).filter((f) => f.fieldtype === "Table").map((f) => f.fieldname)
+	);
+	const out = new Set();
+	for (const f of metaFields || []) {
+		if (f.fieldtype === "Table" || !f.mandatory_depends_on) continue;
+		for (const rule of [f.mandatory_depends_on, f.depends_on]) {
+			for (const m of String(rule || "").matchAll(DOC_REF)) {
+				const name = m[1] || m[2];
+				if (tables.has(name)) out.add(name);
+			}
+		}
+	}
+	return [...out];
+}
+
 // The values a rule may read that the form does not show: every field's static default, then the
-// saved record's values (an update), and each table's saved rows (an empty list when it has none:
-// a rule such as `!doc.links?.length` reads one). Only built for a form whose meta has a main-field
-// rule, so a model without one is unchanged.
-export function mainRuleBase(metaFields, stored, storedTables) {
+// saved record's values (an update), and the saved rows of the tables the rules name (an empty
+// list when it has none). Only built for a form whose meta has a main-field rule, so a model
+// without one is unchanged.
+export function mainRuleBase(metaFields, stored, storedTables, tableNames = []) {
 	if (!(metaFields || []).some((f) => f.fieldtype !== "Table" && f.mandatory_depends_on))
 		return null;
 	const out = parentDefaults(metaFields);
 	for (const f of metaFields) {
-		if (f.fieldtype === "Table") out[f.fieldname] = (storedTables || {})[f.fieldname] || [];
-		else if (stored && f.fieldname in stored) out[f.fieldname] = typed(f, stored[f.fieldname]);
+		if (f.fieldtype !== "Table" && stored && f.fieldname in stored)
+			out[f.fieldname] = typed(f, stored[f.fieldname]);
 	}
+	for (const name of tableNames) out[name] = (storedTables || {})[name] || [];
 	return out;
 }
 
-// A table's rows as a rule reads them: the row's field values, no private `__` keys.
-const ruleRows = (rows) =>
-	(rows || []).map((r) =>
-		Object.fromEntries(Object.entries(r || {}).filter(([k]) => !k.startsWith("__")))
-	);
+// One named table's rows as a rule reads them: the rows the save would count (the same test as
+// the send path, so a blank placeholder row is not a row), each cell typed like a field.
+function ruleRows(table) {
+	const cols = allRowFields(table);
+	return (table.rows || [])
+		.filter((r) => isReal(table, r))
+		.map((r) => Object.fromEntries(cols.map((c) => [c.fieldname, typed(c, r[c.fieldname])])));
+}
+
+// {table: rows} for the built tables the rules name; a table the form does not hold keeps what
+// the base has (its saved rows).
+export function ruleTables(names, tables) {
+	const out = {};
+	for (const t of tables || [])
+		if (t && (names || []).includes(t.fieldname)) out[t.fieldname] = ruleRows(t);
+	return out;
+}
 
 // The rule's `doc`: the base, then the form's own values on top, typed as Desk's doc holds them
-// (a Check is 1 or 0, a number is a number), then each table's current rows. `fields` are panel
-// fields, or meta fields with `values` ({fieldname: raw value}) for a build that has no panel yet;
-// `tables` is {fieldname: rows}.
+// (a Check is 1 or 0, a number is a number), then the named tables' rows. `fields` are panel
+// fields, or meta fields with `values` ({fieldname: raw value}) for a build that has no panel yet.
 export function mainRuleDoc(base, fields, values, tables) {
 	const doc = { ...(base || {}) };
 	for (const f of fields) doc[f.fieldname] = typed(f, values ? values[f.fieldname] : f.value);
-	for (const [name, rows] of Object.entries(tables || {})) doc[name] = ruleRows(rows);
-	return doc;
+	return Object.assign(doc, tables || {});
 }
 
-const tableRowsOf = (model) =>
-	Object.fromEntries((model.tables || []).map((t) => [t.fieldname, t.rows]));
 const modelRuleDoc = (model) =>
-	mainRuleDoc(model.ruleBase, model.fields, null, tableRowsOf(model));
+	mainRuleDoc(model.ruleBase, model.fields, null, ruleTables(model.ruleTables, model.tables));
 
 // Yes / no / null for one main field's rule (see ruleState); `parent` is empty for a main field.
 export function mainRuleState(rule, doc, fieldname = "") {
@@ -72,6 +102,28 @@ export function mainRuleStates(model) {
 	return out;
 }
 
+// Whether a rule makes a field part of the form: its rule state is true (or null, "cannot tell",
+// when `unknownToo`: the build shows such a field, a later reveal waits for a yes) and Desk
+// would not hide it (depends_on). One answer for the build and the reveal.
+export function ruleAdmits(f, doc, unknownToo) {
+	if (!f.mandatory_depends_on || f.read_only) return false;
+	const state = mainRuleState(f.mandatory_depends_on, doc, f.fieldname);
+	return (state === true || (unknownToo && state === null)) && mainFieldShown(f, doc);
+}
+
+// One main field of the form from its meta field. `value` is what it shows, `stored` the saved
+// record's value (the baseline of an update's change mark).
+export function modelField(f, value, stored, verb, { proposed, ruleAdded }) {
+	const pf = panelField(f, value);
+	pf.proposed = proposed;
+	if (ruleAdded) pf.ruleAdded = true; // shown only for its mandatory rule
+	if (verb === "update")
+		pf.orig =
+			stored == null ? "" : String(pf.control === "check" ? checkToYesNo(stored) : stored);
+	pf.changed = verb === "update" && String(pf.value) !== String(pf.orig);
+	return pf;
+}
+
 // What a watcher reads to know a reveal may be due: null when the model has no candidate.
 export function revealKey(model) {
 	return model && model.ruleFields && model.ruleFields.length
@@ -92,17 +144,11 @@ export function revealRuleFields(model) {
 	let added = 0;
 	for (const c of [...cands]) {
 		const f = c.field;
-		if (mainRuleState(f.mandatory_depends_on, doc, f.fieldname) !== true) continue;
-		if (!mainFieldShown(f, doc)) continue;
-		const pf = panelField(f, c.value);
-		pf.proposed = false;
-		pf.ruleAdded = true;
-		if (model.verb === "update")
-			pf.orig =
-				c.value == null
-					? ""
-					: String(pf.control === "check" ? checkToYesNo(c.value) : c.value);
-		pf.changed = model.verb === "update" && String(pf.value) !== String(pf.orig);
+		if (!ruleAdmits(f, doc, false)) continue;
+		const pf = modelField(f, c.value, c.value, model.verb, {
+			proposed: false,
+			ruleAdded: true,
+		});
 		model.fields.push(pf);
 		if (model.snapshot) {
 			model.snapshot.fields[pf.fieldname] = normCell(pf.fieldtype, pf.value);
