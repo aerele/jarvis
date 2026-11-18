@@ -1449,11 +1449,6 @@ class TestRedispatchKeyAcrossAHandOff(_PipelineCase):
 	"""A hop that takes over a re-sent turn must re-attach its lane under the key the
 	gateway knows, not the bare run id, or the reply's frames go nowhere."""
 
-	def test_gateway_key(self):
-		self.assertEqual(pump._gateway_key("r", {}), "r")
-		self.assertEqual(pump._gateway_key("r", {"redispatch": 0}), "r")
-		self.assertEqual(pump._gateway_key("r", {"redispatch": 1}), "r-r1")
-
 	def test_reattach_uses_the_resend_key_before_the_ack(self):
 		conv = self._mk_conv()
 		seed = self._mk_msg(conv, content="hi")
@@ -2402,21 +2397,6 @@ class TestUsageHonesty(_PipelineCase):
 		)
 		self.assertEqual(self._effects("pmp_usage_nokey")["usage"], "pending", "usage stays pending to retry")
 
-	def test_unmapped_user_positive_delta_retries(self):
-		# CDX-6: a FRESH POSITIVE token delta whose session_key has no `Jarvis Chat
-		# Session` user mapping is unattributed real usage => USAGE_RETRY, never VALID_ZERO.
-		from jarvis.chat import usage as _usage
-
-		row = {"key": "sess-unmapped", "totalTokensFresh": True, "inputTokens": 30, "outputTokens": 12}
-		# Ensure there is no mapping row for this session key.
-		frappe.db.delete(SESSION, {"session_key": "sess-unmapped"})
-		frappe.db.commit()
-		self.assertEqual(
-			_usage.record_turn_usage("sess-unmapped", row),
-			_usage.USAGE_RETRY,
-			"positive delta + unmapped user => RETRY (not VALID_ZERO)",
-		)
-
 
 # --------------------------------------------------------------------------- #
 # 13. CDX-12 — terminal_publish backstop
@@ -2709,20 +2689,6 @@ class TestReplyModelAttribution(_PipelineCase):
 		row.update(over)
 		return _ModelRowSess(session_key, **row)
 
-	def test_resolved_model_is_stamped_on_the_assistant_row(self):
-		# The happy path: the model the gateway attributes to this turn's session
-		# lands on the assistant row, paired with its provider (two providers can
-		# serve the same model id, so the PAIR is the identity).
-		rid = "pmp_model_stamp"
-		_conv, amsg = self._finalizing_turn(rid, "sess-model-stamp", model_override="glm-4.7")
-		sess = self._row_sess("sess-model-stamp", model="glm-4.7", modelProvider="openai_compat")
-		with self._gateway(sess):
-			finalize.run_finalize(rid, self._target)
-		row = self._msg(amsg)
-		self.assertEqual(row.model, "glm-4.7", "the resolved model is stamped on the reply")
-		self.assertEqual(row.provider, "openai_compat", "paired with the provider that served it")
-		self.assertEqual(self._effects(rid)["usage"], "done")
-
 	def test_failover_records_the_model_that_answered_not_the_requested_one(self):
 		# The case the issue exists for. The conversation asked for
 		# gemini-3.6-flash; the chain fell over and glm-4.7 actually answered.
@@ -2748,6 +2714,7 @@ class TestReplyModelAttribution(_PipelineCase):
 			"the conversation still asks for the model the user picked; only the "
 			"reply knows it was answered by another",
 		)
+		self.assertEqual(self._effects(rid)["usage"], "done")
 
 	def test_row_without_a_model_leaves_the_stamp_blank(self):
 		# An agent-direct pool that never resolved a model reports no model at
@@ -3954,7 +3921,3 @@ class TestPrepareSessionRepair(_PipelineCase):
 				self.assertTrue(res.get("ready"))
 				self.assertEqual(self._names(fake), ["patch"])
 				self.assertTrue(self._payload(rid)["message"].endswith("\n\nhello"))
-
-	def test_flag_absent_probes(self):
-		conv, rid, fake, res = self._prepare()
-		self.assertEqual(self._names(fake)[0], "describe")

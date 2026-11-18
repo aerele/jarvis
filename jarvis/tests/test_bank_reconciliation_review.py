@@ -464,17 +464,13 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 		):
 			snap = self.snapshot()
 		self.assertEqual(snap["reason_code"], "run_truncated_watermark")
+		self.assertFalse(snap["complete"])
 		self.assertNotIn("Payment Entry", seen)
 
 	def test_journal_cap_counts_entries_not_bank_rows(self):
 		scope = review.scope_from_config(config(company=E2E_CO, bank_account=self.bank_account))
 		with patch.object(review, "MAX_VOUCHERS", 1):
 			self.assertRaises(OverflowError, review._journal_vouchers, scope)
-
-	def test_capacity_limit_is_typed(self):
-		with patch.object(review, "MAX_VOUCHERS", 1):
-			snap = self.snapshot()
-		self.assertEqual((snap["complete"], snap["reason_code"]), (False, "run_truncated_watermark"))
 
 	def test_unreadable_doctype_is_permission_slice(self):
 		real = frappe.has_permission

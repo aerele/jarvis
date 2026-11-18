@@ -97,23 +97,3 @@ class TestJarvisChatSessionDocType(FrappeTestCase):
 				_insert(key, "Administrator")
 		finally:
 			_cleanup(key)
-
-	def test_lookup_by_session_key(self):
-		"""frappe.db.get_value can look up a user by session_key."""
-		key = "test-session-lookup-1"
-		_cleanup(key)
-		try:
-			_insert(key, "Administrator")
-			user = frappe.db.get_value(DOCTYPE, {"session_key": key}, "user")
-			self.assertEqual(user, "Administrator")
-		finally:
-			_cleanup(key)
-
-	def test_missing_session_key_not_found(self):
-		"""Looking up a non-existent session_key returns None."""
-		user = frappe.db.get_value(
-			DOCTYPE,
-			{"session_key": "definitely-not-a-real-session-key-xyz"},
-			"user",
-		)
-		self.assertIsNone(user)

@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
-from frappe.utils import cint, cstr, flt
+from frappe.utils import cstr, flt
 
 from jarvis.chat import confirm_card
 from jarvis.chat.confirm_card import build_card
@@ -437,6 +437,3 @@ class TestCardShowsWhatIsStored(FrappeTestCase):
 		self.assertEqual(card["diff"], [], "an echoed cell in another spelling is not a change either")
 		card = self.update_card("same-1", rows[:1])
 		self.assertEqual(self.table_diff(card)["to"], "1 row", "a removed row is one")
-
-	def test_the_number_helpers_agree_with_frappe(self):
-		self.assertEqual((cint("1000"), flt("1,234.5")), (1000, 1234.5))

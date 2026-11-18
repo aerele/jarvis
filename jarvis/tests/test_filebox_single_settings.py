@@ -205,6 +205,7 @@ class TestFileBoxSingleSettings(_ApplyBase):
 		self.assertEqual(result["reason_code"], "stale")
 		self.assertEqual(self.value(), 1)
 
+<<<<<<< HEAD
 	def test_v15_callback_cut_keeps_earlier_callbacks(self):
 		callbacks = frappe.utils.CallbackManager()
 		called = []
@@ -222,6 +223,8 @@ class TestFileBoxSingleSettings(_ApplyBase):
 		callbacks.run()
 		self.assertEqual(called, ["prior"])
 
+=======
+>>>>>>> 95df126 (test: remove 83 duplicate or no-proof tests (campaign batch 3: api, tools, core utils, chat))
 	def test_cleanup_callbacks_are_isolated_and_keep_the_original_record_failure(self):
 		from jarvis.tools.update_doc import _update_one
 

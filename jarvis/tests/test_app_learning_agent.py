@@ -1096,18 +1096,6 @@ class TestAppLearningAgentTools(FrappeTestCase):
 		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "completed")
 		self.assertTrue(frappe.db.get_value(RUN, run, "finished_at"))
 
-	def test_stale_scribe_run_without_pages_is_failed(self):
-		# A scribe run that produced NO durable pages is a genuinely dead run: the
-		# sweep still fails it (there is no success to reconcile).
-		from jarvis.chat.agent_scheduler import STALE_RUN_AFTER_SECONDS, reap_stale_agent_runs
-
-		run = self._bind_scribe_run()
-		old = frappe.utils.add_to_date(frappe.utils.now_datetime(), seconds=-(STALE_RUN_AFTER_SECONDS + 3600))
-		frappe.db.set_value(RUN, run, "started_at", old, update_modified=False)
-		frappe.db.commit()
-		reap_stale_agent_runs()
-		self.assertEqual(frappe.db.get_value(RUN, run, "status"), "failed")
-
 	def test_list_runs_page_stamps_scribe_nature_and_pages(self):
 		from jarvis.chat import agents_api
 

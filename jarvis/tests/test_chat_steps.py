@@ -380,3 +380,81 @@ class TestPreambleLimitLockstep(FrappeTestCase):
 			match = re.search(r"export const MAX_CANDIDATE_CHARS = (\d+);", fh.read())
 		self.assertIsNotNone(match)
 		self.assertEqual(int(match.group(1)), MAX_PREAMBLE_STEP_CHARS)
+<<<<<<< HEAD
+=======
+
+
+class TestRecoveredReplyStrip(FrappeTestCase):
+	"""#2367: a recovered turn (the relay missed its terminal) saves the runtime's stored
+	final, which carries the narration; the pump strips what it cached for the run."""
+
+	def setUp(self):
+		from jarvis.chat import pump
+
+		self.pump = pump
+		self.run_id = f"test-2367-{frappe.generate_hash(length=8)}"
+
+	def tearDown(self):
+		frappe.cache().delete_value(self.pump._run_steps_key(self.run_id))
+		frappe.cache().delete_value(self.pump._run_preambles_key(self.run_id))
+
+	def test_cached_steps_are_cut_from_the_recovered_text(self):
+		p1 = "I'll check the drafting rules and look up the supplier and item."
+		p2 = "Supplier, item, and company all resolved. Now checking how similar invoices are filled here."
+		answer = "This already exists: ACC-PINV-2026-00006 matches on supplier, date, item and total."
+		self.pump._append_run_step(self.run_id, p1)
+		self.pump._append_run_step(self.run_id, p2)
+		self.assertEqual(self.pump._strip_cached_steps(self.run_id, f"{p1}\n\n{p2}\n\n{answer}"), answer)
+
+	def test_a_flagged_preamble_is_cut_even_before_a_shorter_answer(self):
+		step = "Checking your customer count now."
+		self.pump._append_run_step(self.run_id, step)
+		self.pump._append_run_preamble(self.run_id, step)
+		self.assertEqual(
+			self.pump._strip_cached_steps(self.run_id, f"{step}\n\n3 customers."), "3 customers."
+		)
+
+	def test_no_cache_leaves_the_text_alone(self):
+		text = "Checking the ledger.\n\nThe balance is 87,000 INR."
+		self.assertEqual(self.pump._strip_cached_steps(self.run_id, text), text)
+
+
+class TestRunStepCacheSurvivesTheWatchdogClear(FrappeTestCase):
+	"""#2367: pump.watchdog ends every five-minute tick with frappe.db.set_default, which runs
+	a full frappe.clear_cache(). That deleted a long turn's recorded steps mid-turn, so the next
+	hop re-seeded nothing and settlement neither stripped the narration nor saved the steps."""
+
+	_RUN = "steps_cache_probe_2367"
+	_PROBE = "jarvis:test_non_persistent_probe_2367"
+
+	def tearDown(self):
+		from jarvis.chat import pump
+
+		for key in (
+			pump._run_steps_key(self._RUN),
+			pump._run_step_lines_key(self._RUN),
+			pump._run_preambles_key(self._RUN),
+			self._PROBE,
+		):
+			frappe.cache.delete_value(key)
+		super().tearDown()
+
+	def test_the_steps_survive_the_watchdog_tick(self):
+		from jarvis.chat import pump
+
+		step = "Checking the supplier and the item."
+		pump._append_run_step(self._RUN, step)
+		pump._append_run_step_line(self._RUN, step)
+		pump._append_run_preamble(self._RUN, step)
+		frappe.cache.set_value(self._PROBE, "x")
+
+		frappe.db.set_default(pump.WATCHDOG_LAST_COMPLETED_KEY, frappe.utils.now())
+
+		self.assertIsNone(
+			frappe.cache.get_value(self._PROBE),
+			"an ordinary key must still be cleared - proves the hook, not a no-op clear",
+		)
+		self.assertEqual(pump._read_run_steps(self._RUN), [step])
+		self.assertEqual([line["text"] for line in pump._read_run_step_lines(self._RUN)], [step])
+		self.assertEqual(pump._read_run_preambles(self._RUN), [step])
+>>>>>>> 95df126 (test: remove 83 duplicate or no-proof tests (campaign batch 3: api, tools, core utils, chat))

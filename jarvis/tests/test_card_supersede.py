@@ -15,7 +15,6 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.chat import api as chat_api
 from jarvis.chat import pending_confirm, pending_confirm_legacy, turn_message_binding
-from jarvis.chat.pending_actions import _park
 from jarvis.tests._pending_action_helpers import CONV, MSG, OWNER, PA, PendingActionTestMixin, as_user
 from jarvis.tests._transport_helpers import provision_legacy_site
 from jarvis.tests.test_pending_confirm import _purge_legacy
@@ -78,9 +77,6 @@ class _Base(PendingActionTestMixin, FrappeTestCase):
 
 
 class TestSupersede(_Base):
-	def test_the_hook_is_wired(self):
-		self.assertEqual(_park.SUPERSEDE_HOOK, "jarvis.chat.pending_confirm.supersede_on_park")
-
 	def test_the_user_speaking_then_a_new_proposal_supersedes_the_old_card(self):
 		for origin in ("human", "board_answer"):
 			with self.subTest(origin=origin):
@@ -205,6 +201,7 @@ class TestSupersede(_Base):
 		self.trigger(conv, "continuation")
 		with as_user(OWNER):
 			res = api._run_tool("create_doc", dict(TODO), conversation=conv)
+		self.assertFalse(res["ok"])
 		self.assertEqual(res["error"]["code"], "ConfirmationPendingError")
 		self.assertIn("confirms or discards it", res["error"]["message"])
 
@@ -313,8 +310,3 @@ class TestSingleFlightRefusalText(FrappeTestCase):
 			"question in that reply.",
 			message,
 		)
-
-	def test_the_envelope_is_the_confirmation_pending_error(self):
-		res = api._single_flight_error()
-		self.assertFalse(res["ok"])
-		self.assertEqual(res["error"]["code"], "ConfirmationPendingError")

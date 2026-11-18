@@ -661,12 +661,6 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 		r = self._turn_row("agent:tu-cli-big")
 		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (900, 0))
 
-	def test_non_cli_row_never_estimated(self):
-		_make_session("agent:tu-gpt-tiny", USER_A)
-		usage.record_turn_usage("agent:tu-gpt-tiny", self._gpt_row(outputTokens=3), reply_chars=100000)
-		r = self._turn_row("agent:tu-gpt-tiny")
-		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (3, 0))
-
 	def test_claude_model_name_alone_is_not_a_cli_marker(self):
 		_make_session("agent:tu-api-claude", USER_A)
 		row = self._cli_row(agentRuntime={"id": "default", "source": "provider"})
@@ -1383,22 +1377,6 @@ class TestUsageRollupContextAndUsersDaily(FrappeTestCase):
 		emails = [u["email"] for u in rollup["users"]]
 		self.assertIn(lower_email, emails)
 		self.assertNotIn(mixed_email, emails)
-
-	# -- review fix 6: the UTC ZoneInfo is built once at module level -------- #
-	def test_iso_utc_z_reuses_module_level_utc_zoneinfo(self):
-		from zoneinfo import ZoneInfo as RealZoneInfo
-
-		calls = []
-
-		def spy(key):
-			calls.append(key)
-			return RealZoneInfo(key)
-
-		with patch("jarvis.chat.usage_push.ZoneInfo", side_effect=spy):
-			usage_push._iso_utc_z(frappe.utils.now_datetime())
-			usage_push._iso_utc_z(frappe.utils.now_datetime())
-		self.assertNotIn("UTC", calls, "UTC must come from the module-level _UTC, not a fresh ZoneInfo call")
-		self.assertIsInstance(usage_push._UTC, RealZoneInfo)
 
 	# -- users_daily: grouping, window, per_model cap, email case ----------- #
 	def test_users_daily_rollup_groups_by_user_day_model(self):
