@@ -380,7 +380,7 @@ describe("the typed edit panel when a server draft card arrives", () => {
 		);
 		expect(second).toContain("|| draftPanelStale");
 		expect(primary).toContain("|| draftPanelStale");
-		expect(PANEL).toContain('@click="closeDraftPanel"');
+		expect(PANEL).toContain('@click="onDraftCloseClick"');
 		const discard = slice(
 			'class="jv-action-discard"',
 			'@click="discardDraft"',

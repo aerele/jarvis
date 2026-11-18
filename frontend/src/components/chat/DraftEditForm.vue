@@ -11,16 +11,19 @@
 				:key="f.fieldname"
 				class="jv-draft-fld"
 				:class="{
-					missing: isFieldMissing(f),
+					missing: isFieldMissing(f, ruleRequired(f)),
 					invalid: f.serverInvalid,
 					changed: f.changed,
 				}"
 			>
 				<label
 					>{{ f.label
-					}}<span v-if="(f.reqd || f.serverMissing) && !f.read_only" class="jv-req">
+					}}<span
+						v-if="(f.reqd || f.serverMissing || ruleRequired(f)) && !f.read_only"
+						class="jv-req"
+					>
 						*</span
-					></label
+					><span v-if="mayBeRequired(f)" class="jv-maybe">May be required</span></label
 				>
 				<div class="jv-draft-ctl">
 					<span v-if="f.read_only" class="jv-draft-ro">{{ readonlyDisplay(f) }}</span>
@@ -364,11 +367,12 @@
 // is a state machine the host owns: it is driven through the `link-*` events (the same
 // signatures DraftCell and DraftRowBlock emit) and shown from the read-only `draftLink`.
 // Relative imports only (see draftFormImportGraph.spec.js): the phone resolves `@/` elsewhere.
-import { computed, inject, onMounted, onUpdated, provide, ref, toRef } from "vue";
+import { computed, inject, onMounted, onUpdated, provide, ref, toRef, watch } from "vue";
 import DraftCell from "./DraftCell.vue";
 import DraftLinkMenu from "./DraftLinkMenu.vue";
 import DraftRowBlock from "./DraftRowBlock.vue";
 import { isFieldMissing, readonlyDisplay, removedSavedRows } from "../../lib/draftApply";
+import { mainRuleStates, revealKey, revealRuleFields } from "../../lib/mainRules";
 import { blankRow, openChangedRows, toggleLabel, toggleParts } from "../../lib/draftTables";
 import { draftTotals as totalsOf } from "../../lib/draftTotals";
 import { DRAFT_DATE_CONTROL, DRAFT_SURFACE } from "../../lib/draftSurface";
@@ -394,6 +398,26 @@ const props = defineProps({
 	// inputs, 40px targets, one column, table rows as stacked cards; see the end of the style).
 	surface: { type: String, default: "desktop" },
 });
+// Desk's mandatory_depends_on on the main fields, live as the person edits: a rule that holds
+// adds the star and the missing cue (nothing blocks a save on it); one that cannot be evaluated
+// here (state null) only says "May be required" while the field is editable and empty.
+const ruleStates = computed(() => mainRuleStates(props.model));
+// A field whose rule an edit makes true later joins the form (mainRules.revealRuleFields). The
+// key is null, so nothing runs, for a model with no such candidate; a reveal takes its field out
+// of the candidates, so the key settles after one more run.
+watch(
+	() => revealKey(props.model),
+	(key) => {
+		if (key !== null) revealRuleFields(props.model);
+	}
+);
+const ruleRequired = (f) => ruleStates.value[f.fieldname] === true;
+const mayBeRequired = (f) =>
+	ruleStates.value[f.fieldname] === null &&
+	!f.reqd &&
+	!f.serverMissing &&
+	!f.read_only &&
+	!String(f.value ?? "").trim();
 // Slot `top` (the phone's host: its notices, at the top of the scrolling body) draws nothing when
 // empty. The link menu is teleported to <body>, so it cannot see this component's classes: it asks.
 provide(DRAFT_SURFACE, toRef(props, "surface"));
@@ -980,5 +1004,12 @@ defineExpose({ parkedRegion });
 .jv-surface-phone .jv-grid-del {
 	font-size: 20px;
 	line-height: 1;
+}
+/* A rule the card cannot evaluate: a muted note by the label, not a required marker. */
+.jv-draft-fld .jv-maybe {
+	margin-left: 6px;
+	font-weight: 500;
+	letter-spacing: normal;
+	text-transform: none;
 }
 </style>

@@ -6,7 +6,8 @@
 // Both apps call these functions: the desktop's ChatView imports `TOOL_FORM_POLL_MS`,
 // `watchCalculatedCells`, `toolFooterState` and `previewPrimaryDisabled` (its template and script read
 // them, nothing is copied), and the phone's sheet host imports the same, plus `closeAsksFirst`, which is
-// the phone's own rule (the desktop's X always closes). The specs run the view's own lines against
+// the rule of the phone's close and of the desktop's X button (ChatView onDraftCloseClick; its other
+// ways out stay silent). The specs run the view's own lines against
 // them (ChatView.toolDraft.spec.js, ChatView.toolDraftKeys.spec.js) and toolDraftSheet.spec.js holds
 // the tables, so a change here is a change on both.
 import { draftIsDirty } from "./draftSave.js";
