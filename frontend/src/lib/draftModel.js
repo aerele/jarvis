@@ -13,6 +13,7 @@
 // made it once per mounted ChatView).
 import { panelField } from "./docFields.js";
 import { checkToYesNo } from "./draftApply.js";
+import { mainRuleBase, mainRuleDoc, mainRuleState } from "./mainRules.js";
 import {
 	applyRuleValues,
 	buildDraftTable,
@@ -137,12 +138,27 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 		}
 		const fields = [];
 		const seen = new Set();
+		// A field whose mandatory_depends_on holds, or cannot be told, is shown too (never a
+		// read_only one): the rule reads the defaults, the saved record and the proposed values.
+		const ruleBase = mainRuleBase(meta.fields, base.values);
+		let ruleDoc = null;
+		const ruleSays = (f) => {
+			if (!ruleBase || !f.mandatory_depends_on || f.read_only) return false;
+			ruleDoc =
+				ruleDoc ||
+				mainRuleDoc(
+					ruleBase,
+					meta.fields.filter((m) => m.fieldname in proposed),
+					proposed
+				);
+			return mainRuleState(f.mandatory_depends_on, ruleDoc, f.fieldname) !== false;
+		};
 		for (const f of meta.fields) {
 			if (f.fieldtype === "Table") continue;
 			const has = f.fieldname in proposed;
 			const baseV = base.values[f.fieldname];
 			// Show: agent-proposed fields + required fields + (update) filled fields the agent referenced
-			if (!has && !f.reqd) continue;
+			if (!has && !f.reqd && !ruleSays(f)) continue;
 			const pf = panelField(f, has ? proposed[f.fieldname] : baseV);
 			pf.proposed = has; // agent set a value for this field (vs. shown only because reqd)
 			if (verb === "update")
@@ -205,6 +221,7 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 			parentDefaults: verb === "create" ? parentDefaults(meta.fields) : {},
 			docstatus: Number(base.docstatus || 0),
 			fields,
+			...(ruleBase ? { ruleBase } : {}),
 			tables,
 			tableMeta: meta.tables || {},
 			applying: false,

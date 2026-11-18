@@ -32,9 +32,11 @@ export function isFieldWritable(field, verb) {
 // editable-input-that-discards-your-value trap) must not fire on them.
 // `serverMissing` is a field a failed create named (see docFields.markMissing), which
 // meta may not mark required (mandatory_depends_on).
-export function isFieldMissing(field) {
+// `ruleRequired`: the field's mandatory_depends_on holds right now (lib/mainRules); the cue only,
+// nothing blocks a save on it.
+export function isFieldMissing(field, ruleRequired = false) {
 	return (
-		(!!field.reqd || !!field.serverMissing) &&
+		(!!field.reqd || !!field.serverMissing || ruleRequired) &&
 		!field.read_only &&
 		!String(field.value ?? "").trim()
 	);

@@ -69,6 +69,8 @@ const describedBy = (item) =>
 	[isMissing(item) && reqIdFor(item.field), wasText(item) && wasIdFor(item.field)]
 		.filter(Boolean)
 		.join(" ");
+// A rule that cannot be evaluated here: a muted note, no star, nothing blocks.
+const mayBeRequired = (item) => !!item.maybe && !isStatic(item) && isBlank(item.field.fieldname);
 const isRequired = (item) =>
 	!isStatic(item) && (!!item.reqd || serverMissing.value.has(item.field.fieldname));
 // Names a failed save asked for that the user cannot fill here and that are still blank:
@@ -179,6 +181,8 @@ defineExpose({ allOpen, canFold: computed(() => foldable.value.length > 0), setA
 							{{ item.field.label
 							}}<span v-if="item.reqd && !item.readOnly" class="jv-rowform-req">
 								*</span
+							><span v-if="mayBeRequired(item)" class="jv-rowform-maybe"
+								>May be required</span
 							>
 						</label>
 						<div class="jv-rowform-ctl">
@@ -327,6 +331,12 @@ defineExpose({ allOpen, canFold: computed(() => foldable.value.length > 0), setA
 }
 .jv-rowform-req {
 	color: var(--red);
+}
+.jv-rowform-maybe {
+	margin-left: 6px;
+	font-weight: 500;
+	letter-spacing: normal;
+	text-transform: none;
 }
 .jv-rowform-missing :deep(.jv-action-input) {
 	border-color: var(--amber-bd);
