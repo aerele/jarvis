@@ -31,7 +31,7 @@ import re
 
 import frappe
 
-from jarvis.chat.wiki_permissions import _NON_TARGETABLE_ROLES
+from jarvis.chat.wiki_permissions import is_promotion_target_role
 
 SKILL = "Jarvis Custom Skill"
 SHARE = "Jarvis Custom Skill Share"
@@ -119,8 +119,9 @@ def has_skill_permission(doc, ptype: str = "read", user: str | None = None) -> b
 def own_targetable_roles(user: str) -> list[str]:
 	"""The roles ``user`` may name for a skill's audience as its author or a promotion
 	requester: their own desk roles minus the blanket ones (the wiki's
-	``_NON_TARGETABLE_ROLES``). A requester widens to a team they belong to."""
-	return sorted(r for r in frappe.get_roles(user) if r and r not in _NON_TARGETABLE_ROLES)
+	``_NON_TARGETABLE_ROLES``) and Jarvis's own roles (``is_promotion_target_role``).
+	A requester widens to a team they belong to."""
+	return sorted(r for r in frappe.get_roles(user) if is_promotion_target_role(r))
 
 
 def reviewer_targetable_roles() -> list[str]:
@@ -137,7 +138,7 @@ def reviewer_targetable_roles() -> list[str]:
 		pluck="name",
 		ignore_permissions=True,
 	)
-	return [r for r in roles if r not in _NON_TARGETABLE_ROLES]
+	return [r for r in roles if is_promotion_target_role(r)]
 
 
 # --------------------------------------------------------------------------- #

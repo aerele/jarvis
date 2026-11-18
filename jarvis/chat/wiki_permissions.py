@@ -29,6 +29,7 @@ an explicit True to defer to the normal role-perm check.
 from __future__ import annotations
 
 import frappe
+from frappe import _
 
 from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_SKILL_REVIEWER_ROLE, JARVIS_USER_ROLE
 
@@ -60,6 +61,43 @@ _NON_TARGETABLE_ROLES = (
 	JARVIS_ADMIN_ROLE,
 	JARVIS_SKILL_REVIEWER_ROLE,
 )
+
+# Jarvis's own roles all live in one namespace: the tenant roles above, the retired
+# "Jarvis Support ..." pair, and the control plane's "Jarvis Support" / "Jarvis Customer"
+# on a site that hosts both apps. They are capability or tier roles, never a team (and
+# Jarvis User is held by every app user, so sharing with it is sharing with everyone).
+# A prefix rule keeps a role added later from slipping into the promotion picker (#800);
+# the named tuple above stays the explicit list.
+JARVIS_ROLE_PREFIX = "Jarvis "
+
+
+def is_jarvis_app_role(role: str | None) -> bool:
+	"""True for any role in Jarvis's own ``Jarvis ...`` namespace (case-insensitive,
+	like a Role name lookup). A bare "Jarvis" counts; "Jarvisx" does not."""
+	name = (role or "").strip().casefold()
+	return name == JARVIS_ROLE_PREFIX.strip().casefold() or name.startswith(JARVIS_ROLE_PREFIX.casefold())
+
+
+def is_promotion_target_role(role: str | None) -> bool:
+	"""Whether ``role`` may be named as the audience of a skill or page promotion: not a
+	framework/blanket role (``_NON_TARGETABLE_ROLES``) and not a Jarvis app role.
+	The one predicate behind the picker list and the submit-side refusal."""
+	role = (role or "").strip()
+	return bool(role) and role not in _NON_TARGETABLE_ROLES and not is_jarvis_app_role(role)
+
+
+def refuse_jarvis_app_roles(roles) -> None:
+	"""Throw the one refusal text when any of ``roles`` is a Jarvis app role. Shared by
+	skill and wiki promotion so a posted Jarvis role reads the same on both."""
+	named = [r for r in roles if is_jarvis_app_role(r)]
+	if named:
+		frappe.throw(
+			_(
+				"Jarvis's own roles ({0}) are not team roles, so they cannot be a promotion target. "
+				"Pick a team role, or promote to the whole org."
+			).format(", ".join(named))
+		)
+
 
 # ptypes that reveal page content; everything read-shaped maps to visibility.
 _READ_PTYPES = ("read", "select", "print", "email", "export", "share", "report")
@@ -154,6 +192,10 @@ def manageable_roles(user: str | None = None) -> list[str]:
 	"""Roles the user may target for Role-scope pages: a curator (Knowledge Wiki
 	Manager, or Jarvis Admin which inherits it) targets roles they hold; SM
 	targets any enabled desk role."""
+	# Only the framework/blanket roles are filtered here. This direct-create path is
+	# intentionally NOT filtered for Jarvis's own roles (#800): it is the admin tier
+	# placing a page itself, not a requester asking a reviewer; the Jarvis-role rule
+	# (is_promotion_target_role) governs promotion requests only.
 	user = user or frappe.session.user
 	if _is_sm(user):
 		return [
