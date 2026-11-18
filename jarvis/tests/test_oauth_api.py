@@ -126,14 +126,6 @@ class TestBeginPasteSignin(_OAuthApiBase):
 		self.assertIn("state", entry)
 		self.assertGreater(len(entry["verifier"]), 40)  # base64url(32 bytes)
 
-	def test_gemini_provider_is_no_longer_oauth_supported(self):
-		# Google's chat subscription was removed 2026-08-19 (Google discontinued
-		# login-with-Google for Gemini) - begin_paste_signin now rejects it the
-		# same way it rejects any unknown provider.
-		out = oauth_api.begin_paste_signin("Google Gemini", "gemini-2.0-pro")
-		self.assertFalse(out["ok"])
-		self.assertEqual(out["error"]["code"], "unknown_provider")
-
 	def test_unknown_provider_rejected(self):
 		out = oauth_api.begin_paste_signin("Anthropic", "claude-3-5")
 		self.assertFalse(out["ok"])

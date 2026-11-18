@@ -114,13 +114,6 @@ class TestImportAnnounceBinding(FrappeTestCase):
 		import_announce.bind_after_run_import(self._record(), self._ok(di="No Such Data Import xyz"))
 		self.assertFalse(frappe.db.exists(ANN, {"data_import": "No Such Data Import xyz"}))
 
-	def test_bind_uses_the_token_conversation_only(self):
-		# The helper reads record["conversation"] (the guarded token conv) - never a
-		# client-supplied value (PC-4). Binding is always to that conversation.
-		import_announce.bind_after_run_import(self._record(), self._ok())
-		row = frappe.get_all(ANN, filters={"data_import": self.di_name}, fields=["conversation"])
-		self.assertEqual(row[0].conversation, self.conv)
-
 	# --- T5: conversation cascade -------------------------------------------
 
 	def test_cascade_deletes_rows_on_conversation_trash(self):

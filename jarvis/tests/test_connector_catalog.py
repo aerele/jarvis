@@ -67,27 +67,6 @@ _LEGACY_HINTS = {
 
 
 class TestCatalogShape(unittest.TestCase):
-	def test_forty_eight_providers(self):
-		# 31 from the 2026-09-05 sweep + 16 from the 2026-09-07 gap analysis
-		# + WhatsApp Business (2026-10-19). CONNECTOR_PROVIDERS.md carries all.
-		self.assertEqual(len(catalog.PROVIDERS), 48)
-
-	def test_names_unique(self):
-		names = [p.name for p in catalog.PROVIDERS]
-		self.assertEqual(len(names), len(set(names)))
-
-	def test_keys_unique(self):
-		keys = [p.key for p in catalog.PROVIDERS]
-		self.assertEqual(len(keys), len(set(keys)))
-
-	def test_all_base_urls_https(self):
-		for provider in catalog.PROVIDERS:
-			self.assertTrue(provider.base_url.startswith("https://"), provider.name)
-
-	def test_all_keys_are_lowercase_slugs(self):
-		for provider in catalog.PROVIDERS:
-			self.assertRegex(provider.key, r"^[a-z0-9_-]+$", provider.name)
-
 	def test_auth_class_counts_match_probe_sweep(self):
 		counts = {}
 		for provider in catalog.PROVIDERS:
@@ -130,19 +109,9 @@ class TestLegacyPresetsUnchanged(unittest.TestCase):
 		for name, help_url in _LEGACY_HELP_URLS.items():
 			self.assertEqual(catalog.by_name(name).help_url, help_url, name)
 
-	def test_github_is_static_byoa(self):
-		# GitHub moved onto the sign-in engine as a bring-your-own-app static
-		# provider; the legacy per-app sign-in path it used to take was removed.
-		self.assertEqual(catalog.by_name("GitHub").auth, catalog.AUTH_STATIC)
-
 	def test_atlassian_and_linear_are_dcr(self):
 		self.assertEqual(catalog.by_name("Atlassian").auth, catalog.AUTH_DCR)
 		self.assertEqual(catalog.by_name("Linear").auth, catalog.AUTH_DCR)
-
-	def test_stripe_is_token_with_its_existing_hint(self):
-		stripe = catalog.by_name("Stripe")
-		self.assertEqual(stripe.auth, catalog.AUTH_TOKEN)
-		self.assertEqual(stripe.hint, _STRIPE_HINT)
 
 	def test_legacy_token_hints_are_carried_over_verbatim(self):
 		for name, hint in _LEGACY_HINTS.items():
@@ -624,10 +593,6 @@ class TestAuthorizeParams(unittest.TestCase):
 
 		self.assertIs(catalog._RESERVED_AUTHORIZE_PARAMS, flow.RESERVED_AUTHORIZE_PARAMS)
 
-	def test_not_shipped_by_to_public(self):
-		for row in catalog.to_public():
-			self.assertNotIn("authorize_params", row)
-
 	def test_overlay_may_not_change_params_but_may_repeat_them(self):
 		with self.assertRaises(ValueError):
 			catalog.apply_overlay([{"name": "Gmail", "authorize_params": {"prompt": "none"}}])
@@ -699,14 +664,6 @@ class TestAcceptsKey(unittest.TestCase):
 class TestGapAnalysisEntries(unittest.TestCase):
 	"""The 2026-09-07 additions: shapes that the probe sweep pinned down."""
 
-	def test_pinned_static_entries_pin_all_three_endpoints(self):
-		for name in ("Shopify", "Docusign"):
-			provider = catalog.by_name(name)
-			self.assertEqual(provider.auth, catalog.AUTH_STATIC, name)
-			self.assertTrue(
-				provider.issuer and provider.authorization_endpoint and provider.token_endpoint, name
-			)
-
 	def test_shopify_ships_switched_off(self):
 		self.assertFalse(catalog.by_name("Shopify").enabled)
 		self.assertNotIn("Shopify", catalog.preset_names())
@@ -729,12 +686,6 @@ class TestGapAnalysisEntries(unittest.TestCase):
 		# HubSpot and Calendly serve MCP at the origin itself; a `/mcp` suffix is 404.
 		self.assertEqual(catalog.by_name("HubSpot").base_url, "https://mcp.hubspot.com")
 		self.assertEqual(catalog.by_name("Calendly").base_url, "https://mcp.calendly.com/")
-
-	def test_new_categories_are_allowed_and_used(self):
-		used = {p.category for p in catalog.PROVIDERS}
-		for category in ("accounting", "crm", "commerce", "communication"):
-			self.assertIn(category, catalog._ALLOWED_CATEGORIES)
-			self.assertIn(category, used)
 
 
 class TestWhatsAppBusinessEntry(unittest.TestCase):

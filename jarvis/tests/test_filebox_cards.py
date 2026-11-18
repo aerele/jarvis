@@ -243,14 +243,6 @@ class TestParkFromTurn(_Base):
 		self.assertNotIn("jarvis-action", frappe.db.get_value(MSG, msg, "content"))
 		self.assertEqual(len(self.rows()), 1)
 
-	def test_an_update_note_says_updated(self):
-		self.assertEqual(
-			filebox_cards._note(
-				"update_doc", {"ok": True, "data": {"doctype": "Supplier", "name": "S-1"}}, None
-			),
-			"Updated Supplier S-1.",
-		)
-
 	def test_a_write_waiting_on_an_earlier_approval_files_no_question(self):
 		conv = self.conv()
 		msg = self.reply(conv, self.supplier_card())

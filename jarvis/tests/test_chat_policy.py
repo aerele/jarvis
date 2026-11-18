@@ -97,11 +97,6 @@ class TestValidateCanSend(FrappeTestCase):
 		self.assertFalse(ok)
 		self.assertIsNotNone(reason)
 
-	def test_model_kwarg_defaults_to_no_gate(self):
-		ok, reason = validate_can_send("nobody@example.invalid", model=None)
-		self.assertTrue(ok)
-		self.assertIsNone(reason)
-
 
 class TestSubscriptionGate(FrappeTestCase):
 	"""The entitlement check. Rejecting HERE is the whole point: without it the

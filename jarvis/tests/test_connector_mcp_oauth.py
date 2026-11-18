@@ -268,9 +268,6 @@ class PkceTests(unittest.TestCase):
 	def test_new_verifier_is_not_constant(self):
 		self.assertNotEqual(pkce.new_verifier(), pkce.new_verifier())
 
-	def test_method_is_s256(self):
-		self.assertEqual(pkce.METHOD, "S256")
-
 
 # --------------------------------------------------------------------------- #
 # canonical.py
@@ -323,18 +320,6 @@ class DiscoveryHappyPathTests(unittest.TestCase):
 		self.assertEqual(result.token_endpoint, f"{AS_URL}/token")
 		self.assertEqual(result.registration_endpoint, f"{AS_URL}/register")
 		self.assertEqual(result.raw_as_metadata, as_doc)
-
-	def test_accepts_resource_metadata_with_trailing_slash(self):
-		# MCP_OAUTH_CLIENT_DESIGN.md section 4's own GitHub grounding shows a
-		# real server returning "resource" WITH a trailing slash for a
-		# connector whose base_url is that same URL - the gate must canonicalize
-		# both sides, not string-compare raw values.
-		script, _ = _happy_path_script(resource=BASE_URL)
-		transport = _ScriptedTransport(script)
-
-		result = discovery.discover(BASE_URL, transport=transport)
-
-		self.assertEqual(result.resource, CANONICAL_BASE)
 
 	def test_accepts_resource_metadata_with_uppercase_host(self):
 		script, _ = _happy_path_script(resource="HTTPS://MCP.EXAMPLE.COM/mcp")

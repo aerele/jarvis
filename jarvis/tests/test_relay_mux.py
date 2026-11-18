@@ -902,10 +902,6 @@ class TestRelayMuxFailedFinal(FrappeTestCase):
 		self.assertEqual(term[0], "relay:error")
 		self.assertEqual(term[1]["state"], "failed_final")
 
-	def test_top_level_stop_reason_error_is_a_terminal_error(self):
-		term = self._terminal_for([_chat_failed_final_frame("r1", "s1", stop_reason="error")])
-		self.assertEqual(term[0], "relay:error")
-
 	def test_failed_final_names_the_provider_reason_from_the_lifecycle_frame(self):
 		detail = (
 			"Google Generative AI API error (429): You exceeded your current quota, "

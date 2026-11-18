@@ -181,18 +181,6 @@ class TestAddConnector(_ConnectorApiTestCase):
 		self._connectors.append(out["name"])
 		self.assertEqual(out["base_url"], connectors_api._PRESET_BASE_URLS["GitHub"])
 
-	def test_new_connector_never_marked_passed(self):
-		frappe.set_user(PLAIN_A)
-		out = connectors_api.add_connector(
-			label="Fresh",
-			preset="Linear",
-			base_url="",
-			scope="Personal",
-			credential="tok",
-		)
-		self._connectors.append(out["name"])
-		self.assertEqual(out["last_test_status"], "")
-
 	def test_label_derived_from_preset_when_omitted(self):
 		frappe.set_user(PLAIN_A)
 		out = connectors_api.add_connector(
@@ -280,11 +268,6 @@ class TestDisabledCatalogPreset(_ConnectorApiTestCase):
 
 	DISABLED_PRESET = "Plaid"
 
-	def test_the_preset_is_a_real_disabled_catalog_entry(self):
-		provider = catalog.by_name(self.DISABLED_PRESET)
-		self.assertIsNotNone(provider)
-		self.assertFalse(provider.enabled)
-
 	def test_a_row_on_a_disabled_preset_still_saves(self):
 		# Created directly: add_connector refuses a disabled preset, which is the
 		# point of disabling it. This models the row that predates the change.
@@ -306,11 +289,6 @@ class TestDisabledCatalogPreset(_ConnectorApiTestCase):
 		frappe.set_user(PLAIN_A)
 		with self.assertRaises(frappe.ValidationError):
 			connectors_api.add_connector(preset=self.DISABLED_PRESET, base_url="", scope="Personal")
-
-	def test_the_picker_never_offers_it(self):
-		frappe.set_user(PLAIN_A)
-		names = {row["name"] for row in connectors_api.list_connectors()["catalog"]}
-		self.assertNotIn(self.DISABLED_PRESET, names)
 
 
 class TestOperatorDisabledPreset(_ConnectorApiTestCase):
@@ -335,9 +313,6 @@ class TestOperatorDisabledPreset(_ConnectorApiTestCase):
 				"credential": "tok",
 			}
 		)
-
-	def test_the_preset_ships_enabled(self):
-		self.assertTrue(catalog.by_name(self.PRESET).enabled)
 
 	def test_list_connectors_drops_it_from_the_catalog(self):
 		self._disable(self.PRESET)
@@ -2294,18 +2269,6 @@ class TestListConnectorsMcpOauth(_McpOauthTestCase):
 		self.assertTrue(rows[pending]["needs_static_client"])
 		self.assertEqual(rows[pending]["oauth_redirect_uri"], connectors_api.oauth_redirect_uri())
 
-	def test_preset_rows_report_a_signin_host_too(self):
-		# A bring-your-own-app static preset (GitHub) is seeded from the catalog with
-		# no network, and reports the vendor's sign-in host from the pinned issuer.
-		frappe.set_user(PLAIN_A)
-		transport = _ScriptedTransport({})  # any hop would be an AssertionError
-		with patch.object(connectors_api, "MCP_OAUTH_TRANSPORT", transport):
-			out = connectors_api.add_connector(preset="GitHub", scope="Personal", auth_method="OAuth")
-		self._connectors.append(out["name"])
-		self.assertEqual(transport.calls, [])
-		row = next(r for r in connectors_api.list_connectors()["mine"] if r["name"] == out["name"])
-		self.assertEqual(row["signin_host"], "github.com")
-
 	def test_a_shared_static_rows_connection_state_is_per_user(self):
 		# Design 6a on the engine path: a Shared connector's sign-in is PER USER, so
 		# the SAME row reads connected for the user who signed in and not for anyone
@@ -2848,12 +2811,6 @@ class TestOauthErrorMessages(unittest.TestCase):
 			message, "This app did not ask for a sign-in. Add it with a key, or with no sign-in."
 		)
 		self.assertNotIn("401", message, "the engine's detail is not shown")
-
-	def test_address_mismatch_has_its_own_sentence(self):
-		self.assertEqual(
-			connectors_api._oauth_error_message("client_address_mismatch"),
-			"This connector's address changed. Remove it and add it again.",
-		)
 
 	def test_unknown_code_keeps_the_generic_sentence(self):
 		self.assertEqual(

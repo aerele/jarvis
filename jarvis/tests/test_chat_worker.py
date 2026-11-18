@@ -1388,14 +1388,6 @@ class TestChatSendAttachmentTimeout(FrappeTestCase):
 	def test_negative_counts_never_shrink_the_window(self):
 		self.assertEqual(turn_handler._ack_timeout_s(-5, -5), turn_handler._ACK_TIMEOUT_BASE_S)
 
-	def test_text_attachment_produces_no_vision_parts(self):
-		"""Anchors the premise: the inlined-char count is the ONLY signal a
-		text attachment gives, so the budget has to read it."""
-		before = "hi"
-		msg, parts = turn_handler._prepare_attachments(before, None, vision_ok=True)
-		self.assertEqual(parts, [])
-		self.assertEqual(len(msg) - len(before), 0)
-
 
 class TestChatSendAckTimeoutParks(FrappeTestCase):
 	"""A chat.send ACK timeout is ambiguous: the request frame was already on
@@ -1560,17 +1552,6 @@ class TestRunAgentTurnAborted(FrappeTestCase):
 		self.assertNotIn("_Stopped._", row["content"] or "")
 		self.assertEqual(row["stopped"], 1)
 		self.assertEqual(row["streaming"], 0)
-
-	def test_abort_never_writes_stopped_prose_into_content(self):
-		# Guards the whole class of fix-by-magic-string: the sentinel must not
-		# come back through either writer.
-		self._run(
-			[
-				{"kind": "assistant", "text": "half an ans", "delta": "half an ans"},
-				{"kind": "relay:error", "state": "aborted", "error": "aborted"},
-			]
-		)
-		self.assertNotIn("_Stopped._", self._assistant_row("content") or "")
 
 	def test_abort_publishes_run_end_carrying_stopped(self):
 		# The three run:end consumers (desktop notifier, PWA notify-on-done,

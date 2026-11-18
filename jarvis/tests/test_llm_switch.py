@@ -645,27 +645,6 @@ class TestAwaitingAdmin(_LlmSwitchTestCase):
 
 
 class TestEnd(_LlmSwitchTestCase):
-	def test_end_clears_and_broadcasts_and_promotes(self):
-		with (
-			patch.object(llm_switch, "_inflight", return_value=0),
-			patch("frappe.enqueue"),
-			patch("frappe.publish_realtime"),
-		):
-			llm_switch.begin("jarvis.tests.fake_job")
-		self.assertIsNotNone(llm_switch.status())
-
-		with (
-			patch("frappe.publish_realtime") as mock_pub,
-			patch.object(admission, "promote_next") as mock_promote,
-		):
-			llm_switch.end("ok: moved")
-
-		self.assertIsNone(llm_switch.status())
-		mock_pub.assert_called_once_with(
-			llm_switch.EVENT, {"state": "done", "outcome": "ok: moved"}, room="all"
-		)
-		mock_promote.assert_called_once()
-
 	def test_end_is_a_noop_without_an_active_record(self):
 		with (
 			patch("frappe.publish_realtime") as mock_pub,

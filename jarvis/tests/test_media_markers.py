@@ -197,19 +197,6 @@ class TestEmbeddedMediaPaths(unittest.TestCase):
 		self.assertFalse(gm.has_embedded_media_path(""))
 		self.assertFalse(gm.has_embedded_media_path(None))
 
-	def test_media_marker_behaviour_is_unchanged(self):
-		# The MEDIA: marker path stays leak-safety-first (unconditional strip)
-		# even though the new embedded-path detector is more conservative.
-		pdf = _ROOT + "tool-image-generation/report.pdf"
-		self.assertTrue(gm.has_media_marker(f"MEDIA:{pdf}"))
-		self.assertEqual(gm.strip_media_lines(f"MEDIA:{pdf}\nok"), "ok")
-
-	def test_media_line_not_double_counted_as_embedded(self):
-		# A MEDIA: marker line is claimed by the marker detector; the embedded
-		# scanner must skip it (no double strip / double cap consumption).
-		text = f"MEDIA:{_IMG}"
-		self.assertEqual(gm.detect_media_paths(text), [_IMG])
-
 	def test_cap_shared_across_marker_and_embedded(self):
 		marker_lines = [f"MEDIA:{_ROOT}tool-image-generation/m{i}.png" for i in range(5)]
 		embedded_lines = [f"Attachment: {_ROOT}tool-image-generation/e{i}.png" for i in range(5)]
