@@ -1,9 +1,8 @@
 // Real executable test for the per-RECORDING dictation lifecycle (voiceDictationStore.js).
 // Plain node built-ins (node:test + node:assert) — no external framework — exactly like
-// eventFence.test.js. Run directly (`node --test voiceDictationStore.test.js`) or via the python
-// suite: jarvis/tests/test_voice_dictation_store_client.py subprocess-runs this so the client
-// contract is enforced by every CI run. `node --test` exits non-zero on any failed assertion,
-// which the python runner asserts.
+// eventFence.test.js. Run directly (`node --test voiceDictationStore.test.js`) or via
+// `npm run test:node`, so the client contract is enforced by every CI run. `node --test`
+// exits non-zero on any failed assertion.
 //
 // The two properties every test here defends:
 //   1. ONE recording is transcribed in ONE call, with its whole context — never per fragment.

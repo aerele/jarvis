@@ -41,6 +41,7 @@
   "jarvis.tests.test_agent_token_age": 0.0,
   "jarvis.tests.test_agents_marketplace": 7.1,
   "jarvis.tests.test_amend_doc": 0.0,
+<<<<<<< HEAD
   "jarvis.tests.test_announcement": 0.3,
   "jarvis.tests.test_api": 1.3,
   "jarvis.tests.test_api_chat_session_header": 0.3,
@@ -57,6 +58,23 @@
   "jarvis.tests.test_bank_reconciliation_review": 3.1,
   "jarvis.tests.test_bench_commands_documented": 0.1,
   "jarvis.tests.test_bench_heartbeat": 1.5,
+=======
+  "jarvis.tests.test_announcement": 0.2,
+  "jarvis.tests.test_api": 0.9,
+  "jarvis.tests.test_api_chat_session_header": 0.2,
+  "jarvis.tests.test_api_errors": 0.2,
+  "jarvis.tests.test_app_learning": 1.7,
+  "jarvis.tests.test_app_learning_agent": 1.3,
+  "jarvis.tests.test_app_learning_api": 1.0,
+  "jarvis.tests.test_apply_action_one_approval": 2.2,
+  "jarvis.tests.test_auto_apply": 0.2,
+  "jarvis.tests.test_auto_mode": 0.6,
+  "jarvis.tests.test_auto_mode_gate": 0.2,
+  "jarvis.tests.test_background_exports": 15.4,
+  "jarvis.tests.test_bank_reconciliation_review": 2.1,
+  "jarvis.tests.test_bench_commands_documented": 0.0,
+  "jarvis.tests.test_bench_heartbeat": 0.9,
+>>>>>>> ae903ab (test: drop 13 Python wrappers that re-run JS tests CI already runs (prune campaign layer))
   "jarvis.tests.test_billing_contract": 0.0,
   "jarvis.tests.test_boot_site_setup": 0.0,
   "jarvis.tests.test_brand_assets": 3.5,
@@ -74,11 +92,18 @@
   "jarvis.tests.test_card_stored_form": 0.4,
   "jarvis.tests.test_card_supersede": 0.9,
   "jarvis.tests.test_cards_enrich": 0.0,
+<<<<<<< HEAD
   "jarvis.tests.test_chat_admission": 5.8,
   "jarvis.tests.test_chat_agent_client": 0.4,
   "jarvis.tests.test_chat_api": 3.3,
   "jarvis.tests.test_chat_ask_client": 0.1,
   "jarvis.tests.test_chat_asks": 4.6,
+=======
+  "jarvis.tests.test_chat_admission": 4.3,
+  "jarvis.tests.test_chat_agent_client": 0.3,
+  "jarvis.tests.test_chat_api": 2.3,
+  "jarvis.tests.test_chat_asks": 3.2,
+>>>>>>> ae903ab (test: drop 13 Python wrappers that re-run JS tests CI already runs (prune campaign layer))
   "jarvis.tests.test_chat_attachments": 0.6,
   "jarvis.tests.test_chat_card_never_expire": 0.2,
   "jarvis.tests.test_chat_compaction": 0.9,
@@ -127,12 +152,19 @@
   "jarvis.tests.test_custom_pdf_templates": 19.9,
   "jarvis.tests.test_custom_skill_visibility": 1.0,
   "jarvis.tests.test_custom_skills_push": 0.2,
+<<<<<<< HEAD
   "jarvis.tests.test_customizations_clause": 3.5,
   "jarvis.tests.test_dashboard_builder_ux_client": 0.1,
   "jarvis.tests.test_dashboard_clarify_context": 0.8,
   "jarvis.tests.test_dashboard_filters": 0.1,
   "jarvis.tests.test_dashboard_open_from_chat_client": 0.1,
   "jarvis.tests.test_dashboard_permissions": 4.5,
+=======
+  "jarvis.tests.test_customizations_clause": 3.6,
+  "jarvis.tests.test_dashboard_clarify_context": 0.5,
+  "jarvis.tests.test_dashboard_filters": 0.0,
+  "jarvis.tests.test_dashboard_permissions": 3.9,
+>>>>>>> ae903ab (test: drop 13 Python wrappers that re-run JS tests CI already runs (prune campaign layer))
   "jarvis.tests.test_dashboard_theme_contrast": 0.0,
   "jarvis.tests.test_dashboard_theme_standard": 0.2,
   "jarvis.tests.test_dashboard_theme_validator": 0.1,
@@ -158,8 +190,12 @@
   "jarvis.tests.test_enrichment_pending_client": 0.1,
   "jarvis.tests.test_error_log_titles": 0.1,
   "jarvis.tests.test_error_taxonomy": 0.0,
+<<<<<<< HEAD
   "jarvis.tests.test_event_fence_client": 0.1,
   "jarvis.tests.test_excel_charts": 0.4,
+=======
+  "jarvis.tests.test_excel_charts": 0.5,
+>>>>>>> ae903ab (test: drop 13 Python wrappers that re-run JS tests CI already runs (prune campaign layer))
   "jarvis.tests.test_excel_highlights": 0.2,
   "jarvis.tests.test_exceptions": 0.0,
   "jarvis.tests.test_export_document": 0.3,
@@ -282,8 +318,12 @@
   "jarvis.tests.test_maintenance_notice": 0.1,
   "jarvis.tests.test_marketplace_semgrep": 0.0,
   "jarvis.tests.test_media_markers": 0.1,
+<<<<<<< HEAD
   "jarvis.tests.test_mobile_device_auth": 3.1,
   "jarvis.tests.test_model_badge_client": 0.1,
+=======
+  "jarvis.tests.test_mobile_device_auth": 3.2,
+>>>>>>> ae903ab (test: drop 13 Python wrappers that re-run JS tests CI already runs (prune campaign layer))
   "jarvis.tests.test_model_catalog": 0.1,
   "jarvis.tests.test_next_action": 1.4,
   "jarvis.tests.test_no_access_page": 8.3,
@@ -341,6 +381,7 @@
   "jarvis.tests.test_preview_sandbox_enqueue": 0.9,
   "jarvis.tests.test_prewarm": 0.1,
   "jarvis.tests.test_primary_change_hold": 0.0,
+<<<<<<< HEAD
   "jarvis.tests.test_promotion_budget_client": 0.1,
   "jarvis.tests.test_prompt_suggestions": 2.1,
   "jarvis.tests.test_pulse_feedback": 2.0,
@@ -348,6 +389,22 @@
   "jarvis.tests.test_pump_fence_shared_client": 0.4,
   "jarvis.tests.test_pump_pipeline": 45.0,
   "jarvis.tests.test_purchase_match": 2.6,
+=======
+  "jarvis.tests.test_private_network_admin_calls": 0.0,
+  "jarvis.tests.test_private_network_endpoints": 0.4,
+  "jarvis.tests.test_private_network_hold": 0.3,
+  "jarvis.tests.test_private_network_host": 0.0,
+  "jarvis.tests.test_private_network_outbound": 0.1,
+  "jarvis.tests.test_private_network_signup_gate": 0.2,
+  "jarvis.tests.test_prompt_suggestions": 2.2,
+  "jarvis.tests.test_pulse_feedback": 2.1,
+  "jarvis.tests.test_pump": 16.8,
+  "jarvis.tests.test_pump_io_budget": 26.8,
+  "jarvis.tests.test_pump_pipeline": 45.8,
+  "jarvis.tests.test_pump_send_not_started": 41.5,
+  "jarvis.tests.test_pump_tls_e2e": 46.7,
+  "jarvis.tests.test_purchase_match": 2.5,
+>>>>>>> ae903ab (test: drop 13 Python wrappers that re-run JS tests CI already runs (prune campaign layer))
   "jarvis.tests.test_pwa": 0.1,
   "jarvis.tests.test_pwa_send_receipts": 0.0,
   "jarvis.tests.test_query": 3.2,
@@ -476,6 +533,7 @@
   "jarvis.tests.test_v3_list_extensions": 2.3,
   "jarvis.tests.test_validate_script": 0.0,
   "jarvis.tests.test_vision": 0.8,
+<<<<<<< HEAD
   "jarvis.tests.test_vision_attachments": 0.1,
   "jarvis.tests.test_voice": 0.1,
   "jarvis.tests.test_voice_audio_mirror_client": 0.2,
@@ -485,6 +543,12 @@
   "jarvis.tests.test_voice_notes_crud": 0.4,
   "jarvis.tests.test_voice_send_glue_client": 0.1,
   "jarvis.tests.test_voice_silence_gate_client": 0.1,
+=======
+  "jarvis.tests.test_vision_attachments": 0.3,
+  "jarvis.tests.test_voice": 0.2,
+  "jarvis.tests.test_voice_facts": 1.9,
+  "jarvis.tests.test_voice_notes_crud": 0.7,
+>>>>>>> ae903ab (test: drop 13 Python wrappers that re-run JS tests CI already runs (prune campaign layer))
   "jarvis.tests.test_whitelist_annotations": 0.2,
   "jarvis.tests.test_whitelist_http_methods": 2.6,
   "jarvis.tests.test_whole_file_reading": 3.2,
