@@ -2061,9 +2061,76 @@ _DUAL_FORM_TOOLS = frozenset(
 )
 
 
+def _is_blank(value) -> bool:
+	"""An empty string (whitespace included), list or dict. ``0``, ``False`` and
+	``"0"`` are real values and are not blank."""
+	if isinstance(value, str):
+		return not value.strip()
+	return isinstance(value, list | dict) and not value
+
+
+# Optional args of read-only tools that a strict-schema customer model fills with a
+# blank (``""``, ``[]``, ``{}``) when it does not use them. These tools read
+# ``is not None`` as "supplied", so a blank raised, misrouted the call, or the tool
+# already treated it as missing (``x or None``); ``export_query`` counted
+# ``doctype=""`` as a second source.
+# Per tool, so a blank that means something elsewhere is never dropped.
+# Only top-level values are checked. Nested values are kept on purpose: a blank
+# filter value can mean "is empty", so ``filters={"status": ""}`` keeps its shape.
+# Adding an optional param to one of these tools? List it here - the key-set test
+# pins the map.
+_BLANK_AS_ABSENT: dict[str, frozenset[str]] = {
+	"export_query": frozenset(
+		{
+			"doctype",
+			"spec",
+			"result_id",
+			"report_name",
+			"filters",
+			"fields",
+			"order_by",
+			"parent_doctype",
+			"highlights",
+			"format",
+			"title",
+		}
+	),
+	"query_file": frozenset(
+		{
+			"file_url",
+			"filename",
+			"file_id",
+			"sql",
+			"sheets",
+			"version",
+			"members",
+			"archive_version",
+			"payload_format",
+		}
+	),
+	"read_file": frozenset(
+		{
+			"file_url",
+			"filename",
+			"file_id",
+			"sheet",
+			"read_mode",
+			"cursor",
+			"version",
+			"member",
+			"archive_version",
+			"payload_format",
+		}
+	),
+	"query_report": frozenset({"sql", "version"}),
+	"report_pdf": frozenset({"filters", "orientation", "title"}),
+}
+
+
 def _parse_args(args: dict | str | None, tool: str | None = None) -> dict:
 	"""Decode the args input into a dict + strip legacy identity markers +
-	normalise an empty batch array for a dual-form tool (P0d).
+	normalise an empty batch array for a dual-form tool (P0d) + drop blank
+	optional args of the tools in ``_BLANK_AS_ABSENT``.
 
 	Raises ``InvalidArgumentError`` (a JarvisError subclass) on JSON
 	parse failure - that mirrors what tools raise for malformed input
@@ -2102,8 +2169,11 @@ def _parse_args(args: dict | str | None, tool: str | None = None) -> dict:
 				# Only a key THIS tool actually declares - never touch one it
 				# doesn't accept (dispatch's own param filter would drop it
 				# anyway, but this keeps the persisted/audited args honest).
-				if key in tool_params and args.get(key) in ([], ""):
+				if key in tool_params and _is_blank(args.get(key)):
 					del args[key]
+		for key in _BLANK_AS_ABSENT.get(tool, ()):
+			if key in args and _is_blank(args[key]):
+				del args[key]
 	return args
 
 
