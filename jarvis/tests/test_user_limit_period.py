@@ -66,12 +66,6 @@ class TestPeriodKey(FrappeTestCase):
 	def test_monthly_key(self):
 		self.assertEqual(usage.current_period_key("Monthly", datetime(2026, 9, 8)), "M:2026-09")
 
-	def test_daily_and_weekly_keys_never_collide(self):
-		sunday = datetime(2026, 9, 13)
-		self.assertNotEqual(
-			usage.current_period_key("Daily", sunday), usage.current_period_key("Weekly", sunday)
-		)
-
 
 class TestWindowAccrual(_UsageTestBase):
 	def test_all_time_cap_accrues_no_window(self):

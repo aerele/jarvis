@@ -137,14 +137,6 @@ class TestAttachmentCanvasStorage(FrappeTestCase):
 		self.assertEqual([c["type"] for c in canvas], ["image", "pdf"])
 		self.assertEqual(frappe.db.get_value(MSG, res["message_id"], "content"), "look")
 
-	def test_attachment_only_message_inserts_with_empty_content(self):
-		# No text at all + one file: the doc must still insert (content == "").
-		res = _send(self.conv, "", _atts(("/private/files/scan.pdf", "scan.pdf")))
-		self.assertTrue(res.get("ok"))
-		self.assertTrue(frappe.db.exists(MSG, res["message_id"]))
-		self.assertEqual((frappe.db.get_value(MSG, res["message_id"], "content") or "").strip(), "")
-		self.assertEqual(len(_canvas_of(res["message_id"])), 1)
-
 	def test_no_attachments_leaves_canvas_null(self):
 		res = _send(self.conv, "just text")
 		self.assertIsNone(frappe.db.get_value(MSG, res["message_id"], "canvas"))

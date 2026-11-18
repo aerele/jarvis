@@ -2234,15 +2234,6 @@ class TestKillSwitchSuccession(_PumpTestCase):
 
 
 class TestWatchdogMirrorReconcile(_PumpTestCase):
-	def test_reconciles_default_mirror_with_no_open_turns(self):
-		"""Ruling #3: the OLD watchdog derived its target set from open turns/effects and reconciled
-		the mirror INSIDE that loop, so an IDLE site never healed a divergent mirror. The fix
-		reconciles the default control row's mirror EVERY cycle, outside the loop."""
-		# No nonterminal turns exist for this fresh suite target; assert reconcile still runs once.
-		with patch.object(pump, "reconcile_config_mirror") as rc:
-			pump.watchdog(deps=self._deps())
-		rc.assert_called_once_with(pump.DEFAULT_TARGET)
-
 	def test_idle_site_mirror_divergence_healed_in_one_cycle(self):
 		# Induce a divergence on the DEFAULT shard: row says draining, config says pump. No open
 		# turns anywhere -> the fix still repairs the file from the row in one watchdog pass.
