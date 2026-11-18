@@ -1044,17 +1044,24 @@ if FrappeTestCase is not None:
 		def test_a_field_above_the_users_level_is_marked_not_reset(self):
 			"""Frappe would reset a value above the writer's permission level without a word;
 			the save must refuse it with a mark instead."""
-			from frappe.custom.doctype.property_setter.property_setter import make_property_setter
-
 			conv, token = self.todo_draft()
 			before = self.sealed(token)
-			# A real Property Setter, not a patch on one cached DocField: ``save`` runs as OWNER,
-			# and on Frappe 15 ``set_user`` empties the request-local Meta cache, so the save reads
-			# a fresh copy of the meta and a patched field object never reaches it.
-			ps = make_property_setter("ToDo", "priority", "permlevel", 1, "Int")
-			self.addCleanup(frappe.clear_cache, doctype="ToDo")
-			self.addCleanup(frappe.delete_doc, "Property Setter", ps.name, force=True)
-			out = self.save(token, conv, {"description": f"{MARK} level", "priority": "High"})
+			real_get_meta = frappe.get_meta
+
+			def get_meta(doctype, *args, **kwargs):
+				meta = real_get_meta(doctype, *args, **kwargs)
+				if doctype != "ToDo":
+					return meta
+				# A COPY of the cached meta with the level raised: the cached object (request-local
+				# and Redis) is never touched, so nothing outlives the ``with``. Patching one cached
+				# DocField would not reach the save on Frappe 15: ``save`` runs as OWNER, and there
+				# ``set_user`` empties the request-local Meta cache, so the save reads a fresh copy.
+				meta = copy.deepcopy(meta)
+				meta.get_field("priority").permlevel = 1
+				return meta
+
+			with patch("frappe.get_meta", get_meta):
+				out = self.save(token, conv, {"description": f"{MARK} level", "priority": "High"})
 			self.assertEqual([f["fieldname"] for f in out["error"]["fields"]], ["priority"])
 			self.assert_untouched(token, before)
 
