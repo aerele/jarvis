@@ -11,9 +11,14 @@
 //   }) -> { buildDraftModel(action), fillRuleValues(doctype, tables, isCurrent), formMetaCache }
 // One call makes one builder with its own form-meta cache (never invalidated, as before: the view
 // made it once per mounted ChatView).
-import { panelField } from "./docFields.js";
-import { checkToYesNo } from "./draftApply.js";
-import { mainFieldShown, mainRuleBase, mainRuleDoc, mainRuleState } from "./mainRules.js";
+import {
+	modelField,
+	mainRuleBase,
+	mainRuleDoc,
+	ruleAdmits,
+	ruleTableNames,
+	ruleTables,
+} from "./mainRules.js";
 import {
 	applyRuleValues,
 	buildDraftTable,
@@ -136,28 +141,39 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 			);
 			if (m && m.fieldtype !== "Table") proposed[m.fieldname] = f.value;
 		}
+		const aTables = {};
+		for (const t of a.tables || []) if (t && t.fieldname) aTables[t.fieldname] = t.rows || [];
+		const tables = [];
+		for (const [tf, spec] of Object.entries(meta.tables || {})) {
+			const metaField = meta.fields.find((f) => f.fieldname === tf) || { reqd: 0 };
+			const table = buildDraftTable({
+				fieldname: tf,
+				spec,
+				required: !!metaField.reqd,
+				proposed: aTables[tf],
+				saved: (base.tables || {})[tf] || [],
+				verb,
+			});
+			if (table) tables.push(table);
+		}
+		const tableNames = ruleTableNames(meta.fields);
 		const fields = [];
 		const seen = new Set();
 		// A field whose mandatory_depends_on holds, or cannot be told, is shown too (never a
 		// read_only one): the rule reads the defaults, the saved record and the proposed values.
-		const aTables = {};
-		for (const t of a.tables || []) if (t && t.fieldname) aTables[t.fieldname] = t.rows || [];
-		const ruleBase = mainRuleBase(meta.fields, base.values, base.tables);
+		const ruleBase = mainRuleBase(meta.fields, base.values, base.tables, tableNames);
 		let ruleDoc = null;
 		const ruleSays = (f) => {
-			if (!ruleBase || !f.mandatory_depends_on || f.read_only) return false;
+			if (!ruleBase) return false;
 			ruleDoc =
 				ruleDoc ||
 				mainRuleDoc(
 					ruleBase,
 					meta.fields.filter((m) => m.fieldname in proposed),
 					proposed,
-					aTables
+					ruleTables(tableNames, tables)
 				);
-			return (
-				mainRuleState(f.mandatory_depends_on, ruleDoc, f.fieldname) !== false &&
-				mainFieldShown(f, ruleDoc)
-			);
+			return ruleAdmits(f, ruleDoc, true);
 		};
 		for (const f of meta.fields) {
 			if (f.fieldtype === "Table") continue;
@@ -165,15 +181,11 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 			const baseV = base.values[f.fieldname];
 			// Show: agent-proposed fields + required fields + (update) filled fields the agent referenced
 			if (!has && !f.reqd && !ruleSays(f)) continue;
-			const pf = panelField(f, has ? proposed[f.fieldname] : baseV);
-			pf.proposed = has; // agent set a value for this field (vs. shown only because reqd)
-			if (!has && !f.reqd) pf.ruleAdded = true; // shown only for its mandatory rule
-			if (verb === "update")
-				pf.orig =
-					baseV == null
-						? ""
-						: String(pf.control === "check" ? checkToYesNo(baseV) : baseV);
-			pf.changed = verb === "update" && String(pf.value) !== String(pf.orig);
+			// proposed: the agent set a value for this field (vs. shown only because reqd)
+			const pf = modelField(f, has ? proposed[f.fieldname] : baseV, baseV, verb, {
+				proposed: has,
+				ruleAdded: !has && !f.reqd,
+			});
 			fields.push(pf);
 			seen.add(f.fieldname);
 		}
@@ -189,20 +201,6 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 					)
 					.map((f) => ({ field: f, value: base.values[f.fieldname] }))
 			: [];
-		// child tables: every meta table that is required, agent-proposed, or (update) non-empty
-		const tables = [];
-		for (const [tf, spec] of Object.entries(meta.tables || {})) {
-			const metaField = meta.fields.find((f) => f.fieldname === tf) || { reqd: 0 };
-			const table = buildDraftTable({
-				fieldname: tf,
-				spec,
-				required: !!metaField.reqd,
-				proposed: aTables[tf],
-				saved: (base.tables || {})[tf] || [],
-				verb,
-			});
-			if (table) tables.push(table);
-		}
 		// Bounded: the card shows with the defaults rather than wait on a slow answer.
 		await Promise.race([
 			fillRuleValues(a.doctype, tables),
@@ -240,6 +238,7 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 			fields,
 			...(ruleBase ? { ruleBase } : {}),
 			...(ruleFields.length ? { ruleFields } : {}),
+			...(ruleBase && tableNames.length ? { ruleTables: tableNames } : {}),
 			tables,
 			tableMeta: meta.tables || {},
 			applying: false,
