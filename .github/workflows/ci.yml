@@ -31,7 +31,11 @@ on:
   # skipped check satisfies a required check, so a title edit after a red run would mask
   # the failure. release-guard.yml instead fails a PR whose base changed until it is pushed
   # to or reopened, which is what makes this workflow run against the new base.
+  # ready_for_review: a draft release PR (into version-15 / version-16) skips every job below
+  # while backports keep landing on its hotfix head; marking it ready runs CI once on the
+  # final code. A draft cannot merge, so its skipped checks never satisfy a merge.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     # develop is where work lands; version-16 is the stable line customers install from and
     # version-16-hotfix is where its backports collect until a release merges them into it.
@@ -50,6 +54,7 @@ permissions:
 
 jobs:
   runtime-branding:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     uses: ./.github/workflows/runtime-branding.yml
 
   # The Frappe Marketplace audit's Semgrep ruleset: fails on what fails the audit.
@@ -58,6 +63,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' && contains(fromJSON('["develop", "version-15",
       "version-15-hotfix", "version-16", "version-16-hotfix"]'), github.base_ref)
+      && !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref))
     uses: ./.github/workflows/marketplace-semgrep.yml
 
   # Runs the same .pre-commit-config.yaml the local hook runs, so the checks hold
@@ -65,6 +71,7 @@ jobs:
   # the tests container: this needs only python + node, and it should report in
   # under a minute rather than waiting on a bench.
   lint:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -91,6 +98,7 @@ jobs:
   # range: the 1.6.0 floor and the newest release inside it. It needs only Python and
   # cryptography (for the local TLS pair): no bench, no Frappe, no network beyond pip.
   ws-contract:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -122,6 +130,7 @@ jobs:
   # This is that gate. It needs only node — no bench, no container — so it reports fast and
   # independently of the Python shards above.
   frontend-tests:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -194,6 +203,7 @@ jobs:
 
   # Real-browser Board regression gate, independent of the Python/bench shards.
   approval-layout:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -230,6 +240,7 @@ jobs:
   # SPA's dependencies are installed. Its socket.js reads the bench site config by the same fixed relative
   # path as the SPA's, which the stub step below satisfies (pwa/vite.config.js aliases it like the SPA's).
   frontend-build:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -267,6 +278,7 @@ jobs:
         run: node frontend/scripts/check-holiday-chunks.mjs --pwa
 
   tests:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     # Shards now cover about 4,000 tests each. The first shard can exceed
     # 25 minutes on hosted runners; allow it to finish and upload coverage.
