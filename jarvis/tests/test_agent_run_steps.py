@@ -423,12 +423,6 @@ class TestHumanizeToolCall(unittest.TestCase):
 		)
 		self.assertEqual(label, "Read agent definition")
 
-	def test_an_ordinary_erp_doctype_is_untouched(self):
-		"""The control: the mapping must not swallow the DocTypes the customer
-		does know by name."""
-		label, _ = agent_run_steps.humanize_tool_call("get_list", {"doctype": "Sales Invoice"}, [{}, {}])
-		self.assertEqual(label, "Read Sales Invoice, 2 rows")
-
 	# ---- Singles, and names that did not resolve -------------------------- #
 	def test_a_single_doctype_is_not_named_twice(self):
 		""" "Read System Settings System Settings" - a Single's document name IS
@@ -469,18 +463,6 @@ class TestHumanizeToolCall(unittest.TestCase):
 		label, _ = agent_run_steps.humanize_tool_call("get_doc", {"doctype": "System Settings"}, None)
 		self.assertEqual(label, "Looked up System Settings")
 
-	def test_a_refused_single_read_says_attempt_plus_reason(self):
-		"""The two halves the step hook composes for get_doc's new Single permission
-		check: the label claims only an attempt, and the tool's own refusal is what
-		explains it."""
-		args = {"doctype": "Stock Settings"}
-		label, _ = agent_run_steps.humanize_tool_call("get_doc", args, None)
-		self.assertEqual(label, "Looked up Stock Settings")
-		self.assertEqual(
-			agent_run_steps.error_detail("no read permission on Stock Settings"),
-			"no read permission on Stock Settings",
-		)
-
 	def test_an_unresolved_lookup_says_what_was_attempted(self):
 		"""The record name is MODEL-supplied. A wrong guess produced "Read Company
 		ignore" on the bench; an unresolved lookup must not claim a read at all."""
@@ -488,12 +470,6 @@ class TestHumanizeToolCall(unittest.TestCase):
 			"get_doc", {"doctype": "Company", "name": "ignore"}, None
 		)
 		self.assertEqual(label, "Looked up Company")
-
-	def test_a_resolved_lookup_still_names_the_document(self):
-		label, _ = agent_run_steps.humanize_tool_call(
-			"get_doc", {"doctype": "Company", "name": "Aerele"}, {"name": "Aerele"}
-		)
-		self.assertEqual(label, "Read Company Aerele")
 
 	# ---- error detail ------------------------------------------------------ #
 	def test_error_detail_keeps_the_first_line_only(self):

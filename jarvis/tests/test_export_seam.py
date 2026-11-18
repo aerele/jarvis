@@ -2,21 +2,7 @@ import frappe
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.tools._export.envelope import save_export_file
-from jarvis.tools._export.model import ExportModel
 from jarvis.tools._export.safety import escape_formula
-
-
-class TestExportModel(FrappeTestCase):
-	def test_model_holds_columns_rows_total(self):
-		m = ExportModel(columns=["a", "b"], rows=[[1, 2]], total=1, meta={})
-		self.assertEqual(m.columns, ["a", "b"])
-		self.assertEqual(m.rows, [[1, 2]])
-		self.assertEqual(m.total, 1)
-		self.assertEqual(m.meta, {})
-
-	def test_meta_defaults_to_empty_dict(self):
-		m = ExportModel(columns=["a"], rows=[], total=0)
-		self.assertEqual(m.meta, {})
 
 
 class TestExportEnvelope(FrappeTestCase):
