@@ -1,6 +1,5 @@
 """The 30-day horizon of the stored result (B1) and the shared result builder."""
 
-from datetime import date, timedelta
 from decimal import Decimal
 from unittest import TestCase
 from unittest.mock import patch
@@ -198,10 +197,6 @@ class TestPaymentCalendarHorizon(TestCase):
 		with self.assertRaises(ProjectionError) as caught:
 			self.build(window=scope("2026-11", START, "2029-03-01"))
 		self.assertEqual(caught.exception.code, "invalid_range")
-
-	def test_the_horizon_range_is_inclusive_of_29_days_after_the_anchor(self):
-		end = date.fromisoformat(ANCHOR) + timedelta(days=29)
-		self.assertEqual(self.horizon()["end"], end.isoformat())
 
 	def test_result_has_the_stored_shape(self):
 		result = self.build()

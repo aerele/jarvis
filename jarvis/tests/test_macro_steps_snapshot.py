@@ -187,6 +187,7 @@ class TestAnEditMidRunChangesNothing(SnapshotBase):
 		for index in range(3):
 			self._end_step(conv, run, index)
 		self._assert_ran(run, conv, ["step 1", "step 2", "step 3"])
+		self.assertEqual((self._run(run).current_step, self._run(run).total_steps), (3, 3))
 
 	def test_an_added_step(self):
 		run, conv, macro = self._start(steps=2)
@@ -255,6 +256,7 @@ class TestAnEditMidRunChangesNothing(SnapshotBase):
 		self.assertEqual(self._prompts(conv), ["do all three"])
 		self._end_step(conv, run, 0)
 		self._assert_ran(run, conv, ["do all three"])
+		self.assertEqual((self._run(run).current_step, self._run(run).total_steps), (1, 1))
 
 	def test_a_summarized_run_keeps_its_steps_skills(self):
 		# The summary carries every step's skills. A skill taken off a step while the
@@ -432,6 +434,7 @@ class TestARunWithoutASnapshot(SnapshotBase):
 		sent.assert_not_called()
 		row = self._run(run)
 		self.assertEqual((row.status, row.error), ("failed", macros._MACRO_CHANGED_ERROR))
+		self.assertEqual(frappe.db.get_value(RUN, run, "capacity_attempts"), 0)
 
 	def _unreadable(self, run):
 		frappe.db.set_value(RUN, run, FIELD, "{not json", update_modified=False)
