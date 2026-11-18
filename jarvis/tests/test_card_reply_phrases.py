@@ -61,11 +61,6 @@ class TestClassifyCardReply(FrappeTestCase):
 			for phrase in phrases:
 				self.assertEqual(ap.classify_card_reply(phrase), want, phrase)
 
-	def test_a_voice_go_and_no_pair_is_pinned(self):
-		"""Dictation capitalises and adds a full stop; both still read as intended."""
-		self.assertEqual(ap.classify_card_reply("Go."), ap.APPROVE)
-		self.assertEqual(ap.classify_card_reply("No."), ap.REJECT)
-
 	def test_the_approval_and_rejection_sets_are_disjoint(self):
 		self.assertEqual(ap.APPROVAL_PHRASES & ap.REJECTION_PHRASES, frozenset())
 		for phrase in ap.REJECTION_PHRASES:

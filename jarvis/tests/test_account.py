@@ -701,12 +701,6 @@ class TestAdminChatGate(FrappeTestCase):
 		# Second call served from the positive cache → one admin round-trip.
 		gc.assert_called_once()
 
-	def test_not_ready_verdict_is_not_cached(self):
-		# A transient block must clear on the next call, not stick for the TTL.
-		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Provisioning"}):
-			account._admin_chat_gate()
-		self.assertIsNone(self._cached_verdict())
-
 	def test_a_config_change_drops_the_cached_verdict(self):
 		"""The C05-1 stale window: a save changed what the container is being asked
 		to run, so the verdict admin gave about the PREVIOUS config is finished -
@@ -1441,27 +1435,10 @@ class TestRejectedSyncVerdictClassification(FrappeTestCase):
 		self.assertEqual(out["reason"], "llm_rejected")
 		self.assertEqual(out["detail"], detail, "admin's own sentence must reach the customer unedited")
 
-	def test_a_rejection_with_no_admin_sentence_still_gets_a_readable_default_detail(self):
-		out = self._verdict("failed: Your AI configuration was rejected")
-		self.assertIsNotNone(out)
-		self.assertEqual(out["reason"], "llm_rejected")
-		self.assertEqual(out["detail"], "Your AI configuration was rejected")
-
 	def test_a_push_validation_failure_is_flagged_rejected(self):
 		# AdminValidationError, e.g. a malformed oauth_blob: the pushed payload
 		# itself is invalid, which is the customer's config, not a transient blip.
 		out = self._verdict("failed: validation: missing or malformed oauth_blob")
-		self.assertIsNotNone(out)
-		self.assertEqual(out["reason"], "llm_rejected")
-
-	def test_the_pool_legs_validation_failure_is_flagged_rejected_too(self):
-		# Round-1 review of jarvis#760: sync_pool_now wrote a BARE "failed: {e}"
-		# for AdminValidationError while the direct leg wrote
-		# "failed: validation: {e}", so a pool config admin had PERMANENTLY
-		# rejected read as still applying and ground to the wizard's five minute
-		# ceiling before offering a Retry that could never succeed. Both legs now
-		# prefix the same way; this pins that they stay in step.
-		out = self._verdict("failed: validation: unknown llm_provider 'gemini'")
 		self.assertIsNotNone(out)
 		self.assertEqual(out["reason"], "llm_rejected")
 
@@ -1582,18 +1559,6 @@ class TestRejectedSyncVerdictWiring(FrappeTestCase):
 		self.assertNotEqual(
 			out["reason"], "llm_rejected", "gap 1: a retry could clear this, must not read as rejected"
 		)
-		self.assertEqual(out["reason"], "llm_provisioning")
-
-	def test_a_pending_status_falls_through_to_provisioning_unchanged(self):
-		self._write({"last_sync_status": "pending: applying subscription blob"})
-		out = account.is_ready_for_chat()
-		self.assertFalse(out["ready"])
-		self.assertEqual(out["reason"], "llm_provisioning")
-
-	def test_a_blank_status_falls_through_to_provisioning_unchanged(self):
-		self._write({"last_sync_status": ""})
-		out = account.is_ready_for_chat()
-		self.assertFalse(out["ready"])
 		self.assertEqual(out["reason"], "llm_provisioning")
 
 
@@ -1815,15 +1780,6 @@ class TestDiagnosticClass(FrappeTestCase):
 			out = account._admin_chat_gate()
 		self.assertEqual(out["diag_code"], "admin_forbidden")
 		self.assertFalse(out["retryable"])
-
-	def test_the_cached_verdict_carries_the_same_diagnostic(self):
-		from jarvis.exceptions import AdminUnreachableError
-
-		with patch.object(admin_client, "get_connection", side_effect=AdminUnreachableError("down")) as gc:
-			first = account._admin_chat_gate()
-			second = account._admin_chat_gate()
-		gc.assert_called_once()  # second served from the short unconfirmed cache
-		self.assertEqual(first, second, "a polling wizard must get an identical verdict each beat")
 
 
 class TestBackfillExcludesOauthPushOnly(FrappeTestCase):

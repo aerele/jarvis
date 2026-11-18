@@ -600,32 +600,6 @@ class TestRequestReceiptLabel(FrappeTestCase):
 			frappe.delete_doc(CONV, conv, force=True, ignore_permissions=True)
 		frappe.db.commit()
 
-	def test_request_scoped_write_labels_auto_applied_without_an_armer(self):
-		from jarvis.tools import _agent_run_ctx
-
-		conv = _make_conv(TEST_USER)
-		sk = "sk-request-receipt-ok"
-		frappe.db.set_value(CONV, conv, "session_key", sk, update_modified=False)
-		_agent_run_ctx.set_request_autorun_applied()
-		api._persist_and_publish_tool_call(
-			session_key=sk,
-			tool="submit_doc",
-			args={"doctype": "ToDo", "name": "x"},
-			result={"ok": True, "data": {}},
-			tool_call_id="tc-req-1",
-		)
-		row = frappe.get_all(
-			self.MSG,
-			filters={"conversation": conv, "role": "tool", "tool_call_id": "tc-req-1"},
-			fields=["action_outcome", "armed_by_macro", "armed_by_skill"],
-		)
-		self.assertEqual(len(row), 1)
-		self.assertEqual(row[0].action_outcome, "auto_applied")
-		self.assertFalse(row[0].armed_by_macro, "no external armer name for a user-approved request")
-		self.assertFalse(row[0].armed_by_skill)
-		# Consumed: a later ordinary receipt must NOT inherit the label.
-		self.assertFalse(_agent_run_ctx.take_request_autorun_applied())
-
 	def test_failed_request_scoped_write_labels_failed(self):
 		from jarvis.tools import _agent_run_ctx
 

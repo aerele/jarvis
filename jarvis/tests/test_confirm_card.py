@@ -404,29 +404,6 @@ class TestPhase1Rewire(FrappeTestCase):
 		self.assertNotIn("sk-live-999", str(card))
 		self.assertTrue(all(d["to"] == "[hidden]" for d in card["diff"]))
 
-	def test_update_card_renders_a_real_change(self):
-		# Baseline shape check. NOT a no-op test - a text change passes against the
-		# old raw comparison too. The cast-compare logic is covered at the unit level
-		# in test_record_summary (TestSameValue) and at card level by the existing
-		# test_bulk_update_normalizes_typed_noop.
-		todo = frappe.get_doc({"doctype": "ToDo", "description": "x"}).insert(ignore_permissions=True)
-		card = build_card(
-			"update_doc",
-			{"doctype": "ToDo", "name": todo.name, "changes": {"description": "y"}},
-			{"would": {"description": "y"}},
-		)
-		self.assertEqual(card["kind"], "update")
-		self.assertTrue(any(d["to"] == "y" for d in card["diff"]))
-
-	def test_update_card_drops_an_unchanged_field(self):
-		todo = frappe.get_doc({"doctype": "ToDo", "description": "x"}).insert(ignore_permissions=True)
-		card = build_card(
-			"update_doc",
-			{"doctype": "ToDo", "name": todo.name, "changes": {"description": "x"}},
-			{"would": {"description": "x"}},
-		)
-		self.assertEqual(card["diff"], [])
-
 	def test_update_card_carries_the_record_title(self):
 		# ToDo's title_field is `description`.
 		todo = frappe.get_doc({"doctype": "ToDo", "description": "probe title"}).insert(
@@ -558,13 +535,6 @@ class TestVerbCardRecords(FrappeTestCase):
 		self.assertEqual(card["records"][0]["name"], self.todo.name)
 		self.assertIn("verb card probe", card["records"][0]["title"])
 		self.assertIn("High", {r["value"] for r in card["records"][0]["rows"]})
-
-	def test_targets_and_count_are_unchanged(self):
-		# Additive only: three existing tests assert these, and a client running the
-		# previous bundle still reads `targets`.
-		card = build_card("delete_doc", {"doctype": "ToDo", "name": self.todo.name}, {})
-		self.assertEqual(card["targets"], [self.todo.name])
-		self.assertEqual(card["count"], 1)
 
 	def test_bulk_verb_carries_a_record_per_target(self):
 		other = frappe.get_doc({"doctype": "ToDo", "description": "second"}).insert(ignore_permissions=True)

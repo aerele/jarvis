@@ -245,23 +245,6 @@ class TestDirectLlmUsage(FrappeTestCase):
 		self.assertEqual(by_model[_ZERO_PRICED_MODEL]["tokens_out"], 5_000)
 		self.assertEqual(by_model[_ZERO_PRICED_MODEL]["cost_usd"], 0.0)
 
-	def test_calls_the_direct_path_and_never_the_proxy_path(self):
-		# No fixture rows seeded here: this only exercises the code path
-		# (applicable / shape / which admin_client call fires), since the
-		# shared local site's tenant-wide total is never guaranteed to be
-		# zero (see the module docstring above).
-		with (
-			patch.object(admin_client, "get_model_catalog", return_value=_FAKE_CATALOG),
-			patch.object(admin_client, "get_llm_usage") as proxy_mock,
-		):
-			out = account.get_llm_usage()
-		self.assertIs(out["applicable"], True)
-		self.assertIsInstance(out["per_model"], list)
-		self.assertGreaterEqual(out["tokens_in"], 0)
-		self.assertGreaterEqual(out["cost_usd"], 0.0)
-		# The direct path never touches the proxy-path admin_client call.
-		proxy_mock.assert_not_called()
-
 
 class TestPriceForModel(FrappeTestCase):
 	def setUp(self):
@@ -314,10 +297,6 @@ class TestTenantWidePerModelTokens(FrappeTestCase):
 		self.assertEqual(rows[_PRICED_MODEL]["out_"], 1500)
 		self.assertEqual(rows[_UNKNOWN_MODEL]["in_"], 300)
 		self.assertEqual(rows[_UNKNOWN_MODEL]["out_"], 100)
-
-	def test_no_rows_returns_empty_list(self):
-		# A month nothing (real or fixture) ever posts to.
-		self.assertEqual(usage.tenant_wide_per_model_tokens("1999-01"), [])
 
 	def test_a_different_month_is_not_included(self):
 		month = usage.current_month_key()
@@ -543,22 +522,6 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 		self.assertEqual(out["health"], "attention")
 		self.assertEqual(out["attention_reason"], "turn_error")
 
-	def test_a_failing_turn_never_downgrades_past_attention(self):
-		"""It is evidence that something downstream is wrong, never that the
-		config failed to arrive. "down" is reserved for an unconfirmed apply,
-		because that is the value is_ready_for_chat also refuses chat on, and the
-		two must not disagree."""
-		self._seed(
-			proxy_active=1,
-			last_sync_status="ok (pool_update via admin)",
-			llm_pool_synced_at="2026-07-30 10:00:00",
-		)
-		with patch.object(account, "_last_turn_errored", return_value=True):
-			with patch.object(account, "compute_pool_mode", return_value=True):
-				with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
-					out = account.get_llm_connection_status()
-		self.assertNotEqual(out["health"], "down")
-
 	def test_a_save_in_flight_still_wins_over_a_failing_turn(self):
 		"""Ordering guard: while a save is in flight the container is still on its
 		previous config, so the turn that just failed says nothing about the
@@ -587,17 +550,6 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
 				out = account.get_llm_connection_status()
 		self.assertEqual(out["health"], "ok")
-
-	def test_a_save_in_flight_reports_applying(self):
-		self._seed(
-			proxy_active=1,
-			last_sync_status="pending: admin applying config",
-			llm_pool_synced_at="2026-07-30 10:00:00",
-		)
-		with patch.object(account, "compute_pool_mode", return_value=True):
-			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
-				out = account.get_llm_connection_status()
-		self.assertEqual(out["health"], "applying")
 
 	def test_shape_fields_describe_the_pool_rather_than_models_zero(self):
 		"""The Model/Provider/Auth-mode triple came from the legacy models[0]

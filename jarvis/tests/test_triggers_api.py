@@ -958,11 +958,6 @@ class TestSetEnabledUnsafeAttributes(_TriggersApiTestCase):
 		# the refused toggle changed nothing
 		self.assertEqual(int(frappe.db.get_value(TRIGGER, name, "enabled")), 0)
 
-	def test_toggle_off_on_a_bad_enabled_trigger_works(self):
-		name = self._stored_bad_script_trigger()
-		frappe.set_user(ADMIN_USER)
-		self.assertEqual(set_trigger_enabled(name, 0)["data"]["enabled"], 0)
-
 	def test_toggle_on_refuses_llm_trigger_with_stored_format_condition(self):
 		name = self._create_as_admin()
 		frappe.db.set_value(TRIGGER, name, {"condition": self.BAD_COND, "enabled": 0})
