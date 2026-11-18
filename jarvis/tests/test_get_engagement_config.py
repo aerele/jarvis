@@ -85,6 +85,22 @@ class TestGetEngagementConfig(unittest.TestCase):
 		self.assertEqual(result, {})
 		self.assertEqual([call.args[0] for call in get_value.call_args_list], [RUN])
 
+	def test_empty_snapshot_fails_closed_to_empty_config(self):
+		result, get_value, _ = self._call(
+			session_key="agent:agent-x:R1",
+			run_row=frappe._dict(name="R1", status="running", engagement_config_json=""),
+		)
+		self.assertEqual(result, {})
+		self.assertEqual([call.args[0] for call in get_value.call_args_list], [RUN])
+
+	def test_empty_object_snapshot_fails_closed_to_empty_config(self):
+		result, get_value, _ = self._call(
+			session_key="agent:agent-x:R1",
+			run_row=frappe._dict(name="R1", status="running", engagement_config_json="{}"),
+		)
+		self.assertEqual(result, {})
+		self.assertEqual([call.args[0] for call in get_value.call_args_list], [RUN])
+
 	def test_malformed_snapshot_fails_closed_to_empty_config(self):
 		result, get_value, log_error = self._call(
 			session_key="agent:agent-x:R1",
