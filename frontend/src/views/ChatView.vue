@@ -4107,7 +4107,7 @@
 						<button
 							class="jv-art-close"
 							@click="onDraftCloseClick"
-							title="Close"
+							title="Close (draft stays in chat)"
 							aria-label="Close"
 						>
 							<svg
