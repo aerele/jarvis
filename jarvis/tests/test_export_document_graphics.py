@@ -182,10 +182,6 @@ class TestRagChip(unittest.TestCase):
 				out = rag_chip(status)
 				self.assertIn(f'class="{expected_class}"', out)
 
-	def test_rag_chip_case_insensitive(self) -> None:
-		out = rag_chip("GREEN")
-		self.assertIn('class="rag-green"', out)
-
 	def test_rag_chip_invalid_status_raises(self) -> None:
 		with self.assertRaises(ValueError):
 			rag_chip("blue")

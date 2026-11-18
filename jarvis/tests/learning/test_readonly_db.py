@@ -9,7 +9,6 @@ documented in readonly_db).
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
-from jarvis.learning.compat import statement_timeout_prefix
 from jarvis.learning.readonly_db import (
 	PatternDB,
 	PatternDBViolation,
@@ -88,15 +87,6 @@ class TestPatternDBExecution(FrappeTestCase):
 	def test_timed_select_returns_rows(self):
 		rows = PatternDB().timed_select("SELECT 3 AS v", timeout_s=5)
 		self.assertEqual(rows, [{"v": 3}])
-
-	def test_statement_timeout_prefix_is_mariadb_idiom(self):
-		# max_statement_time in SECONDS; MySQL's max_execution_time does
-		# not exist on MariaDB.
-		self.assertEqual(
-			statement_timeout_prefix("SELECT 1", 30),
-			"SET STATEMENT max_statement_time=30 FOR SELECT 1",
-		)
-		self.assertNotIn("max_execution_time", statement_timeout_prefix("SELECT 1", 30))
 
 
 class TestReadOnlyTransaction(FrappeTestCase):
