@@ -244,6 +244,20 @@ _ACCEPTS_VAR_KW: dict[str, bool] = {
 _ACCEPTED_PARAMS: dict[str, set[str]] = {name: _accepted_params(fn) for name, fn in _TOOLS.items()}
 
 
+def _optional_params(fn: Callable) -> frozenset[str]:
+	"""Names of the keyword-bindable parameters of ``fn`` that have a default: the
+	ones a caller may leave out. ``api._parse_args`` reads a blank value of one of
+	these as "not sent"."""
+	return frozenset(
+		p.name
+		for p in inspect.signature(fn).parameters.values()
+		if p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY) and p.default is not p.empty
+	)
+
+
+_OPTIONAL_PARAMS: dict[str, frozenset[str]] = {name: _optional_params(fn) for name, fn in _TOOLS.items()}
+
+
 def list_tools() -> list[str]:
 	return sorted(_TOOLS.keys())
 
