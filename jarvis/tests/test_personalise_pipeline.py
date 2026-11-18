@@ -514,6 +514,59 @@ class TestWikiPromotion(_PipelineFixture):
 		with _as(USER_A), self.assertRaises(frappe.ValidationError):
 			wiki.request_wiki_promotion(page.slug, "User")
 
+	def _give_user_a(self, *roles):
+		# A bare Has Role row, not User.add_roles: saving the User re-syncs its Contact, whose
+		# timestamp then races the next class's fixture insert. The class teardown deletes the
+		# user, and the row with it; idempotent because the tests in a class share one transaction.
+		for role in roles:
+			if frappe.db.exists("Has Role", {"parent": USER_A, "role": role}):
+				continue
+			frappe.get_doc(
+				{
+					"doctype": "Has Role",
+					"parent": USER_A,
+					"parenttype": "User",
+					"parentfield": "roles",
+					"role": role,
+				}
+			).insert(ignore_permissions=True)
+		frappe.clear_cache(user=USER_A)
+		self.addCleanup(frappe.clear_cache, user=USER_A)
+
+	def test_jarvis_app_role_is_not_a_promotion_target(self):
+		# #800: the wiki shares the skill picker's role list, so a posted Jarvis
+		# app role is refused on the server too, not just hidden in the dialog.
+		page = self._user_page()
+		for role in ("Jarvis User", "Jarvis Admin", " jarvis skill reviewer "):
+			with _as(USER_A), self.assertRaises(frappe.ValidationError) as ctx:
+				wiki.request_wiki_promotion(page.slug, "Role", target_role=role)
+			self.assertIn("are not team roles", str(ctx.exception))
+		self.assertFalse(frappe.db.exists(PROMO, {"page": page.name}))
+
+	def test_blanket_and_unheld_roles_are_refused(self):
+		# Parity with skill promotion: a role the picker would not offer this user
+		# (blanket, or simply not theirs) is refused with the generic message.
+		self._give_user_a("Sales User")
+		page = self._user_page()
+		for role in ("Desk User", "System Manager", "Accounts Manager"):
+			with _as(USER_A), self.assertRaises(frappe.ValidationError) as ctx:
+				wiki.request_wiki_promotion(page.slug, "Role", target_role=role)
+			self.assertIn("You cannot promote to these role(s)", str(ctx.exception))
+		self.assertFalse(frappe.db.exists(PROMO, {"page": page.name}))
+
+	def test_team_role_promotion_still_accepted(self):
+		self._give_user_a("Sales User")
+		page = self._user_page()
+		with _as(USER_A):
+			out = wiki.request_wiki_promotion(page.slug, "Role", target_role="Sales User")
+		self.assertEqual(frappe.db.get_value(PROMO, out["request"], "target_role"), "Sales User")
+
+	def test_org_scope_needs_no_role(self):
+		page = self._user_page()
+		with _as(USER_A):
+			out = wiki.request_wiki_promotion(page.slug, "Org")
+		self.assertTrue(out["ok"])
+
 	def test_approve_merges_body_into_org_page(self):
 		page = self._user_page()
 		with _as(USER_A):
@@ -534,6 +587,7 @@ class TestWikiPromotion(_PipelineFixture):
 		self.assertIsNotNone(req.decided_at)
 
 	def test_approve_to_role_creates_role_suffixed_page(self):
+		self._give_user_a(TEST_ROLE)  # a requester may only target a role they hold (#800)
 		page = self._user_page()
 		with _as(USER_A):
 			out = wiki.request_wiki_promotion(page.slug, "Role", target_role=TEST_ROLE)
