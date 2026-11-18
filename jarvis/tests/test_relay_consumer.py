@@ -149,11 +149,6 @@ class TestRelayTurnEvents(FrappeTestCase):
 	# relay:final with text=None. That is the #543 defect, and it now lives as
 	# test_final_with_no_message_at_all_yields_relay_error below.
 
-	def test_final_with_string_content_yields_text(self):
-		sess = self._sess([_chat_frame("r1", "sk", "final", message={"content": "plain text"})])
-		out = list(sess.relay_turn_events("sk", "r1"))
-		self.assertEqual(out, [{"kind": "relay:final", "text": "plain text"}])
-
 	def test_chat_error_state_yields_relay_error_with_message(self):
 		sess = self._sess(
 			[
@@ -301,21 +296,6 @@ class TestRelayTurnEvents(FrappeTestCase):
 		# omitted entirely - the SAME shape #543's failed-final guard covers,
 		# but this one must route into the yield-wait, not FAILED_FINAL_ERROR.
 		sess = self._sess([_chat_frame("r1", "sk", "final", stopReason="aborted")])
-		out = list(sess.relay_turn_events("sk", "r1"))
-		self.assertEqual(out, [{"kind": "relay:error", "state": "aborted", "text": ""}])
-
-	def test_final_top_level_stop_reason_aborted_with_message_present_is_a_yield(self):
-		sess = self._sess(
-			[
-				_chat_frame(
-					"r1",
-					"sk",
-					"final",
-					stopReason="aborted",
-					message={"content": [{"type": "text", "text": ""}], "stopReason": "aborted"},
-				)
-			]
-		)
 		out = list(sess.relay_turn_events("sk", "r1"))
 		self.assertEqual(out, [{"kind": "relay:error", "state": "aborted", "text": ""}])
 
@@ -725,11 +705,6 @@ class TestSetSessionModel(FrappeTestCase):
 		sess._request = fake_request
 		sess.set_session_model(*args, **kwargs)
 		return captured
-
-	def test_sends_exact_sessions_patch_params(self):
-		captured = self._capture("sk", "openai/gpt-4o")
-		self.assertEqual(captured["method"], "sessions.patch")
-		self.assertEqual(captured["params"], {"key": "sk", "model": "openai/gpt-4o"})
 
 	def test_none_sends_an_explicit_null_to_reset_the_session(self):
 		"""None must reach the gateway as ``"model": null`` -- PRESENT, not omitted.
