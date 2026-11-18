@@ -2,6 +2,10 @@
 
 No line carries a voucher, party, company or user name, and no request text: a `side` that is not
 a known side is logged as `-`. Every function is best effort: a logging failure never changes a reply or a discard.
+
+Lines are WARNING level, except `speed_fallback`: it is ERROR level because production logs at ERROR and the
+line asks for an action (audit a new ERPNext source and bump the pin). It carries a method name, a source
+hash and a version only.
 """
 
 from __future__ import annotations
@@ -37,6 +41,16 @@ def slow(endpoint: str, started: float, rows: int, parties: int) -> None:
 	elapsed = int((monotonic() - started) * 1000)
 	if elapsed > SLOW_MS:
 		_warn(f"slow_read endpoint={endpoint} ms={elapsed} rows={rows} parties={parties}")
+
+
+def speed_fallback(method: str, source_hash: str | None, erpnext_version: str) -> None:
+	"""A speed override ran upstream because its source hash is not pinned; ERROR level so it is seen in production."""
+	try:
+		frappe.logger("payment_calendar").error(
+			f"speed_fallback method={method} hash={source_hash or 'none'} erpnext={erpnext_version}"
+		)
+	except Exception:
+		pass
 
 
 def count_discard(actor: str, snapshot_id: str, kind: str) -> None:
