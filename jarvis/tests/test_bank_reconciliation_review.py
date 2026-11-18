@@ -472,6 +472,11 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 		with patch.object(review, "MAX_VOUCHERS", 1):
 			self.assertRaises(OverflowError, review._journal_vouchers, scope)
 
+	def test_capacity_limit_is_typed(self):
+		with patch.object(review, "MAX_VOUCHERS", 1):
+			snap = self.snapshot()
+		self.assertEqual((snap["complete"], snap["reason_code"]), (False, "run_truncated_watermark"))
+
 	def test_unreadable_doctype_is_permission_slice(self):
 		real = frappe.has_permission
 		with patch.object(
