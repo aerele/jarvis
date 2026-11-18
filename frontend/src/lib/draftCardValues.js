@@ -96,7 +96,7 @@ const rowKeyOf = (r) => (r && r.__key != null ? String(r.__key) : null);
 // A row the save counts: a saved row (it has its name) or one with any value in it. A blank
 // row left in the grid is nothing (the same test as coerceRow, so the row numbers of a
 // failed save's marks line up with the rows sent).
-function isReal(table, r) {
+export function isReal(table, r) {
 	if (!r) return false;
 	if (r.__name) return true;
 	return allRowFields(table).some((c) => !NEVER_SENT.has(c.fieldtype) && !blank(r[c.fieldname]));

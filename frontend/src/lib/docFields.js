@@ -68,6 +68,10 @@ export function panelField(metaField, value) {
 		options,
 		fieldtype: metaField.fieldtype,
 		reqd: metaField.reqd,
+		// Only a field that has a rule carries it, so a rule-less form model is unchanged.
+		...(metaField.mandatory_depends_on
+			? { mandatory_depends_on: metaField.mandatory_depends_on }
+			: {}),
 		read_only: metaField.read_only,
 		link_filters: metaField.link_filters,
 		link_query_filters: metaField.link_query_filters,
