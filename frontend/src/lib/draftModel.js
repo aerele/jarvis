@@ -13,7 +13,7 @@
 // made it once per mounted ChatView).
 import { panelField } from "./docFields.js";
 import { checkToYesNo } from "./draftApply.js";
-import { mainRuleBase, mainRuleDoc, mainRuleState } from "./mainRules.js";
+import { mainFieldShown, mainRuleBase, mainRuleDoc, mainRuleState } from "./mainRules.js";
 import {
 	applyRuleValues,
 	buildDraftTable,
@@ -140,7 +140,9 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 		const seen = new Set();
 		// A field whose mandatory_depends_on holds, or cannot be told, is shown too (never a
 		// read_only one): the rule reads the defaults, the saved record and the proposed values.
-		const ruleBase = mainRuleBase(meta.fields, base.values);
+		const aTables = {};
+		for (const t of a.tables || []) if (t && t.fieldname) aTables[t.fieldname] = t.rows || [];
+		const ruleBase = mainRuleBase(meta.fields, base.values, base.tables);
 		let ruleDoc = null;
 		const ruleSays = (f) => {
 			if (!ruleBase || !f.mandatory_depends_on || f.read_only) return false;
@@ -149,9 +151,13 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 				mainRuleDoc(
 					ruleBase,
 					meta.fields.filter((m) => m.fieldname in proposed),
-					proposed
+					proposed,
+					aTables
 				);
-			return mainRuleState(f.mandatory_depends_on, ruleDoc, f.fieldname) !== false;
+			return (
+				mainRuleState(f.mandatory_depends_on, ruleDoc, f.fieldname) !== false &&
+				mainFieldShown(f, ruleDoc)
+			);
 		};
 		for (const f of meta.fields) {
 			if (f.fieldtype === "Table") continue;
@@ -161,6 +167,7 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 			if (!has && !f.reqd && !ruleSays(f)) continue;
 			const pf = panelField(f, has ? proposed[f.fieldname] : baseV);
 			pf.proposed = has; // agent set a value for this field (vs. shown only because reqd)
+			if (!has && !f.reqd) pf.ruleAdded = true; // shown only for its mandatory rule
 			if (verb === "update")
 				pf.orig =
 					baseV == null
@@ -170,10 +177,20 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 			fields.push(pf);
 			seen.add(f.fieldname);
 		}
+		// The fields a later edit may make required (see mainRules.revealRuleFields).
+		const ruleFields = ruleBase
+			? meta.fields
+					.filter(
+						(f) =>
+							f.fieldtype !== "Table" &&
+							!f.read_only &&
+							f.mandatory_depends_on &&
+							!seen.has(f.fieldname)
+					)
+					.map((f) => ({ field: f, value: base.values[f.fieldname] }))
+			: [];
 		// child tables: every meta table that is required, agent-proposed, or (update) non-empty
 		const tables = [];
-		const aTables = {};
-		for (const t of a.tables || []) if (t && t.fieldname) aTables[t.fieldname] = t.rows || [];
 		for (const [tf, spec] of Object.entries(meta.tables || {})) {
 			const metaField = meta.fields.find((f) => f.fieldname === tf) || { reqd: 0 };
 			const table = buildDraftTable({
@@ -222,6 +239,7 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 			docstatus: Number(base.docstatus || 0),
 			fields,
 			...(ruleBase ? { ruleBase } : {}),
+			...(ruleFields.length ? { ruleFields } : {}),
 			tables,
 			tableMeta: meta.tables || {},
 			applying: false,
