@@ -12,7 +12,9 @@ function body(source, head, next) {
 	const start = source.indexOf(head);
 	expect(start, head).toBeGreaterThan(-1);
 	const end = next ? source.indexOf(next, start + head.length) : source.length;
-	return source.slice(start, end === -1 ? source.length : end);
+	// A named end marker that is gone must fail, never slice to the end of the file.
+	expect(end, `end marker not found: ${next}`).toBeGreaterThan(-1);
+	return source.slice(start, end);
 }
 
 describe("client view identity wiring", () => {
@@ -124,7 +126,11 @@ describe("client view identity wiring", () => {
 		expect(action).toContain("draftActionKey(action) === view.actionKey");
 		expect(desktop).not.toContain("watch(_rawActionFor");
 
-		const panel = body(desktop, "async function openDraftPanel(", "function addDraftRow");
+		const panel = body(
+			desktop,
+			"async function openDraftPanel(",
+			"function dismissDraftPanel"
+		);
 		expect(panel).toContain("if (!draftActionViewIsCurrent(view)) return false;");
 
 		const summary = body(desktop, "async function ensureActionSummary(", "// A create card");

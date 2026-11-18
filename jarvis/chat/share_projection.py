@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 
 import frappe
 
+from jarvis.chat.draft_card import without_mark
 from jarvis.chat.error_taxonomy import headline_for
 from jarvis.chat.scrub import REDACTED, _json_text, scrub_for_share
 
@@ -134,6 +135,9 @@ def project_row(row: dict, conversation: str) -> dict:
 			"awaiting_owner": True,
 		}
 	result = {key: safe_value(row.get(key), conversation) for key in ROW_KEYS}
+	# The draft receipt marker is for the owner's apps (``api._stamp_draft_cards`` reads it from the
+	# stored row): neither the collaborative prompt nor a share recipient gets it.
+	result["tool_result"] = safe_value(without_mark(row.get("tool_result")), conversation)
 	# An unsafe card is only stamped on the in-memory owner response. A later
 	# shared reload reads the persisted close receipt instead, where its
 	# tool_result.reason_code is safety_update. Normal macro, skill, and request

@@ -8,6 +8,7 @@ import {
 	nextTick,
 	onMounted,
 	onUnmounted,
+	reactive,
 	ref,
 	watch,
 } from "vue";
@@ -19,13 +20,26 @@ import {
 	recheck as recheckMaintenance,
 } from "../maintenanceGate";
 import { agentName } from "@/branding";
-import { useRouter } from "vue-router";
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from "vue-router";
 // The desktop SPA's renderer — dependency-free, and sharing it means an agent
 // reply reads identically on both surfaces.
 import { renderMarkdown } from "@shared/markdown.js";
 import { admitEvent } from "@jsshared/pump_fence.mjs";
 import { eventFence } from "../lib/pump_fence_state.js";
 import { draftAnchor } from "../lib/draftAnchor.js";
+import { makeDraftUi, olderCardNotes, rowsHoldPendingDraft } from "../lib/draftCardUi.js";
+import { makeDraftSheet } from "../lib/draftSheetHost.js";
+import { makeSheetHistory } from "../lib/sheetHistory.js";
+import { receiptLines } from "../lib/draftReceiptLines.js";
+import { hiddenSteps, proposeSubmitStep } from "../lib/draftReceiptHost.js";
+import { makeReceiptUi } from "../lib/receiptUi.js";
+import {
+	cardOfItem,
+	isToolDraftItem,
+	keepBusyItems,
+	phoneDraftModel,
+	runDraftDecision,
+} from "../lib/draftCardHost.js";
 import { isShowCardRequest } from "../lib/showCardRequest.js";
 import { isImeKey } from "../lib/composerEnter.js";
 import { advanceViewGeneration, isViewCurrent } from "../lib/viewGeneration.js";
@@ -65,6 +79,7 @@ import {
 } from "../lib/typedCardReply.js";
 import ActionCard from "../components/ActionCard.vue";
 import ChartCard from "../components/ChartCard.vue";
+import DraftCard from "@shared/components/chat/DraftCard.vue";
 import ExportCard from "@shared/components/chat/ExportCard.vue";
 import { exportSummary } from "@shared/lib/exportJobs.js";
 import ReportScope from "../components/ReportScope.vue";
@@ -81,6 +96,8 @@ import {
 import SendRecoveryCard from "../components/SendRecoveryCard.vue";
 import { recoveryState, sendRecovery } from "../sendRecoveryStore";
 import DecisionCard from "../components/DecisionCard.vue";
+import DraftReceipt from "../components/DraftReceipt.vue";
+import DraftSheet from "../components/DraftSheet.vue";
 import DecisionSheet from "../components/DecisionSheet.vue";
 import FilePreviewSheet from "../components/FilePreviewSheet.vue";
 import { turnErrorInfo, showsRawReason } from "../../../jarvis/public/js/turn_errors.mjs";
@@ -146,9 +163,17 @@ const typedApprovalHint = computed(() => hintFor(orderedPending.value));
 // Set when a typed yes/no bound no card (it went to Jarvis as a message); shown while
 // an older card is still here, cleared with the last one (decision 13).
 const olderCardsNote = ref(false);
-const showOlderCardsNote = computed(
-	() => olderCardsNote.value && orderedPending.value.some((p) => !isRecentCard(p))
+// A tile's note and a draft card's own: a draft card has its own buttons, so the tile's "Tap it"
+// line must not be shown for it (draftCardUi.olderCardNotes).
+const olderNotes = computed(() =>
+	olderCardNotes(orderedPending.value, {
+		note: olderCardsNote.value,
+		isDraft: isToolDraftItem,
+		isRecent: isRecentCard,
+	})
 );
+const showOlderCardsNote = computed(() => olderNotes.value.tile);
+const showOlderDraftNote = computed(() => olderNotes.value.draft);
 // A coarse clock for the "Proposed 3h ago" label on a card left waiting.
 const cardClock = ref(Date.now());
 let _cardClockTick = null;
@@ -375,6 +400,78 @@ const sending = computed(
 		localRequests.value.some((r) => r.state === "sending")
 );
 const queuedTurn = computed(() => recoveryState.queued[convId.value]);
+// Server draft cards (the tool path): busy kind and error line are kept BY TOKEN here, not on the
+// items, because loadPending replaces the item objects on every read. `draftModel` is what the
+// pending block draws for them: each card's ctx, the stack's typed hint line, the one-card flag.
+const draftUi = makeDraftUi(reactive);
+// How many draft-card decisions are settling (the card has left the list, the chat is being read).
+const decisionsSettling = ref(0);
+// The receipt lines of decided draft cards (draftReceiptLines.js): drawn only for a row the server
+// stamped as one; every other tool row draws nothing. Submit's busy state and note are kept by
+// record, outside the rows, because every reload replaces them.
+const receiptUi = makeReceiptUi(reactive);
+const stepsHidden = computed(() => hiddenSteps(messages.value, receiptUi.goneKeys()));
+// The edit sheet of a draft card (lib/draftSheetHost.js): its state, and the shared doors that open,
+// save and discard. It reads the pending list as drawn and reloads the chat and the list itself
+// after a Save (a final draft starts no agent turn). Created here, in setup, because it owns a link
+// search that belongs to this component.
+const sheetHistory = makeSheetHistory(router);
+const draftSheet = makeDraftSheet({
+	// one history entry while a sheet is open, so Back always reaches the guard below
+	history: sheetHistory,
+	ui: draftUi,
+	api,
+	items: () => orderedPending.value,
+	conversation: () => convId.value,
+	generation: () => viewGeneration,
+	isCurrent: (cid, generation) => isCurrent(cid, generation),
+	streaming: () => sending.value,
+	agent: () => agentName,
+	removePending: (token) => {
+		pending.value = pending.value.filter((p) => p.token !== token);
+		settledTokens.value = withExcluded(settledTokens.value, [token]);
+	},
+	loadChat: () => load(),
+	loadChatQuietly: () => loadQuietly(),
+	loadPending: (source, opts) => loadPending(source, opts),
+	refreshChats: () => store.loadConversations(),
+	showQueued: (q) => showQueuedContinuation(convId.value, q),
+	say: (text) => {
+		errorBanner.value = text;
+	},
+	receiptShown: (token) =>
+		messages.value.some(
+			(m) => m.role === "tool" && m.tool_call_id === token && !!m.action_outcome
+		),
+	create: (pa) => decideDraft("create", pa),
+	discard: (pa) => decideDraft("cancel", pa),
+});
+// The phone's back button: while a sheet is open it closes the sheet (or asks about unsaved edits)
+// and the chat stays. A change from one chat to another (/c/A to /c/B) is a route UPDATE, not a
+// leave, and would otherwise reset the sheet with its edits.
+onBeforeRouteLeave((to, from) => draftSheet.guardLeave(to, from));
+onBeforeRouteUpdate((to, from) => draftSheet.guardLeave(to, from));
+const draftModel = computed(() =>
+	phoneDraftModel({
+		items: orderedPending.value,
+		streaming: sending.value,
+		stackHint: typedApprovalHint.value,
+		ui: draftUi,
+		editingToken: draftSheet.editingToken.value,
+		buildingToken: draftSheet.building.value,
+		// The thread arrives before the pending list: its row already says a draft card is pending.
+		// And while a decision on one settles (the card has left the list, the chat is being read
+		// again) no typed draft card may flash between the two.
+		holdsDraftRow:
+			rowsHoldPendingDraft(olderPending.value, messages.value) ||
+			decisionsSettling.value > 0,
+	})
+);
+// A card that left the list takes its error line with it.
+watch(
+	() => orderedPending.value.map((p) => p.token).join("\n"),
+	() => draftUi.prune(orderedPending.value.map((p) => p.token))
+);
 const savedDrafts = computed(() =>
 	recoveryState.parkedDrafts.filter((d) => d.conversation === convId.value)
 );
@@ -644,6 +741,15 @@ const items = computed(() => {
 	return out;
 });
 
+// The draft receipt lines of each item, by item key: computed once per change, not per render.
+const receiptsByItem = computed(() => {
+	const out = {};
+	for (const it of items.value)
+		if (it.tools?.length)
+			out[it.key] = receiptLines(it.tools, { hiddenSteps: stepsHidden.value });
+	return out;
+});
+
 // Report receipts bound to their answer by tool_call_ids, never by position.
 const reportToolsByTurn = computed(() => reportToolsByAssistant(messages.value));
 
@@ -651,7 +757,10 @@ const reportToolsByTurn = computed(() => reportToolsByAssistant(messages.value))
 // one that is not a draft (`own`), else the newest unsaved draft (liveDraft.js), drawn
 // under the LAST assistant message so it is always at the bottom. While a reply streams
 // the tail is about to change, so the card is hidden until the turn settles.
-const rawAnchor = computed(() => draftAnchor(messages.value, items.value));
+// A parked draft card is the one card: no typed draft is live while one is pending.
+const rawAnchor = computed(() =>
+	draftAnchor(messages.value, items.value, { parkedDraft: draftModel.value.parked })
+);
 const anchor = computed(() => (live.value ? null : rawAnchor.value));
 
 // True for the item that carries the tail's card (or its error view), unless it was
@@ -733,6 +842,40 @@ async function scrollToBottom(force = false, stillCurrent = () => true) {
 }
 
 // ── loading ─────────────────────────────────────────────────────────────────
+// What a read of the newest page does to the rows on screen (shared by load() and the quiet read).
+function takeThreadPage(d, refresh) {
+	conversation.value = d?.conversation || null;
+	const page = mergeNewestPage(messages.value, historyPaging.value, d, refresh);
+	messages.value = page.messages;
+	historyPaging.value = page.paging;
+	olderPending.value = d?.older_pending || [];
+	observePassiveSafetyUpdates([...page.messages, ...olderPending.value]);
+	return page;
+}
+// A read of the newest page that changes nothing the person sees except the rows themselves: it does
+// not follow the thread to the bottom, scroll, show the loading state, write or clear the banner,
+// or run send recovery, and a failed read is silent. The edit sheet's poll uses it, once, when the
+// card being edited has left the server's pending list (its thread row may still say pending until
+// the thread is read again). A loud load() that started meanwhile wins.
+// Resolves to true when the page was taken, false when the read failed or was overtaken (a loud load,
+// a chat switch): the sheet's poll counts only a read that landed.
+async function loadQuietly() {
+	const cid = convId.value;
+	const generation = viewGeneration;
+	const started = loadGeneration;
+	if (!cid) return false;
+	try {
+		const refresh = refreshNames(messages.value);
+		const after = heldNewestSeq(messages.value, historyPaging.value);
+		const d = await api.getConversation(cid, { refresh, after });
+		if (!isCurrent(cid, generation) || loadGeneration !== started) return false;
+		takeThreadPage(d, refresh);
+		return true;
+	} catch {
+		/* the next poll tick asks again */
+		return false;
+	}
+}
 async function load(force = false, staleRetry = true) {
 	const cid = convId.value;
 	const generation = viewGeneration;
@@ -751,12 +894,7 @@ async function load(force = false, staleRetry = true) {
 		if (!messages.value.length) olderArmed = false; // an open, not a resync
 		const d = await api.getConversation(cid, { refresh, after });
 		if (!current()) return;
-		conversation.value = d?.conversation || null;
-		const page = mergeNewestPage(messages.value, historyPaging.value, d, refresh);
-		messages.value = page.messages;
-		historyPaging.value = page.paging;
-		olderPending.value = d?.older_pending || [];
-		observePassiveSafetyUpdates([...page.messages, ...olderPending.value]);
+		const page = takeThreadPage(d, refresh);
 		sendRecovery.reconcile(cid, messages.value);
 		const row = store.conversations.find((c) => c.name === convId.value);
 		if (row) starred.value = !!row.starred;
@@ -872,7 +1010,11 @@ async function recheckPending() {
 	await loadPending("menu");
 }
 
-async function loadPending(source) {
+// Reads the server's pending list and merges it with the thread's rows. Returns the set of tokens the
+// server listed, or null when that read did not answer cleanly (a blip: the screen is kept).
+// `quiet`: no transcript reload when a clean read drops a card (the edit sheet's poll reads the
+// thread itself, once, when its card is missing).
+async function loadPending(source, { quiet = false } = {}) {
 	const cid = convId.value;
 	const generation = viewGeneration;
 	if (!cid) return;
@@ -907,7 +1049,12 @@ async function loadPending(source) {
 		settledTokens.value,
 		inflightToken.value ? [inflightToken.value] : []
 	);
-	const next = mergePendingSources(base, [fromRows, fromBackstop || []], inflight);
+	// A draft card whose Create or Cancel is in flight stays, whatever this read says.
+	const next = keepBusyItems(
+		mergePendingSources(base, [fromRows, fromBackstop || []], inflight),
+		pending.value,
+		draftUi.busyTokens()
+	);
 	const removedByCleanResync =
 		fromBackstop !== null &&
 		pending.value.some(
@@ -919,7 +1066,8 @@ async function loadPending(source) {
 	pending.value = next;
 	// A clean resync can be the first evidence of a passive close. Reload the
 	// transcript once so its terminal safety receipt gets the Done-only notice.
-	if (removedByCleanResync) load();
+	if (removedByCleanResync && !quiet) load();
+	return fromBackstop === null ? null : new Set(fromBackstop.map((p) => p.token));
 }
 
 // Auto-heal (layered design, phase 1): recover a card the live push dropped with NO user
@@ -1621,6 +1769,70 @@ const onResync = () => {
 	loadPending();
 };
 
+// Submit on a created draft's receipt: parks the ordinary confirmation card for the record's
+// submit (the amber tile) and reloads the pending list so it shows. Nothing runs from the button.
+function submitNext(step) {
+	const cid = convId.value;
+	const generation = viewGeneration;
+	return proposeSubmitStep(step, {
+		ui: receiptUi,
+		propose: (s) => api.proposeNextAction(cid, s),
+		current: () => isCurrent(cid, generation),
+		reload: () => load(),
+		reloadPending: () => loadPending(),
+	});
+}
+
+// A confirmed draft that continues the chat whose turn is waiting for a slot: the same waiting card
+// a queued send shows (recoveryState.queued, read and cancelled by refreshQueue / cancelWaiting).
+function showQueuedContinuation(cid, q) {
+	if (!q || !q.run_id || recoveryState.observedRuns[q.run_id] || recoveryState.queued[cid])
+		return;
+	queueGeneration++;
+	recoveryState.queued[cid] = { run_id: q.run_id, state: "queued", position: q.position };
+}
+
+// Create / Cancel on an inline draft card. No window.confirm: the card's Cancel asks nothing more
+// than the desktop's does. A final draft starts no agent turn, so after either one the chat and the
+// pending list are reloaded here (runDraftDecision); the receipt line comes from the reloaded rows.
+async function decideDraft(kind, pa) {
+	decisionsSettling.value++;
+	try {
+		return await settleDraftDecision(kind, pa);
+	} finally {
+		decisionsSettling.value--;
+	}
+}
+function settleDraftDecision(kind, pa) {
+	const cid = convId.value;
+	const generation = viewGeneration;
+	return runDraftDecision(kind, pa, {
+		ui: draftUi,
+		agent: agentName,
+		confirm: api.confirmTool,
+		dismiss: api.dismissTool,
+		streaming: () => sending.value,
+		current: () => isCurrent(cid, generation),
+		removePending: (token) => {
+			pending.value = pending.value.filter((p) => p.token !== token);
+		},
+		settle: (token) => {
+			settledTokens.value = withExcluded(settledTokens.value, [token]);
+		},
+		showQueued: (q) => showQueuedContinuation(cid, q),
+		say: (text) => {
+			errorBanner.value = text;
+		},
+		reload: () => load(),
+		reloadPending: () => loadPending(),
+		// a decided row for the token is loaded: the receipt line says what happened
+		receiptShown: (token) =>
+			messages.value.some(
+				(m) => m.role === "tool" && m.tool_call_id === token && !!m.action_outcome
+			),
+	});
+}
+
 watch(
 	() => props.id,
 	(id) => {
@@ -1641,6 +1853,9 @@ watch(
 		pending.value = [];
 		clearDecision();
 		inflightToken.value = null;
+		draftSheet.reset();
+		draftUi.reset();
+		receiptUi.reset();
 		settledTokens.value = new Set(); // a settled token belonged to the previous conversation
 		safetyNoticeTokens.value = new Set();
 		safetyUpdateNotice.value = null;
@@ -1660,6 +1875,9 @@ watch(
 );
 
 onMounted(async () => {
+	// a reload with the sheet's marker in the URL: the sheet is gone, so the marker must not stay (it
+	// would cost one extra Back); the hash is taken off in place, no history entry added
+	sheetHistory.clearStale();
 	refreshQueue();
 	queuePoll = setInterval(() => {
 		if (queuedTurn.value) refreshQueue();
@@ -1691,6 +1909,7 @@ onUnmounted(() => {
 	window.removeEventListener("focus", wakePending);
 	document.removeEventListener("visibilitychange", onVisible);
 	stopPendingPoll();
+	draftSheet.reset();
 	clearInterval(_cardClockTick);
 	clearInterval(queuePoll);
 	// Draft attachments remain in tab memory for a later return to this chat.
@@ -1852,6 +2071,14 @@ onUnmounted(() => {
 						@parked="(n) => parkedActions.set(anchor.draftKey, n)"
 						@dismissed="onDraftDismissed"
 					/>
+					<DraftReceipt
+						v-for="line in receiptsByItem[it.key]"
+						:key="line.key"
+						:line="line"
+						:busy="!!line.stepKey && receiptUi.busyKey() === line.stepKey"
+						:note="receiptUi.note(line.stepKey)"
+						@submit="submitNext"
+					/>
 					<RecordCards v-if="it.view.cards" :data="it.view.cards" />
 					<ChartCard v-for="(c, ci) in it.view.charts" :key="ci" :spec="c" />
 					<a
@@ -1966,6 +2193,18 @@ onUnmounted(() => {
 						{{ it.view.took }}
 					</div>
 				</template>
+				<!-- A tool row with no assistant turn to hang off (a truncated thread) still shows
+				     its draft receipt. -->
+				<template v-else>
+					<DraftReceipt
+						v-for="line in receiptsByItem[it.key]"
+						:key="line.key"
+						:line="line"
+						:busy="!!line.stepKey && receiptUi.busyKey() === line.stepKey"
+						:note="receiptUi.note(line.stepKey)"
+						@submit="submitNext"
+					/>
+				</template>
 			</div>
 		</template>
 
@@ -2055,23 +2294,43 @@ onUnmounted(() => {
 					Done
 				</button>
 			</section>
-			<DecisionCard
-				v-for="(p, pi) in orderedPending"
-				:key="p.token"
-				:summary="
-					(orderedPending.length > 1 ? `${pi + 1} of ${orderedPending.length}: ` : '') +
-					(p.summary || p.tool || `${agentName} needs your approval`)
-				"
-				:earlier="!isRecentCard(p)"
-				:proposed="proposedLabel(p.created_at, cardClock)"
-				@open="openDecision(p)"
-			/>
+			<template v-for="(p, pi) in orderedPending" :key="p.token">
+				<!-- A server draft card is drawn inline; every other pending item keeps the amber tile
+				     and its sheet. The wrapper class gives the shared card the phone's colours. -->
+				<div v-if="isToolDraftItem(p)" class="jv-tool-draft jv-draft-tokens">
+					<DraftCard
+						:card="cardOfItem(p)"
+						:ctx="draftModel.ctxMap[p.token]"
+						@create="decideDraft('create', p)"
+						@preview="draftSheet.openPreview(p)"
+						@edit="draftSheet.openEdit(p)"
+						@cancel="decideDraft('cancel', p)"
+					/>
+					<p v-if="draftUi.error(p.token)" class="jv-msg-error" role="alert">
+						{{ draftUi.error(p.token) }}
+					</p>
+				</div>
+				<DecisionCard
+					v-else
+					:summary="
+						(orderedPending.length > 1
+							? `${pi + 1} of ${orderedPending.length}: `
+							: '') + (p.summary || p.tool || `${agentName} needs your approval`)
+					"
+					:earlier="!isRecentCard(p)"
+					:proposed="proposedLabel(p.created_at, cardClock)"
+					@open="openDecision(p)"
+				/>
+			</template>
 			<p v-if="showOlderCardsNote" class="jv-typehint">
 				An earlier action card is still waiting. Tap it to approve or discard.
 			</p>
+			<p v-if="showOlderDraftNote" class="jv-typehint">
+				An earlier draft is still waiting. Use its buttons to create or cancel it.
+			</p>
 		</div>
 		<!-- Both ways to approve, shown once under the stack. -->
-		<p v-if="typedApprovalHint" class="jv-typehint">{{ typedApprovalHint }}</p>
+		<p v-if="draftModel.hintLine" class="jv-typehint">{{ draftModel.hintLine }}</p>
 	</div>
 
 	<div v-if="errorBanner" class="jv-banner">
@@ -2230,6 +2489,7 @@ onUnmounted(() => {
 		</div>
 	</Sheet>
 
+	<DraftSheet :host="draftSheet" />
 	<DecisionSheet
 		:key="`${decisionContext?.generation ?? viewGeneration}:${
 			decisionContext?.conversation ?? ''
@@ -2560,6 +2820,14 @@ onUnmounted(() => {
 	border-radius: 4px;
 }
 
+/* The shared card keeps its own 12px vertical margin; here the thread's gap spaces it, as it
+   does the amber tile. min-width 0 lets the card's table scroll inside it, not the page. */
+.jv-tool-draft {
+	min-width: 0;
+}
+.jv-tool-draft :deep(.dc) {
+	margin: 0;
+}
 .jv-typehint {
 	margin: 6px 4px 2px;
 	font-size: 12px;

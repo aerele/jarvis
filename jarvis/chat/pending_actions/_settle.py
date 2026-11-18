@@ -93,11 +93,14 @@ def _item(row) -> dict:
 		settlement = _seal.unseal_settlement(row) or {}
 	except _seal.SealError:
 		settlement = {}
+	# A draft card saved with edited values ran those, not the card's: its settlement
+	# carries the call that ran (``approvals_api._edit_created`` / ``_edit_failed``).
+	ran = settlement.get("args") if row.get("edited") else None
 	item = {
 		"name": row.name,
 		"kind": row.kind,
 		"tool": row.tool,
-		"args": call.get("args") or {},
+		"args": ran if isinstance(ran, dict) else call.get("args") or {},
 		"result": settlement.get("result"),
 		"status": row.status,
 		"reason_code": row.reason_code or "",
@@ -110,11 +113,23 @@ def _item(row) -> dict:
 		"result_name": row.result_name,
 		"batch_id": row.batch_id,
 		"corrects": row.get("corrects") or "",
+		"draft": _draft_of(row),
 		"late": bool(frappe.flags.get(LATE_SETTLE_FLAG) or row.settle_attempts),
 	}
 	if row.get("collaboration_binding"):
 		item.update(actor=row.actor, collaboration_binding=row.collaboration_binding, run_id=row.run_id)
 	return item
+
+
+def _draft_of(row) -> dict | None:
+	"""The ``draft`` payload of the row's own stored card (a tool-driven draft card), or
+	None. A plain read of the row already in hand: no query, no lock."""
+	try:
+		card = _seal._parsed(row.get("card"))
+	except ValueError:
+		return None
+	draft = card.get("draft") if isinstance(card, dict) else None
+	return draft if isinstance(draft, dict) else None
 
 
 def _delivery_conversation(row) -> str | None:
@@ -147,6 +162,12 @@ def _deliver(item: dict) -> None:
 	# A failed chip shows its reference, also for a failure that never dispatched
 	# (seal, stale, interrupted) and so has no stored result.
 	result = with_reference(item["result"], item["name"]) if item["status"] == FAILED else item["result"]
+	result = _with_next_step(item, result)
+	# The decided row keeps no card: leave it a marker that this one was a draft card, so the
+	# apps word its receipt as a draft's (``draft_card.decided_mark`` reads it back).
+	from jarvis.chat import draft_card
+
+	result = draft_card.with_receipt_mark(result, item.get("draft"), item["reason_code"])
 	api.persist_tool_receipt(
 		conv,
 		item["tool"] or "",
@@ -160,6 +181,37 @@ def _deliver(item: dict) -> None:
 		from jarvis.chat import admission
 
 		admission.publish_action_confirmed(conv)
+
+
+def _with_next_step(item: dict, result):
+	"""A draft card's create that ran gets its next step (Submit, or a workflow action)
+	on its receipt, the one place the desktop reads it from (``data.suggested_next``).
+	Worked out as the owner: a reconciler settle runs as Administrator. Never for an
+	update, a card that is not a draft, or with the draft flag off; a hint never fails
+	the settle."""
+	data = result.get("data") if isinstance(result, dict) else None
+	if not (
+		item["status"] == EXECUTED
+		and item["tool"] == "create_doc"
+		and isinstance(item.get("draft"), dict)
+		and isinstance(data, dict)
+		and item.get("result_doctype")
+		and item.get("result_name")
+	):
+		return result
+	try:
+		from jarvis._session import impersonate
+		from jarvis.chat import draft_card
+		from jarvis.chat.actions_api import _suggest_next_safe
+
+		if not draft_card.enabled():
+			return result
+		with impersonate(item["owner_user"]):
+			step = _suggest_next_safe(item["result_doctype"], item["result_name"])
+	except Exception:
+		frappe.log_error(title="jarvis.pending_action.next_step_failed", message=frappe.get_traceback())
+		return result
+	return {**result, "data": {**data, "suggested_next": step}} if step else result
 
 
 def _announce(item: dict) -> None:

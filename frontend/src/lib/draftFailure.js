@@ -6,15 +6,23 @@
 // says so where the person clicked). `assistant_told: false` means that explanation
 // could not be sent, so the note says to ask in the chat instead of promising a
 // reply. `outcome: "partial"` means something was saved before the failure, so the
-// words never say nothing was saved. Shared by the desktop panel and the phone card
+// words never say nothing was saved. `card_open: true` (a server draft card's save) means the
+// form closes but the card is still waiting: nothing was sent to the chat, so the note carries
+// no sentence about the chat. Shared by the desktop panel and the phone card
 // (@shared/lib/draftFailure.js).
 import { personError } from "./actionSummary.js";
 
 export const FAILURE_FALLBACK = "Could not save. Check the values.";
 
-// { closed, partial, told, error, note } for a failed apply, else null. `agent` is
-// the assistant's (whitelabel) name.
-export function draftFailureOf(r, agent = "Jarvis") {
+// { closed, partial, told, cardOpen, error, note } for a failed apply, else null. `agent` is
+// the assistant's (whitelabel) name. With `strictTold` (a server draft card's save) the chat is
+// promised only when the reply says the assistant was told (`assistant_told: true`) and a "could
+// not be told" is said only when it says it was not: a reply with no flag says neither. A server
+// draft card's reply also says whether a chat reply is really coming (`assistant_replies`: false
+// for a discarded, superseded or cancelled card, which only leave the agent a note): the promise
+// follows that when it is present. Without `strictTold` (the typed panel, the phone) an absent
+// flag still reads as told, as it always has, and `assistant_replies` is ignored.
+export function draftFailureOf(r, agent = "Jarvis", { strictTold = false } = {}) {
 	if (!r || r.ok !== false) return null;
 	const err = personError(r.error || {});
 	const message = (typeof err.message === "string" && err.message.trim()) || FAILURE_FALLBACK;
@@ -22,14 +30,19 @@ export function draftFailureOf(r, agent = "Jarvis") {
 	const sentence = /[.!?]$/.test(message) ? message : `${message}.`;
 	const closed = !!r.closed;
 	const partial = r.outcome === "partial";
-	const told = r.assistant_told !== false;
+	const told = strictTold ? r.assistant_told === true : r.assistant_told !== false;
+	const replies =
+		strictTold && typeof r.assistant_replies === "boolean" ? r.assistant_replies : told;
+	const untold = strictTold ? r.assistant_told === false : !told;
+	const cardOpen = closed && r.card_open === true;
 	let note = "";
 	if (partial) {
 		note = `Part of this may already be saved: ${sentence} Check the record before trying again.`;
 	} else if (closed) {
 		note = `Couldn't save this: ${sentence}`;
-		if (told) note += " The reply in the chat explains what to do.";
+		if (replies && !cardOpen) note += " The reply in the chat explains what to do.";
 	}
-	if (closed && !told) note += ` ${agent} could not be told about it, so ask in the chat.`;
-	return { closed, partial, told, error: { ...err, message }, note };
+	if (closed && untold && !cardOpen)
+		note += ` ${agent} could not be told about it, so ask in the chat.`;
+	return { closed, partial, told, cardOpen, error: { ...err, message }, note };
 }

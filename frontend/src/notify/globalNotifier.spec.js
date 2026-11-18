@@ -161,6 +161,37 @@ describe("the fence does not touch the other signals", () => {
 		expect(useToasts().value).toHaveLength(2);
 	});
 
+	// Break: the toast for a parked draft says the raw tool name ("create_doc"), or the toast of an
+	// ordinary parked write stops saying its tool (the flag-off text changes).
+	it("names a parked draft by its title and any other parked write by its tool", () => {
+		socket.emit({
+			kind: "action:pending",
+			conversation: "conv-a",
+			tool: "jarvis__create_doc",
+			pending_card_safe: true,
+			preview: {
+				card: {
+					draft: {
+						verb: "create",
+						doctype: "Timesheet",
+						title: "New Timesheet",
+						values: {},
+					},
+				},
+			},
+		});
+		socket.emit({
+			kind: "action:pending",
+			conversation: "conv-b",
+			tool: "jarvis__create_doc",
+			pending_card_safe: true,
+			preview: { card: { kind: "create" } },
+		});
+		const [draft, plain] = useToasts().value;
+		expect(draft.body).toMatch(/ needs your confirmation: New Timesheet$/);
+		expect(plain.body).toMatch(/ needs your confirmation: create_doc$/);
+	});
+
 	it("does not announce a raw or delayed pending frame", () => {
 		socket.emit({
 			kind: "action:pending",
