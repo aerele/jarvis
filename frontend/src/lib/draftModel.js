@@ -11,8 +11,14 @@
 //   }) -> { buildDraftModel(action), fillRuleValues(doctype, tables, isCurrent), formMetaCache }
 // One call makes one builder with its own form-meta cache (never invalidated, as before: the view
 // made it once per mounted ChatView).
-import { panelField } from "./docFields.js";
-import { checkToYesNo } from "./draftApply.js";
+import {
+	modelField,
+	mainRuleBase,
+	mainRuleDoc,
+	ruleAdmits,
+	ruleTableNames,
+	ruleTables,
+} from "./mainRules.js";
 import {
 	applyRuleValues,
 	buildDraftTable,
@@ -135,29 +141,9 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 			);
 			if (m && m.fieldtype !== "Table") proposed[m.fieldname] = f.value;
 		}
-		const fields = [];
-		const seen = new Set();
-		for (const f of meta.fields) {
-			if (f.fieldtype === "Table") continue;
-			const has = f.fieldname in proposed;
-			const baseV = base.values[f.fieldname];
-			// Show: agent-proposed fields + required fields + (update) filled fields the agent referenced
-			if (!has && !f.reqd) continue;
-			const pf = panelField(f, has ? proposed[f.fieldname] : baseV);
-			pf.proposed = has; // agent set a value for this field (vs. shown only because reqd)
-			if (verb === "update")
-				pf.orig =
-					baseV == null
-						? ""
-						: String(pf.control === "check" ? checkToYesNo(baseV) : baseV);
-			pf.changed = verb === "update" && String(pf.value) !== String(pf.orig);
-			fields.push(pf);
-			seen.add(f.fieldname);
-		}
-		// child tables: every meta table that is required, agent-proposed, or (update) non-empty
-		const tables = [];
 		const aTables = {};
 		for (const t of a.tables || []) if (t && t.fieldname) aTables[t.fieldname] = t.rows || [];
+		const tables = [];
 		for (const [tf, spec] of Object.entries(meta.tables || {})) {
 			const metaField = meta.fields.find((f) => f.fieldname === tf) || { reqd: 0 };
 			const table = buildDraftTable({
@@ -170,6 +156,51 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 			});
 			if (table) tables.push(table);
 		}
+		const tableNames = ruleTableNames(meta.fields);
+		const fields = [];
+		const seen = new Set();
+		// A field whose mandatory_depends_on holds, or cannot be told, is shown too (never a
+		// read_only one): the rule reads the defaults, the saved record and the proposed values.
+		const ruleBase = mainRuleBase(meta.fields, base.values, base.tables, tableNames);
+		let ruleDoc = null;
+		const ruleSays = (f) => {
+			if (!ruleBase) return false;
+			ruleDoc =
+				ruleDoc ||
+				mainRuleDoc(
+					ruleBase,
+					meta.fields.filter((m) => m.fieldname in proposed),
+					proposed,
+					ruleTables(tableNames, tables)
+				);
+			return ruleAdmits(f, ruleDoc, true);
+		};
+		for (const f of meta.fields) {
+			if (f.fieldtype === "Table") continue;
+			const has = f.fieldname in proposed;
+			const baseV = base.values[f.fieldname];
+			// Show: agent-proposed fields + required fields + (update) filled fields the agent referenced
+			if (!has && !f.reqd && !ruleSays(f)) continue;
+			// proposed: the agent set a value for this field (vs. shown only because reqd)
+			const pf = modelField(f, has ? proposed[f.fieldname] : baseV, baseV, verb, {
+				proposed: has,
+				ruleAdded: !has && !f.reqd,
+			});
+			fields.push(pf);
+			seen.add(f.fieldname);
+		}
+		// The fields a later edit may make required (see mainRules.revealRuleFields).
+		const ruleFields = ruleBase
+			? meta.fields
+					.filter(
+						(f) =>
+							f.fieldtype !== "Table" &&
+							!f.read_only &&
+							f.mandatory_depends_on &&
+							!seen.has(f.fieldname)
+					)
+					.map((f) => ({ field: f, value: base.values[f.fieldname] }))
+			: [];
 		// Bounded: the card shows with the defaults rather than wait on a slow answer.
 		await Promise.race([
 			fillRuleValues(a.doctype, tables),
@@ -205,6 +236,9 @@ export function makeDraftModelBuilder({ getDoctypeFormMeta, loadDocForEdit, rule
 			parentDefaults: verb === "create" ? parentDefaults(meta.fields) : {},
 			docstatus: Number(base.docstatus || 0),
 			fields,
+			...(ruleBase ? { ruleBase } : {}),
+			...(ruleFields.length ? { ruleFields } : {}),
+			...(ruleBase && tableNames.length ? { ruleTables: tableNames } : {}),
 			tables,
 			tableMeta: meta.tables || {},
 			applying: false,
