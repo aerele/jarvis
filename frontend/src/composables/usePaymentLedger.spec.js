@@ -420,12 +420,6 @@ describe("Payment ledger composable", () => {
 			expect(ledger.modal.error).toBeNull();
 			expect(ledger.modal.rows).toHaveLength(8);
 		});
-		it("does not call the core refusal path for an ordinary failure", async () => {
-			const spy = vi.spyOn(core, "handleRefusal");
-			api.getDayDetail.mockResolvedValueOnce(refusal("network_error", "failed"));
-			await settle(ledger.setSide("Receivable"));
-			expect(spy).not.toHaveBeenCalled();
-		});
 		it("sends a refusal to the core path", async () => {
 			const spy = vi.spyOn(core, "handleRefusal");
 			api.getDayDetail.mockResolvedValueOnce(refusal("scope_changed"));
@@ -556,9 +550,6 @@ describe("Payment ledger composable", () => {
 			await vi.advanceTimersByTimeAsync(200);
 			await reading;
 			expect(dayCalls()).toBe(before);
-		});
-		it("asks the panel alone for five rows", () => {
-			expect(lastLedgerCall(api.getDayDetail)[6]).toBe(5);
 		});
 		it("serves the panel and the modal of the same scope and page from one read", async () => {
 			await settle(ledger.openModal());

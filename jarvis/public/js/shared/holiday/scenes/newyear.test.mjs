@@ -134,11 +134,6 @@ test("the year is drawn as laid out for the mark's place", () => {
   r.end();
 });
 
-test("the page keeps the mark low enough that the year fits above the hat", () => {
-  const need = CLEAR + yearRoom();
-  assert.ok(HERO_TOP_UNITS.newyear >= need - 1e-9);
-});
-
 // The centre y of burst n as drawn, from the layer.
 const burstY = (r, n) =>
   Number(

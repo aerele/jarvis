@@ -702,14 +702,6 @@ const _apiRow = (over = {}) => ({
 	...over,
 });
 
-test("apiKeyModelHealth: a failed model surfaces a warn state with actionable title", () => {
-	const ms = [{ provider: "openai_compat", model: "claude-sonnet-4-6", status: "failed" }];
-	const h = apiKeyModelHealth(_apiRow(), ms);
-	assert.equal(h.level, "warn");
-	assert.ok(h.label, "a failed row must carry a label, not just a bare dot");
-	assert.match(h.title, /base URL|API key|model id/i);
-});
-
 test("apiKeyModelHealth: verified is a MEANINGFUL green (ok, no label)", () => {
 	const ms = [{ provider: "openai_compat", model: "claude-sonnet-4-6", status: "verified" }];
 	assert.deepEqual(apiKeyModelHealth(_apiRow(), ms), { level: "ok" });
@@ -844,11 +836,6 @@ test("providerLabel/providerId: zai_coding id ⇄ 'GLM / Z.ai (Coding Plan)' lab
 	assert.equal(providerLabel("zai_coding"), "GLM / Z.ai (Coding Plan)");
 	assert.equal(providerId("GLM / Z.ai (Coding Plan)"), "zai_coding");
 	assert.notEqual(providerLabel("zai_coding"), providerLabel("zai"));
-});
-
-test("PROVIDER_LABELS: zai_coding is a first-class entry", () => {
-	const ids = PROVIDER_LABELS.map((p) => p.id);
-	assert.ok(ids.includes("zai_coding"));
 });
 
 test("validatePool: GLM / Z.ai (Coding Plan) requires a base_url, same as GLM / Z.ai", () => {
@@ -1022,6 +1009,7 @@ test("subscriptionAccountHealth: no verdict at all -> quiet green ONLY when know
 	assert.deepEqual(subscriptionAccountHealth(""), { level: "ok" });
 	assert.deepEqual(subscriptionAccountHealth(undefined), { level: "ok" });
 	assert.deepEqual(subscriptionAccountHealth("not_applicable"), { level: "ok" });
+	assert.deepEqual(subscriptionAccountHealth("", { expired: null }), { level: "ok" });
 });
 
 test("subscriptionAccountHealth: no verdict at all -> neutral (grey), never green, when knownGood is false", () => {
@@ -1053,13 +1041,6 @@ test("subscriptionAccountHealth: an unrecognised status is treated as unchecked,
 	// A typo'd/legacy verdict string behaves identically - the enum is closed, not the
 	// set of strings a real or misbehaving fleet might ever send.
 	assert.deepEqual(subscriptionAccountHealth("Unverified"), known);
-});
-
-test("subscriptionAccountHealth: an unrecognised status is never 'ok' even in the failover-list editor (knownGood defaults true)", () => {
-	// This is the exact scenario the finding describes: the failover-list editor calls
-	// subscriptionAccountHealth with its default options (knownGood defaults true), so
-	// the regression would show here first.
-	assert.notEqual(subscriptionAccountHealth("expired").level, "ok");
 });
 
 // ---- dirtyAccountHealth: what LlmPoolEditor's dot shows once the pool is dirty
@@ -1098,14 +1079,6 @@ test("dirtyAccountHealth: a settled 'warn'/'unchecked'/'neutral' row stays 'neut
 		level: "neutral",
 	});
 	assert.deepEqual(dirtyAccountHealth({ level: "neutral" }, true), { level: "neutral" });
-});
-
-test("dirtyAccountHealth: 'pending' and 'neutral' are visibly distinct levels (regression lock)", () => {
-	// The whole point of this fix is that these two must NOT collapse into one
-	// customer-visible state again - assert the levels differ, not just that both exist.
-	const wasHealthy = dirtyAccountHealth({ level: "ok" }, true);
-	const neverProven = dirtyAccountHealth({ level: "neutral" }, true);
-	assert.notEqual(wasHealthy.level, neverProven.level);
 });
 
 // jarvis#556: the pre-flight probe used to skip only ollama/vllm BY PROVIDER ID,

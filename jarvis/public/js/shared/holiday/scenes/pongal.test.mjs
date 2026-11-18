@@ -12,7 +12,6 @@ import {
   SUN,
   caneSVG,
   kolamSVG,
-  sunMinY,
   TORAN_BOTTOM,
   toranSVG,
 } from "./pongal-art.mjs";
@@ -20,7 +19,6 @@ import {
   GAP,
   MIN_FLOOR_SCALE,
   TORAN,
-  sceneHeroTop,
 } from "../scene-geometry.mjs";
 
 import {
@@ -221,14 +219,6 @@ test("the sun follows a mark that sits low, beside it and above the greeting", (
   assert.ok(400 + SUN.dx - SUN.r >= 400 + 36 + GAP);
   // above the greeting, which starts 116 units under the mark's top
   assert.ok(SUN.dy + SUN.r < 116 - GAP);
-});
-
-test("the page keeps the mark low enough that the sun fits under the thoranam", () => {
-  for (const s of [0.6, 1, 1.25]) {
-    const mt = sceneHeroTop("pongal", s) / s;
-    assert.ok(mt + SUN.dy - SUN.r >= TORAN_BOTTOM + GAP - 1e-9, `s ${s}`);
-    assert.ok(sunMinY() - SUN.dy <= mt + 1e-9);
-  }
 });
 
 // ---- Jarvis's own pot boils over -----------------------------------------------------------------

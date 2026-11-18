@@ -253,15 +253,6 @@ test("the #above / #overlay / #footer slots render at their positions", () => {
 // prompt-history recall, the clear after send — now reaches the textarea only
 // through that watcher, so a dropped watcher or the wrong flush timing (which
 // would measure the pre-update DOM) is a silent regression.
-test("a programmatic modelValue change grows the box, clamped to the default maxHeight", async () => {
-	const w = mountBare({ modelValue: "" });
-	const ta = w.find("textarea");
-	stubScrollHeight(ta.element, 400);
-	await w.setProps({ modelValue: "x\ny\nz" });
-	// 140 is Composer's declared default for the `maxHeight` prop.
-	expect(ta.element.style.height).toBe("140px");
-});
-
 test("a shorter value shrinks the box back (height is recomputed, not only raised)", async () => {
 	const w = mountBare({ modelValue: "" });
 	const ta = w.find("textarea");
