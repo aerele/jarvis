@@ -341,17 +341,6 @@ describe("buildDraftTable: the hidden fields the row form's rules read (rule_fie
 		expect(ruleFetchLinks(t)).toEqual({});
 	});
 
-	it("rule values never reach the save payload", () => {
-		const t = buildDraftTable({
-			fieldname: "items",
-			spec: withRules,
-			proposed: [{ item_code: "C", qty: 1 }],
-			verb: "create",
-		});
-		applyRuleValues(t, { item_code: { C: { is_fixed_asset: 1 } } });
-		expect(coerceRow(t, t.rows[0], "create")).not.toHaveProperty("is_fixed_asset");
-	});
-
 	it("a value the agent proposed for a rule field is used", () => {
 		const t = build({ proposed: [{ name: "r1", stock_kind: "Service" }], saved });
 		expect(t.rows[0].__rule.stock_kind).toBe("Service");

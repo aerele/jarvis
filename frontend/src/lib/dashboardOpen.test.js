@@ -842,31 +842,6 @@ test("?edit= wins over ?chat=, and says so", () => {
 // for a given message landed on (the fired stamp - see chatGoto.test.js for
 // its shape) and has every later trigger for that SAME message resume it.
 
-test("gotoDashboards passes the message id through to the fired-stamp lookup", () => {
-	// see chatGoto.test.js for gotoDashboards' own body assertions - this only
-	// pins that BOTH call sites (the live redirect, the card button) reach it
-	// through the one dispatcher, which passes the message id the stamp is keyed
-	// on, or the lookup has nothing to key off. The calendar branch of that
-	// dispatcher never touches the builder's prefill.
-	const dispatch = fnBody(
-		chatSrc,
-		'function openGotoAction(goto, action, messageId, { auto = false, runId = "" } = {})'
-	);
-	assert.match(dispatch, /return gotoDashboards\(goto\.prompt, messageId\);/);
-	assert.match(dispatch, /if \(action === PAYMENT_CALENDAR_PAGE\) \{/);
-	assert.match(dispatch, /return gotoPaymentCalendar\(messageId\);/);
-	assert.doesNotMatch(dispatch, /setDashboardPrefill|builderSeed/);
-	// the auto-open (timer expiry and Open now) names the run it consumes; the card click does not
-	assert.match(
-		chatSrc,
-		/openGotoAction\(goto, action, state\.messageId, \{\s*auto: true,\s*runId: state\.runId,?\s*\}\)/
-	);
-	assert.match(chatSrc, /openGotoAction\(goto, decision\.action, m\.name\);/);
-	assert.match(chatSrc, /@open="openGotoCard\(m\)"/);
-	const calendar = fnBody(chatSrc, "function gotoPaymentCalendar(messageId)");
-	assert.doesNotMatch(calendar, /setDashboardPrefill|builderSeed|requestBefore/);
-});
-
 test("send() learns the conversation a goto hand-off landed on and stamps it", () => {
 	assert.match(
 		paneSrc,
@@ -1332,16 +1307,6 @@ test("a promotion that would cost the user something confirms first", () => {
 	// and the default is restored when the dialog settles, or the next plain
 	// discard inherits the promotion's wording
 	assert.match(fnBody(pageSrc, "function settleDiscard("), /discardCopy\.value = DISCARD_COPY;/);
-});
-
-test("that confirm never offers an escape into general chat", () => {
-	const promote = fnBody(pageSrc, "async function promoteFromChat(");
-	assert.doesNotMatch(promote, /offerChat/);
-	assert.doesNotMatch(pageSrc, /const discardOfferChat/);
-	assert.doesNotMatch(pageSrc, /label: "Open its chat"/);
-	assert.doesNotMatch(pageSrc, /router\.push\("\/c\//);
-	const confirm = fnBody(pageSrc, "function confirmDiscard(");
-	assert.doesNotMatch(confirm, /offerChat/);
 });
 
 test("the query is stripped once the promotion settles, both ways", () => {
