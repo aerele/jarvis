@@ -469,6 +469,15 @@ class TestIntakeCapture(FrappeTestCase):
 		self.assertEqual(self._rows(rule), [])
 		enq.assert_not_called()
 
+	def test_a_file_bound_during_this_save_is_captured_once(self):
+		rule, note = self._watched_note()
+		doc = self._bind(note)
+		with mock.patch("frappe.enqueue") as enq:
+			note.reload().save()
+			note.save()
+		self.assertEqual([r.source_file for r in self._rows(rule)], [doc.name])
+		self.assertEqual(enq.call_count, 1)
+
 	def test_a_new_record_captures_every_file_attached_now(self):
 		rule, _ = self._watched_note()
 		note = frappe.get_doc({"doctype": "Note", "title": "n-" + frappe.generate_hash(length=6)})

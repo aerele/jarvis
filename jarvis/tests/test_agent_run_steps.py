@@ -463,6 +463,18 @@ class TestHumanizeToolCall(unittest.TestCase):
 		label, _ = agent_run_steps.humanize_tool_call("get_doc", {"doctype": "System Settings"}, None)
 		self.assertEqual(label, "Looked up System Settings")
 
+	def test_a_refused_single_read_says_attempt_plus_reason(self):
+		"""The two halves the step hook composes for get_doc's new Single permission
+		check: the label claims only an attempt, and the tool's own refusal is what
+		explains it."""
+		args = {"doctype": "Stock Settings"}
+		label, _ = agent_run_steps.humanize_tool_call("get_doc", args, None)
+		self.assertEqual(label, "Looked up Stock Settings")
+		self.assertEqual(
+			agent_run_steps.error_detail("no read permission on Stock Settings"),
+			"no read permission on Stock Settings",
+		)
+
 	def test_an_unresolved_lookup_says_what_was_attempted(self):
 		"""The record name is MODEL-supplied. A wrong guess produced "Read Company
 		ignore" on the bench; an unresolved lookup must not claim a read at all."""

@@ -224,7 +224,6 @@ class TestRunReportPrepared(FrappeTestCase):
 			env = run_report(report_name=PREP_REPORT)
 		self.assertEqual(env["status"], "ready")
 		self.assertEqual(env["run"], run)
-		self.assertEqual(env["read_status"], "not_read")
 		self.assertEqual(env["next_query"]["args"], {"prepared_report": run})
 		enqueue.assert_not_called()
 		for key in ("result", "columns", "row_note", "source_rows"):
@@ -685,6 +684,18 @@ class TestPreparedReportsSince(FrappeTestCase):
 		)
 		self.assertNotIn("waiting", generating)
 		self.assertEqual(set(generating), {"prepared_report", "status", "report_name", "message", "run"})
+
+	def test_an_unreadable_copy_without_since_does_not_regenerate(self):
+		bad = _make_pr("Completed")
+		before = self._count()
+		with patch(_ENQUEUE) as enqueue, patch.object(PreparedReport, "get_prepared_data") as read:
+			env = self._handle(since=None)
+		read.assert_not_called()
+		enqueue.assert_not_called()
+		self.assertEqual(env["status"], "ready")
+		self.assertEqual(env["read_status"], "not_read")
+		self.assertEqual(env["run"], bad)
+		self.assertEqual(self._count(), before)
 
 	def test_run_report_passes_the_macro_runs_start_as_since(self):
 		ctx = frappe._dict(name="r", started_at=self.since, current_step=1, resume_turn="")
