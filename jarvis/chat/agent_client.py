@@ -55,7 +55,7 @@ from jarvis.chat.device import (
 	update_device_token,
 )
 from jarvis.chat.events import parse_event
-from jarvis.chat.gateway_ids import model_ref_for_gateway
+from jarvis.chat.gateway_ids import alternate_ref, model_ref_for_gateway
 
 # #773: every socket call of a session goes through one gated, deadline-bounded IO
 # path; the names are re-exported here for callers of this module.
@@ -1463,11 +1463,23 @@ class AgentSession:
 		``modelOverrideSource: "auto"`` -- and that marker is not in the sessions.patch
 		schema (the gateway rejects it with INVALID_REQUEST), so not overriding is the
 		supported way to preserve failover. See ``turn_handler._session_model_for``."""
-		self._request(
-			"sessions.patch",
-			{"key": session_key, "model": model_ref},
-			timeout_s=timeout_s,
-		)
+		try:
+			self._request(
+				"sessions.patch",
+				{"key": session_key, "model": model_ref},
+				timeout_s=timeout_s,
+			)
+		except AgentUnreachableError as err:
+			# The stored runtime version can lag a roll by one heartbeat, so the provider id
+			# may be in the wrong form. A pin is idempotent: on a definitive refusal, try the
+			# other form once and, if that fails too, raise the first error.
+			other = alternate_ref(model_ref)
+			if other is None or not is_definitive_refusal(err) or is_session_changed(err):
+				raise
+			try:
+				self._request("sessions.patch", {"key": session_key, "model": other}, timeout_s=timeout_s)
+			except AgentUnreachableError:
+				raise err from None
 
 	# -- Session repair calls (#753) -----------------------------------------
 	# Used only by jarvis.chat.session_repair, before a send. A refusal raises an

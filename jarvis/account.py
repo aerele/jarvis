@@ -608,7 +608,11 @@ def _admin_chat_gate() -> dict:
 	# be discarded and would take a row lock on Jarvis Settings for nothing. persist never raises.
 	if _write_is_durable():
 		holiday_policy.persist(conn, daily=False)
-		native_runtime.persist(conn)
+		try:
+			native_runtime.persist(conn)
+		except Exception:
+			# Bookkeeping must never block chat.
+			frappe.log_error(title="native_runtime.persist failed", message=frappe.get_traceback())
 	notice = conn.get("billing_notice") or {}
 	if "chat_readiness" in conn and conn["chat_readiness"] != "Ready":
 		# Authority-repair incident (review plan 04 P0-6): admin's strict resolver

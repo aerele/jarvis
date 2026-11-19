@@ -185,7 +185,7 @@ class TestPersistFacts(FrappeTestCase):
 	def _persist(self, reply, stored):
 		fields = {"native_subscription_pool": 0, "agent_runtime_version": "", **stored}
 		with (
-			patch.object(native_runtime.frappe.db, "get_singles_dict", return_value=fields),
+			patch.object(native_runtime.frappe, "get_cached_value", return_value=frappe._dict(fields)),
 			patch.object(native_runtime.frappe.db, "set_single_value") as write,
 			patch.object(native_runtime, "_refresh_proxy_active") as refresh,
 		):
@@ -284,3 +284,51 @@ class TestNativeUsage(unittest.TestCase):
 		out, direct = self._get_usage(sub)
 		direct.assert_called_once_with(sub)
 		self.assertTrue(out["applicable"])
+
+
+class TestPinRetryWithTheOtherForm(unittest.TestCase):
+	def test_alternate_ref_flips_only_the_seven_ids(self):
+		self.assertEqual(gateway_ids.alternate_ref("moonshot/kimi-k2.6"), "moonshot_api/kimi-k2.6")
+		self.assertEqual(gateway_ids.alternate_ref("moonshot_api/kimi-k2.6"), "moonshot/kimi-k2.6")
+		for ref in ("openai/gpt-5.5", "gpt-5.5", "moonshot-0/x", None):
+			self.assertIsNone(gateway_ids.alternate_ref(ref))
+
+	def _session(self, errors):
+		from jarvis.exceptions import AgentUnreachableError
+
+		session = object.__new__(AgentSession)
+		calls = []
+
+		def request(method, params, timeout_s=None):
+			calls.append(params["model"])
+			if errors:
+				err = AgentUnreachableError("refused")
+				err.rejected_method, err.code = "sessions.patch", errors.pop(0)
+				raise err
+			return {}
+
+		session._request = request
+		return session, calls
+
+	def test_a_refused_pin_is_retried_once_with_the_other_form(self):
+		session, calls = self._session(["INVALID_REQUEST"])
+		session.set_session_model("k", "moonshot/kimi-k2.6")
+		self.assertEqual(calls, ["moonshot/kimi-k2.6", "moonshot_api/kimi-k2.6"])
+
+	def test_the_first_error_is_raised_when_the_retry_fails_too(self):
+		from jarvis.exceptions import AgentUnreachableError
+
+		session, calls = self._session(["INVALID_REQUEST", "FORBIDDEN"])
+		with self.assertRaises(AgentUnreachableError) as cm:
+			session.set_session_model("k", "moonshot/kimi-k2.6")
+		self.assertEqual(cm.exception.code, "INVALID_REQUEST")
+		self.assertEqual(len(calls), 2)
+
+	def test_temporary_errors_and_other_providers_are_not_retried(self):
+		from jarvis.exceptions import AgentUnreachableError
+
+		for ref, code in (("moonshot/kimi-k2.6", "UNAVAILABLE"), ("openai/gpt-5.5", "INVALID_REQUEST")):
+			session, calls = self._session([code])
+			with self.assertRaises(AgentUnreachableError):
+				session.set_session_model("k", ref)
+			self.assertEqual(len(calls), 1)

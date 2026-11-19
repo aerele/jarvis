@@ -71,8 +71,8 @@ def persist(reply) -> None:
 			changes[VERSION_FIELD] = raw.strip()
 	if not changes:
 		return
-	# DB truth, not the document cache: a stale cache must not suppress a needed write.
-	stored = frappe.db.get_singles_dict(SETTINGS) or {}
+	# Two cached field reads, not the whole Single; set_single_value below clears the cache.
+	stored = frappe.get_cached_value(SETTINGS, SETTINGS, [NATIVE_FIELD, VERSION_FIELD], as_dict=True) or {}
 	changes = {
 		k: v
 		for k, v in changes.items()

@@ -54,3 +54,15 @@ def model_ref_for_gateway(provider, model, settings=None):
 	if provider and model:
 		return f"{provider_to_gateway(provider, settings)}/{model}"
 	return model
+
+
+def alternate_ref(ref):
+	"""The same ref with the other form of its provider id, or None when the ref does not
+	start with one of the seven ids (in either form). Used for ONE retry when the gateway
+	refuses a pin: after an image roll or a rollback, the stored version can be one
+	heartbeat behind the gateway, so the first form we send may be the wrong one."""
+	if not isinstance(ref, str) or "/" not in ref:
+		return None
+	provider, model = ref.split("/", 1)
+	other = WIRE_PROVIDER_IDS.get(provider) or _FROM_WIRE.get(provider)
+	return f"{other}/{model}" if other else None
