@@ -309,6 +309,15 @@ describe("deep-link seed from ?status= (header pill preselect)", () => {
 		).toHaveLength(5);
 	});
 
+	it("falls back to All with no ?status= at all", async () => {
+		expect(
+			mountList()
+				.findComponent(ListPageStub)
+				.props("rows")
+				.map((r) => r.name)
+		).toHaveLength(5);
+	});
+
 	// AppShell's single router-view reuses THIS component instance across a
 	// same-route navigation (clicking the header pill's list link while
 	// already on /support does not remount the page), so the seed must be a

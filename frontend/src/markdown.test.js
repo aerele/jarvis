@@ -142,13 +142,23 @@ test("local evidence links escape labels and only permit Desk paths", () => {
 // bare, inert tag while keeping everything else — including <br> WITH attributes — escaped,
 // and must NOT leak into content that should render verbatim (inline code spans).
 
+test("renders a bare <br> inside a table cell as a line break, not literal text", () => {
+	const md = [
+		"| Leave Application | Comment |",
+		"| --- | --- |",
+		"| HR-LAP-2026-00314 | Approve.<br>Reason: Not feeling well |",
+	].join("\n");
+	const html = renderMarkdown(md);
+	assert.ok(html.includes("Approve.<br>Reason: Not feeling well"), "the <br> renders as a tag");
+	assert.ok(!html.includes("&lt;br&gt;"), "no literal &lt;br&gt; leaks through");
+});
+
 test("renders EVERY <br> in a multi-line cell, not just the first (the motivating case)", () => {
 	// "suggestion / reason / note" = 3 lines, 2 breaks. Would fail if the /g flag were dropped.
 	const cell = "Approve.<br>Reason: unwell<br>Note: rest well";
 	const html = renderMarkdown(["| A | B |", "| - | - |", `| x | ${cell} |`].join("\n"));
 	assert.equal((html.match(/<br>/g) || []).length, 2, "both <br> converted, not just the first");
 	assert.ok(!html.includes("&lt;br&gt;"));
-	assert.ok(html.includes("Approve.<br>Reason: unwell<br>Note: rest well"));
 });
 
 test("renders <br/>, <br /> and <BR> variants (self-closing + case-insensitive)", () => {

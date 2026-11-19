@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { isStale, readAnswer } from "./answer.mjs";
+import { DESIGNS, isStale, readAnswer } from "./answer.mjs";
 
 const CASES = JSON.parse(
   readFileSync(
@@ -86,6 +86,16 @@ test("an unknown design or occasion reads as none", () => {
       String(occasion)
     );
   }
+});
+
+test("republic is an occasion on the independence design, not a design", () => {
+  assert.ok(!DESIGNS.includes("republic"));
+  const out = readAnswer({
+    ...good(),
+    design: "independence",
+    occasion: "republic",
+  });
+  assert.equal(out.occasion, "republic");
 });
 
 test("a day without a usable date or tz reads as none", () => {

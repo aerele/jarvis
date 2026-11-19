@@ -91,6 +91,20 @@ test("Submit emits the formatted answers once", async () => {
 	);
 });
 
+test("the picks survive Submit, so a host that refuses the text loses nothing", async () => {
+	// DashboardChatPane.sendText and ChatView.send both return early while a send
+	// is in flight (or a dictation is still transcribing). Clearing sel/other
+	// inside submit() emptied the card anyway - the answers were gone and the
+	// button was disabled again. The card unmounts on the next assistant message
+	// (it is keyed by message name), so there is nothing to reset here.
+	const w = mountWithPalette(AskCard, { spec: CHOICES });
+	await optionNamed(w, "Open").trigger("click");
+	await optionNamed(w, "Approve").trigger("click");
+	await submit(w).trigger("click");
+	expect(optionNamed(w, "Open").classes()).toContain("on");
+	expect(findCard(w).emitted("submit")).toHaveLength(1);
+});
+
 test("single-submit: once answered, Submit locks and a second click cannot dispatch again", async () => {
 	// Repeat-click / repeat-Enter is the owner-reported bug: the SAME picks
 	// firing a second "submit" is a duplicate answer, not a legitimate resend.
@@ -130,6 +144,15 @@ test("busy=true refuses the dispatch (host would swallow it) without locking the
 	expect(findCard(w).emitted("submit")).toBeUndefined();
 	// not locked - the button still reads as an unanswered, resubmittable card
 	expect(submit(w).text()).toBe("Submit answers");
+});
+
+test("busy=false lets an otherwise-ready ask actually dispatch", async () => {
+	const w = mountWithPalette(AskCard, { spec: CHOICES, busy: false });
+	await optionNamed(w, "Open").trigger("click");
+	await optionNamed(w, "Approve").trigger("click");
+	expect(submit(w).attributes("disabled")).toBeUndefined();
+	await submit(w).trigger("click");
+	expect(findCard(w).emitted("submit")).toHaveLength(1);
 });
 
 test("answering closes an open link-search dropdown for good, not just the input", async () => {
