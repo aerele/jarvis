@@ -9,7 +9,8 @@ from unittest import SkipTest
 from uuid import uuid4
 
 import frappe
-from frappe.utils import add_days, nowdate
+from frappe.model.meta import get_field_precision
+from frappe.utils import add_days, flt, nowdate
 
 from jarvis.payment_calendar.compatibility import source_profile
 
@@ -27,6 +28,80 @@ def require_calendar_test_site():
 def clear_error_throttle():
 	"""The API writes one Error Log row per (operation, exception class) in 300 s; start with none written."""
 	frappe.cache.delete_keys("jarvis:pcal:errlog:")
+
+
+# doctype -> (party fieldname, party type, ledger account fieldname) of the two invoice kinds
+_INVOICE_HEADERS = {
+	"Sales Invoice": ("customer", "Customer", "debit_to"),
+	"Purchase Invoice": ("supplier", "Supplier", "credit_to"),
+}
+
+
+def sync_outstanding(company: str) -> int:
+	"""Bring the stored ``outstanding_amount`` of every submitted Sales/Purchase Invoice of ``company``
+	in step with the ledger, the way ERPNext's ``update_voucher_outstanding`` does.
+
+	The value is ERPNext's own ``QueryPaymentLedger.get_voucher_outstandings`` figure for the
+	invoice (party and account filter, no posting-date filter: later-dated lines count), rounded
+	to the precision of the field in the invoice's own party account currency. Fixtures raw-insert
+	invoices without a header, and tests edit ledger rows after the insert, so the reader (which
+	discovers open invoices from the header) needs this step; today's read never reads the header.
+	Status, dunning and notify steps are omitted.
+
+	An invoice with no ledger row gives an empty outstanding list, and ERPNext then leaves the
+	header unchanged (erpnext/accounts/utils.py:2205): so does this helper. Invoices without a
+	party are skipped, as ERPNext skips them. Returns the number of headers that changed.
+	"""
+	from erpnext.accounts.utils import QueryPaymentLedger
+
+	ple = frappe.qb.DocType("Payment Ledger Entry")
+	changed = 0
+	company_currency = frappe.get_cached_value("Company", company, "default_currency")
+	for doctype, (party_field, party_type, account_field) in _INVOICE_HEADERS.items():
+		field = frappe.get_meta(doctype).get_field("outstanding_amount")
+		invoices = frappe.get_all(
+			doctype,
+			filters={"company": company, "docstatus": 1},
+			fields=["name", "outstanding_amount", "party_account_currency", party_field, account_field],
+			order_by="name",
+			ignore_permissions=True,
+		)
+		groups = {}
+		for invoice in invoices:
+			if invoice[party_field]:
+				groups.setdefault((invoice[party_field], invoice[account_field]), []).append(invoice)
+		# One ERPNext call per (party, account): same filter as the per-invoice call, fewer queries.
+		for (party, account), members in groups.items():
+			common_filter = [ple.party_type == party_type, ple.party == party]
+			if account:
+				common_filter.append(ple.account == account)
+			outstandings = QueryPaymentLedger().get_voucher_outstandings(
+				[frappe._dict(voucher_type=doctype, voucher_no=m["name"]) for m in members],
+				common_filter=common_filter,
+			)
+			# The (party, account) filter leaves one row per invoice, which ERPNext takes as outstanding[0];
+			# summing keeps a dropped filter visible instead of depending on row order.
+			by_voucher = {}
+			for row in outstandings:
+				by_voucher[row["voucher_no"]] = by_voucher.get(row["voucher_no"], 0) + flt(
+					row["outstanding_in_account_currency"]
+				)
+			for member in members:
+				if member["name"] not in by_voucher:
+					continue
+				# ERPNext rounds with ref_doc.precision("outstanding_amount"): the field's currency is the
+				# invoice's own party_account_currency (a doc without one falls back to the company's).
+				precision = get_field_precision(
+					field, currency=member["party_account_currency"] or company_currency
+				)
+				value = flt(by_voucher[member["name"]], precision)
+				if flt(member["outstanding_amount"], precision) == value:
+					continue
+				frappe.db.set_value(
+					doctype, member["name"], "outstanding_amount", value, update_modified=False
+				)
+				changed += 1
+	return changed
 
 
 class CalendarFixtures:
@@ -94,6 +169,85 @@ class CalendarFixtures:
 		frappe.get_doc({"doctype": doctype, "name": name, **fields}).db_insert()
 		self.created.append((doctype, name))
 		return name
+
+	def voucher_lines(
+		self, voucher_type: str, voucher_no: str, lines: list[dict], *, header: dict | None = None
+	) -> str:
+		"""Insert the ledger ``lines`` of one voucher, preceded by a minimal submitted header.
+
+		The header is inserted only when ``voucher_type`` is a DocType of the site and no such document
+		exists, and carries only the company and posting date fields the DocType has (a raw ``db_insert``,
+		like ``insert`` does for Payment and Journal Entries); ``header`` adds more fields (for example
+		``voucher_type`` of a Journal Entry), again only those the DocType has. Each line is a dict of
+		Payment Ledger Entry values and needs ``suffix`` and ``amount``; the others default to a Payable
+		line of the fixture supplier against the voucher itself, dated today.
+
+		A line may carry ``advance_voucher=(doctype, name)``: the advance link of an advance payment. ERPNext
+		writes it to an Advance Payment Ledger Entry (erpnext/accounts/utils.py:2100-2141), never to the
+		Payment Ledger Entry, which keeps the voucher's own reference (a Payment Entry against itself,
+		payment_entry.py:1597-1610). That row is inserted when the DocType exists on the site.
+		"""
+		if frappe.db.exists("DocType", voucher_type) and not frappe.db.exists(voucher_type, voucher_no):
+			meta = frappe.get_meta(voucher_type)
+			values = {"company": self.company, "posting_date": self.today, **(header or {})}
+			doc = {"doctype": voucher_type, "name": voucher_no, "docstatus": 1}
+			doc.update({key: value for key, value in values.items() if meta.has_field(key)})
+			frappe.get_doc(doc).db_insert()
+			self.created.append((voucher_type, voucher_no))
+		for line in lines:
+			values = {
+				"company": self.company,
+				"posting_date": self.today,
+				"account_type": "Payable",
+				"account": self.payable,
+				"account_currency": "INR",
+				"party_type": "Supplier",
+				"party": self.supplier,
+				"voucher_type": voucher_type,
+				"voucher_no": voucher_no,
+				"against_voucher_type": voucher_type,
+				"against_voucher_no": voucher_no,
+				"delinked": 0,
+				**{key: value for key, value in line.items() if key not in ("suffix", "advance_voucher")},
+			}
+			values.setdefault("amount_in_account_currency", values["amount"])
+			self.insert("Payment Ledger Entry", line["suffix"], **values)
+			if line.get("advance_voucher"):
+				self.advance_ledger_entry(line["suffix"], values, *line["advance_voucher"])
+		return voucher_no
+
+	def advance_ledger_entry(self, suffix, line, advance_type, advance_no):
+		"""The Advance Payment Ledger Entry ERPNext writes next to a line that settles an advance document."""
+		if not frappe.db.exists("DocType", "Advance Payment Ledger Entry"):
+			return
+		own = (line["against_voucher_type"], line["against_voucher_no"]) == (
+			line["voucher_type"],
+			line["voucher_no"],
+		)
+		extra = {}
+		if advance_type == "Employee Advance":
+			# erpnext utils.py (get_payment_ledger_entries, `if gle.advance_voucher_no`): only an Employee Advance
+			# also carries the company-currency amount and the transaction exchange rate of its GL line.
+			in_account = line["amount_in_account_currency"]
+			extra = {
+				"base_amount": line["amount"],
+				"exchange_rate": line.get("exchange_rate")
+				or (line["amount"] / in_account if in_account else 1),
+			}
+		self.insert(
+			"Advance Payment Ledger Entry",
+			suffix + "Advance",
+			company=line["company"],
+			voucher_type=line["voucher_type"],
+			voucher_no=line["voucher_no"],
+			against_voucher_type=advance_type,
+			against_voucher_no=advance_no,
+			amount=line["amount_in_account_currency"],
+			currency=line["account_currency"],
+			event="Submit" if own else "Adjustment",
+			delinked=0,
+			**extra,
+		)
 
 	def account(self, suffix, account_type, root_type, **fields):
 		return self.insert(

@@ -252,6 +252,18 @@ def _report_class():
 			else:
 				self.terms[_key(row)] = deepcopy(row.payment_terms)
 
+		def voucher_limit(self):
+			"""The invoice count above which the read refuses `too_large`; None lifts the guard."""
+			return MAX_VOUCHERS
+
+		def has_multiple_invoice_accounts(self, counts):
+			"""True when one invoice appears under more than one ledger key, which refuses the read.
+
+			`counts` maps each (voucher_type, voucher_no) to the number of ledger keys (account, party)
+			it has. A subclass may only widen this refusal, never lift it.
+			"""
+			return any(count > 1 for count in counts.values())
+
 		def build_data(self):
 			if not isinstance(self.voucher_balance, dict):
 				raise CalendarSourceUnavailable()
@@ -272,7 +284,8 @@ def _report_class():
 				for k, r in self.voucher_balance.items()
 				if self.is_invoice(r) and r.invoiced > 0
 			}
-			if len(self.pre) > MAX_VOUCHERS:
+			limit = self.voucher_limit()
+			if limit is not None and len(self.pre) > limit:
 				raise CalendarSourceUnavailable("too_large")
 			if fast:
 				# Per entry: upstream pops due_date from the source entries.
@@ -291,7 +304,7 @@ def _report_class():
 				for r in self.pre.values()
 				if self.is_invoice(r) and r.invoiced > 0
 			)
-			if any(count > 1 for count in counts.values()):
+			if self.has_multiple_invoice_accounts(counts):
 				raise CalendarSourceUnavailable("multiple_invoice_accounts")
 			super().build_data()
 			# The report's output alone cannot prove reconciliation: a malformed
@@ -467,6 +480,30 @@ def _ledger_rows_exceed(company, account_type, anchor, limit):
 
 
 def _read_obligations(company, account_type, as_of, window_start, window_end):
+	# builtin_reader.read_obligations repeats this sequence (inputs, books, engine, assemble) with its own
+	# reads and no size guards: a change to the gates or their order here needs the same change there.
+	report, start, end, anchor, company_values = _require_inputs(
+		company, account_type, as_of, window_start, window_end
+	)
+	fast = source_profile().major == "16"
+	# On v16 a bounded probe goes first: a huge ledger must not pay for the full-history book scan.
+	if fast and _ledger_rows_exceed(company, account_type, anchor, MAX_LEDGER_ROWS):
+		raise CalendarSourceUnavailable("too_large")
+	validate_obligation_books(company, account_type, anchor)
+	if (
+		not fast
+		and frappe.db.count(
+			"Payment Ledger Entry",
+			{"company": company, "account_type": account_type, "delinked": 0, "posting_date": ["<=", anchor]},
+		)
+		> MAX_LEDGER_ROWS
+	):
+		raise CalendarSourceUnavailable("too_large")
+	engine = _run_engine(_report_class(), _engine_filters(company, anchor), account_type, start, end)
+	return _assemble(engine, report, account_type, start, end, company_values)
+
+
+def _require_inputs(company, account_type, as_of, window_start, window_end):
 	if not as_of or not window_start or not window_end:
 		raise frappe.ValidationError("The accounting date and calendar window are required.")
 	report = require_report(company, account_type)
@@ -484,37 +521,28 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 	if start > end:
 		raise frappe.ValidationError("Invalid calendar window.")
 	company_values = require_company(company)
-	fast = source_profile().major == "16"
-	# On v16 a bounded probe goes first: a huge ledger must not pay for the full-history book scan.
-	if fast and _ledger_rows_exceed(company, account_type, anchor, MAX_LEDGER_ROWS):
-		raise CalendarSourceUnavailable("too_large")
-	validate_obligation_books(company, account_type, anchor)
-	if (
-		not fast
-		and frappe.db.count(
-			"Payment Ledger Entry",
-			{"company": company, "account_type": account_type, "delinked": 0, "posting_date": ["<=", anchor]},
-		)
-		> MAX_LEDGER_ROWS
-	):
-		raise CalendarSourceUnavailable("too_large")
-	engine = _report_class()(
-		{
-			"company": company,
-			"report_date": anchor,
-			"based_on_payment_terms": 1,
-			"ageing_based_on": "Due Date",
-			"range": "30,60,90,120",
-			"group_by_party": 0,
-			"ignore_accounts": 0,
-			"show_future_payments": 0,
-			"in_party_currency": 0,
-			"for_revaluation_journals": 0,
-			"finance_book": None,
-		},
-		start,
-		end,
-	)
+	return report, start, end, anchor, company_values
+
+
+def _engine_filters(company, anchor):
+	return {
+		"company": company,
+		"report_date": anchor,
+		"based_on_payment_terms": 1,
+		"ageing_based_on": "Due Date",
+		"range": "30,60,90,120",
+		"group_by_party": 0,
+		"ignore_accounts": 0,
+		"show_future_payments": 0,
+		"in_party_currency": 0,
+		"for_revaluation_journals": 0,
+		"finance_book": None,
+	}
+
+
+def _run_engine(engine_factory, filters, account_type, start, end):
+	"""Build the engine with `engine_factory(filters, start, end)` (a class, or a callable) and run it."""
+	engine = engine_factory(filters, start, end)
 	if engine.ple_fetch_method not in ("Buffered Cursor", "UnBuffered Cursor"):
 		raise CalendarSourceUnavailable("source_configuration_unavailable")
 	try:
@@ -532,6 +560,10 @@ def _read_obligations(company, account_type, as_of, window_start, window_end):
 		not hasattr(engine, field) for field in ("currency_precision", "columns", "data", "terms", "metadata")
 	):
 		raise CalendarSourceUnavailable()
+	return engine
+
+
+def _assemble(engine, report, account_type, start, end, company_values):
 	precision = engine.currency_precision
 	canonical = _visible_rows(engine, report, engine.data)
 	# Upstream keeps positive float residues, including values below the currency

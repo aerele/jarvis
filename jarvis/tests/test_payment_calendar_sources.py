@@ -848,6 +848,62 @@ class TestVoucherBalanceGate(EngineCase):
 				)
 
 
+class TestReadHooks(EngineCase):
+	"""The two guard hooks a subclass can override; the base class keeps today's guards."""
+
+	def run_read(self, engine_class):
+		anchor = getdate(self.fx.today)
+		return sources._run_engine(
+			engine_class,
+			sources._engine_filters(self.fx.company, anchor),
+			"Payable",
+			anchor,
+			getdate(add_days(self.fx.today, 40)),
+		)
+
+	def two_account_invoice(self):
+		invoice = self.fx.invoice((100,))
+		other = self.fx.account("Payable2", "Payable", "Liability")
+		self.fx.ple("InvoicePLE2", "Purchase Invoice", invoice, 50, account=other)
+		return invoice
+
+	def refusal_code(self, engine_class):
+		with self.assertRaises(CalendarSourceUnavailable) as raised:
+			self.run_read(engine_class)
+		return raised.exception.code
+
+	def test_voucher_limit_none_disables_only_the_voucher_guard(self):
+		self.fx.invoice((100,))
+		self.fx.invoice((100,))
+
+		class Unlimited(sources._report_class()):
+			def voucher_limit(self):
+				return None
+
+		with patch.object(sources, "MAX_VOUCHERS", 0):
+			self.assertEqual(self.refusal_code(sources._report_class()), "too_large")
+			self.assertEqual(len(self.run_read(Unlimited).data), 2)
+		# The default limit is exactly MAX_VOUCHERS: one invoice over refuses, a count equal to it does not.
+		with patch.object(sources, "MAX_VOUCHERS", 1):
+			self.assertEqual(self.refusal_code(sources._report_class()), "too_large")
+		with patch.object(sources, "MAX_VOUCHERS", 2):
+			self.assertEqual(len(self.run_read(sources._report_class()).data), 2)
+
+	def test_multiple_invoice_accounts_hook_can_only_widen_the_refusal(self):
+		self.fx.invoice((100,))
+
+		class Widened(sources._report_class()):
+			def has_multiple_invoice_accounts(self, counts):
+				return True
+
+		self.assertEqual(self.refusal_code(Widened), "multiple_invoice_accounts")
+		self.assertTrue(self.run_read(sources._report_class()).data)
+
+	def test_default_hook_keeps_the_two_account_refusal(self):
+		self.two_account_invoice()
+		self.assertEqual(self.refusal_code(sources._report_class()), "multiple_invoice_accounts")
+
+
 class TestLedgerOrder(EngineCase):
 	def tied_lines(self):
 		"""Two self-referencing lines of one journal, same day and party; the greater name goes in first."""

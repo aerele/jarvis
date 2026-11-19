@@ -254,25 +254,12 @@ def collect(scope: dict, fingerprint: str) -> dict:
 					)
 			except CalendarSourceUnavailable as exc:
 				unavailable[side] = exc.code
-		if any(sources.values()) and profile.defaults_cache_hit not in hits:
-			raise CalendarSourceUnavailable("source_contract_unavailable")
+		# Before collect's own precision read: that read would itself add the cache hit.
+		require_defaults_cache_hit(hits, sources, profile)
 		from erpnext.accounts.utils import get_currency_precision
 
 		precision = get_currency_precision() or 2
-		if any(
-			source and (source["currency"] != proof["currency"] or source["precision"] != precision)
-			for source in sources.values()
-		):
-			raise CalendarSourceUnavailable("currency_reconciliation_unavailable")
-		if bank and (not fiscal_years_read(hits) or bank["precision"] != precision):
-			raise CalendarSourceUnavailable("source_contract_unavailable")
-		if any(sources.values()) and (
-			profile.defaults_cache_hit not in hits
-			or not any(
-				key.startswith("document_cache::Company::") for method, key in hits if method == "get_value"
-			)
-		):
-			raise CalendarSourceUnavailable("source_contract_unavailable")
+		check_source_contract(hits, sources, bank, proof["currency"], precision, profile)
 		projecting = monotonic()
 		result = build_result(
 			scope,
@@ -290,6 +277,30 @@ def collect(scope: dict, fingerprint: str) -> dict:
 	authorize_scope(scope, expected_fingerprint=fingerprint, result=result)
 	_log_collected(started, projections_ms, sources)
 	return result
+
+
+def require_defaults_cache_hit(hits, sources, profile):
+	"""A source read that never met the defaults cache did not run inside the fixed view."""
+	if any(sources.values()) and profile.defaults_cache_hit not in hits:
+		raise CalendarSourceUnavailable("source_contract_unavailable")
+
+
+def check_source_contract(hits, sources, bank, currency, precision, profile):
+	"""Every source was read in the fixed view and agrees on currency and precision."""
+	if any(
+		source and (source["currency"] != currency or source["precision"] != precision)
+		for source in sources.values()
+	):
+		raise CalendarSourceUnavailable("currency_reconciliation_unavailable")
+	if bank and (not fiscal_years_read(hits) or bank["precision"] != precision):
+		raise CalendarSourceUnavailable("source_contract_unavailable")
+	if any(sources.values()) and (
+		profile.defaults_cache_hit not in hits
+		or not any(
+			key.startswith("document_cache::Company::") for method, key in hits if method == "get_value"
+		)
+	):
+		raise CalendarSourceUnavailable("source_contract_unavailable")
 
 
 def elapsed_ms(started):
