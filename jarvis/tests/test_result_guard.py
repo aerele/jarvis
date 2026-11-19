@@ -474,3 +474,119 @@ class TestNoteNeverPushesPastTheCap(unittest.TestCase):
 			self.assertLessEqual(guard._size(out), guard.MAX_RESULT_CHARS, width)
 			if out.get("_truncated") and out.get("shown"):
 				self.assertIn("export_query", out["note"])
+
+
+SNAPSHOT_ID = "rs_" + "A1b2C3d4" * 4
+
+
+def _snapshot_run_report(count=3000, width=50, **extra):
+	return {
+		"columns": ["a", "b"],
+		"result": _rows(count, width),
+		"skip_total_row": 0,
+		"run": SNAPSHOT_ID,
+		"_jarvis_snapshot": True,
+		**extra,
+	}
+
+
+class TestMeasure(unittest.TestCase):
+	def test_measure_is_the_serialized_size(self):
+		from jarvis.tools import _result_guard as guard
+
+		data = _rows(20, 10)
+		self.assertEqual(guard.measure(data), _size(data))
+
+	def test_measure_failure_is_none_not_a_raise(self):
+		from jarvis.tools import _result_guard as guard
+
+		class Boom:
+			def __str__(self):
+				raise RuntimeError("no")
+
+		self.assertIsNone(guard.measure([{"x": Boom()}]))
+
+	def test_a_measured_size_is_not_measured_again(self):
+		from unittest.mock import patch
+
+		from jarvis.tools import _result_guard as guard
+
+		data = _rows(3000, 50)
+		size = guard.measure(data)
+		with patch.object(guard, "_size", wraps=guard._size) as spy:
+			_, event = guard.enforce_result_budget(data, tool="get_list", measured=size)
+		self.assertEqual(event["original_chars"], size)
+		# The envelope builder measures partial rows; the whole result is measured once, before.
+		self.assertNotIn(len(data), [len(call.args[0]) for call in spy.call_args_list])
+
+	def test_a_measured_size_inside_the_budget_returns_the_data_unchanged(self):
+		data = [{"name": "A"}]
+		out, event = enforce_result_budget(data, tool="get_list", measured=10)
+		self.assertIs(out, data)
+		self.assertIsNone(event)
+
+
+class TestSnapshotEnvelope(unittest.TestCase):
+	NOTE_START = "Partial preview: "
+
+	def test_a_cut_snapshot_carries_the_snapshot_note_and_no_internal_flag(self):
+		out, event = enforce_result_budget(_snapshot_run_report(), tool="run_report")
+		self.assertEqual(event["kind"], "truncated")
+		self.assertEqual(out["run"], SNAPSHOT_ID)
+		self.assertIs(out["preview_complete"], False)
+		self.assertNotIn("_jarvis_snapshot", out)
+		self.assertTrue(out["note"].startswith(f"{self.NOTE_START}{out['shown']} of {out['total']} rows."))
+		self.assertIn(f"prepared_report={SNAPSHOT_ID}", out["note"])
+		self.assertIn("report_totals", out["note"])
+		self.assertIn("Never total preview rows.", out["note"])
+		self.assertTrue(out["_truncated"])
+		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
+
+	def test_the_non_row_overflow_case_gets_the_snapshot_note_too(self):
+		data = _snapshot_run_report(count=3, columns=[{"label": "L" * (MAX_RESULT_CHARS + 500)}])
+		out, event = enforce_result_budget(data, tool="run_report")
+		self.assertEqual(event["kind"], "uncapped_nonrow")
+		self.assertEqual(out["shown"], 0)
+		self.assertEqual(out["result"], [])
+		self.assertIs(out["preview_complete"], False)
+		self.assertNotIn("_jarvis_snapshot", out)
+		self.assertTrue(out["note"].startswith(f"{self.NOTE_START}0 of 3 rows."))
+		self.assertEqual(out["run"], SNAPSHOT_ID)
+
+	def test_the_note_is_at_most_600_chars_at_the_largest_counts_and_id(self):
+		from jarvis.tools import _result_guard as guard
+
+		note = guard._snapshot_note(100_000, 100_000, "rs_" + "x" * 32)
+		self.assertLessEqual(len(note), 600)
+
+	def test_a_cut_that_keeps_no_row_still_fits_the_cap_with_the_snapshot_note(self):
+		data = _snapshot_run_report(count=3, width=MAX_RESULT_CHARS)
+		out, event = enforce_result_budget(data, tool="run_report")
+		self.assertEqual((event["kind"], event["shown"]), ("truncated", 0))
+		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
+		self.assertTrue(out["note"].startswith(f"{self.NOTE_START}0 of 3 rows."))
+		self.assertEqual(out["run"], SNAPSHOT_ID)
+
+	def test_every_row_width_fits_with_the_snapshot_note(self):
+		for width in range(1, 400, 13):
+			out, _event = enforce_result_budget(_snapshot_run_report(width=width), tool="run_report")
+			self.assertLessEqual(_size(out), MAX_RESULT_CHARS, width)
+
+	def test_without_the_snapshot_flag_the_generic_note_is_unchanged(self):
+		data = _snapshot_run_report()
+		data.pop("_jarvis_snapshot")
+		out, _event = enforce_result_budget(data, tool="run_report")
+		self.assertTrue(out["note"].startswith("Result truncated to fit the context window"))
+		self.assertNotIn("preview_complete", out)
+
+	def test_only_run_report_gets_the_snapshot_note(self):
+		out, _event = enforce_result_budget(_snapshot_run_report(), tool="get_list")
+		self.assertTrue(out["note"].startswith("Result truncated to fit the context window"))
+		self.assertNotIn("preview_complete", out)
+		self.assertNotIn("_jarvis_snapshot", out)
+
+	def test_a_flag_on_a_non_snapshot_run_id_is_not_trusted(self):
+		data = _snapshot_run_report()
+		data["run"] = "PREP-0001"
+		out, _event = enforce_result_budget(data, tool="run_report")
+		self.assertTrue(out["note"].startswith("Result truncated to fit the context window"))
