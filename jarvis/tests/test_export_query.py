@@ -40,6 +40,11 @@ class TestExportQuery(FrappeTestCase):
 		with self.assertRaises(InvalidArgumentError):
 			export_query("ToDo", format="parquet")
 
+	def test_fails_closed_above_ceiling(self):
+		with mock.patch.object(resolvers, "_HARD_ROW_CEILING", 2):
+			with self.assertRaises(InvalidArgumentError):
+				export_query("ToDo", filters={"description": ["like", "eq-%"]}, fields=["name"])
+
 	def test_emits_telemetry_ok(self):
 		with mock.patch("jarvis.telemetry.record_export_event") as m:
 			export_query("ToDo", filters={"description": ["like", "eq-%"]}, fields=["name"])

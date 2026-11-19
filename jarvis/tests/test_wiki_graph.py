@@ -250,6 +250,19 @@ class TestWikiGraphCompute(WikiGraphTestCase):
 		# dangling manual link (no such page) dropped
 		self.assertFalse(any(e.get("target") == "page:nope-missing-slug" for e in g["edges"]))
 
+	def test_manual_links_are_capped_per_page(self):
+		"""#645: curated links were the only unbounded per-page contributor. PR #642
+		wired the add-link loop, so they accumulate one click at a time and are never
+		pruned; left uncapped, one heavily curated page can take a large share of the
+		global MAX_EDGES budget and crowd every other page out of the graph.
+
+		Exercised against the helper rather than through a real graph, because the
+		interesting input is 60+ existing target pages."""
+		known = {f"slug-{i}" for i in range(60)}
+		raw = json.dumps(sorted(known))
+		out = wiki_graph._manual_link_targets(raw, known)
+		self.assertEqual(len(out), wiki_graph._MAX_LINKS_PER_PAGE)
+
 	def test_the_cap_keeps_the_NEWEST_links(self):
 		"""``add_wiki_link`` APPENDS, so a head-truncating cap means that past 50 links a
 		user clicks "+ link", is told it succeeded, the link is durably stored, and it
@@ -583,6 +596,14 @@ class TestWikiGraphSync(FrappeTestCase):
 			out = wiki_graph.sync()
 		self.assertFalse(out["ok"])
 
+	def test_push_ok_returns_counts(self):
+		with (
+			patch("jarvis.admin_client.push_wiki_graph", return_value={"ok": True}),
+		):
+			out = wiki_graph.sync()
+		self.assertTrue(out["ok"])
+		self.assertIn("pages", out)
+
 
 # A title a customer would be upset to find in the vendor's console. Deliberately
 # real free text, not "User Page": the production degenerate case is an authored
@@ -744,7 +765,6 @@ class TestWikiGraphKillSwitch(WikiGraphTestCase):
 			out = wiki_graph.sync()
 		push.assert_called_once()
 		self.assertTrue(out["ok"])
-		self.assertIn("pages", out)
 
 	def test_history_snapshot_is_a_noop_when_the_wiki_is_off(self):
 		with _wiki_disabled():

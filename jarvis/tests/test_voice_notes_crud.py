@@ -274,6 +274,14 @@ class TestVoiceNoteSourceContract(VoiceNotesCrudTestCase):
 				msg=f"{source!r} was dropped from voice_notes_api._SOURCES - {client} now 417s",
 			)
 
+	def test_allowlist_is_a_subset_of_the_doctype_options(self):
+		# frappe rejects an off-list Select value at insert, so an allowlist entry
+		# missing from the doctype would pass validation here and then explode on
+		# doc.insert() for the caller.
+		options = frappe.get_meta(NOTE).get_field("source").options.split("\n")
+		for source in voice_notes_api._SOURCES:
+			self.assertIn(source, options)
+
 	def test_each_allowed_source_round_trips(self):
 		# End-to-end through the endpoint (not just the constant): proves frappe's
 		# Select validation accepts the value on a real insert.

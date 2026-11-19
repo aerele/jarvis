@@ -1553,6 +1553,17 @@ class TestRunAgentTurnAborted(FrappeTestCase):
 		self.assertEqual(row["stopped"], 1)
 		self.assertEqual(row["streaming"], 0)
 
+	def test_abort_never_writes_stopped_prose_into_content(self):
+		# Guards the whole class of fix-by-magic-string: the sentinel must not
+		# come back through either writer.
+		self._run(
+			[
+				{"kind": "assistant", "text": "half an ans", "delta": "half an ans"},
+				{"kind": "relay:error", "state": "aborted", "error": "aborted"},
+			]
+		)
+		self.assertNotIn("_Stopped._", self._assistant_row("content") or "")
+
 	def test_abort_publishes_run_end_carrying_stopped(self):
 		# The three run:end consumers (desktop notifier, PWA notify-on-done,
 		# PWA bell feed) each announce a completion for a reply the user
