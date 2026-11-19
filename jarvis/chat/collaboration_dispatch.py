@@ -113,4 +113,4 @@ def dispatch(session_key: str, tool: str, raw_args, call_id: str) -> dict:
 			"PermissionError", "This shared tool call is no longer authorized for its initiating user."
 		)
 	except JarvisError as exc:
-		return api._error(type(exc).__name__, scrub_for_share(str(exc)))
+		return api._error(api._error_code(exc), scrub_for_share(str(exc)))
