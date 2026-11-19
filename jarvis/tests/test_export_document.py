@@ -743,6 +743,11 @@ class TestPlainPathBackCompatUnit(_RichBase):
 	"""Site-free mirror of the FrappeTestCase plain-path assertions, so the
 	'plain path unchanged' contract is proven under bare pytest too."""
 
+	def _plain_html(self, content, *, content_is_html=False):
+		# content-only (no title): title now activates the rich path.
+		export_document(content, format="html", content_is_html=content_is_html)
+		return self.save_plain.call_args.args[1].decode("utf-8")
+
 	def test_plain_html_is_standalone_and_renders_markdown(self):
 		text = self._plain_html(_MD)
 		self.assertFalse(self.render.called)
