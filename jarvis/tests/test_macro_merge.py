@@ -195,6 +195,26 @@ class TestUpdateMacroSummary(_MacroMergeBase):
 	merged_prompt straight off get_macro and editing the summary as a plain
 	form field)."""
 
+	def test_stores_summary_and_keeps_steps(self):
+		# The sequence stays as the editable source; the summary rides alongside
+		# and (see TestMergedRun) is what run_macro executes.
+		m = _mk_macro(
+			[
+				{"label": "a", "prompt": "p1"},
+				{"label": "b", "prompt": "p2"},
+				{"label": "c", "prompt": "p3"},
+			]
+		)
+		self.addCleanup(
+			lambda: frappe.delete_doc("Jarvis Macro", m.name, force=True, ignore_permissions=True)
+		)
+		update_macro(m.name, merged_prompt="Do p1, and from those results p2, then p3.")
+		doc = frappe.get_doc("Jarvis Macro", m.name)
+		self.assertEqual(len(doc.steps), 3)  # steps untouched
+		self.assertEqual([s.prompt for s in doc.steps], ["p1", "p2", "p3"])
+		self.assertIn("from those results", doc.merged_prompt)
+		self.assertEqual(doc.merge_status, "ready")
+
 	def test_clearing_merged_prompt_clears_merge_status(self):
 		m = _mk_macro([{"prompt": "p1"}, {"prompt": "p2"}])
 		self.addCleanup(
@@ -359,11 +379,6 @@ class TestMergedRun(_MacroMergeBase):
 			lambda: frappe.delete_doc("Jarvis Macro", m.name, force=True, ignore_permissions=True)
 		)
 		update_macro(m.name, merged_prompt="One prompt to rule them all.")
-		self.assertEqual(
-			frappe.get_all("Jarvis Macro Step", filters={"parent": m.name}, pluck="prompt", order_by="idx"),
-			["p1", "p2", "p3"],
-		)
-		self.assertEqual(frappe.db.get_value("Jarvis Macro", m.name, "merge_status"), "ready")
 		with patch("jarvis.chat.api._enqueue_turn") as enq:
 			r = macros.run_macro(m.name)
 		run_name = r["data"]["macro_run"]
@@ -742,6 +757,36 @@ class TestMacroRunModeSnapshot(_MacroMergeBase):
 		self.assertEqual(sent, [], "nothing may dispatch once the snapshot is unrunnable")
 		self.assertIn("edited", (frappe.db.get_value(self.RUN, run_name, "error") or "").lower())
 
+	def _stepped_run_whose_steps_shrank_past_the_cursor(self, *, snapshot: bool):
+		from jarvis.chat import macros
+
+		m = self._mk(3)
+		state, fake = self._recorder()
+		with patch("jarvis.chat.api._enqueue_turn", side_effect=fake):
+			run_name, conv = self._start(m)  # p1 dispatches, current_step = 1
+			if not snapshot:
+				self._forget_the_steps_snapshot(run_name)
+			state["overloaded"] = True
+			macros.advance_after_turn(conv, errored=False)  # parks at current_step = 1
+			# The macro is cut to a single step, so index 1 no longer exists on it.
+			update_macro(m.name, steps=[{"prompt": "only"}])
+			state["overloaded"] = False
+			macros.resume_waiting_capacity_runs()
+		return run_name, state["sent"]
+
+	def test_stepped_run_whose_steps_shrank_past_the_cursor_sends_the_step_it_started_with(self):
+		run_name, sent = self._stepped_run_whose_steps_shrank_past_the_cursor(snapshot=True)
+		self.assertEqual(sent, ["p1", "p2"])
+		self.assertEqual(self._row(run_name).status, "running")
+
+	def test_stepped_run_without_a_steps_snapshot_whose_steps_shrank_fails_honestly(self):
+		# Left alone this is an IndexError re-raised once per cron cycle until the
+		# attempt cap.
+		run_name, sent = self._stepped_run_whose_steps_shrank_past_the_cursor(snapshot=False)
+		self.assertEqual(sent, ["p1"])
+		self.assertEqual(self._row(run_name).status, "failed")
+		self.assertEqual(frappe.db.get_value(self.RUN, run_name, "capacity_attempts"), 0)
+
 	# ---- the unedited paths still work ------------------------------------------ #
 	def test_normal_merged_run_still_works_end_to_end(self):
 		from jarvis.chat import macros
@@ -768,6 +813,21 @@ class TestMacroRunModeSnapshot(_MacroMergeBase):
 		self.assertEqual(state["sent"], ["p1", "p2", "p3"])
 		row = self._row(run_name)
 		self.assertEqual((row.status, row.total_steps, row.current_step), ("completed", 3, 3))
+
+	def test_parked_and_unedited_run_resumes_in_its_own_mode(self):
+		from jarvis.chat import macros
+
+		m = self._mk(3)
+		update_macro(m.name, merged_prompt="MERGED")
+		state, fake = self._recorder()
+		state["overloaded"] = True
+		with patch("jarvis.chat.api._enqueue_turn", side_effect=fake):
+			run_name, conv = self._start(m)
+			state["overloaded"] = False
+			macros.resume_waiting_capacity_runs()
+			macros.advance_after_turn(conv, errored=False)
+		self.assertEqual(state["sent"], ["MERGED"])
+		self.assertEqual(self._row(run_name).status, "completed")
 
 	# ---- interaction with the #471 reaper ---------------------------------------- #
 	def test_a_parked_run_stays_distinguishable_from_a_stranded_one(self):
