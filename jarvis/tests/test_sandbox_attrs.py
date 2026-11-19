@@ -19,6 +19,8 @@ from frappe.utils.safe_exec import safe_exec
 from jarvis.exceptions import InvalidFieldValueError, SandboxCodeError
 from jarvis.tools import _sandbox_attrs
 from jarvis.tools._sandbox_attrs import (
+	FORMAT_NAMES,
+	SANDBOX_CODE_FIELDS,
 	capped,
 	check_sandbox_code,
 	dotted,
@@ -229,6 +231,19 @@ class TestErrorText(unittest.TestCase):
 	def test_empty(self):
 		self.assertEqual(error_text([]), "")
 
+	def test_cap_and_more_marker(self):
+		errors = [f"e{i}" for i in range(13)]
+		lines = error_text(errors).split("\n")
+		self.assertEqual(lines[:10], errors[:10])
+		self.assertEqual(lines[10:], ["(+3 more)"])
+
+	def test_at_cap_has_no_marker(self):
+		errors = [f"e{i}" for i in range(10)]
+		self.assertNotIn("more", error_text(errors))
+
+	def test_custom_cap(self):
+		self.assertEqual(error_text(["a", "b", "c"], cap=2), "a\nb\n(+1 more)")
+
 
 class TestCapped(unittest.TestCase):
 	def test_under_cap_is_a_copy(self):
@@ -312,6 +327,9 @@ class TestUnsafeAttributeSource(unittest.TestCase):
 
 
 class TestRuntimeHint(unittest.TestCase):
+	def test_format_names(self):
+		self.assertEqual(FORMAT_NAMES, frozenset({"format", "format_map"}))
+
 	def test_no_hint_for_other_names(self):
 		for name in ("__class__", "gi_frame", "format_value", ""):
 			self.assertIsNone(runtime_hint(name))
@@ -330,6 +348,9 @@ def _raised(*args, **kwargs) -> str:
 
 class TestCheckSandboxCode(unittest.TestCase):
 	"""T4: an agent write of a Server Script / Report script is checked."""
+
+	def test_mapped_fields(self):
+		self.assertEqual(SANDBOX_CODE_FIELDS, {"Server Script": ("script",), "Report": ("report_script",)})
 
 	def test_create_lists_every_line_in_one_error(self):
 		text = _raised("Server Script", {"script": _THREE_BAD})

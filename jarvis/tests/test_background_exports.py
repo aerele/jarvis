@@ -1018,6 +1018,17 @@ class TestBackgroundExportJobs(FrappeTestCase):
 		self.assertFalse(job.phase)
 		self.assertIsNone(jobs.public(job)["phase"])
 
+	def test_finalizing_is_recorded_before_a_csv_publish(self):
+		job = self.job()
+		at_publish = []
+		with (
+			self.phase_seen_by(jobs, "_publish_locked", job.name, at_publish),
+			patch.object(jobs, "dispatch"),
+		):
+			jobs.run(job.name, "abc123")
+		self.assertEqual(at_publish, [{"phase": "finalizing", "status": "running", "rows_written": 2}])
+		self.assertEqual(job.reload().status, "ready", job.error)
+
 	def test_a_failed_phase_write_does_not_fail_the_export(self):
 		job = self.job()
 		with (

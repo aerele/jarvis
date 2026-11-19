@@ -211,6 +211,17 @@ class TestHappyPath(FrappeTestCase):
 			)
 		self.assertEqual(result, {"action": "reload", "result": "ok"})
 
+	def test_restart_returns_unwrapped_data(self):
+		mock_post = MagicMock(
+			return_value=_mock_response(
+				200,
+				json_body={"message": {"ok": True, "data": {"action": "restart", "result": "ok"}}},
+			)
+		)
+		with patch("requests.post", mock_post):
+			result = post_update_llm_creds("OpenAI", "gpt-4o", "https://api.openai.com", "sk-new")
+		self.assertEqual(result["action"], "restart")
+
 
 class TestHeaders(FrappeTestCase):
 	def setUp(self):
@@ -1652,6 +1663,20 @@ class TestMissingConfig(FrappeTestCase):
 	def setUp(self):
 		_settings_clear_admin()
 
+	def test_no_credentials_raises_auth_error(self):
+		"""api_key + api_secret are required; missing either raises early."""
+		from jarvis.exceptions import AdminAuthError
+
+		settings = _admin_settings()
+		settings.db_set("jarvis_admin_url", "https://admin.example.com")
+		settings.db_set("jarvis_admin_api_key", "")
+		settings.db_set("jarvis_admin_api_secret", "")
+		try:
+			with self.assertRaises(AdminAuthError):
+				post_update_llm_creds("p", "m", "b", "k")
+		finally:
+			_settings_clear_admin()
+
 	def test_no_secret_raises_auth_error(self):
 		from jarvis.exceptions import AdminAuthError
 
@@ -2282,6 +2307,17 @@ class TestPostUpdateLlmCredsAuthMode(FrappeTestCase):
 
 	def tearDown(self):
 		_settings_clear_admin()
+
+	def test_default_auth_mode_is_api_key(self):
+		captured = {}
+
+		def _fake_post(url, json=None, **_kw):
+			captured["body"] = json
+			return _mock_response(200, json_body={"message": {"ok": True, "data": {"action": "restart"}}})
+
+		with patch("requests.post", side_effect=_fake_post):
+			post_update_llm_creds(provider="OpenAI", model="gpt-4o", base_url="", api_key="sk-1")
+		self.assertEqual(captured["body"]["auth_mode"], "api_key")
 
 	def test_explicit_subscription_auth_mode(self):
 		captured = {}
