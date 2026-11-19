@@ -313,6 +313,12 @@ test("expiry that throws still settles: the row cannot stick and Esc is not swal
 	}
 });
 
+test("expiry has no shortcut around settleGoto: one try/finally owns the exit", () => {
+	const body = fnBody("function onGotoExpire(state)");
+	assert.match(body, /try \{/);
+	assert.match(body, /\} finally \{\s*settleGoto\(state, outcome\);\s*\}/);
+});
+
 test("the Dashboards stamp is read for THIS message at expiry; the calendar ignores it", () => {
 	const keys = [];
 	const scope = exitScope({
@@ -332,12 +338,23 @@ test("the Dashboards stamp is read for THIS message at expiry; the calendar igno
 	assert.equal(cal.calls.opened.length, 1);
 });
 
+test("expiry source: the message, the draft, the stamp and the navigation failure are all checked", () => {
+	const expire = fnBody("function onGotoExpire(state)");
+	assert.match(expire, /resolveGotoFor\(state\)/);
+	assert.match(expire, /composerHasDraft\(\)/);
+	assert.match(expire, /readGotoStamp\(gotoFiredKey\(state\.messageId\)\)/);
+	assert.match(expire, /let outcome = "refused"/);
+	const resolve = fnBody("function resolveGotoFor(state)");
+	assert.match(resolve, /messages\.value\.find\(\(x\) => x\.name === state\.messageId\)/);
+	const open = fnBody("function openGotoFromCountdown(state, goto, action)");
+	assert.match(open, /isNavigationFailure\(/);
+	assert.match(open, /gotoNavFailed\(/);
+	assert.match(open, /return "opened";/);
+	assert.match(open, /return "refused";/);
+});
+
 test("expiry and Open now share one resolver for the message's current goto", () => {
 	assert.match(fnBody("function onGotoExpire(state)"), /resolveGotoFor\(state\)/);
-	assert.match(
-		fnBody("function onGotoExpire(state)"),
-		/gotoDecision\(found\.goto, gotoInputs\(found\.m, state\.runId\)\)\.autoOpen/
-	);
 	assert.match(fnBody("function onGotoOpenNow(state)"), /resolveGotoFor\(state\)/);
 	const scope = exitScope({
 		messages: {
@@ -615,6 +632,15 @@ test("a draft in the composer at run:end starts no countdown on either page: car
 		assert.equal(scope.gotoMorph.value, null);
 		assert.deepEqual(scope.log.listeners, []);
 	}
+});
+
+test("startGotoCountdown checks the draft in the same guard as the hidden tab, before it starts anything", () => {
+	const body = fnBody("function startGotoCountdown(m, goto, decision, runId)");
+	assert.match(
+		body,
+		/if \(document\.visibilityState !== "visible" \|\| composerHasDraft\(\)\) \{\s*gotoCd\.markHandled\(m\.name\);\s*return null;\s*\}/
+	);
+	assert.ok(body.indexOf("composerHasDraft()") < body.indexOf("gotoCd.start("));
 });
 
 test("a Dashboards countdown watches for a second tab's claim; the calendar one does not", () => {

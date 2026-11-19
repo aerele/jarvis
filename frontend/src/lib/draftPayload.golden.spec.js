@@ -211,6 +211,16 @@ describe("golden Apply payloads (recorded before the review fixes)", () => {
 			expect(JSON.stringify(values)).not.toMatch(/"__/);
 		}
 	});
+
+	it("no serialised key starts with __", () => {
+		const values = payload("update", {
+			saved: savedRows(),
+			mutate: (t) => {
+				t.rows[0].qty = "9";
+			},
+		});
+		expect(JSON.stringify(values)).not.toMatch(/"__/);
+	});
 });
 
 // the hidden fields the row form's rules read (rule_fields, __rule) are display
