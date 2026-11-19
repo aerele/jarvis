@@ -71,6 +71,12 @@ describe("the fast-path swallows the message ONLY when a card actually surfaced"
 		expect(guardAt).toBeGreaterThan(-1);
 		expect(clearAt).toBeGreaterThan(guardAt);
 	});
+
+	it("re-checks the conversation after the await, so a switch can't clear the new composer", () => {
+		// resyncPendingConfirmations is async; the user may have switched chats while
+		// it ran. Clearing input then would wipe an unrelated draft.
+		expect(SURFACED_GUARD).toContain("chatViewIsCurrent(_typedView)");
+	});
 });
 
 describe("a kept draft card at the tail is shown once per draft, never silently", () => {
