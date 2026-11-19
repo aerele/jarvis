@@ -561,6 +561,12 @@ class TestWikiPromotion(_PipelineFixture):
 			out = wiki.request_wiki_promotion(page.slug, "Role", target_role="Sales User")
 		self.assertEqual(frappe.db.get_value(PROMO, out["request"], "target_role"), "Sales User")
 
+	def test_org_scope_needs_no_role(self):
+		page = self._user_page()
+		with _as(USER_A):
+			out = wiki.request_wiki_promotion(page.slug, "Org")
+		self.assertTrue(out["ok"])
+
 	def test_approve_merges_body_into_org_page(self):
 		page = self._user_page()
 		with _as(USER_A):

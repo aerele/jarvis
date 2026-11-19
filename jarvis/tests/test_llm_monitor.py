@@ -245,6 +245,23 @@ class TestDirectLlmUsage(FrappeTestCase):
 		self.assertEqual(by_model[_ZERO_PRICED_MODEL]["tokens_out"], 5_000)
 		self.assertEqual(by_model[_ZERO_PRICED_MODEL]["cost_usd"], 0.0)
 
+	def test_calls_the_direct_path_and_never_the_proxy_path(self):
+		# No fixture rows seeded here: this only exercises the code path
+		# (applicable / shape / which admin_client call fires), since the
+		# shared local site's tenant-wide total is never guaranteed to be
+		# zero (see the module docstring above).
+		with (
+			patch.object(admin_client, "get_model_catalog", return_value=_FAKE_CATALOG),
+			patch.object(admin_client, "get_llm_usage") as proxy_mock,
+		):
+			out = account.get_llm_usage()
+		self.assertIs(out["applicable"], True)
+		self.assertIsInstance(out["per_model"], list)
+		self.assertGreaterEqual(out["tokens_in"], 0)
+		self.assertGreaterEqual(out["cost_usd"], 0.0)
+		# The direct path never touches the proxy-path admin_client call.
+		proxy_mock.assert_not_called()
+
 
 class TestPriceForModel(FrappeTestCase):
 	def setUp(self):

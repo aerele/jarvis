@@ -1435,10 +1435,27 @@ class TestRejectedSyncVerdictClassification(FrappeTestCase):
 		self.assertEqual(out["reason"], "llm_rejected")
 		self.assertEqual(out["detail"], detail, "admin's own sentence must reach the customer unedited")
 
+	def test_a_rejection_with_no_admin_sentence_still_gets_a_readable_default_detail(self):
+		out = self._verdict("failed: Your AI configuration was rejected")
+		self.assertIsNotNone(out)
+		self.assertEqual(out["reason"], "llm_rejected")
+		self.assertEqual(out["detail"], "Your AI configuration was rejected")
+
 	def test_a_push_validation_failure_is_flagged_rejected(self):
 		# AdminValidationError, e.g. a malformed oauth_blob: the pushed payload
 		# itself is invalid, which is the customer's config, not a transient blip.
 		out = self._verdict("failed: validation: missing or malformed oauth_blob")
+		self.assertIsNotNone(out)
+		self.assertEqual(out["reason"], "llm_rejected")
+
+	def test_the_pool_legs_validation_failure_is_flagged_rejected_too(self):
+		# Round-1 review of jarvis#760: sync_pool_now wrote a BARE "failed: {e}"
+		# for AdminValidationError while the direct leg wrote
+		# "failed: validation: {e}", so a pool config admin had PERMANENTLY
+		# rejected read as still applying and ground to the wizard's five minute
+		# ceiling before offering a Retry that could never succeed. Both legs now
+		# prefix the same way; this pins that they stay in step.
+		out = self._verdict("failed: validation: unknown llm_provider 'gemini'")
 		self.assertIsNotNone(out)
 		self.assertEqual(out["reason"], "llm_rejected")
 
@@ -1559,6 +1576,18 @@ class TestRejectedSyncVerdictWiring(FrappeTestCase):
 		self.assertNotEqual(
 			out["reason"], "llm_rejected", "gap 1: a retry could clear this, must not read as rejected"
 		)
+		self.assertEqual(out["reason"], "llm_provisioning")
+
+	def test_a_pending_status_falls_through_to_provisioning_unchanged(self):
+		self._write({"last_sync_status": "pending: applying subscription blob"})
+		out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
+		self.assertEqual(out["reason"], "llm_provisioning")
+
+	def test_a_blank_status_falls_through_to_provisioning_unchanged(self):
+		self._write({"last_sync_status": ""})
+		out = account.is_ready_for_chat()
+		self.assertFalse(out["ready"])
 		self.assertEqual(out["reason"], "llm_provisioning")
 
 

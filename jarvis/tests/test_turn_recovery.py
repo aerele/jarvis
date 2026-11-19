@@ -414,6 +414,22 @@ class TestTurnRecovery(FrappeTestCase):
 		self.assertEqual(row.recovering, 0)
 		self.assertIn("run:end", [c.args[1]["kind"] for c in pub.call_args_list])
 
+	def test_watermark_zero_behaves_as_before(self):
+		# Default watermark (0, i.e. never captured) must not change any
+		# pre-existing recovery behavior.
+		sess = self._fake_sess(
+			messages_by_key={
+				SK: [
+					transcript_message("assistant", "the full answer", seq=2),
+				]
+			}
+		)
+		_, pub = self._run(sess)
+		row = self._row()
+		self.assertEqual(row.content, "the full answer")
+		self.assertEqual(row.streaming, 0)
+		self.assertEqual(row.recovering, 0)
+
 	def test_latest_assistant_text_min_seq_filters_out_older_message(self):
 		text = turn_recovery._latest_assistant_text(
 			[

@@ -438,6 +438,17 @@ class TestParseBudget(unittest.TestCase):
 		(spec,) = extract_charts(_bytes(wb))
 		self.assertEqual(len(spec["series"]), MAX_SERIES)
 
+	def test_wide_rows_large_cells_and_deep_rows_cost_nothing(self):
+		# worksheets are never read, however heavy they are
+		wb, ws = _book()
+		_add(ws, BarChart())
+		ws["A9"] = "x" * 200_000
+		ws.cell(row=2000, column=300, value=1)
+		src = _bytes(wb)
+		with mock.patch.object(openpyxl, "load_workbook") as load:
+			self.assertEqual(len(extract_charts(src)), 1)
+		load.assert_not_called()
+
 	def test_sheet_cap(self):
 		src = _crafted(sheets=MAX_SHEETS + 20, drawings_per_sheet=1, charts_per_drawing=1, distinct=True)
 		with _Counting() as n:

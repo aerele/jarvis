@@ -475,6 +475,22 @@ class TestDispatch(_TriggerTestCase):
 		# no activity for a plain condition miss
 		self.assertEqual(self._activities(trig.name), [])
 
+	def test_condition_eval_error_is_fail_open(self):
+		trig = self._make_llm_trigger(condition='doc.status == "Open"')
+		# Fixture todo goes in while the condition is still valid (its insert
+		# dispatches through the live hooks); THEN plant a condition that
+		# errors at dispatch time, bypassing validate.
+		todo = self._make_todo()
+		frappe.db.set_value(
+			TRIGGER, trig.name, "condition", "doc.no_such_attr_zz == 1", update_modified=False
+		)
+		engine.clear_cache()
+		self._clear_llm_queue()
+		engine.dispatch(todo, "on_update")  # must not raise
+		rows = self._activities(trig.name, status="Failed")
+		self.assertEqual(len(rows), 1)
+		self.assertIn("condition error", rows[0].summary)
+
 	def test_disabled_trigger_does_not_fire(self):
 		trig = self._make_llm_trigger(enabled=0)
 		todo = self._make_todo()
@@ -508,6 +524,26 @@ class TestDispatch(_TriggerTestCase):
 		self.assertEqual(blocked[0].kwargs.get("status"), "Blocked")
 		self.assertEqual(blocked[0].kwargs.get("trigger"), trig.name)
 		self.assertIn("blocked by trigger test", blocked[0].kwargs.get("summary") or "")
+
+	def test_script_runtime_error_is_fail_open(self):
+		todo = self._make_todo()
+		trig = self._make_script_trigger(body="x = 1 / 0", event="on_update")
+		with patch(EXEC_FLAG, return_value=True):
+			engine.dispatch(todo, "on_update")  # must not raise
+		rows = self._activities(trig.name)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].status, "Failed")
+
+	def test_script_throw_on_nonblockable_event_fails_open(self):
+		# Review P2: a ValidationError raised on a POST event (on_update) must
+		# NOT block/rollback the user's save — only validate/before_submit block.
+		todo = self._make_todo()
+		trig = self._make_script_trigger(body='frappe.throw("would block")', event="on_update")
+		with patch(EXEC_FLAG, return_value=True):
+			engine.dispatch(todo, "on_update")  # must not raise
+		rows = self._activities(trig.name)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].status, "Failed")
 
 	# -- T5: Failed-row summaries carry the exception class only ------------- #
 	# The Activity summary is readable and searchable by non-managers; raw

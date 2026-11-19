@@ -937,6 +937,12 @@ class TestFencingTimelines(_TurnStateTestCase):
 		)
 		frappe.db.rollback()
 
+	def test_d4d_dual_acquisition_exactly_one_wins(self):
+		"""D4 (d): two pumps race lease_acquire on the same stale lease; exactly one
+		bumps the epoch, the other re-evaluates the freshened predicate and gets 0
+		rows (threaded, real separate DB connections)."""
+		self._run_dual_acquire()
+
 	def _run_dual_acquire(self, isolation: str | None = None):
 		target = self._target
 		frappe.db.set_value(

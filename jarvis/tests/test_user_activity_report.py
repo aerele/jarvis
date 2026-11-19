@@ -239,6 +239,11 @@ class TestReportMigration(FrappeTestCase):
 		self.assertEqual(_link_target(), NEW)
 		self.assertEqual(_sidebar_target(), NEW)
 
+	def test_rename_moves_workspace_link_rows_in_the_normal_path(self):
+		rename_patch()
+		self.assertEqual(_link_target(), NEW)
+		self.assertEqual(_sidebar_target(), NEW)
+
 	def test_both_rows_exist_links_move_and_old_row_is_dropped(self):
 		reload_patch()  # the new row exists alongside the old one
 		self.assertEqual(_report_names(), [OLD, NEW])
@@ -601,6 +606,32 @@ class TestReportExecute(FrappeTestCase):
 		self.assertEqual(len(data), 505)
 		self.assertNotIn("Showing the newest", message)
 
+	def test_events_view_is_not_capped_at_the_api_default_page(self):
+		# Not mocked: the report must ask for the export ceiling, not the 200-row page.
+		import datetime as dt
+
+		who = "uar-many@example.com"
+		day = dt.date.today() - dt.timedelta(days=3)  # inside the kept window (events() clamps to it)
+		n = 205
+		for i in range(n):
+			frappe.get_doc(
+				{
+					"doctype": "Jarvis Activity Event",
+					"at": dt.datetime.combine(day, dt.time(10, 0, 0)) + dt.timedelta(seconds=i),
+					"actor": who,
+					"actor_name": "Many",
+					"event": "read",
+					"method": "get_list",
+					"outcome": "ok",
+					"row_count": 1,
+				}
+			).insert(ignore_permissions=True, ignore_links=True)
+
+		_c, data, message = self._execute({"user": who, "from_date": str(day), "to_date": str(day)})
+
+		self.assertEqual(len(data), n)
+		self.assertNotIn("Showing the newest", message)
+
 	def test_first_event_at_is_gated(self):
 		from jarvis import activity_report
 
@@ -706,6 +737,9 @@ class TestReportExecute(FrappeTestCase):
 	def test_summary_message_stale_days_singular_and_plural(self):
 		self.assertIn(" Totals for 1 day are still being prepared.", self._summary_message(stale_days=1))
 		self.assertIn(" Totals for 3 days are still being prepared.", self._summary_message(stale_days=3))
+
+	def test_summary_message_clamped(self):
+		self.assertIn(" Data is kept for 90 days.", self._summary_message(clamped=True))
 
 	def test_summary_message_scheduler_disabled(self):
 		message = self._summary_message(logging_health={"warn": False, "scheduler_disabled": True})

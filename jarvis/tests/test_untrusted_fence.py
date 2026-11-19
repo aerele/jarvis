@@ -247,6 +247,12 @@ class TestPrepareAttachmentsFencing(FrappeTestCase):
 		msg, _ = _prepare_attachments("hi", [crafted_att], vision_ok=True)
 		self.assertIn(att["file_name"], msg)
 
+	def test_list_file_name_does_not_crash_the_turn(self):
+		att = _make_file("notes.log", b"hello world")
+		crafted_att = {"file_id": att["file_id"], "file_url": att["file_url"], "file_name": ["a", "b"]}
+		msg, _ = _prepare_attachments("hi", [crafted_att], vision_ok=True)
+		self.assertIn(att["file_name"], msg)
+
 	def test_truncation_still_applies_inside_the_fence(self):
 		big = "x" * (_MAX_INLINE_CHARS + 500)
 		att = _make_file("big.log", big.encode("utf-8"))
