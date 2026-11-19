@@ -554,6 +554,21 @@ describe("subscription Test (same probe the apply path uses)", () => {
 // keep calling saveLlmPool with FEWER than five arguments, so force_probe
 // silently defaults to false there and the request they send is unchanged.
 describe("subscription Test force_probe (jarvis_admin_v2#297): no repeat can carry a stale verdict", () => {
+	it("every Test press asks admin for a forced probe, as the 5th saveLlmPool argument", async () => {
+		const w = await mountOnboarding();
+		const r = await connectSubscriptionRow(w);
+		api.getLlmApplyOperation.mockResolvedValue({
+			operation_id: "op1",
+			state: "ready",
+			chat_readiness: true,
+			force_probed: true,
+		});
+
+		await w.vm.testSubscriptionRow(r);
+
+		expect(api.saveLlmPool.mock.calls[0][4]).toBe(true);
+	});
+
 	it("footerless save() (Start chatting's path) never asks for a forced probe", async () => {
 		const w = await mountOnboarding();
 		await connectSubscriptionRow(w);
@@ -747,6 +762,30 @@ describe("Claude sign-in (startConnect/finishConnect via the claude-login relay)
 		r._connect.pastedUrl = "the-pasted-code-abcd1234";
 		return r;
 	}
+
+	it("startConnect calls beginClaudeCliLogin with the model, not beginPoolAccountSignin", async () => {
+		const w = await mountOnboarding();
+		const r = await beginClaudeSignin(w);
+		expect(api.beginClaudeCliLogin).toHaveBeenCalledWith("claude-opus-5");
+		expect(r._connect.authorizeUrl).toBe("https://claude.com/cai/oauth/authorize?code=true");
+	});
+
+	it("finishConnect relays the pasted code to completeClaudeCliLogin, keyed by login_id", async () => {
+		const w = await mountOnboarding();
+		const r = await beginClaudeSignin(w);
+		api.completeClaudeCliLogin.mockResolvedValue({
+			ok: true,
+			data: { capture_id: "cap1", account_ref: "CLAUDE_a", label: "Claude subscription" },
+		});
+
+		await w.vm.finishConnect(r);
+
+		expect(api.completeClaudeCliLogin).toHaveBeenCalledWith(
+			"login-abc",
+			"the-pasted-code-abcd1234"
+		);
+		expect(api.completePoolAccountSignin).not.toHaveBeenCalled();
+	});
 
 	it("an invalid code keeps the panel open with the backend's own actionable message", async () => {
 		const w = await mountOnboarding();

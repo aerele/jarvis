@@ -1365,7 +1365,6 @@ describe("Claude sign-in", () => {
 		});
 		await w.vm.finishConnect(row);
 		expect(api.completeClaudeCliLogin).toHaveBeenCalledWith("login-1", "the-pasted-code-1234");
-		expect(api.completePoolAccountSignin).not.toHaveBeenCalled();
 		expect(row.accounts).toHaveLength(1);
 		expect(row.accounts[0].account_ref).toBe("CLAUDE_test");
 		expect(row.accounts[0].capture_id).toBe("capture-test");
