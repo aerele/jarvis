@@ -225,7 +225,7 @@ def _apply_max_concurrent_chats_safely(reply) -> None:
 
 
 def _apply_native_facts_safely(reply) -> None:
-	"""Store admin's native-pool flag and openclaw version (``jarvis.native_runtime``). The
+	"""Store admin's native-pool flag and agent runtime version (``jarvis.native_runtime``). The
 	heartbeat already landed, so a fault here must not skip the steps after it."""
 	try:
 		from jarvis import native_runtime

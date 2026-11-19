@@ -292,7 +292,7 @@ def resolved_model_identity(row: dict | None) -> tuple[str, str]:
 	reading it costs nothing extra: finalize already polls it for usage."""
 	if not isinstance(row, dict):
 		return "", ""
-	# The gateway names a few providers differently on openclaw 2026.11 (moonshot_api);
+	# The gateway names a few providers differently on agent runtime 2026.11 (moonshot_api);
 	# the rest of the app, and admin, know the plain id.
 	return (row.get("model") or "").strip(), provider_from_gateway((row.get("modelProvider") or "").strip())
 

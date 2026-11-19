@@ -428,7 +428,7 @@ def compute_proxy_active(settings) -> bool:
 	(``pool_mode=False`` with ``proxy_active=True``, or the reverse) is the
 	#498 shape the implication above exists to rule out.
 	"""
-	# Admin runs this tenant's subscription pool on openclaw itself: no sidecars at all.
+	# Admin runs this tenant's subscription pool on the agent runtime itself: no sidecars at all.
 	if is_native_pool(settings):
 		return False
 	if not has_subscription_model(settings):
@@ -480,7 +480,7 @@ def _upstream_has_renderer(upstream: str, native: bool = False) -> bool:
 # settings (see the two functions around this). They mirror the admin seed's
 # renderer_id and default_base_url; a test compares them with the catalog fixture.
 _RENDERER_UPSTREAMS = frozenset({"openai", "anthropic"})
-# On a native tenant (openclaw 2026.11+, no sidecars) the fleet also renders xAI's own
+# On a native tenant (agent runtime 2026.11+, no sidecars) the fleet also renders xAI's own
 # sign-in on the direct leg.
 _NATIVE_RENDERER_UPSTREAMS = _RENDERER_UPSTREAMS | {"xai"}
 _BASE_URL_BACKFILL = {
@@ -521,7 +521,7 @@ def _lone_direct_capable(settings) -> bool:
 	  models, or a subscription mixed with api-key rows, still needs the pool
 	  leg (failover across N credentials is a pool feature).
 	- Exactly one connected account on that model. Multiple accounts mean
-	  ROTATION, which is a pool feature (cliproxy on a sidecar tenant, openclaw's
+	  ROTATION, which is a pool feature (cliproxy on a sidecar tenant, the runtime's
 	  own profile order on a native one) - the direct leg pushes a single oauth
 	  blob and has no rotation concept, on either kind of tenant.
 	- That account's upstream is one the fleet template can render on the

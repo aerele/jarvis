@@ -1,6 +1,6 @@
-"""Native subscription pool and openclaw 2026.11 on the customer site.
+"""Native subscription pool and agent runtime 2026.11 on the customer site.
 
-Admin tells the site two facts (``native_subscription_pool``, ``openclaw_version``). With
+Admin tells the site two facts (``native_subscription_pool``, ``agent_runtime_version``). With
 the first on, the site derives no proxy; with the second at 2026.11 or later, the few
 provider ids the gateway renames are translated at one boundary (``chat.gateway_ids``).
 Fixtures are bare ``frappe._dict`` settings: no site data is read or changed."""
@@ -16,7 +16,7 @@ from jarvis.chat import gateway_ids, session_pin_sweep, turn_handler, usage
 from jarvis.chat.agent_client import AgentSession
 from jarvis.jarvis import pool_serialize
 
-V11 = {"openclaw_version": "2026.11.5"}
+V11 = {"agent_runtime_version": "2026.11.5"}
 
 
 def _acct(upstream="openai", ref="A1"):
@@ -88,13 +88,15 @@ class TestRuntimeFacts(unittest.TestCase):
 	def test_stand_ins_without_the_fields_read_as_unset(self):
 		self.assertFalse(native_runtime.is_native_pool(frappe._dict()))
 		self.assertFalse(native_runtime.is_native_pool(object()))
-		self.assertIsNone(native_runtime.openclaw_version(frappe._dict()))
+		self.assertIsNone(native_runtime.agent_runtime_version(frappe._dict()))
 
 	def test_version_parsing_and_the_2026_11_boundary(self):
 		for raw, expected in (("2026.11.5", True), ("2026.11.0", True), ("2027.1.0", True)):
-			self.assertEqual(native_runtime.gateway_is_v11(frappe._dict(openclaw_version=raw)), expected, raw)
+			self.assertEqual(
+				native_runtime.gateway_is_v11(frappe._dict(agent_runtime_version=raw)), expected, raw
+			)
 		for raw in ("2026.9.2", "2026.10.9", "", None, "latest", "2026.11", "2026.11.5-2"):
-			self.assertFalse(native_runtime.gateway_is_v11(frappe._dict(openclaw_version=raw)), raw)
+			self.assertFalse(native_runtime.gateway_is_v11(frappe._dict(agent_runtime_version=raw)), raw)
 
 
 class TestGatewayIds(unittest.TestCase):
@@ -102,7 +104,7 @@ class TestGatewayIds(unittest.TestCase):
 	_KEPT = ("openai", "anthropic", "xai", "gemini", "google", "openrouter", "openai_compat", "zai_coding")
 
 	def test_write_renames_the_seven_ids_only_on_a_known_2026_11_gateway(self):
-		v11, v9, unknown = frappe._dict(V11), frappe._dict(openclaw_version="2026.9.2"), frappe._dict()
+		v11, v9, unknown = frappe._dict(V11), frappe._dict(agent_runtime_version="2026.9.2"), frappe._dict()
 		for pid in self._RENAMED:
 			self.assertEqual(gateway_ids.provider_to_gateway(pid, v11), f"{pid}_api")
 			self.assertEqual(gateway_ids.provider_to_gateway(pid, v9), pid)
@@ -181,7 +183,7 @@ class TestNoPlaceholderOnANativeTenant(unittest.TestCase):
 
 class TestPersistFacts(FrappeTestCase):
 	def _persist(self, reply, stored):
-		fields = {"native_subscription_pool": 0, "openclaw_version": "", **stored}
+		fields = {"native_subscription_pool": 0, "agent_runtime_version": "", **stored}
 		with (
 			patch.object(native_runtime.frappe.db, "get_singles_dict", return_value=fields),
 			patch.object(native_runtime.frappe.db, "set_single_value") as write,
@@ -193,30 +195,32 @@ class TestPersistFacts(FrappeTestCase):
 	def test_a_new_value_is_written_and_a_flag_change_recomputes_proxy_active(self):
 		write, refresh = self._persist({"native_subscription_pool": True, **V11}, {})
 		self.assertEqual(
-			write.call_args.args[1], {"native_subscription_pool": 1, "openclaw_version": "2026.11.5"}
+			write.call_args.args[1], {"native_subscription_pool": 1, "agent_runtime_version": "2026.11.5"}
 		)
 		refresh.assert_called_once()
 
 	def test_a_version_change_alone_does_not_touch_proxy_active(self):
-		write, refresh = self._persist({"openclaw_version": "2026.11.5"}, {"native_subscription_pool": 1})
-		self.assertEqual(write.call_args.args[1], {"openclaw_version": "2026.11.5"})
+		write, refresh = self._persist(
+			{"agent_runtime_version": "2026.11.5"}, {"native_subscription_pool": 1}
+		)
+		self.assertEqual(write.call_args.args[1], {"agent_runtime_version": "2026.11.5"})
 		refresh.assert_not_called()
 
 	def test_unchanged_absent_or_malformed_values_write_nothing(self):
-		stored = {"native_subscription_pool": 1, "openclaw_version": "2026.11.5"}
+		stored = {"native_subscription_pool": 1, "agent_runtime_version": "2026.11.5"}
 		for reply in (
 			{"native_subscription_pool": True, **V11},
 			{},
 			None,
-			{"native_subscription_pool": "yes", "openclaw_version": "latest"},
+			{"native_subscription_pool": "yes", "agent_runtime_version": "latest"},
 		):
 			write, refresh = self._persist(reply, stored)
 			write.assert_not_called()
 			refresh.assert_not_called()
 
 	def test_a_null_version_clears_the_stored_one(self):
-		write, _ = self._persist({"openclaw_version": None}, {"openclaw_version": "2026.11.5"})
-		self.assertEqual(write.call_args.args[1], {"openclaw_version": ""})
+		write, _ = self._persist({"agent_runtime_version": None}, {"agent_runtime_version": "2026.11.5"})
+		self.assertEqual(write.call_args.args[1], {"agent_runtime_version": ""})
 
 
 class TestHeartbeatCarriesTheFacts(unittest.TestCase):

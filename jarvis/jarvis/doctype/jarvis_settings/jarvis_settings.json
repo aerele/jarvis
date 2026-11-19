@@ -134,7 +134,7 @@
   "installed_apps_synced",
   "max_concurrent_chats",
   "native_subscription_pool",
-  "openclaw_version",
+  "agent_runtime_version",
   "last_subscription_status",
   "subscription_health",
   "last_sync_warnings",
@@ -1030,7 +1030,7 @@
    "read_only": 1
   },
   {
-   "description": "Set by Jarvis admin: the workspace runs its subscription pool on openclaw itself, with no proxy sidecars. Backend-only; refreshed by the heartbeat and the connection sync.",
+   "description": "Set by Jarvis admin: the workspace runs its subscription pool on the agent runtime itself, with no proxy sidecars. Backend-only; refreshed by the heartbeat and the connection sync.",
    "fieldname": "native_subscription_pool",
    "fieldtype": "Check",
    "hidden": 1,
@@ -1038,11 +1038,11 @@
    "read_only": 1
   },
   {
-   "description": "Set by Jarvis admin: the openclaw version the workspace runs, for example 2026.11.5. Empty when admin did not report one. Backend-only; refreshed by the heartbeat and the connection sync.",
-   "fieldname": "openclaw_version",
+   "description": "Set by Jarvis admin: the agent runtime version the workspace runs, for example 2026.11.5. Empty when admin did not report one. Backend-only; refreshed by the heartbeat and the connection sync.",
+   "fieldname": "agent_runtime_version",
    "fieldtype": "Data",
    "hidden": 1,
-   "label": "Openclaw Version",
+   "label": "Agent Runtime Version",
    "read_only": 1
   },
   {

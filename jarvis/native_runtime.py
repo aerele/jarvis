@@ -1,7 +1,7 @@
 """What admin tells this site about the tenant's runtime: whether the subscription pool
-runs natively (no Bifrost or CLIProxy sidecars) and which openclaw version the gateway is.
+runs natively (no Bifrost or CLIProxy sidecars) and which agent runtime version the gateway is.
 
-Admin sends ``native_subscription_pool`` (bool) and ``openclaw_version`` (``"2026.11.5"`` or
+Admin sends ``native_subscription_pool`` (bool) and ``agent_runtime_version`` (``"2026.11.5"`` or
 null) on every heartbeat reply and on the connection payload. They are stored on Jarvis
 Settings and read from there, so the hot chat path makes no admin call. A key that is absent
 (an older admin) keeps what is stored; the default is the sidecar behaviour.
@@ -16,9 +16,9 @@ from frappe.utils import cint
 
 SETTINGS = "Jarvis Settings"
 NATIVE_FIELD = "native_subscription_pool"
-VERSION_FIELD = "openclaw_version"
+VERSION_FIELD = "agent_runtime_version"
 
-# First openclaw release that renames a few provider ids (see jarvis.chat.gateway_ids).
+# First agent runtime release that renames a few provider ids (see jarvis.chat.gateway_ids).
 GATEWAY_V11 = (2026, 11, 0)
 
 _VERSION = re.compile(r"^\d{1,5}(\.\d{1,5}){2}$")
@@ -39,7 +39,7 @@ def is_native_pool(settings=None) -> bool:
 	return isinstance(value, int | str) and bool(cint(value))
 
 
-def openclaw_version(settings=None) -> tuple[int, ...] | None:
+def agent_runtime_version(settings=None) -> tuple[int, ...] | None:
 	"""The gateway's version as ``(2026, 11, 5)``, or None when admin did not report one."""
 	raw = _stored(settings, VERSION_FIELD)
 	raw = raw.strip() if isinstance(raw, str) else ""
@@ -47,8 +47,8 @@ def openclaw_version(settings=None) -> tuple[int, ...] | None:
 
 
 def gateway_is_v11(settings=None) -> bool:
-	"""True when the gateway is known to run openclaw 2026.11 or later."""
-	version = openclaw_version(settings)
+	"""True when the gateway is known to run agent runtime 2026.11 or later."""
+	version = agent_runtime_version(settings)
 	return version is not None and version >= GATEWAY_V11
 
 

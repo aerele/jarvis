@@ -1,12 +1,12 @@
 """Provider ids as the gateway names them, versus as this app and admin name them.
 
-openclaw 2026.11 treats a few bare provider ids as its own official plugins, so fleet
+Agent runtime 2026.11 treats a few bare provider ids as its own official plugins, so fleet
 renders those providers under ``<id>_api`` (``moonshot`` becomes ``moonshot_api``). A pin
 such as ``moonshot/kimi-k2.6`` then names an id the 2026.11 gateway no longer has. Everything
 else in the app keeps the plain id; this module is the one place that converts.
 
 * Writing to the gateway (a session's model pin): ``model_ref_for_gateway`` renames the
-  provider, and only when admin has told us the gateway runs openclaw 2026.11 or later
+  provider, and only when admin has told us the gateway runs agent runtime 2026.11 or later
   (``native_runtime.gateway_is_v11``). With no version known, the plain id is sent, as before.
 * Reading from the gateway (the ``modelProvider`` of a session row): ``provider_from_gateway``
   maps ``<id>_api`` back to the plain id whatever the version. No app id ends in ``_api``,
@@ -15,7 +15,7 @@ else in the app keeps the plain id; this module is the one place that converts.
 Only the ids in ``WIRE_PROVIDER_IDS`` are touched. Pool ids such as ``moonshot-0`` and the
 providers that are not renamed (``openai``, ``anthropic``, ``xai``, ``gemini``, ``google``,
 ``openrouter``, ``openai_compat``, ``zai_coding``, ``minimax``) pass through unchanged.
-Keep the table in step with jarvis-fleet-agent ``openclaw_v11.WIRE_PROVIDER_IDS``."""
+Keep the table in step with jarvis-fleet-agent the fleet agent's wire provider id table."""
 
 from jarvis import native_runtime
 
