@@ -124,6 +124,12 @@ class TestThinkingDirectiveLeading(FrappeTestCase):
 		)
 		self.assertIn("[Context:", msg)
 
+	def test_directive_leads_without_doc_context(self):
+		"""Baseline: thinking kwarg set without doc-context (no regression)."""
+		msg, thinking = self._capture_message_sent(context=None)
+		self.assertEqual(thinking, "high")
+		self.assertNotIn("/think", msg)
+
 	def test_proxy_route_sends_no_thinking(self):
 		"""A turn on the proxy route drops the stored level: the agent would answer
 		it with an error reply instead of running the turn (jarvis-admin-v2#648)."""

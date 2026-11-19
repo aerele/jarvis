@@ -897,6 +897,16 @@ class TestWikiPageFull(_WikiBase):
 
 	# --- W-AC1: real funnel, both the auto and reviewer-approve paths ------ #
 
+	def test_auto_path_refuses_overflow_body_byte_identical(self):
+		name = self._seed_page(body_len=wiki.MAX_BODY_LEN - 50)
+		before = frappe.get_doc(WIKI, name).body_md
+		result = api._file_box_wiki_write(
+			{"slug": "party-fake-co", "append_md": "y" * 100}, self.conv, user=DROPPER
+		)
+		self.assertFalse(result["ok"])
+		self.assertEqual(result["reason"], "page_full")
+		self.assertEqual(frappe.get_doc(WIKI, name).body_md, before)
+
 	def test_reviewer_approve_path_refuses_overflow_real_funnel(self):
 		# AC4: the page fills up AFTER the proposal, between propose and land.
 		name = self._seed_page(body_len=200)

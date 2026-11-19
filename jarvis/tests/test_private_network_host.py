@@ -162,3 +162,6 @@ class TestSignupBody(FrappeTestCase):
 	def test_the_staff_origin_is_never_sent_in_public_mode(self):
 		body = self._staff_origin("http://erp.office.local:8000/", mode="")
 		self.assertNotIn("staff_origin", body)
+
+	def test_the_capability_constant_is_exact(self):
+		self.assertEqual(admin_client.PRIVATE_NETWORK_CAPABILITY, "v1")

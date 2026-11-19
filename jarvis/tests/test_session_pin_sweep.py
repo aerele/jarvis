@@ -117,6 +117,12 @@ class TestSessionPinSweep(FrappeTestCase):
 		sess = _fake_sess(_page([_row(key, provider="zai_coding-0", model="claude-sonnet-4-6")]))
 		self.assertEqual(self._verbs(self._sweep(sess)), {key: CLEAR})
 
+	def test_legacy_pool_placeholder_pin_is_cleared(self):
+		key = "agent:main:dashboard:pin-legacy"
+		self._conv(key, model_override="")
+		sess = _fake_sess(_page([_row(key, provider="openai_compat-0", model="jarvis-pool")]))
+		self.assertEqual(self._verbs(self._sweep(sess)), {key: CLEAR})
+
 	def test_explicit_customer_pick_is_kept(self):
 		key = "agent:main:dashboard:pin-pick"
 		self._conv(key, model_override="gemini-3.6-flash")
