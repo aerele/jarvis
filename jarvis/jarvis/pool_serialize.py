@@ -10,6 +10,8 @@ All functions here are defensive: no function raises on bad input.
 
 import json
 
+from jarvis.native_runtime import is_native_pool
+
 
 def _get_password(doc, fieldname: str, raise_exception: bool = False) -> str:
 	"""Read a password field from a doc (BaseDocument) or plain dict/frappe._dict.
@@ -346,6 +348,17 @@ def has_native_claude_subscription(settings) -> bool:
 	)
 
 
+def subscription_only_models(settings) -> set:
+	"""Model ids that only an enabled chat-subscription row serves. An id that an api-key
+	row also carries is left out: that row bills per token, so the id is priced."""
+	by_id: dict = {}
+	for m in _enabled_models(settings):
+		name = (_field(m, "model") or "").strip()
+		if name:
+			by_id.setdefault(name, []).append(_credential_type(m) == "subscription")
+	return {name for name, flags in by_id.items() if all(flags)}
+
+
 def has_subscription_model(settings) -> bool:
 	"""True when at least one ENABLED models[] row is a chat subscription."""
 	return any(_credential_type(m) == "subscription" for m in _enabled_models(settings))
@@ -415,6 +428,9 @@ def compute_proxy_active(settings) -> bool:
 	(``pool_mode=False`` with ``proxy_active=True``, or the reverse) is the
 	#498 shape the implication above exists to rule out.
 	"""
+	# Admin runs this tenant's subscription pool on openclaw itself: no sidecars at all.
+	if is_native_pool(settings):
+		return False
 	if not has_subscription_model(settings):
 		return False
 	# Claude plan credentials are served by the agent's first-party claude-cli
@@ -445,7 +461,7 @@ def compute_proxy_active(settings) -> bool:
 # thread, live-verified against agent 2026.6.8 + the live provider
 # catalog): xai and moonshot are both in that state today, so they stay on
 # the pool leg until a template arm + catalog id ship for them.
-def _upstream_has_renderer(upstream: str) -> bool:
+def _upstream_has_renderer(upstream: str, native: bool = False) -> bool:
 	"""True when ``upstream`` has a fleet renderer (a non-empty ``renderer_id`` in
 	the admin seed). Deliberately reads reviewed code (_RENDERER_UPSTREAMS), never
 	the live admin catalog: this feeds a save-time, hot-chat-path decision
@@ -455,7 +471,8 @@ def _upstream_has_renderer(upstream: str) -> bool:
 	gate below exists to rule out. Widening the renderable set is a deploy
 	(edit _RENDERER_UPSTREAMS), which is the review gate this wants.
 	"""
-	return (upstream or "").strip().lower() in _RENDERER_UPSTREAMS
+	allowed = _NATIVE_RENDERER_UPSTREAMS if native else _RENDERER_UPSTREAMS
+	return (upstream or "").strip().lower() in allowed
 
 
 # Provider wiring the save path needs, kept as reviewed code rather than read
@@ -463,6 +480,9 @@ def _upstream_has_renderer(upstream: str) -> bool:
 # settings (see the two functions around this). They mirror the admin seed's
 # renderer_id and default_base_url; a test compares them with the catalog fixture.
 _RENDERER_UPSTREAMS = frozenset({"openai", "anthropic"})
+# On a native tenant (openclaw 2026.11+, no sidecars) the fleet also renders xAI's own
+# sign-in on the direct leg.
+_NATIVE_RENDERER_UPSTREAMS = _RENDERER_UPSTREAMS | {"xai"}
 _BASE_URL_BACKFILL = {
 	"groq": "https://api.groq.com/openai/v1",
 	"deepseek": "https://api.deepseek.com",
@@ -501,10 +521,11 @@ def _lone_direct_capable(settings) -> bool:
 	  models, or a subscription mixed with api-key rows, still needs the pool
 	  leg (failover across N credentials is a pool feature).
 	- Exactly one connected account on that model. Multiple accounts mean
-	  ROTATION, which only cliproxy implements - the direct leg pushes a
-	  single oauth blob and has no rotation concept.
+	  ROTATION, which is a pool feature (cliproxy on a sidecar tenant, openclaw's
+	  own profile order on a native one) - the direct leg pushes a single oauth
+	  blob and has no rotation concept, on either kind of tenant.
 	- That account's upstream is one the fleet template can render on the
-	  direct oauth leg today (``_upstream_has_renderer``).
+	  direct oauth leg today (``_upstream_has_renderer``; a native tenant adds xAI).
 	- ``llm_pool_synced_at`` is unset. This is the NON-RETROACTIVITY gate
 	  (jarvis#715 "step 3 is not a predicate flip" analysis): the predicate is
 	  a pure function of stored settings, so without it this exception would
@@ -538,7 +559,7 @@ def _lone_direct_shape(settings) -> bool:
 	accounts = _model_accounts(m)
 	if len(accounts) != 1:
 		return False
-	return _upstream_has_renderer(_field(accounts[0], "upstream"))
+	return _upstream_has_renderer(_field(accounts[0], "upstream"), native=is_native_pool(settings))
 
 
 def lone_direct_handover_due(settings) -> bool:
@@ -548,6 +569,9 @@ def lone_direct_handover_due(settings) -> bool:
 	run the fleet handover instead of another pool push. Claude plans are
 	excluded: they always sync through the pool leg and already run without a
 	proxy."""
+	# A native tenant has no CLIProxy holding the sign-in, so there is nothing to hand over.
+	if is_native_pool(settings):
+		return False
 	if not _lone_direct_shape(settings) or not getattr(settings, "llm_pool_synced_at", None):
 		return False
 	account = _model_accounts(_enabled_models(settings)[0])[0]

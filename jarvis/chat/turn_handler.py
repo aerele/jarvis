@@ -51,10 +51,12 @@ from jarvis.chat import (
 from jarvis.chat.agent_client import FAILED_FINAL_ERROR, TURN_TIMEOUT_SECONDS, YIELD_CONTINUATION_WAIT_S
 from jarvis.chat.error_taxonomy import classify_error_text
 from jarvis.chat.filebox_source import SourceLost
+from jarvis.chat.gateway_ids import model_ref_for_gateway
 from jarvis.chat.runtime_profile import get_profile
 from jarvis.chat.session_repair import Repair, ensure_session_usable
 from jarvis.exceptions import AgentUnreachableError
 from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription, pool_primary_model
+from jarvis.native_runtime import is_native_pool
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -767,7 +769,13 @@ def _session_model_for(conv) -> tuple[str | None, str | None]:
 	if model:
 		return model, provider
 	settings = frappe.get_single("Jarvis Settings")
-	if getattr(settings, "proxy_active", 0) and not has_native_claude_subscription(settings):
+	# A native tenant has no Bifrost, so it has no "jarvis-pool" to name: it takes the
+	# agent-direct reset below and chats report the real model.
+	if (
+		getattr(settings, "proxy_active", 0)
+		and not is_native_pool(settings)
+		and not has_native_claude_subscription(settings)
+	):
 		return POOL_VIRTUAL_MODEL, None  # Bifrost expands it into the chain
 	# A pool with a native Claude-plan leg is NOT a Bifrost chain: fleet renders
 	# Claude as the claude-cli runtime and the ChatGPT leg as the proxy route, and
@@ -799,7 +807,7 @@ def _session_model_patch(conv) -> tuple[bool, str | None]:
 	model, provider = _session_model_for(conv)
 	if model == "":
 		return False, None
-	return True, f"{provider}/{model}" if provider and model else model
+	return True, model_ref_for_gateway(provider, model)
 
 
 # Effort levels the chat pickers offer. Mirrors ``Jarvis Conversation.thinking_override``,

@@ -133,6 +133,8 @@
   "chat_ready_authority",
   "installed_apps_synced",
   "max_concurrent_chats",
+  "native_subscription_pool",
+  "openclaw_version",
   "last_subscription_status",
   "subscription_health",
   "last_sync_warnings",
@@ -1028,6 +1030,22 @@
    "read_only": 1
   },
   {
+   "description": "Set by Jarvis admin: the workspace runs its subscription pool on openclaw itself, with no proxy sidecars. Backend-only; refreshed by the heartbeat and the connection sync.",
+   "fieldname": "native_subscription_pool",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "label": "Native Subscription Pool",
+   "read_only": 1
+  },
+  {
+   "description": "Set by Jarvis admin: the openclaw version the workspace runs, for example 2026.11.5. Empty when admin did not report one. Backend-only; refreshed by the heartbeat and the connection sync.",
+   "fieldname": "openclaw_version",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Openclaw Version",
+   "read_only": 1
+  },
+  {
    "description": "fleet-agent's subscription_status from the last pool apply: verified | unverified | unchecked | not_applicable. Empty when the fleet didn't report one (older contract) or the last sync failed. Backend-only - the SPA reads this via get_llm_sync_status, not the form.",
    "fieldname": "last_subscription_status",
    "fieldtype": "Data",
@@ -1555,5 +1573,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-13 19:00:00.000000"
+ "modified": "2026-11-19 09:00:00.000000"
 }

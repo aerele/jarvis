@@ -224,6 +224,17 @@ def _apply_max_concurrent_chats_safely(reply) -> None:
 		_log_failure_throttled()
 
 
+def _apply_native_facts_safely(reply) -> None:
+	"""Store admin's native-pool flag and openclaw version (``jarvis.native_runtime``). The
+	heartbeat already landed, so a fault here must not skip the steps after it."""
+	try:
+		from jarvis import native_runtime
+
+		native_runtime.persist(reply)
+	except Exception:
+		_log_failure_throttled()
+
+
 def push_bench_heartbeat() -> None:
 	"""``*/5`` scheduler entry. Self-gating + best-effort; NEVER raises. UNCONDITIONAL:
 	posts every tick whenever admin is configured (that is the point — silence means the
@@ -244,6 +255,7 @@ def push_bench_heartbeat() -> None:
 			_requeue_subscription_signals(signals)
 			raise
 		_apply_max_concurrent_chats_safely(reply)
+		_apply_native_facts_safely(reply)
 		_apply_subscription_health(reply)
 	except (AdminAuthError, AdminUnreachableError, AdminRateLimitedError, AdminValidationError):
 		# Best-effort telemetry: ANY push the backend does not accept — not onboarded, admin

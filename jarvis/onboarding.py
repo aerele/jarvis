@@ -18,6 +18,7 @@ from jarvis import (
 	compat,
 	connector_catalogue,
 	maintenance_notice,
+	native_runtime,
 	onboarding_contract,
 	release_notice,
 )
@@ -540,6 +541,8 @@ def _sync_connection(timeout_s: int | None = None, prove: bool = False) -> dict:
 	# Marker-aware + KEEP-on-doubt (jarvis.connector_catalogue) so an old/rolled-back CP
 	# never re-enables a switched-off preset fleet-wide.
 	connector_catalogue.persist_from_connection(data)
+	# Same cadence: the tenant's native-pool flag and openclaw version (jarvis.native_runtime).
+	native_runtime.persist(data)
 	# Same cadence: mirror the operator's holiday-touch policy. This is the daily path, the
 	# only one that stamps holiday_policy_synced_at (jarvis.holiday_touch.policy). Never raises.
 	holiday_policy.persist(data, daily=True)
