@@ -383,7 +383,7 @@ class TestReloadReply(ReloadCase):
 		):
 			error = self.reload(snapshot_id, sql=SQL, version=first["version"])
 		self.assertEqual(len(calls), 1)
-		self.assertIn("Access or report definition changed.", str(error))
+		self.assertIn("Access changed.", str(error))
 		self.assertNotEqual(error.version, first["version"])
 
 	def test_the_reload_runs_with_the_stored_literal_report_date(self):
@@ -448,14 +448,47 @@ class TestReloadReply(ReloadCase):
 		for perm, data, wording in (
 			(False, False, "Data unchanged."),
 			(False, True, "Data changed."),
-			(True, False, "Access or report definition changed."),
-			(True, True, "Access or report definition and data changed."),
+			(True, False, "Access changed."),
+			(True, True, "Access and data changed."),
 		):
 			with self.subTest(wording):
 				info = snap.ReloadInfo(2, "2026-11-18 10:00:00.123456", data, perm, "R")
 				message = str(query_module._reload_error({"version": "v" * 64}, info, sql_given=True))
 				self.assertIn(wording, message)
 				self.assertLessEqual(len(message), 400)
+
+
+class TestReportSaveIsNotAnAccessChange(ReloadCase):
+	"""`Report.modified` is not a digest input: Frappe saves the Report during a slow run
+	(`enable_prepared_report`), which must not make the next read a "permission change"."""
+
+	def assert_read_is_live(self, snapshot_id):
+		first = self.call(snapshot_id)
+		with self.run_hook() as calls:
+			answer = self.call(snapshot_id, sql=SQL, version=first["version"])
+		self.assertTrue(answer["sql_executed"])
+		self.assertEqual(calls, [])  # no reload
+		self.assertEqual(self.generation(snapshot_id), 0)
+		self.assertTrue(_has(_content_key(snapshot_id)))  # nothing deleted
+
+	def test_the_prepared_report_automation_between_create_and_read_is_a_live_read(self):
+		snapshot_id = self.seed()
+		before = frappe.db.get_value("Report", self.rows_report, "modified")
+		# The body of frappe's `enable_prepared_report`, in this connection: it would
+		# re-init and destroy the test process otherwise.
+		self.addCleanup(frappe.db.set_value, "Report", self.rows_report, "prepared_report", 0)
+		frappe.db.set_value("Report", self.rows_report, "prepared_report", 1)
+		self.assertNotEqual(frappe.db.get_value("Report", self.rows_report, "modified"), before)
+		digest.forget_perm_digest()
+		self.assert_read_is_live(snapshot_id)
+
+	def test_a_plain_report_save_between_create_and_read_is_a_live_read(self):
+		snapshot_id = self.seed()
+		before = frappe.db.get_value("Report", self.rows_report, "modified")
+		frappe.get_doc("Report", self.rows_report).save(ignore_permissions=True)
+		self.assertNotEqual(frappe.db.get_value("Report", self.rows_report, "modified"), before)
+		digest.forget_perm_digest()
+		self.assert_read_is_live(snapshot_id)
 
 
 class TestRefusals(ReloadCase):
@@ -1712,7 +1745,7 @@ class TestCustomReportFilters(ReloadCase):
 		frappe.db.set_value(
 			"Report", self.custom, "json", json.dumps({"filters": {"tag": self.prefix("B")}, "columns": []})
 		)
-		digest.forget_perm_digest()  # a new request: the edit moved Report.modified
+		digest.forget_perm_digest()  # a new request
 		self.expire(snapshot_id)
 		with self.run_hook() as calls:
 			error = self.reload(snapshot_id)
@@ -1720,9 +1753,7 @@ class TestCustomReportFilters(ReloadCase):
 		self.assertIs(calls[0]["are_default_filters"], False)
 		# The scope did not move: the rows are the two of A (B has one), byte for byte.
 		self.assertEqual(_meta(snapshot_id)["sha256"], sha)
-		self.assertIn(
-			"Access or report definition changed.", str(error)
-		)  # the edited report changed the digest
+		self.assertIn("Data unchanged.", str(error))  # a report edit is not an access change
 		self.assertEqual(self.generation(snapshot_id), 1)
 
 	def test_without_the_pin_frappe_would_have_applied_the_new_defaults(self):
@@ -1886,7 +1917,7 @@ class TestRealAccessChanges(ReloadCase):
 		with self.run_hook() as calls:
 			error = self.reload(snapshot_id)  # the content was live: the digest alone forced it
 		self.assertEqual(len(calls), 1)
-		self.assertIn("Access or report definition changed.", str(error))
+		self.assertIn("Access changed.", str(error))
 		self.assertEqual(self.generation(snapshot_id), 1)
 		self.assertEqual(self.call(snapshot_id)["generation"], 1)  # settled: reads the new rows
 		frappe.set_user("Administrator")
@@ -1896,7 +1927,7 @@ class TestRealAccessChanges(ReloadCase):
 		with self.run_hook() as calls:
 			error = self.reload(snapshot_id)
 		self.assertEqual(len(calls), 1)
-		self.assertIn("Access or report definition changed.", str(error))
+		self.assertIn("Access changed.", str(error))
 		self.assertEqual(self.generation(snapshot_id), 2)
 
 

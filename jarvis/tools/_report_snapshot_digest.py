@@ -49,9 +49,7 @@ def _doctype_inputs(doctype, user):
 
 
 def _compute_digest(user, report_name):
-	report = (
-		frappe.db.get_value("Report", report_name, ["name", "ref_doctype", "modified"], as_dict=True) or {}
-	)
+	report = frappe.db.get_value("Report", report_name, ["name", "ref_doctype"], as_dict=True) or {}
 	# The database matches a name case-insensitively: look the party reports up by the
 	# canonical name, as `_column_policy` does with `report.name`.
 	canonical = report.get("name") or report_name
@@ -62,7 +60,6 @@ def _compute_digest(user, report_name):
 		"roles": sorted(frappe.get_roles(user)),
 		"user_permissions": _stable(get_user_permissions(user)),
 		"doctypes": {dt: _doctype_inputs(dt, user) for dt in doctypes},
-		"report_modified": str(report.get("modified")),
 	}
 	return hashlib.sha256(_canonical(payload).encode()).hexdigest()
 
@@ -78,7 +75,10 @@ def perm_digest(user, report_name, *, fresh=False):
 	must see a change another request made since the digest of the call was taken.
 
 	Permitted fieldnames and masks are not inputs: `_column_policy` recomputes them on
-	every read and the version covers the masked and denied columns."""
+	every read and the version covers the masked and denied columns. `Report.modified` is
+	not an input either: report access (roles, ref doctype permission, disabled) is
+	re-checked by `gate_report` on every read, and Frappe's prepared-report automation
+	saves the Report in the middle of a slow run."""
 	memo = getattr(frappe.local, _DIGEST_MEMO, None)
 	if memo is None:
 		memo = {}
