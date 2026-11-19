@@ -59,6 +59,11 @@ class _Clock:
 		return getattr(time, name)
 
 
+def _big_run():
+	rows = [{"name": f"R{i}", "blob": "x" * 90} for i in range(600)]
+	return {"ok": True, "data": {"columns": [{"fieldname": "name"}], "result": rows}}
+
+
 class SnapshotBudgetCase(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
@@ -378,10 +383,78 @@ class TestWhatIsPassedToCreate(SnapshotBudgetCase):
 		self.assertIsInstance(run_ms, int)
 		self.assertEqual(run_ms, 250)  # the injected clock moved 0.25 s inside the call
 
+	def test_the_digest_passed_is_the_one_taken_before_the_run(self):
+		"""Taken fresh before the run, so a stale per-request memo is not stamped on the rows."""
+		pre_run = []
+
+		def fake_run(*a, **k):
+			pre_run.append(digest._compute_digest("Administrator", self.rows_report))
+			return _big_run()
+
+		setattr(frappe.local, digest._DIGEST_MEMO, {("Administrator", self.rows_report): "stale"})
+		create, _ = self.run_with_create({"report_name": self.rows_report}, run_tool=fake_run)
+		self.assertEqual(create.call_args.kwargs["perm_digest"], pre_run[0])
+
+	def test_a_role_removed_during_the_run_is_not_stamped_on_the_rows(self):
+		def fake_run(*a, **k):
+			patcher = patch.object(frappe, "get_roles", return_value=["System Manager", "Another Role"])
+			patcher.start()
+			self.addCleanup(patcher.stop)
+			return _big_run()
+
+		before = digest._compute_digest("Administrator", self.rows_report)
+		result, _ = self.dispatch("run_report", {"report_name": self.rows_report}, run_tool=fake_run)
+		stored = json.loads(
+			frappe.cache().get(frappe.cache().make_key(store.META_PREFIX + result["data"]["run"]))
+		)
+		self.assertEqual(stored["perm_digest"], before)
+		self.assertNotEqual(before, digest._compute_digest("Administrator", self.rows_report))
+
+	def test_no_digest_is_taken_for_another_tool(self):
+		with patch("jarvis.api._report_snapshots.perm_digest") as taken:
+			self.dispatch("list_docs", {"doctype": "ToDo"}, run_tool=lambda *a, **k: {"ok": True, "data": {}})
+		taken.assert_not_called()
+
 	def test_the_result_is_measured_once_for_the_snapshot_gate_and_the_guard(self):
 		with patch("jarvis.api.measure", wraps=measure) as spy:
 			self.run_with_create({"report_name": "R"})
 		self.assertEqual(spy.call_count, 1)
+
+	def run_taking(self, run_s, create_s=0.0):
+		"""A run that takes `run_s` and a create that takes `create_s` on the injected clock."""
+		clock = _Clock()
+
+		def fake_run(*a, **k):
+			clock.now += run_s
+			return _big_run()
+
+		def fake_create(*a, **k):
+			clock.now += create_s
+			return store.Created("rs_" + "a" * 32, "ok", 1234)
+
+		with (
+			patch("jarvis.api.time", clock),
+			patch("jarvis.api._report_snapshots.create", side_effect=fake_create) as create,
+			patch("jarvis.api.telemetry.record_budget_event") as record,
+		):
+			result, _ = self.dispatch("run_report", {"report_name": "R"}, run_tool=fake_run)
+		return create, record.call_args.kwargs, result
+
+	def test_a_run_that_took_too_long_is_not_snapshotted(self):
+		create, event, result = self.run_taking(api.CREATE_SKIP_AFTER_MS / 1000)
+		create.assert_not_called()
+		self.assertEqual(event["snapshot"], "skipped:slow")
+		self.assertNotIn("snapshot_create_ms", event)
+		self.assertNotIn("run", result["data"])
+
+	def test_a_run_just_under_the_limit_is_snapshotted(self):
+		create, event, _ = self.run_taking(api.CREATE_SKIP_AFTER_MS / 1000 - 0.001)
+		create.assert_called_once()
+		self.assertEqual(event["snapshot"], "created")
+
+	def test_the_create_time_is_recorded_when_a_create_ran(self):
+		_, event, _ = self.run_taking(0.25, create_s=0.5)
+		self.assertEqual(event["snapshot_create_ms"], 500)
 
 	def test_the_id_and_flag_reach_the_guard_not_the_model(self):
 		_, result = self.run_with_create({"report_name": "R"})
@@ -401,10 +474,14 @@ class TestBudgetEventFields(FrappeTestCase):
 		self.assertEqual(line["outcome"], "truncated")
 		self.assertEqual(line["kind"], "result_budget")
 
+	def test_the_create_time_is_additive(self):
+		self.assertEqual(self.emitted(snapshot="created", snapshot_create_ms=42)["snapshot_create_ms"], 42)
+
 	def test_without_them_the_line_is_as_before(self):
 		line = self.emitted()
 		self.assertNotIn("snapshot", line)
 		self.assertNotIn("snapshot_bytes", line)
+		self.assertNotIn("snapshot_create_ms", line)
 
 	def test_a_skip_reason_is_kept(self):
 		self.assertEqual(self.emitted(snapshot="skipped:tree")["snapshot"], "skipped:tree")

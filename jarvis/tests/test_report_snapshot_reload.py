@@ -1534,6 +1534,23 @@ class TestStampRobustness(ReloadCase):
 		self.reload(snapshot_id)  # not `failed:killed`
 		self.assertEqual(self.generation(snapshot_id), 1)
 
+	def test_a_reader_write_between_watch_and_exec_does_not_leave_a_killed_stamp(self):
+		"""A reader's `content_deleted_at` write loses our fence. The stamp is ours and no
+		newer writer exists, so it is taken back: the next call reloads, it is not `killed`."""
+		snapshot_id = self.seed()
+		self.expire(snapshot_id)
+
+		def reader_write():
+			_put_meta(snapshot_id, content_deleted_at="2026-11-19 00:00:00")
+
+		with patch.object(store, "_between_check_and_exec", reader_write):
+			self.refused(snapshot_id, RetryLaterError)
+		self.assertIsNone(_meta(snapshot_id)["reload_started_at"])
+		with self.events() as record:
+			self.reload(snapshot_id)
+		self.assertEqual(self.last_end(record)[0], "ok")
+		self.assertEqual(self.generation(snapshot_id), 1)
+
 	def test_a_stamp_that_is_not_ours_is_never_cleared_after_a_lost_reply(self):
 		snapshot_id = self.seed()
 		self.expire(snapshot_id)

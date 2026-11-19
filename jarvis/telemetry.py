@@ -90,6 +90,7 @@ def record_budget_event(
 	snapshot: str | None = None,
 	snapshot_bytes: int | None = None,
 	snapshot_error: str | None = None,
+	snapshot_create_ms: int | None = None,
 ) -> None:
 	"""One line per agent-boundary result-size guard event (truncation or an
 	uncapped-but-oversized result). Unlike ``record_tool``, this is not gated
@@ -99,8 +100,8 @@ def record_budget_event(
 	with this line's own ``kind`` discriminator. A cut inline ``run_report`` adds
 	``snapshot`` (``created`` / ``skipped:<reason>`` / ``failed``) and, once stored,
 	``snapshot_bytes`` (the gzip size); when a snapshot failed or was skipped with
-	``error``, ``snapshot_error`` names the exception class. All three keys are absent on
-	every other line.
+	``error``, ``snapshot_error`` names the exception class. When a create ran,
+	``snapshot_create_ms`` is its wall time. All four keys are absent on every other line.
 	Never raises."""
 	try:
 		line = {
@@ -119,6 +120,8 @@ def record_budget_event(
 			line["snapshot_bytes"] = snapshot_bytes
 		if snapshot_error is not None:
 			line["snapshot_error"] = snapshot_error
+		if snapshot_create_ms is not None:
+			line["snapshot_create_ms"] = snapshot_create_ms
 		_emit(line)
 	except Exception:
 		pass

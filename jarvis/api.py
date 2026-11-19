@@ -1071,6 +1071,9 @@ def _dispatch_from_session(
 					tool_call_id=tool_call_id,
 				)
 				return result
+			# The digest of what the run is allowed to see, taken before it: access that
+			# changes during a long run must not be stamped on rows of the old access.
+			snapshot_digest = _pre_run_digest(tool, parsed_args)
 			started_ms = time.monotonic()
 			try:
 				with (
@@ -1145,7 +1148,9 @@ def _dispatch_from_session(
 			if result_mode is None and isinstance(result, dict) and result.get("ok"):
 				data, measured, snapshot = result["data"], None, {}
 				if tool == "run_report" and isinstance(data, dict) and not data.get("prepared_report"):
-					data, measured, snapshot = _snapshot_oversized_run_report(data, parsed_args, run_ms)
+					data, measured, snapshot = _snapshot_oversized_run_report(
+						data, parsed_args, run_ms, snapshot_digest
+					)
 				guarded, event = enforce_result_budget(data, tool=tool, measured=measured)
 				if event:
 					result["data"] = guarded
@@ -1175,7 +1180,25 @@ def _dispatch_from_session(
 		_agent_run_ctx.take_request_autorun_applied()  # belt: same for the request-scoped marker
 
 
-def _snapshot_oversized_run_report(data: dict, args, run_ms: int) -> tuple[dict, int | None, dict]:
+# A run this slow is not snapshotted: the create would push the call past the plugin's 30 s abort.
+CREATE_SKIP_AFTER_MS = 20_000
+
+
+def _pre_run_digest(tool: str, args) -> str | None:
+	"""The caller's permission digest for a ``run_report`` call, taken fresh before the run
+	(a per-request memo may hold an older value). None for any other tool, or when it cannot
+	be taken: the snapshot then takes its own."""
+	if tool != "run_report" or not isinstance(args, dict):
+		return None
+	try:
+		return _report_snapshots.perm_digest(frappe.session.user, args.get("report_name"), fresh=True)
+	except Exception:
+		return None
+
+
+def _snapshot_oversized_run_report(
+	data: dict, args, run_ms: int, perm_digest: str | None = None
+) -> tuple[dict, int | None, dict]:
 	"""Store an inline ``run_report`` result that is over the model-facing budget as a
 	report snapshot, so the model can read the whole report through ``query_report``.
 
@@ -1189,29 +1212,34 @@ def _snapshot_oversized_run_report(data: dict, args, run_ms: int) -> tuple[dict,
 	measured = measure(data)
 	if measured is None or measured <= MAX_RESULT_CHARS:
 		return data, measured, {}
+	if run_ms >= CREATE_SKIP_AFTER_MS:
+		return data, measured, {"snapshot": "skipped:slow"}
 	try:
 		filters = _snapshot_filters(args, data)
 		if filters is None:
 			return data, measured, {"snapshot": "skipped:filters"}
 		if not _snapshot_passes_read_gate(args.get("report_name"), filters):
 			return data, measured, {"snapshot": "skipped:gate"}
+		began = time.monotonic()
 		created = _report_snapshots.create(
 			data,
 			report_name=args.get("report_name"),
 			filters=filters,
 			run_ms=run_ms,
 			measured=measured,
+			perm_digest=perm_digest,
 		)
+		create_ms = int((time.monotonic() - began) * 1000)
 	except Exception as exc:  # `create` never raises; this guards the filters step above
 		telemetry.record_snapshot_failure("create_failed", exc)
 		return data, measured, {"snapshot": "failed", "snapshot_error": type(exc).__name__}
 	snapshot_id, reason = created
 	if not snapshot_id:
-		fields = {"snapshot": f"skipped:{reason}"}
+		fields = {"snapshot": f"skipped:{reason}", "snapshot_create_ms": create_ms}
 		if created.error:
 			fields["snapshot_error"] = created.error
 		return data, measured, fields
-	snapshot = {"snapshot": "created", "snapshot_bytes": created.size}
+	snapshot = {"snapshot": "created", "snapshot_bytes": created.size, "snapshot_create_ms": create_ms}
 	return {**data, "run": snapshot_id, "_jarvis_snapshot": True}, measured, snapshot
 
 
