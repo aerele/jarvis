@@ -215,6 +215,16 @@ class TestActivityContract(FrappeTestCase):
 			if "download" in name or "export" in name:
 				self.assertEqual(entry[0], "LOGGED", key)
 
+	def test_no_whitelisted_method_lives_on_a_class(self):
+		endpoints, _, _ = _problems_for_repo()
+		self.assertEqual([ep.key for ep in endpoints if ep.in_class], [])
+
+	def test_the_registry_is_a_pure_literal(self):
+		# load_registry would raise on a call or a name inside the tables.
+		entries, duplicates, _ = load_registry(REGISTRY.read_text())
+		self.assertEqual(duplicates, [])
+		self.assertTrue(entries)
+
 
 # --------------------------------------------------------------------------- #
 # self-test: plant violations, prove the gate fires

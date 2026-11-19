@@ -170,6 +170,12 @@ class TestSignupRefusalsOverTheWire(FrappeTestCase):
 				self.assertEqual(caught.exception.http_status_code, 417)
 				self.assertNotIn(caught.exception.http_status_code, (401, 403))
 
+	def test_an_address_taken_conflict_does_not_trigger_the_failed_payment_resume(self):
+		with patch.object(admin_client, "resume_pending_signup") as resume:
+			with self.assertRaises(frappe.ValidationError):
+				self._signup(409, _thrown("DuplicateEntryError", "PRIVATE_ADDRESS_TAKEN", "Taken."))
+		resume.assert_not_called()
+
 
 class TestGateOrder(FrappeTestCase):
 	def setUp(self):
