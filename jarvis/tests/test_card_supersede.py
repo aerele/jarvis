@@ -201,7 +201,6 @@ class TestSupersede(_Base):
 		self.trigger(conv, "continuation")
 		with as_user(OWNER):
 			res = api._run_tool("create_doc", dict(TODO), conversation=conv)
-		self.assertFalse(res["ok"])
 		self.assertEqual(res["error"]["code"], "ConfirmationPendingError")
 		self.assertIn("confirms or discards it", res["error"]["message"])
 
@@ -310,3 +309,8 @@ class TestSingleFlightRefusalText(FrappeTestCase):
 			"question in that reply.",
 			message,
 		)
+
+	def test_the_envelope_is_the_confirmation_pending_error(self):
+		res = api._single_flight_error()
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["code"], "ConfirmationPendingError")

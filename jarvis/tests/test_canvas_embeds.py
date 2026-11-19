@@ -98,6 +98,9 @@ class TestCanvasPathTraversal(FrappeTestCase):
 	def test_dotdot_mid_path_rejected(self):
 		self.assertEqual(detect_canvas_names("canvas/charts/../../secret.html"), [])
 
+	def test_legit_subdir_still_ok(self):
+		self.assertEqual(detect_canvas_names("canvas/charts/sales.html"), ["charts/sales.html"])
+
 
 class TestPersistCanvasesGatewayFallback(FrappeTestCase):
 	"""End-to-end ``persist_canvases`` behavior when the gateway's canvas route
