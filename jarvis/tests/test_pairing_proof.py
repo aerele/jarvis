@@ -447,6 +447,16 @@ class TestResyncAfterPairing(JarvisSettingsSnapshot, FrappeTestCase):
 			onboarding.run_key_resync()
 		self.assertIn("RuntimeError: admin down", log_error.call_args.kwargs["message"])
 
+	def test_resync_runs_after_rotate_pairing(self):
+		priv_pub = {"device_token": "tok-new"}
+		with (
+			patch("jarvis.chat.device.admin_client.pair_chat_device", return_value=priv_pub),
+			patch("jarvis.chat.device._save_credentials"),
+			patch("jarvis.onboarding.resync_callback_key_after_pairing") as resync,
+		):
+			chat_device._generate_and_pair()
+		resync.assert_called_once_with()
+
 
 class TestSyncConnection(JarvisSettingsSnapshot, FrappeTestCase):
 	def setUp(self):
@@ -702,6 +712,10 @@ class TestReverify(JarvisSettingsSnapshot, FrappeTestCase):
 			self.assertEqual(site_pin.reverify()["error"], "not_verified")
 		with patch("jarvis.admin_client.verify_site", side_effect=AdminAmbiguousError("read timeout")):
 			self.assertEqual(site_pin.reverify()["error"], "unreachable")
+
+	def test_a_normal_answer_carries_no_error(self):
+		with patch("jarvis.admin_client.verify_site", return_value={"proved": True}):
+			self.assertNotIn("error", site_pin.reverify())
 
 	def test_verify_site_sends_instance_id_only_when_given(self):
 		with patch.object(admin_client, "_post", return_value={"proved": True}) as post:

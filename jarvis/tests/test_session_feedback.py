@@ -328,6 +328,12 @@ class TestSubmitSessionFeedback(_SessionFeedbackTestCase):
 		push.assert_not_called()
 		self.assertIsNone(self._stored())
 
+	def test_the_request_never_calls_admin(self):
+		with patch(_PUSH, side_effect=RuntimeError("admin down")) as push:
+			res = submit_session_feedback(self.conv, "Great")
+		self.assertEqual(res, {"ok": True, "recorded": True, "delivered": False})
+		self.assertEqual(self._item(push)["chip_value"], "Great")
+
 	def test_rejects_another_users_conversation(self):
 		frappe.set_user("Administrator")
 		other = create_conversation()

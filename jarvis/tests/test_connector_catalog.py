@@ -67,6 +67,10 @@ _LEGACY_HINTS = {
 
 
 class TestCatalogShape(unittest.TestCase):
+	def test_all_base_urls_https(self):
+		for provider in catalog.PROVIDERS:
+			self.assertTrue(provider.base_url.startswith("https://"), provider.name)
+
 	def test_auth_class_counts_match_probe_sweep(self):
 		counts = {}
 		for provider in catalog.PROVIDERS:
@@ -109,9 +113,19 @@ class TestLegacyPresetsUnchanged(unittest.TestCase):
 		for name, help_url in _LEGACY_HELP_URLS.items():
 			self.assertEqual(catalog.by_name(name).help_url, help_url, name)
 
+	def test_github_is_static_byoa(self):
+		# GitHub moved onto the sign-in engine as a bring-your-own-app static
+		# provider; the legacy per-app sign-in path it used to take was removed.
+		self.assertEqual(catalog.by_name("GitHub").auth, catalog.AUTH_STATIC)
+
 	def test_atlassian_and_linear_are_dcr(self):
 		self.assertEqual(catalog.by_name("Atlassian").auth, catalog.AUTH_DCR)
 		self.assertEqual(catalog.by_name("Linear").auth, catalog.AUTH_DCR)
+
+	def test_stripe_is_token_with_its_existing_hint(self):
+		stripe = catalog.by_name("Stripe")
+		self.assertEqual(stripe.auth, catalog.AUTH_TOKEN)
+		self.assertEqual(stripe.hint, _STRIPE_HINT)
 
 	def test_legacy_token_hints_are_carried_over_verbatim(self):
 		for name, hint in _LEGACY_HINTS.items():
@@ -593,6 +607,10 @@ class TestAuthorizeParams(unittest.TestCase):
 
 		self.assertIs(catalog._RESERVED_AUTHORIZE_PARAMS, flow.RESERVED_AUTHORIZE_PARAMS)
 
+	def test_not_shipped_by_to_public(self):
+		for row in catalog.to_public():
+			self.assertNotIn("authorize_params", row)
+
 	def test_overlay_may_not_change_params_but_may_repeat_them(self):
 		with self.assertRaises(ValueError):
 			catalog.apply_overlay([{"name": "Gmail", "authorize_params": {"prompt": "none"}}])
@@ -663,6 +681,14 @@ class TestAcceptsKey(unittest.TestCase):
 
 class TestGapAnalysisEntries(unittest.TestCase):
 	"""The 2026-09-07 additions: shapes that the probe sweep pinned down."""
+
+	def test_pinned_static_entries_pin_all_three_endpoints(self):
+		for name in ("Shopify", "Docusign"):
+			provider = catalog.by_name(name)
+			self.assertEqual(provider.auth, catalog.AUTH_STATIC, name)
+			self.assertTrue(
+				provider.issuer and provider.authorization_endpoint and provider.token_endpoint, name
+			)
 
 	def test_shopify_ships_switched_off(self):
 		self.assertFalse(catalog.by_name("Shopify").enabled)

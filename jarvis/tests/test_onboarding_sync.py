@@ -2185,6 +2185,14 @@ class TestAccountReconnect(FrappeTestCase):
 			out = onboarding.reconnect_available("a@b.example")
 		self.assertEqual(out, {"eligible": False, "needs_company": False, "company_account_exists": False})
 
+	def test_check_expired_passthrough(self):
+		with patch(
+			"jarvis.onboarding.admin_client.get_reconnect_state",
+			return_value={"status": "expired"},
+		):
+			out = onboarding.check_account_reconnect("rid-x")
+		self.assertEqual(out["status"], "expired")
+
 	# ---- operator-issued code path (redeem_reconnect_code) -------------------
 	def test_redeem_forwards_code_and_email_and_lands_connected(self):
 		"""The request-less path: forward exactly (code, email) to admin and land

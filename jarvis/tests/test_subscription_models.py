@@ -60,6 +60,10 @@ class TestSubscriptionCatalogue(unittest.TestCase):
 			self.assertEqual(dict(cat.SUBSCRIPTION_MODELS), {})
 			self.assertEqual(dict(cat.DEFAULT_MODEL), {})
 
+	def test_coerce_falls_back_to_default_for_bogus_and_empty(self):
+		self.assertEqual(_coerce_subscription_model("OpenAI", "nope"), "gpt-5.6-terra")
+		self.assertEqual(_coerce_subscription_model("OpenAI", ""), "gpt-5.6-terra")
+
 	def test_signin_refuses_with_an_envelope_when_the_catalog_is_unavailable(self):
 		# Never start a sign-in toward a blank model, and never raise out of the
 		# sign-in endpoints: they answer with the {code, message} envelope.
