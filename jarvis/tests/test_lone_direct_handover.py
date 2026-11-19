@@ -880,6 +880,13 @@ class TestHandoverEndsTheSwitch(FrappeTestCase):
 
 		mock_end.assert_called_once_with(f"{_PENDING_HANDOVER_STATUS} (attempt 1)")
 
+	def test_failed_ends_the_switch(self):
+		settings = _handover_ready_settings()
+		with patch("jarvis.chat.llm_switch.end") as mock_end:
+			self._run_with_follow_up(settings, None, last_sync_status="failed: auth: token expired")
+
+		mock_end.assert_called_once_with("failed: auth: token expired")
+
 	def test_a_terminal_outcome_with_a_stale_run_id_never_ends_the_switch(self):
 		"""Review fix wave: the active record now belongs to a DIFFERENT run
 		(e.g. a retarget moved it on while this attempt was executing) - this
@@ -1010,6 +1017,26 @@ class TestSwitchOrEnqueueJoinsAnActiveSwitch(FrappeTestCase):
 		# whatever switch is active) is left exactly as begin()'s own
 		# idempotent retarget leaves it.
 		mock_end.assert_not_called()
+
+	def test_is_switch_true_still_routes_through_begin_when_no_switch_is_active(self):
+		"""Sanity check the OR the other way: a genuine switch-worthy apply
+		with no OTHER switch active still goes through begin(), unchanged
+		from before this fix."""
+		with (
+			patch("jarvis.chat.llm_switch.is_active", return_value=False),
+			patch("jarvis.chat.llm_switch.begin") as mock_begin,
+			patch("frappe.enqueue") as mock_enqueue,
+		):
+			_switch_or_enqueue(
+				frappe._dict(),
+				"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_handover_via_admin",
+				is_switch=True,
+				job_id="jarvis_settings_sync:handover",
+				deduplicate=True,
+			)
+
+		mock_begin.assert_called_once()
+		mock_enqueue.assert_not_called()
 
 	def test_neither_switch_nor_active_enqueues_directly(self):
 		with (

@@ -164,6 +164,10 @@ class TestInstalledAppsSync(FrappeTestCase):
 			ias.after_migrate()  # must not raise
 		logged.assert_called_once()
 
+	def test_record_snapshot_roundtrip(self):
+		ias.record_synced_snapshot()
+		self.assertEqual(ias._synced_apps(), sorted(frappe.get_installed_apps()))
+
 	def test_sync_via_admin_stamps_snapshot_on_send(self):
 		"""_sync_via_admin('restart') must stamp the snapshot right after
 		post_update_llm_creds returns (admin persisted the list desired-first),

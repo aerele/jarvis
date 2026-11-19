@@ -103,6 +103,10 @@ class TestRedactEgress(unittest.TestCase):
 		# The placeholder must NOT be a tenant/agent name - this module names nothing.
 		self.assertNotIn("jarvis", _COLLAPSED_PLACEHOLDER.lower())
 
+	def test_empty_input_stays_empty(self):
+		# The no-collapse invariant applies only to non-empty input; "" stays "".
+		self.assertEqual(redact_egress("", _rules(r"acme")), ("", False))
+
 	def test_compile_rules_tolerates_non_list(self):
 		# A corrupt cache blob (non-iterable) must not raise out of compile_rules.
 		self.assertEqual(compile_rules(123), [])

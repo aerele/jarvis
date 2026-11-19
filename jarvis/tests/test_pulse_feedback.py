@@ -579,6 +579,13 @@ class TestSubmitPulseFeedback(_PulseTestCase):
 		with patch(_FEATURES, return_value={}):
 			self.assertTrue(pulse_context()["due"])
 
+	def test_the_request_never_calls_admin_and_still_silences(self):
+		with patch(_PUSH, side_effect=RuntimeError("admin down")) as push:
+			res = submit_pulse_feedback(stars=2, features_offered=[], features_selected=[])
+		self.assertEqual(res, {"ok": True, "delivered": False})
+		self.assertEqual(self._item(push)["stars"], 2)
+		self.assertEqual(self._pulse().pulse_offer_count, PULSE_MAX_OFFERS)
+
 	def test_free_text_is_bounded(self):
 		with patch(_PUSH) as push:
 			submit_pulse_feedback(

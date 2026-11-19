@@ -261,6 +261,10 @@ class TestWhitespace(FrappeTestCase):
 				self.assertNotIn("/model", out)
 				self.assertIn(SLASH + "model", out)
 
+	def test_python_whitespace_would_miss_feff(self):
+		self.assertFalse("\ufeff".isspace())
+		self.assertIn("\ufeff", df.WS_BODY)
+
 
 class TestNeutralize(FrappeTestCase):
 	"""F4."""
