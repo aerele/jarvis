@@ -73,12 +73,7 @@ def source_receipt(tool, args, result):
 		}
 	stored_args = _references(args)
 	if source_tool in {"query_file", "query_report"}:
-		# A report snapshot answers a call that carried SQL without running it (it was
-		# reloaded): the result says so, and then the call's SQL is not what ran.
-		executed = data.get("sql_executed") if isinstance(data, dict) else None
-		stored_args["source_query_executed"] = (
-			executed if type(executed) is bool else bool(isinstance(args, dict) and args.get("sql"))
-		)
+		stored_args["source_query_executed"] = bool(isinstance(args, dict) and args.get("sql"))
 	return stored_args, stored
 
 

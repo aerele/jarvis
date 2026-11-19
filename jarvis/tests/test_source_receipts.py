@@ -88,48 +88,18 @@ class TestSourceReceipts(unittest.TestCase):
 		self.assertEqual(source_receipt("update_doc", args, result), (args, result))
 
 
-class TestQueryExecutedFollowsTheResult(unittest.TestCase):
-	"""A snapshot reload answers a call that carried SQL without running it."""
-
-	RUN = "rs_" + "a" * 32
-
+class TestQueryExecutedFollowsTheCall(unittest.TestCase):
 	def executed(self, args, data, tool="query_report"):
 		stored_args, _ = source_receipt(tool, args, {"ok": True, "data": data})
 		return stored_args["source_query_executed"]
 
-	def test_sql_that_did_not_run_is_not_recorded_as_run(self):
-		args = {"prepared_report": self.RUN, "sql": "SELECT 1", "version": "a" * 64}
-		self.assertIs(self.executed(args, {"sql_executed": False, "prepared_report": self.RUN}), False)
-
-	def test_sql_that_ran_is_recorded_as_run(self):
-		args = {"prepared_report": self.RUN, "sql": "SELECT 1"}
-		self.assertIs(self.executed(args, {"sql_executed": True}), True)
-
-	def test_the_result_decides_even_when_the_call_had_no_sql(self):
-		self.assertIs(self.executed({"prepared_report": self.RUN}, {"sql_executed": True}), True)
-
-	def test_without_the_field_the_call_decides_as_before(self):
-		self.assertIs(self.executed({"prepared_report": "PR-1", "sql": "SELECT 1"}, {}), True)
-		self.assertIs(self.executed({"prepared_report": "PR-1"}, {}), False)
-		self.assertIs(self.executed({"file_id": "F", "sql": "SELECT 1"}, {"rows": []}, "query_file"), True)
-
-	def test_a_field_that_is_not_a_boolean_is_ignored(self):
-		for value in ("false", 0, 1, None, [], "no"):
-			with self.subTest(value=value):
-				self.assertIs(
-					self.executed({"prepared_report": "P", "sql": "SELECT 1"}, {"sql_executed": value}), True
-				)
-				self.assertIs(self.executed({"prepared_report": "P"}, {"sql_executed": value}), False)
-
-	def test_an_error_result_keeps_the_old_reading(self):
-		args, _ = source_receipt("query_report", {"sql": "SELECT 1"}, {"ok": False, "error": {"code": "X"}})
-		self.assertIs(args["source_query_executed"], True)
-
-	def test_the_field_is_not_kept_in_the_stored_result(self):
-		_, stored = source_receipt(
-			"query_report", {"sql": "SELECT 1"}, {"ok": True, "data": {"sql_executed": False, "rows": [[1]]}}
+	def test_the_call_decides_and_the_result_field_is_not_read(self):
+		run = "rs_" + "a" * 32
+		self.assertIs(
+			self.executed({"prepared_report": run, "sql": "SELECT 1"}, {"sql_executed": False}), True
 		)
-		self.assertNotIn("sql_executed", stored["data"])
+		self.assertIs(self.executed({"prepared_report": run}, {"sql_executed": True}), False)
+		self.assertIs(self.executed({"file_id": "F", "sql": "SELECT 1"}, {"rows": []}, "query_file"), True)
 
 
 class TestStoredSourceReceipt(FrappeTestCase):

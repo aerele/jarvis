@@ -202,6 +202,20 @@ class TestCreate(SnapshotCase):
 		self.assertEqual(meta["perm_digest"], snap.perm_digest("Administrator", self.report.name))
 		self.assertTrue(meta["created_at"])
 
+	def test_a_digest_taken_before_the_run_is_the_one_stored(self):
+		"""A role removed during a long run must not stamp the old-access rows with the new
+		digest: `create` stores the digest it is given, not one taken after the run."""
+		before = snap.perm_digest("Administrator", self.report.name, fresh=True)
+		with patch.object(frappe, "get_roles", return_value=["System Manager", "Another Role"]):
+			digest.forget_perm_digest()  # a new request computes the post-run value
+			snapshot_id = self.make(perm_digest=before)
+			self.assertNotEqual(snap.perm_digest("Administrator", self.report.name), before)
+			self.assertEqual(_meta(snapshot_id)["perm_digest"], before)
+			with self.assertRaises(RetryLaterError) as caught:  # the next read sees the change
+				snap.SnapshotSource(snapshot_id).read()
+		self.assertEqual(str(caught.exception), CHANGED)
+		self.assertEqual(_has(_content_key(snapshot_id)), 0)
+
 	def test_keys_are_site_prefixed_and_expire(self):
 		snapshot_id = self.make()
 		cache = frappe.cache()
