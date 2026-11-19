@@ -229,7 +229,6 @@ test("a floor row of its own height: floorFit takes the row, the Diwali row by d
   const tall = { up: 200, rise: 0 };
   const over = 560 - (500 - FLOOR_GAP_PX);
   assert.equal(floorFit({ ...args, row: tall }).scale, 1 - over / 200);
-  assert.equal(floorFit({ ...args, row: tall }).scale, 1 - 72 / 200); // 72 = 560 - (500 - 12)
   assert.equal(
     floorFit({ ...args, row: { up: 20, rise: 0 } }).scale,
     MIN_FLOOR_SCALE

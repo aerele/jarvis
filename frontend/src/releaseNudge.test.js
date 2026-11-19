@@ -34,7 +34,6 @@ test("pillFor: soft -> amber; behind>=1 shows the count, behind<1 falls back", (
 		tone: "amber",
 		label: "2 versions behind",
 	});
-	assert.equal(pillFor({ version: "16.4.0", tier: "soft" }).tone, "amber");
 	// behind==1 is singular: "1 version behind", never "1 versions behind".
 	assert.equal(
 		pillFor({ version: "16.4.0", tier: "soft", behind: 1 }).label,
@@ -54,7 +53,6 @@ test("pillFor: hard -> red; behind>=1 shows the count, behind<1 falls back", () 
 		tone: "red",
 		label: "5 versions behind",
 	});
-	assert.equal(pillFor({ version: "16.4.0", tier: "hard" }).tone, "red");
 	// behind==1 is singular: "1 version behind", never "1 versions behind".
 	assert.equal(
 		pillFor({ version: "16.4.0", tier: "hard", behind: 1 }).label,
@@ -69,7 +67,6 @@ test("pillFor: severe -> red (non-blocking); behind>=1 shows the count, behind<1
 		tone: "red",
 		label: "4 versions behind",
 	});
-	assert.equal(pillFor({ version: "16.4.0", tier: "severe" }).tone, "red");
 	// behind==1 is singular: "1 version behind", never "1 versions behind".
 	assert.equal(
 		pillFor({ version: "16.4.0", tier: "severe", behind: 1 }).label,
@@ -97,6 +94,16 @@ test("pillFor: an unknown-but-versioned future tier -> amber, NEVER a false gree
 	assert.equal(p.tone, "amber");
 	assert.equal(p.label, "Update available");
 	assert.notEqual(p.tone, "green");
+});
+
+test("pillFor: the pill only nudges - none is hidden, every other versioned tier is amber/red", () => {
+	// Regression pin: "none" (up to date) shows no pill at all; green is never
+	// produced. Every other versioned tier is a nudge (amber/red), never green.
+	assert.equal(pillFor({ version: "16.4.0", tier: "none" }).show, false);
+	assert.equal(pillFor({ version: "16.4.0", tier: "soft" }).tone, "amber");
+	assert.equal(pillFor({ version: "16.4.0", tier: "severe" }).tone, "red");
+	assert.equal(pillFor({ version: "16.4.0", tier: "hard" }).tone, "red");
+	assert.equal(pillFor({ version: "16.4.0", tier: "future-thing" }).tone, "amber");
 });
 
 // ---- bannerToneFor: single-sourced from pillFor --------------------------
