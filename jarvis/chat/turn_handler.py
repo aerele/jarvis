@@ -823,6 +823,26 @@ def _session_model_patch(conv) -> tuple[bool, str | None]:
 	return True, model_ref_for_gateway(provider, model)
 
 
+def set_session_model_refreshing(sess, session_key: str, conv, model_ref) -> None:
+	"""``sess.set_session_model`` with ONE self-heal. A pin the gateway definitively refuses
+	(not a session-changed race) may have been built from stale facts: after a flip of the
+	native pool the site learns it only on the next heartbeat, and a pick can name a provider
+	that no longer exists. Re-read the facts from admin once, rebuild the pin, and retry once
+	if it changed. If the refresh fails or changes nothing, the original error is raised."""
+	from jarvis.chat.agent_client import is_definitive_refusal, is_session_changed
+	from jarvis.native_runtime import refresh_from_admin
+
+	try:
+		sess.set_session_model(session_key, model_ref)
+	except AgentUnreachableError as err:
+		if not is_definitive_refusal(err) or is_session_changed(err) or not refresh_from_admin():
+			raise
+		_, fresh = _session_model_patch(conv)
+		if fresh == model_ref:
+			raise
+		sess.set_session_model(session_key, fresh)
+
+
 # Effort levels the chat pickers offer. Mirrors ``Jarvis Conversation.thinking_override``,
 # a Select limited to low/medium/high; the agent knows more levels, but offering one the
 # Select rejects would fail the save.
@@ -2065,7 +2085,7 @@ def handle_chat_send(payload: dict) -> None:
 				# See _session_model_patch.
 				if patch_session_model:
 					try:
-						sess.set_session_model(conv.session_key, session_model_ref)
+						set_session_model_refreshing(sess, conv.session_key, conv, session_model_ref)
 					except AgentUnreachableError:
 						raise
 					except Exception:

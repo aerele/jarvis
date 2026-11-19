@@ -92,3 +92,16 @@ def _refresh_proxy_active() -> None:
 	wanted = 1 if compute_proxy_active(settings) else 0
 	if cint(settings.get("proxy_active")) != wanted:
 		frappe.db.set_single_value(SETTINGS, "proxy_active", wanted, update_modified=False)
+
+
+def refresh_from_admin() -> bool:
+	"""Read the two facts from admin now, through the same connection read the daily sync
+	uses, and store them. For the moment a pin is refused and the stored facts may lag a
+	flip by up to one heartbeat. True when the read and the store worked. Never raises."""
+	try:
+		from jarvis import admin_client
+
+		persist(admin_client.get_connection(timeout_s=8) or {})
+		return True
+	except Exception:
+		return False

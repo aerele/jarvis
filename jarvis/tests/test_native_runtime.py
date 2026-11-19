@@ -414,3 +414,87 @@ class TestClaudeMemberOnANativePool(unittest.TestCase):
 		):
 			conv.model_override = "grok-4"
 			self.assertEqual(turn_handler._resolve_model_and_provider(conv), ("grok-4", "xai"))
+
+
+class TestPinSelfHealWhenFactsAreStale(unittest.TestCase):
+	_MODELS = [_sub("claude-opus-5", "anthropic", order=0), _sub("gpt-5.5", order=1)]
+
+	def _patch(self, settings, conv):
+		with (
+			patch.object(turn_handler.frappe, "get_single", return_value=settings),
+			patch.object(turn_handler, "_is_native_claude_pick", return_value=False),
+		):
+			return turn_handler._session_model_patch(conv)
+
+	def test_a_conversation_pinned_before_the_flip_is_repatched_with_the_real_provider(self):
+		conv = frappe._dict(model_override="gpt-5.5")
+		before = self._patch(_settings(self._MODELS, proxy_active=1), conv)
+		self.assertEqual(before, (True, "openai_compat/gpt-5.5"))
+		after = self._patch(_settings(self._MODELS, proxy_active=0, native_subscription_pool=1), conv)
+		self.assertEqual(after, (True, "openai/gpt-5.5"))
+
+	def _refused(self, code="INVALID_REQUEST"):
+		from jarvis.exceptions import AgentUnreachableError
+
+		err = AgentUnreachableError("refused")
+		err.rejected_method, err.code = "sessions.patch", code
+		return err
+
+	def _run(self, errors, refreshed, fresh_ref):
+		sess = MagicMock()
+		sess.set_session_model.side_effect = errors
+		with (
+			patch("jarvis.native_runtime.refresh_from_admin", return_value=refreshed) as refresh,
+			patch.object(turn_handler, "_session_model_patch", return_value=(True, fresh_ref)),
+		):
+			try:
+				turn_handler.set_session_model_refreshing(sess, "k", frappe._dict(), "openai_compat/gpt-5.5")
+				raised = None
+			except Exception as e:
+				raised = e
+		return sess, refresh, raised
+
+	def test_a_refused_pin_refreshes_the_facts_once_and_retries_with_the_new_pin(self):
+		sess, refresh, raised = self._run([self._refused(), None], True, "openai/gpt-5.5")
+		self.assertIsNone(raised)
+		refresh.assert_called_once()
+		self.assertEqual(
+			[c.args[1] for c in sess.set_session_model.call_args_list],
+			["openai_compat/gpt-5.5", "openai/gpt-5.5"],
+		)
+
+	def test_the_original_error_stands_when_the_refresh_fails_or_changes_nothing(self):
+		first = self._refused()
+		for refreshed, fresh in ((False, "openai/gpt-5.5"), (True, "openai_compat/gpt-5.5")):
+			sess, _, raised = self._run([first], refreshed, fresh)
+			self.assertIs(raised, first)
+			self.assertEqual(sess.set_session_model.call_count, 1)
+
+	def test_a_second_refusal_is_not_refreshed_again(self):
+		sess, refresh, raised = self._run([self._refused(), self._refused()], True, "openai/gpt-5.5")
+		self.assertIsNotNone(raised)
+		refresh.assert_called_once()
+		self.assertEqual(sess.set_session_model.call_count, 2)
+
+	def test_temporary_errors_and_session_changed_do_not_refresh(self):
+		for code in ("UNAVAILABLE",):
+			sess, refresh, raised = self._run([self._refused(code)], True, "openai/gpt-5.5")
+			self.assertIsNotNone(raised)
+			refresh.assert_not_called()
+		changed = self._refused()
+		changed.details = {"reason": "session-changed"}
+		sess, refresh, raised = self._run([changed], True, "openai/gpt-5.5")
+		self.assertIs(raised, changed)
+		refresh.assert_not_called()
+
+	def test_refresh_from_admin_stores_the_connection_facts_and_never_raises(self):
+		reply = {"native_subscription_pool": True, "agent_runtime_version": "2026.11.5"}
+		with (
+			patch("jarvis.admin_client.get_connection", return_value=reply) as read,
+			patch.object(native_runtime, "persist") as persist,
+		):
+			self.assertTrue(native_runtime.refresh_from_admin())
+		read.assert_called_once()
+		persist.assert_called_once_with(reply)
+		with patch("jarvis.admin_client.get_connection", side_effect=RuntimeError("down")):
+			self.assertFalse(native_runtime.refresh_from_admin())
