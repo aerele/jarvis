@@ -108,6 +108,11 @@ class TestKnowledgeLanguage(unittest.TestCase):
 		self.assertEqual(directive, knowledge_language._ORIGINAL_DIRECTIVE)
 		self.assertIn("dominant language of the source material", directive)
 
+	def test_directive_always_non_empty(self):
+		for value in (None, "English", "Original", "Klingon", ""):
+			_set_value(value if value else None)
+			self.assertTrue(knowledge_language.language_directive())
+
 	# ------------------------------------------------------------------ #
 	# voice_facts prompt wiring (the single boundary for rule AND context
 	# facts - context facts bypass the wiki ingest prompt entirely)
@@ -130,6 +135,12 @@ class TestKnowledgeLanguage(unittest.TestCase):
 		system = m.call_args.args[0][0]["content"]
 		self.assertIn(knowledge_language._ORIGINAL_DIRECTIVE, system)
 		self.assertNotIn(knowledge_language._ENGLISH_DIRECTIVE, system)
+
+	# ------------------------------------------------------------------ #
+	# _SETTINGS_DEFAULTS seeding (after_migrate)
+	# ------------------------------------------------------------------ #
+	def test_settings_default_registered(self):
+		self.assertEqual(voice_facts._SETTINGS_DEFAULTS.get(FIELD), "English")
 
 	def test_after_migrate_seeds_missing_row_only(self):
 		_set_value(None)

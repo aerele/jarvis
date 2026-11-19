@@ -728,6 +728,12 @@ class TestJF014UnsignedPathRetired(_PluginAuthTestBase):
 		self.assertEqual(frappe.local.response.http_status_code, 400)
 		self.assertIn("signature headers required", result["error"]["message"])
 
+	def test_signed_request_still_accepted_with_flag_off(self):
+		"""No regression for the path every shipped plugin build uses."""
+		with self._conf(self._ABSENT):
+			result = self._call()
+		self.assertTrue(result["ok"], msg=result)
+
 	def test_removed_flag_values_never_reopen_the_path(self):
 		"""The retired site_config key is ignored: no value re-opens the path."""
 		for value in (self._ABSENT, 0, "0", "", None, False, "false", "no", "maybe", 1, "1", True, "yes"):
@@ -893,6 +899,26 @@ class TestRotateAgentTokenEndpoint(JarvisSettingsSnapshot, FrappeTestCase):
 			frappe.set_user("Administrator")
 			frappe.delete_doc("User", user_email, force=True, ignore_permissions=True)
 			frappe.db.commit()
+
+
+class TestC2AgentTokenExpiry(_PluginAuthTestBase):
+	"""C2 token age is advisory (#16b): nothing rotates the agent_token on its own
+	yet, so an old token is NOT refused (that would take the agent down on day N);
+	oauth.cron.check_agent_token_age tells System Managers to rotate instead
+	(tests/test_agent_token_age.py)."""
+
+	def _patch_settings(self, *, max_age_days: int, age_days: int | None):
+		"""Patch the token read at its use site (the plugin-auth key read is a direct
+		password lookup, not a Settings doc). The age arguments are what the loop below
+		varies: plugin-auth must not look at them at all."""
+		return patch("jarvis._plugin_auth._agent_token", return_value=self.TOKEN)
+
+	def test_tokens_of_any_age_are_accepted(self):
+		for max_age_days, age_days in ((0, 1000), (90, None), (90, 30), (90, 90), (90, 100)):
+			with self.subTest(max_age_days=max_age_days, age_days=age_days):
+				with self._patch_settings(max_age_days=max_age_days, age_days=age_days):
+					result = self._call()
+				self.assertTrue(result["ok"], msg=result)
 
 
 class TestDispatchFromSessionResultBudget(FrappeTestCase):

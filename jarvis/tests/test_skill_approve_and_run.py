@@ -948,6 +948,24 @@ class TestPumpPrepareBindsTurnMessage(FrappeTestCase):
 		frappe.db.commit()
 		return run_id
 
+	def test_run_prepare_binds_seed_message_before_dispatch(self):
+		"""The bind fires with the turn's genuine (conversation, seed_message). Mutation-
+		verify: removing the bind from run_prepare leaves the mock uncalled - red."""
+		from jarvis.chat import prepare
+
+		conv = _make_conv(TEST_USER)
+		seed = _make_user_msg(conv, TEST_USER, "/someskill do it")
+		run_id = self._queued_turn(conv, seed)
+		bind_mock = MagicMock()
+		with (
+			patch("jarvis.chat.turn_message_binding.bind_turn_message", bind_mock),
+			patch("jarvis.chat.prepare._create_placeholder_locked", return_value="amsg-fake"),
+			patch("jarvis.chat.turn_state.attach_placeholder", return_value=True),
+			patch("jarvis.chat.turn_handler.assemble_prompt", side_effect=RuntimeError("stop here")),
+		):
+			prepare.run_prepare(run_id, self._target)
+		bind_mock.assert_called_once_with(conv, seed)
+
 	def test_real_binding_reads_back_the_seed(self):
 		"""End-to-end (bind NOT patched): after run_prepare, the binding reads back the
 		exact seed message id - proof the pump path leaves a genuine, offer-gate-usable
@@ -1415,6 +1433,9 @@ class TestSkillAutorunPartition(FrappeTestCase):
 			"run) or never (always parks) - a tool in neither is a fail-open gap",
 		)
 
+	def test_every_covered_member_is_a_gated_write(self):
+		self.assertLessEqual(api._SKILL_AUTORUN_COVERED, api._GATED_WRITES)
+
 	def test_covered_is_the_exact_expected_set(self):
 		# Fail-closed pin: _COVERED is derived (_GATED_WRITES - _BRAKE), so adding a
 		# gated tool auto-covers it - this exact-membership assertion goes RED until a
@@ -1469,6 +1490,9 @@ class TestSkillAutorunPartition(FrappeTestCase):
 		self.assertNotIn("create_custom_skill", api._SKILL_AUTORUN_COVERED)
 		self.assertNotIn("create_custom_skill", api._ARMED_SKIP_COVERED)
 		self.assertIn("create_custom_skill", api._BRAKE)
+
+	def test_run_method_is_covered(self):
+		self.assertIn("run_method", api._SKILL_AUTORUN_COVERED)
 
 
 class TestSkillAutorunGate(FrappeTestCase):
@@ -2683,6 +2707,28 @@ class TestMacroSkillFlagSeparation(FrappeTestCase):
 		with patch.object(chat_api, "validate_can_send", return_value=(True, None)):
 			with self.assertRaises(frappe.ValidationError):
 				chat_api.send_message(conversation=conv, message="let me in")
+
+	def test_send_is_allowed_and_clears_skill_autorun_conv(self):
+		"""INVARIANT (opposite of the test above): skill_autorun=1 (an approved skill
+		run) never blocks an interactive send - a genuine new top-level message is
+		close-trigger #2 (design §3.4 "Other close-triggers") and ENDS the run,
+		leaving skill_autorun 0 rather than refusing the send."""
+		from jarvis.chat.api import send_message
+		from jarvis.tests._transport_helpers import provision_legacy_site
+
+		provision_legacy_site(self)
+		conv = _make_conv(TEST_USER)
+		_stamp_autorun(conv)
+		frappe.set_user(TEST_USER)
+		with patch("jarvis.chat.api._ensure_session_key", return_value="agent:fake"):
+			with patch("frappe.enqueue"):
+				res = send_message(conv, "make three todos please")
+		self.assertTrue(res["ok"], "a skill_autorun conversation must accept an interactive send")
+		self.assertEqual(
+			int(frappe.db.get_value(CONV, conv, "skill_autorun") or 0),
+			0,
+			"a new top-level message closes the approved run",
+		)
 
 	def test_confirm_refused_on_skip_confirmation_conv(self):
 		"""INVARIANT: skip_confirmation=1 withdraws a parked card's confirm too, not

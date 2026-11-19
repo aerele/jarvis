@@ -661,6 +661,12 @@ class TestCacheAndClaudeOutputEstimate(FrappeTestCase):
 		r = self._turn_row("agent:tu-cli-big")
 		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (900, 0))
 
+	def test_non_cli_row_never_estimated(self):
+		_make_session("agent:tu-gpt-tiny", USER_A)
+		usage.record_turn_usage("agent:tu-gpt-tiny", self._gpt_row(outputTokens=3), reply_chars=100000)
+		r = self._turn_row("agent:tu-gpt-tiny")
+		self.assertEqual((r.tokens_out, r.tokens_out_estimated), (3, 0))
+
 	def test_claude_model_name_alone_is_not_a_cli_marker(self):
 		_make_session("agent:tu-api-claude", USER_A)
 		row = self._cli_row(agentRuntime={"id": "default", "source": "provider"})

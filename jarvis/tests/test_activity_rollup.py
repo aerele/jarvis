@@ -581,6 +581,10 @@ class TestRollup(RollupCase):
 			self.assertEqual(ru._roll_day(d(1), advance=True), "skipped")  # an advancing roll does lock
 			self.assertEqual(len(locks()), 1)
 
+	def test_the_budget_is_240_seconds(self):
+		self.assertEqual(ru.TIME_BUDGET_S, 240)
+		self.assertEqual(ru.LOCK_TTL_S, 600)
+
 	def test_yesterday_is_rerolled_by_every_run_of_the_following_day(self):
 		# A row can commit hours after its ``at`` (a long transaction): yesterday stays open
 		# for the whole next day, not for a 2 h grace window that closed it undercounted.
@@ -1332,6 +1336,9 @@ class TestLiveCap(RollupCase):
 		res = self.people(frm, to)
 		p = person(res, A)
 		return res, (p["reads"] if p else 0)
+
+	def test_the_cap_is_seven_days(self):
+		self.assertEqual(ar.LIVE_DAY_CAP, 7)
 
 	def test_only_the_seven_most_recent_unrolled_days_are_computed_live(self):
 		calls = self.counted()
