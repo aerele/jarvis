@@ -1273,7 +1273,9 @@ def _mark_fields(err_obj: dict, verb: str, doctype: str, name: str, values: dict
 	from jarvis.chat.panel_fields import invalid_marks, missing_marks
 
 	invalid = invalid_marks(verb, doctype, name, values)
-	missing = missing_marks(verb, doctype, name, values) if isinstance(exc, frappe.MandatoryError) else []
+	missing = (
+		missing_marks(verb, doctype, name, values, str(exc)) if isinstance(exc, frappe.MandatoryError) else []
+	)
 	if missing is None:
 		if not invalid:
 			return False

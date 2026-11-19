@@ -6,6 +6,10 @@ accept (``invalid``: an option the Select does not list, a link to a record that
 does not exist, a value the field type check refuses). Every mark is worked out
 from the draft itself, not parsed from the error, so a save that failed on one
 problem still marks the others (a missing value AND a bad link are both marked).
+One exception (#2171): a value a controller requires in code (Frappe's
+``reqd`` does not know it, e.g. a field another app makes mandatory under a setting)
+raises a ``MandatoryError`` with only a message. A field still empty in the draft and
+named in that message by its label or fieldname is marked too, on any DocType.
 
 Only top-level values are checked for ``invalid``; a child row's bad value stays in
 the message (the panel's grid has no per-cell marks). A missing value the panel
@@ -26,13 +30,14 @@ def invalid_marks(verb: str, doctype: str, name: str, values: dict) -> list[dict
 	return [] if doc is None else _invalid(doc.meta, doctype, values)
 
 
-def missing_marks(verb: str, doctype: str, name: str, values: dict) -> list[dict] | None:
+def missing_marks(verb: str, doctype: str, name: str, values: dict, message: str = "") -> list[dict] | None:
 	"""Marks for required values still empty (None: one the panel cannot fill). Only
 	for a "Value missing" failure: Frappe checks links before the controller fills its
 	own required fields, so after any other failure the draft would show gaps that
-	are not the person's to fill."""
+	are not the person's to fill. ``message`` is the failure's text: an empty field it
+	names is marked as well (a value a controller requires in code)."""
 	doc = _draft_doc(verb, doctype, name, values)
-	return [] if doc is None else _missing(doc, verb)
+	return [] if doc is None else _missing(doc, verb, message)
 
 
 def mark_entry(meta, missing: dict) -> dict:
@@ -102,7 +107,7 @@ def _link_exists(doctype: str, value) -> bool:
 	return bool(frappe.db.exists(doctype, value))
 
 
-def _missing(doc, verb: str) -> list[dict] | None:
+def _missing(doc, verb: str, message: str = "") -> list[dict] | None:
 	"""Required values still empty, as the panel can mark them (None: one it cannot).
 	A create is run in a rollback sandbox with mandatory checks off, so values its
 	controller fills (a Sales Order's currency) are not asked for; when that run fails
@@ -112,7 +117,44 @@ def _missing(doc, verb: str) -> list[dict] | None:
 	if verb == "create":
 		_fill_in_sandbox(doc)
 	found = missing_fields(doc, 0)
-	return None if found is None else [mark_entry(doc.meta, m) for m in _skip_fetched(doc, found)]
+	if found is None:
+		return None
+	found = _skip_fetched(doc, found)
+	seen = {m["fieldname"] for m in found if not m.get("parentfield")}
+	# Not passed through _skip_fetched: the failure itself says the value is still
+	# missing, so a fetch_from source that is set (an Item Group with no HSN code)
+	# did not fill it.
+	found += [m for m in _named_in_message(doc, message) if m["fieldname"] not in seen]
+	return [mark_entry(doc.meta, m) for m in found]
+
+
+def _named_in_message(doc, message: str) -> list[dict]:
+	"""Top-level fields still empty in ``doc`` that the failure's message names, by label
+	(as written or translated) or fieldname, as a whole word or phrase: a value the
+	controller requires in code, which ``reqd`` does not list. Only fields the panel can
+	fill: not a table or other non-form field, not a secret, not above permlevel 0."""
+	import re
+
+	from frappe.utils import strip_html
+
+	from jarvis.chat._record_summary import is_secret
+	from jarvis.chat.api import _NON_EDIT_FIELDTYPES
+
+	text = strip_html(message or "").casefold()
+	if not text.strip():
+		return []
+	named = []
+	for df in doc.meta.fields:
+		if df.fieldtype in _NON_EDIT_FIELDTYPES or df.permlevel or is_secret(doc.meta, df.fieldname):
+			continue
+		if doc.get(df.fieldname) not in (None, ""):
+			continue
+		names = {df.fieldname, df.label or "", _(df.label) if df.label else ""}
+		for term in (n.strip().casefold() for n in names):
+			if len(term) >= 2 and re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text):
+				named.append({"fieldname": df.fieldname})
+				break
+	return named
 
 
 def _skip_fetched(doc, found: list[dict]) -> list[dict]:
