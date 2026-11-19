@@ -38,6 +38,10 @@ class TestFromQuery(FrappeTestCase):
 		m = from_query("ToDo", filters={"description": ["like", "resolver-test-%"]})
 		self.assertIn("name", m.columns)
 
+	def test_rejects_star_fields(self):
+		with self.assertRaises(InvalidArgumentError):
+			from_query("ToDo", fields=["*"])
+
 	def test_child_table_needs_parent_doctype(self):
 		# "Has Role" is a child table (istable) of User.
 		with self.assertRaises(InvalidArgumentError) as ctx:

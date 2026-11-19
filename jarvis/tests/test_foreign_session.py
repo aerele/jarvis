@@ -102,6 +102,11 @@ class TestForeignSessionHardening(JarvisSettingsSnapshot, FrappeTestCase):
 		_clear_cache(KEYS)
 		self.addCleanup(_clear_cache, KEYS)
 
+	def test_prefix_is_a_persistent_cache_key(self):
+		from jarvis import hooks
+
+		self.assertIn("jarvis:foreign_session:", hooks.persistent_cache_keys)
+
 	def test_throttle_survives_a_full_cache_clear(self):
 		with patch("frappe.enqueue"):
 			self.assertTrue(foreign_session.record(KEYS[0]))
@@ -231,6 +236,12 @@ class TestForeignSessionHardening(JarvisSettingsSnapshot, FrappeTestCase):
 			foreign_session.record(KEYS[1])
 		self.assertEqual(enq.call_args.kwargs["job_id"], "jarvis-foreign-session-report")
 		self.assertTrue(enq.call_args.kwargs["deduplicate"])
+
+	def test_notice_is_claimed_before_notifying(self):
+		with patch("jarvis.learning.lifecycle.notify_system_managers") as notify:
+			foreign_session._notify_system_managers_once_a_day()
+			foreign_session._notify_system_managers_once_a_day()
+		notify.assert_called_once_with(_NOTICE_SUBJECT, foreign_session.NOTICE_MESSAGE)
 
 
 class TestCallToolRecordsForeignSession(JarvisSettingsSnapshot, FrappeTestCase):

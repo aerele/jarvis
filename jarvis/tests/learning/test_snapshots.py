@@ -152,6 +152,11 @@ class TestSnapshotUpsert(FrappeTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			snapshots.upsert_monthly(_TEST_DETECTOR, "2026-13", None, {"counts": {}})
 
+	def test_engine_fence_covers_snapshot_writes(self):
+		from jarvis.learning.engine import ALLOWED_WRITE_DOCTYPES
+
+		self.assertIn(SNAPSHOT, ALLOWED_WRITE_DOCTYPES)
+
 
 class TestPrintLogIngest(FrappeTestCase):
 	"""Stream -> resolve -> monthly snapshot -> watermark, engine-side."""

@@ -385,6 +385,14 @@ class TestPromotionFlow(unittest.TestCase):
 			again = learned_api.decide_promotion(req.name, 1, "second")
 		self.assertFalse(again["ok"])
 
+	def test_decide_promotion_delegates_with_reviewer_identity(self):
+		# The write itself lives in the wiki helper; the gate + reviewer stamping
+		# live here. Assert the delegation contract (reviewer = session user).
+		with mock.patch("jarvis.chat.wiki.apply_promotion", return_value={"ok": True}) as ap:
+			with _as(REVIEWER):
+				learned_api.decide_promotion("JWPR-XYZ", 1, "n")
+		ap.assert_called_once_with("JWPR-XYZ", 1, "n", reviewer=REVIEWER)
+
 	def test_decide_promotion_refused_for_plain(self):
 		_page, req = _mk_promo(to_scope="Org")
 		with _as(PLAIN), enforced_role_guards():
