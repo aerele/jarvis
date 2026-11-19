@@ -413,6 +413,31 @@ class TestBurstAndCancel(_AdmissionTestCase):
 		self.assertEqual(admission._position_of(runs[5], admission.DEFAULT_RELAY_TARGET), 1)
 
 
+class TestContinuationNoBypass(_AdmissionTestCase):
+	def test_continuation_queues_at_cap_and_does_not_bypass(self):
+		"""R-7: enqueue_continuation routes through admission. At cap, the
+		continuation becomes a durable queued turn instead of a privileged
+		bypass that runs concurrently."""
+		conv = self._mk_conv()
+		s1 = self._mk_msg(conv, 1)
+		dispatched = []
+		with (
+			patch.object(admission, "_max_inflight", return_value=1),
+			patch.object(
+				chat_api, "_dispatch_turn", side_effect=lambda *a, **k: dispatched.append(a[0]["run_id"])
+			),
+		):
+			# Occupy the single credit with a live turn on this conversation.
+			self._accept(conv, "live", s1)
+			self.assertEqual(self._state("live"), "dispatching")
+			# A confirm continuation now must queue (not bypass).
+			out = chat_api.enqueue_continuation(conv, "created ORD-001")
+		run_id = out["run_id"]
+		self.assertEqual(self._state(run_id), "queued")
+		# It never dispatched while the live turn holds the credit.
+		self.assertNotIn(run_id, dispatched)
+
+
 class TestFourCallersGated(_AdmissionTestCase):
 	def test_send_message_creates_turn(self):
 		conv = self._mk_conv()
@@ -433,6 +458,17 @@ class TestFourCallersGated(_AdmissionTestCase):
 		# OAR-3: retry reuses the EXISTING user message; no new user row.
 		self.assertEqual(frappe.db.get_value(TURN, res["run_id"], "seed_message"), u)
 		self.assertEqual(frappe.db.count(MSG, {"conversation": conv, "role": "user"}), 1)
+
+	def test_redispatch_orphan_creates_background_turn(self):
+		conv = self._mk_conv()
+		u = self._mk_msg(conv, 1)
+		with patch.object(chat_api, "_dispatch_turn", side_effect=lambda *a, **k: None):
+			chat_api._redispatch_orphan(conv, u)
+		row = frappe.db.get_value(
+			TURN, {"conversation": conv, "seed_message": u}, ["turn_class", "state"], as_dict=True
+		)
+		self.assertIsNotNone(row)
+		self.assertEqual(row["turn_class"], "background")
 
 	def test_enqueue_turn_macro_caller_creates_turn(self):
 		conv = self._mk_conv()

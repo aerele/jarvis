@@ -68,6 +68,19 @@ class TestEnforceResultBudget(unittest.TestCase):
 		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
 		self.assertEqual(event["kind"], "truncated")
 
+	def test_query_huge_sql_bounds_rows_keeps_sql(self):
+		# The non-row bulk (the SQL text) alone exceeds the budget: rows can't be
+		# truncated under the cap, so ALL rows are dropped to bound the blast radius
+		# while the sql is preserved (not itself truncated). uncapped_nonrow.
+		data = {"sql": "x" * (MAX_RESULT_CHARS + 5000), "rows": [{"n": 1}]}
+		out, ev = enforce_result_budget(data, tool="query")
+		self.assertEqual(ev["kind"], "uncapped_nonrow")
+		self.assertTrue(out["_truncated"])
+		self.assertEqual(out["sql"], data["sql"])
+		self.assertEqual(out["rows"], [])
+		self.assertEqual(out["shown"], 0)
+		self.assertEqual(ev["total"], 1)
+
 	def test_single_giant_row_returns_empty_rows_note(self):
 		data = [{"blob": "x" * (MAX_RESULT_CHARS + 5000)}]
 		out, ev = enforce_result_budget(data, tool="get_list")

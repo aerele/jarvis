@@ -1047,6 +1047,13 @@ class TestQueryBarrierAndFacets(unittest.TestCase):
 					[{"doctype": MACRO, "fieldname": "enabled", "operator": "=", "value": 1}]
 				)
 
+	def test_unknown_view_still_fails_closed_on_the_empty_path(self):
+		"""The short-circuit must not become a way to smuggle a bad view_key past
+		the contract check."""
+		with self.assertRaises(ListFilterError) as caught:
+			compile_list_filters("not-a-view", [], user=USER_A)
+		self.assertEqual(caught.exception.filter_error_code, ERR_UNKNOWN_VIEW)
+
 
 # --------------------------------------------------------------------------- #
 # 8. Typed compilation details

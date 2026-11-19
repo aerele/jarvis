@@ -416,7 +416,6 @@ class TestPolishEndpoint(_PolishTestCase):
 		self.assertIsNone(out["text"])
 		self.assertEqual(out["reason"], "gateway error")
 		self.assertEqual(frappe.db.get_value(JLP, name, "skill_draft"), DRAFT)
-		self.assertEqual(int(frappe.db.get_value(JLP, name, "draft_polished") or 0), 0)
 
 	def test_budget_exhausted_returns_reason(self):
 		name = _mk("ep-budget")

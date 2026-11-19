@@ -66,6 +66,16 @@ class TestCallConnectorDelegation(unittest.TestCase):
 		broker_call.assert_called_once_with("github", "create_issue", {"title": "x"}, run_id="sess-1")
 		self.assertIs(result, broker_result)
 
+	def test_broker_error_result_passed_through_unmodified(self):
+		broker_result = {"ok": False, "error": {"code": "action_denied", "message": "nope"}}
+		with (
+			mock.patch.object(call_connector, "get_session_key", return_value=None),
+			mock.patch.object(call_connector.broker, "resolve_for_status", return_value=_ready_row()),
+			mock.patch.object(call_connector.broker, "call", return_value=broker_result),
+		):
+			result = call_connector.call_connector("github", "delete_repo")
+		self.assertEqual(result, broker_result)
+
 	def test_unresolvable_connector_falls_through_to_broker(self):
 		"""Unknown / not-visible-to-caller is broker.call's own error to raise
 		(connector_not_found) - the readiness pre-check must not invent a
@@ -125,6 +135,16 @@ class TestCallConnectorReadiness(unittest.TestCase):
 		# update_connector clears tools_cache on a credential/base_url change
 		# without necessarily rewriting last_test_status in the same edit.
 		self._not_ready(_ready_row(tools_cache=None))
+
+	def test_enabled_and_passed_with_cache_is_ready(self):
+		broker_result = {"ok": True, "result": {}}
+		with (
+			mock.patch.object(call_connector.broker, "resolve_for_status", return_value=_ready_row()),
+			mock.patch.object(call_connector.broker, "call", return_value=broker_result) as broker_call,
+		):
+			result = call_connector.call_connector("github", "create_issue")
+		broker_call.assert_called_once()
+		self.assertEqual(result, broker_result)
 
 
 class TestListConnectorActionsShape(unittest.TestCase):
@@ -412,6 +432,16 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 		self.assertEqual(result["connectors"][0]["actions"][0]["input_schema"], schema)
 		# Only the matching connector's cache is read.
 		self.assertEqual(fake.db.get_values.call_args.args[1], {"name": ["in", ["conn-gh"]]})
+
+	def test_schema_under_cap_passes_through_unchanged(self):
+		schema = {"type": "object", "properties": {"id": {"type": "string"}}, "required": ["id"]}
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
+			[self._action("conn-1", "read_issue", read_only=1, allowed=1)],
+			caches={"conn-1": self._cache({"read_issue": schema})},
+		)
+		result = self._run(fake, connector="github", action="read_issue")
+		self.assertEqual(result["connectors"][0]["actions"][0]["input_schema"], schema)
 
 	def test_oversize_schema_returns_top_level_summary(self):
 		# > 16 KiB serialised; required carries a non-string the summary must drop.
