@@ -118,11 +118,13 @@ def _dump(meta):
 
 def load_meta(snapshot_id):
 	"""The meta record or None. Redis errors propagate."""
+	# nosemgrep: frappe-cache-breaks-multitenancy -- key is make_key site-scoped; plain get raises on Redis errors (B.9.0)
 	return parse_meta(frappe.cache().get(keys(snapshot_id)[1]))
 
 
 def load_content(snapshot_id):
 	"""The gzip rows or None. Redis errors propagate."""
+	# nosemgrep: frappe-cache-breaks-multitenancy -- key is make_key site-scoped; plain get raises on Redis errors (B.9.0)
 	return frappe.cache().get(keys(snapshot_id)[0])
 
 
