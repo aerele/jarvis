@@ -86,6 +86,15 @@ test("an upload failure says what to do", () => {
   );
 });
 
+test("serverReason reads Frappe's server message", () => {
+  const body = {
+    _server_messages: JSON.stringify([
+      JSON.stringify({ message: "<b>Too big</b>" }),
+    ]),
+  };
+  assert.equal(serverReason(body), "Too big");
+});
+
 test("a 403 the server explained shows its own sentence, not 'session expired'", () => {
   const refused = {
     status: 403,

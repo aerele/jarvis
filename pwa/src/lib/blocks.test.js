@@ -30,12 +30,6 @@ test("stripAgentBlocks: removes every control fence from the prose", () => {
 		const out = stripAgentBlocks(`Before\n${fence(kind, '{"a":1}')}\nAfter`);
 		assert.equal(out, "Before\n\nAfter", `${kind} leaked into the prose`);
 	}
-	assert.equal(
-		stripAgentBlocks(
-			"Hi\n" + fence("jarvis-goto", '{"page":"settings","prompt":"Show cash by month"}')
-		),
-		"Hi"
-	);
 });
 
 test("stripAgentBlocks: strips both xychart charts and ordinary mermaid diagrams", () => {
@@ -123,6 +117,10 @@ test("stripAgentBlocks: a goto block of either page leaves the prose and no JSON
 	}
 });
 
+test("stripAgentBlocks: a goto naming an unknown page is stripped too", () => {
+	assert.equal(stripAgentBlocks(`Hi\n${goto("settings")}`), "Hi");
+});
+
 test("gotoChipPage: the page a valid goto names, trimmed, extra keys ignored", () => {
 	assert.equal(gotoChipPage(`Opening it.\n${goto("dashboards")}`), "dashboards");
 	assert.equal(
@@ -141,6 +139,23 @@ test("gotoChipPage: a valid payment-calendar goto gets the chip as well", () => 
 		"payment-calendar"
 	);
 	assert.equal(gotoChipPage(goto("payment-calendar", "   ")), null, "blank prompt");
+});
+
+test("gotoChipPage: an invalid goto gets no chip", () => {
+	assert.equal(gotoChipPage(goto("settings")), null, "unknown page");
+	assert.equal(gotoChipPage(goto("dashboards", "   ")), null, "blank prompt");
+	assert.equal(gotoChipPage(fence("jarvis-goto", '{"page":"dashboards"}')), null);
+	assert.equal(gotoChipPage(fence("jarvis-goto", "{not json")), null, "bad JSON");
+	assert.equal(gotoChipPage(fence("jarvis-goto", "[1]")), null, "not an object");
+	assert.equal(gotoChipPage(fence("jarvis-goto", "null")), null, "null");
+	assert.equal(
+		gotoChipPage('```jarvis-goto\n{"page":"dashboards","prompt":"x"}'),
+		null,
+		"unclosed fence"
+	);
+	assert.equal(gotoChipPage("no block here"), null);
+	assert.equal(gotoChipPage(""), null);
+	assert.equal(gotoChipPage(null), null);
 });
 
 const diagram = () => fence("mermaid", "flowchart TD\nA-->B");
@@ -176,10 +191,6 @@ test("messageChips: no chip for plain text, an invalid goto, or an unclosed goto
 	assert.deepEqual(messageChips(goto("settings")), []);
 	assert.deepEqual(messageChips(goto("dashboards", "  ")), []);
 	assert.deepEqual(messageChips('```jarvis-goto\n{"page":"dashboards","prompt":"x"}'), []);
-	assert.deepEqual(messageChips(fence("jarvis-goto", '{"page":"dashboards"}')), []);
-	assert.deepEqual(messageChips(fence("jarvis-goto", "{not json")), []);
-	assert.deepEqual(messageChips(fence("jarvis-goto", "[1]")), []);
-	assert.deepEqual(messageChips(fence("jarvis-goto", "null")), []);
 });
 
 test("messageChips: a chip carries no prompt or JSON from the goto block", () => {

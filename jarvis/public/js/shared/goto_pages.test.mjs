@@ -3,7 +3,11 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { GOTO_PAGES } from "./goto_pages.mjs";
+import {
+  DASHBOARDS_PAGE,
+  GOTO_PAGES,
+  PAYMENT_CALENDAR_PAGE,
+} from "./goto_pages.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const routerSrc = fs.readFileSync(
@@ -26,6 +30,15 @@ test("goto pages: the keys the agent may name, and the routes they open", () => 
     dashboards: "DashboardsPage",
     "payment-calendar": "PaymentCalendar",
   });
+});
+
+test("goto pages: the key constants are the literal keys the agent writes", () => {
+  assert.equal(DASHBOARDS_PAGE, "dashboards");
+  assert.equal(PAYMENT_CALENDAR_PAGE, "payment-calendar");
+  assert.deepEqual(Object.keys(GOTO_PAGES), [
+    DASHBOARDS_PAGE,
+    PAYMENT_CALENDAR_PAGE,
+  ]);
 });
 
 test("goto pages: every route name is a route the SPA router defines", () => {

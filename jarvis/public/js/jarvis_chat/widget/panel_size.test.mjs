@@ -8,6 +8,12 @@ import {
   serializeSize,
   resizeFrom,
 } from "./panel_size.mjs";
+import { PANEL_W, PANEL_MAX_H } from "./panel_anchor.mjs";
+
+test("MIN_* are the shipped default (the never-shrink floor)", () => {
+  assert.equal(MIN_W, PANEL_W);
+  assert.equal(MIN_H, PANEL_MAX_H);
+});
 
 test("STORAGE_KEY is stable", () => {
   assert.equal(STORAGE_KEY, "jarvis-panel-size");

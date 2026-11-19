@@ -37,6 +37,12 @@ describe("subscriptionAccountHealth expired level", () => {
 		}
 	});
 
+	it("is unchanged without an entry (signature stays backward compatible)", () => {
+		expect(subscriptionAccountHealth("verified")).toEqual({ level: "ok" });
+		expect(subscriptionAccountHealth("unverified").level).toBe("warn");
+		expect(subscriptionAccountHealth("", { expired: null })).toEqual({ level: "ok" });
+	});
+
 	it("survives a dirty or pending pool instead of collapsing to neutral", () => {
 		const settled = subscriptionAccountHealth("", { expired: entry("A1") });
 		expect(dirtyAccountHealth(settled, true)).toBe(settled);

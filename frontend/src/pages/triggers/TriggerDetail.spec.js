@@ -383,6 +383,16 @@ describe("TriggerDetail Recent activity: counts and the end of the list", () => 
 		expect(count(wrapper).text()).toBe("Showing all 10");
 	});
 
+	it("a manager's empty page ends the list without the non-manager message", async () => {
+		apiTr.listActivityPage
+			.mockResolvedValueOnce(answer(rowsOf(0, 10), { start: 0, total: 30, has_more: true }))
+			.mockResolvedValueOnce(answer([], { start: 10, total: 30, has_more: true }));
+		await mountDetail();
+		await click(wrapper, MOUSE);
+		expect(moreBtn(wrapper)).toBeUndefined();
+		expect(block(wrapper).text()).not.toContain("Older runs are not listed here.");
+	});
+
 	it("a non-manager first page that is empty but has more shows the end message, not No activity yet", async () => {
 		apiTr.listActivityPage.mockResolvedValue(
 			answer([], { start: 0, has_more: true, approximate: true })

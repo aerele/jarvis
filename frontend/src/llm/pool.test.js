@@ -1009,7 +1009,6 @@ test("subscriptionAccountHealth: no verdict at all -> quiet green ONLY when know
 	assert.deepEqual(subscriptionAccountHealth(""), { level: "ok" });
 	assert.deepEqual(subscriptionAccountHealth(undefined), { level: "ok" });
 	assert.deepEqual(subscriptionAccountHealth("not_applicable"), { level: "ok" });
-	assert.deepEqual(subscriptionAccountHealth("", { expired: null }), { level: "ok" });
 });
 
 test("subscriptionAccountHealth: no verdict at all -> neutral (grey), never green, when knownGood is false", () => {
@@ -1041,6 +1040,13 @@ test("subscriptionAccountHealth: an unrecognised status is treated as unchecked,
 	// A typo'd/legacy verdict string behaves identically - the enum is closed, not the
 	// set of strings a real or misbehaving fleet might ever send.
 	assert.deepEqual(subscriptionAccountHealth("Unverified"), known);
+});
+
+test("subscriptionAccountHealth: an unrecognised status is never 'ok' even in the failover-list editor (knownGood defaults true)", () => {
+	// This is the exact scenario the finding describes: the failover-list editor calls
+	// subscriptionAccountHealth with its default options (knownGood defaults true), so
+	// the regression would show here first.
+	assert.notEqual(subscriptionAccountHealth("expired").level, "ok");
 });
 
 // ---- dirtyAccountHealth: what LlmPoolEditor's dot shows once the pool is dirty

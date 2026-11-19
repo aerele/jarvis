@@ -34,6 +34,10 @@ test("shown when setup-complete is unknown (older boot payload)", () => {
   assert.equal(shouldHideWidget(["List", "Sales Invoice"], undefined), false);
 });
 
+test("shown on a normal desk page once setup is complete", () => {
+  assert.equal(shouldHideWidget(["List", "Sales Invoice"], true), false);
+});
+
 test("opt-in hides only users without the existing access verdict", () => {
   for (const hasAccess of [false, undefined, null]) {
     assert.equal(

@@ -14,7 +14,13 @@ import {
   sleighAt,
   sleighPlan,
 } from "./christmas-art.mjs";
-import { CLEAR, GAP, HERO_TOP_UNITS } from "../scene-geometry.mjs";
+import {
+  CLEAR,
+  GAP,
+  HERO_TOP_UNITS,
+  floorFit,
+  FLOOR_ROW as DIWALI_ROW,
+} from "../scene-geometry.mjs";
 import {
   boxes,
   contractSuite,
@@ -113,6 +119,16 @@ test("at the lowest mark the page allows, the sleigh fits at its smallest size, 
     if (box.r >= 400 - 36 - 8 && box.l <= 400 + 36 + 8)
       assert.ok(box.b <= mt - GAP + 0.05, `u ${i / 200}: bottom ${box.b}`);
   }
+});
+
+test("floorFit gives the Diwali answer for the Diwali row, and uses this row's own height", () => {
+  const args = { ground: 560, hostH: 500, s: 1 };
+  assert.deepEqual(floorFit({ ...args, row: DIWALI_ROW }), floorFit(args));
+  const over = 560 - (500 - 12); // how far the row's bottom is past the stage's gap line
+  assert.equal(
+    floorFit({ ...args, row: FLOOR_ROW }).scale,
+    1 - over / FLOOR_ROW.up
+  );
 });
 
 test("the tree and gifts stay at the stage's ends when the row shrinks, never drifting in over the heading", () => {

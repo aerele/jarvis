@@ -37,12 +37,23 @@ test("sendRefusalMessage: maintenance -> branded back-shortly line", () => {
   );
 });
 
+test("sendRefusalMessage: any other refusal -> the generic try-again line", () => {
+  assert.equal(
+    sendRefusalMessage("something_else", "Aida"),
+    "That couldn't be sent. Please try again."
+  );
+  // Brand is irrelevant to the generic line - it names no product.
+  assert.equal(
+    sendRefusalMessage("something_else"),
+    "That couldn't be sent. Please try again."
+  );
+});
+
 test("sendRefusalMessage: an unknown/empty reason -> the generic line, never branded", () => {
   const generic = "That couldn't be sent. Please try again.";
   assert.equal(sendRefusalMessage("", "Aida"), generic);
   assert.equal(sendRefusalMessage(undefined, "Aida"), generic);
   assert.equal(sendRefusalMessage(null, "Aida"), generic);
-  assert.equal(sendRefusalMessage("something_else", "Aida"), generic);
 });
 
 import { isKnownRefusal } from "./panel_send_copy.mjs";
