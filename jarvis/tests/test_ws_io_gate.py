@@ -825,6 +825,26 @@ class TestOutsideOperationGuard(_SpyCase):
 		self.assertFalse(any(b"stray" in m[2] for m in peer.messages))
 
 
+class TestLegacyWriteFailure(_SocketCase):
+	"""AC-L2: a legacy (pooled, single-flow) session whose write stalls reports the
+	ambiguous ``ack-timeout`` (turn_handler's existing park-for-recovery branch),
+	is marked disconnected so the pool evicts it, and refuses the next send."""
+
+	def test_tls13(self):
+		from jarvis.chat import agent_session_pool
+		from jarvis.chat.agent_client import SendNotStarted
+		from jarvis.exceptions import AgentUnreachableError
+
+		sess, peer, _ = self.session("tls13", bufsize=65536)
+		peer.paused.set()
+		with self.assertRaises(AgentUnreachableError) as cm:
+			sess._write_frame(json.dumps({"blob": "l" * (4 * MB)}), write_s=1.0, method="chat.send")
+		self.assertEqual(cm.exception.code, "ack-timeout")
+		self.assertFalse(agent_session_pool._safe_connected(sess))
+		with self.assertRaises(SendNotStarted):
+			sess._send("chat.send", {"message": "again"})
+
+
 class TestWebsocketClientContract(FrappeTestCase):
 	"""AC-T9/F-9: the socket gate depends on websocket-client internals. The harness
 	(``jarvis/tests/harness/ws_io_contract.py``) runs the product ``_SocketIO`` in a

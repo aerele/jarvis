@@ -704,6 +704,11 @@ class TestSetSessionModel(FrappeTestCase):
 		sess.set_session_model(*args, **kwargs)
 		return captured
 
+	def test_sends_exact_sessions_patch_params(self):
+		captured = self._capture("sk", "openai/gpt-4o")
+		self.assertEqual(captured["method"], "sessions.patch")
+		self.assertEqual(captured["params"], {"key": "sk", "model": "openai/gpt-4o"})
+
 	def test_none_sends_an_explicit_null_to_reset_the_session(self):
 		"""None must reach the gateway as ``"model": null`` -- PRESENT, not omitted.
 
