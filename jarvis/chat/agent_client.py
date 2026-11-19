@@ -55,6 +55,7 @@ from jarvis.chat.device import (
 	update_device_token,
 )
 from jarvis.chat.events import parse_event
+from jarvis.chat.gateway_ids import model_ref_for_gateway
 
 # #773: every socket call of a session goes through one gated, deadline-bounded IO
 # path; the names are re-exported here for callers of this module.
@@ -1744,7 +1745,7 @@ class AgentSession:
 		if model:
 			self.set_session_model(
 				session_key,
-				f"{provider}/{model}" if provider else model,
+				model_ref_for_gateway(provider, model),
 				timeout_s=CONNECT_TIMEOUT_SECONDS,
 			)
 
