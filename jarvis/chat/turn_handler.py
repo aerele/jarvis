@@ -603,6 +603,16 @@ def _is_proxy_subscription_pick(settings, model_id: str) -> bool:
 	)
 
 
+def _pick_upstream(settings, model_id: str) -> str | None:
+	"""The upstream (``openai``, ``xai``) of the enabled non-Claude sign-in row serving ``model_id``."""
+	from jarvis.jarvis.pool_serialize import _credential_type, _enabled_models, _subscription_upstream
+
+	for m in _enabled_models(settings):
+		if (getattr(m, "model", None) or "").strip() == model_id and _credential_type(m) == "subscription":
+			return _subscription_upstream(m) or None
+	return None
+
+
 def _is_native_claude_pick(settings, model_id: str) -> bool:
 	"""True when ``model_id`` is an Anthropic subscription-tier id and this pool has a
 	native Claude-plan leg to serve it. Reads the same catalog-backed allowlist the
@@ -690,6 +700,9 @@ def _resolve_model_and_provider(conv) -> tuple[str, str | None]:
 			return override, NATIVE_CLAUDE_PROVIDER
 		if override and override in enabled_names:
 			if has_native_claude_subscription(settings) and _is_proxy_subscription_pick(settings, override):
+				if is_native_pool(settings):
+					# No Bifrost door on a native tenant: name the sign-in's own provider.
+					return override, _pick_upstream(settings, override)
 				return override, PROXY_DOOR_PROVIDER  # a bare id would land on the Claude CLI
 			return override, None  # Validated override accepted
 		return "", None  # Let the pool route

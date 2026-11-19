@@ -332,3 +332,85 @@ class TestPinRetryWithTheOtherForm(unittest.TestCase):
 			with self.assertRaises(AgentUnreachableError):
 				session.set_session_model("k", ref)
 			self.assertEqual(len(calls), 1)
+
+
+class TestClaudeMemberOnANativePool(unittest.TestCase):
+	def _claude(self, order):
+		return _sub("claude-opus-5", "anthropic", order=order)
+
+	def _errors(self, models, **extra):
+		return pool_serialize.validate_models(_settings(models, **extra))
+
+	def test_claude_in_the_middle_is_allowed_only_on_a_native_tenant(self):
+		models = [
+			_sub("gpt-5.5", order=0),
+			self._claude(1),
+			_sub("gpt-5.6", order=2, accounts=[_acct("openai", "A2")]),
+		]
+		self.assertIn("Claude runs outside the proxy. Keep it first or last.", self._errors(models))
+		self.assertNotIn(
+			"Claude runs outside the proxy. Keep it first or last.",
+			self._errors(models, native_subscription_pool=1),
+		)
+
+	def test_xai_may_join_a_claude_pool_only_on_a_native_tenant(self):
+		models = [self._claude(0), _sub("grok-4", "xai", order=1)]
+		self.assertIn("Claude can be combined only with ChatGPT or API keys for now.", self._errors(models))
+		errors = self._errors(models, native_subscription_pool=1)
+		self.assertFalse([e for e in errors if "Claude can be combined" in e])
+
+	def test_kimi_is_still_refused_with_claude_on_a_native_tenant(self):
+		models = [self._claude(0), _sub("kimi-k2", "kimi", order=1)]
+		self.assertTrue(
+			[e for e in self._errors(models, native_subscription_pool=1) if "Claude can be combined" in e]
+		)
+
+	def test_one_claude_row_and_one_account_still_apply_on_native(self):
+		two_rows = [self._claude(0), self._claude(1)]
+		self.assertIn(
+			"Only one Claude subscription model is supported per pool.",
+			self._errors(two_rows, native_subscription_pool=1),
+		)
+		two_accounts = [
+			_sub("claude-opus-5", "anthropic", accounts=[_acct("anthropic", "A"), _acct("anthropic", "B")])
+		]
+		self.assertTrue(
+			[
+				e
+				for e in self._errors(two_accounts, native_subscription_pool=1)
+				if "exactly one connected account" in e
+			]
+		)
+
+	def test_a_claude_member_does_not_turn_the_proxy_back_on(self):
+		settings = _settings([self._claude(0), _sub("gpt-5.5", order=1)], native_subscription_pool=1)
+		self.assertTrue(pool_serialize.compute_pool_mode(settings))
+		self.assertFalse(pool_serialize.compute_proxy_active(settings))
+		# The reset path, not the placeholder, even with a stale stored proxy_active.
+		settings.proxy_active = 1
+		with (
+			patch.object(turn_handler.frappe, "get_single", return_value=settings),
+			patch.object(turn_handler, "_resolve_model_and_provider", return_value=("", None)),
+		):
+			self.assertEqual(turn_handler._session_model_for(frappe._dict()), (None, None))
+
+	def test_a_chatgpt_pick_names_its_own_provider_on_native_and_the_door_otherwise(self):
+		models = [self._claude(0), _sub("gpt-5.5", order=1), _sub("grok-4", "xai", order=2)]
+		conv = frappe._dict(model_override="gpt-5.5")
+		for extra, expected in (
+			({}, turn_handler.PROXY_DOOR_PROVIDER),
+			({"native_subscription_pool": 1}, "openai"),
+		):
+			settings = _settings(models, **extra)
+			with (
+				patch.object(turn_handler.frappe, "get_single", return_value=settings),
+				patch.object(turn_handler, "_is_native_claude_pick", return_value=False),
+			):
+				self.assertEqual(turn_handler._resolve_model_and_provider(conv), ("gpt-5.5", expected))
+		settings = _settings(models, native_subscription_pool=1)
+		with (
+			patch.object(turn_handler.frappe, "get_single", return_value=settings),
+			patch.object(turn_handler, "_is_native_claude_pick", return_value=False),
+		):
+			conv.model_override = "grok-4"
+			self.assertEqual(turn_handler._resolve_model_and_provider(conv), ("grok-4", "xai"))

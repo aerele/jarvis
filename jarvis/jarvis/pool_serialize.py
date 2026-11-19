@@ -787,9 +787,9 @@ def validate_models(settings) -> list:
 				)
 
 	# Claude credentials may never enter the rotating CLIProxy path. One Claude
-	# row/account is supported. When Codex is also present, Claude may be first or
-	# last around the single collapsed Bifrost route. A middle position cannot be
-	# represented faithfully, so it fails closed.
+	# row/account is supported. On a sidecar pool with Codex also present, Claude may be
+	# first or last around the single collapsed Bifrost route; a middle position cannot be
+	# represented faithfully, so it fails closed. A native tenant has no such limit.
 	ordered_enabled = sorted(_enabled_models(settings), key=_fleet_sort_key)
 	claude_positions = [
 		i
@@ -809,9 +809,17 @@ def validate_models(settings) -> list:
 		if _credential_type(m) == "subscription" and _subscription_upstream(m) != "anthropic"
 	]
 	if claude_positions and other_subscriptions:
-		if any(upstream != "openai" for upstream in other_subscriptions):
-			errors.append("Claude can be combined only with ChatGPT or API keys for now.")
-		if claude_positions[0] not in (0, len(ordered_enabled) - 1):
+		# A native tenant serves ChatGPT and xAI sign-ins as profiles of its own and the
+		# Claude member at any position; only a sidecar pool needs the narrower rules.
+		native = is_native_pool(settings)
+		allowed = {"openai", "xai"} if native else {"openai"}
+		if any(upstream not in allowed for upstream in other_subscriptions):
+			errors.append(
+				"Claude can be combined only with ChatGPT, xAI or API keys for now."
+				if native
+				else "Claude can be combined only with ChatGPT or API keys for now."
+			)
+		if not native and claude_positions[0] not in (0, len(ordered_enabled) - 1):
 			errors.append("Claude runs outside the proxy. Keep it first or last.")
 
 	return errors
