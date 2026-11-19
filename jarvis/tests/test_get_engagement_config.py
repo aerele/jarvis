@@ -14,6 +14,7 @@ from jarvis.exceptions import InvalidArgumentError
 from jarvis.tools.get_engagement_config import get_engagement_config
 
 RUN = "Jarvis Agent Run"
+INSTALLATION = "Jarvis Agent Installation"
 
 
 class TestGetEngagementConfig(unittest.TestCase):
@@ -117,3 +118,22 @@ class TestGetEngagementConfig(unittest.TestCase):
 		)
 		self.assertEqual(result, {})
 		self.assertEqual([call.args[0] for call in get_value.call_args_list], [RUN])
+
+	def test_mutable_installation_config_cannot_change_a_running_run(self):
+		"""A later save that changes `depr_run_posted` cannot rewrite this run."""
+		# The hypothetical Installation now says True. The mocked DB throws if the
+		# tool even attempts to read that row; only the server-stamped False snapshot
+		# may reach the delegate.
+		mutable_installation = {"depr_run_posted": True}
+		self.assertTrue(mutable_installation["depr_run_posted"])
+		result, get_value, _ = self._call(
+			session_key="agent:agent-x:R1",
+			run_row=frappe._dict(
+				name="R1", status="running", engagement_config_json='{"depr_run_posted": false}'
+			),
+		)
+		self.assertEqual(result, {"depr_run_posted": False})
+		# `_call` raises on any non-Run query. This exact call list makes the
+		# prohibited mutable Installation read an explicit regression assertion.
+		self.assertEqual([call.args[0] for call in get_value.call_args_list], [RUN])
+		self.assertNotIn(INSTALLATION, [call.args[0] for call in get_value.call_args_list])

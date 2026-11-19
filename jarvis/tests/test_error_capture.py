@@ -1555,6 +1555,11 @@ class TestBrowserRunError(CaptureBase):
 		)
 		frappe.set_user("Administrator")
 
+	def test_a_run_error_for_an_errored_turn_is_left_to_the_turn_lane(self):
+		_make_turn("errcap-run-1")
+		self._report(run_id="errcap-run-1")
+		self.assertEqual(self.buffered(), [])
+
 	def test_a_run_error_with_nothing_behind_it_is_kept(self):
 		self._report()
 		self.assertEqual(len(self.buffered()), 1)

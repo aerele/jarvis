@@ -243,6 +243,9 @@ class TestApplyingOutlivesTheStaleWindow(FrappeTestCase):
 	def _error(self, s):
 		return _sync_status_payload(s, s.last_sync_status)["attempt_error"]
 
+	def test_applying_for_60s_is_still_applying(self):
+		self.assertEqual(self._error(_aged(60)), "")
+
 	def test_applying_for_130s_is_still_applying_while_the_converge_poll_window_runs(self):
 		self.assertEqual(self._error(_aged(130)), "")
 

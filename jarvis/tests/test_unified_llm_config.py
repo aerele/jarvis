@@ -345,6 +345,25 @@ class TestProviderNormalization(FrappeTestCase):
 			normalize_provider("GLM / Z.ai"),
 		)
 
+	def test_glm_coding_plan_serializes_to_openai_compat_with_its_own_base_url(self):
+		# Same wire-collapse guarantee as the standard GLM row, but the
+		# coding-plan row must keep ITS OWN base_url (the coding endpoint),
+		# not the pay-as-you-go one - the whole point of the two ids existing
+		# separately is that they point at different URLs.
+		from jarvis.jarvis.pool_serialize import build_pool_payload
+
+		glm_coding = _api_key_model(
+			provider="GLM / Z.ai (Coding Plan)",
+			model="glm-4.6",
+			base_url="https://api.z.ai/api/coding/paas/v4",
+			api_key="zk",
+			order=0,
+		)
+		settings = _make_settings_with_models([glm_coding])
+		spec, _api_keys, _ = build_pool_payload(settings)
+		self.assertEqual(spec["models"][0]["provider"], "openai_compat")
+		self.assertEqual(spec["models"][0]["base_url"], "https://api.z.ai/api/coding/paas/v4")
+
 	def test_standard_zai_wire_payload_unaffected_by_the_coding_plan_sibling(self):
 		# Regression lock: adding "zai_coding" must NOT change one byte of the
 		# standard "zai" row's wire output. Same assertions as
@@ -3013,6 +3032,29 @@ class TestFT3EmptyPoolGuards(_RT3SettingsTestCase):
 class TestFT4PasswordMaskingAndBlobShape(FrappeTestCase):
 	"""FT4: Password masking and oauth_blob shape validation."""
 
+	def test_resave_db_backed_subscription_tenant_does_not_raise_malformed_blob(self):
+		"""Re-reading a DB-backed subscription account's oauth_blob (masked) and
+		running validate_models must NOT produce a 'malformed' error."""
+		from jarvis.jarvis.pool_serialize import validate_models
+
+		# Build in-memory account with oauth_blob set (simulating a DB-backed row
+		# where the field is readable via _get_password which returns the real value).
+		acc = frappe._dict(
+			upstream="openai",
+			account_ref="ACC_MASKED_001",
+			label="test@example.com",
+			oauth_blob='{"token": "real_value", "refresh": "abc"}',
+		)
+		m = _subscription_model(accounts=[acc])
+		settings = _make_settings_with_models([m])
+
+		# Should not produce a 'malformed' error.
+		errors = validate_models(settings)
+		malformed_errors = [e for e in errors if "malformed" in e.lower()]
+		self.assertEqual(
+			malformed_errors, [], f"No malformed errors expected for valid oauth_blob; got: {errors}"
+		)
+
 	def test_non_dict_blob_is_rejected(self):
 		"""oauth_blob that parses to a list → validate_models returns error containing 'dict' or 'object'."""
 		from jarvis.jarvis.pool_serialize import validate_models
@@ -3174,6 +3216,17 @@ class TestFT5ChatWorkerPoolAwareness(_RT3SettingsTestCase):
 				f"override={override!r} must resolve to '' (no opinion); got: {effective_model!r}",
 			)
 			self.assertIsNone(provider)
+
+	def test_api_key_pool_is_not_proxy_active(self):
+		"""A pool of two BYO api keys deploys NO sidecar, so proxy_active must be 0.
+
+		jarvis-fleet-agent renders it agent-direct: each key becomes its own
+		provider inside agent, which drives failover itself. Deriving
+		proxy_active=1 here is the root of the dead "Auto" turn below.
+		"""
+		self._pool_of_two()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(int(settings.proxy_active or 0), 0)
 
 	def test_subscription_pool_is_proxy_active(self):
 		"""Any enabled subscription keeps the Bifrost+cliproxy sidecars."""
@@ -3711,6 +3764,22 @@ class TestOnboardingAuditFixes(_RT3SettingsTestCase):
 			status.startswith("failed: unexpected error"),
 			"the terminal failure status must survive the job-runner rollback "
 			f"(was the finally-backstop committed?); got: {status!r}",
+		)
+
+	def test_pool_sync_ok_stamps_llm_pool_synced_at(self):
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("llm_pool_synced_at", None, update_modified=False)
+		frappe.db.commit()
+
+		self._seed_pool()
+		with patch("jarvis.admin_client.post_update_llm_pool", return_value={"action": "pool_update"}):
+			_enqueued_sync_via_admin_pool()
+
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertTrue(settings.llm_pool_synced_at, "a successful pool apply must stamp llm_pool_synced_at")
+		self.assertTrue(
+			(settings.last_sync_status or "").startswith("ok"),
+			f"expected ok status, got: {settings.last_sync_status!r}",
 		)
 
 	def test_pending_applying_flips_to_ok_when_admin_reports_ready(self):
@@ -5439,6 +5508,12 @@ class TestNativeClaudePickRouting(unittest.TestCase):
 			self._resolve("claude-opus-4-8", api_key_row="claude-sonnet-5"),
 			("claude-opus-4-8", "anthropic"),
 		)
+
+	def test_session_patch_carries_the_provider_prefix(self):
+		from jarvis.chat import turn_handler as th
+
+		with patch.object(th, "_session_model_for", return_value=("claude-sonnet-5", "anthropic")):
+			self.assertEqual(th._session_model_patch(frappe._dict()), (True, "anthropic/claude-sonnet-5"))
 
 
 def setUpModule():
