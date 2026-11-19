@@ -4,7 +4,7 @@
 // behind, pause that cannot be starved of time).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createGotoCountdown, GOTO_COUNTDOWN_MS } from "./gotoCountdown.js";
+import { createGotoCountdown, GOTO_COUNTDOWN_MS, RESUME_FLOOR_MS } from "./gotoCountdown.js";
 
 // A clock whose intervals fire only as `advance` moves time past them.
 function fakeClock() {
@@ -85,6 +85,11 @@ function make(overrides = {}) {
 	cd = createGotoCountdown(deps);
 	return { cd, clock, log, deps };
 }
+
+test("the constants: 3 s countdown, 2 s resume floor", () => {
+	assert.equal(GOTO_COUNTDOWN_MS, 3000);
+	assert.equal(RESUME_FLOOR_MS, 2000);
+});
 
 test("ticks 3, 2, 1, then expires exactly once at 3000 ms and never reports 0", () => {
 	const { cd, clock, log } = make();
