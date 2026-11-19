@@ -92,6 +92,10 @@ class TestExportDocumentGuards(FrappeTestCase):
 		with self.assertRaises(NoDataError):
 			export_document("   \n  ")
 
+	def test_rejects_unknown_format(self):
+		with self.assertRaises(InvalidArgumentError):
+			export_document(_MD, format="docx")
+
 
 class TestExportDocumentFormats(FrappeTestCase):
 	def _mock(self):
@@ -602,6 +606,10 @@ class TestRichPipeline(_RichBase):
 		out = export_document(_RICH_MD, format="pdf", letterhead="Ghost")
 		self.assertTrue(any("Ghost" in n for n in out["notes"]), out["notes"])
 
+	def test_notes_field_present_even_when_clean(self):
+		out = export_document(_RICH_MD, format="pdf", theme=True)
+		self.assertEqual(out["notes"], [])
+
 
 class TestMastheadAndCover(_RichBase):
 	"""The tool-built masthead, the scalable cover, and numeric-column alignment."""
@@ -734,6 +742,25 @@ class TestTelemetry(_RichBase):
 class TestPlainPathBackCompatUnit(_RichBase):
 	"""Site-free mirror of the FrappeTestCase plain-path assertions, so the
 	'plain path unchanged' contract is proven under bare pytest too."""
+
+	def test_plain_html_is_standalone_and_renders_markdown(self):
+		text = self._plain_html(_MD)
+		self.assertFalse(self.render.called)
+		self.assertIn("<!doctype html>", text.lower())
+		self.assertIn("<title>Document</title>", text)  # plain path default (no title)
+		self.assertIn("<table", text)
+		self.assertIn("Revenue", text)
+
+	def test_plain_script_and_img_stripped(self):
+		md = self._plain_html("![x](http://169.254.169.254/latest/meta-data/)")
+		self.assertNotIn("<img", md)
+		html_text = self._plain_html("<p>hi</p><script>alert(1)</script>", content_is_html=True)
+		self.assertNotIn("<script", html_text)
+
+	def test_plain_css_and_media_urls_stripped(self):
+		text = self._plain_html(_URL_VECTORS, content_is_html=True)
+		self.assertNotIn("169.254.169.254", text)
+		self.assertNotIn("file://", text)
 
 	def test_plain_pdf_uses_get_pdf_not_rich(self):
 		out = export_document(_MD, format="pdf")  # content-only: title now activates rich

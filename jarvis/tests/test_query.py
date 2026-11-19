@@ -714,6 +714,78 @@ class TestQueryV02Additions(FrappeTestCase):
 				)
 			self.assertIn("select", str(cm.exception).lower())
 
+	def test_exists_subspec_rejects_order_by(self):
+		with (
+			patch("frappe.has_permission", return_value=True),
+			patch("frappe.database.query.Engine") as fake_engine,
+		):
+			fake_engine.return_value.get_permission_conditions.return_value = None
+			with self.assertRaises(InvalidArgumentError):
+				query(
+					{
+						"from": "DocType",
+						"alias": "dt",
+						"where": [
+							{
+								"op": "exists",
+								"value": {
+									"from": "DocField",
+									"alias": "df",
+									"order_by": [{"field": "df.fieldname"}],
+								},
+							}
+						],
+					}
+				)
+
+	def test_exists_subspec_rejects_limit(self):
+		with (
+			patch("frappe.has_permission", return_value=True),
+			patch("frappe.database.query.Engine") as fake_engine,
+		):
+			fake_engine.return_value.get_permission_conditions.return_value = None
+			with self.assertRaises(InvalidArgumentError):
+				query(
+					{
+						"from": "DocType",
+						"alias": "dt",
+						"where": [
+							{
+								"op": "exists",
+								"value": {
+									"from": "DocField",
+									"alias": "df",
+									"limit": 10,
+								},
+							}
+						],
+					}
+				)
+
+	def test_exists_subspec_rejects_distinct(self):
+		with (
+			patch("frappe.has_permission", return_value=True),
+			patch("frappe.database.query.Engine") as fake_engine,
+		):
+			fake_engine.return_value.get_permission_conditions.return_value = None
+			with self.assertRaises(InvalidArgumentError):
+				query(
+					{
+						"from": "DocType",
+						"alias": "dt",
+						"where": [
+							{
+								"op": "exists",
+								"value": {
+									"from": "DocField",
+									"alias": "df",
+									"distinct": True,
+								},
+							}
+						],
+					}
+				)
+
 	def test_exists_recursion_depth_capped(self):
 		"""Two levels of nesting (outer + one EXISTS) is the cap;
 		three levels raises."""
@@ -3249,8 +3321,6 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 		self.assertIn(self.SCOPE_PARENT_B, msg)
 		self.assertIn("parenttype", msg)  # points at the disambiguation fix
 		self.assertNotIn("<strong>", msg)  # no raw framework HTML
-		self.assertNotIn("Insufficient Permission", msg)
-		self.assertNotIn("</", msg)
 
 	# ---- 5: disambiguation returns correctly-scoped rows -------------
 
@@ -3426,6 +3496,15 @@ class TestQueryPermlevelFieldACL(FrappeTestCase):
 
 	# ---- 11: clean errors (no raw framework HTML for child queries) --
 
+	def test_scope_child_denials_are_clean_no_html(self):
+		frappe.set_user(self.USER_SCOPE_AB)
+		with self.assertRaises(PermissionDeniedError) as cm:
+			query({"from": self.SCOPE_CHILD_DT, "alias": "c", "select": ["c.name"]})
+		msg = str(cm.exception)
+		self.assertNotIn("Insufficient Permission", msg)  # raw framework class gone
+		self.assertNotIn("<strong>", msg)
+		self.assertNotIn("</", msg)
+
 	# ---- 12: field-ACL denial names the governing parent -------------
 
 	def test_scope_child_permlevel_field_denial_names_parent(self):
@@ -3535,16 +3614,7 @@ class TestExistsSpecShape(TestCase):
 		from jarvis.tools.query import _build_exists_criterion
 
 		for op in (False, True):
-			for key in (
-				"filters",
-				"filter",
-				"order",
-				"select",
-				"order_by",
-				"limit",
-				"distinct",
-				"unexpected",
-			):
+			for key in ("filters", "filter", "order", "select", "unexpected"):
 				with self.subTest(negate=op, key=key):
 					with self.assertRaisesRegex(InvalidArgumentError, "EXISTS sub-spec must not include"):
 						_build_exists_criterion({"from": "ToDo", key: []}, {}, 1, negate=op)

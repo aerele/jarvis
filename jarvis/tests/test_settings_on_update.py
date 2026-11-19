@@ -875,6 +875,16 @@ class TestCredsWireAuthMode(FrappeTestCase):
 		self.assertEqual(creds_wire_auth_mode(""), "api_key")
 		self.assertEqual(creds_wire_auth_mode(None), "api_key")
 
+	def test_it_translates_the_WIRE_only_and_never_the_stored_value(self):
+		"""The stored field stays "subscription" because other consumers read it,
+		and widening those guards is what force-disconnected healthy pool tenants
+		before (jarvis-admin-v2#89). This pins that the helper is pure."""
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import creds_wire_auth_mode
+
+		stored = "subscription"
+		self.assertEqual(creds_wire_auth_mode(stored), "oauth")
+		self.assertEqual(stored, "subscription")
+
 	def test_a_whitespace_only_value_falls_back_to_api_key(self):
 		"""A whitespace-only stored value is TRUTHY, so defaulting before stripping
 		returned "" - not a mode fleet branches on, which lands the tenant on its

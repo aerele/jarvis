@@ -113,6 +113,13 @@ class TestMint(_Base):
 		self.assertIsNone(shown.expires_at, "a pending action never expires")
 		self.assertIsNone(pending_confirm_legacy.peek(token), "nothing on Redis")
 
+	def test_flag_zero_mints_a_redis_token(self):
+		self.flag(0)
+		conv = self.make_conv()
+		token = self.mint(conv)
+		self.assertFalse(frappe.db.exists(PA, token))
+		self.assertEqual(pending_confirm_legacy.peek(token)["conversation"], conv)
+
 	def test_a_missing_table_mints_a_redis_token(self):
 		conv = self.make_conv()
 		with patch.object(pending_confirm, "_pa_ready", return_value=False):
@@ -884,7 +891,6 @@ class TestDualReadDeploy(_Base):
 		self.flag(0)
 		legacy_token = self.mint(legacy_conv)
 		self.assertFalse(frappe.db.exists(PA, legacy_token))
-		self.assertEqual(pending_confirm_legacy.peek(legacy_token)["conversation"], legacy_conv)
 		self.assertEqual({c["token"] for c in pending_confirm.list_for_owner(OWNER)}, {token, legacy_token})
 		with fake_dispatch() as calls, as_user(OWNER):
 			self.assertTrue(actions_api.confirm_tool(token, conversation=pa_conv)["ok"])

@@ -1584,6 +1584,18 @@ class TestAgentsMarketplace(unittest.TestCase):
 	def _count_slug(self, payload: list, slug: str) -> int:
 		return sum(1 for p in payload if p["slug"] == slug)
 
+	def test_push_payload_emits_one_entry_per_slug_across_owners(self):
+		"""P0-B: two owners, same agent, both enabled -> the slug appears ONCE."""
+		self._enable_for(self.owner, "close-auditor")
+		self._enable_for(self.other, "close-auditor")
+
+		payload = agent_catalog.build_agent_push_payload()  # bench-global, as the push is
+		self.assertEqual(self._count_slug(payload, "agent-close-auditor"), 1)
+		# ...and the payload as a whole carries no duplicate slug at all, which is
+		# exactly what admin validates.
+		slugs = [p["slug"] for p in payload]
+		self.assertEqual(len(slugs), len(set(slugs)), f"duplicate slug in payload: {slugs}")
+
 	def test_push_payload_dedupe_is_union_not_last_wins(self):
 		"""A slug ships if ANY enabled install clears the gates — a blocked or
 		non-installable sibling row must not suppress a qualifying one."""
