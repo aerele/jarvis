@@ -742,6 +742,33 @@ class TestMacroRunModeSnapshot(_MacroMergeBase):
 		self.assertEqual(sent, [], "nothing may dispatch once the snapshot is unrunnable")
 		self.assertIn("edited", (frappe.db.get_value(self.RUN, run_name, "error") or "").lower())
 
+	# ---- the unedited paths still work ------------------------------------------ #
+	def test_normal_merged_run_still_works_end_to_end(self):
+		from jarvis.chat import macros
+
+		m = self._mk(3)
+		update_macro(m.name, merged_prompt="MERGED")
+		state, fake = self._recorder()
+		with patch("jarvis.chat.api._enqueue_turn", side_effect=fake):
+			run_name, conv = self._start(m)
+			macros.advance_after_turn(conv, errored=False)
+		self.assertEqual(state["sent"], ["MERGED"])
+		row = self._row(run_name)
+		self.assertEqual((row.status, row.total_steps, row.current_step), ("completed", 1, 1))
+
+	def test_normal_stepped_run_still_works_end_to_end(self):
+		from jarvis.chat import macros
+
+		m = self._mk(3)
+		state, fake = self._recorder()
+		with patch("jarvis.chat.api._enqueue_turn", side_effect=fake):
+			run_name, conv = self._start(m)
+			for _ in range(3):
+				macros.advance_after_turn(conv, errored=False)
+		self.assertEqual(state["sent"], ["p1", "p2", "p3"])
+		row = self._row(run_name)
+		self.assertEqual((row.status, row.total_steps, row.current_step), ("completed", 3, 3))
+
 	# ---- interaction with the #471 reaper ---------------------------------------- #
 	def test_a_parked_run_stays_distinguishable_from_a_stranded_one(self):
 		from jarvis.chat import macros
