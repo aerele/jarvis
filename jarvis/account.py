@@ -21,7 +21,15 @@ import hashlib
 
 import frappe
 
-from jarvis import admin_client, announcement, compat, maintenance_notice, onboarding_contract, release_notice
+from jarvis import (
+	admin_client,
+	announcement,
+	compat,
+	maintenance_notice,
+	native_runtime,
+	onboarding_contract,
+	release_notice,
+)
 from jarvis.exceptions import (
 	AdminAuthError,
 	AdminRateLimitedError,
@@ -29,7 +37,8 @@ from jarvis.exceptions import (
 	AdminValidationError,
 )
 from jarvis.holiday_touch import policy as holiday_policy
-from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model
+from jarvis.jarvis.pool_serialize import compute_pool_mode, pool_primary_model, subscription_only_models
+from jarvis.native_runtime import is_native_pool
 from jarvis.onboarding import _surface
 from jarvis.permissions import require_jarvis_access, require_jarvis_admin
 
@@ -599,6 +608,7 @@ def _admin_chat_gate() -> dict:
 	# be discarded and would take a row lock on Jarvis Settings for nothing. persist never raises.
 	if _write_is_durable():
 		holiday_policy.persist(conn, daily=False)
+		native_runtime.persist(conn)
 	notice = conn.get("billing_notice") or {}
 	if "chat_readiness" in conn and conn["chat_readiness"] != "Ready":
 		# Authority-repair incident (review plan 04 P0-6): admin's strict resolver
@@ -1391,6 +1401,10 @@ def get_llm_usage() -> dict:
 	require_jarvis_admin()
 	settings = frappe.get_single("Jarvis Settings")
 	if not getattr(settings, "proxy_active", 0):
+		# A native tenant (no sidecars) has no proxy ledger in any shape: its api-key legs
+		# are priced here and its sign-in legs show tokens only.
+		if is_native_pool(settings):
+			return _direct_llm_usage(settings)
 		# Blank/unset llm_auth_mode coerces to "api_key" — the field is reqd with
 		# that default, and the two other reads in this file (account.py:688, :1511)
 		# treat a blank the same way, so a legacy row with no auth mode must still
@@ -1411,10 +1425,14 @@ def get_llm_usage() -> dict:
 	return data
 
 
-def _direct_llm_usage() -> dict:
+def _direct_llm_usage(settings=None) -> dict:
 	"""Real cost for a DIRECT (BYO api-key, no Bifrost sidecar) tenant: this
 	month's tenant-wide per-model token totals, priced off the admin
 	catalog's ``input_price_per_1m_usd`` / ``output_price_per_1m_usd``.
+
+	With ``settings`` of a native-pool tenant, a model served only by a chat sign-in is
+	listed with its tokens and ``cost_usd`` 0 (``subscription: True``) and stays out of the
+	total: a plan has no per-token price.
 
 	Returns the SAME shape ``get_llm_usage`` returns for a proxied tenant, so
 	the Billing/Metering chart renders it with no frontend change - see
@@ -1423,6 +1441,7 @@ def _direct_llm_usage() -> dict:
 	from jarvis.chat import pricing, usage
 
 	month = usage.current_month_key()
+	plan_models = subscription_only_models(settings) if settings is not None else set()
 	per_model = []
 	tokens_in_total = 0
 	tokens_out_total = 0
@@ -1431,17 +1450,19 @@ def _direct_llm_usage() -> dict:
 		model = row.get("model")
 		tokens_in = int(row.get("in_") or 0)
 		tokens_out = int(row.get("out_") or 0)
-		price_in, price_out = pricing.price_for_model(model)
+		on_plan = model in plan_models
+		price_in, price_out = (0.0, 0.0) if on_plan else pricing.price_for_model(model)
 		cost = (tokens_in / 1_000_000) * price_in + (tokens_out / 1_000_000) * price_out
-		per_model.append(
-			{
-				"model": model,
-				"provider": "",
-				"tokens_in": tokens_in,
-				"tokens_out": tokens_out,
-				"cost_usd": round(cost, 6),
-			}
-		)
+		entry = {
+			"model": model,
+			"provider": "",
+			"tokens_in": tokens_in,
+			"tokens_out": tokens_out,
+			"cost_usd": round(cost, 6),
+		}
+		if on_plan:
+			entry["subscription"] = True
+		per_model.append(entry)
 		tokens_in_total += tokens_in
 		tokens_out_total += tokens_out
 		cost_total += cost
