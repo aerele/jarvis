@@ -344,7 +344,12 @@ class _Attempt:
 		return self._not_available(f"failed:{type(exc).__name__}", type(exc).__name__)
 
 	def _after_write_refusal(self, reason, error, run_ms):
-		if reason == "stale":  # a newer writer won: delete nothing, clear nothing
+		if reason == "stale":
+			# A newer writer won, or a reader wrote the meta between WATCH and EXEC. Delete
+			# nothing. Take back our own stamp: left set, the next call reads it as a killed
+			# attempt and deletes the keys. The compare-and-set leaves a newer writer's meta
+			# alone, as it carries no stamp of ours.
+			self._clear_stamp(run_ms)
 			return self._transient("failed:watch", "WatchError")
 		if reason == "gone":  # trimmed meanwhile; the content is already deleted
 			return self._not_available("refused:gone")

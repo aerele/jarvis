@@ -88,9 +88,10 @@ def parse_meta(raw):
 	return meta
 
 
-def new_meta(owner, report_name, filters, json_bytes, run_ms, generation, created=None):
+def new_meta(owner, report_name, filters, json_bytes, run_ms, generation, created=None, digest=None):
 	"""The one meta record of a snapshot, at create (generation 0) and at every reload.
-	`created` is `(created_at, created_ts)` of the first run, given for a reload. Each time
+	`created` is `(created_at, created_ts)` of the first run, given for a reload. `digest`
+	is the permission digest taken before the run; without it the digest is taken now. Each time
 	is kept twice: as site-time text for people and as an epoch float for age math, which
 	must not move with a DST change."""
 	now, ts = frappe.utils.now(), time.time()
@@ -99,7 +100,7 @@ def new_meta(owner, report_name, filters, json_bytes, run_ms, generation, create
 		"owner": owner,
 		"report_name": report_name,
 		"filters": filters,
-		"perm_digest": perm_digest(owner, report_name),
+		"perm_digest": digest or perm_digest(owner, report_name),
 		"sha256": hashlib.sha256(json_bytes).hexdigest(),
 		"created_at": created_at,
 		"created_ts": created_ts,
@@ -143,21 +144,34 @@ def read_state(snapshot_id):
 
 
 def create(
-	data, *, report_name, filters, run_ms, snapshot_id=None, generation=0, created=None, measured=None
+	data,
+	*,
+	report_name,
+	filters,
+	run_ms,
+	snapshot_id=None,
+	generation=0,
+	created=None,
+	measured=None,
+	perm_digest=None,
 ):
 	"""Store a cut inline result. Returns `Created`: `(id, "ok")` or `(None, reason)`.
 	Never raises. `measured` is the size `api` already took of the result: it lets the caps
-	refuse an oversized result before anything is serialised. With `snapshot_id` it
+	refuse an oversized result before anything is serialised. `perm_digest` is the owner's
+	digest taken before the run: a role removed during a long run must not stamp the rows
+	of the old access with the new digest. With `snapshot_id` it
 	rewrites that snapshot as a reload (B.9.4), with `created` the `(created_at, created_ts)` of its
 	first run."""
 	try:
-		return _create(data, report_name, filters, run_ms, snapshot_id, generation, created, measured)
+		return _create(
+			data, report_name, filters, run_ms, snapshot_id, generation, created, measured, perm_digest
+		)
 	except Exception as exc:
 		log("create_error", exc)
 		return Created(None, "error", error=type(exc).__name__)
 
 
-def _create(data, report_name, filters, run_ms, snapshot_id, generation, created, measured):
+def _create(data, report_name, filters, run_ms, snapshot_id, generation, created, measured, digest):
 	if not enabled():
 		return Created(None, "disabled")
 	reason = payload.skip_reason(data, measured)
@@ -173,7 +187,7 @@ def _create(data, report_name, filters, run_ms, snapshot_id, generation, created
 		)
 	owner = frappe.session.user
 	snapshot_id = "rs_" + secrets.token_urlsafe(24)
-	meta = new_meta(owner, report_name, filters, json_bytes, run_ms, generation)
+	meta = new_meta(owner, report_name, filters, json_bytes, run_ms, generation, digest=digest)
 	content_key, meta_key = keys(snapshot_id)
 	try:
 		with frappe.cache().pipeline() as pipe:
