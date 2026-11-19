@@ -103,11 +103,7 @@ def _reload_error(inspected, reloaded, *, sql_given):
 	version when the inspect fitted the budget. Wire code `snapshot_reloaded`."""
 	version = inspected.get("version") if inspected else None
 	if reloaded.perm_changed:
-		changed = (
-			"Access or report definition and data changed"
-			if reloaded.data_changed
-			else "Access or report definition changed"
-		)
+		changed = "Access and data changed" if reloaded.data_changed else "Access changed"
 	else:
 		changed = "Data changed" if reloaded.data_changed else "Data unchanged"
 	message = (

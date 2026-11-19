@@ -573,8 +573,16 @@ class TestPermDigest(SnapshotCase):
 			self.assertNotEqual(self.digest(), base)
 		with patch.object(digest, "get_role_permissions", return_value={"read": 1, "if_owner": {"read": 1}}):
 			self.assertNotEqual(self.digest(), base)
+
+	def test_a_report_save_that_only_moves_modified_does_not_change_the_digest(self):
+		# Not an access input: gate_report re-checks the report on every read. Frappe's
+		# prepared-report automation saves the Report in the middle of a slow run.
+		base = self.digest()
+		before = frappe.db.get_value("Report", self.report.name, "modified")
+		self.addCleanup(frappe.db.set_value, "Report", self.report.name, "query", self.report.query)
 		frappe.db.set_value("Report", self.report.name, "query", "select name from `tabToDo` limit 2")
-		self.assertNotEqual(self.digest(), base)
+		self.assertNotEqual(frappe.db.get_value("Report", self.report.name, "modified"), before)
+		self.assertEqual(self.digest(), base)
 
 	def test_a_read_share_changes_the_digest(self):
 		todo = frappe.get_doc({"doctype": "ToDo", "description": "digest share " + self.tag}).insert(
