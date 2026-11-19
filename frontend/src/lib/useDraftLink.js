@@ -4,7 +4,12 @@
 // call is injected (`searchLink`), as is the refresh of the rules' hidden values after a pick
 // (`fillRuleValues`); `draftPanel` is the ref of the draft model the form edits.
 import { onBeforeUnmount, ref, watch } from "vue";
-import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "./draftLinkFilters";
+import {
+	draftLinkSearch,
+	draftLinkContext,
+	DraftLinkFilterError,
+	DraftLinkTargetError,
+} from "./draftLinkFilters";
 
 export function useDraftLink({ draftPanel, searchLink, fillRuleValues }) {
 	// one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<row __key>:<col>"
@@ -34,7 +39,19 @@ export function useDraftLink({ draftPanel, searchLink, fillRuleValues }) {
 		draftLink.value = { key, items: [], open: true, anchor };
 		const search = draftLink.value;
 		draftLinkError.value = "";
-		if (!doctype) return;
+		if (!doctype) {
+			// A Dynamic Link whose controlling field is still empty: say which field to set.
+			// Any other link without a DocType stays silent, as before.
+			try {
+				draftLinkSearch(draftPanel.value, key);
+			} catch (e) {
+				if (e instanceof DraftLinkTargetError) {
+					draftLink.value = { ...draftLink.value, open: false, items: [] };
+					draftLinkError.value = e.message;
+				}
+			}
+			return;
+		}
 		try {
 			const args = draftLinkSearch(draftPanel.value, key);
 			const filterContext = JSON.stringify(args);

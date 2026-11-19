@@ -171,6 +171,38 @@ describe("useDraftLink", () => {
 		expect(link.draftLink.value.open).toBe(false);
 	});
 
+	it("a Dynamic Link with its DocType field empty says which field to set (admin-v2#785)", async () => {
+		// Catches: a Dynamic Link searched before its Type is chosen failing silently, as a
+		// plain Link with no DocType still does.
+		const type = {
+			fieldname: "reference_type",
+			label: "Reference Type",
+			fieldtype: "Link",
+			options: "DocType",
+			value: "",
+		};
+		const ref_ = {
+			fieldname: "reference_name",
+			fieldtype: "Dynamic Link",
+			options: "reference_type",
+			value: "",
+		};
+		const { link, searchLink } = mountComposable({ model: model([type, ref_]) });
+		await link.onDraftLink("f:reference_name", () => "", "", { target: input() });
+		expect(link.draftLinkError.value).toBe("Set Reference Type before searching this field.");
+		expect(searchLink).not.toHaveBeenCalled();
+		// a plain Link with no DocType stays silent, as before
+		const plain = mountComposable({ model: model([customer({ options: "" })]) });
+		await plain.link.onDraftLink("f:customer", () => "", "", { target: input() });
+		expect(plain.link.draftLinkError.value).toBe("");
+		// once the Type is set, the host searches that DocType
+		type.value = "Customer";
+		await link.onDraftLink("f:reference_name", () => "", "Customer", { target: input() });
+		expect(searchLink).toHaveBeenCalledTimes(1);
+		expect(searchLink.mock.calls[0][0]).toBe("Customer");
+		expect(link.draftLinkError.value).toBe("");
+	});
+
 	it("resetDraftLink clears the menu and the error, and a pending answer cannot reopen it", async () => {
 		// Catches: closing the panel (or switching chats) leaving an in-flight search free to
 		// reopen the menu over the next draft.
