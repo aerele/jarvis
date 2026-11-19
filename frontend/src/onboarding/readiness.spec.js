@@ -376,10 +376,6 @@ describe("regateOnRouteChange (jarvis#691 round-4 review F3/F4)", () => {
  * component in the app and boots sockets, so this reads the template instead,
  * the same trick dashboardOpen.test.js already uses on this file).
  */
-describe("ChatView banner chain order", () => {
-	const HERE = path.dirname(fileURLToPath(import.meta.url));
-	const chatSrc = fs.readFileSync(path.join(HERE, "..", "views", "ChatView.vue"), "utf8");
-});
 
 /**
  * Upgrade maintenance hold (Stream E). Same source-read technique as the suites

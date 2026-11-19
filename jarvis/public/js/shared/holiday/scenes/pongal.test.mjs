@@ -15,11 +15,7 @@ import {
   TORAN_BOTTOM,
   toranSVG,
 } from "./pongal-art.mjs";
-import {
-  GAP,
-  MIN_FLOOR_SCALE,
-  TORAN,
-} from "../scene-geometry.mjs";
+import { GAP, MIN_FLOOR_SCALE, TORAN } from "../scene-geometry.mjs";
 
 import {
   contractSuite,
