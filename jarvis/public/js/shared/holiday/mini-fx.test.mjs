@@ -4,11 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DESIGNS } from "./answer.mjs";
-import {
-  MINI_PARTICLE,
-  particleMarkup,
-  playParticles,
-} from "./mini-fx.mjs";
+import { MINI_PARTICLE, particleMarkup, playParticles } from "./mini-fx.mjs";
 
 // An svg double: innerHTML in, fake `.mfx` elements out, each remembering its animation.
 function fakeSvg() {

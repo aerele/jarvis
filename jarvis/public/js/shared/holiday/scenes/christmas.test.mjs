@@ -14,11 +14,7 @@ import {
   sleighAt,
   sleighPlan,
 } from "./christmas-art.mjs";
-import {
-  CLEAR,
-  GAP,
-  HERO_TOP_UNITS,
-} from "../scene-geometry.mjs";
+import { CLEAR, GAP, HERO_TOP_UNITS } from "../scene-geometry.mjs";
 import {
   boxes,
   contractSuite,

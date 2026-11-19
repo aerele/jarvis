@@ -1,8 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { fmtTokens, contextReading, limitWindow, limitReading } from "./tokens.js";
-
-describe("fmtTokens", () => {
-});
+import { contextReading, limitWindow, limitReading } from "./tokens.js";
 
 describe("contextReading", () => {
 	it("reads the used/capacity pair when fresh", () => {
