@@ -12,12 +12,7 @@ import {
   lanternSpot,
   moonY,
 } from "./eid-art.mjs";
-import {
-  CLEAR,
-  GAP,
-  HERO_TOP_UNITS,
-  MARK_TOP,
-} from "../scene-geometry.mjs";
+import { CLEAR, GAP, HERO_TOP_UNITS, MARK_TOP } from "../scene-geometry.mjs";
 import {
   boxes,
   contractSuite,
