@@ -27,18 +27,28 @@
 				>
 				<div class="jv-draft-ctl">
 					<span v-if="f.read_only" class="jv-draft-ro">{{ readonlyDisplay(f) }}</span>
-					<template v-else-if="f.control === 'link'">
+					<template v-else-if="f.control === 'link' || isDynamicLink(f)">
 						<input
 							class="jv-action-input"
 							v-model="f.value"
 							@input="
-								onDraftLink('f:' + f.fieldname, () => f.value, f.options, $event)
+								onDraftLink(
+									'f:' + f.fieldname,
+									() => f.value,
+									linkTarget(f),
+									$event
+								)
 							"
 							@focus="
-								onDraftLink('f:' + f.fieldname, () => f.value, f.options, $event)
+								onDraftLink(
+									'f:' + f.fieldname,
+									() => f.value,
+									linkTarget(f),
+									$event
+								)
 							"
 							@blur="closeDraftLink"
-							:placeholder="'Search ' + (f.options || 'records') + '…'"
+							:placeholder="'Search ' + (linkTarget(f) || 'records') + '…'"
 							autocomplete="off"
 						/>
 						<DraftLinkMenu
@@ -427,6 +437,14 @@ const dateControl = inject(DRAFT_DATE_CONTROL, null);
 const emit = defineEmits(["link-search", "link-blur", "link-pick", "link-close"]);
 // The host answers these; the arguments pass through unchanged.
 const onDraftLink = (...a) => emit("link-search", ...a);
+// A Dynamic Link is a link whose DocType is the value of its controlling field (options), as
+// in Desk: it searches that DocType, and picking fills it. Unset, the search says which field to
+// set first (lib/draftLinkFilters). panelField leaves it a "data" control for the other forms.
+const isDynamicLink = (f) => f.fieldtype === "Dynamic Link";
+const linkTarget = (f) =>
+	isDynamicLink(f)
+		? String(props.model.fields.find((x) => x.fieldname === f.options)?.value || "")
+		: f.options;
 // The row's "Row N:" mark (lib/draftRowError.js) goes when the person edits that row; the next save reply
 // clears it too (markRowFromMessage resets every row's flag).
 const clearRowFlag = (row) => {
