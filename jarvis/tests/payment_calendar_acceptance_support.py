@@ -28,7 +28,7 @@ from pypika.functions import Cast
 from jarvis.payment_calendar import builtin_reader
 from jarvis.payment_calendar import sources as today_sources
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable, ReaderFallback
-from jarvis.tests.payment_calendar_differential import _canonical, _ids, _recording_lines, ids_may_differ
+from jarvis.tests.payment_calendar_differential import _canonical, _ids
 from jarvis.tests.payment_calendar_fixtures import is_calendar_test_site
 
 TEST_SITE = "test_jarvis"
@@ -246,7 +246,7 @@ def error_label(error) -> str:
 	return f"error:{type(error).__name__}"
 
 
-def compare_reads(args, reader, today, read_names) -> dict:
+def compare_reads(reader, today) -> dict:
 	"""Classify one reader outcome against today's: compared, refusal or fallback, with a count of diffs.
 
 	`reader` and `today` are `(result, error)` pairs. Only counts, field names and digests are returned.
@@ -271,7 +271,9 @@ def compare_reads(args, reader, today, read_names) -> dict:
 	found["outcome"] = "compared"
 	found["ids"] = "equal"
 	if found["diffs"] == 0 and _ids(result) != _ids(expected):
-		found["ids"] = "accepted" if ids_may_differ(args, {}, read_names) else "differ"
+		# An id is a position in the whole result: an id difference counts as a difference, like a row's.
+		found["ids"] = "differ"
+		found["diffs"] += 1
 	return found
 
 
@@ -327,26 +329,23 @@ def settled_rows(result: dict | None) -> int | None:
 def read_both(args) -> dict:
 	"""The reader (timed, with stats) and today's read (guards lifted) on the same `args`.
 
-	The caller owns the transaction view. Returns the two pairs, the reader's stats and seconds, and the
-	names of the ledger lines the reader read.
+	The caller owns the transaction view. Returns the two pairs, the reader's stats and seconds.
 	"""
 	stats = {}
-	with _recording_lines() as names:
-		started = time.perf_counter()
-		reader = attempt(builtin_reader.read_obligations, *args, stats=stats)
-		seconds = time.perf_counter() - started
+	started = time.perf_counter()
+	reader = attempt(builtin_reader.read_obligations, *args, stats=stats)
+	seconds = time.perf_counter() - started
 	return {
 		"reader": reader,
 		"today": attempt(today_lifted, *args),
 		"stats": stats,
 		"seconds": round(seconds, 3),
-		"names": names,
 	}
 
 
 def reader_record(read: dict, args) -> dict:
 	"""What the gate needs from one side: outcome, diffs, control total, overlay counts, timings."""
-	found = compare_reads(args, read["reader"], read["today"], read["names"])
+	found = compare_reads(read["reader"], read["today"])
 	stats = read["stats"]
 	return {
 		**found,

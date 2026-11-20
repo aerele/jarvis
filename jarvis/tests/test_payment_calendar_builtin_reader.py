@@ -226,8 +226,10 @@ NARROWING = re.compile(
 	r"`against_voucher_no`\s+IN\b|`against_voucher_type`\s*=|`against_voucher_type`\s+IS NULL|`voucher_no`\s+IN\b"
 )
 # sha256 of the source of the two copies of the settled-in-window rule (see the test that uses it).
+# Re-audited when `_settled_in_window` began returning the selected keys in candidate order (a list) instead of
+# the set: the selection rule is unchanged, so `_due_in_window` still finds the same candidates.
 SETTLED_RULE_PINS = {
-	"sources._settled_in_window": "b8c50a6711543c5455c404abe89b64de4d9d61f4bf0527e8a39b4412a8a64ce7",
+	"sources._settled_in_window": "0421064fbcfd968c1af46bc60e3df72be67645d92f712fd3a54844ae97721b73",
 	"builtin_reader._due_in_window": "0a62b0e1116b09ed8708382d33a6869779b192c64b4c2ec6a02baa73138ba528",
 }
 SIDES_ACCOUNT_FIELD = {"Receivable": "debit_to", "Payable": "credit_to"}
@@ -620,6 +622,29 @@ class TestBuiltinReaderCore(ReaderCase):
 				for index, name in enumerate(self.COLLATION_NAMES):
 					entry = self.fx.prefix + "Journal" + name + side
 					self.raw(name + side, "Journal Entry", entry, "Journal Entry", entry, 10 + index, side)
+				self.assert_ids_and_order_equal_today(side)
+
+	def test_a_voucher_whose_first_line_is_against_an_unread_closed_invoice_keeps_its_place(self):
+		"""One date, one party: PE1's first line pays a closed invoice the reader never discovers, its second line
+		is unallocated; PE2 has one unallocated line. Today sees PE1 first (its first line has the lower name).
+		Row ids follow that order, so the reader must see PE1 first too, though it reads only PE1's second line.
+		"""
+
+		def scenario(side):
+			invoice = self.invoice(side, (100,), schedules=False, offset=-400)
+			doctype = INVOICE_TYPES[side]
+			# Closed and due long before the window: nothing selects the invoice, so none of its lines is read.
+			frappe.db.set_value(
+				doctype, invoice, "due_date", add_days(self.fx.today, -380), update_modified=False
+			)
+			first, second = (self.fx.prefix + name + side for name in ("PE1", "PE2"))
+			self.raw("IdA" + side, "Payment Entry", first, doctype, invoice, -100, side)
+			self.raw("IdB" + side, "Payment Entry", second, "Payment Entry", second, -30, side)
+			self.raw("IdC" + side, "Payment Entry", first, "Payment Entry", first, -50, side)
+
+		for side in SIDES:
+			with self.subTest(side):
+				scenario(side)
 				self.assert_ids_and_order_equal_today(side)
 
 	def test_a_tied_line_order_follows_the_report(self):

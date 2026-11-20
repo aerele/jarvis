@@ -400,7 +400,10 @@ def _report_class():
 					due = self.metadata.get(key[2], {}).get("due_date")
 					if key[2] in parents or (due and self.window_start <= getdate(due) <= self.window_end):
 						selected.add(key)
-			return selected
+			# In the order of `candidates`, not the set's: the order sets the overlay rows' positions, so their
+			# ids. A set of text keys iterates by hash, which differs between two sets of the same keys built
+			# in another order or size (the reader's candidates are fewer than today's) and between processes.
+			return [key for key in candidates if key in selected]
 
 	return CalendarReport
 

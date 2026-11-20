@@ -949,6 +949,23 @@ class TestLedgerOrder(EngineCase):
 		self.assertNotIn("name", self.order_keys(engine))
 
 
+class TestSettledOverlayOrder(TestCase):
+	"""The settled overlay's order sets its rows' positions, so their ids: it must not be a set's hash order."""
+
+	def test_settled_in_window_keeps_the_order_of_the_candidates(self):
+		keys = [("Account", "Sales Invoice", f"SINV-{number:04d}", "Party") for number in range(300, 0, -1)]
+		candidates = {key: SimpleNamespace(voucher_type="Sales Invoice") for key in keys}
+		window = {key[2]: {"due_date": "2026-01-15"} for key in keys[::2]}
+		window.update({key[2]: {"due_date": "2030-01-15"} for key in keys[1::2]})
+		engine = SimpleNamespace(
+			metadata=window, window_start=getdate("2026-01-01"), window_end=getdate("2026-12-31")
+		)
+		with patch.object(frappe, "get_all", return_value=[]):
+			selected = sources._report_class()._settled_in_window(engine, candidates)
+		self.assertIsInstance(selected, list)
+		self.assertEqual(selected, keys[::2])
+
+
 class TestBatchedPartyDetails(EngineCase):
 	def party_engine(self, side, parties):
 		engine = self.engine()

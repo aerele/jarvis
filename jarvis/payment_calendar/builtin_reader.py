@@ -32,15 +32,12 @@ Memory: the lines read are held in Python. Three caps (`GENERIC_LINE_CAP`, `TOTA
 `RANK_PARTY_CAP`) end a read that would hold too many in `ReaderFallback("too_many_lines")`; the header,
 schedule and aggregate scans still grow with the history, and the database does that work.
 
-Known differences from today's read (accepted; the differential comparator must list them, and only these):
-
-* Row ids, never amounts. An id is the row's position in the whole result, which follows the order in which
-  the first line of each key was seen. Lines are merged in the report's own order (posting date, party, line
-  name, the last two ranked by the database collation), so ids are equal except where a key's own first line
-  in the full ledger is not read: the key is then first seen at its first READ line, which can move it among
-  keys that tie, shift the ids of the rows in between, and reorder rows tied on (due date, voucher type,
-  voucher number). The comparator already ignores ids and row order (`_canonical`).
-* Nothing else: a row, an amount, a note, a reason or a refusal that differs is a reader bug.
+No known difference from today's read: amounts, rows, notes, reasons, refusals, row ids and row order are
+equal. A row id is the row's position in the whole result, which follows the order in which the report's
+`init_voucher_balance` first meets each key, by the line's OWN voucher. The lines read could meet a key later
+than the full ledger does (a voucher whose first line pays an invoice the read skipped), so the INIT pass
+also sees the other lines of the vouchers whose key a read line creates (`_other_lines_of_read_vouchers`). They
+feed init only: never the update pass, the control total or a row.
 
 Nothing here writes, commits or rolls back, and nothing outside the tests imports this module (yet).
 """
@@ -458,6 +455,8 @@ def _builtin_class():
 		# Row type per selected field list (see `line_class`).
 		_line_classes: dict = None
 		_read_query = None
+		# The lines of the init pass (the read lines and the other lines of their vouchers); see `_narrow_lines`.
+		_init_lines = None
 
 		def voucher_limit(self):
 			"""The reader never refuses `too_large`; its own line caps end in a `too_many_lines` fallback."""
@@ -481,6 +480,7 @@ def _builtin_class():
 			self.reader_stats = {"counts": {}, "timings_ms": {}, "control": {}}
 			self._line_classes = {}
 			self._read_query = None
+			self._init_lines = None
 			try:
 				self._read_data()
 			except ReaderFallback as exc:
@@ -530,7 +530,9 @@ def _builtin_class():
 					self.invoice_details = self._narrow_invoice_details(lines)
 			# ERPNext's own accumulation, as fetch_ple_in_buffered_cursor runs it: two passes.
 			with self._timed("accumulate"):
-				for ple in lines:
+				# Init sees the lines of the read vouchers the read skipped too, so keys are first met in
+				# today's order (row ids); update sees only the lines read.
+				for ple in lines if self._init_lines is None else self._init_lines:
 					self.init_voucher_balance(ple)
 				for ple in lines:
 					self.update_voucher_balance(ple)
@@ -871,11 +873,45 @@ def _builtin_class():
 						if voucher_type == doctype
 					}
 			ordered = sort_like_the_report(list(lines.values()))
+			init_only = self._other_lines_of_read_vouchers(ordered)
+			if len(ordered) + len(init_only) > TOTAL_LINE_CAP:
+				raise ReaderFallback("too_many_lines")
+			self._init_lines = sort_like_the_report(ordered + init_only) if init_only else ordered
 			counts = self.reader_stats["counts"]
-			counts.update(lines=len(ordered), rekey_probed=len(probed), rekey_rounds=rounds)
+			counts.update(
+				lines=len(ordered),
+				init_only_lines=len(init_only),
+				rekey_probed=len(probed),
+				rekey_rounds=rounds,
+			)
 			# Exact sum of the lines read, for the control check (frappe turns amounts into floats).
 			self._lines_total = sum((Decimal(str(row.amount or 0)) for row in ordered), Decimal(0))
 			return ordered
+
+		def _other_lines_of_read_vouchers(self, lines: list) -> list:
+			"""The ledger lines the read did not take, of the vouchers whose key a read line creates.
+
+			Row ids follow the order in which the report's `init_voucher_balance` first meets each key, and
+			it keys a line by its OWN voucher. A voucher whose first line pays an invoice the read skipped
+			(closed, outside the window) would otherwise be met first at a later line and move among the keys
+			that tie. These lines feed the INIT pass only (`_init_lines`, used by `_read_data`): never the update pass, the control
+			total or any row, so no amount can change. Read by `voucher_no`, as the re-key probe does, and
+			only lines of a key that already has a read line (the key exists in the read as well).
+			"""
+			read = {line.name for line in lines}
+			owned = {(line.account, line.voucher_type, line.voucher_no, line.party) for line in lines}
+			by_type = {}
+			for _, voucher_type, voucher_no, _ in owned:
+				by_type.setdefault(voucher_type, set()).add(voucher_no)
+			ple, other = self.ple, {}
+			for voucher_type, names in sorted(by_type.items()):
+				for chunk in _chunks(sorted(names)):
+					for row in self._read((ple.voucher_type == voucher_type) & ple.voucher_no.isin(chunk)):
+						key = (row.account, row.voucher_type, row.voucher_no, row.party)
+						# `IN` matches letter case loosely; the key match is exact.
+						if row.name not in read and key in owned:
+							other[row.name] = row
+			return list(other.values())
 
 		def _read_keyed(self, targets, add):
 			"""Read the lines of every key in `targets` (account, voucher_type, voucher_no, party) by `voucher_no`.

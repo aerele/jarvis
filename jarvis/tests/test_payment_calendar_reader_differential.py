@@ -21,7 +21,6 @@ from jarvis.tests import test_payment_calendar_voucher_types as voucher_tests
 from jarvis.tests.payment_calendar_differential import (
 	READER_TALLY,
 	compare_reader_with_today,
-	first_line_unread,
 	no_reader_compare,
 )
 from jarvis.tests.payment_calendar_fixtures import sync_outstanding
@@ -203,50 +202,21 @@ class TestReaderComparator(TestCase):
 		# The guards are restored afterwards.
 		self.assertLess(today_sources.MAX_VOUCHERS, 10**9)
 
-	def test_ids_differ_only_in_the_accepted_case(self):
+	def test_any_id_difference_fails_there_is_no_accepted_case(self):
 		moved = result([{"id": "b", "voucher_no": "X", "remaining": "10"}])
 		with self.assertRaises(AssertionError):
-			self.compare(returning(moved), returning(result()), explain_ids=lambda *args: False)
-		before = READER_TALLY["id_only"]
-		self.assertIs(
-			self.compare(returning(moved), returning(result()), explain_ids=lambda *args: True), moved
-		)
-		self.assertEqual(READER_TALLY["id_only"], before + 1)
+			self.compare(returning(moved), returning(result()))
 
-	def test_the_explanation_gets_the_keys_of_the_rows_whose_ids_differ(self):
-		first = {"id": "a", "account": "A", "voucher_type": "T", "voucher_no": "X", "party": "P"}
-		second = {"id": "b", "account": "A", "voucher_type": "T", "voucher_no": "Y", "party": "P"}
-		moved = [first, {**second, "id": "c"}]
-		asked = []
-
-		def explain(args, kwargs, read_names, keys):
-			asked.append(keys)
-			return True
-
-		self.compare(returning(result(moved)), returning(result([first, second])), explain_ids=explain)
-		self.assertEqual(asked, [{("A", "T", "Y", "P")}])
-
-	def test_equal_ids_do_not_ask_for_an_explanation(self):
-		def explain(*args):
-			raise AssertionError("asked")
-
-		self.compare(returning(result()), returning(result()), explain_ids=explain)
-
-	def test_an_id_difference_never_excuses_an_amount_difference(self):
-		moved = result([{"id": "b", "voucher_no": "X", "remaining": "11"}])
-		with self.assertRaises(AssertionError):
-			self.compare(returning(moved), returning(result()), explain_ids=lambda *args: True)
+	def test_equal_ids_pass(self):
+		same = result()
+		self.assertIs(self.compare(returning(same), returning(result())), same)
 
 	def test_swapped_ids_on_two_rows_are_a_difference(self):
 		first = {"id": "a", "voucher_no": "X", "remaining": "10"}
 		second = {"id": "b", "voucher_no": "Y", "remaining": "5"}
 		swapped = [{**first, "id": "b"}, {**second, "id": "a"}]
 		with self.assertRaises(AssertionError):
-			self.compare(
-				returning(result(swapped)),
-				returning(result([first, second])),
-				explain_ids=lambda *args: False,
-			)
+			self.compare(returning(result(swapped)), returning(result([first, second])))
 
 	def test_the_sync_runs_first_and_receives_the_company(self):
 		order = []
@@ -257,49 +227,6 @@ class TestReaderComparator(TestCase):
 
 		compare_reader_with_today(reader, returning(result()), sync=order.append)(*self.ARGS)
 		self.assertEqual(order, ["company", "reader"])
-
-
-class TestUnreadFirstLine(TestCase):
-	"""The accepted difference, decided from the full ledger and the lines the reader read."""
-
-	@staticmethod
-	def line(name, key, date):
-		return {"name": name, "key": key, "posting_date": date}
-
-	def test_all_lines_read_means_no_accepted_difference(self):
-		lines = [self.line("a", "K", 1), self.line("b", "K", 2), self.line("c", "L", 1)]
-		self.assertFalse(first_line_unread(lines, {"a", "b", "c"}))
-
-	def test_an_unread_first_line_of_a_read_key_is_the_accepted_case(self):
-		lines = [self.line("a", "K", 1), self.line("b", "K", 2)]
-		self.assertTrue(first_line_unread(lines, {"b"}))
-
-	def test_an_unread_line_after_the_first_read_line_is_not(self):
-		lines = [self.line("a", "K", 1), self.line("b", "K", 2)]
-		self.assertFalse(first_line_unread(lines, {"a"}))
-
-	def test_a_key_with_no_read_line_is_not(self):
-		lines = [self.line("a", "K", 1), self.line("b", "L", 2)]
-		self.assertFalse(first_line_unread(lines, {"b"}))
-
-	def test_only_the_keys_of_the_rows_with_a_changed_id_can_excuse_it(self):
-		lines = [
-			self.line("a", "K", 1),
-			self.line("b", "K", 2),
-			self.line("c", "L", 1),
-			self.line("d", "L", 2),
-		]
-		read = {"b", "c", "d"}
-		self.assertTrue(first_line_unread(lines, read), "K qualifies")
-		self.assertTrue(first_line_unread(lines, read, {"K"}))
-		self.assertFalse(
-			first_line_unread(lines, read, {"L"}), "L has its first line read: K cannot excuse it"
-		)
-		self.assertFalse(first_line_unread(lines, read, set()))
-
-	def test_a_tie_on_the_date_counts_because_the_collation_decides(self):
-		lines = [self.line("a", "K", 1), self.line("b", "K", 1)]
-		self.assertTrue(first_line_unread(lines, {"b"}))
 
 
 class RunUnderReader:

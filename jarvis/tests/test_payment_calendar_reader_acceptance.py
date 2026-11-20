@@ -294,9 +294,17 @@ class TestAcceptanceSiteGuards(TestCase):
 
 
 class TestResultDiff(TestCase):
-	def test_equal_results_have_no_diffs_even_with_other_ids(self):
+	def test_the_content_diff_leaves_ids_to_the_comparison_that_counts_them(self):
 		found = result_diff(result(row(id="a")), result(row(id="b")))
 		self.assertEqual(found["diffs"], 0)
+
+	def test_an_id_difference_is_counted_as_a_difference(self):
+		from jarvis.tests.payment_calendar_acceptance_support import compare_reads
+
+		same = compare_reads((result(row(id="a")), None), (result(row(id="a")), None))
+		other = compare_reads((result(row(id="a")), None), (result(row(id="b")), None))
+		self.assertEqual((same["ids"], same["diffs"]), ("equal", 0))
+		self.assertEqual((other["ids"], other["diffs"]), ("differ", 1))
 
 	def test_a_difference_names_fields_and_digests_never_values(self):
 		found = result_diff(

@@ -299,13 +299,14 @@ on the `version-16` head, so there is one hash each. When ERPNext changes a pinn
 
 Only a `"16"` entry exists. Entries for v15 come with the v15 backport.
 
-**Accepted difference: row ids.** An id encodes the row's position in the whole result, which follows
-the order in which the first line of each key was seen. The reader merges its lines in the report's own
-order, so ids are equal except where a key's own first line in the full ledger is not read: the key is
-then first seen at its first read line. That can move it among keys that tie, shift the ids between,
-and reorder rows that tie on due date, voucher type and voucher number. Never an amount, note, reason
-or refusal. The comparator ignores ids and row order and checks the case explicitly
-(`ids_may_differ`); no consumer keeps an id across reads.
+**Row ids equal today's.** An id encodes the row's position in the whole result, which follows the order
+in which `init_voucher_balance` first meets each key. It keys a line by its own voucher, so the reader
+also reads the other ledger lines of every voucher whose key a read line creates (by `voucher_no`, the
+indexed lookup) and feeds them to the init pass only. They never reach the update pass, the control total
+or a row, so no amount changes; they count toward `TOTAL_LINE_CAP` (`too_many_lines` above it) and show
+as `init_only_lines` in the stats. Ids, row order and amounts all equal today's read: the differential
+accepts no difference. The settled overlay is ordered by the candidate order, not by a set's hash order (`_settled_in_window`), which differs between two sets of the same keys and between processes. An id still does not outlive a read (it moves when the ledger changes); no
+consumer keeps one across reads.
 
 **Manual acceptance** (outputs outside the repository, companies as HMAC digests, rows by digest and
 field name, never a party or voucher name). The functions live in
