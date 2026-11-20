@@ -204,7 +204,7 @@ describe("one editable value of a child row", () => {
 		expect(row.w).toBe("Stores");
 	});
 
-	it("a Dynamic Link is a picker on its row's DocType, and the pick fills it (admin-v2#785)", async () => {
+	it("a Dynamic Link is a picker on its row's DocType, and the pick fills it", async () => {
 		// A Payment Entry reference: Name (reference_name) follows its Type (reference_doctype).
 		const row = reactive({ reference_doctype: "Sales Invoice", reference_name: "" });
 		const field = F("reference_name", "Dynamic Link", { options: "reference_doctype" });

@@ -171,7 +171,7 @@ describe("useDraftLink", () => {
 		expect(link.draftLink.value.open).toBe(false);
 	});
 
-	it("a Dynamic Link with its DocType field empty says which field to set (admin-v2#785)", async () => {
+	it("a Dynamic Link with its DocType field empty says which field to set", async () => {
 		// Catches: a Dynamic Link searched before its Type is chosen failing silently, as a
 		// plain Link with no DocType still does.
 		const type = {

@@ -1,4 +1,4 @@
-"""admin-v2#785: a Payment Entry reference's Type and Name pickers narrow as Desk's do.
+"""A Payment Entry reference's Type and Name pickers narrow as Desk's do.
 
 erpnext/accounts/doctype/payment_entry/payment_entry.js sets two queries on the references
 table: Type (reference_doctype, a Link to DocType) is limited to the documents a payment can
