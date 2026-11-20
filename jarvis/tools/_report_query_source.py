@@ -192,7 +192,18 @@ def gate_report(report_name, filters, user):
 			) from None
 		metadata = get_report_filters(report_name)
 		filter_defs = metadata.get("filters") or []
-		validate_filters_permissions(report_name, filters, user, js_filters=metadata.get("filters") or [])
+		# Frappe v15 checks saved Report.filters, but has no js_filters argument.
+		# Keep that gate and check the script-declared Links before reading bytes.
+		validate_filters_permissions(report_name, filters, user)
+		for field in filter_defs:
+			name = field.get("fieldname")
+			if name in filters and field.get("fieldtype") == "Link":
+				if not frappe.has_permission(
+					doctype=field.get("options"), ptype="read", doc=filters[name], user=user
+				) and not frappe.has_permission(
+					doctype=field.get("options"), ptype="select", doc=filters[name], user=user
+				):
+					raise frappe.PermissionError
 		company = filters.get("company")
 		if company:
 			companies = [company] if isinstance(company, str) else company
@@ -293,59 +304,7 @@ class ReportSource:
 		return meta
 
 	def _gate(self):
-<<<<<<< HEAD
-		# frappe.throw also queues its raw message for the HTTP JSON envelope.
-		# Keep the framework's exception, but suppress its saved-scope popup text.
-		mute_messages = frappe.flags.mute_messages
-		frappe.flags.mute_messages = True
-		try:
-			try:
-				self.report = get_report_doc(self.meta.report_name)
-			except frappe.ValidationError:
-				raise InvalidArgumentError(
-					"The selected report is unavailable. Choose an enabled report."
-				) from None
-			metadata = get_report_filters(self.meta.report_name)
-			self.filter_defs = metadata.get("filters") or []
-			# Frappe v15 checks saved Report.filters, but has no js_filters argument.
-			# Keep that gate and check the script-declared Links before reading bytes.
-			validate_filters_permissions(self.meta.report_name, self.filters, self.user)
-			for field in self.filter_defs:
-				name = field.get("fieldname")
-				if name in self.filters and field.get("fieldtype") == "Link":
-					if not frappe.has_permission(
-						doctype=field.get("options"), ptype="read", doc=self.filters[name], user=self.user
-					) and not frappe.has_permission(
-						doctype=field.get("options"), ptype="select", doc=self.filters[name], user=self.user
-					):
-						raise frappe.PermissionError
-			company = self.filters.get("company")
-			if company:
-				companies = [company] if isinstance(company, str) else company
-				if not isinstance(companies, list) or not all(isinstance(c, str) and c for c in companies):
-					raise InvalidArgumentError("Stored report company scope is invalid.")
-				for company in companies:
-					_assert_company_readable(company, supplied=True)
-			# Standard AR/AP reports need a stored company and date. Never apply today's defaults.
-			if self.report.name in {
-				"Accounts Receivable",
-				"Accounts Receivable Summary",
-				"Accounts Payable",
-				"Accounts Payable Summary",
-			}:
-				if not self.filters.get("company") or not self.filters.get("report_date"):
-					raise InvalidArgumentError(
-						"The saved accounting report lacks its company or report date. Regenerate it."
-					)
-		except (frappe.PermissionError, frappe.ValidationError):
-			raise PermissionDeniedError(
-				"You do not have permission to read this report or its saved scope."
-			) from None
-		finally:
-			frappe.flags.mute_messages = mute_messages
-=======
 		self.report, self.filter_defs = gate_report(self.meta.report_name, self.filters, self.user)
->>>>>>> 44c2042 (feat(reports): read every row of a large report through query_report snapshots, with server reload)
 
 	def read(self):
 		content = read_bounded(frappe.get_cached_doc("File", self.file.name))
