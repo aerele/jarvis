@@ -7,6 +7,7 @@ from time import monotonic
 
 import frappe
 
+from jarvis.payment_calendar import sources as obligation_sources
 from jarvis.payment_calendar.access import authorize_scope
 from jarvis.payment_calendar.banks import read_bank_balances
 from jarvis.payment_calendar.compatibility import source_profile
@@ -296,9 +297,10 @@ def elapsed_ms(started):
 
 
 def _log_collected(started, projections_ms, sources):
-	"""Timing and row counts only: no company, party or voucher text (B11)."""
+	"""Timing, row counts and the speed-path flag only: no company, party or voucher text (B11)."""
 	counts = {side: len(source["rows"]) if source else 0 for side, source in sources.items()}
 	frappe.logger("payment_calendar").info(
 		f"collect complete duration_ms={elapsed_ms(started)} projections_ms={projections_ms} "
-		f"payable_rows={counts['Payable']} receivable_rows={counts['Receivable']}"
+		f"payable_rows={counts['Payable']} receivable_rows={counts['Receivable']} "
+		f"fast_path={obligation_sources.FAST_PATH}"
 	)
