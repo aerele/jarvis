@@ -941,9 +941,14 @@ class TestDispatchFromSessionResultBudget(FrappeTestCase):
 		return patch("jarvis.api.frappe.db.get_value", side_effect=get_value)
 
 	def test_dispatch_with_a_cold_doctype_meta_cache(self):
-		from frappe.model.meta import clear_meta_cache
+		import frappe.model.meta as meta_module
 
-		clear_meta_cache()
+		# Frappe v16 has clear_meta_cache(); v15 keeps meta in the "doctype_meta" Redis hash.
+		clear_meta_cache = getattr(meta_module, "clear_meta_cache", None)
+		if clear_meta_cache:
+			clear_meta_cache()
+		else:
+			frappe.cache.delete_value("doctype_meta")
 		env = self._dispatch([{"name": "C1"}])
 		self.assertEqual(env["data"], [{"name": "C1"}])
 
