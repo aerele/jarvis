@@ -158,7 +158,7 @@ describe("draft Link field filters", () => {
 });
 
 // a link search is keyed by the row's __key, not its position.
-describe("a Dynamic Link searches the DocType its controlling field holds (admin-v2#785)", () => {
+describe("a Dynamic Link searches the DocType its controlling field holds", () => {
 	const name = {
 		fieldname: "reference_name",
 		label: "Name",
