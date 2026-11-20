@@ -16,7 +16,11 @@ from jarvis.payment_calendar.compatibility import (
 	require_obligation_scope,
 	source_profile,
 )
-from jarvis.payment_calendar.errors import CalendarSourceUnavailable
+from jarvis.payment_calendar.errors import (
+	READER_FALLBACK_REASONS,
+	CalendarSourceUnavailable,
+	ReaderFallback,
+)
 
 
 class TestPaymentCalendarCompatibility(TestCase):
@@ -161,6 +165,139 @@ class TestPaymentCalendarCompatibility(TestCase):
 					self.assertEqual(cache.hget("fiscal_years", "company"), "stale year")
 					self.assertEqual(cache.hget("roles", "actor"), "old roles")
 					self.assertFalse({"get_value", "set_value", "hget", "hset"}.intersection(vars(cache)))
+
+	def test_reader_pins_match_installed_source(self):
+		"""Deliberate tripwire: any edit of a pinned upstream source needs a fresh audit of the reader."""
+		drifted = compatibility.reader_pin_drift()
+		self.assertEqual(
+			drifted,
+			[],
+			"Reader pins drifted; audit each and update _READER_PINS:\n"
+			+ "\n".join(f"{name} {compatibility.qualified_source_hash(name)}" for name in drifted),
+		)
+
+	def test_reader_pins_cover_the_audited_upstream_names(self):
+		pinned = set(compatibility._READER_PINS["16"])
+		rpr = "erpnext.accounts.report.accounts_receivable.accounts_receivable.ReceivablePayableReport."
+		for method in (
+			"get_data",
+			"get_invoice_details",
+			"init_voucher_balance",
+			"get_voucher_balance",
+			"update_voucher_balance",
+			"prepare_conditions",
+			"add_common_filters",
+			"exclude_employee_transaction",
+			"prepare_ple_query",
+			"build_data",
+			"get_return_entries",
+			"fetch_ple_in_buffered_cursor",
+			"fetch_ple_in_unbuffered_cursor",
+			"build_delivery_note_map",
+		):
+			self.assertIn(rpr + method, pinned)
+		self.assertIn("erpnext.accounts.utils.update_voucher_outstanding", pinned)
+		self.assertIn("erpnext.accounts.utils.build_qb_match_conditions", pinned)
+		self.assertIn("frappe.desk.query_report.get_filtered_data", pinned)
+		restriction = "erpnext.stock.doctype.company_restriction.company_restriction."
+		for function in (
+			"get_permission_query_conditions",
+			"has_permission",
+			"get_inherited_permission_query_conditions",
+			"has_inherited_permission",
+		):
+			self.assertIn(restriction + function, pinned)
+
+	def test_qualified_source_hash_resolves_functions_and_methods(self):
+		from hashlib import sha256
+		from inspect import getsource
+
+		from erpnext.accounts.report.accounts_receivable.accounts_receivable import ReceivablePayableReport
+		from erpnext.accounts.utils import update_voucher_outstanding
+
+		qualified = "erpnext.accounts.utils.update_voucher_outstanding"
+		self.assertEqual(
+			compatibility.qualified_source_hash(qualified),
+			sha256(getsource(update_voucher_outstanding).encode()).hexdigest(),
+		)
+		method = (
+			"erpnext.accounts.report.accounts_receivable.accounts_receivable.ReceivablePayableReport.get_data"
+		)
+		self.assertEqual(
+			compatibility.qualified_source_hash(method),
+			sha256(getsource(ReceivablePayableReport.get_data).encode()).hexdigest(),
+		)
+
+	def test_qualified_source_hash_is_none_for_anything_unreadable(self):
+		for qualified in (
+			"jarvis_no_such_module.function",
+			"erpnext.accounts.utils.jarvis_no_such_function",
+			"erpnext.accounts.report.accounts_receivable.accounts_receivable.NoClass.get_data",
+			"erpnext.accounts.utils.__name__",
+		):
+			with self.subTest(qualified=qualified):
+				self.assertIsNone(compatibility.qualified_source_hash(qualified))
+		with patch.object(compatibility, "getsource", side_effect=OSError):
+			self.assertIsNone(
+				compatibility.qualified_source_hash("erpnext.accounts.utils.update_voucher_outstanding")
+			)
+
+	def test_reader_pin_drift_lists_unknown_and_unreadable_sources(self):
+		name = "erpnext.accounts.utils.update_voucher_outstanding"
+		pins = {"16": {**compatibility._READER_PINS["16"], name: ("unknown",)}}
+		with patch.object(compatibility, "_READER_PINS", pins):
+			self.assertEqual(compatibility.reader_pin_drift(), [name])
+			self.assertEqual(compatibility.reader_pin_drift([name]), [name])
+			self.assertEqual(
+				compatibility.reader_pin_drift(["erpnext.accounts.utils.no_pin"]),
+				["erpnext.accounts.utils.no_pin"],
+			)
+		with patch.object(compatibility, "getsource", side_effect=OSError):
+			self.assertEqual(compatibility.reader_pin_drift(), sorted(compatibility._READER_PINS["16"]))
+
+	def test_reader_pins_have_no_v15_entry_so_v15_drifts_everything(self):
+		self.assertNotIn("15", compatibility._READER_PINS)
+		with patch.object(erpnext, "__version__", "15.0.0"):
+			self.assertEqual(compatibility.reader_pin_drift(), sorted(compatibility._READER_PINS["16"]))
+
+	def test_reader_fallback_reasons_and_refusal_codes(self):
+		self.assertEqual(
+			READER_FALLBACK_REASONS,
+			{
+				"ineligible",
+				"eligibility_unknown",
+				"unsupported_major",
+				"pin_drift",
+				"sales_person_scope",
+				"control_total",
+				"reader_error",
+				"rekey_unresolved",
+				"too_many_lines",
+			},
+		)
+		codes = {
+			"too_many_lines": "too_large",
+			"control_total": "reconciliation_mismatch",
+			"pin_drift": "source_contract_unavailable",
+			"unsupported_major": "source_contract_unavailable",
+		}
+		for reason in READER_FALLBACK_REASONS:
+			with self.subTest(reason=reason):
+				error = ReaderFallback(reason)
+				self.assertEqual(error.reason, reason)
+				self.assertEqual(error.refusal_code, codes.get(reason))
+				self.assertNotIn(reason, str(error))
+				self.assertNotIsInstance(error, CalendarSourceUnavailable)
+		with self.assertRaises(ValueError):
+			ReaderFallback("not a reason")
+		self.assertEqual(ReaderFallback("pin_drift").detail, ())
+		self.assertEqual(ReaderFallback("pin_drift", ("a.b", "c.d")).detail, ("a.b", "c.d"))
+		for bad in (["a.b"], ("a.b", 1), "a.b", ({"party": "x"},)):
+			with self.subTest(bad=bad), self.assertRaises(ValueError):
+				ReaderFallback("pin_drift", bad)
+		detailed = ReaderFallback("ineligible", ("user_permission",))
+		self.assertNotIn("user_permission", str(detailed), "the message stays fixed")
+		self.assertEqual(str(ReaderFallback("ineligible")), str(ReaderFallback("pin_drift")))
 
 
 class _Cache:

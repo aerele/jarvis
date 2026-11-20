@@ -1,7 +1,14 @@
-"""Audited ERPNext/Frappe source boundaries: classification pins fail closed; speed pins fall back to upstream."""
+"""Audited ERPNext/Frappe source boundaries, pinned by source hash. Three kinds of pin:
 
+* classification pins (`_PROFILES`, the bank helper hashes): an unknown source refuses the read;
+* speed pins (`_SPEED_PINS`): an unknown source makes the caller use the upstream method;
+* reader pins (`_READER_PINS`): an unknown source makes the built-in reader fall back to today's read.
+"""
+
+from collections.abc import Iterable
 from dataclasses import dataclass
 from hashlib import sha256
+from importlib import import_module
 from inspect import getsource
 
 import frappe
@@ -140,3 +147,108 @@ def installed_hash(name: str) -> str | None:
 		return sha256(getsource(getattr(ReceivablePayableReport, name, None)).encode()).hexdigest()
 	except (OSError, TypeError):
 		return None
+
+
+# The built-in reader copies or narrows the logic of these upstream functions, so each one is pinned by the
+# hash of the source it was audited against. Names are fully qualified (module path, then attribute path).
+# An unknown hash never refuses a read: the reader raises ReaderFallback("pin_drift") and today's read runs.
+# 16: ERPNext 16.55.0 (8e10a348) and version-16 head 16.60.0 (886ab6ae, 2026-11-17) have the same source for
+# every name below but the last-added pair (build_qb_match_conditions, get_filtered_data), so one hash each;
+# that pair is hashed from the installed ERPNext 16.55.0 and frappe 16.56.0 and not compared with the head.
+# Only a "16" entry exists; v15 entries come with the v15 backport.
+_RPR = "erpnext.accounts.report.accounts_receivable.accounts_receivable.ReceivablePayableReport."
+_RESTRICTION = "erpnext.stock.doctype.company_restriction.company_restriction."
+_READER_PINS: dict[str, dict[str, tuple[str, ...]]] = {
+	"16": {
+		# Sequence re-run: get_data and the methods it calls that the reader reuses or replaces.
+		_RPR + "get_data": ("6afcb9e48b38f40c5574240d767dc85faf9a4ef09638edf46c0609776997f66b",),
+		_RPR + "fetch_ple_in_buffered_cursor": (
+			"fe84993c128d7c411eb243335c4ef546a3fc2f0a64f0e45a95c6205156b6be7c",
+		),
+		_RPR + "fetch_ple_in_unbuffered_cursor": (
+			"96bc3244934f4f9cff91f7fe77b03125a377aa517e5adf072125922127584987",
+		),
+		_RPR + "build_delivery_note_map": (
+			"3153088d774c46f36c57b34424a748cb077249e764128f511576737a8d58436a",
+		),
+		# Narrowed copy of the invoice details read.
+		_RPR + "get_invoice_details": ("775e7c1262eeb713c91dcaa24279a48c1eced03768ed904a53a5362a3d187ef9",),
+		# Subset closure: the sum of key residuals equals the sum of line amounts.
+		_RPR + "init_voucher_balance": ("50fcf1862bf45c96f57b29dc6aa07d91a70430730a95865a6a62db439c7b3c40",),
+		_RPR + "get_voucher_balance": ("85c6747e59c247caa53a0d2c8b6709d5e81fd4c4d73d7097f6e0b0740ce950f2",),
+		_RPR + "update_voucher_balance": (
+			"5bdcfc25d6b2a49949469b1c782c21d22d2cc11403e3948cacd82e702dc8d4d0",
+		),
+		# Control-total predicate copy; the narrow reads extend ple_query.
+		_RPR + "prepare_conditions": ("ef00919561052e62486aa0bab3468b17852a2e7777fb6ab62aceb41edbeba640",),
+		_RPR + "add_common_filters": ("f7b280f065d52e374db14a6183be68069d7e500b0ce14fdfcb7442a1c5fbfe92",),
+		_RPR + "exclude_employee_transaction": (
+			"5b498a34caa9b23773d103175623632ea031c9242262ce305882db5f8dfcac22",
+		),
+		_RPR + "prepare_ple_query": ("9e431342f355878cb768683aac464ebaf2d8e9485e652ebe2aa3371386f5e974",),
+		# The must_consider rule behind FX discovery, and the return fold.
+		_RPR + "build_data": ("e06946f70655cee1a4fee818b465e458e3c843c4c0d59758c1ea4177ecb702ab",),
+		_RPR + "get_return_entries": ("1aad0cf0bdeaa4d8d32ca0b90cb4842b37181cb8fa6e6d99169d7e014001ba9b",),
+		# Header semantics used for discovery: account currency, no posting-date filter.
+		"erpnext.accounts.utils.update_voucher_outstanding": (
+			"a1796c5b901bfa6ad5493c04dfe213fb21520473794dd77090909f6ab2ac8196",
+		),
+		# Eligibility: the match conditions behind the report's per-user narrowing, and the report's own
+		# per-row filter that the calendar runs on the engine's rows. A change in either may narrow more.
+		"erpnext.accounts.utils.build_qb_match_conditions": (
+			"191620a81236486bbb1352187da7ba676d15d96b18577dc296d92e997d31d2c7",
+		),
+		"frappe.desk.query_report.get_filtered_data": (
+			"da077a20feb39ce209213809cf6bc577867a9b17d0810430ebca9414edfbdfa0",
+		),
+		# Company restriction hooks (eligibility).
+		_RESTRICTION + "get_permission_query_conditions": (
+			"2b3c4cece676fea27a11739b1204f0657d04f0654c0c2b708413d6608244960f",
+		),
+		_RESTRICTION + "has_permission": (
+			"914bbd15fcee2abea64077347613cac3324044ce9a0304896347772655ae33c4",
+		),
+		_RESTRICTION + "get_inherited_permission_query_conditions": (
+			"e325af70ec524ddd4c8ee94108b9504b367e02b0ca524ff15ab13e6d3f936749",
+		),
+		_RESTRICTION + "has_inherited_permission": (
+			"f944694dddd8567c796442b2f399a9da09b77a976c527b6933b11dc53e9d2ff7",
+		),
+	},
+}
+
+
+def qualified_source_hash(qualified: str) -> str | None:
+	"""Uncached sha256 of the source of a fully qualified function or method, or None when unreadable.
+
+	The longest importable module prefix is imported and the rest is resolved by `getattr`.
+	"""
+	parts = qualified.split(".")
+	for end in range(len(parts) - 1, 0, -1):
+		try:
+			target = import_module(".".join(parts[:end]))
+		except ImportError:
+			continue
+		try:
+			for attribute in parts[end:]:
+				target = getattr(target, attribute)
+			return sha256(getsource(target).encode()).hexdigest()
+		except (AttributeError, OSError, TypeError):
+			return None
+	return None
+
+
+def reader_pin_drift(names: Iterable[str] | None = None) -> list[str]:
+	"""Sorted reader pin names whose installed source is not an accepted hash.
+
+	With no entry for the installed major, or a frappe and ERPNext major that differ, every name has drifted.
+	"""
+	import erpnext
+
+	major = erpnext.__version__.split(".")[0]
+	pins = _READER_PINS.get(major) if frappe.__version__.split(".")[0] == major else None
+	if names is None:
+		names = pins if pins is not None else {name for entry in _READER_PINS.values() for name in entry}
+	if pins is None:
+		return sorted(names)
+	return sorted(name for name in names if qualified_source_hash(name) not in pins.get(name, ()))

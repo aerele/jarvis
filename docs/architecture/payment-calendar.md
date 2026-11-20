@@ -193,6 +193,158 @@ Bump procedure when ERPNext changes a pinned method:
 The pin is computed against the ERPNext source of the CI base image (`version-16` head) and the
 local release; accept both when they differ.
 
+## Built-in reader (S1, not wired)
+
+`jarvis/payment_calendar/builtin_reader.py` reads the same obligations as `sources.read_obligations`
+without the full-history ledger scan and without the size guards (`MAX_LEDGER_ROWS`, `MAX_VOUCHERS`).
+Nothing calls it except tests and the manual acceptance functions below: there is no flag, hook,
+scheduler entry or API change, and a test (`TestReaderIsNotWired`) fails if a runtime module imports or
+names `builtin_reader` or `eligibility`. Slice S2 adds the routing; until then today's read serves every
+request.
+
+**What it reads.** The reader is a subclass of today's `CalendarReport` and replaces only the ledger fetch
+inside ERPNext's `get_data`. It then runs ERPNext's own `init_voucher_balance` and
+`update_voucher_balance`, today's `build_data` (repair, settled overlay, excluded FX, every refusal) and
+today's result assembly. Every figure therefore comes from ledger lines through ERPNext's code. Invoice
+headers (`outstanding_amount`) only find which invoices to read; no figure comes from a header. The
+reader takes no transaction control and writes nothing, so it passes inside `snapshot.consistent_read()`.
+
+**Discovery sets.** The ledger lines of these invoices are read, by the indexed `against_voucher_no`:
+
+- `open`: a header with a non-zero `outstanding_amount`, plus every invoice with a line dated after
+  the anchor (the header counts those lines, the report does not).
+- `orphans`: invoices on the side's accounts that are cancelled or posted after the anchor. The report
+  has no row for them, so a payment against them lands on the payment's own row.
+- `due_in_window`: today's settled-candidate rule. An invoice with a payment term, or a header due date,
+  inside the window, whatever its settlement date. Settled invoices are found by this set.
+- `fx`: invoices on a foreign-currency account with a non-zero residual, so today's excluded-FX rule
+  decides them.
+- `multi`: every invoice with lines on more than one (account, party) key over the full history (one
+  aggregate), so the inherited counter refuses `multiple_invoice_accounts` exactly when today does.
+- `returns`: computed last over the union of the others and closed in both directions (a return needs its
+  original, an original needs its returns).
+
+Every line whose `against_voucher_type` is not the side's invoice type is read too (Payment Entry,
+Journal Entry, orders, Employee Advance and so on); the types come from the control aggregate. A re-key
+probe then follows each read line that falls back to its own key: it looks the target key up by
+`voucher_no` and reads its lines, to a fixed point of at most 8 rounds (`rekey_unresolved` beyond that).
+
+**Control total.** One SQL aggregate per side with the report's own predicate (the side's accounts of
+the company, `delinked = 0`, `posting_date <= anchor`; on Receivable also `party_type != 'Employee'`,
+with SQL semantics, so a NULL party type is excluded as in the report). The sum is read as text and
+parsed as Decimal. The reader checks that the sum of the key balances and the sum of the lines it read
+both equal that total within half a unit of the last place of the currency. This proves that the lines
+NOT read sum to zero. It does not say to which keys they belong; the closure and the probe above cover
+that. A mismatch raises `ReaderFallback("control_total")`.
+
+**MariaDB only.** The reader uses MariaDB features (SQL semantics of the control aggregate, collation
+checks, the ledger indexes) and is not tested on another database. Elsewhere it must fall back.
+
+**Eligibility** (`jarvis/payment_calendar/eligibility.py`, fail closed). The reader reads without the
+report's per-user narrowing, so it serves only a user for whom that narrowing removes nothing. The
+reasons for `ineligible` are: an incomplete scope, a User Permission on a doctype the report links to,
+a Company permission that excludes the company or a company restriction, an unaudited permission hook,
+and a column match filter. A masked or permlevel-restricted field among those the reader reads on Sales
+Invoice, Purchase Invoice, Journal Entry and Payment Entry has no reason of its own: it gives the same
+`column_filter` reason as a column match filter. Any exception while checking gives
+`eligibility_unknown`.
+
+**Fallbacks.** The reader raises `ReaderFallback(reason)`, never a refusal. A fallback means "run today's
+read"; it is not a `CalendarSourceUnavailable`, so it cannot be mistaken for a refusal. The reasons are
+`ineligible`, `eligibility_unknown`, `unsupported_major`, `pin_drift`, `sales_person_scope`,
+`control_total`, `rekey_unresolved`, `too_many_lines` and `reader_error` (a programming error in
+reader-only code). `too_many_lines` means the ledger of the side has more lines than the reader may hold
+in memory (a cap on the lines of the generic voucher types, on the total, and on the parties ranked, see
+`builtin_reader`); it is a memory guard, not an error, and today's read serves the request instead. The
+reader's own refusals are today's: it has the same input checks, books gate and error mapping, and the
+same codes, except that it never gives `too_large`.
+
+**How an operator sees a fallback.** The reader never logs by itself. `read_obligations(..., stats=d)`
+fills `d["fallback"]` with the reason (and `d["fallback_detail"]`, a tuple of fixed strings such as the
+names of drifted pins or the eligibility reason codes, never a data value) before it raises, also when the
+failure comes before the engine exists. A caller that catches `ReaderFallback` can therefore log the reason,
+the detail and the timings. No caller does this yet: S2 wires the routing and the log line, and until
+then nothing is observable in production because the reader is not called.
+
+**Known fallback causes.**
+
+- A payment line against a closed invoice but on another party account lands on the payment's own
+  key, which is not read. The control total then differs and the read falls back (`control_total`).
+  The playground and drift runs must show 0 of these.
+- A header whose stored `outstanding_amount` is wrong can hide an open invoice from discovery. The
+  side-level control total catches it unless two stale headers cancel exactly.
+  **Known limit (offsetting stale headers):** if one stale header hides an invoice of +X and another
+  hides an invoice of -X on the same side, the control total still matches, the read is served, and both
+  invoices are missing from it. No amount of a served row is wrong, but the two rows are absent. This is
+  accepted for S1 (it needs two exactly offsetting stale headers on one side); the stale-header count of
+  the playground run measures how likely it is, and a stale header is a data defect that ERPNext's own
+  reports show too. A value never comes from a header.
+- ERPNext or frappe major other than 16, or a pinned source that changed: `unsupported_major` and
+  `pin_drift`.
+
+**Pins and bump procedure.** `compatibility._READER_PINS["16"]` holds the sha256 of every upstream
+source the reader copies or narrows (`get_data`, the two `fetch_ple_*` cursors, `build_delivery_note_map`,
+`get_invoice_details`, the voucher-balance methods, the predicate methods, `build_data`,
+`get_return_entries`, `update_voucher_outstanding` and the company restriction hooks). It is checked per
+read; `reader_pin_drift()` lists the names that drifted. The hashes are the same on ERPNext 16.55.0 and
+on the `version-16` head, so there is one hash each. When ERPNext changes a pinned source:
+
+1. Run the pin test, `test_reader_pins_match_installed_source` (in `test_payment_calendar_compatibility`);
+   it names the drifted function and prints the new hash.
+2. Audit the upstream diff against the reader's copy or narrowing; the reader differential
+   (`test_payment_calendar_reader_differential`) and the seeded drift test must stay green.
+3. Add the new hash next to the old one with the ERPNext commit in the comment.
+4. Restart the web and background workers after the bump. A worker caches the pin result in its process,
+   so a worker that was not restarted keeps the old verdict (a stale `pin_drift`, or a missed one).
+
+Only a `"16"` entry exists. Entries for v15 come with the v15 backport.
+
+**Row ids equal today's.** An id encodes the row's position in the whole result, which follows the order
+in which `init_voucher_balance` first meets each key. It keys a line by its own voucher, so the reader
+also reads the other ledger lines of every voucher whose key a read line creates (by `voucher_no`, the
+indexed lookup) and feeds them to the init pass only. They never reach the update pass, the control total
+or a row, so no amount changes; they count toward `TOTAL_LINE_CAP` (`too_many_lines` above it) and show
+as `init_only_lines` in the stats. Ids, row order and amounts all equal today's read: the differential
+accepts no difference. The settled overlay is ordered by the candidate order, not by a set's hash order (`_settled_in_window`), which differs between two sets of the same keys and between processes. An id still does not outlive a read (it moves when the ledger changes); no
+consumer keeps one across reads.
+
+**Manual acceptance** (outputs outside the repository, companies as HMAC digests, rows by digest and
+field name, never a party or voucher name). The functions live in
+`jarvis/tests/payment_calendar_reader_acceptance.py`; each checks its site first and returns a short
+summary, the full result is the JSON file.
+
+| Function | Site | What it proves |
+| --- | --- | --- |
+| `playground` | `jarvis_playground.localhost`, session READ ONLY; `skip_eligibility` (below) | AC-10: both sides in one read view each, 0 diffs against today's read with guards lifted, no fallback, control total passes, equal settled-overlay counts, `check_source_contract` accepts the result; counts invoices whose header differs from the ledger |
+| `drift` | `test_jarvis` | AC-11: a seeded run of real controllers, both sides at every drain (1-20 operations), 0 diffs, 0 fallbacks, control total passes, isolation probe equal (it counts companies too); rolled back. Drains run under frozen time, so the drain records carry no timings. The shared ledger company is created and committed first, outside the write guards (on a fresh site HRMS runs an ALTER TABLE that commits by itself) |
+| `timing` | `jarvis_playground.localhost`, session READ ONLY; `skip_eligibility` (below) | AC-12 at a real company: run 1 per side cold (cache cleared), later runs warm; per-step timings, including control aggregate, `due_window` (D6) and `multi` (D8); memory of each read |
+| `timing_guard_size` | `test_jarvis` | AC-12 (no-regression rule) at 10,000 vouchers and 100,000 ledger rows per side, settled due dates inside the window, unreferenced Payment Entry and Journal Entry lines; the fixture is raw-inserted in a savepoint and rolled back. Per side and run it times the reader and today's `read_obligations` (size guards lifted as in the differential) back to back, each in a forked child, alternating the order (reader first on odd runs, today first on even runs); the summary has `no_regression` and `no_regression_median` |
+
+**`skip_eligibility`.** `playground` and `timing` take an acceptance-only option `skip_eligibility` (default `False`). When `True` the function refuses unless the session user is Administrator, then runs the reader with its eligibility call patched to report no reason for the duration of the read; the summary and the output carry `eligibility_skipped: true`. Every other guard stays (site check first, READ ONLY session, `consistent_read`, no writes, HMAC output). Why: on the playground site another app registers a `has_permission` hook (`<other_app>.access.has_permission`) for a voucher or party doctype. The eligibility gate cannot audit it and, correctly, fails closed, so every user is ineligible and both sides fall back with `ineligible` and compare nothing. The AC-10 run is therefore an exactness check of the reader against today's read, not an eligibility check (the eligibility tests cover that); the timing run then has a trivial `eligibility` step.
+
+**No-regression rule (AC-12, guard size).** At the guard size (worst case) the reader must be no slower than today's read measured under the same load; at a real company size it must take 30 s or less. A time of today's read taken at another moment is not comparable on a shared machine, so `timing_guard_size` measures both reads back to back for each run and side, in forked children (the same method as for the reader), and alternates which read goes first: the first read of a pair finds the MariaDB buffer pool colder than the second, and the alternation cancels that bias. Per run it records both seconds and both read growths (`today` holds today's record). `per_side` in the summary has the max and median of each, the `order` of the runs and the outcome of today's read.
+
+**Memory of a read.** Each timed read runs in a forked child process, because the process lifetime peak (`ru_maxrss`) never goes down and would carry the fixture builder and earlier reads. A child starts with the parent's resident size, so the figure of a read is `read_growth_mb` = child peak minus resident size at the fork (`baseline_rss_mb` and `peak_rss_mb` are in the record too). The parent's `memory_mb` stages are lifetime peaks and only describe the fixture build. At a real company (read only) the child opens its own DB connection. At guard size the fixture is an open transaction of the parent, so the child borrows the parent's connection while the parent waits; it runs SELECTs only and ends with `os._exit`. Each child rebuilds its process-local caches, as a new request does; Redis caches stay warm.
+
+```
+# W = the worktree or app checkout under test; O = an output directory outside every git work tree
+# (and not under a `public` folder); <company> = the company name on that site; <bench> = the bench folder.
+W=<path of the jarvis checkout under test>
+O=<output directory>
+mkdir -p $O && cd <bench>
+# AC-10 playground, read only (skip_eligibility: playground-only app hook; exactness check, not an eligibility check)
+PYTHONPATH=$W bench --site jarvis_playground.localhost execute jarvis.tests.payment_calendar_reader_acceptance.playground --kwargs "{'company': '<company>', 'out': '$O/playground.json', 'skip_eligibility': True}"
+# AC-11 drift, test site only, one seed per run
+for s in 1 2 3; do PYTHONPATH=$W bench --site test_jarvis execute jarvis.tests.payment_calendar_reader_acceptance.drift --kwargs "{'seed': $s, 'ops': 300, 'out': '$O/drift-$s.json'}"; done
+# AC-12 timing (a fresh process per command: the first run is cold)
+PYTHONPATH=$W bench --site jarvis_playground.localhost execute jarvis.tests.payment_calendar_reader_acceptance.timing --kwargs "{'company': '<company>', 'out': '$O/timing-playground.json', 'runs': 3, 'skip_eligibility': True}"
+PYTHONPATH=$W bench --site test_jarvis execute jarvis.tests.payment_calendar_reader_acceptance.timing_guard_size --kwargs "{'out': '$O/timing-guard.json'}"
+```
+
+The gate reads the JSON: `eligibility_skipped` is stated, `diffs == 0`, `fallbacks` empty, `control_passed`, `max_seconds <= 30` and
+`served` (playground company); at guard size `no_regression` is true (max of the reader <= max of today's read on every side; `no_regression_median` is the same by median). "Cold" means the first read after `frappe.clear_cache()` in a fresh process; the MariaDB buffer
+pool is not flushed. The accepted fallback rate is the stale-header count the playground run records.
+
 ## Company floor and coherent reads
 
 `Jarvis Payment Calendar Settings` has a stable random ID and unique Company
