@@ -60,6 +60,15 @@ def decode_report(content, *, legacy_columns=None, add_total_row=False):
 		columns, rows, skip, has_skip = legacy_columns, data, None, False
 	else:
 		raise InvalidArgumentError("Stored report has no tabular result.")
+	return validate_report(columns, rows, skip=skip, has_skip=has_skip)
+
+
+def validate_report(columns, rows, *, skip=None, has_skip=False):
+	"""The structural checks of `decode_report` on parsed `columns` and `rows`: limits, column
+	metadata, the total-row layout, row shapes and Dynamic Link metadata. Returns
+	`(schema, rows, total_index)`. A caller that holds the parsed result (the snapshot
+	writer) calls it without the gzip and JSON round trip; a row that is a tuple counts as
+	a list, as it would after JSON."""
 	rows = [] if rows is None else rows
 	if not isinstance(columns, list) or not isinstance(rows, list):
 		raise InvalidArgumentError("Stored report columns and result must be lists.")
@@ -83,7 +92,9 @@ def decode_report(content, *, legacy_columns=None, add_total_row=False):
 		# footer. Current Report.add_total_row can change after generation.
 		all_dicts = all(isinstance(row, dict) for row in rows)
 		mixed_total = (
-			len(rows) > 1 and isinstance(rows[-1], list) and all(isinstance(row, dict) for row in rows[:-1])
+			len(rows) > 1
+			and isinstance(rows[-1], list | tuple)
+			and all(isinstance(row, dict) for row in rows[:-1])
 		)
 		if mixed_total:
 			if has_skip and _flag(skip):
@@ -94,9 +105,9 @@ def decode_report(content, *, legacy_columns=None, add_total_row=False):
 				"Stored report total-row layout is ambiguous. Regenerate it before analysis."
 			)
 	for row in rows:
-		if not isinstance(row, (dict, list)):
+		if not isinstance(row, (dict, list, tuple)):
 			raise InvalidArgumentError("Stored report contains a non-tabular row.")
-		if isinstance(row, list) and len(row) > len(normalized):
+		if isinstance(row, list | tuple) and len(row) > len(normalized):
 			raise InvalidArgumentError("Stored report contains cells without a column definition.")
 	dynamic = {}
 	for col in normalized:

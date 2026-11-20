@@ -1228,6 +1228,7 @@ persistent_cache_keys = [
 	"jarvis:activity_rollup",  # The rollup's run claim (600 s TTL) must survive any full cache clear.
 	"jarvis:activity_flood:",  # App-action dedupe (5 min) and per-person cap (1 min) must survive the clear.
 	"jarvis:activity_seen:",  # The 24 h app-action health counters (activity_actions) must survive it too.
+	"jarvis:report_snapshot",  # Report snapshot rows, meta, index, reload lock and rate survive the 5-minute full cache clear.
 ]
 
 # Durable background export state is owner-scoped, including direct REST reads.
