@@ -1,4 +1,4 @@
-"""Put back the source links of a document built from another one (admin-v2#782).
+"""Put back the source links of a document built from another one.
 
 ``get_creation_context`` runs the ERP's own mapper (``_source_mapper``) and gives the agent a
 ``mapped`` draft whose rows carry links to the source: a Purchase Invoice row's

@@ -1,4 +1,4 @@
-"""admin-v2#782: a document built from another keeps its source links.
+"""A document built from another keeps its source links.
 
 ``create_doc(mapped_from=...)`` re-runs the ERP's mapper and fills only the source link fields
 the agent left empty (``_source_links``). The real Purchase Invoice meta is used; the mapper and
