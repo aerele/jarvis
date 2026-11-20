@@ -802,9 +802,9 @@ def _execute_source(tool: str, spec: dict) -> tuple[list, list | None]:
 		kwargs.setdefault("doctype", "")
 		return _get_list(confirm_large=True, **kwargs), None
 	if tool == "run_report":
-		from jarvis.tools.run_report import run_report as _run_report
+		from jarvis.tools.run_report import run_report as _run_report_tool
 
-		res = _run_report(spec.get("report_name") or "", spec.get("filters") or {})
+		res = _run_report_tool(spec.get("report_name") or "", spec.get("filters") or {})
 		if not isinstance(res, dict) or res.get("prepared_report") or not isinstance(res.get("result"), list):
 			raise _PreparedReportError()
 		# run_report has no inherent row cap; slice here so a huge report never

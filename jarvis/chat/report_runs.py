@@ -120,6 +120,9 @@ def _open_runs(rows) -> list[dict]:
 	for r in rows:
 		args = _json(r.tool_args)
 		if r.get("tool_name") == "query_report":
+			# A report snapshot (``rs_`` id) is no Prepared Report and has no card.
+			if _is_snapshot(r.get("prepared_report")):
+				continue
 			# An inspection is not an answer. Close only this exact run after a
 			# successful query loaded the complete permitted source.
 			if (args.get("sql") or args.get("source_query_executed") is True) and r.get(
@@ -128,7 +131,7 @@ def _open_runs(rows) -> list[dict]:
 				open_runs.pop((r.conversation, r.get("prepared_report")), None)
 			continue
 		run, report = r.run, r.report_name or args.get("report_name")
-		if not run or not report:
+		if not run or not report or _is_snapshot(run):
 			continue
 		key = _key(report, args.get("filters"), defaults)
 		for k, v in list(open_runs.items()):
@@ -145,6 +148,12 @@ def _open_runs(rows) -> list[dict]:
 				"key": key,
 			}
 	return list(open_runs.values())
+
+
+def _is_snapshot(run) -> bool:
+	"""A report snapshot id (``rs_...``, an inline run_report cut and stored in Redis),
+	not a Prepared Report: it never opens, shows or closes a report card."""
+	return isinstance(run, str) and run.startswith("rs_")
 
 
 def _key(report: str, filters, defaults: dict) -> str | None:
