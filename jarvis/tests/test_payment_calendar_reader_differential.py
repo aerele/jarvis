@@ -66,6 +66,9 @@ NO_HEADER_UPKEEP = {
 # read (a comparison or a declared fallback); comparator unit tests and wiring tests never add to them.
 REAL_SCENARIOS: dict[str, int] = {}
 REAL_FALLBACKS: dict[str, int] = {}
+# Reader* scenarios that SKIPPED (the app owning their DocTypes is not installed, e.g. lending on CI): they ran
+# no read, and say why. Only a skip counts here; a scenario that silently never ran the reader is still missing.
+SKIPPED_SCENARIOS: set[str] = set()
 
 
 def result(rows=None, **changes):
@@ -321,6 +324,13 @@ class RunUnderReader:
 				self.addCleanup(patcher.stop)
 		super().setUp()
 
+	def run(self, result=None):
+		skipped = len(result.skipped) if result is not None else 0
+		outcome = super().run(result)
+		if result is not None and len(result.skipped) > skipped:
+			SKIPPED_SCENARIOS.add(self.id())
+		return outcome
+
 	def counted(self, comparator):
 		"""`comparator`, recording each call of this scenario that compared or declared a fallback."""
 
@@ -484,6 +494,11 @@ def reader_scenarios():
 	}
 
 
+def scenarios_without_a_real_run(expected, real, skipped):
+	"""The scenarios that must have run the reader beside today's read and did not: skipped ones are excused."""
+	return sorted(set(expected) - set(skipped) - set(real))
+
+
 class TestTallyOfTheWholeFamily(TestCase):
 	"""Runs after the `Reader*` classes (the loader orders classes by name): the family cannot pass empty."""
 
@@ -508,12 +523,38 @@ class TestTallyOfTheWholeFamily(TestCase):
 		)
 		self.assertTrue(expected, "no Reader* scenario exists")
 		self.assertGreater(READER_TALLY["compared"], 0, "no read was compared: run the whole module")
-		missing = sorted(expected - set(REAL_SCENARIOS))
-		self.assertGreaterEqual(
-			len(REAL_SCENARIOS),
-			len(expected),
+		missing = scenarios_without_a_real_run(expected, REAL_SCENARIOS, SKIPPED_SCENARIOS)
+		self.assertFalse(
+			missing,
 			f"{len(missing)} Reader* scenarios did not run the reader (run the whole module): {missing[:5]}",
 		)
+
+	def test_a_skipped_scenario_is_excused_and_a_silent_one_is_not(self):
+		expected = {"a", "b", "c"}
+		self.assertEqual(scenarios_without_a_real_run(expected, {"a": 1, "b": 1, "c": 1}, set()), [])
+		self.assertEqual(scenarios_without_a_real_run(expected, {"a": 1, "b": 1}, {"c"}), [])
+		self.assertEqual(scenarios_without_a_real_run(expected, {"a": 1}, {"c"}), ["b"])
+		self.assertEqual(scenarios_without_a_real_run(expected, {"a": 1, "b": 1}, set()), ["c"])
+
+	def test_a_scenario_that_skips_is_recorded_as_skipped(self):
+		name = "test_loan_disbursement_and_repayment"
+		case = READER_CASES["TestVoucherTypeScenarios"](name)
+		outcome, recorded = TestResult(), set(SKIPPED_SCENARIOS)  # a wiring run is not the scenario's own run
+		real = voucher_tests.frappe.db.exists
+
+		def lending_absent(doctype, *args, **kwargs):
+			if doctype == "DocType" and args and args[0] in ("Loan", "Loan Disbursement", "Loan Repayment"):
+				return None
+			return real(doctype, *args, **kwargs)
+
+		with patch.object(voucher_tests.frappe.db, "exists", side_effect=lending_absent):
+			case.run(outcome)
+		try:
+			self.assertEqual(len(outcome.skipped), 1)
+			self.assertIn(case.id(), SKIPPED_SCENARIOS)
+		finally:
+			SKIPPED_SCENARIOS.clear()
+			SKIPPED_SCENARIOS.update(recorded)
 
 	def test_no_fallback_was_a_control_total_and_only_declared_scenarios_fell_back(self):
 		self.assertNotIn("control_total", READER_TALLY["fallbacks"])

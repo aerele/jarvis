@@ -21,6 +21,7 @@ unread (a payment against a journal entry whose lines are against a closed invoi
 the controllers. Both are covered by the raw-row unit tests in `test_payment_calendar_builtin_reader`.
 """
 
+import random
 import time
 from collections import Counter
 from datetime import date
@@ -34,6 +35,7 @@ from jarvis.payment_calendar import builtin_reader
 from jarvis.payment_calendar import sources as today_sources
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.tests import _erpnext_masters as masters
+from jarvis.tests import payment_calendar_drift as drift_module
 from jarvis.tests.payment_calendar_differential import READER_TALLY, compare_reader_with_today
 from jarvis.tests.payment_calendar_drift import GuardError, frozen_clock, run_drift, write_guards
 from jarvis.tests.payment_calendar_fixtures import require_calendar_test_site
@@ -171,6 +173,26 @@ class TestReaderDrift(FrappeTestCase):
 		for kwargs in seen:
 			self.assertIsNone(kwargs["sync"])
 			self.assertIsNone(kwargs["expected_fallback"])
+
+	def test_the_supplier_group_is_created_on_a_site_with_no_root_group(self):
+		"""A bare site (CI) has no 'All Supplier Groups': the generator's group is then a root itself."""
+		frappe.db.savepoint("pcal_no_root")
+		self.addCleanup(frappe.db.rollback, save_point="pcal_no_root")
+		generator = drift_module.DriftGenerator(random.Random(1), ANCHOR, seed=1, warmup=10, forced_from=0)
+		group = "_PCALZ No Root Group"
+		real = frappe.db.get_value
+
+		def no_root(doctype, filters=None, *args, **kwargs):
+			if doctype == "Supplier Group" and isinstance(filters, dict) and "is_group" in filters:
+				return None  # the root lookup only
+			return real(doctype, filters, *args, **kwargs)
+
+		with (
+			patch.object(drift_module, "SUPPLIER_GROUP", group),
+			patch.object(frappe.db, "get_value", side_effect=no_root),
+		):
+			generator._parties()
+		self.assertTrue(real("Supplier Group", group, "name"))
 
 	def test_the_frozen_clock_is_restored_in_a_module_first_imported_inside_it(self):
 		import importlib

@@ -289,12 +289,16 @@ class DriftGenerator(DriftOperations):
 
 	def _parties(self) -> None:
 		if not frappe.db.exists("Supplier Group", SUPPLIER_GROUP):
+			# The site's own root group: a bare site (CI) may have none, and the group is then a root itself.
+			root = frappe.db.get_value(
+				"Supplier Group", {"is_group": 1, "parent_supplier_group": ["in", ["", None]]}, "name"
+			)
 			frappe.get_doc(
 				{
 					"doctype": "Supplier Group",
 					"supplier_group_name": SUPPLIER_GROUP,
 					"is_group": 0,
-					"parent_supplier_group": "All Supplier Groups",
+					"parent_supplier_group": root,
 				}
 			).insert(ignore_permissions=True)
 		for index in range(N_CUSTOMERS):
