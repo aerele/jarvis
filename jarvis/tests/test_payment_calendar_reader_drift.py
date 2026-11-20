@@ -27,7 +27,6 @@ from datetime import date
 from unittest.mock import patch
 
 import frappe
-from frappe.tests.classes.context_managers import freeze_time
 from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days, add_months, get_first_day, get_last_day
 
@@ -36,7 +35,7 @@ from jarvis.payment_calendar import sources as today_sources
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.tests import _erpnext_masters as masters
 from jarvis.tests.payment_calendar_differential import READER_TALLY, compare_reader_with_today
-from jarvis.tests.payment_calendar_drift import GuardError, run_drift, write_guards
+from jarvis.tests.payment_calendar_drift import GuardError, frozen_clock, run_drift, write_guards
 from jarvis.tests.payment_calendar_fixtures import require_calendar_test_site
 
 FROZEN = "2025-06-16 10:00:00"
@@ -130,9 +129,9 @@ class TestReaderDrift(FrappeTestCase):
 		outcomes: list = []
 		before = probe(self.company)
 		frappe.db.savepoint("drift_seed")
-		started = time.monotonic()  # measured outside freeze_time: freezegun freezes monotonic
+		started = time.monotonic()  # measured outside the frozen clock
 		try:
-			with freeze_time(FROZEN), write_guards() as guards:
+			with frozen_clock(FROZEN), write_guards() as guards:
 				self.assertTrue(frappe.flags.in_test)
 				summary = run_drift(
 					SEED,
@@ -172,6 +171,27 @@ class TestReaderDrift(FrappeTestCase):
 		for kwargs in seen:
 			self.assertIsNone(kwargs["sync"])
 			self.assertIsNone(kwargs["expected_fallback"])
+
+	def test_the_frozen_clock_is_restored_in_a_module_first_imported_inside_it(self):
+		import importlib
+		import sys
+		import types
+
+		from frappe.utils import data as frappe_data
+
+		name = "jarvis_pcal_clock_probe"
+		with frozen_clock(FROZEN):
+			module = types.ModuleType(name)
+			module.now_datetime = frappe_data.now_datetime  # a lazy `from frappe.utils import now_datetime`
+			sys.modules[name] = module
+			self.assertEqual(module.now_datetime().year, 2025)
+			self.assertEqual(frappe_data.nowdate(), "2025-06-16")
+		try:
+			self.assertIs(module.now_datetime, frappe_data.now_datetime)
+			self.assertNotEqual(frappe_data.nowdate(), "2025-06-16")
+		finally:
+			sys.modules.pop(name, None)
+		importlib.invalidate_caches()
 
 	def test_the_write_guard_fails_on_commit_and_is_restored(self):
 		original = frappe.db.commit

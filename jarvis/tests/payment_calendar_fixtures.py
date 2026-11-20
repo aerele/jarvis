@@ -15,11 +15,15 @@ from frappe.utils import add_days, flt, nowdate
 from jarvis.payment_calendar.compatibility import source_profile
 
 
-def require_calendar_test_site():
-	allowed = frappe.local.site == "test_jarvis" or (
+def is_calendar_test_site() -> bool:
+	"""The disposable sites: `test_jarvis`, or `jarvis-ci.test` when the CI environment variable is set."""
+	return frappe.local.site == "test_jarvis" or bool(
 		os.environ.get("CI") and frappe.local.site == "jarvis-ci.test"
 	)
-	assert allowed, "Calendar fixtures require the disposable local or CI test site"
+
+
+def require_calendar_test_site():
+	assert is_calendar_test_site(), "Calendar fixtures require the disposable local or CI test site"
 	if "erpnext" not in frappe.get_installed_apps():
 		raise SkipTest("Payment Calendar requires ERPNext")
 	source_profile()

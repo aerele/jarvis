@@ -29,6 +29,7 @@ from jarvis.payment_calendar import builtin_reader
 from jarvis.payment_calendar import sources as today_sources
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable, ReaderFallback
 from jarvis.tests.payment_calendar_differential import _canonical, _ids, _recording_lines, ids_may_differ
+from jarvis.tests.payment_calendar_fixtures import is_calendar_test_site
 
 TEST_SITE = "test_jarvis"
 PLAYGROUND_SITE = "jarvis_playground.localhost"
@@ -43,8 +44,14 @@ TOP_TIMERS = ("eligibility", "control", "discovery", "lines", "details", "accumu
 
 
 def require_site(expected: str) -> None:
-	"""Refuse before any read or write when this is not the site the run is meant for."""
-	if frappe.local.site != expected:
+	"""Refuse before any read or write when this is not the site the run is meant for.
+
+	The playground functions name their site; the test-site functions (`expected` is `TEST_SITE`) accept
+	only the allow-list of the calendar fixtures (`is_calendar_test_site`): `test_jarvis`, or `jarvis-ci.test`
+	under CI. A site's own `allow_tests` flag is not enough: a real-data site may carry it.
+	"""
+	allowed = is_calendar_test_site() if expected == TEST_SITE else frappe.local.site == expected
+	if not allowed:
 		raise RuntimeError(f"this acceptance run is for {expected} only; the site is another one")
 
 

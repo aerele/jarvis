@@ -223,6 +223,30 @@ class TestAcceptanceSiteGuards(TestCase):
 		self.assertEqual(queries, [])
 		self.assertFalse(self.out.exists())
 
+	def test_only_the_calendar_test_sites_are_accepted_whatever_allow_tests_says(self):
+		from jarvis.tests.payment_calendar_acceptance_support import PLAYGROUND_SITE, require_site
+
+		def accepted(site, ci):
+			env = {"CI": "true"} if ci else {}
+			with (
+				patch.object(frappe.local, "site", site),
+				patch.dict(frappe.conf, {"allow_tests": 1}),
+				patch.dict("os.environ", env),
+			):
+				if not ci:
+					os.environ.pop("CI", None)
+				try:
+					require_site("test_jarvis")
+				except RuntimeError:
+					return False
+				return True
+
+		self.assertTrue(accepted("test_jarvis", False))
+		self.assertTrue(accepted("jarvis-ci.test", True))
+		self.assertFalse(accepted("jarvis-ci.test", False), "the CI site only under CI")
+		self.assertFalse(accepted("other.example.com", True), "allow_tests alone is not a test site")
+		self.assertFalse(accepted(PLAYGROUND_SITE, True))
+
 	def test_the_output_must_be_outside_the_repository_and_its_folder_must_exist(self):
 		from jarvis.tests.payment_calendar_acceptance_support import REPO, prepare_out
 

@@ -33,7 +33,6 @@ from datetime import date
 from unittest.mock import patch
 
 import frappe
-from frappe.tests.classes.context_managers import freeze_time
 from frappe.utils import getdate, nowdate
 
 from jarvis.payment_calendar import builtin_reader, compatibility, snapshot
@@ -58,7 +57,7 @@ from jarvis.tests.payment_calendar_acceptance_support import (
 	window,
 	write_out,
 )
-from jarvis.tests.payment_calendar_drift import run_drift, write_guards
+from jarvis.tests.payment_calendar_drift import frozen_clock, run_drift, write_guards
 from jarvis.tests.payment_calendar_fixtures import sync_outstanding
 
 FROZEN = "2025-06-16 10:00:00"
@@ -129,7 +128,7 @@ def drift(seed: int, ops: int, out: str) -> dict:
 		frappe.db.savepoint(SEED_SAVEPOINT)
 		try:
 			# The seed (frozen date, no commit) and its drains, as in the CI drift test.
-			with freeze_time(FROZEN), write_guards() as guards:
+			with frozen_clock(FROZEN), write_guards() as guards:
 				run = run_drift(
 					seed,
 					ops,
@@ -271,7 +270,8 @@ def _drain(company: str, done: int) -> list[dict]:
 	for side in SIDES:
 		args = (company, side, str(ANCHOR), *window(ANCHOR))
 		record = reader_record(read_both(args), args)
-		# Drains run under `freeze_time`, which freezes `perf_counter` too: no timing here is real.
+		# The seed is one uncommitted, rolled-back transaction on a tiny ledger: the timings of a drain say
+		# nothing about speed, so the summary carries counts and outcomes only.
 		for frozen in ("timings_ms", "reader_seconds"):
 			record.pop(frozen, None)
 		records.append({"op": done, "side": side, **record})

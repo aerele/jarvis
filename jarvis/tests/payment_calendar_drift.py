@@ -8,13 +8,15 @@
 from __future__ import annotations
 
 import random
+import sys
 from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime
 
 import frappe
 from frappe.utils import add_days
+from frappe.utils import data as frappe_data
 
 from jarvis.tests import _erpnext_masters as masters
 from jarvis.tests.payment_calendar_drift_ops import (
@@ -30,6 +32,37 @@ from jarvis.tests.payment_calendar_drift_ops import (
 	customer_name,
 	supplier_name,
 )
+
+
+@contextmanager
+def frozen_clock(moment: str) -> Iterator[None]:
+	"""The site's clock at `moment` (`YYYY-MM-DD HH:MM:SS`), for the code inside the block.
+
+	Stdlib mock, not freezegun: CI does not install it (Frappe's own `freeze_time` needs it). `nowdate`,
+	`today`, `now` and `nowtime` read `frappe.utils.data.now_datetime` at call time; every module that imported
+	`now_datetime` by name holds its own reference, so each of those is swapped too and restored on exit,
+	including a module first imported inside the block.
+	The monotonic clocks stay real.
+	"""
+	fixed = datetime.strptime(moment, "%Y-%m-%d %H:%M:%S")
+	original = frappe_data.now_datetime
+
+	def fake():
+		return fixed
+
+	def swap(old, new):
+		for module in list(sys.modules.values()):
+			if getattr(module, "__dict__", {}).get("now_datetime") is old:
+				module.now_datetime = new
+
+	swap(original, fake)
+	try:
+		yield
+	finally:
+		# By identity, not from a list taken at entry: a module first imported inside the block
+		# (a lazy import in a controller) took the fake, and must get the real function back too.
+		swap(fake, original)
+
 
 SAVEPOINT = "drift_op"
 SUPPLIER_GROUP = "_PCALZ Supplier Group"

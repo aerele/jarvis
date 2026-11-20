@@ -65,6 +65,24 @@ def require_doctypes(*doctypes):
 
 
 class VoucherCase(ReaderCase):
+	def both_sides(self, scenario, window=None):
+		"""As `ReaderCase.both_sides`, but a scenario that skips (its app's DocType is absent) skips the TEST.
+
+		`unittest` records a `SkipTest` raised inside a `subTest` as a skipped sub-test and runs on, so the
+		test body would assert expected rows over a ledger nothing was built into.
+		"""
+		for side in SIDES:
+			skipped = None
+			with self.subTest(side):
+				try:
+					scenario(side)
+				except SkipTest as skip:
+					skipped = skip
+				else:
+					self.assert_reader_equals_today(side, window)
+			if skipped:
+				raise skipped
+
 	def reader_result(self, side, window=None):
 		"""The PUBLIC reader: it must serve (a ReaderFallback propagates and fails the test)."""
 		start, end = self.window(window)
@@ -567,6 +585,18 @@ class TestVoucherTypeScenarios(VoucherCase):
 		self.assertIn("filtered_obligations", result["scope_reasons"])
 		self.assertFalse(result["complete_for_company"])
 		self.assertEqual(self.rows("Receivable", "voucher_type"), [])
+
+	def test_a_scenario_that_skips_skips_the_test(self):
+		"""An absent app's DocType skips the whole test; it is not a skipped sub-test followed by assertions."""
+		built = []
+
+		def scenario(side):
+			built.append(side)
+			raise SkipTest("app absent")
+
+		with self.assertRaises(SkipTest):
+			self.both_sides(scenario)
+		self.assertEqual(built, [SIDES[0]])
 
 	def test_loan_disbursement_and_repayment(self):
 		"""lending loan_disbursement.py:753-760 (debit of the loan account, applicant as party) and
