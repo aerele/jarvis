@@ -163,6 +163,7 @@ def create_doc(
 	docs: list | None = None,
 	notes: list | None = None,
 	fields: list | None = None,
+	mapped_from: dict | None = None,
 ) -> dict:
 	"""Insert a new document - or a whole batch when ``docs`` is given.
 
@@ -170,6 +171,11 @@ def create_doc(
 	plus ``status`` and the title field when the DocType has them. ``fields``
 	names more fields to return (as ``get_doc``'s ``fields`` does; unknown or
 	unreadable ones are refused); read anything else with ``get_doc``.
+	``mapped_from`` (single only): ``{source_doctype, source_name}``, as
+	``get_creation_context`` returned it, for a document built from another one.
+	The ERP's mapper runs again and the source links the rows need (a Purchase
+	Invoice row's ``purchase_order`` / ``po_detail``) are filled where ``values``
+	left them empty; nothing else changes (``_source_links``).
 	Batch (``docs``): returns ``{"created":[{"doctype","name"}], "notes":[...]}``.
 
 	Raises:
@@ -180,10 +186,16 @@ def create_doc(
 	"""
 	if docs is not None:
 		refuse_fields_with_batch(fields)
+		if mapped_from is not None:
+			raise InvalidArgumentError("mapped_from is for a single document, not a batch")
 		return _create_batch(docs, notes)
 
 	_validate_create_args(doctype, values)
 	check_write_fields(doctype, fields)
+	if mapped_from is not None:
+		from jarvis.tools._source_links import restore_source_links
+
+		values = restore_source_links(doctype, values, mapped_from)
 	doc = _insert_one(doctype, values)
 	doc.apply_fieldlevel_read_permissions()
 	return write_result(doc, fields)
