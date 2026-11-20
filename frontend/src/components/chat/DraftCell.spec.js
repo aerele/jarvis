@@ -204,6 +204,41 @@ describe("one editable value of a child row", () => {
 		expect(row.w).toBe("Stores");
 	});
 
+	it("a Dynamic Link is a picker on its row's DocType, and the pick fills it", async () => {
+		// A Payment Entry reference: Name (reference_name) follows its Type (reference_doctype).
+		const row = reactive({ reference_doctype: "Sales Invoice", reference_name: "" });
+		const field = F("reference_name", "Dynamic Link", { options: "reference_doctype" });
+		const w = cell(field, row);
+		const input = w.find("input");
+		expect(input.exists()).toBe(true);
+		await input.trigger("focus");
+		const [, getter, doctype] = w.emitted("link-search")[0];
+		expect([getter(), doctype]).toEqual(["", "Sales Invoice"]);
+		// a new Type moves the search with it
+		row.reference_doctype = "Journal Entry";
+		await input.trigger("input");
+		expect(w.emitted("link-search")[1][2]).toBe("Journal Entry");
+		// no Type yet: the search still fires, with no DocType (the host says to set Type)
+		row.reference_doctype = "";
+		await input.trigger("input");
+		expect(w.emitted("link-search")[2][2]).toBe("");
+		const anchor = document.createElement("input");
+		anchor.getBoundingClientRect = () => ({ left: 0, top: 0, bottom: 20, width: 100 });
+		document.body.append(anchor);
+		await w.setProps({
+			draftLink: link({
+				open: true,
+				key: "t:0:0:reference_name",
+				items: [{ value: "SINV-1", label: "" }],
+				anchor,
+			}),
+		});
+		w.findComponent({ name: "DraftLinkMenu" }).vm.$emit("pick", { value: "SINV-1" });
+		const [setter, item] = w.emitted("link-pick")[0];
+		setter(item.value);
+		expect(row.reference_name).toBe("SINV-1");
+	});
+
 	it("opens the suggestion menu only for its own key", () => {
 		const row = reactive({ w: "" });
 		const field = F("w", "Link", { options: "Warehouse" });

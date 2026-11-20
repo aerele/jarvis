@@ -1,6 +1,9 @@
 import { allRowFields, draftParentDoc } from "./draftApply";
 
 export class DraftLinkFilterError extends Error {}
+// A Dynamic Link whose controlling field (its DocType) is not set yet: there is nothing to
+// search until it is, and the message names that field.
+export class DraftLinkTargetError extends DraftLinkFilterError {}
 
 const fieldName = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const forbidden = new Set(["__proto__", "prototype", "constructor"]);
@@ -32,7 +35,11 @@ function resolveValue(value, doc, parent) {
 	return value;
 }
 
-export function resolveLinkFilters(field, doc, parent = null) {
+// `target` is the DocType being searched: a Link's options, or a Dynamic Link's current
+// DocType. A Dynamic Link may carry filters for several DocTypes (four-part entries); only the
+// target's apply, the others are skipped. A three-part entry applies to the target.
+export function resolveLinkFilters(field, doc, parent = null, target = field.options) {
+	const dynamic = field.fieldtype === "Dynamic Link";
 	const filters = new Map();
 	for (let source of [field.link_query_filters, field.link_filters]) {
 		if (!source) continue;
@@ -47,9 +54,10 @@ export function resolveLinkFilters(field, doc, parent = null) {
 		for (const filter of source) {
 			if (!Array.isArray(filter) || ![3, 4].includes(filter.length)) throw unsupported();
 			const [doctype, name, operator, value] =
-				filter.length === 3 ? [field.options, ...filter] : filter;
+				filter.length === 3 ? [target, ...filter] : filter;
+			if (dynamic && filter.length === 4 && doctype !== target) continue;
 			if (
-				doctype !== field.options ||
+				doctype !== target ||
 				!fieldName.test(name) ||
 				forbidden.has(name) ||
 				typeof operator !== "string"
@@ -92,12 +100,24 @@ export function draftLinkSearch(model, key) {
 			parentfield: table.fieldname,
 		};
 	}
-	if (!field || field.fieldtype !== "Link" || !field.options) throw unsupported();
+	const dynamic = !!field && field.fieldtype === "Dynamic Link";
+	if (!field || !(field.fieldtype === "Link" || dynamic) || !field.options) throw unsupported();
+	const context = row || doc;
+	// A Dynamic Link searches the DocType its controlling field holds (Desk's behaviour).
+	const target = dynamic ? String((context && context[field.options]) || "") : field.options;
+	if (!target) {
+		const fields = key.startsWith("f:")
+			? model.fields
+			: allRowFields(model.tables[Number(key.split(":")[1])]);
+		const control = (fields || []).find((f) => f.fieldname === field.options);
+		const label = (control && control.label) || field.options.replaceAll("_", " ");
+		throw new DraftLinkTargetError(`Set ${label} before searching this field.`);
+	}
 	return {
-		doctype: field.options,
+		doctype: target,
 		referenceDoctype: model.doctype,
 		linkFieldname: field.fieldname,
-		filters: resolveLinkFilters(field, row || doc, row ? doc : null),
+		filters: resolveLinkFilters(field, context, row ? doc : null, target),
 	};
 }
 

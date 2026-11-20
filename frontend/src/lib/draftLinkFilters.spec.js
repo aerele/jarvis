@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { draftLinkContext, draftLinkSearch, resolveLinkFilters } from "./draftLinkFilters";
+import {
+	DraftLinkTargetError,
+	draftLinkContext,
+	draftLinkSearch,
+	resolveLinkFilters,
+} from "./draftLinkFilters";
 import { panelField } from "./docFields";
 
 const companyFilter = [["Account", "company", "=", "eval:doc.company"]];
@@ -153,6 +158,92 @@ describe("draft Link field filters", () => {
 });
 
 // a link search is keyed by the row's __key, not its position.
+describe("a Dynamic Link searches the DocType its controlling field holds", () => {
+	const name = {
+		fieldname: "reference_name",
+		label: "Name",
+		fieldtype: "Dynamic Link",
+		options: "reference_doctype",
+		link_query_filters: [
+			["Sales Invoice", "docstatus", "=", 1],
+			["Sales Invoice", "company", "=", "eval:parent.company"],
+			["Sales Invoice", "customer", "=", "eval:parent.party"],
+			["Journal Entry", "docstatus", "=", 1],
+			["Journal Entry", "company", "=", "eval:parent.company"],
+		],
+	};
+	const model = (type) => ({
+		doctype: "Payment Entry",
+		docName: "",
+		linkContext: {},
+		fields: [
+			{ fieldname: "company", fieldtype: "Link", options: "Company", value: "Acme" },
+			{
+				fieldname: "party",
+				fieldtype: "Dynamic Link",
+				options: "party_type",
+				value: "Cust A",
+			},
+		],
+		tables: [
+			{
+				fieldname: "references",
+				child: "Payment Entry Reference",
+				columns: [
+					{
+						fieldname: "reference_doctype",
+						label: "Type",
+						fieldtype: "Link",
+						options: "DocType",
+					},
+					name,
+				],
+				rows: [{ __key: 1, reference_doctype: type, reference_name: "" }],
+			},
+		],
+	});
+
+	it("targets the row's Type and applies only that Type's filters", () => {
+		expect(draftLinkSearch(model("Sales Invoice"), "t:0:1:reference_name")).toMatchObject({
+			doctype: "Sales Invoice",
+			filters: [
+				["Sales Invoice", "docstatus", "=", 1],
+				["Sales Invoice", "company", "=", "Acme"],
+				["Sales Invoice", "customer", "=", "Cust A"],
+			],
+		});
+		expect(draftLinkSearch(model("Journal Entry"), "t:0:1:reference_name")).toMatchObject({
+			doctype: "Journal Entry",
+			filters: [
+				["Journal Entry", "docstatus", "=", 1],
+				["Journal Entry", "company", "=", "Acme"],
+			],
+		});
+	});
+	it("a Type with no filters of its own searches unfiltered", () => {
+		expect(draftLinkSearch(model("Dunning"), "t:0:1:reference_name").filters).toEqual([]);
+	});
+	it("with no Type set, it names the field to set first", () => {
+		expect(() => draftLinkSearch(model(""), "t:0:1:reference_name")).toThrow(
+			DraftLinkTargetError
+		);
+		expect(() => draftLinkSearch(model(""), "t:0:1:reference_name")).toThrow(
+			"Set Type before searching this field."
+		);
+		expect(draftLinkContext(model(""), "t:0:1:reference_name")).toBeNull();
+	});
+	it("a three-part filter applies to whichever DocType is the target", () => {
+		const f = { ...name, link_query_filters: [["docstatus", "=", 1]] };
+		expect(resolveLinkFilters(f, {}, null, "Sales Order")).toEqual([
+			["Sales Order", "docstatus", "=", 1],
+		]);
+	});
+	it("a plain Link still refuses a filter for another DocType", () => {
+		const f = account({ link_query_filters: [["Customer", "name", "=", "x"]] });
+		expect(() => resolveLinkFilters(f, {})).toThrow("need ERPNext");
+	});
+});
+
 describe("a link search finds its row by __key", () => {
 	const model = () => ({
 		doctype: "Custom Order",
