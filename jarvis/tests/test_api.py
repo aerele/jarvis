@@ -926,6 +926,27 @@ class TestDispatchFromSessionResultBudget(FrappeTestCase):
 	(_dispatch_from_session), not the shared _dispatch_and_wrap path that the
 	dashboard builder/desk/external call_tool callers use."""
 
+	def _conversation_lookup(self):
+		"""`frappe.db.get_value` that answers the conversation lookup with a fixed name and
+		passes every other call on. A blanket return value also answered the DocType read of
+		a cold doctype-meta cache (any full `frappe.clear_cache()` of an earlier test or
+		process empties it) and failed with "'str' object has no attribute 'get'"."""
+		real = frappe.db.get_value
+
+		def get_value(doctype, *args, **kwargs):
+			if doctype == "Jarvis Conversation":
+				return "conv1"
+			return real(doctype, *args, **kwargs)
+
+		return patch("jarvis.api.frappe.db.get_value", side_effect=get_value)
+
+	def test_dispatch_with_a_cold_doctype_meta_cache(self):
+		from frappe.model.meta import clear_meta_cache
+
+		clear_meta_cache()
+		env = self._dispatch([{"name": "C1"}])
+		self.assertEqual(env["data"], [{"name": "C1"}])
+
 	def _dispatch(self, result_data):
 		from jarvis.api import _dispatch_from_session
 
@@ -935,7 +956,7 @@ class TestDispatchFromSessionResultBudget(FrappeTestCase):
 			patch("jarvis.api._persist_and_publish_tool_call"),
 			patch("jarvis.tools._delegate_capability.tool_denial", return_value=None),
 			patch("jarvis.api._get_header", return_value=None),
-			patch("jarvis.api.frappe.db.get_value", return_value="conv1"),
+			self._conversation_lookup(),
 		):
 			return _dispatch_from_session(
 				user="Administrator",
@@ -972,7 +993,7 @@ class TestDispatchFromSessionResultBudget(FrappeTestCase):
 			patch("jarvis.api._persist_and_publish_tool_call"),
 			patch("jarvis.tools._delegate_capability.tool_denial", return_value=None),
 			patch("jarvis.api._get_header", return_value=None),
-			patch("jarvis.api.frappe.db.get_value", return_value="conv1"),
+			self._conversation_lookup(),
 			patch("jarvis.api.enforce_result_budget") as g,
 		):
 			result = _dispatch_from_session(
