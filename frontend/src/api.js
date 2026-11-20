@@ -377,6 +377,20 @@ export const ruleValues = (doctype, table, links) =>
 	call(AC + "rule_values", { doctype, table, links: JSON.stringify(links) });
 export const applyAction = (action) =>
 	call(AC + "apply_action", { action: JSON.stringify(action) });
+// Cancel an unsaved draft card for good: the server records a "discarded" receipt for
+// the DRAFT row's message, so the card stays gone after a reload and on the phone.
+export const dismissDraft = (conversation, message) =>
+	call(AC + "dismiss_draft", { conversation, message });
+// Save an edited SERVER draft card: `values` is only what the person changed (lib/draftCardValues.js).
+// The server claims the card and runs the edited call itself (the stored card and arguments are
+// never rewritten): the card ends as the decided row, or stays Pending when the reply says
+// `card_open`. Same envelopes as applyAction.
+export const saveDraftCard = (token, conversation, values) =>
+	call(AC + "save_draft_card", {
+		token,
+		conversation: conversation || "",
+		values: JSON.stringify(values || {}),
+	});
 // Park the confirm card for a create receipt's suggested next step (#621). Same
 // card the assistant's own submit/workflow call gets; nothing runs until Confirm.
 export const proposeNextAction = (conversation, step) =>

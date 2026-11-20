@@ -69,9 +69,11 @@ class TestAutoModesCardTheFourTools(FrappeTestCase):
 					self.assertFalse(covered.called, (tool, res))
 
 	def test_run_method_and_send_email_show_their_card(self):
+		# The site has email: #834 refuses a send_email card on one that does not.
+		find_outgoing = "frappe.email.doctype.email_account.email_account.EmailAccount.find_outgoing"
 		for mode in ("auto_mode", "confirm_all"):
 			for tool in ("run_method", "send_email"):
-				with self.subTest(mode=mode, tool=tool):
+				with self.subTest(mode=mode, tool=tool), patch(find_outgoing, return_value=object()):
 					res, _ = self.run_tool(tool, CALLS[tool], self.conv(mode))
 					self.assertEqual((res.get("data") or {}).get("status"), "pending_confirmation", res)
 

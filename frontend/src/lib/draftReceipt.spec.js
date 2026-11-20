@@ -1,0 +1,200 @@
+// The receipt of a decided server draft card (lib/draftReceipt.js), as the State Table words it.
+import { describe, expect, it } from "vitest";
+import { draftReceipt, isDraftReceiptRow } from "./draftReceipt.js";
+
+// A decided row as get_conversation hands it for a draft card: `draft_card` false (it is true only
+// while Pending), `draft_receipt` true (jarvis/chat/draft_card.py decided_mark).
+const row = (over = {}, result = null, args = { doctype: "Timesheet" }) => ({
+	role: "tool",
+	tool_name: "create_doc",
+	tool_call_id: "tok-1",
+	tool_status: "",
+	pending_card: null,
+	draft_card: false,
+	draft_receipt: true,
+	action_outcome: "confirmed",
+	tool_args: JSON.stringify(args),
+	tool_result: result === null ? null : JSON.stringify(result),
+	...over,
+});
+const ok = (data) => ({ ok: true, data: { doctype: "Timesheet", name: "TS-0001", ...data } });
+const fail = (error, extra = {}) => ({ ok: false, error, ...extra });
+
+describe("draftReceipt: the words of S6, S7, S8 and S10", () => {
+	// Break: a receipt says something else than the State Table (the wording is the contract with the
+	// phone and the person), loses its link or its Submit, or a record changed or deleted after the
+	// draft reads as a plain failure.
+	const table = [
+		[
+			"S6 created",
+			row({}, ok()),
+			{
+				text: "Created Timesheet TS-0001",
+				tone: "ok",
+				open: { doctype: "Timesheet", name: "TS-0001" },
+			},
+		],
+		[
+			"S6 created, submittable and still a draft: Submit",
+			row({}, ok({ suggested_next: { kind: "submit" } })),
+			{
+				text: "Created Timesheet TS-0001",
+				tone: "ok",
+				open: { doctype: "Timesheet", name: "TS-0001" },
+				submit: true,
+			},
+		],
+		[
+			"S6 created, a workflow hint is not Submit",
+			row({}, ok({ suggested_next: { kind: "workflow", action: "Approve" } })),
+			{
+				text: "Created Timesheet TS-0001",
+				tone: "ok",
+				open: { doctype: "Timesheet", name: "TS-0001" },
+			},
+		],
+		[
+			"S6 updated",
+			row({ tool_name: "update_doc" }, ok({ doctype: "ToDo", name: "TD-9" })),
+			{ text: "Updated ToDo TD-9", tone: "ok", open: { doctype: "ToDo", name: "TD-9" } },
+		],
+		[
+			"S6 created with no name in the result: from the arguments, else none",
+			row({}, { ok: true, data: {} }, { doctype: "ToDo" }),
+			{ text: "Created ToDo", tone: "ok" },
+		],
+		[
+			"S8 cancelled",
+			row({ action_outcome: "discarded" }),
+			{ text: "Draft cancelled", tone: "ok" },
+		],
+		[
+			"S7 failed create",
+			row({ action_outcome: "failed" }, fail({ message: "Employee is required." })),
+			{ text: "Not created", tone: "error", reason: "Employee is required." },
+		],
+		[
+			"S7 failed update",
+			row(
+				{ tool_name: "update_doc", action_outcome: "failed" },
+				fail({ message: "Cannot edit." })
+			),
+			{ text: "Not saved", tone: "error", reason: "Cannot edit." },
+		],
+		[
+			"S7 partly applied",
+			row({ action_outcome: "partial" }, fail({ message: "Second step failed." })),
+			{ text: "Partly applied", tone: "warn", reason: "Second step failed." },
+		],
+		[
+			// What the server stores for a stale update: `error` holds only the confirmation's id
+			// (settlement's with_reference over no result), the reason is the row's stamp.
+			"S10 the record changed (as stored: no message, the stamp says why)",
+			row(
+				{
+					tool_name: "update_doc",
+					action_outcome: "failed",
+					draft_receipt_reason: "stale",
+				},
+				fail({ reference: "PA-0001" })
+			),
+			{ text: "Not saved: this record changed after the draft was made", tone: "error" },
+		],
+		[
+			"S10 the record was deleted (as stored, from Save in the form too)",
+			row(
+				{
+					tool_name: "update_doc",
+					action_outcome: "failed",
+					draft_receipt_reason: "target_missing",
+				},
+				fail({ reference: "PA-0001" })
+			),
+			{ text: "Not saved: this record changed after the draft was made", tone: "error" },
+		],
+		[
+			"a failure that ran keeps its own message, even if it says the record changed",
+			row(
+				{ tool_name: "update_doc", action_outcome: "failed" },
+				fail({
+					message: "The record changed after this action was proposed.",
+					reference: "PA-0001",
+				})
+			),
+			{
+				text: "Not saved",
+				tone: "error",
+				reason: "The record changed after this action was proposed.",
+			},
+		],
+		[
+			"a failure with no message has no reason",
+			row({ action_outcome: "failed" }, null),
+			{ text: "Not created", tone: "error", reason: "" },
+		],
+		[
+			"a stored result that is not JSON is read as empty",
+			row({ action_outcome: "failed", tool_result: "{oops" }),
+			{ text: "Not created", tone: "error", reason: "" },
+		],
+		[
+			"a result already parsed",
+			row({ tool_result: ok(), tool_args: { doctype: "Timesheet" } }),
+			{
+				text: "Created Timesheet TS-0001",
+				tone: "ok",
+				open: { doctype: "Timesheet", name: "TS-0001" },
+			},
+		],
+	];
+	for (const [name, r, want] of table) it(name, () => expect(draftReceipt(r)).toEqual(want));
+});
+
+describe("draftReceipt: rows it leaves alone", () => {
+	// Break: an outcome the State Table gives no receipt, or another tool's row, gets a draft
+	// receipt (it would replace the chip the person has always seen).
+	const none = [
+		["replaced by a newer draft (S9)", row({ action_outcome: "superseded" })],
+		["stopped before it was answered", row({ action_outcome: "cancelled" })],
+		["expired", row({ action_outcome: "expired" })],
+		["outcome unknown", row({ action_outcome: "unknown" })],
+		["ran under an armed macro", row({ action_outcome: "auto_applied" })],
+		["a value this build does not know", row({ action_outcome: "later" })],
+		["no outcome (still pending, or the Claude route's twin)", row({ action_outcome: "" })],
+		["another tool", row({ tool_name: "submit_doc" })],
+		["not a tool row", row({ role: "assistant" })],
+		["not a row", null],
+	];
+	for (const [name, r] of none) it(`${name}: null`, () => expect(draftReceipt(r)).toBeNull());
+});
+
+describe("isDraftReceiptRow: which decided rows were draft cards", () => {
+	// Break: the receipt guesses instead of reading the server's stamp: a decided SENSITIVE card (no
+	// stamp, `draft_card` false like every decided row) or a flag-off row gets the draft wording, or
+	// a stamped draft row loses it (after a reload, or because the stamp is read as truthy).
+	const table = [
+		["decided draft row (stamped)", row({}), true],
+		[
+			"decided sensitive create row (the stamp is absent, draft_card false)",
+			row({ draft_receipt: undefined }),
+			false,
+		],
+		[
+			"flag-off decided row (no draft keys at all)",
+			row({ draft_receipt: undefined, draft_card: undefined }),
+			false,
+		],
+		[
+			"pending row (draft_card true, no outcome)",
+			row({ draft_card: true, draft_receipt: undefined, action_outcome: "" }),
+			false,
+		],
+		["stamped but still without an outcome", row({ action_outcome: "" }), false],
+		["a stamp that is not exactly true", row({ draft_receipt: "yes" }), false],
+		["another tool, stamped", row({ tool_name: "submit_doc" }), false],
+		["not a tool row", row({ role: "assistant" }), false],
+		["not a row", undefined, false],
+	];
+	for (const [name, r, want] of table)
+		it(`${name}: ${want}`, () => expect(isDraftReceiptRow(r)).toBe(want));
+});

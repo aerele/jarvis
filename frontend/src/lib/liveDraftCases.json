@@ -1,0 +1,4103 @@
+[
+	{
+		"id": "draft-is-last",
+		"note": "the newest assistant row is the draft",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m2",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"live": "m2"
+	},
+	{
+		"id": "draft-then-chat",
+		"note": "plain chat after a draft does not retire it",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m5",
+				"role": "assistant",
+				"content": "Done."
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "draft-then-confirmed-receipt",
+		"note": "a confirmed receipt after the draft retires it",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "confirmed"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "draft-then-discarded-receipt",
+		"note": "a discarded receipt after the draft retires it",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "discarded"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "draft-then-failed-receipt",
+		"note": "a failed receipt after the draft retires it",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "failed"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "draft-then-plain-tool-rows",
+		"note": "tool rows with an empty action_outcome do not retire a draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": ""
+			},
+			{
+				"name": "t2",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "  "
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "two-drafts",
+		"note": "the newer draft replaces the older one",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"Task\",\"title\":\"T2\",\"fields\":[{\"label\":\"subject\",\"value\":\"z\"}]}\n```"
+			}
+		],
+		"live": "m3"
+	},
+	{
+		"id": "good-then-broken",
+		"note": "a newer broken draft is the live one; the good one does not come back",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{not json\n```"
+			}
+		],
+		"live": "m3",
+		"bad": true
+	},
+	{
+		"id": "draft-then-email-block",
+		"note": "an email block is not a draft row and does not hide the older draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"email\",\"to\":\"a@b.com\",\"subject\":\"Hi\",\"body\":\"Hello\"}\n```"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "draft-then-gated-verb-block",
+		"note": "a gated verb block is not a draft row and does not hide the older draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"submit\",\"doctype\":\"ToDo\",\"name\":\"TD-1\"}\n```"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "six-user-rows-later",
+		"note": "six user rows after the draft retire it",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a1",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a2",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u3",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u4",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a4",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u5",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a5",
+				"role": "assistant",
+				"content": "Sure."
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "five-user-rows-later",
+		"note": "five user rows after the draft keep it live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a1",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a2",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u3",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "u4",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a4",
+				"role": "assistant",
+				"content": "Sure."
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "hidden-draft",
+		"note": "a hidden draft row is skipped",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```",
+				"hidden": 1
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "streaming-draft",
+		"note": "a streaming draft row is skipped",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```",
+				"streaming": true
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "no-draft",
+		"note": "a chat with no action block has no live draft",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Hello"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Hi"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "unclosed-fence",
+		"note": "an unclosed fence is not a draft",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\"}"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "update-draft-then-chat",
+		"note": "an update draft stays live through chat",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"update\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"y\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Sure."
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "hidden-later-rows-ignored",
+		"note": "hidden user rows and hidden receipts after the draft are skipped",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "confirmed",
+				"hidden": 1
+			},
+			{
+				"name": "h0",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h1",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h2",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h3",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h4",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h5",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			},
+			{
+				"name": "h6",
+				"role": "user",
+				"content": "ok",
+				"hidden": true
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "unreadable-action-draft",
+		"note": "an unreadable edit action is a draft row (error card)",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"fields\":\"oops\"}\n```"
+			}
+		],
+		"live": "m1",
+		"bad": true
+	},
+	{
+		"id": "missing-verb-draft",
+		"note": "a doc block with no verb is a draft row",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[]}\n```"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "capitalised-verb-draft",
+		"note": "a capitalised verb is read as lower case",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"Create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[]}\n```"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "first-fence-only",
+		"note": "only the first closed fence counts: email first then a create is not a draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"email\",\"to\":\"a@b.com\",\"subject\":\"Hi\",\"body\":\"Hello\"}\n```\n\nDrafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "non-assistant-block",
+		"note": "a block in a user row is not a draft",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "newer-draft-retired-older-stays-gone",
+		"note": "a receipt after the newer draft retires it and the older draft does not come back",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"Task\",\"title\":\"T2\",\"fields\":[{\"label\":\"subject\",\"value\":\"z\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "confirmed"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "streaming-assistant-after-draft",
+		"note": "a streaming assistant row after the draft is skipped, the draft stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Working on it.",
+				"streaming": 1
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "broken-block-only-draft",
+		"note": "a lone broken block is itself the live draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{not json\n```"
+			}
+		],
+		"live": "m1",
+		"bad": true
+	},
+	{
+		"id": "receipt-before-draft-ignored",
+		"note": "a receipt before the draft does not retire it",
+		"rows": [
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "confirmed"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m3",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"live": "m3"
+	},
+	{
+		"id": "hidden-receipt-then-visible-receipt",
+		"note": "a hidden receipt is skipped but the visible one after it retires the draft",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "confirmed",
+				"hidden": 1
+			},
+			{
+				"name": "t2",
+				"role": "tool",
+				"content": "receipt",
+				"action_outcome": "discarded"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "sixty-rows-later",
+		"note": "exactly 60 rows of any role after the draft (5 user, 5 assistant, 50 plain tool rows) keep it live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t0_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a1",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t1_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a2",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t2_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u3",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t3_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u4",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a4",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t4_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "sixty-one-rows-later",
+		"note": "61 rows of any role after the draft retire it: it may sit beyond the page a client loaded",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t0_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a1",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t1_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a2",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t2_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u3",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t3_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u4",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a4",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t4_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx10",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "sixty-one-rows-one-hidden",
+		"note": "61 rows after the draft where one is hidden: 60 count, so it stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t0_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t0_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a1",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t1_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t1_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a2",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t2_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t2_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "h0",
+				"role": "user",
+				"content": "hidden",
+				"hidden": 1
+			},
+			{
+				"name": "u3",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a3",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t3_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t3_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "u4",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a4",
+				"role": "assistant",
+				"content": "Sure."
+			},
+			{
+				"name": "t4_0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "t4_7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			},
+			{
+				"name": "tx9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "legacy-create-receipt-without-outcome",
+		"note": "a completed create_doc row with no action_outcome (a receipt from before 2026-07-17) retires the draft and no tool_call_id",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> completed",
+				"tool_name": "create_doc",
+				"tool_status": "completed",
+				"tool_call_id": null
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "legacy-update-receipt-without-outcome",
+		"note": "a completed update_doc row with no action_outcome retires the draft too and no tool_call_id",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "update_doc -> completed",
+				"tool_name": "update_doc",
+				"tool_status": "completed",
+				"tool_call_id": null
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "completed-read-tool-after-draft",
+		"note": "a completed get_doc row is a read, not a write: the draft stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "get_doc -> completed",
+				"tool_name": "get_doc",
+				"tool_status": "completed"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "pending-create-card-after-draft",
+		"note": "a create_doc row still pending with no outcome is a parked card, not a write: the draft stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "failed-create-call-after-draft",
+		"note": "a create_doc call that ended in an error wrote nothing: the draft stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> error",
+				"tool_name": "create_doc",
+				"tool_status": "error"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "staged-gated-card-after-draft",
+		"note": "the agent staged a gated create card after the draft: its pending card row and its own completed call row both carry a tool_call_id, so the draft stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "pa-token-1"
+			},
+			{
+				"name": "t2",
+				"role": "tool",
+				"content": "create_doc -> completed",
+				"tool_name": "create_doc",
+				"tool_status": "completed",
+				"tool_call_id": "call-1"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "agent-write-with-outcome",
+		"note": "an agent write that ran (completed, with a tool_call_id) and carries an outcome retires the draft through its outcome",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> auto_applied",
+				"tool_name": "create_doc",
+				"tool_status": "completed",
+				"tool_call_id": "call-1",
+				"action_outcome": "auto_applied"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "own-turn-tool-rows-do-not-count",
+		"note": "70 tool rows directly after the draft are its own turn (the reply row took its seq at turn start): they do not count, so it stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "o0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o0"
+			},
+			{
+				"name": "o1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o1"
+			},
+			{
+				"name": "o2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o2"
+			},
+			{
+				"name": "o3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o3"
+			},
+			{
+				"name": "o4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o4"
+			},
+			{
+				"name": "o5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o5"
+			},
+			{
+				"name": "o6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o6"
+			},
+			{
+				"name": "o7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o7"
+			},
+			{
+				"name": "o8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o8"
+			},
+			{
+				"name": "o9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o9"
+			},
+			{
+				"name": "o10",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o10"
+			},
+			{
+				"name": "o11",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o11"
+			},
+			{
+				"name": "o12",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o12"
+			},
+			{
+				"name": "o13",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o13"
+			},
+			{
+				"name": "o14",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o14"
+			},
+			{
+				"name": "o15",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o15"
+			},
+			{
+				"name": "o16",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o16"
+			},
+			{
+				"name": "o17",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o17"
+			},
+			{
+				"name": "o18",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o18"
+			},
+			{
+				"name": "o19",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o19"
+			},
+			{
+				"name": "o20",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o20"
+			},
+			{
+				"name": "o21",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o21"
+			},
+			{
+				"name": "o22",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o22"
+			},
+			{
+				"name": "o23",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o23"
+			},
+			{
+				"name": "o24",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o24"
+			},
+			{
+				"name": "o25",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o25"
+			},
+			{
+				"name": "o26",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o26"
+			},
+			{
+				"name": "o27",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o27"
+			},
+			{
+				"name": "o28",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o28"
+			},
+			{
+				"name": "o29",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o29"
+			},
+			{
+				"name": "o30",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o30"
+			},
+			{
+				"name": "o31",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o31"
+			},
+			{
+				"name": "o32",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o32"
+			},
+			{
+				"name": "o33",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o33"
+			},
+			{
+				"name": "o34",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o34"
+			},
+			{
+				"name": "o35",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o35"
+			},
+			{
+				"name": "o36",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o36"
+			},
+			{
+				"name": "o37",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o37"
+			},
+			{
+				"name": "o38",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o38"
+			},
+			{
+				"name": "o39",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o39"
+			},
+			{
+				"name": "o40",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o40"
+			},
+			{
+				"name": "o41",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o41"
+			},
+			{
+				"name": "o42",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o42"
+			},
+			{
+				"name": "o43",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o43"
+			},
+			{
+				"name": "o44",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o44"
+			},
+			{
+				"name": "o45",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o45"
+			},
+			{
+				"name": "o46",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o46"
+			},
+			{
+				"name": "o47",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o47"
+			},
+			{
+				"name": "o48",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o48"
+			},
+			{
+				"name": "o49",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o49"
+			},
+			{
+				"name": "o50",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o50"
+			},
+			{
+				"name": "o51",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o51"
+			},
+			{
+				"name": "o52",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o52"
+			},
+			{
+				"name": "o53",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o53"
+			},
+			{
+				"name": "o54",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o54"
+			},
+			{
+				"name": "o55",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o55"
+			},
+			{
+				"name": "o56",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o56"
+			},
+			{
+				"name": "o57",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o57"
+			},
+			{
+				"name": "o58",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o58"
+			},
+			{
+				"name": "o59",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o59"
+			},
+			{
+				"name": "o60",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o60"
+			},
+			{
+				"name": "o61",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o61"
+			},
+			{
+				"name": "o62",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o62"
+			},
+			{
+				"name": "o63",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o63"
+			},
+			{
+				"name": "o64",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o64"
+			},
+			{
+				"name": "o65",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o65"
+			},
+			{
+				"name": "o66",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o66"
+			},
+			{
+				"name": "o67",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o67"
+			},
+			{
+				"name": "o68",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o68"
+			},
+			{
+				"name": "o69",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o69"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "own-turn-rows-then-60-later-rows",
+		"note": "10 own-turn tool rows, then 60 later rows (a user row, a reply, 58 tool rows): exactly 60 count, so it stays live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "o0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o0"
+			},
+			{
+				"name": "o1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o1"
+			},
+			{
+				"name": "o2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o2"
+			},
+			{
+				"name": "o3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o3"
+			},
+			{
+				"name": "o4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o4"
+			},
+			{
+				"name": "o5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o5"
+			},
+			{
+				"name": "o6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o6"
+			},
+			{
+				"name": "o7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o7"
+			},
+			{
+				"name": "o8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o8"
+			},
+			{
+				"name": "o9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o9"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Done."
+			},
+			{
+				"name": "l0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l0"
+			},
+			{
+				"name": "l1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l1"
+			},
+			{
+				"name": "l2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l2"
+			},
+			{
+				"name": "l3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l3"
+			},
+			{
+				"name": "l4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l4"
+			},
+			{
+				"name": "l5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l5"
+			},
+			{
+				"name": "l6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l6"
+			},
+			{
+				"name": "l7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l7"
+			},
+			{
+				"name": "l8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l8"
+			},
+			{
+				"name": "l9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l9"
+			},
+			{
+				"name": "l10",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l10"
+			},
+			{
+				"name": "l11",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l11"
+			},
+			{
+				"name": "l12",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l12"
+			},
+			{
+				"name": "l13",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l13"
+			},
+			{
+				"name": "l14",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l14"
+			},
+			{
+				"name": "l15",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l15"
+			},
+			{
+				"name": "l16",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l16"
+			},
+			{
+				"name": "l17",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l17"
+			},
+			{
+				"name": "l18",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l18"
+			},
+			{
+				"name": "l19",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l19"
+			},
+			{
+				"name": "l20",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l20"
+			},
+			{
+				"name": "l21",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l21"
+			},
+			{
+				"name": "l22",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l22"
+			},
+			{
+				"name": "l23",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l23"
+			},
+			{
+				"name": "l24",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l24"
+			},
+			{
+				"name": "l25",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l25"
+			},
+			{
+				"name": "l26",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l26"
+			},
+			{
+				"name": "l27",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l27"
+			},
+			{
+				"name": "l28",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l28"
+			},
+			{
+				"name": "l29",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l29"
+			},
+			{
+				"name": "l30",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l30"
+			},
+			{
+				"name": "l31",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l31"
+			},
+			{
+				"name": "l32",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l32"
+			},
+			{
+				"name": "l33",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l33"
+			},
+			{
+				"name": "l34",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l34"
+			},
+			{
+				"name": "l35",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l35"
+			},
+			{
+				"name": "l36",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l36"
+			},
+			{
+				"name": "l37",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l37"
+			},
+			{
+				"name": "l38",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l38"
+			},
+			{
+				"name": "l39",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l39"
+			},
+			{
+				"name": "l40",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l40"
+			},
+			{
+				"name": "l41",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l41"
+			},
+			{
+				"name": "l42",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l42"
+			},
+			{
+				"name": "l43",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l43"
+			},
+			{
+				"name": "l44",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l44"
+			},
+			{
+				"name": "l45",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l45"
+			},
+			{
+				"name": "l46",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l46"
+			},
+			{
+				"name": "l47",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l47"
+			},
+			{
+				"name": "l48",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l48"
+			},
+			{
+				"name": "l49",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l49"
+			},
+			{
+				"name": "l50",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l50"
+			},
+			{
+				"name": "l51",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l51"
+			},
+			{
+				"name": "l52",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l52"
+			},
+			{
+				"name": "l53",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l53"
+			},
+			{
+				"name": "l54",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l54"
+			},
+			{
+				"name": "l55",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l55"
+			},
+			{
+				"name": "l56",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l56"
+			},
+			{
+				"name": "l57",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l57"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "own-turn-rows-then-61-later-rows",
+		"note": "10 own-turn tool rows, then 61 later rows (a user row, a reply, 59 tool rows): 61 count, so it is retired",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "o0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o0"
+			},
+			{
+				"name": "o1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o1"
+			},
+			{
+				"name": "o2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o2"
+			},
+			{
+				"name": "o3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o3"
+			},
+			{
+				"name": "o4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o4"
+			},
+			{
+				"name": "o5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o5"
+			},
+			{
+				"name": "o6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o6"
+			},
+			{
+				"name": "o7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o7"
+			},
+			{
+				"name": "o8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o8"
+			},
+			{
+				"name": "o9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o9"
+			},
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "a0",
+				"role": "assistant",
+				"content": "Done."
+			},
+			{
+				"name": "l0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l0"
+			},
+			{
+				"name": "l1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l1"
+			},
+			{
+				"name": "l2",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l2"
+			},
+			{
+				"name": "l3",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l3"
+			},
+			{
+				"name": "l4",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l4"
+			},
+			{
+				"name": "l5",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l5"
+			},
+			{
+				"name": "l6",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l6"
+			},
+			{
+				"name": "l7",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l7"
+			},
+			{
+				"name": "l8",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l8"
+			},
+			{
+				"name": "l9",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l9"
+			},
+			{
+				"name": "l10",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l10"
+			},
+			{
+				"name": "l11",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l11"
+			},
+			{
+				"name": "l12",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l12"
+			},
+			{
+				"name": "l13",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l13"
+			},
+			{
+				"name": "l14",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l14"
+			},
+			{
+				"name": "l15",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l15"
+			},
+			{
+				"name": "l16",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l16"
+			},
+			{
+				"name": "l17",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l17"
+			},
+			{
+				"name": "l18",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l18"
+			},
+			{
+				"name": "l19",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l19"
+			},
+			{
+				"name": "l20",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l20"
+			},
+			{
+				"name": "l21",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l21"
+			},
+			{
+				"name": "l22",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l22"
+			},
+			{
+				"name": "l23",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l23"
+			},
+			{
+				"name": "l24",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l24"
+			},
+			{
+				"name": "l25",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l25"
+			},
+			{
+				"name": "l26",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l26"
+			},
+			{
+				"name": "l27",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l27"
+			},
+			{
+				"name": "l28",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l28"
+			},
+			{
+				"name": "l29",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l29"
+			},
+			{
+				"name": "l30",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l30"
+			},
+			{
+				"name": "l31",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l31"
+			},
+			{
+				"name": "l32",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l32"
+			},
+			{
+				"name": "l33",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l33"
+			},
+			{
+				"name": "l34",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l34"
+			},
+			{
+				"name": "l35",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l35"
+			},
+			{
+				"name": "l36",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l36"
+			},
+			{
+				"name": "l37",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l37"
+			},
+			{
+				"name": "l38",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l38"
+			},
+			{
+				"name": "l39",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l39"
+			},
+			{
+				"name": "l40",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l40"
+			},
+			{
+				"name": "l41",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l41"
+			},
+			{
+				"name": "l42",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l42"
+			},
+			{
+				"name": "l43",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l43"
+			},
+			{
+				"name": "l44",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l44"
+			},
+			{
+				"name": "l45",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l45"
+			},
+			{
+				"name": "l46",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l46"
+			},
+			{
+				"name": "l47",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l47"
+			},
+			{
+				"name": "l48",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l48"
+			},
+			{
+				"name": "l49",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l49"
+			},
+			{
+				"name": "l50",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l50"
+			},
+			{
+				"name": "l51",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l51"
+			},
+			{
+				"name": "l52",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l52"
+			},
+			{
+				"name": "l53",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l53"
+			},
+			{
+				"name": "l54",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l54"
+			},
+			{
+				"name": "l55",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l55"
+			},
+			{
+				"name": "l56",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l56"
+			},
+			{
+				"name": "l57",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l57"
+			},
+			{
+				"name": "l58",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-l58"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "own-turn-receipt-still-retires",
+		"note": "a receipt inside the draft's own turn (directly after it) still retires it",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "o0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o0"
+			},
+			{
+				"name": "o1",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-o1",
+				"action_outcome": "confirmed"
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "typed-draft-then-parked-tool-draft",
+		"note": "a parked tool draft after a typed draft retires it: the tool card is the one card",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t1",
+				"draft_card": true
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "typed-draft-then-sensitive-park-from-it",
+		"note": "a pending tool row with no draft_card (a sensitive park from the typed draft) leaves the typed draft live",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t1"
+			}
+		],
+		"live": "m1"
+	},
+	{
+		"id": "parked-tool-draft-only",
+		"note": "a parked tool draft and no typed draft: nothing is live",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t1",
+				"draft_card": true
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "typed-draft-then-tool-draft-cancelled",
+		"note": "a tool draft that was cancelled keeps the old typed draft retired",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> cancelled",
+				"tool_name": "create_doc",
+				"tool_status": "",
+				"tool_call_id": "call-t1",
+				"action_outcome": "cancelled",
+				"draft_card": false
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "typed-draft-then-tool-draft-confirmed",
+		"note": "a tool draft that was confirmed keeps the old typed draft retired",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> confirmed",
+				"tool_name": "create_doc",
+				"tool_status": "",
+				"tool_call_id": "call-t1",
+				"action_outcome": "confirmed",
+				"draft_card": false
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "typed-draft-then-tool-draft-superseded-by-edit",
+		"note": "a tool draft superseded by an edit keeps the old typed draft retired",
+		"rows": [
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> superseded",
+				"tool_name": "create_doc",
+				"tool_status": "",
+				"tool_call_id": "call-t1",
+				"action_outcome": "superseded",
+				"draft_card": false
+			},
+			{
+				"name": "u2",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "t2",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t2",
+				"draft_card": true
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "typed-block-and-tool-draft-same-turn",
+		"note": "the reply holds a typed block and its own turn's tool rows (after it, in seq order) include a parked tool draft: the tool card is the one card",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			},
+			{
+				"name": "t0",
+				"role": "tool",
+				"content": "get_list -> completed",
+				"tool_name": "get_list",
+				"tool_status": "completed",
+				"tool_call_id": "call-t0"
+			},
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t1",
+				"draft_card": true
+			}
+		],
+		"live": null
+	},
+	{
+		"id": "parked-tool-draft-then-typed-draft-next-turn",
+		"note": "a Pending draft card from an earlier turn: the typed block of the next turn is not live (one card)",
+		"rows": [
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> pending",
+				"tool_name": "create_doc",
+				"tool_status": "pending",
+				"tool_call_id": "call-t1",
+				"draft_card": true
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m2",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"parked_draft": true,
+		"live": null
+	},
+	{
+		"id": "typed-draft-with-old-parked-card-outside-loaded-rows",
+		"note": "the Pending card's row is not among the loaded rows: the flag alone hides the typed draft",
+		"rows": [
+			{
+				"name": "u0",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m1",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"parked_draft": true,
+		"live": null
+	},
+	{
+		"id": "typed-draft-after-parked-card-was-decided",
+		"note": "a decided card before a NEW typed draft does not hide it",
+		"rows": [
+			{
+				"name": "t1",
+				"role": "tool",
+				"content": "create_doc -> confirmed",
+				"tool_name": "create_doc",
+				"tool_status": "",
+				"tool_call_id": "call-t1",
+				"action_outcome": "confirmed",
+				"draft_card": false
+			},
+			{
+				"name": "u1",
+				"role": "user",
+				"content": "ok"
+			},
+			{
+				"name": "m2",
+				"role": "assistant",
+				"content": "Drafting.\n\n```jarvis-action\n{\"kind\":\"doc\",\"verb\":\"create\",\"doctype\":\"ToDo\",\"title\":\"T\",\"fields\":[{\"label\":\"description\",\"value\":\"x\"}]}\n```"
+			}
+		],
+		"parked_draft": false,
+		"live": "m2"
+	}
+]

@@ -11,6 +11,10 @@ port of that parser plus the row lifecycle:
   assistant persist — parse the LAST fence, create ONE Pending
   ``Jarvis Approval Request`` (source "Chat") owned by the conversation
   owner, and publish an ``approval:new`` jarvis:event to them.
+- ``ask_lead_in``: the prose just above that fence (what the agent said it was doing),
+  stored as plain text in the row's ``context_md`` for chat asks (never File Box), shown on
+  the board, and quoted back as DATA in the decision message that resumes the chat, so the
+  decision names the task it belongs to (jarvis-admin-v2#793).
 - ``resolve_on_user_message``: called at user-message intake — the user
   replied in chat, so any Pending chat-sourced row for that conversation
   flips to "Answered" (decision "(answered in chat)"). This closes the
@@ -26,10 +30,13 @@ from __future__ import annotations
 
 import json
 import re
+import traceback
 
 import frappe
 
 from jarvis.chat.events import publish_to_user
+from jarvis.chat.latency import get_logger
+from jarvis.chat.safe_text import LEAD_IN_CAP, safe_line
 
 APPROVAL = "Jarvis Approval Request"
 CONV = "Jarvis Conversation"
@@ -101,6 +108,50 @@ def _ask_items(parsed):
 	return [parsed] if _ask_text(parsed) or parsed.get("type") or parsed.get("kind") else None
 
 
+_OPTION_KEYS = ("label", "title", "text", "name", "value")
+
+
+def _scalar_text(v) -> str:
+	"""A JSON scalar as JavaScript's ``String(v)`` writes it, so the chat card
+	(chatAsk.js) and the Approval Board row show the same chip text: ``true``
+	not ``True``, ``1`` not ``1.0``."""
+	if isinstance(v, bool):
+		return "true" if v else "false"
+	if isinstance(v, float) and v.is_integer():
+		return str(int(v))
+	return str(v).strip()
+
+
+def _option_text(o) -> str:
+	"""An option's display text. The spec asks for plain strings, but a model also
+	writes ``{label, value}`` objects, which ``str()`` turns into a dict repr (#837).
+	Mirrors chatAsk.js ``optionText``: its readable text first, then its value; an
+	option with neither is ``""`` and dropped. Only the text is kept: the answer
+	sent back is that text, so a ``{label, value}`` option answers with its label."""
+	if o is None or isinstance(o, list):
+		return ""
+	if isinstance(o, dict):
+		for key in _OPTION_KEYS:
+			v = o.get(key)
+			if v is not None and not isinstance(v, (dict, list)) and _scalar_text(v):
+				return _scalar_text(v)
+		return ""
+	return _scalar_text(o)
+
+
+def _option_texts(options, cap: int) -> list[str]:
+	"""The first ``cap`` non-empty option texts. Stops at the cap instead of
+	reading every option; empty ones do not count toward it (as in chatAsk.js)."""
+	texts: list[str] = []
+	for o in options:
+		if len(texts) >= cap:
+			break
+		text = _option_text(o)
+		if text:
+			texts.append(text)
+	return texts
+
+
 def parse_ask(content: str | None) -> list[dict]:
 	"""Normalized questions ``[{q, type, options, doctype, fieldname}]`` from
 	the LAST ```jarvis-ask``` fence in ``content``, or ``[]``.
@@ -110,7 +161,7 @@ def parse_ask(content: str | None) -> list[dict]:
 	``q``/``question``/``label``/``title``/``prompt``, the type is ``type`` else
 	a known ``kind``, and a nested ``field: {doctype, fieldname}`` makes a
 	``field`` question; at most 6 questions; ``type`` normalized
-	("boolean" -> "yesno", unknown -> "single"); at most 8 string options
+	("boolean" -> "yesno", unknown -> "single"); at most 8 options as text (an object option shows its label, else its value)
 	(200 for ``select``, which with none degrades to ``text``); a ``field``
 	question needs a plain-identifier doctype and fieldname (else it degrades
 	to a ``text`` question labelled by the humanized fieldname) and may have an
@@ -141,7 +192,7 @@ def parse_ask(content: str | None) -> list[dict]:
 			qtype = "single"
 		cap = 200 if qtype == "select" else 8
 		options = q.get("options")
-		options = [str(o) for o in options[:cap]] if isinstance(options, list) else []
+		options = _option_texts(options, cap) if isinstance(options, list) else []
 		if qtype == "select" and not options:
 			qtype = "text"
 		text = _ask_text(q)
@@ -201,6 +252,145 @@ def question_excerpt(content: str | None, limit: int = 140) -> str:
 	return text[-limit:].lstrip()
 
 
+# The "why" stored with a chat ask (jarvis-admin-v2#793): what the agent said just above its
+# question, so a decision can name the task it belongs to.
+_LEAD_IN_SHORT = 120  # a nearest paragraph this short ("A few quick questions:") names no task
+# Markdown the board and the prompt would show as stray characters: [text](url) and
+# ![alt](url) keep their text; **x**, __x__, *x* and _x_ lose their markers only when they wrap
+# a word (so snake_case_names, "a * b * c" and 2*3*4 survive); a leading "#" before a letter is
+# a heading marker ("#42" is not).
+_MD_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
+_MD_STRONG = re.compile(r"(?<![\w*])\*\*(?=\S)(.+?)(?<=\S)\*\*(?![\w*])|(?<!\w)__(?=\S)(.+?)(?<=\S)__(?!\w)")
+_MD_EM = re.compile(
+	r"(?<![\w*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?![\w*])|(?<![\w_])_(?=[^\s_])(.+?)(?<=[^\s_])_(?![\w_])"
+)
+_MD_HEADING = re.compile(r"^#{1,6}[ \t]*(?=[^\W\d_])")
+# Lines that are structure, not prose: table rows, list items, headings, horizontal rules.
+_NON_PROSE_LINE = re.compile(r"^\s*(?:\||#{1,6}\s|[-*+]\s|\d+[.)]\s|(?:-{3,}|\*{3,}|_{3,})\s*$)")
+
+
+_FENCE_MARKERS = ("```", "~~~")
+
+
+def _strip_markdown(text: str) -> str:
+	"""``text`` without link syntax, emphasis markers and a leading heading marker."""
+	text = _MD_LINK.sub(r"\1", text)
+	for pattern in (_MD_STRONG, _MD_EM):
+		text = pattern.sub(lambda m: m.group(1) or m.group(2), text)
+	return _MD_HEADING.sub("", text)
+
+
+def _prose_paragraphs(prose: str) -> list[str]:
+	"""Blank-line separated prose paragraphs of ``prose``, whitespace collapsed. Fenced code
+	(a ``` or ~~~ fence, closed or not; a one-line ```x``` is inline) and table/list/heading lines are passed over, not stopped at."""
+	paras: list[str] = []
+	block: list[str] = []
+
+	def flush():
+		text = " ".join(" ".join(block).split())
+		# Clip to the tail BEFORE the markdown regexes: on a long unbroken paragraph of unmatched
+		# markers (" **a" * N, a run of "[") they are quadratic and would stall the turn.
+		# ask_lead_in only ever uses the last LEAD_IN_CAP chars of a paragraph, so keep twice
+		# that. A clip that lands mid-word is fine: _tail_fit and safe_line cut again later.
+		text = _strip_markdown(text[-2 * LEAD_IN_CAP :])
+		if text:
+			paras.append(text)
+		block.clear()
+
+	fence = ""  # the marker that opened the current fenced block, "" outside one
+	for line in prose.splitlines():
+		stripped = line.lstrip()
+		marker = next((m for m in _FENCE_MARKERS if stripped.startswith(m)), "")
+		# A line holding two or more markers (```x```) opens and closes in one line: inline,
+		# so it never toggles the fence state.
+		inline = bool(marker) and stripped.count(marker) >= 2
+		if fence:
+			if marker == fence and not inline:
+				fence = ""
+			continue
+		if marker:
+			flush()
+			if not inline:
+				fence = marker
+		elif not line.strip():
+			flush()
+		elif not _NON_PROSE_LINE.match(line):
+			block.append(line.strip())
+	flush()
+	return paras
+
+
+def _tail_fit(text: str, room: int) -> str:
+	"""The END of ``text`` in at most ``room`` chars (the part nearest the ask), starting on a
+	word boundary and led by an ellipsis."""
+	tail = text[len(text) - (room - 1) :]
+	if not text[len(text) - room].isspace():
+		space = tail.find(" ")
+		if 0 <= space <= (room - 1) // 2:
+			tail = tail[space + 1 :]
+	return "…" + tail.lstrip()
+
+
+def ask_lead_in(content: str | None) -> str:
+	"""The prose just above the LAST ```jarvis-ask``` fence of ``content`` as one safe line of at
+	most ~400 chars, or ``""``.
+
+	Walks back from the fence over blank-line paragraphs, passing over tables, lists, headings
+	and fences. It takes whole paragraphs nearest-first while they fit; when the nearest is
+	under ~120 chars (a generic "a few quick questions" line) it always adds the next
+	paragraph, keeping that paragraph's end to fit; a nearest paragraph over the cap is taken
+	capped, keeping its end. Original order is kept."""
+	content = content or ""
+	fences = list(_ASK_RE.finditer(content))
+	if fences:
+		prose = content[: fences[-1].start()]
+	else:
+		cut = content.rfind("```jarvis-ask")
+		prose = content[:cut] if cut >= 0 else content
+	paras = _prose_paragraphs(prose)
+	if not paras:
+		return ""
+	near = paras[-1]
+	if len(near) > LEAD_IN_CAP:
+		chosen = [_tail_fit(near, LEAD_IN_CAP)]
+	else:
+		chosen = [near]
+		used = len(near)
+		short = len(near) < _LEAD_IN_SHORT
+		for para in reversed(paras[:-1]):
+			room = LEAD_IN_CAP - used - 1
+			if len(para) <= room:
+				chosen.insert(0, para)
+				used += len(para) + 1
+			elif short and len(chosen) == 1:
+				chosen.insert(0, _tail_fit(para, room))
+				break
+			else:
+				break
+	out = safe_line(" ".join(chosen), LEAD_IN_CAP)
+	# punctuation or markup alone ("...", "***") names no task
+	return out if any(ch.isalnum() for ch in out) else ""
+
+
+def _log_lead_in_failure(conversation: str, exc: Exception) -> None:
+	"""Record a lead-in failure for on-call without its content, and never raise."""
+	try:
+		get_logger().warning(f"chat ask lead_in failed: {type(exc).__name__}")
+	except Exception:
+		pass
+	try:
+		frappe.log_error(
+			title="jarvis.chat.ask_lead_in_failed",
+			message=(
+				f"conversation: {conversation}\nexception: {type(exc).__name__}\n"
+				"Traceback (frames only, no exception message):\n"
+				+ "".join(traceback.format_tb(exc.__traceback__))
+			),
+		)
+	except Exception:
+		pass
+
+
 def materialize_from_turn(conversation: str, assistant_content: str) -> str | None:
 	"""Create ONE Pending chat-sourced approval row from the final assistant
 	content's ```jarvis-ask``` fence, and tell the conversation owner.
@@ -220,7 +410,9 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	# flips the old row the moment the user replies.
 	if frappe.db.exists(APPROVAL, {"conversation": conversation, "status": "Pending", "source": "Chat"}):
 		return None
-	conversation_meta = frappe.db.get_value(CONV, conversation, ["owner", "origin_page"], as_dict=True)
+	conversation_meta = frappe.db.get_value(
+		CONV, conversation, ["owner", "origin_page", "file_box"], as_dict=True
+	)
 	if not conversation_meta:
 		return None
 	owner = conversation_meta.owner
@@ -234,6 +426,16 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 	# too, not cut to a partial chip row.
 	if len(options) > _BOARD_MAX_CHIPS:
 		options = []
+	# The lead-in is garnish: nothing it raises may cost the customer the ask card. Only
+	# Exception is caught, so an rq job timeout (BaseException) still reaches the worker. What
+	# is logged is the conversation name, the exception class and the stack frames: never the
+	# exception message and never the agent's text.
+	lead_in = ""
+	if not conversation_meta.file_box:
+		try:
+			lead_in = ask_lead_in(assistant_content)
+		except Exception as exc:
+			_log_lead_in_failure(conversation, exc)
 	doc = frappe.get_doc(
 		{
 			"doctype": APPROVAL,
@@ -243,6 +445,8 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 			"conversation": conversation,
 			"question": question_text,
 			"options": json.dumps(options) if options else "",
+			# A File Box ask is routed by its own flow; only a chat ask carries the "why".
+			"context_md": lead_in,
 		}
 	)
 	doc.insert(ignore_permissions=True)
@@ -265,6 +469,14 @@ def materialize_from_turn(conversation: str, assistant_content: str) -> str | No
 			"question": question_text,
 		},
 	)
+	# Last, and guarded: a logging fault must never cost the ask the customer was just sent.
+	# Constant metadata only (whether the lead-in was captured, never its text). get_logger()
+	# re-pins INFO on every call; frappe.logger defaults to ERROR and would drop this line.
+	try:
+		state = "skipped" if conversation_meta.file_box else ("yes" if doc.context_md else "no")
+		get_logger().info(f"chat ask {doc.name} lead_in={state}")
+	except Exception:
+		pass
 	return doc.name
 
 

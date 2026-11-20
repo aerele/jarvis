@@ -30,7 +30,7 @@ describe("upload failures are surfaced, never swallowed", () => {
 		const body = fn.slice(0, fn.indexOf("\n}"));
 		expect(body).toContain("failedUploads.value = [");
 		expect(body).toContain("notify(");
-		expect(body).toContain("errMessage(err)");
+		expect(body).toContain("uploadErrorCopy(err)");
 	});
 
 	it("the in-flight pill always clears, even when the upload throws", () => {

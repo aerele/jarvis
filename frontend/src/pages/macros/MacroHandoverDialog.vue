@@ -346,8 +346,21 @@ function onPick(event, u) {
 		return;
 	}
 	if (event.type !== "change") return;
-	if (event.target.checked && !isPicked(u)) picked.value = [...picked.value, u];
-	else if (!event.target.checked) unpick(u);
+	if (event.target.checked && !isPicked(u)) {
+		picked.value = [...picked.value, u];
+		clearSearchAfterPick();
+	} else if (!event.target.checked) unpick(u);
+}
+
+// A tick ends that search (#829): the box empties and the full list comes back, so
+// the next person is found by typing afresh, and focus returns to the box.
+function clearSearchAfterPick() {
+	if (search.value) {
+		clearTimeout(searchTimer);
+		search.value = "";
+		load();
+	}
+	nextTick(() => document.getElementById(searchId)?.focus());
 }
 
 // The framework's answer when the method does not exist: the server runs a release

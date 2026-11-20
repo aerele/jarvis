@@ -16,7 +16,7 @@ import re
 
 import frappe
 from frappe import _
-from frappe.utils import cint
+from frappe.utils import cint, get_datetime
 
 from jarvis import audit
 from jarvis._commit_watch import CommitWatch
@@ -267,15 +267,24 @@ def rule_values(doctype: str, table: str, links: str | dict | None = None) -> di
 	user may read are fetched. Display only: the card never sends these values."""
 	doctype = (doctype or "").strip()
 	if not doctype or not frappe.db.exists("DocType", doctype):
-		return {"ok": False, "reason": _("unknown doctype")}
+		return {
+			"ok": False,
+			"reason": _("We don't recognise that record type. Reload the chat and try again."),
+		}
 	if not frappe.has_permission(doctype, "read"):
 		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
 	table_df = frappe.get_meta(doctype).get_field(table or "")
 	if not table_df or table_df.fieldtype != "Table" or not table_df.options:
-		return {"ok": False, "reason": _("unknown table")}
+		return {
+			"ok": False,
+			"reason": _("That table isn't part of this record. Reload the chat and try again."),
+		}
 	links = frappe.parse_json(links) if isinstance(links, str) else links
 	if not isinstance(links, dict):
-		return {"ok": False, "reason": _("links must be an object")}
+		return {
+			"ok": False,
+			"reason": _("We couldn't read the linked values. Reload the chat and try again."),
+		}
 	child = table_df.options
 	# link field -> {rule field: source field on the linked doctype}
 	sources: dict[str, dict[str, str]] = {}
@@ -358,7 +367,10 @@ def get_doctype_form_meta(doctype: str) -> dict:
 	shows (or pre-fills, via ``load_doc``) a value Desk would hide from them."""
 	doctype = (doctype or "").strip()
 	if not doctype or not frappe.db.exists("DocType", doctype):
-		return {"ok": False, "reason": _("unknown doctype")}
+		return {
+			"ok": False,
+			"reason": _("We don't recognise that record type. Reload the chat and try again."),
+		}
 	if not frappe.has_permission(doctype, "read"):
 		frappe.throw(_("You don't have access to {0}.").format(doctype), frappe.PermissionError)
 	meta = frappe.get_meta(doctype)
@@ -538,7 +550,7 @@ def _require_own_conversation(conversation: str) -> None:
 	if not owner:
 		raise InvalidArgumentError("unknown conversation")
 	if owner != frappe.session.user:
-		frappe.throw(_("Not your conversation."), frappe.PermissionError)
+		frappe.throw(_("This chat belongs to someone else."), frappe.PermissionError)
 	from jarvis.chat.collaboration import require_legacy_conversation
 
 	require_legacy_conversation(conversation)
@@ -656,6 +668,10 @@ def _append_receipt(
 	frappe.db.set_value(CONV, conversation, "last_active_at", frappe.utils.now(), update_modified=False)
 
 
+# The agent note for a saved draft, typed (``_note_applied``) or a card (``on_chat_settled``).
+_DRAFT_SAVED_NOTE = "the user confirmed the draft and it was saved: {receipt}"
+
+
 def _note_applied(conversation: str, receipt: str) -> None:
 	"""jarvis#2253: a Confirm without ``continue`` queues no turn, and the agent's own
 	session memory still says the write is pending. Queue the receipt as an agent note
@@ -663,9 +679,118 @@ def _note_applied(conversation: str, receipt: str) -> None:
 	from jarvis.chat import agent_notes
 
 	try:
-		agent_notes.append(conversation, f"the user confirmed the draft and it was saved: {receipt}")
+		agent_notes.append(conversation, _DRAFT_SAVED_NOTE.format(receipt=receipt))
 	except Exception:
 		frappe.log_error(title="apply_action agent note failed", message=frappe.get_traceback())
+
+
+def _draft_refusal(code: str, message: str) -> dict:
+	"""A save no retry fixes: ``closed`` makes both apps drop the card (``draftFailureOf``)
+	and show the message. No reply in the chat explains it (no turn is queued), so
+	``assistant_told`` is False and the note says to ask in the chat."""
+	return {"ok": False, "closed": True, "assistant_told": False, "error": {"code": code, "message": message}}
+
+
+def _closed_draft_refusal(
+	conversation: str, verb: str, doctype: str, name: str, source: str, tool: str, args: dict
+) -> dict | None:
+	"""The refusal for a draft that may not be applied, or None. ``source`` must be the
+	conversation's live draft. An update draft is also refused when its record changed after
+	the draft's reply: an update takes no claim and checks no ``modified``, so a kept draft
+	would silently overwrite those changes. That draft is then over, so it gets the
+	``failed`` receipt a save that failed for good leaves, which retires its card on both
+	apps and after a reload. Reads only, except that receipt."""
+	from jarvis.chat import live_draft
+
+	live = live_draft.find(conversation)
+	if not live or live["message"] != source:
+		return _draft_refusal(
+			"DraftClosedError", _("This draft is no longer open. Ask me to draft it again.")
+		)
+	if verb == "update" and _changed_since_draft(doctype, name, source):
+		from jarvis.chat.panel_failure import end_draft_card
+
+		refusal = _draft_refusal(
+			"DraftStaleError",
+			_("This record changed after the draft was made. Ask me to draft the update again."),
+		)
+		# Nothing was written before this; the request's own commit persists the receipt.
+		end_draft_card(conversation, tool, args, refusal, draft=source)
+		return refusal
+	return None
+
+
+def _changed_since_draft(doctype: str, name: str, source: str) -> bool:
+	"""True when the record was modified after the draft's reply was written. A record that
+	is gone, one the person may not read, or a doctype that is not one is left to the write,
+	which reports it as it always has: this check never tells anyone more than that path does
+	(that an unreadable record exists, or changed)."""
+	if not name or not frappe.db.exists("DocType", doctype, cache=True):
+		return False
+	if not frappe.db.exists(doctype, name) or not frappe.has_permission(doctype, "read", doc=name):
+		return False
+	modified = frappe.db.get_value(doctype, name, "modified")
+	drafted = frappe.db.get_value(MSG, source, "creation")
+	return bool(modified and drafted) and get_datetime(modified) > get_datetime(drafted)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def dismiss_draft(conversation: str, message: str) -> dict:
+	"""Cancel the live draft card for good (the Cancel button), so it stays gone after a reload.
+
+	Owner-checked like ``apply_action``. Acts only when ``message`` is the conversation's live
+	draft (``jarvis.chat.live_draft``): it appends ONE ``discarded`` receipt row and queues a
+	note so the agent learns nothing was saved. Any other message (already saved, cancelled,
+	replaced, unknown) writes nothing and answers ``already``, so a second Cancel is harmless."""
+	refuse_in_tool_dispatch()
+	conversation = (conversation or "").strip()
+	message = (message or "").strip()
+	if not conversation:
+		raise InvalidArgumentError("conversation is required")
+	if not message:
+		raise InvalidArgumentError("message is required")
+	_require_own_conversation(conversation)
+
+	from jarvis import api
+	from jarvis.chat import agent_notes, live_draft
+
+	def open_draft() -> dict | None:
+		"""The live draft when it is ``message`` and no save of it has committed yet. A save
+		marks the draft row (``draft_saved_as``) in the write's own transaction, before its
+		receipt row exists, so a Cancel that waited on the conversation lock for that save
+		reads it here and writes nothing."""
+		live = live_draft.find(conversation)
+		if not live or live["message"] != message:
+			return None
+		if frappe.db.get_value(MSG, message, "draft_saved_as"):
+			return None
+		return live
+
+	live = open_draft()
+	if not live:
+		return {"ok": True, "already": True}
+	# The token makes a double click write one row, and ``only_if`` re-reads the conversation
+	# and the draft row under its lock, so a Cancel racing a Create or a Save on another
+	# device writes nothing.
+	written = api.persist_tool_receipt(
+		conversation,
+		f"{live['verb']}_doc",
+		{"doctype": live["doctype"]},
+		None,
+		action_outcome="discarded",
+		flip_token=f"draft-cancel:{message}",
+		only_if=lambda: open_draft() is not None,
+	)
+	if not written:
+		return {"ok": True, "already": True}
+	doctype = live_draft.real_doctype(live["doctype"])  # only a real DocType is named
+	subject = f"the {doctype} draft" if doctype else "the draft"
+	try:
+		agent_notes.append(conversation, f"the user cancelled {subject}; nothing was saved")
+	except Exception:
+		frappe.log_error(title="dismiss_draft agent note failed", message=frappe.get_traceback())
+	return {"ok": True}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -772,9 +897,26 @@ def apply_action(action: dict | str | None = None) -> dict:
 	if _risk == "sensitive":
 		return _park_sensitive(tool, args, conversation, verb, name, (a.get("message") or "").strip())
 
+	# Only the live draft can be applied (``jarvis.chat.live_draft``, the rule both apps draw
+	# the card by): a cancelled, saved, failed or replaced draft left open in another tab
+	# writes nothing, and a kept update draft whose record changed since is refused. A save
+	# that names no draft (an older client) has nothing to check; File Box and sensitive
+	# drafts kept their own rule above. ``one_approval.claim_create`` stays the second line.
+	source = (a.get("message") or "").strip()
+	if source:
+		refused = _closed_draft_refusal(conversation, verb, doctype, name, source, tool, args)
+		if refused is not None:
+			audit.record(
+				tool=f"apply_action.{verb}_doc",
+				args=args,
+				ok=False,
+				error_code=refused["error"]["code"],
+				error_message=refused["error"]["message"],
+			)
+			return refused
+
 	# One approval per proposed create (#777): the draft's reply is used once, and a
 	# confirmation card for the same proposal is retired with this write.
-	source = (a.get("message") or "").strip()
 	retired = []
 	if verb == "create":
 		from jarvis.chat import one_approval
@@ -820,6 +962,13 @@ def apply_action(action: dict | str | None = None) -> dict:
 			else:  # update
 				from jarvis.tools.update_doc import update_doc
 
+				if source:
+					# An update takes no claim: hold the conversation lock (the order a
+					# create's claim and the Cancel's receipt use) from before the write to
+					# its commit, so a Cancel waits and then reads the draft row's mark.
+					from jarvis.chat.pending_actions._store import lock_conversation
+
+					lock_conversation(conversation)
 				update_doc(doctype, name, values)
 		hidden = _write_risk.take_refusal()
 		if hidden is not None:
@@ -895,8 +1044,12 @@ def apply_action(action: dict | str | None = None) -> dict:
 	audit.record(
 		tool=f"apply_action.{verb}_doc", args=args, ok=True, result={"doctype": doctype, "name": name}
 	)
-	if verb == "create":
-		one_approval.mark_saved(source, name)  # commits with the record, not with its receipt
+	if source:
+		from jarvis.chat import one_approval
+
+		# The draft row names the record it became or changed, committed with the record and
+		# not with its receipt: a Cancel that wakes before the receipt row writes nothing.
+		one_approval.mark_saved(source, name)
 
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before receipt append
 	receipt = _receipt_text(verb, doctype, name, do_submit)
@@ -1102,7 +1255,9 @@ def _mark_fields(err_obj: dict, verb: str, doctype: str, name: str, values: dict
 	from jarvis.chat.panel_fields import invalid_marks, missing_marks
 
 	invalid = invalid_marks(verb, doctype, name, values)
-	missing = missing_marks(verb, doctype, name, values) if isinstance(exc, frappe.MandatoryError) else []
+	missing = (
+		missing_marks(verb, doctype, name, values, str(exc)) if isinstance(exc, frappe.MandatoryError) else []
+	)
 	if missing is None:
 		if not invalid:
 			return False
@@ -1147,7 +1302,7 @@ _ARMED_RUN_CONFIRM_WITHDRAWN = {
 	"ok": False,
 	"error": {
 		"type": "InvalidConfirmation",
-		"message": "This macro run is stopping; that confirmation was withdrawn and nothing ran.",
+		"message": "This automated run is stopping, so that confirmation was withdrawn. Nothing was changed.",
 	},
 }
 
@@ -1156,8 +1311,8 @@ _CONFIRMATION_UNAVAILABLE = {
 	"error": {
 		"type": "ConfirmationUnavailableError",
 		"message": (
-			"Confirmation storage is temporarily unavailable. Nothing was changed "
-			"by this request. Keep this card and try again shortly."
+			"Confirmations are temporarily unavailable. Nothing was changed. "
+			"Keep this card and try again in a moment."
 		),
 	},
 }
@@ -1167,9 +1322,8 @@ _CONFIRMATION_OUTCOME_UNKNOWN = {
 	"error": {
 		"type": "ConfirmationOutcomeUnknownError",
 		"message": (
-			"The confirmation token's storage outcome could not be verified. The "
-			"business action was not run by this request. Refresh the confirmations "
-			"before trying again."
+			"We couldn't confirm whether that went through. Nothing was changed by this "
+			"request. Reload the chat to see the current cards, then try again."
 		),
 	},
 }
@@ -1219,7 +1373,7 @@ _APPROVE_RUN_MACRO_CONVERSATION = {
 	"reason_code": "armed_run",
 	"error": {
 		"type": "InvalidConfirmation",
-		"message": "Approve & run isn't available in an armed macro run. Nothing was changed.",
+		"message": "Approve & run isn't available during an automated run. Nothing was changed.",
 	},
 }
 
@@ -1294,6 +1448,33 @@ def confirm_tool(token: str, conversation: str | None = None) -> dict:
 	"""
 	refuse_in_tool_dispatch()
 	return _confirm_core(token, conversation)
+
+
+@frappe.whitelist(methods=["POST"])
+@require_jarvis_user
+def save_draft_card(
+	token: str, conversation: str, values: dict | list | str | int | float | None = None
+) -> dict:
+	"""Save a draft card with the values the person edited: their Save confirms THOSE
+	values (``jarvis.chat.draft_save``). Owner-checked like ``apply_action``.
+
+	``values`` is annotated wide on purpose. Every whitelisted parameter must be annotated
+	(``require_type_annotated_api_methods``: an un-annotated one is a 500), and Frappe validates
+	the call against the annotation: a narrow ``dict | str`` would turn a list, a number or a
+	malformed body into a framework type error instead of the "could not be read" reply the
+	form shows (``draft_save.values_of``).
+
+	``values``: the edited fields, written over the draft's own values; ``{}`` saves the
+	card as drafted. The exact contract, child tables included, is stated once in
+	``jarvis.chat.draft_values``. Answers with ``apply_action``'s three shapes: saved,
+	fixable (``error.fields``, possibly empty; the card is still open and unchanged), or
+	``closed``. A retry of a save that went through answers saved again."""
+	refuse_in_tool_dispatch()
+	_require_own_conversation(conversation)
+	from jarvis._session import authenticated_user
+	from jarvis.chat import draft_save
+
+	return draft_save.save(str(token or "").strip(), conversation, values, authenticated_user())
 
 
 def _approve_run_refusal(record) -> dict | None:
@@ -2188,6 +2369,43 @@ def _stamp_correction(names: list[str], message: str) -> None:
 		)
 
 
+# Keyed on the STORED card (``item["draft"]``), not on the live ``jarvis_draft_cards`` flag: a draft
+# card parked while the flag was on and confirmed after it was turned off still takes the no-turn
+# path here, and the "draft saved" note still reaches the agent.
+def _is_final_draft(conversation: str | None, items: list[dict]) -> bool:
+	"""One confirmed (Executed) tool-driven draft card, not part of a typed batch, that the
+	agent did not mark ``continue``, in a conversation that is not an armed skill run
+	("Approve & run" queues no turn itself: it relies on this settle's continuation). Every
+	other settle keeps its continuation turn."""
+	from jarvis.chat.pending_actions._store import EXECUTED
+
+	if len(items) != 1:
+		return False
+	item = items[0]
+	draft = item.get("draft")
+	if not (
+		item["status"] == EXECUTED
+		and not item.get("batch_id")
+		and isinstance(draft, dict)
+		and draft.get("continue") is not True
+	):
+		return False
+	# One plain read, last: only a candidate final draft pays for it.
+	return not (conversation and frappe.db.get_value("Jarvis Conversation", conversation, "skill_autorun"))
+
+
+def _draft_saved_note(receipt: str) -> str:
+	"""The agent note for a saved draft card. The receipt carries a record name the model or
+	the user chose, and the note is later placed inside a ``[Context: ...; notes: ...]``
+	bracket, so it is made one safe line with no bracket or semicolon."""
+	from jarvis.chat.turn_handler import _safe_label_name
+
+	safe = _safe_label_name(receipt)
+	for ch in ";[]":
+		safe = safe.replace(ch, " ")
+	return _DRAFT_SAVED_NOTE.format(receipt=" ".join(safe.split()))
+
+
 def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 	"""``_settle.CONTINUATIONS["chat"]``: tell the agent how its settled card(s) ended,
 	at most once (D5). Executed/Failed: ONE hidden continuation turn carrying every
@@ -2205,6 +2423,16 @@ def on_chat_settled(conversation: str | None, items: list[dict]) -> None:
 
 	names = [i["name"] for i in items]
 	decided = [i for i in items if i["status"] in (EXECUTED, FAILED)]
+	if conversation and _is_final_draft(conversation, items):
+		# A saved final draft costs no turn: the receipt chip is already written
+		# (``_settle._deliver``), and the agent hears of it on its next turn.
+		lock_conversation(conversation)  # conversation -> pending action lock order
+		if claim_settled(names):
+			from jarvis.chat import agent_notes
+
+			receipt = _settled_plan(decided)["receipt"]
+			agent_notes.append(conversation, _draft_saved_note(receipt))  # commits the claim
+		return
 	if conversation and decided:
 		# A cron / operator settle runs as Administrator: the turn is the owner's, and
 		# never runs AS Administrator / Guest / a disabled user on their behalf.

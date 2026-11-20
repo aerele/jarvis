@@ -57,7 +57,12 @@
 					:class="bodyClass"
 					style="white-space: normal"
 					v-html="html"
+					@click="onBodyClick"
 				/>
+				<template v-else-if="quoted.quote">
+					<div class="jv-uquote">{{ quoted.quote }}</div>
+					<span>{{ quoted.rest }}</span>
+				</template>
 				<template v-else>{{ text }}</template>
 			</div>
 			<DeliveryStatus
@@ -190,6 +195,7 @@
 					:class="bodyClass"
 					style="font-size: 14px; line-height: 1.6; color: var(--text)"
 					v-html="html"
+					@click="onBodyClick"
 				></div>
 				<slot name="below-body" />
 				<!-- Built-in trailer (attachments + Copy bar) for consumers that
@@ -278,9 +284,10 @@
 
 <script setup>
 import { computed, useSlots } from "vue";
+import { splitQuote } from "@jsshared/reply_quote.mjs";
 import DeliveryStatus from "./DeliveryStatus.vue";
 
-defineProps({
+const props = defineProps({
 	// 'bubble' (right-aligned chat/support-customer message) | 'row'
 	// (left-aligned assistant/support-agent message with identity + body).
 	variant: { type: String, default: "bubble" },
@@ -322,18 +329,108 @@ defineProps({
 	// customer's photo attachment showing a preview read as a worse "vague"
 	// crop than just naming the file, per feedback.
 	imagesAsChips: { type: Boolean, default: false },
+	// Draw a leading Markdown blockquote of `text` (a Reply to part of an earlier
+	// reply, aerele/jarvis#2191) as a quote block above the question. Chat only.
+	quotes: { type: Boolean, default: false },
 });
 
-const emit = defineEmits(["edit", "copy", "retry", "dismiss", "retry-same", "open-attachment"]);
+const emit = defineEmits([
+	"edit",
+	"copy",
+	"retry",
+	"dismiss",
+	"retry-same",
+	"open-attachment",
+	"code-copy",
+]);
 
 // When a consumer supplies #below-body it OWNS the whole post-body region
 // (chat does — its activity/cards/metabar live there, byte-identical), so the
 // built-in attachments + Copy trailer must yield to avoid double-rendering.
 const slots = useSlots();
 const hasBelowBody = computed(() => !!slots["below-body"]);
+
+// A code block's copy button (markdown.js ``copyCode``, #2170). The body is v-html,
+// so the click is caught here and copies that block's <code> text, exactly as shown.
+function onBodyClick(event) {
+	const btn = event.target?.closest?.(".jv-code-copy");
+	if (!btn) return;
+	event.preventDefault();
+	const code = btn.parentElement?.querySelector("pre code");
+	if (!code) return;
+	copyPlain(code.textContent || "").then((ok) => {
+		// The title change is not read out, so the parent announces it in its own
+		// live region (the chat's, shared with the reply Copy).
+		emit("code-copy", ok);
+		btn.classList.toggle("is-copied", ok);
+		btn.title = ok ? "Copied" : "Copy failed";
+		setTimeout(() => {
+			btn.classList.remove("is-copied");
+			btn.title = "Copy";
+		}, 1500);
+	});
+}
+
+// navigator.clipboard exists only on a secure page (https / localhost); over plain
+// http fall back to a hidden textarea, as the message Copy does.
+async function copyPlain(text) {
+	try {
+		if (navigator.clipboard && window.isSecureContext) {
+			await navigator.clipboard.writeText(text);
+			return true;
+		}
+	} catch (e) {
+		/* fall back below */
+	}
+	try {
+		const ta = document.createElement("textarea");
+		ta.value = text;
+		ta.setAttribute("readonly", "");
+		ta.style.position = "fixed";
+		ta.style.top = "-9999px";
+		document.body.appendChild(ta);
+		ta.select();
+		ta.setSelectionRange(0, text.length);
+		const ok = document.execCommand("copy");
+		document.body.removeChild(ta);
+		return ok;
+	} catch (e) {
+		return false;
+	}
+}
+
+const quoted = computed(() =>
+	props.quotes && !props.html ? splitQuote(props.text) : { quote: "", rest: props.text }
+);
 </script>
 
 <style scoped>
+/* The quoted part of a Reply (aerele/jarvis#2191), above the question. */
+.jv-uquote {
+	margin: 0 0 8px;
+	position: relative;
+	padding: 6px 10px 6px 13px;
+	border-radius: 7px;
+	background: var(--surface);
+	color: var(--text-2);
+	font-size: 13px;
+	white-space: pre-line;
+	display: -webkit-box;
+	-webkit-line-clamp: 6;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+/* The Jarvis brand bar (the mark's gradient), as on the Reply card. */
+.jv-uquote::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: 3px;
+	border-radius: 3px 0 0 3px;
+	background: var(--brand-grad, linear-gradient(135deg, #6e8bff, #8b5cf6));
+}
 /* per-message Copy/Edit bar — revealed on hover. Shared by BOTH variants:
    the assistant row moved in too, and ChatView's own copies of these rules
    were deleted with it, so this is now the single definition. */
@@ -658,6 +755,52 @@ const hasBelowBody = computed(() => !!slots["below-body"]);
 	font-size: 12px;
 	color: var(--text);
 	white-space: pre;
+}
+/* code block copy button (#2170): top-right of the block, outside the <pre> so it
+   stays put while a long line scrolls sideways. Shown on hover, always on touch. */
+.jv-md-body.jv-md :deep(.jv-md-codeblock) {
+	position: relative;
+}
+.jv-md-body.jv-md :deep(.jv-code-copy) {
+	position: absolute;
+	top: 12px;
+	right: 6px;
+	z-index: 1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	padding: 0;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	background: var(--surface-1);
+	color: var(--text-3);
+	cursor: pointer;
+	opacity: 0;
+	transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.jv-md-body.jv-md :deep(.jv-md-codeblock:hover .jv-code-copy),
+.jv-md-body.jv-md :deep(.jv-code-copy:focus-visible),
+.jv-md-body.jv-md :deep(.jv-code-copy.is-copied) {
+	opacity: 1;
+}
+.jv-md-body.jv-md :deep(.jv-code-copy:hover) {
+	color: var(--text);
+	background: var(--surface-2);
+	border-color: var(--border-2);
+}
+.jv-md-body.jv-md :deep(.jv-code-copy.is-copied) {
+	color: var(--green);
+}
+/* keep the first line's end clear of the button */
+.jv-md-body.jv-md :deep(.jv-md-codeblock .jv-md-pre) {
+	padding-right: 40px;
+}
+@media (hover: none) {
+	.jv-md-body.jv-md :deep(.jv-code-copy) {
+		opacity: 1;
+	}
 }
 /* markdown content → the imported design's table look */
 .jv-md-body.jv-md :deep(.jv-md-p) {

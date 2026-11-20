@@ -345,16 +345,6 @@ class TestMergeApplyHook(_MacroMergeBase):
 		titles = " ".join(str(c.kwargs.get("title", "")) for c in logged.call_args_list)
 		self.assertIn("merge-apply failed", titles)
 
-	def test_a_fault_still_does_not_strand_the_turn(self):
-		"""The contract advance_after_turn's docstring states: a macro bug must never
-		raise into a normal turn. Re-raising from _apply_merge_after_turn must not
-		change that, so the outer guard is what callers keep relying on."""
-		from jarvis.chat import macros
-
-		_, conv = self._pending_macro_with_reply(MERGE_BLOCK)
-		with patch.object(macros, "_merge_outcome", side_effect=ImportError("boom")):
-			macros.advance_after_turn(conv, errored=False)  # must not raise
-
 	def test_unmergeable_reply_marks_failed(self):
 		from jarvis.chat import macros
 

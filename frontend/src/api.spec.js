@@ -16,6 +16,7 @@ import {
 	tagApprovalReviewer,
 	continueApprovalChat,
 	untagApprovalReviewer,
+	saveDraftCard,
 } from "./api.js";
 
 // The args object handed to `call("jarvis.chat.api.send_message", args)`.
@@ -45,6 +46,25 @@ describe("Link search field context", () => {
 			reference_doctype: "Purchase Invoice",
 			link_fieldname: "credit_to",
 			filters,
+		});
+	});
+});
+
+describe("saveDraftCard", () => {
+	it("posts the card's token, the conversation and the edited values as JSON text", async () => {
+		await saveDraftCard("tok-1", "C1", { qty: 3, logs: [{ _draft_row: 0 }] });
+		expect(call).toHaveBeenCalledWith("jarvis.chat.actions_api.save_draft_card", {
+			token: "tok-1",
+			conversation: "C1",
+			values: '{"qty":3,"logs":[{"_draft_row":0}]}',
+		});
+	});
+	it("sends an empty object, never undefined, when nothing was changed", async () => {
+		await saveDraftCard("tok-1", "", undefined);
+		expect(call).toHaveBeenCalledWith("jarvis.chat.actions_api.save_draft_card", {
+			token: "tok-1",
+			conversation: "",
+			values: "{}",
 		});
 	});
 });

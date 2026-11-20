@@ -2,12 +2,12 @@
 // form shows (form_fields from get_doctype_form_meta), laid out in its sections and
 // columns, with Desk's depends_on / mandatory_depends_on / read_only_depends_on
 // rules evaluated on the row. Pure, so it is unit-testable without the view.
-import { allRowFields, checkToYesNo, ruleFetchSource, toPanelRow } from "@/lib/draftApply";
+import { allRowFields, checkToYesNo, ruleFetchSource, toPanelRow } from "./draftApply";
 
 const NUMERIC = new Set(["Int", "Float", "Currency", "Percent", "Rating"]);
 
 // One value as Desk's `doc` holds it: a Check "0" is falsy, a number is a number.
-function typed(field, v) {
+export function typed(field, v) {
 	if (field.fieldtype === "Check") return checkToYesNo(v) === "Yes" ? 1 : 0;
 	if (NUMERIC.has(field.fieldtype)) {
 		const n = Number(v);
@@ -118,11 +118,20 @@ function warnOnce(rule, label, why, err) {
 // and Desk evaluates them the same way. A failure is warned once per rule, naming
 // `label` (the child doctype or table, the field and the rule kind) when given.
 export function ruleHolds(rule, doc, parent, fallback = true, label = "") {
+	const state = ruleState(rule, doc, parent, label);
+	return state === null ? fallback : state;
+}
+
+// The same rule as three answers: true (it holds), false (it does not) or null (it cannot be
+// evaluated here: a syntax error, a missing object such as a settings global, a form-script
+// "fn:" rule). ruleHolds is this with a fallback for null; a caller that wants to tell "not
+// required" from "cannot tell" reads this one. Warns once per failing rule, like ruleHolds.
+export function ruleState(rule, doc, parent, label = "") {
 	const r = String(rule || "").trim();
 	if (!r) return true;
 	if (r.startsWith("eval:")) {
 		let fn = compiled.get(r);
-		if (fn === FAILED) return fallback;
+		if (fn === FAILED) return null;
 		try {
 			if (!fn) {
 				// eslint-disable-next-line no-new-func
@@ -141,13 +150,13 @@ export function ruleHolds(rule, doc, parent, fallback = true, label = "") {
 		} catch (e) {
 			if (!fn) compiled.set(r, FAILED);
 			warnOnce(r, label, "could not evaluate the rule", e);
-			return fallback;
+			return null;
 		}
 	}
 	if (r.startsWith("fn:")) {
 		// a form-script method: not available here
 		warnOnce(r, label, "cannot run the form-script rule");
-		return fallback;
+		return null;
 	}
 	const v = doc[r];
 	return !(v === undefined || v === null || v === "" || v === 0 || v === "0");
@@ -297,12 +306,14 @@ export function rowFormLayout(table, row, parent, ctx = {}) {
 		const shown = (changed ? changed.has(f.fieldname) : valued) || named.has(f.fieldname);
 		const at = `${where}.${f.fieldname}`;
 		if (!ruleHolds(f.depends_on, doc, parent, true, `${at} depends_on`) && !shown) continue;
+		const mandatory = f.mandatory_depends_on
+			? ruleState(f.mandatory_depends_on, doc, parent, `${at} mandatory`)
+			: false;
 		section.columns[section.columns.length - 1].push({
 			field: f,
-			reqd:
-				!!f.reqd ||
-				(!!f.mandatory_depends_on &&
-					ruleHolds(f.mandatory_depends_on, doc, parent, false, `${at} mandatory`)),
+			reqd: !!f.reqd || mandatory === true,
+			// A rule that cannot be evaluated here reads as not required; the form says so.
+			...(!f.reqd && mandatory === null ? { maybe: true } : {}),
 			readOnly:
 				!!f.read_only ||
 				(!!f.read_only_depends_on &&

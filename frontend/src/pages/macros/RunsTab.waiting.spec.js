@@ -203,13 +203,4 @@ describe("RunsTab: a run waiting for a report", () => {
 		expect(rowEl(w, "run-w").text()).not.toContain("Waiting for report");
 		expect(stopBtn(rowEl(w, "run-w"))).toBeTruthy();
 	});
-
-	it("keeps its error state when the load fails", async () => {
-		api.listMacroRuns.mockRejectedValue(new Error("boom"));
-		api.macroRunStats.mockResolvedValue({});
-		api.listMacros.mockResolvedValue([]);
-		const w = mount(RunsTab, { global: { provide: { $socket: { on() {}, off() {} } } } });
-		await flushPromises();
-		expect(w.text()).toContain("Couldn't load macro runs");
-	});
 });

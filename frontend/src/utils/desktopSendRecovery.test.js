@@ -114,7 +114,7 @@ function harness(pendingStore) {
 		},
 		raiseHold: noop,
 		recheckMaintenance: noop,
-		sendRejectionCopy: () => ({ message: "Rejected" }),
+		rejectionCopy: () => ({ message: "Rejected" }),
 		brand: { agentName: "Jarvis" },
 		voiceStore: {
 			captureSentInPayload: () => null,

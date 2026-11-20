@@ -18,6 +18,9 @@ class TestReceiptRefreshOrder(unittest.TestCase):
 			purchase_receipts = [{"receipt_document": "old", "grand_total": 10}]
 			taxes = []
 
+			def is_new(self):
+				return False
+
 			def get(self, field):
 				return getattr(self, field, None)
 

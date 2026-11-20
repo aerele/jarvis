@@ -97,6 +97,42 @@ def _commit():
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 
+# Final job statuses that are an export that did not deliver (cancelled is user-initiated).
+_FAILED_STATUSES = ("failed", "too large", "too slow")
+
+
+def _record_export_activity(job, outcome, rows, code=""):
+	"""One ``export`` Jarvis Activity Event for a background export (plan
+	``.claude/workflow/plans/2026-11-06-user-activity-report.md`` 4.3(4)).
+
+	Called only from the four places a job settles (publish -> ready, ``_finish``, the report
+	gate ``_report_copy_ready`` and the reaper -> failed), each BEFORE the ``_commit()`` that
+	persists that state, so the row rides the same transaction: a failed commit rolls both back
+	and the retry records once.
+	Never at enqueue time. ``record`` never raises or commits; the guard covers the lookups."""
+	try:
+		from jarvis import activity_log
+
+		activity_log.record(
+			"export",
+			actor=job.owner,
+			# The tool that queued the job is not stored on it; export_query is the only one that hands off.
+			method="export_query",
+			ref_doctype=job.source_doctype or "",
+			row_count=rows,
+			outcome=outcome,
+			channel="chat" if job.conversation else None,
+			code=code,
+		)
+	except Exception as exc:
+		# The audit trail must never fail or delay the export's own state change. File log only,
+		# exception class alone: a message or frame locals could quote row data.
+		with contextlib.suppress(Exception):
+			frappe.logger("jarvis.activity_log").error(
+				f"activity log: export event not recorded ({type(exc).__name__})"
+			)
+
+
 def _traceback_text(exc, cause):
 	errors = [error for error in (exc, cause) if error is not None]
 	if len(errors) == 2 and errors[0] is errors[1]:
@@ -620,24 +656,60 @@ def _report_copy_ready(row) -> bool:
 			asked = get_datetime(row.asked_at) if row.asked_at else now_datetime()
 			deadline = add_to_date(asked, seconds=_prepared_reports.report_deadline_s(report_name))
 			if now_datetime() > deadline:
-				frappe.db.set_value(
-					DOCTYPE,
-					row.name,
-					{
-						"status": "too slow",
-						"error": f"{report_name} is still generating in the background after its time "
-						f"budget. Ask for the export again later.",
-						"finished_at": now_datetime(),
-						"phase": "",
-					},
-				)
-				_commit()
-				_safely("announce", row.name, announce, row.name)
+				_settle_report_too_slow(row, report_name)
 			return False
 	except Exception as exc:
 		# A broken peek must not wedge the queue: let the worker try and report properly.
 		_log_failure(row.name, "report peek", exc)
 		return True
+
+
+def _settle_report_too_slow(row, report_name):
+	"""Settle a report job whose prepared copy never came, once, under its row lock.
+
+	Runs inside the dispatcher's transaction, which already holds uncommitted work, so it
+	never issues a bare ``frappe.db.rollback()`` (that would discard that work too):
+	  1. an UNLOCKED status read first; a row already settled elsewhere is the common
+	     case and needs no lock;
+	  2. the ``FOR UPDATE`` re-check inside a savepoint, authoritative (a current read,
+	     unlike the snapshot read above); a settled row rolls back to the savepoint only;
+	  3. a lock-wait timeout means another worker holds the row: leave it, it is still
+	     waiting (the caller answers "not ready") and the next poll looks again.
+	Not token-fenced: only a row that is still waiting is settled, so a concurrent settle
+	(or a second dispatch) cannot make this record twice."""
+	waiting = ("queued", "paused")
+	if frappe.db.get_value(DOCTYPE, row.name, "status") not in waiting:
+		return
+	savepoint = f"report_gate_{frappe.generate_hash(length=8)}"
+	frappe.db.savepoint(savepoint)
+	try:
+		cur = frappe.db.get_value(
+			DOCTYPE,
+			row.name,
+			["status", "owner", "source_doctype", "conversation"],
+			as_dict=True,
+			for_update=True,
+		)
+	except frappe.QueryTimeoutError:
+		frappe.db.rollback(save_point=savepoint)
+		return
+	if not cur or cur.status not in waiting:
+		frappe.db.rollback(save_point=savepoint)
+		return
+	frappe.db.set_value(
+		DOCTYPE,
+		row.name,
+		{
+			"status": "too slow",
+			"error": f"{report_name} is still generating in the background after its time "
+			f"budget. Ask for the export again later.",
+			"finished_at": now_datetime(),
+			"phase": "",
+		},
+	)
+	_record_export_activity(cur, "failed", 0, "too slow")  # plan 4.3(4), same commit
+	_commit()
+	_safely("announce", row.name, announce, row.name)
 
 
 def on_prepared_report_update(doc, method=None):
@@ -1069,6 +1141,8 @@ def _publish_locked(job, token, path, source, result, permission_key, folder):
 				"error": "",
 			},
 		)
+		# Plan 4.3(4): the export event rides the same commit as `ready`.
+		_record_export_activity(job, "ok", result.get("rows_written", 0))
 		# Publish File and ready state atomically before any delivery transaction.
 		_commit()
 	except Exception:
@@ -1083,7 +1157,7 @@ def _finish(name, token, status, error):
 	row = frappe.db.get_value(
 		DOCTYPE,
 		name,
-		["attempt_token", "status", "retries", "cancel_requested"],
+		["attempt_token", "status", "retries", "cancel_requested", "owner", "source_doctype", "conversation"],
 		as_dict=True,
 		for_update=True,
 	)
@@ -1102,6 +1176,8 @@ def _finish(name, token, status, error):
 		else:
 			values.update(retries=1, next_attempt=add_to_date(now_datetime(), minutes=5), finished_at=None)
 	frappe.db.set_value(DOCTYPE, name, values)
+	if values["status"] in _FAILED_STATUSES:
+		_record_export_activity(row, "failed", 0, values["status"])  # plan 4.3(4), same commit
 	# Persist the fenced terminal/retry state before notification and dispatch.
 	_commit()
 
@@ -1337,6 +1413,8 @@ def _recover_row(name):
 					+ ("Retrying once." if status == "queued" else "Please run it again."),
 				},
 			)
+			if status == "failed":
+				_record_export_activity(job, "failed", 0, status)  # plan 4.3(4), same commit
 			# Revoke the old attempt durably before deleting its files or retrying.
 			_commit()
 		if job.attempt_token:

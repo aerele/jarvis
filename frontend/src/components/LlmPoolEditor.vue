@@ -1392,13 +1392,15 @@
 							</div>
 							<!-- Actions right-aligned, like every other confirm action in this pane.
                  The inner Cancel is EDIT-mode only: there it calls closeConnect to
-                 collapse the steps back to the account list. In add mode the steps ARE
-                 the panel (they render directly from panel.mode==='add'), so closeConnect
-                 can't hide them - Connect stays to submit. The footer below owns Cancel
-                 for every other flow, but its container can never share a row with this
-                 one, so add mode gets its own paired Cancel here instead (Connect on the
-                 left, Cancel on the right, as requested) and the footer's copy is
-                 suppressed via spineCancelPaired so it does not render a second time. -->
+                 collapse the steps back to the account list (where the footer's Close
+                 is one click away). In add mode the steps ARE the panel (they render
+                 directly from panel.mode==='add'), so closeConnect can't hide them -
+                 Connect stays to submit. The footer below owns Cancel/Close for every
+                 other flow, but its container can never share a row with this one, so
+                 while this spine is up (either mode) the footer's copy is suppressed
+                 via spineCancelPaired. Add mode gets its own paired Cancel here
+                 (Connect on the left, Cancel on the right, as requested); edit mode
+                 keeps Cancel before Connect. One row, never a second lone button. -->
 							<div class="jv-cn-acts">
 								<button
 									v-if="panel.mode !== 'add'"
@@ -1609,16 +1611,15 @@
 					{{ applyMessage }}
 				</div>
 
-				<div class="jv-cfgpanel-acts">
-					<!-- Suppressed while spineCancelPaired: the OAuth spine's own Cancel
-		                 (jv-cn-acts, add mode) already covers this, paired with its Connect
-		                 in the order the product asked for - rendering this one too would
-		                 put a second Cancel on screen. -->
+				<div v-if="!spineCancelPaired" class="jv-cfgpanel-acts">
+					<!-- The whole footer is suppressed while spineCancelPaired: the OAuth
+		                 spine's own Cancel (jv-cn-acts) already covers this, paired with
+		                 its Connect on the same row - rendering this one too would strand
+		                 a lone Close/Cancel on a second row under it. -->
 					<button
-						v-if="!spineCancelPaired"
 						type="button"
 						:disabled="!editable"
-						class="jv-btn jv-btn--sm jv-btn--ghost"
+						class="jv-btn jv-btn--ghost"
 						@click="closePanel"
 					>
 						{{
@@ -3783,9 +3784,11 @@ const addFoldsInto = computed(() => {
 });
 
 // True exactly when the spine's own Cancel is standing in for the footer's -
-// the paste-back add flow above (jv-cn-acts), not the device-code flow (that one
-// has no Connect to pair against, so it keeps the footer's Cancel as-is). Read by
-// the footer below to skip its own Cancel/Close and avoid showing two.
+// the paste-back flow above (jv-cn-acts), in add AND edit mode, not the
+// device-code flow (that one has no Connect to pair against, so it keeps the
+// footer's Cancel/Close as-is). Read by the footer below to skip its own
+// Cancel/Close: it cannot share a row with the spine's actions, so it would
+// otherwise sit alone on a second row under Cancel + Connect.
 //
 // The explicit panel.source check matters: setPanelSource("preset") leaves
 // panelRow.credentialType at whatever it was on the tab the customer came
@@ -3797,7 +3800,6 @@ const spineCancelPaired = computed(() => {
 	return !!(
 		panel.value.source === "subscription" &&
 		panelConnectOpen.value &&
-		panel.value.mode === "add" &&
 		r &&
 		r._connect &&
 		!r._connect.deviceFlow

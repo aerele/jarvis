@@ -207,6 +207,7 @@ describe("Payment Calendar page: side ledger and full details", () => {
 	describe("full details", () => {
 		it("opens the month scope from View totals, and Escape closes it", async () => {
 			await render();
+			expect($("[role=dialog]")).toBeNull(); // no dialog is open on first render
 			wrapper.get("#month-flow-details").element.focus();
 			await wrapper.get("#month-flow-details").trigger("click");
 			await settleReads();
@@ -285,12 +286,5 @@ describe("Payment Calendar page: side ledger and full details", () => {
 				order: "asc",
 			});
 		});
-	});
-
-	it("shows no old detail table and no bucket dialog any more", async () => {
-		await render();
-		expect(wrapper.find(".pcal-tabs").exists()).toBe(false);
-		expect(wrapper.find(".terms-table").exists()).toBe(false);
-		expect($("[role=dialog]")).toBeNull();
 	});
 });

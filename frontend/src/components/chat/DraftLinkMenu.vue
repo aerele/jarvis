@@ -1,6 +1,11 @@
 <template>
 	<Teleport to="body">
-		<div ref="menu" class="jv-action-linkmenu" :style="[palette, position]">
+		<div
+			ref="menu"
+			class="jv-action-linkmenu"
+			:class="{ 'jv-linkmenu-phone': phone }"
+			:style="[palette, position]"
+		>
 			<button
 				v-for="item in items"
 				:key="item.value"
@@ -17,7 +22,8 @@
 </template>
 
 <script setup>
-import { onMounted, onBeforeUnmount, ref } from "vue";
+import { computed, inject, onMounted, onBeforeUnmount, ref } from "vue";
+import { DRAFT_SURFACE } from "../../lib/draftSurface";
 
 const props = defineProps({
 	anchor: { type: Object, required: true },
@@ -25,6 +31,10 @@ const props = defineProps({
 	palette: { type: Object, default: () => ({}) },
 });
 defineEmits(["pick", "close"]);
+// The surface the edit form is drawn on (it provides it; no provider = the desktop). On the phone
+// the menu stays inside what the virtual keyboard leaves of the screen (the visual viewport).
+const surface = inject(DRAFT_SURFACE, ref("desktop"));
+const phone = computed(() => surface.value === "phone");
 const menu = ref(null);
 const position = ref({});
 let observer;
@@ -50,8 +60,13 @@ function place(force = true) {
 	const margin = 8;
 	const gap = 4;
 	const width = Math.min(Math.max(rect.width, 300), window.innerWidth - 2 * margin);
-	const below = window.innerHeight - rect.bottom - gap - margin;
-	const above = rect.top - gap - margin;
+	// The part of the layout viewport the person can see: all of it on the desktop; on the phone
+	// what the keyboard leaves (iOS does not shrink the layout viewport for it).
+	const vv = phone.value ? window.visualViewport : null;
+	const viewTop = vv ? vv.offsetTop : 0;
+	const viewBottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
+	const below = viewBottom - rect.bottom - gap - margin;
+	const above = rect.top - viewTop - gap - margin;
 	const up = below < 220 && above > below;
 	position.value = {
 		visibility: hit === props.anchor ? "visible" : "hidden",
@@ -84,12 +99,20 @@ onMounted(() => {
 	window.addEventListener("scroll", onScroll, true);
 	observer = new ResizeObserver(place);
 	observer.observe(props.anchor);
+	if (phone.value && window.visualViewport) {
+		window.visualViewport.addEventListener("resize", place);
+		window.visualViewport.addEventListener("scroll", place);
+	}
 });
 onBeforeUnmount(() => {
 	window.removeEventListener("resize", place);
 	window.removeEventListener("scroll", onScroll, true);
 	observer?.disconnect();
 	cancelAnimationFrame(frame);
+	if (phone.value && window.visualViewport) {
+		window.visualViewport.removeEventListener("resize", place);
+		window.visualViewport.removeEventListener("scroll", place);
+	}
 });
 </script>
 
@@ -124,5 +147,16 @@ onBeforeUnmount(() => {
 .jv-action-linkmenu button:focus-visible {
 	background: var(--surface-2);
 	color: var(--text);
+}
+/* ---- surface="phone" (appended; the desktop rules above are untouched) -----------------------
+   Rows are 40px tall and 16px. The menu is teleported to <body>, so it cannot be inside the
+   sheet's stacking context: its own z-index (91) sits above the phone's Sheet (60). */
+.jv-action-linkmenu.jv-linkmenu-phone button {
+	min-height: 40px;
+	padding: 10px 12px;
+	font-size: 16px;
+}
+.jv-action-linkmenu.jv-linkmenu-phone {
+	overscroll-behavior: contain;
 }
 </style>

@@ -72,4 +72,11 @@ describe("Composer pending-attachment preview", () => {
 		// so there is nothing clickable to open a preview (no file_url yet).
 		expect(w.find('[title^="Preview "]').exists()).toBe(false);
 	});
+
+	it("a failed upload says why on the chip, not only on hover", () => {
+		const w = makeWrapper([FAILED]);
+		expect(w.get(".jv-att-failed").text()).toContain("d.pdf: nope");
+		const bare = makeWrapper([{ ...FAILED, error: "" }]);
+		expect(bare.get(".jv-att-failed").text()).toContain("d.pdf failed");
+	});
 });

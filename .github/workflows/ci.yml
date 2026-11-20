@@ -476,15 +476,24 @@ jobs:
           #
           # --with-coverage is this command's spelling of run-tests' --coverage (different
           # click commands; do not "fix" one to match the other).
+          #
+          # Coverage is measured on push, not on pull requests. On Python 3.11 the tracer
+          # nearly doubles this step: shard 2, same bench, same 3,213 tests, took 1,662 s
+          # with --with-coverage and 913 s without (2026-11-16). A pull request here is a
+          # backport of code that already passed the coverage gate on develop, and the push
+          # that follows its merge runs this job again with coverage and the floor.
+          COVERAGE_FLAG="--with-coverage"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then COVERAGE_FLAG=""; fi
           cd sites
           ../env/bin/python -m jarvis.ci.shard_split run -- \
             --site jarvis-ci.test run-parallel-tests \
             --app jarvis \
             --build-number ${{ matrix.shard }} \
             --total-builds 4 \
-            --with-coverage
+            $COVERAGE_FLAG
 
       - name: Stash this shard's coverage under a non-hidden name
+        if: github.event_name != 'pull_request'
         working-directory: frappe-bench
         run: |
           # frappe's CodeCoverage writes sites/.coverage. Renaming off the leading dot is
@@ -494,6 +503,7 @@ jobs:
           mv sites/.coverage "sites/coverage-data-${{ matrix.shard }}"
 
       - name: Upload this shard's coverage
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ matrix.shard }}
@@ -537,6 +547,10 @@ jobs:
   # succeeded, so a failing shard surfaces as one honest test failure, not that plus a
   # bogus coverage failure from the missing quarter.
   coverage:
+    # Not on pull requests: the shards measure no coverage there (see the test step).
+    # A skipped job still satisfies the required `coverage` check and takes no runner.
+    # The floor is enforced on every push to version-15-hotfix and version-15.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     needs: tests
     timeout-minutes: 10

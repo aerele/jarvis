@@ -8,6 +8,7 @@
 // means the phone bundle can't be grown by a change made for the desktop.
 // Voice is the exception — see transcribeAudio below.
 import { call } from "frappe-ui";
+import { serverReason } from "../../jarvis/public/js/shared/chat_failure_copy.mjs";
 import { HISTORY_PAGE_SIZE } from "@shared/lib/historyPaging.js";
 
 const CHAT = "jarvis.chat.api.";
@@ -183,6 +184,51 @@ export const loadDoc = (doctype, name) =>
 	call("jarvis.chat.actions_api.load_doc", { doctype, name });
 export const applyAction = (action) =>
 	call("jarvis.chat.actions_api.apply_action", { action: JSON.stringify(action) });
+// Cancel an unsaved draft for good: the server records it, so a reload (or the web
+// app) no longer shows the card. `message` is the DRAFT row's name.
+export const dismissDraft = (conversation, message) =>
+	call("jarvis.chat.actions_api.dismiss_draft", { conversation, message });
+
+// ── Server draft cards (the shared draft host's calls) ──────────────────────
+// The shared form builder and draft host (@shared/lib/draftModel.js, toolDraftHost.js) call
+// these by the desktop SPA's names and argument order, so the phone passes them straight in.
+// Same endpoints, methods and serialisation as the desktop's api.js.
+// `loadDocForEdit` is `loadDoc` under the name the shared builder uses (one implementation).
+export const loadDocForEdit = loadDoc;
+// The hidden values a child table's row rules read that Desk fetches from a link:
+// {ok, values: {link field: {link value: {rule field: value}}}}.
+export const ruleValues = (doctype, table, links) =>
+	call("jarvis.chat.actions_api.rule_values", {
+		doctype,
+		table,
+		links: JSON.stringify(links),
+	});
+// Save an edited SERVER draft card: `values` is only what the person changed. The server runs the
+// edited call itself and the card ends as the decided row, or stays Pending when the reply says
+// `card_open`. Same envelopes as applyAction.
+export const saveDraftCard = (token, conversation, values) =>
+	call("jarvis.chat.actions_api.save_draft_card", {
+		token,
+		conversation: conversation || "",
+		values: JSON.stringify(values || {}),
+	});
+// The edit form's link picker: Frappe's own search_link. The optional context is sent only when known.
+export const searchLink = (doctype, txt, pageLength, referenceDoctype, linkFieldname, filters) => {
+	const args = { doctype, txt: txt || "", page_length: pageLength || 8 };
+	if (referenceDoctype) args.reference_doctype = referenceDoctype;
+	if (linkFieldname) args.link_fieldname = linkFieldname;
+	if (filters?.length) args.filters = filters;
+	return call("frappe.desk.search.search_link", args);
+};
+// Park the confirm card for a create receipt's suggested next step (Submit). Nothing runs until Confirm.
+export const proposeNextAction = (conversation, step) =>
+	call("jarvis.chat.actions_api.propose_next_action", {
+		conversation,
+		doctype: step.doctype,
+		name: step.name,
+		kind: step.kind,
+		...(step.action ? { action: step.action } : {}),
+	});
 
 // ── Attachments ────────────────────────────────────────────────────────────
 // Standard Frappe upload, private by default: a chat attachment is the user's
@@ -197,7 +243,13 @@ export async function uploadFile(file) {
 		body: fd,
 		credentials: "include",
 	});
-	if (!r.ok) throw new Error(`Couldn't upload ${file.name} (${r.status})`);
+	if (!r.ok) {
+		// status and serverReason let uploadFailureCopy say what to do (too large, sign in again).
+		const err = new Error(`Couldn't upload ${file.name} (${r.status})`);
+		err.status = r.status;
+		err.serverReason = serverReason(await r.json().catch(() => null));
+		throw err;
+	}
 	const data = await r.json();
 	const f = data.message || data;
 	return { file_url: f.file_url, file_name: f.file_name || file.name, name: f.name };
@@ -231,3 +283,8 @@ export const activeQueuedTurn = (conversation) =>
 export const queuePosition = (run_id) => call("jarvis.chat.admission.queue_position", { run_id });
 export const cancelQueuedTurn = (run_id) =>
 	call("jarvis.chat.admission.cancel_queued_turn", { run_id });
+
+// The failed reply's error (secrets removed), model and run id, for the Report error ticket
+// draft. Resolves {ok, data}; rejects without support access.
+export const getErrorReportDetails = (conversation, message) =>
+	call("jarvis.support.api.error_report_details", { conversation, message });
