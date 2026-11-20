@@ -15,9 +15,9 @@
 // The saved rows (the origJson parse) are cached by draftApply.js. What a row removal
 // changes ("Saving removes N rows") is NOT cached here: it depends on the rows' names.
 import { computed, effectScope, shallowRef, toRaw, watch, watchEffect } from "vue";
-import { draftParentDoc } from "@/lib/draftApply";
-import { changedSummary, savedRowsByName } from "@/lib/draftTables";
-import { rowStatus } from "@/lib/rowForm";
+import { draftParentDoc } from "./draftApply";
+import { changedSummary, savedRowsByName } from "./draftTables";
+import { rowStatus } from "./rowForm";
 
 // The `parent.<name>` values a table's rules read, or null when a rule reads `parent`
 // any other way (`parent[x]`, passed whole): then the table gets every parent value.

@@ -1,10 +1,11 @@
 // The draft grid's leading cell: the row number and the row-form toggle sit
 // in the FIRST column, so they are on screen at scrollLeft 0 on a phone with no sticky
-// CSS; Remove stays in the last one. ChatView is too big to mount, so this compiles the
-// REAL <table class="jv-grid"> markup out of the view source and mounts it with stubbed
-// cells and the same helpers ChatView passes in. Layout (the 96px cap, wrapping, tap
-// targets, light/dark) is CSS and cannot be measured in jsdom: those are source-level
-// assertions on the rules, and a real browser has not confirmed them.
+// CSS; Remove stays in the last one. The grid lives in the shared draft edit form
+// (components/chat/DraftEditForm.vue), so this compiles the REAL <table class="jv-grid">
+// markup out of that source and mounts it with stubbed cells and the same helpers the form
+// passes in; a warning (an identifier the markup uses but this harness does not supply) throws.
+// Layout (the 96px cap, wrapping, tap targets, light/dark) is CSS and cannot be measured in
+// jsdom: those are source-level assertions on the rules, and a real browser has not confirmed them.
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -13,12 +14,19 @@ import { nextTick, reactive } from "vue";
 import { toggleLabel, toggleParts } from "@/lib/draftTables";
 import { closeRowForm, rowFormId, rowToggleId, toggleRowForm } from "@/lib/rowFormFocus";
 
-const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
+const src = fs.readFileSync(
+	path.resolve(__dirname, "../components/chat/DraftEditForm.vue"),
+	"utf8"
+);
 const gridStart = src.indexOf('<table class="jv-grid">');
-expect(gridStart).toBeGreaterThan(-1);
-const gridMarkup = src.slice(gridStart, src.indexOf("</table>", gridStart) + "</table>".length);
+expect(gridStart, "grid start marker not found").toBeGreaterThan(-1);
+const gridEnd = src.indexOf("</table>", gridStart);
+expect(gridEnd, "grid end marker not found").toBeGreaterThan(-1);
+const gridMarkup = src.slice(gridStart, gridEnd + "</table>".length);
 // All declarations of every rule whose selector list names `selector`.
-const css = src.slice(src.indexOf("<style")).replace(/\/\*[\s\S]*?\*\//g, "");
+const styleStart = src.indexOf("<style");
+expect(styleStart, "style block not found").toBeGreaterThan(-1);
+const css = src.slice(styleStart).replace(/\/\*[\s\S]*?\*\//g, "");
 const cssRule = (selector) => {
 	const out = [];
 	for (const m of css.matchAll(/([^{}]+)\{([^}]*)\}/g)) {
@@ -57,14 +65,25 @@ function mountGrid({ withForm = true, keys = ["k1", "k2", "k3"], status = () => 
 				rowMemo: { parentFor: () => ({}) },
 				removeDraftRow,
 				draftLink: {},
-				paletteVars: {},
+				palette: {},
+				emit() {},
 				onDraftLink() {},
 				closeDraftLink() {},
 				pickDraftLink() {},
 			}),
 			template: `<div>${gridMarkup}</div>`,
 		},
-		{ attachTo: document.body, global: { stubs: { DraftCell: true, DraftRowBlock: true } } }
+		{
+			attachTo: document.body,
+			global: {
+				stubs: { DraftCell: true, DraftRowBlock: true },
+				config: {
+					warnHandler(msg) {
+						throw new Error(msg);
+					},
+				},
+			},
+		}
 	);
 	return { t, removeDraftRow };
 }

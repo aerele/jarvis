@@ -593,3 +593,54 @@ test("a terminal frame clears the waking phase", () => {
     assert.equal(applyEvent(woke, { kind, run_id: "r1" }).status, null, kind);
   }
 });
+
+// A server DRAFT card (flag jarvis_draft_cards): the widget cannot show its contents, so the
+// realtime item carries its title for the panel's "Draft: <title>" line.
+const DRAFT_CARD = {
+  kind: "create",
+  draft: {
+    verb: "create",
+    doctype: "Timesheet",
+    title: "New Timesheet",
+    values: {},
+  },
+};
+// Break: the title is only added on the action:pending frame, so a draft that arrives in a
+// run:end / run:error pending list shows the raw summary and a Confirm.
+test("a draft in a run:end or run:error pending list carries its title too", () => {
+  for (const kind of ["run:end", "run:error"]) {
+    const s = applyEvent(emptyStream(), {
+      kind,
+      pending: [
+        {
+          token: "d1",
+          pending_card_safe: true,
+          summary: "create_doc",
+          preview: { card: DRAFT_CARD },
+        },
+        {
+          token: "p1",
+          pending_card_safe: true,
+          summary: "Create ToDo",
+          preview: { card: { kind: "create" } },
+        },
+      ],
+    });
+    assert.equal(s.pending[0].draft_title, "New Timesheet", kind);
+    assert.equal("draft_title" in s.pending[1], false, kind);
+    assert.equal(s.pending[1].summary, "Create ToDo", kind);
+  }
+});
+
+// Break: an unreadable draft (a draft key that is not an object) keeps a Confirm: it is still a
+// draft, with the fallback title. (A sensitive card, and a draft on each of the three paths, are in
+// pending_items.test.mjs.)
+test("an unreadable draft is still a draft, with the fallback title", () => {
+  const u = applyEvent(emptyStream(), {
+    kind: "action:pending",
+    token: "u1",
+    pending_card_safe: true,
+    preview: { card: { draft: "junk" } },
+  });
+  assert.equal(u.pending[0].draft_title, "Draft");
+});

@@ -66,6 +66,20 @@ def _fieldname(meta, label: str) -> str | None:
 	return None
 
 
+def _fields_tables(a: dict) -> tuple[list, list]:
+	"""A card's ``fields`` and ``tables`` as lists, whether a client sent a list or a map
+	(``{label: value}`` / ``{fieldname: {"rows": [...]}}``). One copy for every reader."""
+	fields = a.get("fields") or []
+	if isinstance(fields, dict):
+		fields = [{"label": k, "value": v} for k, v in fields.items()]
+	tables = a.get("tables") or []
+	if isinstance(tables, dict):
+		tables = [
+			{"fieldname": k, "rows": v.get("rows") if isinstance(v, dict) else v} for k, v in tables.items()
+		]
+	return fields, tables
+
+
 def tool_call(a: dict) -> tuple[str, dict] | None:
 	"""``(tool, args)`` for card ``a``; None when a field can't be matched to the doctype."""
 	doctype = a["doctype"]
@@ -74,9 +88,7 @@ def tool_call(a: dict) -> tuple[str, dict] | None:
 	meta = frappe.get_meta(doctype)
 	verb = a.get("verb") or "create"
 	values = {}
-	fields = a.get("fields") or []
-	if isinstance(fields, dict):
-		fields = [{"label": k, "value": v} for k, v in fields.items()]
+	fields, tables = _fields_tables(a)
 	for f in fields:
 		if not isinstance(f, dict) or not f.get("label"):
 			continue
@@ -87,11 +99,6 @@ def tool_call(a: dict) -> tuple[str, dict] | None:
 		if not fieldname:
 			return None
 		values[fieldname] = value
-	tables = a.get("tables") or []
-	if isinstance(tables, dict):
-		tables = [
-			{"fieldname": k, "rows": v.get("rows") if isinstance(v, dict) else v} for k, v in tables.items()
-		]
 	for t in tables:
 		rows = t.get("rows") if isinstance(t, dict) else None
 		if not isinstance(rows, list) or not meta.has_field(t.get("fieldname") or ""):
@@ -123,22 +130,66 @@ def _run(tool: str, args: dict, conversation: str) -> dict:
 
 
 def _card_text(a: dict) -> str:
+	"""The card as the board shows it, and the key a re-shown card is matched on: every
+	field value and every child-table row, so two different changes never read alike."""
 	lines = [f"{a.get('verb') or 'create'} {a['doctype']} {a.get('name') or ''}".strip()]
-	for f in a.get("fields") or []:
+	fields, tables = _fields_tables(a)
+	for f in fields:
 		if isinstance(f, dict) and f.get("label"):
-			lines.append(f"- {f['label']}: {f.get('value')}")
-	for t in a.get("tables") or []:
-		if isinstance(t, dict) and isinstance(t.get("rows"), list):
-			lines.append(f"- {t.get('fieldname')}: {len(t['rows'])} row(s)")
+			lines.append(f"- {f['label']}: {_js(f.get('value'))}")
+	for t in tables:
+		if not (isinstance(t, dict) and isinstance(t.get("rows"), list)):
+			continue
+		lines.append(f"- {t.get('fieldname')}: {len(t['rows'])} row(s)")
+		for i, row in enumerate(t["rows"], 1):
+			if isinstance(row, dict):
+				pairs = sorted((str(k), _js(v)) for k, v in row.items())
+				cells = ", ".join(f"{k}={v}" for k, v in pairs if v)
+			else:
+				cells = _js(row)
+			lines.append(f"  - row {i}: {cells}")
 	return "\n".join(lines)
 
 
-def _ask(conversation: str, owner: str, a: dict, reason: str) -> str:
-	"""File the card as a board question: a human handles the change, then answers."""
+def _ask(conversation: str, owner: str, a: dict, reason: str) -> tuple[str, bool]:
+	"""File the card as a board question: a human handles the change, then answers.
+	``(name, created)``: the identical card still Pending in this conversation is reused.
+
+	Commit, then lock the conversation as the first statement of the transaction (a
+	REPEATABLE READ snapshot taken earlier would miss a racing park's insert); nothing
+	commits until ``_park``'s closing swap, so the lookup and the insert are one step. The
+	opening commit also seals the refused run's bookkeeping, so a failure here rolls back
+	only the question.
+
+	#762: a re-shown card filed a second Pending question."""
+	from jarvis.chat.pending_actions._store import lock_conversation
+
 	doctype = a["doctype"]
 	question = (
 		f"Jarvis couldn't make this change to {doctype}: handle it yourself, then answer Done (or Skip)."
 	)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- the lock must open a fresh transaction
+	lock_conversation(conversation)
+	card = _card_text(a)
+	prefix = f"{card}\n\nWhy: "[:10000]
+	for row in frappe.get_all(
+		AR,
+		filters={
+			"conversation": conversation,
+			"status": "Pending",
+			"source": "File Box",
+			"ref_doctype": doctype,
+			"ref_name": a.get("name") or "",
+			"question": question,
+		},
+		fields=["name", "context_md"],
+		order_by="creation asc",
+	):
+		if (row.context_md or "").startswith(prefix):
+			from jarvis.chat.latency import get_logger
+
+			get_logger().info("filebox_question reused conversation=%s ar=%s", conversation, row.name)
+			return row.name, False
 	doc = frappe.get_doc(
 		{
 			"doctype": AR,
@@ -150,13 +201,13 @@ def _ask(conversation: str, owner: str, a: dict, reason: str) -> str:
 			"ref_doctype": doctype,
 			"ref_name": a.get("name") or "",
 			"question": question,
-			"context_md": f"{_card_text(a)}\n\nWhy: {reason}"[:10000],
+			"context_md": f"{card}\n\nWhy: {reason}"[:10000],
 			"options": json.dumps(_DONE_OPTIONS),
 		}
 	).insert(ignore_permissions=True)
 	if doc.owner != owner:
 		frappe.db.set_value(AR, doc.name, "owner", owner, update_modified=False)
-	return doc.name
+	return doc.name, True
 
 
 def _desk_link(doctype, name, user: str | None) -> str | None:
@@ -201,9 +252,10 @@ def _note(tool: str | None, res: dict, asked: str | None, user: str | None = Non
 	return f"{verb} {doctype or ''} {name}.".replace("  ", " ")
 
 
-def _outcome(conversation: str, owner: str, a: dict, call) -> tuple[dict, str | None]:
+def _outcome(conversation: str, owner: str, a: dict, call) -> tuple[dict, str | None, bool]:
 	"""Run the card as its tool call; a refusal a human must handle becomes a question.
-	A write waiting on an earlier approval is left to that approval's resume."""
+	A write waiting on an earlier approval is left to that approval's resume.
+	``(result, question, created)``: ``created`` is False when a Pending question was reused."""
 	try:
 		res = _run(*call, conversation) if call else _unreadable()
 	except Exception:
@@ -212,8 +264,9 @@ def _outcome(conversation: str, owner: str, a: dict, call) -> tuple[dict, str | 
 		res = {"ok": False, "error": {"message": "The change could not be checked."}}
 	err = res.get("error") or {}
 	if res.get("ok") or err.get("code") == "ApprovalPendingError":
-		return res, None
-	return res, _ask(conversation, owner, a, str(err.get("message") or ""))
+		return res, None, False
+	asked, created = _ask(conversation, owner, a, str(err.get("message") or ""))
+	return res, asked, created
 
 
 def _park(conversation: str, message: str, content: str, a: dict, call=None, fence: str | None = None):
@@ -227,14 +280,14 @@ def _park(conversation: str, message: str, content: str, a: dict, call=None, fen
 	try:
 		with impersonate(owner):
 			call = call or tool_call(a)
-			res, asked = _outcome(conversation, owner, a, call)
+			res, asked, created = _outcome(conversation, owner, a, call)
 	except Exception:
 		frappe.db.rollback()
 		_swap(message, claimed, content)
 		raise
 	note = _note(call[0] if call else None, res, asked, user=owner)
 	_swap(message, claimed, _sub(content, note, fence))
-	if asked:
+	if asked and created:
 		publish_to_user(owner, {"kind": "approval:new", "conversation_id": conversation, "name": asked})
 	return note
 
@@ -278,14 +331,7 @@ def _whole(v):
 def _ident(a: dict) -> str:
 	"""A card's identity, the same however a client normalised it (``fields`` or
 	``tables`` as a map or a list, ``kind`` inferred, values stringified)."""
-	fields = a.get("fields") or []
-	if isinstance(fields, dict):
-		fields = [{"label": k, "value": v} for k, v in fields.items()]
-	tables = a.get("tables") or []
-	if isinstance(tables, dict):
-		tables = [
-			{"fieldname": k, "rows": v.get("rows") if isinstance(v, dict) else v} for k, v in tables.items()
-		]
+	fields, tables = _fields_tables(a)
 	pairs = sorted(
 		(str(f["label"]), _js(f.get("value"))) for f in fields if isinstance(f, dict) and f.get("label")
 	)

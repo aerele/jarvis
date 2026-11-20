@@ -252,7 +252,8 @@ describe("the two gates that disagreed stay mirrored", () => {
 		// no-structured-card FALLBACK used to <pre> the same JSON straight into the
 		// card body, so a confirmation whose preview did not summarise landed as a
 		// wall of JSON above the Confirm button. Both surfaces must collapse it.
-		expect(src).toContain('<details\n\t\t\t\t\t\t\t\t\t\tv-else-if="pendingPreviewOf(pa)"');
+		// whitespace-tolerant: the card sits one level deeper (under the draft/legacy branch)
+		expect(src).toMatch(/<details\s+v-else-if="pendingPreviewOf\(pa\)"/);
 		expect(src).not.toMatch(/<pre\s+v-else-if="pendingPreviewOf\(pa\)"/);
 	});
 

@@ -20,7 +20,9 @@ describe("liveDraftRow shared cases", () => {
 	});
 	for (const c of CASES) {
 		it(`${c.id}: ${c.note}`, () => {
-			expect(liveDraftRow(c.rows)?.name ?? null).toBe(c.live);
+			expect(liveDraftRow(c.rows, { parkedDraft: !!c.parked_draft })?.name ?? null).toBe(
+				c.live
+			);
 		});
 	}
 });
@@ -51,6 +53,27 @@ describe("retiresDraft", () => {
 				).toBe(true);
 		const ran = { tool_name: "create_doc", tool_status: "completed", tool_call_id: "call-1" };
 		expect(retiresDraft({ role: "tool", ...ran, action_outcome: "auto_applied" })).toBe(true);
+	});
+	it("is a parked tool draft: draft_card true, and only the boolean true", () => {
+		// Without this a typed draft and a parked draft card would both stay on screen.
+		expect(
+			retiresDraft({
+				role: "tool",
+				tool_name: "create_doc",
+				tool_status: "pending",
+				draft_card: true,
+			})
+		).toBe(true);
+		for (const draft_card of [false, undefined, null, "true", 1])
+			expect(
+				retiresDraft({
+					role: "tool",
+					tool_name: "create_doc",
+					tool_status: "pending",
+					draft_card,
+				})
+			).toBe(false);
+		expect(retiresDraft({ role: "assistant", draft_card: true })).toBe(false);
 	});
 	it("is not a read, a parked card, a staged call, a failed call or a padded outcome", () => {
 		for (const row of [

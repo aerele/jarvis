@@ -884,6 +884,8 @@ def record_server_error(
 		_capture_warning("server error not buffered")
 
 
+# Reads the v1 method paths. ``jarvis.activity_actions._method_from`` reads the same paths (and the
+# ``cmd`` form key and the v2 forms) for the user-activity hook: keep the two in step.
 _METHOD_PATH_RE = re.compile(r"^/api/(?:v\d+/)?method/(jarvis\.[\w.]+)")
 
 #: Endpoints whose failures are not captured here: the reporter's own (a

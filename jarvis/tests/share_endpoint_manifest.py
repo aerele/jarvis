@@ -81,6 +81,14 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.activity_report",
+	"Admin-only (require_jarvis_admin) User activity read model: per-person counts and event metadata from the activity tables; no transcript lookup, so shared chat identifiers grant no authority.",
+	"""
+    get_user_activity
+    """,
+)
+
+_unrelated(
 	"jarvis.api",
 	"Agent credential administration; tool dispatch is separately classified as chat-scoped.",
 	"""
@@ -819,6 +827,14 @@ ENDPOINTS.update(
 				"doctype": "Jarvis Conversation",
 				"kind": "update",
 				"name": "$conversation",
+			},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.actions_api.save_draft_card": {
+			"arguments": {
+				"conversation": "$conversation",
+				"token": "$token",
+				"values": {"title": "recipient edit"},
 			},
 			"scope": "chat_scoped",
 		},

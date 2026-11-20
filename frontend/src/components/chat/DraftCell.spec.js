@@ -1,7 +1,24 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+// frappe-ui's pickers do not load under jsdom. These stand-ins are shaped like them:
+// a Popover root that keeps no attrs, with the <input> inside (see DateControl.spec).
+vi.mock("frappe-ui", () => {
+	const picker = (name) => ({
+		name,
+		inheritAttrs: false,
+		props: ["modelValue", "disabled", "placeholder"],
+		template: '<div class="popover-root"><input :value="modelValue" /></div>',
+	});
+	return {
+		DatePicker: picker("DatePicker"),
+		DateTimePicker: picker("DateTimePicker"),
+		TimePicker: picker("TimePicker"),
+	};
+});
 import { mount } from "@vue/test-utils";
 import { reactive } from "vue";
 import DraftCell from "./DraftCell.vue";
+import DateControl from "@/components/forms/DateControl.vue";
+import { DRAFT_DATE_CONTROL } from "../../lib/draftSurface";
 
 const F = (fieldname, fieldtype, extra = {}) => ({
 	fieldname,
@@ -18,9 +35,13 @@ const DraftLinkMenu = {
 	props: ["anchor", "items", "palette"],
 	template: "<div />",
 };
-const cell = (field, row, props = {}) =>
+// The desktop host provides its picker under DRAFT_DATE_CONTROL; the phone provides none.
+const cell = (field, row, props = {}, provideDate = true) =>
 	mount(DraftCell, {
-		global: { stubs: { DraftLinkMenu } },
+		global: {
+			stubs: { DraftLinkMenu },
+			provide: provideDate ? { [DRAFT_DATE_CONTROL]: DateControl } : {},
+		},
 		props: { field, row, cellKey: "t:0:0:" + field.fieldname, draftLink: link(), ...props },
 	});
 
@@ -33,11 +54,14 @@ describe("one editable value of a child row", () => {
 			n: "5",
 			r: "0.6",
 		});
-		expect(cell(F("d", "Date"), row).find("input").attributes("type")).toBe("date");
-		expect(cell(F("dt", "Datetime"), row).find("input").attributes("type")).toBe(
-			"datetime-local"
-		);
-		expect(cell(F("t", "Time"), row).find("input").attributes("type")).toBe("time");
+		// Date / Datetime / Time use frappe-ui's pickers through DateControl (#833)
+		const picker = (f) => cell(f, row).findComponent(DateControl);
+		expect([
+			picker(F("d", "Date")).props("kind"),
+			picker(F("d", "Date")).props("modelValue"),
+		]).toEqual(["date", "2026-01-02"]);
+		expect(picker(F("dt", "Datetime")).props("kind")).toBe("datetime");
+		expect(picker(F("t", "Time")).props("kind")).toBe("time");
 		expect(cell(F("n", "Currency"), row).find("input").attributes("type")).toBe("number");
 		expect(cell(F("r", "Rating"), row).find("input").attributes("type")).toBe("number");
 	});
@@ -117,6 +141,43 @@ describe("one editable value of a child row", () => {
 		).toBe("id-q");
 	});
 
+	// Break: the shared cell imports the desktop picker, which the phone cannot load, or the phone
+	// (no provider) loses its date inputs.
+	it("with no host picker (the phone) a Date / Datetime / Time cell is the browser's own input", () => {
+		const row = reactive({ d: "2026-01-02", dt: "", t: "" });
+		const types = ["Date", "Datetime", "Time"].map((t, i) =>
+			cell(F(["d", "dt", "t"][i], t), row, {}, false)
+				.find("input")
+				.attributes("type")
+		);
+		expect(types).toEqual(["date", "datetime-local", "time"]);
+	});
+
+	it("a Date / Datetime / Time cell puts its id and aria attributes on the picker's input", () => {
+		const row = reactive({ d: "2026-01-02", dt: "", t: "" });
+		for (const f of [F("d", "Date"), F("dt", "Datetime"), F("t", "Time")]) {
+			const input = cell(f, row, {
+				label: "When",
+				controlId: `id-${f.fieldname}`,
+				describedby: `was-${f.fieldname}`,
+				required: true,
+			}).find("input");
+			expect({
+				id: input.attributes("id"),
+				label: input.attributes("aria-label"),
+				describedby: input.attributes("aria-describedby"),
+				required: input.attributes("aria-required"),
+				stateClass: input.classes().includes("jv-action-input"),
+			}).toEqual({
+				id: `id-${f.fieldname}`,
+				label: "When",
+				describedby: `was-${f.fieldname}`,
+				required: "true",
+				stateClass: true,
+			});
+		}
+	});
+
 	it("reports link search, blur and pick, and the pick writes into the row", async () => {
 		const row = reactive({ w: "" });
 		const field = F("w", "Link", { options: "Warehouse" });
@@ -141,6 +202,41 @@ describe("one editable value of a child row", () => {
 		const [setter, item] = w.emitted("link-pick")[0];
 		setter(item.value);
 		expect(row.w).toBe("Stores");
+	});
+
+	it("a Dynamic Link is a picker on its row's DocType, and the pick fills it", async () => {
+		// A Payment Entry reference: Name (reference_name) follows its Type (reference_doctype).
+		const row = reactive({ reference_doctype: "Sales Invoice", reference_name: "" });
+		const field = F("reference_name", "Dynamic Link", { options: "reference_doctype" });
+		const w = cell(field, row);
+		const input = w.find("input");
+		expect(input.exists()).toBe(true);
+		await input.trigger("focus");
+		const [, getter, doctype] = w.emitted("link-search")[0];
+		expect([getter(), doctype]).toEqual(["", "Sales Invoice"]);
+		// a new Type moves the search with it
+		row.reference_doctype = "Journal Entry";
+		await input.trigger("input");
+		expect(w.emitted("link-search")[1][2]).toBe("Journal Entry");
+		// no Type yet: the search still fires, with no DocType (the host says to set Type)
+		row.reference_doctype = "";
+		await input.trigger("input");
+		expect(w.emitted("link-search")[2][2]).toBe("");
+		const anchor = document.createElement("input");
+		anchor.getBoundingClientRect = () => ({ left: 0, top: 0, bottom: 20, width: 100 });
+		document.body.append(anchor);
+		await w.setProps({
+			draftLink: link({
+				open: true,
+				key: "t:0:0:reference_name",
+				items: [{ value: "SINV-1", label: "" }],
+				anchor,
+			}),
+		});
+		w.findComponent({ name: "DraftLinkMenu" }).vm.$emit("pick", { value: "SINV-1" });
+		const [setter, item] = w.emitted("link-pick")[0];
+		setter(item.value);
+		expect(row.reference_name).toBe("SINV-1");
 	});
 
 	it("opens the suggestion menu only for its own key", () => {

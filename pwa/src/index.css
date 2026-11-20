@@ -122,6 +122,27 @@
 	color-scheme: light;
 }
 
+/* The names the shared draft form and preview read (lib/draftTokens.js holds the map; a test keeps
+   this block equal to it). Scoped, not on :root: the export card and the document blocks read
+   some of these names with a fallback of their own, and defining them globally would repaint
+   them. Put the class on the draft sheet or card; the link menu is teleported to <body>, so it
+   takes the same values as its `palette` prop instead. Light and dark follow the phone tokens. */
+.jv-draft-tokens {
+	--surface: var(--card);
+	--surface-1: var(--card2);
+	--surface-2: var(--card3);
+	--text: var(--ink9);
+	--text-2: var(--ink7);
+	--text-3: var(--ink6);
+	--border-2: var(--border2);
+	--cta: var(--inv-bg);
+	--cta-fg: var(--inv-ink);
+	--cta-bg: var(--card3);
+	--cta-bd: var(--border2);
+	--amber-bd: color-mix(in srgb, var(--amber) 22%, var(--card));
+	--red-bd: color-mix(in srgb, var(--red) 22%, var(--card));
+}
+
 html,
 body,
 #app {

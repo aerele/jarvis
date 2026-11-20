@@ -68,7 +68,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint, now_datetime
 
-from jarvis.chat import list_filters, wiki_permissions
+from jarvis.chat import list_filters, skill_permissions, wiki_permissions
 from jarvis.chat.events import publish_to_user
 from jarvis.jarvis.doctype.jarvis_wiki_page.jarvis_wiki_page import (
 	MAX_BODY_LEN,
@@ -1970,6 +1970,15 @@ def request_wiki_promotion(page: str, to_scope: str, target_role: str = "", note
 	target_role = (str(target_role).strip() if target_role else "") or None
 	if to_scope == "Role" and not target_role:
 		frappe.throw(_("Promoting to Role scope needs a target role."))
+	if to_scope == "Role":
+		# Same rule as skill promotion (#800): never trust the client's role. Jarvis's own
+		# roles get their specific message; anything else must be a role this requester may
+		# actually target, the list the promotion picker offers.
+		wiki_permissions.refuse_jarvis_app_roles([target_role])
+		if not wiki_permissions.is_promotion_target_role(
+			target_role
+		) or target_role not in skill_permissions.own_targetable_roles(user):
+			frappe.throw(_("You cannot promote to these role(s): {0}.").format(target_role))
 
 	req = frappe.get_doc(
 		{

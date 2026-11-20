@@ -818,6 +818,7 @@
 						<ReceiptChip
 							v-else-if="m.role === 'tool' && hasCurrentMessageSnapshot"
 							:message="m"
+							:draft-receipt="draftReceiptFor(m)"
 							:auto-mode="!!convAutoMode"
 							:next-done="nextStepDone(m)"
 							:next-busy="nextBusyKey === m.name"
@@ -829,6 +830,7 @@
 							v-else-if="m.role === 'user'"
 							variant="bubble"
 							:text="m.content"
+							quotes
 							:attachments="m.canvas"
 							:timestamp="msgTime(m)"
 							:timestampFull="msgTimeFull(m)"
@@ -2001,6 +2003,48 @@
 											:title="msgTimeFull(m)"
 											>{{ msgTime(m) }}</span
 										>
+										<!-- read the reply aloud with the device's own voice -->
+										<button
+											v-if="reader.supported && canCopyReply(m)"
+											class="jv-msgbtn"
+											:class="{ 'jv-msgbtn-on': speakingId === m.name }"
+											@click="reader.toggle(m.name, replyBodyText($event))"
+											:title="
+												speakingId === m.name
+													? 'Stop reading'
+													: 'Read aloud'
+											"
+											:aria-label="
+												speakingId === m.name
+													? 'Stop reading'
+													: 'Read aloud'
+											"
+										>
+											<svg
+												v-if="speakingId === m.name"
+												width="14"
+												height="14"
+												viewBox="0 0 24 24"
+												fill="currentColor"
+											>
+												<rect x="6" y="6" width="12" height="12" rx="2" />
+											</svg>
+											<svg
+												v-else
+												width="14"
+												height="14"
+												viewBox="0 0 24 24"
+												fill="none"
+												stroke="currentColor"
+												stroke-width="1.8"
+												stroke-linecap="round"
+												stroke-linejoin="round"
+											>
+												<path d="M11 5 6 9H2v6h4l5 4z" />
+												<path d="M15.5 8.5a5 5 0 0 1 0 7" />
+												<path d="M19 5a10 10 0 0 1 0 14" />
+											</svg>
+										</button>
 										<!-- hidden (not removed) while streaming so the bar keeps its
 										     height; copying half a reply would be wrong -->
 										<button
@@ -2235,111 +2279,172 @@
 							</button>
 						</div>
 					</div>
-					<div
-						v-for="(pa, pi) in visiblePendingActions"
-						:key="pa.token"
-						class="jv-action jv-pending"
-					>
-						<div class="jv-action-head">
-							<svg
-								width="16"
-								height="16"
-								viewBox="0 0 24 24"
-								fill="none"
-								stroke="var(--amber)"
-								stroke-width="1.8"
-								stroke-linecap="round"
-								stroke-linejoin="round"
-							>
-								<path
-									d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+					<template v-for="(pa, pi) in visiblePendingActions" :key="pa.token">
+						<!-- A server draft card (a card with a draft and no risk) is the shared
+					     DraftCard; every other pending item keeps the card below. Create is
+					     the confirm button, Cancel the discard button, and the card draws its
+					     own typed-approval hint, so the hint further down is not drawn for it. -->
+						<div v-if="isToolDraftItem(pa)" class="jv-tool-draft">
+							<DraftCard
+								:data-draft-token="pa.token"
+								:card="cardOfItem(pa)"
+								:ctx="draftCtxByToken[pa.token]"
+								@create="createToolDraft(pa)"
+								@preview="previewToolDraft(pa)"
+								@edit="openToolDraft(pa)"
+								@cancel="cancelToolDraft(pa)"
+							/>
+							<div v-if="pa.error" style="margin: 8px 0 12px">
+								<ActionError
+									:error="pa.error"
+									:can-report="!!supportOn"
+									@report="openActionErrorSupport"
 								/>
-								<path d="M12 9v4M12 17h.01" />
-							</svg>
-							<span class="jv-action-title">Confirm before this runs</span>
-							<!-- Parked before the user's latest message: a bare "yes"/"no"
-							     no longer binds it, only its number or its buttons. -->
-							<span v-if="!isRecentCard(pa)" class="jv-pending-earlier"
-								>Earlier</span
-							>
-							<!-- Cards never expire: one that has waited over an hour says so. -->
-							<span v-if="pendingAgeOf(pa)" class="jv-pending-age">{{
-								pendingAgeOf(pa)
-							}}</span>
-							<!-- The number is what a typed "confirm 1 and 3" selects by, so it
-							     only appears when there is actually a choice to make. -->
-							<span v-if="visiblePendingActions.length > 1" class="jv-pending-num">
-								{{ pi + 1 }} of {{ visiblePendingActions.length }}
-							</span>
+							</div>
 						</div>
-						<div class="jv-pending-body">
-							<div v-if="pendingSummaryOf(pa)" class="jv-pending-summary">
-								{{ pendingSummaryOf(pa) }}
+						<div v-else class="jv-action jv-pending">
+							<div class="jv-action-head">
+								<svg
+									width="16"
+									height="16"
+									viewBox="0 0 24 24"
+									fill="none"
+									stroke="var(--amber)"
+									stroke-width="1.8"
+									stroke-linecap="round"
+									stroke-linejoin="round"
+								>
+									<path
+										d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+									/>
+									<path d="M12 9v4M12 17h.01" />
+								</svg>
+								<span class="jv-action-title">Confirm before this runs</span>
+								<!-- Parked before the user's latest message: a bare "yes"/"no"
+							     no longer binds it, only its number or its buttons. -->
+								<span v-if="!isRecentCard(pa)" class="jv-pending-earlier"
+									>Earlier</span
+								>
+								<!-- Cards never expire: one that has waited over an hour says so. -->
+								<span v-if="pendingAgeOf(pa)" class="jv-pending-age">{{
+									pendingAgeOf(pa)
+								}}</span>
+								<!-- The number is what a typed "confirm 1 and 3" selects by, so it
+							     only appears when there is actually a choice to make. -->
+								<span
+									v-if="visiblePendingActions.length > 1"
+									class="jv-pending-num"
+								>
+									{{ pi + 1 }} of {{ visiblePendingActions.length }}
+								</span>
 							</div>
-							<div v-if="pendingExpiredOf(pa)" class="jv-pending-expired">
-								This confirmation expired. Tell me the action again to retry it.
-							</div>
-							<template v-else>
-								<!-- F9: the server-built "what will change" card (raw preview behind Details) -->
-								<PendingCard
-									v-if="pendingCardOf(pa)"
-									:card="pendingCardOf(pa)"
-									:details="pendingDetailsOf(pa)"
-								/>
+							<div class="jv-pending-body">
+								<div v-if="pendingSummaryOf(pa)" class="jv-pending-summary">
+									{{ pendingSummaryOf(pa) }}
+								</div>
+								<div v-if="pendingExpiredOf(pa)" class="jv-pending-expired">
+									This confirmation expired. Tell me the action again to retry
+									it.
+								</div>
 								<template v-else>
-									<div v-if="pendingNoteOf(pa)" class="jv-pending-note">
-										{{ pendingNoteOf(pa) }}
-									</div>
-									<ul v-if="pendingBatchOf(pa)" class="jv-pending-batch">
-										<li
-											v-for="(a, i) in pendingBatchOf(pa).actions"
-											:key="'a' + i"
-										>
-											Create <b>{{ a.doctype }}</b> "{{ a.name }}"
-										</li>
-									</ul>
-									<!-- Raw dry-run JSON belongs BEHIND an expander, exactly as
+									<!-- F9: the server-built "what will change" card (raw preview behind Details) -->
+									<PendingCard
+										v-if="pendingCardOf(pa)"
+										:card="pendingCardOf(pa)"
+										:details="pendingDetailsOf(pa)"
+									/>
+									<template v-else>
+										<div v-if="pendingNoteOf(pa)" class="jv-pending-note">
+											{{ pendingNoteOf(pa) }}
+										</div>
+										<ul v-if="pendingBatchOf(pa)" class="jv-pending-batch">
+											<li
+												v-for="(a, i) in pendingBatchOf(pa).actions"
+												:key="'a' + i"
+											>
+												Create <b>{{ a.doctype }}</b> "{{ a.name }}"
+											</li>
+										</ul>
+										<!-- Raw dry-run JSON belongs BEHIND an expander, exactly as
 									     PendingCard puts it behind its own "Details". This branch
 									     is the fallback for when the server built no structured
 									     card, and it used to dump the JSON straight into the card
 									     body - so a confirmation whose preview did not summarise
 									     landed as a wall of JSON above the Confirm button. Same
 									     information, same click to reach it, no dump. -->
-									<details
-										v-else-if="pendingPreviewOf(pa)"
-										class="jv-pending-details"
-									>
-										<summary>Details</summary>
-										<pre class="jv-pending-preview">{{
-											pendingPreviewOf(pa)
-										}}</pre>
-									</details>
+										<details
+											v-else-if="pendingPreviewOf(pa)"
+											class="jv-pending-details"
+										>
+											<summary>Details</summary>
+											<pre class="jv-pending-preview">{{
+												pendingPreviewOf(pa)
+											}}</pre>
+										</details>
+									</template>
 								</template>
-							</template>
-						</div>
-						<div v-if="pa.error" style="margin: 0 14px 10px">
-							<ActionError
-								:error="pa.error"
-								:can-report="!!supportOn"
-								@report="openActionErrorSupport"
-							/>
-						</div>
-						<!-- What the amber button covers, as text: a title is invisible on
+							</div>
+							<div v-if="pa.error" style="margin: 0 14px 10px">
+								<ActionError
+									:error="pa.error"
+									:can-report="!!supportOn"
+									@report="openActionErrorSupport"
+								/>
+							</div>
+							<!-- What the amber button covers, as text: a title is invisible on
 						     touch and to anyone who does not hover. -->
-						<p
-							v-if="pendingCardOf(pa)?.approve_run"
-							:id="'jv-runnote-' + pa.token"
-							class="jv-action-runnote"
-						>
-							Approve &amp; run runs the rest of this request without asking. Delete,
-							cancel and amend still ask.
-						</p>
-						<div class="jv-action-foot">
-							<template v-if="pendingCardOf(pa)?.approve_run">
-								<!-- Step-by-step stays THIS card's plain confirm - the
+							<p
+								v-if="pendingCardOf(pa)?.approve_run"
+								:id="'jv-runnote-' + pa.token"
+								class="jv-action-runnote"
+							>
+								Approve &amp; run runs the rest of this request without asking.
+								Delete, cancel and amend still ask.
+							</p>
+							<div class="jv-action-foot">
+								<template v-if="pendingCardOf(pa)?.approve_run">
+									<!-- Step-by-step stays THIS card's plain confirm - the
 								     low-friction default, first in tab order, so a plain
 								     click/Enter takes the safe per-card path (D-TRIGGER). -->
+									<button
+										class="jv-action-primary"
+										:disabled="
+											pa.busy || convStreaming || pendingExpiredOf(pa)
+										"
+										:title="
+											convStreaming
+												? 'Waiting for the current reply to finish'
+												: ''
+										"
+										@click="confirmPending(pa)"
+									>
+										<span v-if="pa.busy && approveRunBusyToken !== pa.token"
+											>Confirming…</span
+										><span v-else>Step-by-step</span>
+									</button>
+									<!-- Approve & run opens an open-ended run (D-RUN): the
+								     deliberate choice, so it gets its own noticeable-but-not-
+								     alarming amber affordance, never the primary/first slot. -->
+									<button
+										class="jv-action-runall"
+										:disabled="
+											pa.busy || convStreaming || pendingExpiredOf(pa)
+										"
+										:aria-describedby="'jv-runnote-' + pa.token"
+										:title="
+											convStreaming
+												? 'Waiting for the current reply to finish'
+												: ''
+										"
+										@click="approveAndRunPending(pa)"
+									>
+										<span v-if="pa.busy && approveRunBusyToken === pa.token"
+											>Running…</span
+										><span v-else>▶ Approve &amp; run</span>
+									</button>
+								</template>
 								<button
+									v-else
 									class="jv-action-primary"
 									:disabled="pa.busy || convStreaming || pendingExpiredOf(pa)"
 									:title="
@@ -2349,58 +2454,30 @@
 									"
 									@click="confirmPending(pa)"
 								>
-									<span v-if="pa.busy && approveRunBusyToken !== pa.token"
-										>Confirming…</span
-									><span v-else>Step-by-step</span>
+									<span v-if="pa.busy">Confirming…</span
+									><span v-else>✓ Confirm</span>
 								</button>
-								<!-- Approve & run opens an open-ended run (D-RUN): the
-								     deliberate choice, so it gets its own noticeable-but-not-
-								     alarming amber affordance, never the primary/first slot. -->
-								<button
-									class="jv-action-runall"
-									:disabled="pa.busy || convStreaming || pendingExpiredOf(pa)"
-									:aria-describedby="'jv-runnote-' + pa.token"
-									:title="
-										convStreaming
-											? 'Waiting for the current reply to finish'
-											: ''
-									"
-									@click="approveAndRunPending(pa)"
-								>
-									<span v-if="pa.busy && approveRunBusyToken === pa.token"
-										>Running…</span
-									><span v-else>▶ Approve &amp; run</span>
-								</button>
-							</template>
-							<button
-								v-else
-								class="jv-action-primary"
-								:disabled="pa.busy || convStreaming || pendingExpiredOf(pa)"
-								:title="
-									convStreaming ? 'Waiting for the current reply to finish' : ''
-								"
-								@click="confirmPending(pa)"
-							>
-								<span v-if="pa.busy">Confirming…</span
-								><span v-else>✓ Confirm</span>
-							</button>
-							<!-- Two equal ways to approve. Shown once per stack, on the last
+								<!-- Two equal ways to approve. Shown once per stack, on the last
 							     card, so a queue of five does not repeat it five times. -->
-							<span
-								v-if="pi === visiblePendingActions.length - 1"
-								class="jv-action-typehint"
-							>
-								{{ typedApprovalHint }}
-							</span>
-							<button
-								class="jv-action-discard"
-								:disabled="pa.busy"
-								@click="discardPending(pa)"
-							>
-								Discard
-							</button>
+								<span
+									v-if="pi === visiblePendingActions.length - 1"
+									class="jv-action-typehint"
+								>
+									{{ typedApprovalHint }}
+								</span>
+								<button
+									class="jv-action-discard"
+									:disabled="pa.busy"
+									@click="discardPending(pa)"
+								>
+									Discard
+								</button>
+							</div>
 						</div>
-					</div>
+					</template>
+					<!-- The stack's hint, when the last card is a draft card that has no line for it
+					     (editing, working, unreadable, turn running). -->
+					<div v-if="orphanHint" class="jv-stack-hint">{{ orphanHint }}</div>
 					<!-- A typed yes/no that bound no card went to Jarvis as a normal
 					     message; say so without blocking anything (decision 13). The
 					     live region stays mounted and only its text toggles, so the
@@ -2721,6 +2798,14 @@
 						@remove-attachment="removeAttachment"
 						@preview-attachment="openUserFile"
 					>
+						<template #inside-top>
+							<ReplyQuote
+								v-if="replyQuote"
+								:text="replyQuote"
+								:who="brand.agentName"
+								@close="clearReplyQuote(true)"
+							/>
+						</template>
 						<template #above>
 							<!-- Create menu "Create a trigger": trigger-build mode. While this marker
 							     is up every send carries {page:"triggers"} so the agent stays in
@@ -4014,10 +4099,14 @@
 								· {{ draftPanel.docName }}</template
 							></span
 						>
-						<span class="jv-draft-badge">Draft - not saved</span>
+						<span class="jv-draft-badge">{{
+							draftPanel.tool && draftPanel.verb === "update"
+								? draftBadgeText(true)
+								: "Draft - not saved"
+						}}</span>
 						<button
 							class="jv-art-close"
-							@click="closeDraftPanel"
+							@click="onDraftCloseClick"
 							title="Close (draft stays in chat)"
 							aria-label="Close"
 						>
@@ -4035,426 +4124,54 @@
 							</svg>
 						</button>
 					</div>
-					<div class="jv-draft-body">
-						<p v-if="draftLinkError" class="jv-draft-toast" role="alert">
-							{{ draftLinkError }}
-						</p>
-						<div v-if="draftPanel.updatedToast" class="jv-draft-toast">
-							Draft updated from chat
-						</div>
-						<div class="jv-draft-fields">
-							<div
-								v-for="f in draftPanel.fields"
-								:key="f.fieldname"
-								class="jv-draft-fld"
-								:class="{
-									missing: isFieldMissing(f),
-									invalid: f.serverInvalid,
-									changed: f.changed,
-								}"
-							>
-								<label
-									>{{ f.label
-									}}<span
-										v-if="(f.reqd || f.serverMissing) && !f.read_only"
-										class="jv-req"
-									>
-										*</span
-									></label
-								>
-								<div class="jv-draft-ctl">
-									<span v-if="f.read_only" class="jv-draft-ro">{{
-										readonlyDisplay(f)
-									}}</span>
-									<template v-else-if="f.control === 'link'">
-										<input
-											class="jv-action-input"
-											v-model="f.value"
-											@input="
-												onDraftLink(
-													'f:' + f.fieldname,
-													() => f.value,
-													f.options,
-													$event
-												)
-											"
-											@focus="
-												onDraftLink(
-													'f:' + f.fieldname,
-													() => f.value,
-													f.options,
-													$event
-												)
-											"
-											@blur="closeDraftLink"
-											:placeholder="
-												'Search ' + (f.options || 'records') + '…'
-											"
-											autocomplete="off"
-										/>
-										<DraftLinkMenu
-											v-if="
-												draftLink.open &&
-												draftLink.key === 'f:' + f.fieldname &&
-												draftLink.items.length
-											"
-											:anchor="draftLink.anchor"
-											:items="draftLink.items"
-											:palette="paletteVars"
-											@pick="
-												(it) =>
-													pickDraftLink((v) => {
-														f.value = v;
-													}, it)
-											"
-											@close="draftLink.open = false"
-										/>
-									</template>
-									<select
-										v-else-if="f.control === 'select'"
-										class="jv-action-input jv-action-sel"
-										v-model="f.value"
-									>
-										<option v-for="o in f.options" :key="o" :value="o">
-											{{ o }}
-										</option>
-									</select>
-									<select
-										v-else-if="f.control === 'check'"
-										class="jv-action-input jv-action-sel"
-										v-model="f.value"
-									>
-										<option>Yes</option>
-										<option>No</option>
-									</select>
-									<input
-										v-else-if="f.control === 'date'"
-										type="date"
-										class="jv-action-input"
-										v-model="f.value"
-									/>
-									<input
-										v-else-if="f.control === 'datetime'"
-										type="datetime-local"
-										class="jv-action-input"
-										v-model="f.value"
-									/>
-									<input
-										v-else-if="f.control === 'time'"
-										type="time"
-										class="jv-action-input"
-										v-model="f.value"
-									/>
-									<input
-										v-else-if="f.control === 'number'"
-										type="number"
-										class="jv-action-input"
-										v-model="f.value"
-									/>
-									<textarea
-										v-else-if="f.control === 'text'"
-										class="jv-action-input"
-										v-model="f.value"
-										rows="3"
-									></textarea>
-									<input v-else class="jv-action-input" v-model="f.value" />
-								</div>
-							</div>
-						</div>
-						<div
-							v-for="(t, ti) in draftPanel.tables"
-							:key="t.fieldname"
-							class="jv-draft-table"
-						>
-							<div class="jv-draft-table-title">{{ t.label }}</div>
-							<div
-								v-if="removedSavedRows(t).length"
-								class="jv-rows-removed"
-								role="note"
-							>
-								Saving removes {{ removedSavedRows(t).length }} saved
-								{{ removedSavedRows(t).length === 1 ? "row" : "rows" }}:
-								{{ removedSavedRows(t).join(", ") }}
-							</div>
-							<div
-								v-if="draftChangeSummaries[ti]"
-								class="jv-rows-changed"
-								role="note"
-							>
-								<template v-if="draftChangeSummaries[ti].grouped">
-									<span>{{ draftChangeSummaries[ti].text }}</span>
-									<button
-										type="button"
-										class="jv-rows-changed-open"
-										@click="openChangedRows(t, draftChangeSummaries[ti])"
-									>
-										{{ draftChangeSummaries[ti].openLabel }}
-									</button>
-								</template>
-								<template v-else>
-									<span>{{ draftChangeSummaries[ti].lead }}</span>
-									<button
-										v-for="i in draftChangeSummaries[ti].rows"
-										:key="i"
-										type="button"
-										class="jv-rows-changed-open"
-										:aria-label="'Open row ' + (i + 1)"
-										@click="showRowForm(ti, t.rows[i])"
-									>
-										{{ i + 1 }}
-									</button>
-								</template>
-							</div>
-							<div class="jv-draft-gridwrap">
-								<table class="jv-grid">
-									<thead>
-										<tr>
-											<th class="jv-grid-lead">
-												<span class="jv-sr">Row</span>
-											</th>
-											<th v-for="c in t.columns" :key="c.fieldname">
-												{{ c.label }}
-											</th>
-											<th class="jv-grid-x"></th>
-										</tr>
-									</thead>
-									<tbody>
-										<template v-for="(r, ri) in t.rows" :key="r.__key">
-											<!-- An open row is its full form in place, as Desk opens a
-											     row: a card the panel's width at the row's own spot. -->
-											<tr v-if="r.__open" class="jv-grid-openrow">
-												<td
-													:colspan="t.columns.length + 2"
-													class="jv-grid-opencell"
-												>
-													<DraftRowBlock
-														:table="t"
-														:row="r"
-														:parent="rowMemo.parentFor(t)"
-														:table-index="ti"
-														:row-index="ri"
-														:changed-fields="
-															rowStatusFor(t, r, ri).changedFields
-														"
-														:saved-row="
-															rowStatusFor(t, r, ri).savedRow
-														"
-														:draft-link="draftLink"
-														:palette="paletteVars"
-														@close="closeRowForm(ti, r)"
-														@remove="removeDraftRow(ti, ri)"
-														@insert="insertDraftRowBelow(ti, ri)"
-														@link-search="onDraftLink"
-														@link-blur="closeDraftLink"
-														@link-pick="pickDraftLink"
-														@link-close="draftLink.open = false"
-													/>
-												</td>
-											</tr>
-											<tr v-else>
-												<td class="jv-grid-lead">
-													<div class="jv-grid-lead-in">
-														<span class="jv-grid-num">{{
-															ri + 1
-														}}</span>
-														<button
-															v-if="
-																t.formFields && t.formFields.length
-															"
-															type="button"
-															:id="rowToggleId(ti, r.__key)"
-															class="jv-grid-more"
-															:class="{
-																'jv-grid-more-warn': rowStatusFor(
-																	t,
-																	r,
-																	ri
-																).missing,
-															}"
-															:aria-expanded="
-																r.__open ? 'true' : 'false'
-															"
-															:aria-controls="
-																r.__open
-																	? rowFormId(ti, r.__key)
-																	: undefined
-															"
-															:title="rowToggleLabel(t, r, ri)"
-															:aria-label="rowToggleLabel(t, r, ri)"
-															@click="toggleRowForm(ti, r)"
-														>
-															<!-- Desk's row edit icon: opens the row's full form. -->
-															<svg
-																width="14"
-																height="14"
-																viewBox="0 0 24 24"
-																fill="none"
-																stroke="currentColor"
-																stroke-width="2"
-																stroke-linecap="round"
-																stroke-linejoin="round"
-																aria-hidden="true"
-															>
-																<path
-																	d="M21.17 6.81a1 1 0 0 0-3.99-3.98L3.84 16.17a2 2 0 0 0-.5.83l-1.32 4.35a.5.5 0 0 0 .62.62l4.35-1.32a2 2 0 0 0 .83-.5z"
-																/>
-																<path d="m15 5 4 4" />
-															</svg>
-															<span
-																v-for="part in toggleParts(
-																	rowStatusFor(t, r, ri)
-																)"
-																:key="part.kind"
-																class="jv-grid-badge"
-																:class="{
-																	'jv-grid-badge-warn':
-																		part.kind === 'missing',
-																}"
-																aria-hidden="true"
-																>{{ part.text }}</span
-															>
-														</button>
-													</div>
-												</td>
-												<td
-													v-for="c in t.columns"
-													:key="c.fieldname"
-													:class="{ 'jv-grid-ro': c.read_only }"
-												>
-													<DraftCell
-														:field="c"
-														:row="r"
-														:cell-key="
-															't:' +
-															ti +
-															':' +
-															r.__key +
-															':' +
-															c.fieldname
-														"
-														:read-only="!!c.read_only"
-														:label="c.label"
-														:draft-link="draftLink"
-														:palette="paletteVars"
-														@link-search="onDraftLink"
-														@link-blur="closeDraftLink"
-														@link-pick="pickDraftLink"
-														@link-close="draftLink.open = false"
-													/>
-												</td>
-												<td class="jv-grid-x">
-													<span class="jv-grid-acts">
-														<button
-															type="button"
-															class="jv-grid-del"
-															@click="removeDraftRow(ti, ri)"
-															title="Remove row"
-															:aria-label="'Remove row ' + (ri + 1)"
-														>
-															✕
-														</button>
-													</span>
-												</td>
-											</tr>
-										</template>
-									</tbody>
-								</table>
-							</div>
-							<button class="jv-draft-addrow" @click="addDraftRow(ti)">
-								＋ Add row
-							</button>
-						</div>
-						<div v-if="draftTotals" class="jv-draft-totals">
-							<div class="jv-draft-total-fld">
-								<label>Total Qty</label>
-								<div class="jv-draft-total-ctl">
-									<input
-										class="jv-action-input jv-draft-total-input"
-										:value="draftTotals.qty"
-										readonly
-										tabindex="-1"
-										aria-readonly="true"
-									/>
-									<svg
-										class="jv-draft-total-lock"
-										width="12"
-										height="12"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.9"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										aria-hidden="true"
-									>
-										<rect x="3" y="11" width="18" height="11" rx="2" />
-										<path d="M7 11V7a5 5 0 0 1 10 0v4" />
-									</svg>
-								</div>
-							</div>
-							<div v-if="draftTotals.hasAmt" class="jv-draft-total-fld">
-								<label>Est. Total</label>
-								<div class="jv-draft-total-ctl">
-									<input
-										class="jv-action-input jv-draft-total-input"
-										:value="draftTotals.amount"
-										readonly
-										tabindex="-1"
-										aria-readonly="true"
-									/>
-									<svg
-										class="jv-draft-total-lock"
-										width="12"
-										height="12"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										stroke-width="1.9"
-										stroke-linecap="round"
-										stroke-linejoin="round"
-										aria-hidden="true"
-									>
-										<rect x="3" y="11" width="18" height="11" rx="2" />
-										<path d="M7 11V7a5 5 0 0 1 10 0v4" />
-									</svg>
-								</div>
-							</div>
-							<p class="jv-draft-est">
-								Auto-calculated · ERPNext computes the final totals.
-							</p>
-						</div>
-						<div v-if="draftPanel.error" style="margin-top: 10px">
+					<div v-if="draftPanelStale" role="alert" style="margin: 10px 14px 0">
+						<Banner type="error" :message="DRAFT_STALE_TEXT" />
+					</div>
+					<!-- A server draft's form: a dead card, a form that cannot save, a record that
+					     could not be loaded (lib/toolDraftHost toolPanelNotices). -->
+					<div
+						v-for="n in toolNotices"
+						:key="n.text"
+						:role="n.type === 'error' ? 'alert' : 'status'"
+						style="margin: 10px 14px 0"
+					>
+						<Banner :type="n.type" :message="n.text" />
+					</div>
+					<DraftEditForm
+						ref="draftFormEl"
+						:model="draftPanel"
+						:draft-link="draftLink"
+						:palette="paletteVars"
+						:link-error="draftLinkError"
+						@link-search="onDraftLink"
+						@link-blur="closeDraftLink"
+						@link-pick="pickDraftLink"
+						@link-close="draftLink.open = false"
+					>
+						<template #error>
 							<ActionError
 								:error="draftPanel.error"
 								:can-report="!!supportOn"
 								@report="openActionErrorSupport"
 							/>
-						</div>
-						<!-- Always present, so a screen reader announces the note when it fills. -->
-						<div
-							ref="draftParkedRegion"
-							class="jv-draft-parked"
-							:class="{ 'is-empty': !draftPanel.parked }"
-							role="status"
-							aria-live="polite"
-							tabindex="-1"
-							style="margin-top: 10px"
-						>
-							{{ draftPanel.parked || "" }}
-						</div>
-					</div>
-					<div class="jv-draft-foot">
+						</template>
+					</DraftEditForm>
+					<div v-if="!draftPanel.tool" class="jv-draft-foot">
 						<button
 							v-if="draftPanel.submittable && draftPanel.verb === 'create'"
 							class="jv-action-2nd"
-							:disabled="draftPanel.applying || !!draftPanel.parked"
+							:disabled="
+								draftPanel.applying || !!draftPanel.parked || draftPanelStale
+							"
 							@click="applyDraft(1)"
 						>
 							Create &amp; Submit
 						</button>
 						<button
 							class="jv-action-primary"
-							:disabled="draftPanel.applying || !!draftPanel.parked"
+							:disabled="
+								draftPanel.applying || !!draftPanel.parked || draftPanelStale
+							"
 							@click="applyDraft(0)"
 						>
 							{{ draftPanel.applying ? "Saving…" : draftCta }}
@@ -4465,6 +4182,25 @@
 							class="jv-action-discard"
 							:disabled="draftPanel.applying || !!draftPanel.parked"
 							@click="discardDraft"
+						>
+							Discard
+						</button>
+					</div>
+					<!-- A server draft: Create / Save changes is the tool save, Discard is the card's
+					     Cancel. No Create & Submit. -->
+					<div v-else class="jv-draft-foot">
+						<button
+							class="jv-action-primary"
+							:disabled="toolFoot.primaryDisabled"
+							:title="toolFoot.primaryTitle"
+							@click="saveToolDraft()"
+						>
+							{{ toolFoot.primaryLabel }}
+						</button>
+						<button
+							class="jv-action-discard"
+							:disabled="toolFoot.discardDisabled"
+							@click="discardToolPanel()"
 						>
 							Discard
 						</button>
@@ -4480,6 +4216,23 @@
 			@close="previewOpen = false"
 			@edit="onPreviewEdit"
 			@confirm="onPreviewConfirm"
+		/>
+		<!-- Preview of a server draft card: its own model, the card's own numbers; Confirm is the
+		     card's Create. -->
+		<DraftPreview
+			v-if="toolPreview"
+			ref="toolPreviewRef"
+			:model="toolPreview.model"
+			:confirm-label="toolPrimaryLabel(toolPreview.model)"
+			:disabled="
+				previewPrimaryDisabled({
+					streaming: convStreaming,
+					busy: toolPreviewItem && toolPreviewItem.busy,
+				})
+			"
+			@close="toolPreview = null"
+			@edit="onToolPreviewEdit"
+			@confirm="onToolPreviewConfirm"
 		/>
 
 		<FileBoxSheetReview
@@ -4507,6 +4260,25 @@
 		     maybeCheckSessionFeedback below, following the same shared-ref
 		     pattern as WhatsNewDialog/noticeGate. -->
 		<SessionFeedbackDialog />
+		<!-- aerele/jarvis#2191: the bar over text selected in a reply -->
+		<SelectionActions
+			:root="rootEl"
+			selector=".jv-amsg .jv-md-body"
+			:actions="selectionActions"
+			@action="onSelectionAction"
+		/>
+		<!-- a selection being read has no button of its own to stop it from -->
+		<button
+			v-if="speakingId === 'selection'"
+			type="button"
+			class="jv-readstop"
+			@click="reader.stop()"
+		>
+			<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+				<rect x="6" y="6" width="12" height="12" rx="2" />
+			</svg>
+			Stop reading
+		</button>
 		<!-- Periodic business-pulse survey: opened by maybeOpenPulseFeedback,
 		     checked once per genuine chat-open event. -->
 		<PulseFeedbackDialog />
@@ -4536,6 +4308,8 @@ import {
 	computed,
 	h,
 	inject,
+	markRaw,
+	provide,
 	onMounted,
 	onBeforeUnmount,
 	onUnmounted,
@@ -4552,9 +4326,9 @@ import {
 } from "vue-router";
 import { Button, Dropdown } from "frappe-ui";
 import ContextRing from "@/components/chat/ContextRing.vue";
-import DraftLinkMenu from "@/components/chat/DraftLinkMenu.vue";
-import DraftCell from "@/components/chat/DraftCell.vue";
-import DraftRowBlock from "@/components/chat/DraftRowBlock.vue";
+import DraftEditForm from "@/components/chat/DraftEditForm.vue";
+import DateControl from "@/components/forms/DateControl.vue";
+import { DRAFT_DATE_CONTROL } from "@/lib/draftSurface";
 import ExportCard from "@/components/chat/ExportCard.vue";
 import GotoCard from "@/components/chat/GotoCard.vue";
 import { createGotoCountdown, GOTO_COUNTDOWN_MS, PAUSE } from "@/lib/gotoCountdown";
@@ -4661,8 +4435,13 @@ import DraftPreview from "@/components/doc/DraftPreview.vue";
 import ActionError from "@/components/ActionError.vue";
 import Banner from "@/components/Banner.vue";
 import PendingCard from "@/components/PendingCard.vue";
+import DraftCard from "@/components/chat/DraftCard.vue";
 import ReceiptChip from "@/components/ReceiptChip.vue";
 import Message from "@/components/chat/Message.vue";
+import SelectionActions from "@/components/chat/SelectionActions.vue";
+import { cleanQuote, quoteMarkdown } from "@jsshared/reply_quote.mjs";
+import ReplyQuote from "@/components/chat/ReplyQuote.vue";
+import { createReader } from "@jsshared/read_aloud.mjs";
 import {
 	newSendRequestId,
 	observeDelivery,
@@ -4728,38 +4507,11 @@ import { PAYMENT_CALENDAR_PAGE } from "../../../jarvis/public/js/shared/goto_pag
 import { normaliseAction } from "@/lib/chatAction";
 import { draftBlockError } from "@/lib/chatAction";
 import { isSilentRun, shouldStopSpinning, streamingRowIsLive } from "@/lib/silentRun";
-import { markMissing, panelField as _panelField } from "@/lib/docFields";
-import { draftLinkSearch, draftLinkContext, DraftLinkFilterError } from "@/lib/draftLinkFilters";
-import {
-	alignComputedRows,
-	blankComputedColumns,
-	checkToYesNo,
-	draftValues,
-	isFieldMissing,
-	readonlyDisplay,
-	removedSavedRows,
-	allRowFields,
-} from "@/lib/draftApply";
-import {
-	applyAutoOpen,
-	applyRuleValues,
-	blankRow,
-	buildDraftTable,
-	markMissingRows,
-	openChangedRows,
-	parentDefaults,
-	ruleFetchLinks,
-	toggleLabel,
-	toggleParts,
-} from "@/lib/draftTables";
-import { createRowStatusMemo } from "@/lib/rowStatusMemo";
-import {
-	closeRowForm,
-	rowFormId,
-	rowToggleId,
-	showRowForm,
-	toggleRowForm,
-} from "@/lib/rowFormFocus";
+import { markMissing } from "@/lib/docFields";
+import { makeDraftModelBuilder } from "@/lib/draftModel";
+import { useDraftLink } from "@/lib/useDraftLink";
+import { alignComputedRows, blankComputedColumns, draftValues } from "@/lib/draftApply";
+import { applyAutoOpen, markMissingRows } from "@/lib/draftTables";
 import { stripBlocks } from "@/lib/chatBlocks";
 import { replyBarParts, stampDeltaTime, useClientStamp } from "@/lib/replyBar";
 import { needsJumpArrow, shouldFollowBottom } from "@/lib/chatScroll";
@@ -4775,14 +4527,49 @@ import {
 	typedApprovalHint as hintFor,
 } from "@/lib/typedCardReply";
 import { proposedLabel } from "@/lib/cardAge";
+import { cardOfItem, isToolDraftItem } from "@/lib/toolDraft";
+import { draftBadgeText } from "@/lib/draftBadge";
+import { draftReceipt, isDraftReceiptRow } from "@/lib/draftReceipt";
 import {
-	chatRefusalMessage,
+	DRAFT_STALE_TEXT,
+	cancelToolItem,
+	discardFromForm,
+	hasParkedDraft as itemsHoldParkedDraft,
+	nextPanelStale,
+	openToolDraftPanel,
+	openToolPreview,
+	orphanStackHint,
+	receiptReloadNeeded,
+	saveToolDraft as saveToolPanel,
+	toolDraftCtxMap,
+	toolPanelDead,
+	toolPanelNotices,
+	withBusyKind,
+} from "@/lib/toolDraftHost";
+import { focusFirstMark, toolPrimaryLabel } from "@/lib/toolDraftPanel";
+import {
+	TOOL_FORM_POLL_MS,
+	closeAsksFirst,
+	previewPrimaryDisabled,
+	toolFooterState,
+	watchCalculatedCells,
+} from "@/lib/toolDraftSheet";
+import {
+	firstEditable,
+	openerButton,
+	tabWrapTarget,
+	toolPanelKeyAction,
+} from "@/lib/toolDraftKeys";
+import {
 	chatSettledReason,
-	keepsChatCard,
+	confirmReplyOutcome,
+	confirmationStorageUnavailable,
+	dismissReplyOutcome,
 	nextStepActedKeys,
 	nextStepRefusal,
 	receiptRecord,
 	shouldHideNextStep,
+	thrownCardError,
 } from "@/lib/chatCardActions";
 import { errMessage, turnErrorInfo, showsRawReason } from "@/lib/errors";
 import {
@@ -4870,6 +4657,9 @@ import {
 
 const session = inject("$session");
 const socket = inject("$socket");
+// The desktop draws a draft form's Date / Datetime / Time fields with frappe-ui's pickers (#833).
+// The shared draft components cannot import them (the phone has none), so the host hands them down.
+provide(DRAFT_DATE_CONTROL, markRaw(DateControl));
 const route = useRoute();
 const router = useRouter();
 
@@ -7877,6 +7667,35 @@ const _lastAssistant = computed(() => {
 	}
 	return last && last.role === "assistant" && !last.streaming ? last : null;
 });
+// The queue of parked confirmations (action:pending cards) and what of it this screen draws.
+// Declared here, ahead of _liveDraft, because the typed draft's gate (hasParkedDraft) reads
+// them when the first watcher below sets up. The write-safety notes stay at the
+// "action:pending confirm card" section further down.
+const pendingActions = ref([]);
+// A close migration can settle a card while it is cached on this page. Keep
+// its token locally after the terminal receipt arrives, so a late socket frame
+// cannot restore a Confirm card before the next durable resync completes.
+const safetySettledTokens = ref(new Set());
+// Only the cards belonging to the conversation on screen render (a parked write
+// from another chat must not show here). The queue is already pruned to the
+// current conversation on load, but filter defensively for the template v-for.
+// Sorted in mint order (created_at, the token breaking a same-second tie;
+// expires_at is only the fallback for a pre-P0c record with no created_at), so the
+// numbers never shuffle: a typed "confirm 1 and 3" binds to the tokens THIS screen
+// numbered (approval_tokens), and a resync merges cards in whatever order the store
+// returned them.
+const visiblePendingActions = computed(() =>
+	// Ordered by the shared, unit-tested comparator (sortPendingCards): stable
+	// numbers for a typed "confirm N". See lib/sortPendingCards.js.
+	sortPendingCards(
+		pendingActions.value.filter(
+			(pa) => pa.conversation === currentId.value && !safetySettledTokens.value.has(pa.token)
+		)
+	)
+);
+// This chat has a server draft card on screen (lib/toolDraftHost): then no typed draft is live
+// (_liveDraft), and a typed edit panel that is open turns stale (draftPanelStale).
+const hasParkedDraft = computed(() => itemsHoldParkedDraft(visiblePendingActions.value));
 // The newest unsaved draft row (lib/liveDraft, the one rule the phone and the server
 // share): kept through later replies until it is saved, cancelled or replaced. Null
 // whenever _lastAssistant is, so nothing shows mid-turn. It reads the loaded rows as the
@@ -7887,6 +7706,9 @@ const _lastAssistant = computed(() => {
 const hiddenDrafts = ref(new Set());
 const _liveDraft = computed(() => {
 	const live = liveDraftMessage(messages.value, _lastAssistant.value);
+	// One card always: a server draft card on screen retires every typed draft (the rows of a
+	// realtime push carry no draft_card flag, so the pending list is what tells us).
+	if (hasParkedDraft.value) return null;
 	return live && !hiddenDrafts.value.has(live.name) ? live : null;
 });
 // The last message's own action block that is not a draft (an email draft, a gated verb's
@@ -7992,50 +7814,14 @@ function answerAsk(answer, messageId) {
 }
 
 // --- Field-control helpers shared by the confirm card and the record draft
-// panel (chip → side panel; see _formMeta / openDraftPanel below).
+// panel (chip → side panel; see buildDraftModel / openDraftPanel below).
 function _isLongVal(v) {
 	const s = String(v == null ? "" : v);
 	return s.length > 55 || s.includes("\n");
 }
-// "Item Group" / "item_group" / "itemGroup" all → "itemgroup": the agent's
-// action JSON labels fields sometimes by display label, sometimes by fieldname.
-function _normKey(s) {
-	return String(s || "")
-		.toLowerCase()
-		.replace(/[^a-z0-9]/g, "");
-}
-// Resolve one card label to a field: exact normalized match on label/fieldname,
-// else unique containment (e.g. "UOM" → stock_uom when it's the only sensible
-// hit; required fields win ambiguous shorthands).
-function _actField(meta, label) {
-	const k = _normKey(label);
-	if (!k) return null;
-	if (meta.map[k]) return meta.map[k];
-	const hits = meta.fields.filter((f) => f._kl.includes(k) || f._kf.includes(k));
-	if (hits.length === 1) return hits[0];
-	if (hits.length > 1) {
-		const reqd = hits.filter((f) => f.reqd);
-		if (reqd.length === 1) return reqd[0];
-	}
-	return null;
-}
 // --- Record draft panel: the action JSON is the draft; edits are local; apply
 // posts to actions_api (no LLM round-trip). ---
 const draftPanel = ref(null);
-// A row's form status for its toggle and form: blank required fields, and (on an
-// update) what differs from the saved row. One computed per row that keeps its
-// object while nothing in the status changed, and one parent object per table with
-// just the record values its rules read (lib/rowStatusMemo.js): typing in a row, or
-// in a main field no rule reads, does not re-render the other rows.
-const rowMemo = createRowStatusMemo(() => draftPanel.value);
-// Above each grid, the rows the agent (or the user) changed outside it: named when
-// few, grouped by field when many, with a button that opens them (draftTables).
-const draftChangeSummaries = rowMemo.summaries;
-const rowStatusFor = rowMemo.rowStatusFor;
-// The toggle's accessible name: which row, and what needs attention in it.
-function rowToggleLabel(t, r, ri) {
-	return toggleLabel(ri + 1, rowStatusFor(t, r, ri));
-}
 // Drafts the server turned into a gated confirmation card (sensitive
 // configuration): message name -> the note. Waiting, not saved, never re-applied.
 const parkedDrafts = ref(new Map());
@@ -8045,7 +7831,10 @@ const activeParkedNote = computed(
 		parkedNoteFor(parkedDrafts.value, actionFor.value) ||
 		parkedByCard(pendingActions.value, actionFor.value)
 );
-const draftParkedRegion = ref(null);
+// The edit form (components/chat/DraftEditForm.vue) owns the body's template ref; the save
+// focuses the parked-note region through the form's exposed `parkedRegion`.
+const draftFormEl = ref(null);
+const draftParkedRegion = computed(() => draftFormEl.value?.parkedRegion ?? null);
 
 // Resizable edit panel — drag the inner (left) edge. Clamped to [min, max],
 // snaps to the default within +/-10px, width persisted to localStorage. Scoped
@@ -8120,176 +7909,26 @@ function onOverlayBackdropClick(close) {
 	if (_overlayPressOnBackdrop) close();
 }
 
-// one shared link-search menu for panel inputs, keyed "f:<fieldname>" or "t:<ti>:<row __key>:<col>"
-const draftLink = ref({ key: "", items: [], open: false, anchor: null });
-// Each popup belongs to one search, including its pending blur and response.
-let draftLinkGeneration = 0;
-onBeforeUnmount(() => {
-	draftLinkGeneration++;
+// The draft form builder (lib/draftModel.js) with this view's API calls. It is made here, above
+// useDraftLink, because the link menu below is handed fillRuleValues while the view is set up.
+// The form-meta cache it returns lives as long as this view, as the closure's did.
+const {
+	buildDraftModel,
+	fillRuleValues,
+	formMetaCache: _formMetaCache,
+} = makeDraftModelBuilder({
+	getDoctypeFormMeta: (doctype) => api.getDoctypeFormMeta(doctype),
+	loadDocForEdit: (doctype, name) => api.loadDocForEdit(doctype, name),
+	ruleValues: (doctype, table, links) => api.ruleValues(doctype, table, links),
 });
-const draftLinkError = ref("");
-// Company / row dependency changes invalidate suggestions even if a request is
-// still pending or its field remains focused. Existing field values stay intact.
-watch(
-	() => draftLinkContext(draftPanel.value, draftLink.value.key),
-	(context) => {
-		if (draftLink.value.filterContext && context !== draftLink.value.filterContext)
-			draftLink.value = { ...draftLink.value, open: false, items: [] };
-	},
-	{ flush: "sync" }
-);
-const _formMetaCache = {};
 
-async function _formMeta(doctype) {
-	if (_formMetaCache[doctype]) return _formMetaCache[doctype];
-	const r = await api.getDoctypeFormMeta(doctype);
-	if (!r || !r.ok) throw new Error("no form meta");
-	for (const f of r.fields) {
-		f._kl = _normKey(f.label);
-		f._kf = _normKey(f.fieldname);
-	}
-	_formMetaCache[doctype] = r;
-	return r;
-}
-
-// Build the draft model from an action + form meta (+ live doc for updates),
-// WITHOUT opening the panel - so the editable panel and later summary/preview
-// surfaces can share one construction path.
-async function buildDraftModel(a) {
-	if (!a || a.kind !== "doc" || !a.doctype) return;
-	const verb = a.verb === "update" ? "update" : "create";
-	// An action block we cannot render must FAIL, not render empty - a blank card
-	// reads as "Jarvis did not try" rather than "Jarvis emitted a shape I cannot
-	// draw". `docs` is a create_doc batch payload, not an action key (AGENTS.md:122
-	// documents fields+tables for ONE record) - throw on it for EITHER verb: a
-	// {"verb":"update","docs":[...]} fusion otherwise builds an empty diff, renders
-	// "No field changes." with Confirm ENABLED, and sends update_doc(dt, "", {}).
-	// A hybrid carrying BOTH fields and docs throws too: rendering the fields and
-	// dropping the docs is a half-card the user confirms believing it is the set.
-	if (Array.isArray(a.docs)) {
-		const err = new Error(
-			"This draft carries a `docs` batch, which is a create_doc payload rather than a card. Ask me to apply them as a batch."
-		);
-		err.jvUserMessage = err.message;
-		throw err;
-	}
-	// Create-only: a fieldless UPDATE block legitimately renders "No field changes.",
-	// and a tables-only create is legal, so neither may throw.
-	if (verb === "create" && !(a.fields || []).length && !(a.tables || []).length) {
-		const err = new Error("This draft has no fields to show.");
-		err.jvUserMessage = err.message;
-		throw err;
-	}
-	let meta;
-	try {
-		meta = await _formMeta(a.doctype);
-	} catch (e) {
-		return;
-	} // no meta → no panel (old card still shows)
-	let base = { values: {}, tables: {} };
-	if (verb === "update" && a.name) {
-		try {
-			base = await api.loadDocForEdit(a.doctype, a.name);
-		} catch (e) {
-			// Without the saved rows the card cannot show which rows a proposed table
-			// keeps or removes, so never offer to apply one blind (CR-3).
-			if ((a.tables || []).length) {
-				const err = new Error(
-					"Could not load this record's saved rows, so I can't show what would change. Tell me to try again."
-				);
-				err.jvUserMessage = err.message;
-				throw err;
-			}
-			/* not editable → create-style view */
-		}
-	}
-	// proposed main fields: agent's fields resolved by label-or-fieldname
-	const metaLookup = { fields: meta.fields, map: {} };
-	for (const f of meta.fields) {
-		if (f._kf && !metaLookup.map[f._kf]) metaLookup.map[f._kf] = f;
-		if (f._kl) metaLookup.map[f._kl] = f;
-	}
-	const proposed = {}; // fieldname -> value
-	for (const f of a.fields || []) {
-		const m = _actField(metaLookup, f.label);
-		if (m && m.fieldtype !== "Table") proposed[m.fieldname] = f.value;
-	}
-	const fields = [];
-	const seen = new Set();
-	for (const f of meta.fields) {
-		if (f.fieldtype === "Table") continue;
-		const has = f.fieldname in proposed;
-		const baseV = base.values[f.fieldname];
-		// Show: agent-proposed fields + required fields + (update) filled fields the agent referenced
-		if (!has && !f.reqd) continue;
-		const pf = _panelField(f, has ? proposed[f.fieldname] : baseV);
-		pf.proposed = has; // agent set a value for this field (vs. shown only because reqd)
-		if (verb === "update")
-			pf.orig =
-				baseV == null ? "" : String(pf.control === "check" ? checkToYesNo(baseV) : baseV);
-		pf.changed = verb === "update" && String(pf.value) !== String(pf.orig);
-		fields.push(pf);
-		seen.add(f.fieldname);
-	}
-	// child tables: every meta table that is required, agent-proposed, or (update) non-empty
-	const tables = [];
-	const aTables = {};
-	for (const t of a.tables || []) if (t && t.fieldname) aTables[t.fieldname] = t.rows || [];
-	for (const [tf, spec] of Object.entries(meta.tables || {})) {
-		const metaField = meta.fields.find((f) => f.fieldname === tf) || { reqd: 0 };
-		const table = buildDraftTable({
-			fieldname: tf,
-			spec,
-			required: !!metaField.reqd,
-			proposed: aTables[tf],
-			saved: (base.tables || {})[tf] || [],
-			verb,
-		});
-		if (table) tables.push(table);
-	}
-	// Bounded: the card shows with the defaults rather than wait on a slow answer.
-	await Promise.race([
-		fillRuleValues(a.doctype, tables),
-		new Promise((resolve) => setTimeout(resolve, RULE_VALUES_WAIT_MS)),
-	]);
-	// A Prompt-autonamed DocType (e.g. Server Script) carries its document name as a
-	// proposed "name" field, not a real DocField, so it never lands in `fields`.
-	// Capture it here so applyDraft sends it as `name` (the backend folds it into
-	// the create values). Field/series-named DocTypes have no such field -> "".
-	const proposedCreateName =
-		verb === "update"
-			? ""
-			: String(
-					(
-						(a.fields || []).find(
-							(x) => String(x.label || "").toLowerCase() === "name"
-						) || {}
-					).value ?? ""
-			  );
-	return {
-		verb,
-		doctype: a.doctype,
-		docName: verb === "update" ? a.name || "" : proposedCreateName,
-		title: a.title || "",
-		titleField: meta.title_field || "",
-		submittable: !!meta.is_submittable,
-		// Multi-step plans: the card marks non-final steps "continue": 1; the
-		// bench then dispatches a follow-up agent turn after Apply so the agent
-		// stages the next step without the user typing "continue".
-		cont: a.continue ? 1 : 0,
-		linkContext: { ...base.values, ...proposed },
-		// For child rows' rules: Desk's new-form defaults and the record's docstatus.
-		parentDefaults: verb === "create" ? parentDefaults(meta.fields) : {},
-		docstatus: Number(base.docstatus || 0),
-		fields,
-		tables,
-		tableMeta: meta.tables || {},
-		applying: false,
-		error: "",
-		updatedToast: false,
-	};
-}
-
+// The form's link-search state and handlers (one shared menu), the same composable the phone calls.
+const { draftLink, draftLinkError, onDraftLink, pickDraftLink, closeDraftLink, resetDraftLink } =
+	useDraftLink({
+		draftPanel,
+		searchLink: (...args) => api.searchLink(...args),
+		fillRuleValues,
+	});
 // Open the editable panel for an action, via the shared buildDraftModel.
 async function openDraftPanel(a, capturedView = null) {
 	// The draft this panel edits, captured before the build: actionFor goes null
@@ -8333,21 +7972,6 @@ async function openDraftPanel(a, capturedView = null) {
 	return true;
 }
 
-function addDraftRow(ti) {
-	const t = draftPanel.value.tables[ti];
-	t.rows.push(blankRow(t));
-}
-function removeDraftRow(ti, ri) {
-	draftPanel.value.tables[ti].rows.splice(ri, 1);
-}
-// Insert below, from an open row's card (as Desk's row editor): a blank row right
-// after it, opened in its place while the row it came from closes.
-function insertDraftRowBelow(ti, ri) {
-	const t = draftPanel.value.tables[ti];
-	t.rows[ri].__open = false;
-	t.rows.splice(ri + 1, 0, blankRow(t));
-	showRowForm(ti, t.rows[ri + 1]);
-}
 // A click outside the panel closes it only when nothing would be lost. With edits it
 // stays open (the dimmed chat behind it, its card's buttons included, is not a way
 // out); the X still closes it on purpose.
@@ -8359,138 +7983,34 @@ function dismissDraftPanel() {
 	closeDraftPanel();
 }
 function closeDraftPanel() {
-	draftLinkGeneration++;
-	draftLinkError.value = "";
 	draftPanel.value = null;
-	draftLink.value = { key: "", items: [], open: false, anchor: null };
+	resetDraftLink();
 }
-
-// Link search shared by panel fields + grid cells.
-async function onDraftLink(key, target, doctype, ev) {
-	const generation = ++draftLinkGeneration;
-	const anchor = ev && ev.target;
-	draftLink.value = { key, items: [], open: true, anchor };
-	const search = draftLink.value;
-	draftLinkError.value = "";
-	if (!doctype) return;
-	try {
-		const args = draftLinkSearch(draftPanel.value, key);
-		const filterContext = JSON.stringify(args);
-		draftLink.value.filterContext = filterContext;
-		const r = await api.searchLink(
-			doctype,
-			target(),
-			8,
-			args.referenceDoctype,
-			args.linkFieldname,
-			args.filters
-		);
-		if (
-			generation !== draftLinkGeneration ||
-			draftLink.value !== search ||
-			draftLinkContext(draftPanel.value, key) !== filterContext
-		)
-			return;
-		draftLink.value = {
-			key,
-			items: (r || [])
-				.map((x) => ({ value: x.value, label: x.description || "" }))
-				.slice(0, 8),
-			open: true,
-			anchor,
-			filterContext,
-		};
-	} catch (e) {
-		if (generation === draftLinkGeneration && draftLink.value === search) {
-			draftLink.value = { ...draftLink.value, open: false, items: [] };
-			draftLinkError.value =
-				e instanceof DraftLinkFilterError
-					? e.message
-					: "Could not load this field's choices. Try again or open the document in ERPNext.";
-		}
-	}
-}
-// The hidden values the rows' rules read that Desk fetches from a link (is_fixed_asset
-// from the Item), one call per table that still needs one, so the card shows and
-// requires what Desk would before the record is saved. A failure keeps the defaults;
-// `isCurrent` drops an answer that lands after its panel was closed or replaced.
-const RULE_VALUES_WAIT_MS = 1500;
-async function fillRuleValues(doctype, tables, isCurrent = () => true) {
-	await Promise.all(
-		(tables || []).map(async (t) => {
-			const links = ruleFetchLinks(t);
-			if (!Object.keys(links).length) return;
-			try {
-				const r = await api.ruleValues(doctype, t.fieldname, links);
-				if (r && r.ok && isCurrent()) applyRuleValues(t, r.values, links);
-			} catch (e) {
-				// the rules read the defaults, as before
-			}
-		})
-	);
-}
-function pickDraftLink(setter, item) {
-	draftLinkGeneration++;
-	if (
-		draftLink.value.filterContext !== draftLinkContext(draftPanel.value, draftLink.value.key)
-	) {
-		draftLink.value = { ...draftLink.value, open: false, items: [] };
+// The X button only (every other way out calls closeDraftPanel and stays silent): a server
+// draft's form with edits asks first, the way the phone's sheet does. The ask is one at a time,
+// and the form closes only if it is still the same panel when the person answers.
+let draftCloseAsking = false;
+async function onDraftCloseClick() {
+	const panel = draftPanel.value;
+	if (draftCloseAsking) return;
+	if (!closeAsksFirst(panel, { dead: draftPanelDead.value })) {
+		closeDraftPanel();
 		return;
 	}
-	setter(item.value);
-	draftLink.value = { key: "", items: [], open: false, anchor: null };
-	// A row's new link (an item) can change what its rules read: fetch it, as Desk does.
-	const panel = draftPanel.value;
-	if (panel) fillRuleValues(panel.doctype, panel.tables, () => draftPanel.value === panel);
-}
-function closeDraftLink(ev) {
-	const generation = draftLinkGeneration;
-	const anchor = ev?.target || draftLink.value.anchor;
-	setTimeout(() => {
-		if (generation !== draftLinkGeneration || document.activeElement === anchor) return;
-		draftLinkGeneration++;
-		draftLink.value = { ...draftLink.value, open: false };
-	}, 160);
+	draftCloseAsking = true;
+	try {
+		const ok = await confirm({
+			title: "Discard your changes?",
+			confirmLabel: "Discard",
+			cancelLabel: "Keep editing",
+			danger: true,
+		});
+		if (ok && draftPanel.value === panel) closeDraftPanel();
+	} finally {
+		draftCloseAsking = false;
+	}
 }
 
-// est. totals: any grid with qty (+rate) columns
-// Auto-derived, read-only totals for the edit panel: sum the line-item qty and
-// qty×rate across every child table that has a `qty` column. Returns a
-// structured object (not a string) so the UI can render each figure as its own
-// read-only field; null when there's nothing to total.
-const draftTotals = computed(() => {
-	const p = draftPanel.value;
-	if (!p) return null;
-	let qty = 0,
-		amt = 0,
-		hasQty = false,
-		hasAmt = false;
-	for (const t of p.tables) {
-		// Any field of the row, not only the grid's columns: a user's own grid columns
-		// may leave qty or rate out, and the totals must still add up.
-		const q = allRowFields(t).find((c) => c.fieldname === "qty");
-		const r = allRowFields(t).find((c) => c.fieldname === "rate");
-		if (!q) continue;
-		hasQty = true;
-		for (const row of t.rows) {
-			const n = parseFloat(row.qty) || 0;
-			qty += n;
-			if (r) {
-				hasAmt = true;
-				amt += n * (parseFloat(row.rate) || 0);
-			}
-		}
-	}
-	if (!hasQty) return null;
-	return {
-		qty: qty.toLocaleString("en-IN"),
-		amount: amt.toLocaleString("en-IN", {
-			minimumFractionDigits: 2,
-			maximumFractionDigits: 2,
-		}),
-		hasAmt,
-	};
-});
 const draftCta = computed(() => {
 	const p = draftPanel.value;
 	if (!p) return "";
@@ -8649,12 +8169,14 @@ async function openDraftForMissing(a, error, capturedView = null) {
 
 // Read-only preview: opens DraftPreview over the current summary's model.
 const previewOpen = ref(false);
+// A server draft card retires the typed draft, and the typed Preview (which holds no edits) with it.
+watch(hasParkedDraft, (parked) => {
+	if (parked) previewOpen.value = false;
+});
 function resetDraftActionState() {
 	// This is called by the synchronous conversation-switch fence. It must not
 	// use closeDraftPanel(), which is for a user action in the current view.
-	draftLinkGeneration++;
-	draftLinkError.value = "";
-	draftLink.value = { key: "", items: [], open: false, anchor: null };
+	resetDraftLink();
 	draftPanel.value = null;
 	summaryState.value = blankSummaryState();
 	previewOpen.value = false;
@@ -8691,7 +8213,9 @@ watch(actionFor, () => {
 	if (!a || a.kind === "email" || !isEditVerb(a)) return;
 	const view = captureDraftActionView(a, actionFor.value || "", draftActionKey(a));
 	ensureActionSummary(a); // keep the summary card in sync with the latest action
-	if (draftPanel.value) {
+	// (A server draft card's form is not the typed draft's panel: a typed draft that comes back
+	// after that card died must never replace it, and with it the person's edits.)
+	if (draftPanel.value && !draftPanel.value.tool) {
 		// panel is open (user is editing) and the action re-emitted: rebuilt only when the
 		// agent proposed something different (openDraftPanel keeps the same draft's edits)
 		openDraftPanel({ verb: a.verb || "create", ...a }, view).then((rebuilt) => {
@@ -8875,11 +8399,6 @@ function scrollDraftCardIntoView() {
 // a single turn can park more than one gated write, and each keeps its OWN
 // confirmable card + busy/error state. Each item:
 // { conversation, token, tool, summary, preview, run_id, busy, error }.
-const pendingActions = ref([]);
-// A close migration can settle a card while it is cached on this page. Keep
-// its token locally after the terminal receipt arrives, so a late socket frame
-// cannot restore a Confirm card before the next durable resync completes.
-const safetySettledTokens = ref(new Set());
 const safetyUpdateNotice = ref(null);
 const safetyUpdateQueue = ref([]);
 const SAFETY_UPDATE_COPY =
@@ -8925,14 +8444,6 @@ function dismissSafetyUpdateNotice() {
 // approve-and-run).
 const approveRunBusyToken = ref(null);
 
-// Only the cards belonging to the conversation on screen render (a parked write
-// from another chat must not show here). The queue is already pruned to the
-// current conversation on load, but filter defensively for the template v-for.
-// Sorted in mint order (created_at, the token breaking a same-second tie;
-// expires_at is only the fallback for a pre-P0c record with no created_at), so the
-// numbers never shuffle: a typed "confirm 1 and 3" binds to the tokens THIS screen
-// numbered (approval_tokens), and a resync merges cards in whatever order the store
-// returned them.
 // What the hint offers depends on how many cards are stacked: with one there
 // is nothing to select, with several the useful thing to teach is that both
 // all-at-once and pick-a-few work.
@@ -8953,15 +8464,48 @@ const olderCardsNoteText = computed(() =>
 		? "An earlier action card is still waiting. Use its buttons or the Approval Board."
 		: ""
 );
-const visiblePendingActions = computed(() =>
-	// Ordered by the shared, unit-tested comparator (sortPendingCards): stable
-	// numbers for a typed "confirm N". See lib/sortPendingCards.js.
-	sortPendingCards(
-		pendingActions.value.filter(
-			(pa) => pa.conversation === currentId.value && !safetySettledTokens.value.has(pa.token)
-		)
-	)
+// What DraftCard is told about each server draft card on screen, built once per change of its
+// inputs (not once per render, which a streamed token triggers): its state, its place in the
+// stack and the stack's hint, whether its form is open ("Editing") and whether its form or
+// preview is being built.
+const draftCtxByToken = computed(() =>
+	toolDraftCtxMap({
+		items: visiblePendingActions.value,
+		streaming: convStreaming.value,
+		stackHint: typedApprovalHint.value,
+		editingToken: draftPanel.value?.tool ? draftPanel.value.token : "",
+		buildingToken: toolDraftBuilding.value,
+	})
 );
+// The receipt of a decided server draft card says what the State Table says (S6 to S10). A decided
+// row carries no card, so the server stamps it `draft_receipt` (lib/draftReceipt isDraftReceiptRow).
+// A decided row only ever reaches the screen from a reload that carries the stamp (a live tool:result
+// with an outcome is dropped, the chat reloads after every decision), so nothing is remembered here.
+// Any other row: null, the chip as before.
+function draftReceiptFor(m) {
+	return isDraftReceiptRow(m) ? draftReceipt(m) : null;
+}
+// The stack's hint, drawn under the stack when its last card is a draft card with no line for it.
+const orphanHint = computed(() =>
+	orphanStackHint({
+		items: visiblePendingActions.value,
+		ctxMap: draftCtxByToken.value,
+		stackHint: typedApprovalHint.value,
+	})
+);
+// A typed edit panel that was open when a server draft card arrived: its Save has no typed
+// draft to act on. The panel stays open, shows DRAFT_STALE_TEXT, and its save buttons are off;
+// the X still closes it, which clears the flag.
+const draftPanelStale = ref(false);
+// The form of a server draft card (`panel.tool`) is not stale because a draft is parked: it IS
+// the parked draft's form, with its own dead-token rule (draftPanelDead below).
+watch([hasParkedDraft, draftPanel], ([parked, panel], [, previous]) => {
+	draftPanelStale.value = nextPanelStale(draftPanelStale.value, {
+		panelOpen: !!panel && !panel.tool,
+		panelChanged: panel !== previous,
+		parked,
+	});
+});
 
 // A legacy container (persona v0.39, pre write-safety) may still emit a
 // jarvis-action card for a gated write verb / an email whose own action button
@@ -9047,18 +8591,10 @@ function settleSafetyUpdateNotice(token, message) {
 
 // A direct Confirm, Approve & run, or Discard can race a close migration. The
 // endpoint then returns the same terminal safety_update envelope as a durable
-// receipt. Treat it as that receipt immediately: exclude only its token, drop
-// only its card, and give the person the one Done-only explanation. A later
-// transcript reload sees the exclusion and cannot add a duplicate notice.
-function settleSafetyUpdate(token, response) {
-	if (!token || response?.reason_code !== "safety_update") return false;
-	settleSafetyUpdateNotice(token, response?.error?.message || SAFETY_UPDATE_COPY);
-	return true;
-}
-function confirmationStorageUnavailable(response) {
-	const type = response && response.error && response.error.type;
-	return type === "ConfirmationUnavailableError" || type === "ConfirmationOutcomeUnknownError";
-}
+// receipt (lib/chatCardActions outcome.safety). Treat it as that receipt
+// immediately: exclude only its token, drop only its card, and give the person
+// the one Done-only explanation. A later transcript reload sees the exclusion
+// and cannot add a duplicate notice.
 // Enqueue a parked confirmation, deduped by token (a resync + a live event can
 // both carry the same card).
 // PR-1: build a confirm-card queue item from a durable pending action-row (a
@@ -9134,6 +8670,40 @@ function enqueuePending(card) {
 	});
 }
 
+// Applies what lib/chatCardActions decided for a card's Confirm / Approve & run / Discard answer
+// (confirmReplyOutcome, dismissReplyOutcome): the safety-update notice, a kept card with its error
+// and toast, or a spent card taken off the list (with its toast, or a reload of the chat, and the
+// queued chip of a continuation that is waiting for a slot).
+async function applyCardOutcome(out, { token, view, cardById }) {
+	if (out.safety) {
+		settleSafetyUpdateNotice(token, out.safety.message);
+		return;
+	}
+	if (out.fate === "kept") {
+		const card = cardById();
+		if (card) card.error = out.cardError;
+		notify(out.message, { type: "error" });
+		return;
+	}
+	removePending(token);
+	if (out.toast) {
+		notify(out.message, { type: "error" });
+		return;
+	}
+	if (out.reload) {
+		await loadConversation(view.conversation);
+		if (!chatViewIsCurrent(view)) return;
+		store.loadConversations();
+	}
+	// SUX-3/SUXI-2: the continuation turn queued (all slots taken). Show the
+	// standard queued chip + lock the composer so the card doesn't vanish into
+	// silence after the "Change saved" ack clears (mirrors send()'s r.queued).
+	if (out.queued) {
+		queuedTurn.value = out.queued;
+		sending.value = true;
+	}
+}
+
 async function confirmPending(pa) {
 	if (!pa || pa.busy) return;
 	// Defense in depth behind the disabled button: never dispatch a continuation
@@ -9157,70 +8727,17 @@ async function confirmPending(pa) {
 	try {
 		const r = await api.confirmTool(token, view.conversation);
 		if (!pendingActionIsCurrent(view)) return;
-		if (r && r.ok === false) {
-			if (settleSafetyUpdate(token, r)) return;
-			if (confirmationStorageUnavailable(r)) {
-				const card = cardById();
-				if (card) card.error = r.error;
-				notify(r.error.message, { type: "error" });
-				return;
-			}
-			if (keepsChatCard(r)) {
-				// Not settled (busy, already running, identity refused, a stopping armed run): keep it.
-				const card = cardById();
-				if (card) card.error = { message: chatRefusalMessage(r) };
-				notify(chatRefusalMessage(r), { type: "error" });
-				return;
-			}
-			// Token gone/expired/used, or the executed tool reported failure. Either
-			// way the card is spent - surface a brief note and dismiss.
-			if (r.error && r.error.type === "InvalidConfirmation") {
-				removePending(token);
-				// A settled card (isChatSettled) still carrying a specific reason_code
-				// (stale/target_missing/tampered/unverifiable, …) says why. Only a
-				// bare legacy token (no reason_code at all) gets the opaque guess:
-				// use the card's own wall-clock expiry for the right one (F15).
-				const settledReason = chatSettledReason(r);
-				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
-				notify(
-					settledReason ||
-						(expired
-							? "This confirmation expired. Tell me the action again to retry it."
-							: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again."),
-					{ type: "error" }
-				);
-				return;
-			}
-			// The token was consumed and the tool failed; confirm_tool already
-			// persisted a durable "failed" receipt chip. Drop the card and reload
-			// so the chip shows in the thread instead of a lingering spent card.
-			removePending(token);
-			await loadConversation(view.conversation);
-			if (!chatViewIsCurrent(view)) return;
-			store.loadConversations();
-			return;
-		}
-		// Success - the executed result surfaces via the turn's normal tool/stream
-		// events; reload to be sure the transcript reflects it (same as applyDraft).
-		removePending(token);
-		await loadConversation(view.conversation);
-		if (!chatViewIsCurrent(view)) return;
-		store.loadConversations();
-		// SUX-3/SUXI-2: the continuation turn queued (all slots taken). Show the
-		// standard queued chip + lock the composer so the card doesn't vanish into
-		// silence after the "Change saved" ack clears (mirrors send()'s r.queued).
-		if (r && r.queued) {
-			queuedTurn.value = {
-				run_id: r.run_id,
-				message_id: r.message_id,
-				position: r.queued_position || null,
-			};
-			sending.value = true;
-		}
+		await applyCardOutcome(
+			confirmReplyOutcome(r, {
+				draft: isToolDraftItem(pa),
+				expired: pendingExpiry(pa.expires_at, Date.now()).expired,
+			}),
+			{ token, view, cardById }
+		);
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = thrownActionError(e, "Could not confirm this action.");
+		if (card) card.error = thrownCardError(e, "confirm");
 	} finally {
 		// The switch watcher already dropped this view's in-flight token. Do not
 		// delete a same-token action started by a later A view after A → B → A.
@@ -9236,9 +8753,9 @@ async function confirmPending(pa) {
 // which both confirms this card's step 1 AND opens the armed skill's
 // uninterrupted run (D-RUN) - covered writes after this one then execute with
 // receipts instead of parking their own cards. Same {ok,...}/
-// InvalidConfirmation/storage-unavailable envelope as confirm_tool, so the
-// {ok:false} handling below mirrors confirmPending's verbatim - the two must
-// not drift in what a failure looks like to the user. Only reachable from this
+// InvalidConfirmation/storage-unavailable envelope as confirm_tool, so it reads
+// the reply with the same confirmReplyOutcome - the two must not drift in what a
+// failure looks like to the user. Only reachable from this
 // card's own "Approve & run" button - never from the typed go-ahead path.
 async function approveAndRunPending(pa) {
 	if (!pa || pa.busy) return;
@@ -9259,62 +8776,17 @@ async function approveAndRunPending(pa) {
 	try {
 		const r = await api.approveAndRun(token, view.conversation);
 		if (!pendingActionIsCurrent(view)) return;
-		if (r && r.ok === false) {
-			if (settleSafetyUpdate(token, r)) return;
-			if (confirmationStorageUnavailable(r)) {
-				const card = cardById();
-				if (card) card.error = r.error;
-				notify(r.error.message, { type: "error" });
-				return;
-			}
-			if (keepsChatCard(r)) {
-				const card = cardById();
-				if (card) card.error = { message: chatRefusalMessage(r) };
-				notify(chatRefusalMessage(r), { type: "error" });
-				return;
-			}
-			if (r.error && r.error.type === "InvalidConfirmation") {
-				removePending(token);
-				// Mirrors confirmPending's InvalidConfirmation branch: a settled card
-				// carrying a specific reason_code says why, not the opaque guess.
-				const settledReason = chatSettledReason(r);
-				const expired = pendingExpiry(pa.expires_at, Date.now()).expired;
-				notify(
-					settledReason ||
-						(expired
-							? "This confirmation expired. Tell me the action again to retry it."
-							: "Couldn't confirm. It may have been handled in another tab. Refresh, or ask me to try again."),
-					{ type: "error" }
-				);
-				return;
-			}
-			// The token was consumed and step 1 failed - approve_and_run never opens
-			// the run on a failed first step (§3.4), so this is exactly confirmPending's
-			// spent-card path: a durable "failed" receipt chip is already persisted.
-			removePending(token);
-			await loadConversation(view.conversation);
-			if (!chatViewIsCurrent(view)) return;
-			store.loadConversations();
-			return;
-		}
-		// Success - the run's own writes surface via the turn's normal tool/stream
-		// events as they happen; reload to be sure the transcript reflects step 1.
-		removePending(token);
-		await loadConversation(view.conversation);
-		if (!chatViewIsCurrent(view)) return;
-		store.loadConversations();
-		if (r && r.queued) {
-			queuedTurn.value = {
-				run_id: r.run_id,
-				message_id: r.message_id,
-				position: r.queued_position || null,
-			};
-			sending.value = true;
-		}
+		await applyCardOutcome(
+			confirmReplyOutcome(r, {
+				draft: isToolDraftItem(pa),
+				expired: pendingExpiry(pa.expires_at, Date.now()).expired,
+			}),
+			{ token, view, cardById }
+		);
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = thrownActionError(e, "Could not start the run.");
+		if (card) card.error = thrownCardError(e, "approve");
 	} finally {
 		// See confirmPending: this continuation must not clear a later view's
 		// matching token when the user leaves and returns while it is in flight.
@@ -9396,28 +8868,12 @@ async function discardPending(pa) {
 	try {
 		const r = await api.dismissTool(token, view.conversation);
 		if (!pendingActionIsCurrent(view)) return;
-		if (settleSafetyUpdate(token, r)) return;
-		if (r && r.ok === false && confirmationStorageUnavailable(r)) {
-			const card = cardById();
-			if (card) card.error = r.error;
-			notify(r.error.message, { type: "error" });
-			return;
-		}
-		if (keepsChatCard(r)) {
-			const card = cardById();
-			if (card) card.error = { message: chatRefusalMessage(r) };
-			notify(chatRefusalMessage(r), { type: "error" });
-			return;
-		}
-		removePending(token);
-		// Re-fetch so the durable "discarded" chip shows in the thread.
-		await loadConversation(view.conversation);
-		if (!chatViewIsCurrent(view)) return;
-		store.loadConversations();
+		// Re-fetch (applyCardOutcome) so the durable "discarded" chip shows in the thread.
+		await applyCardOutcome(dismissReplyOutcome(r), { token, view, cardById });
 	} catch (e) {
 		if (!pendingActionIsCurrent(view)) return;
 		const card = cardById();
-		if (card) card.error = thrownActionError(e, "Could not discard this action.");
+		if (card) card.error = thrownCardError(e, "dismiss");
 	} finally {
 		// A stale direct dismissal must leave a later view's in-flight guard
 		// untouched. The synchronous switch reset owns the old guard instead.
@@ -9471,6 +8927,248 @@ async function proposeNext(m, step) {
 			nextBusyKey.value = "";
 	}
 }
+
+// The buttons of a server draft card and its form. Create is the Confirm button's handler and
+// Cancel the Discard button's, each with the item's busyKind set around it
+// (lib/toolDraftHost.withBusyKind) so the card shows its working state and ignores a second
+// press. Every reply, a refusal, an already-decided card and a thrown error are handled by
+// confirmPending / discardPending. Edit and Preview build the form's model (lib/toolDraftHost
+// openToolDraftPanel / openToolPreview: build, snapshot, guard, then show); Save, Discard and
+// the dead-token rule of the form are in the same file.
+async function createToolDraft(pa) {
+	const started = await withBusyKind(pa, "create", confirmPending);
+	// A Create that spends the card without a receipt (State S10: the record changed after the
+	// draft was made) takes the card off the list and toasts the reason; the decided row, which
+	// carries the "Not saved ..." receipt, is only loaded by a reload. confirmPending stays as it is.
+	if (
+		started &&
+		receiptReloadNeeded({
+			token: pa.token,
+			conversation: pa.conversation,
+			currentConversation: currentId.value,
+			items: pendingActions.value,
+			rows: messages.value,
+		})
+	)
+		await loadConversation(pa.conversation);
+}
+const toolDraftBuilding = ref("");
+// The preview of a server draft card: { token, model } (the model's calculated cells are the card's).
+const toolPreview = ref(null);
+const toolPreviewItem = computed(() =>
+	toolPreview.value
+		? pendingActions.value.find((x) => x.token === toolPreview.value.token)
+		: undefined
+);
+// A preview holds no edits: it closes when its card goes (confirmed, discarded, replaced, chat switched).
+watch(
+	() => !!toolPreview.value && !toolPreviewItem.value,
+	(gone) => {
+		if (gone) toolPreview.value = null;
+	}
+);
+// The open form of a server draft card whose card is no longer pending: the banner, Save off,
+// the fields stay (never closed or rebuilt silently).
+const draftPanelDead = computed(() =>
+	toolPanelDead(draftPanel.value, visiblePendingActions.value)
+);
+const toolNotices = computed(() => toolPanelNotices(draftPanel.value, draftPanelDead.value));
+// The footer of the form of a server draft: the primary's words and which buttons are off
+// (lib/toolDraftSheet.js, shared with the phone's sheet).
+const toolFoot = computed(() =>
+	toolFooterState(draftPanel.value, {
+		dead: draftPanelDead.value,
+		streaming: convStreaming.value,
+	})
+);
+// What the lib doors need from this view.
+const toolDeps = {
+	find: (token, conversation) =>
+		pendingActions.value.find((x) => x.token === token && x.conversation === conversation),
+	capture: captureChatView,
+	pendingCurrent: pendingActionIsCurrent,
+	chatCurrent: chatViewIsCurrent,
+	panel: () => draftPanel.value,
+	setPanel: (model) => {
+		draftPanel.value = model;
+	},
+	closePanel: () => closeDraftPanel(),
+	build: (action) => buildDraftModel(action),
+	autoOpen: (model) => applyAutoOpen(model, null),
+	building: () => toolDraftBuilding.value,
+	setBuilding: (token) => {
+		toolDraftBuilding.value = token;
+	},
+	setPreview: (preview) => {
+		toolPreview.value = preview;
+	},
+	notify: (text, opts) => notify(text, opts),
+	warn: (...args) => console.warn(...args),
+	streaming: () => convStreaming.value,
+	inflight: inflightTokens,
+	removePending: (token) => removePending(token),
+	reload: (conversation) => loadConversation(conversation),
+	refreshChats: () => store.loadConversations(),
+	showQueued: (r) => showQueuedContinuation(r),
+	save: (token, conversation, values) => api.saveDraftCard(token, conversation, values),
+	agent: () => brand.agentName,
+	thrown: (e, fallback) => thrownActionError(e, fallback),
+	metaFields: (doctype) => (_formMetaCache[doctype] || {}).fields,
+	afterMarks: (mark) => nextTick(() => focusFirstMark(draftPanelEl.value, mark)),
+	create: (pa) => createToolDraft(pa),
+	discard: (pa) => withBusyKind(pa, "cancel", discardPending),
+};
+function cancelToolDraft(pa) {
+	return cancelToolItem(pa, toolDeps);
+}
+async function openToolDraft(pa) {
+	rememberToolOpener(pa, "Edit");
+	const result = await openToolDraftPanel(pa, toolDeps);
+	if (result === "failed") focusAfterFailedOpen();
+	return result;
+}
+function previewToolDraft(pa) {
+	rememberToolOpener(pa, "Preview");
+	return openToolPreview(pa, toolDeps);
+}
+function saveToolDraft(panel = draftPanel.value) {
+	return saveToolPanel(panel, toolDeps);
+}
+function discardToolPanel(panel = draftPanel.value) {
+	return discardFromForm(panel, toolDeps);
+}
+function onToolPreviewConfirm() {
+	const pa = toolPreviewItem.value;
+	toolPreview.value = null;
+	if (pa) createToolDraft(pa);
+}
+function onToolPreviewEdit() {
+	const pa = toolPreviewItem.value;
+	toolPreview.value = null;
+	if (pa) openToolDraft(pa);
+}
+
+// ---- the keyboard, focus and upkeep of the panels of a server draft card -------------------
+// (lib/toolDraftKeys; the typed edit panel and the typed Preview are not touched.)
+const toolPreviewRef = ref(null);
+const toolPreviewPanel = () =>
+	(toolPreviewRef.value && toolPreviewRef.value.$el && toolPreviewRef.value.$el.querySelector
+		? toolPreviewRef.value.$el.querySelector(".dp-panel")
+		: null) || document.querySelector(".dp-panel");
+const toolFormOpen = computed(() => !!draftPanel.value && !!draftPanel.value.tool);
+
+// Escape closes an open Link menu first, then the Preview and a clean form; a form with edits stays (as a click on the
+// backdrop does) and takes focus back. Tab stays inside the open panel. A key something inside
+// the panel already took (a link menu, a row form) or an open dialog is left alone.
+function onToolPanelKey(e) {
+	if (!toolPreview.value && !toolFormOpen.value) return;
+	if (e.key === "Tab") {
+		if (e.defaultPrevented || e.isComposing || store.settingsOpen || modalIsOpen(document))
+			return;
+		const root = toolPreview.value ? toolPreviewPanel() : draftPanelEl.value;
+		const to = tabWrapTarget(root, document.activeElement, e.shiftKey);
+		if (to) {
+			e.preventDefault();
+			to.focus();
+		}
+		return;
+	}
+	const action = toolPanelKeyAction({
+		key: e.key,
+		defaultPrevented: e.defaultPrevented,
+		composing: e.isComposing || e.keyCode === 229,
+		dialogOpen: !!store.settingsOpen || modalIsOpen(document),
+		preview: !!toolPreview.value,
+		form: toolFormOpen.value,
+		dirty: toolFormOpen.value && draftIsDirty(draftPanel.value),
+		linkMenu: !toolPreview.value && draftLink.value.open && draftLink.value.items.length > 0,
+	});
+	if (!action) return;
+	e.preventDefault();
+	// closeDraftLink is the blur handler (it keeps the menu while its input has focus), so the menu
+	// is closed the way the panel's own @link-close does
+	if (action === "close-menu") draftLink.value = { ...draftLink.value, open: false };
+	else if (action === "close-preview") toolPreview.value = null;
+	else if (action === "close-form") closeDraftPanel();
+	else if (draftPanelEl.value) draftPanelEl.value.focus();
+}
+onMounted(() => window.addEventListener("keydown", onToolPanelKey));
+onBeforeUnmount(() => window.removeEventListener("keydown", onToolPanelKey));
+
+// Focus goes into a panel when it opens (the form: its first editable field; the Preview: its first
+// control) and back to the card button that opened it when it closes, or to the composer when
+// the card is gone or its button cannot take focus.
+let toolOpener = null;
+function rememberToolOpener(pa, label) {
+	toolOpener = { token: pa.token, conversation: pa.conversation, label };
+}
+watch(
+	() => (toolFormOpen.value ? draftPanel.value.token : ""),
+	async (token) => {
+		if (!token) return;
+		await nextTick();
+		const el = firstEditable(draftPanelEl.value);
+		if (el && typeof el.focus === "function") el.focus({ preventScroll: true });
+	}
+);
+watch(
+	() => (toolPreview.value ? toolPreview.value.token : ""),
+	async (token) => {
+		if (!token) return;
+		await nextTick();
+		const el = tabWrapTarget(toolPreviewPanel(), null, false);
+		if (el) el.focus({ preventScroll: true });
+	}
+);
+watch(
+	[toolFormOpen, () => !!toolPreview.value],
+	async ([form, preview], [wasForm, wasPreview]) => {
+		if (!((wasForm && !form) || (wasPreview && !preview))) return;
+		// the panel that closed is about to be replaced by another (Preview, then its Edit): leave focus to it
+		if (form || preview || toolDraftBuilding.value) return;
+		const opener = toolOpener;
+		await nextTick();
+		returnToolFocus(opener);
+	}
+);
+// Back to the card button that opened a panel, else the composer. Nothing moves while another
+// panel is open or building.
+function returnToolFocus(opener) {
+	if (toolFormOpen.value || toolPreview.value || toolDraftBuilding.value) return;
+	if (!opener || opener.conversation !== currentId.value) return;
+	const button = openerButton(document, opener.token, opener.label);
+	if (button) button.focus();
+	else composerRef.value?.focusInput?.();
+}
+// The form could not be built (a Preview that led to Edit has already closed): the focus watcher
+// skipped its return while the build ran, so it goes back here.
+function focusAfterFailedOpen() {
+	return returnToolFocus(toolOpener);
+}
+
+// While the form is open its card can be replaced, confirmed or cancelled elsewhere: the pending
+// list is re-read every few seconds, so the dead-draft banner shows without waiting for a focus
+// event. Nothing is polled while no form is open.
+let _toolFormPoll = null;
+function stopToolFormPoll() {
+	if (_toolFormPoll) clearInterval(_toolFormPoll);
+	_toolFormPoll = null;
+}
+watch(
+	() => (toolFormOpen.value ? draftPanel.value.token : ""),
+	(token) => {
+		stopToolFormPoll();
+		if (!token) return;
+		_toolFormPoll = setInterval(() => {
+			if (currentId.value) resyncPendingConfirmations(currentId.value, "auto");
+		}, TOOL_FORM_POLL_MS);
+	}
+);
+onBeforeUnmount(stopToolFormPoll);
+
+// The cells the card shows and the draft left blank (Hrs on a Timesheet) follow the person's edits:
+// blank while their row is edited, the card's number while it is as drafted (see settleCalculatedCells).
+watchCalculatedCells(watch, () => draftPanel.value);
 
 // Resync (R3 fix for #3): re-fetch the current conversation's live parked
 // confirmations so a reload / reconnect re-surfaces the cards that a realtime
@@ -9774,6 +9472,53 @@ function showCopied(id) {
 	_copyTimer = setTimeout(() => {
 		copiedId.value = "";
 	}, 1300);
+}
+// aerele/jarvis#2191: Reply, offered on text selected in a reply, shows that text as a
+// quote card in the composer (WhatsApp / Claude style); the message carries it as a
+// leading Markdown blockquote, so the agent gets the exact text and the history keeps
+// it, and the user bubble draws it as a quote. A new Reply replaces an unsent quote.
+// Read aloud reads the selection; a floating Stop reading chip stops it.
+// Computed: read lazily, after `reader` below exists.
+const selectionActions = computed(() => [
+	{ key: "reply", label: "Reply" },
+	...(reader.supported ? [{ key: "read", label: "Read aloud" }] : []),
+]);
+function onSelectionAction(key, text) {
+	if (key === "reply") replyWith(text);
+	else if (key === "read") reader.speak("selection", text);
+}
+// The quote the next message replies to: shown as a card in the composer (ReplyQuote),
+// sent as a leading Markdown blockquote. Cleared on send, on its close button and on a
+// chat switch.
+const replyQuote = ref("");
+watch(currentId, () => (replyQuote.value = ""));
+// Read aloud, under each reply: the browser's own voice (shared/read_aloud.mjs); no
+// button where the browser has none. One reading at a time; it stops on a chat switch,
+// on leaving and on Escape.
+const reader = createReader(window);
+const speakingId = ref(null);
+reader.subscribe((id) => (speakingId.value = id));
+watch(currentId, () => reader.stop());
+onBeforeUnmount(() => reader.stop());
+function stopReadingOnEscape(e) {
+	if (e.key === "Escape" && speakingId.value) reader.stop();
+}
+document.addEventListener("keydown", stopReadingOnEscape);
+onBeforeUnmount(() => document.removeEventListener("keydown", stopReadingOnEscape));
+// The reply as it reads on screen (tables, lists and links as text, no Markdown).
+function replyBodyText(e) {
+	const body = e?.currentTarget?.closest?.(".jv-amsg")?.querySelector?.(".jv-md-body");
+	return body ? body.innerText : "";
+}
+function replyWith(text) {
+	const quote = cleanQuote(text);
+	if (!quote) return;
+	replyQuote.value = quote;
+	nextTick(() => composerRef.value?.focusInput?.());
+}
+function clearReplyQuote(focus = false) {
+	replyQuote.value = "";
+	if (focus) nextTick(() => composerRef.value?.focusInput?.());
 }
 function editCommand(m) {
 	if (!messageActionIsCurrent(captureChatView(m?.name || ""))) return;
@@ -12141,7 +11886,7 @@ async function send(textArg, resendAck) {
 	)
 		return;
 	const fromMain = !retryBubble && typeof textArg !== "string";
-	const text = retryBubble
+	let text = retryBubble
 		? retryBubble.sendRequest.text
 		: (fromMain ? input.value : textArg).trim();
 	const compactCmd = parseCompactCommand(text);
@@ -12215,6 +11960,10 @@ async function send(textArg, resendAck) {
 		? pendingFiles.value.slice()
 		: [];
 	if ((!text && !attachments.length) || sending.value) return;
+	// aerele/jarvis#2191: a Reply's quote rides in front of the typed question (only a
+	// main-composer message with words of its own; the history keeps just the question).
+	const typedText = text;
+	if (fromMain && text && replyQuote.value) text = quoteMarkdown(replyQuote.value) + text;
 	// canSend already darkens the Send button, but Enter routes here directly (onKey
 	// preventDefaults and calls send()), and a programmatic send never sees the button
 	// at all. With no model connected the turn can only fail at the agent, so refuse it
@@ -12231,8 +11980,8 @@ async function send(textArg, resendAck) {
 		);
 		return;
 	}
-	if (text && promptHistory.value[promptHistory.value.length - 1] !== text) {
-		promptHistory.value.push(text); // for Up/Down recall
+	if (typedText && promptHistory.value[promptHistory.value.length - 1] !== typedText) {
+		promptHistory.value.push(typedText); // for Up/Down recall
 	}
 	histIdx.value = null;
 	histDraft.value = "";
@@ -12245,6 +11994,7 @@ async function send(textArg, resendAck) {
 	}
 	if (fromMain) {
 		input.value = "";
+		replyQuote.value = "";
 		pendingFiles.value = [];
 		failedUploads.value = [];
 		mention.value = { ...mention.value, open: false };
@@ -15272,6 +15022,31 @@ onUnmounted(() => {
 	font-size: 11px;
 	color: var(--text-3);
 }
+/* aerele/jarvis#2191: the reply being read keeps its bar (and Stop) in view. */
+.jv-msgbtn-on {
+	color: var(--cta) !important;
+}
+:deep(.jv-msgbar:has(.jv-msgbtn-on)) {
+	opacity: 1 !important;
+}
+.jv-readstop {
+	position: fixed;
+	left: 50%;
+	bottom: 132px;
+	transform: translateX(-50%);
+	z-index: 60;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 12px;
+	font-size: 13px;
+	color: var(--text);
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: 999px;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+	cursor: pointer;
+}
 .jv-metabar {
 	display: flex;
 	align-items: center;
@@ -18031,6 +17806,7 @@ onUnmounted(() => {
 }
 .jv-action-foot {
 	display: flex;
+	flex-wrap: wrap;
 	align-items: center;
 	gap: 8px;
 	padding: 11px 14px;
@@ -18042,9 +17818,14 @@ onUnmounted(() => {
 	align-items: center;
 	gap: 7px;
 	font-family: inherit;
+	height: 28px;
+	padding: 0 10px;
+	justify-content: center;
 	font-size: 13px;
-	font-weight: 600;
-	padding: 8px 14px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	flex: 0 0 auto;
 	border-radius: 8px;
 	cursor: pointer;
 	background: var(--cta);
@@ -18066,9 +17847,14 @@ onUnmounted(() => {
 	align-items: center;
 	gap: 7px;
 	font-family: inherit;
+	height: 28px;
+	padding: 0 10px;
+	justify-content: center;
 	font-size: 13px;
-	font-weight: 550;
-	padding: 8px 13px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	flex: 0 0 auto;
 	border-radius: 8px;
 	cursor: pointer;
 	background: var(--amber-bg);
@@ -18085,9 +17871,14 @@ onUnmounted(() => {
 	align-items: center;
 	gap: 7px;
 	font-family: inherit;
+	height: 28px;
+	padding: 0 10px;
+	justify-content: center;
 	font-size: 13px;
-	font-weight: 550;
-	padding: 8px 13px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	flex: 0 0 auto;
 	border-radius: 8px;
 	cursor: pointer;
 	background: var(--surface);
@@ -18184,9 +17975,14 @@ onUnmounted(() => {
 	align-items: center;
 	gap: 6px;
 	font-family: inherit;
-	font-size: 12.5px;
-	font-weight: 600;
-	padding: 8px 13px;
+	height: 28px;
+	padding: 0 10px;
+	justify-content: center;
+	font-size: 13px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	flex: 0 0 auto;
 	border-radius: 8px;
 	border: 1px solid var(--red-bd);
 	background: var(--red-bg);
@@ -18206,6 +18002,40 @@ onUnmounted(() => {
    marks a write parked awaiting the owner's Confirm click. */
 .jv-pending {
 	border-color: var(--amber);
+}
+/* A server draft card sits in the thread exactly like the confirmation card above: the card's
+   own 12px margins give way to the wrapper's 12px top margin (the flex gap supplies the rest),
+   so it is 12px + gap above and the gap alone below, as a .jv-action is. */
+.jv-tool-draft {
+	margin-top: 12px;
+}
+/* The stack's typed-approval hint, when its last card is a draft card with no line for it. The look of
+   .jv-pending-older-note. */
+.jv-stack-hint {
+	margin: 4px 14px 8px;
+	font-size: 12px;
+	color: var(--text-3);
+}
+/* Where an assistant reply's text starts in the thread: the 28px HolidayMark plus the 12px gap
+   of Message.vue's row. ChatView.toolDraft.spec.js ties this number to those two. */
+.jv-thread-inner {
+	--jv-reply-indent: 40px;
+}
+/* Every agent-side card and note that is a direct child of the thread starts where the replies
+   do, not under the avatar: the receipts, the "didn't run" tile, the pending cards, the draft
+   card, the File Box and report cards. The child combinator keeps the same components (the
+   receipt in the shared read-only chat, the File Box card on the Approval Board) full width
+   elsewhere. Only the left edge moves: the thread is a stretching column, so the right edge
+   stays. User bubbles, day dividers and the full-width banners are not listed on purpose. */
+.jv-thread-inner > :is(.jv-receipt, .jv-toolfail, .jv-action, .jv-tool-draft, .jv-fbw, .jv-rrc) {
+	margin-left: var(--jv-reply-indent);
+}
+/* The two lines that already carry a 14px left margin keep it on top of the indent. */
+.jv-thread-inner > :is(.jv-stack-hint, .jv-pending-older-note) {
+	margin-left: calc(var(--jv-reply-indent) + 14px);
+}
+.jv-tool-draft :deep(.dc) {
+	margin: 0;
 }
 .jv-safety-update {
 	border-color: var(--border-2);
@@ -18526,91 +18356,6 @@ onUnmounted(() => {
 	padding: 3px 9px;
 	margin-left: 8px;
 }
-.jv-draft-body {
-	flex: 1;
-	overflow-y: auto;
-	padding: 14px 16px;
-	display: flex;
-	flex-direction: column;
-	gap: 14px;
-}
-.jv-draft-toast {
-	font-size: 12px;
-	color: var(--cta);
-	background: var(--cta-bg);
-	border: 1px solid var(--cta-bd);
-	border-radius: 8px;
-	padding: 7px 11px;
-}
-.jv-draft-fields {
-	display: grid;
-	grid-template-columns: 1fr 1fr;
-	gap: 10px 12px;
-}
-.jv-draft-fld label {
-	display: block;
-	font-size: 10.5px;
-	font-weight: 650;
-	letter-spacing: 0.06em;
-	text-transform: uppercase;
-	color: var(--text-3);
-	margin-bottom: 4px;
-}
-.jv-draft-fld .jv-req {
-	color: var(--red);
-}
-.jv-draft-fld.missing .jv-action-input {
-	border-color: var(--amber-bd);
-}
-/* a value the save refused (a bad option or link): marked until the next save */
-.jv-draft-fld.invalid .jv-action-input {
-	border-color: var(--red);
-}
-.jv-draft-fld.changed .jv-action-input {
-	border-color: var(--cta-bd);
-	background: var(--cta-bg);
-}
-.jv-draft-ctl {
-	position: relative;
-}
-/* A read_only main field is shown, not editable: a muted static value (mirrors the
-   child-grid jv-grid-ro treatment) so the user can't type into a field the confirm
-   would discard. A proposed read_only value still shows here for review. */
-.jv-draft-ro {
-	display: inline-block;
-	padding: 4px 0;
-	color: var(--text-2);
-	word-break: break-word;
-}
-.jv-rows-changed {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: 6px 10px;
-	padding: 6px 10px;
-	margin-bottom: 6px;
-	border-radius: 6px;
-	border: 1px solid var(--cta-bd);
-	background: var(--cta-bg);
-	color: var(--cta);
-	font-size: 12.5px;
-	overflow-wrap: anywhere;
-}
-.jv-rows-changed-open {
-	background: none;
-	border: 1px solid var(--cta-bd);
-	border-radius: 7px;
-	color: var(--cta);
-	font-weight: 600;
-	font-size: 12.5px;
-	cursor: pointer;
-	padding: 2px 10px;
-	min-height: 32px;
-}
-.jv-rows-changed-open:focus-visible {
-	outline: 2px solid var(--cta);
-	outline-offset: 1px;
-}
 .jv-rows-removed {
 	padding: 6px 10px;
 	margin-bottom: 6px;
@@ -18620,225 +18365,6 @@ onUnmounted(() => {
 	color: var(--red);
 	font-size: 12px;
 }
-.jv-draft-table-title {
-	font-size: 12px;
-	font-weight: 650;
-	color: var(--text-2);
-	margin-bottom: 6px;
-}
-.jv-draft-gridwrap {
-	overflow-x: auto;
-	border: 1px solid var(--border);
-	border-radius: 9px;
-}
-.jv-grid {
-	width: 100%;
-	border-collapse: collapse;
-	font-size: 13px;
-}
-.jv-grid th {
-	font-size: 10.5px;
-	font-weight: 650;
-	letter-spacing: 0.05em;
-	text-transform: uppercase;
-	color: var(--text-3);
-	text-align: left;
-	padding: 7px 8px;
-	border-bottom: 1px solid var(--border-2);
-	background: var(--surface-1);
-}
-.jv-grid td {
-	padding: 5px 6px;
-	border-bottom: 1px solid var(--border);
-	position: relative;
-	min-width: 90px;
-}
-/* An open row (DraftRowBlock in place): one cell across the whole row, its card pinned
-   to the left at the scroller's visible width (the gridwrap is an inline-size
-   container), so it fits the panel however far the grid is scrolled sideways. */
-.jv-draft-gridwrap {
-	container-type: inline-size;
-}
-.jv-grid td.jv-grid-opencell {
-	padding: 0;
-	min-width: 0;
-	background: var(--surface);
-}
-.jv-grid-opencell > :deep(.jv-rowform-block) {
-	position: sticky;
-	left: 0;
-	width: 100cqi;
-	box-sizing: border-box;
-}
-.jv-grid td .jv-action-input {
-	width: 100%;
-	box-sizing: border-box;
-}
-.jv-grid-ro {
-	color: var(--text-3);
-}
-.jv-grid-x {
-	width: 1%;
-	white-space: nowrap;
-	min-width: 0 !important;
-}
-/* The leading cell: row number + the row-form toggle, first in the row so they are on
-   screen at scrollLeft 0 on a phone without sticky CSS. At most 96px; the extra
-   specificity beats `.jv-grid td { min-width: 90px }`. The badges wrap under the arrow
-   rather than widening it. */
-.jv-grid td.jv-grid-lead,
-.jv-grid th.jv-grid-lead {
-	width: 96px;
-	max-width: 96px;
-	min-width: 0;
-	box-sizing: border-box;
-}
-.jv-grid th.jv-grid-lead {
-	position: relative; /* anchors the visually-hidden "Row" label */
-}
-/* Inside the cell, not on it: a flex td would leave table layout. */
-.jv-grid-lead-in {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: center;
-	gap: 4px;
-}
-.jv-grid-num {
-	min-width: 1.4em;
-	font-size: 11.5px;
-	font-variant-numeric: tabular-nums;
-	color: var(--text-3);
-}
-.jv-grid-lead .jv-grid-more {
-	flex-wrap: wrap;
-	max-width: 100%;
-	box-sizing: border-box;
-}
-.jv-grid-acts {
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-}
-/* Opens a row's full form (DraftRowForm, below the grid). A ~32px target, kept
-   apart from Remove so a thumb aimed at one does not hit the other. */
-.jv-grid-more,
-.jv-grid-del {
-	min-width: 32px;
-	min-height: 32px;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	gap: 3px;
-}
-.jv-grid-more {
-	background: none;
-	border: 1px solid var(--border);
-	color: var(--text-3);
-	cursor: pointer;
-	padding: 2px 6px;
-	border-radius: 7px;
-}
-.jv-grid-more:hover,
-.jv-grid-more[aria-expanded="true"] {
-	color: var(--cta);
-	background: var(--surface-1);
-}
-.jv-grid-more-warn {
-	border-color: var(--amber-bd);
-}
-.jv-grid-badge {
-	font-size: 10.5px;
-	font-weight: 650;
-	line-height: 16px;
-	min-width: 16px;
-	padding: 0 4px;
-	border-radius: 8px;
-	background: var(--surface-1);
-	color: var(--text-2);
-}
-.jv-grid-badge-warn {
-	background: var(--amber-bg);
-	color: var(--amber);
-}
-.jv-grid-more:focus-visible,
-.jv-grid-del:focus-visible {
-	outline: 2px solid var(--cta);
-	outline-offset: 1px;
-}
-.jv-grid-del {
-	background: none;
-	border: none;
-	color: var(--text-3);
-	cursor: pointer;
-	padding: 4px 6px;
-	border-radius: 6px;
-}
-.jv-grid-del:hover {
-	color: var(--red);
-	background: var(--red-bg);
-}
-.jv-draft-addrow {
-	align-self: flex-start;
-	margin-top: 8px;
-	background: none;
-	border: none;
-	color: var(--cta);
-	font-weight: 600;
-	font-size: 12.5px;
-	cursor: pointer;
-	padding: 4px 2px;
-}
-.jv-draft-totals {
-	display: flex;
-	flex-wrap: wrap;
-	align-items: flex-end;
-	gap: 10px 14px;
-	padding: 12px 14px;
-	border: 1px solid var(--border);
-	border-radius: 10px;
-	background: var(--surface-1);
-}
-.jv-draft-total-fld {
-	display: flex;
-	flex-direction: column;
-	flex: 1 1 130px;
-	min-width: 120px;
-}
-.jv-draft-total-fld label {
-	display: block;
-	font-size: 10.5px;
-	font-weight: 650;
-	letter-spacing: 0.06em;
-	text-transform: uppercase;
-	color: var(--text-3);
-	margin-bottom: 4px;
-}
-.jv-draft-total-ctl {
-	position: relative;
-}
-/* read-only: muted fill, no caret, a lock glyph — clearly not an editable field */
-.jv-draft-total-input {
-	width: 100%;
-	box-sizing: border-box;
-	background: var(--surface-2);
-	color: var(--text);
-	font-weight: 650;
-	font-variant-numeric: tabular-nums;
-	cursor: default;
-	padding-right: 28px;
-}
-.jv-draft-total-input:focus {
-	border-color: var(--border-2);
-	box-shadow: none;
-}
-.jv-draft-total-lock {
-	position: absolute;
-	right: 9px;
-	top: 50%;
-	transform: translateY(-50%);
-	color: var(--text-3);
-	pointer-events: none;
-}
 .jv-draft-parked {
 	padding: 10px 12px;
 	border: 1px solid var(--border);
@@ -18846,28 +18372,13 @@ onUnmounted(() => {
 	color: var(--text-2);
 	font-size: 13px;
 }
-.jv-draft-parked.is-empty {
-	padding: 0;
-	border: 0;
-	margin-top: 0 !important;
-}
-.jv-draft-est {
-	flex-basis: 100%;
-	margin: 0;
-	color: var(--text-3);
-	font-size: 11px;
-}
 .jv-draft-foot {
 	display: flex;
-	gap: 10px;
+	flex-wrap: wrap;
+	gap: 8px;
 	align-items: center;
 	padding: 12px 16px;
 	border-top: 1px solid var(--border);
-}
-@media (max-width: 700px) {
-	.jv-draft-fields {
-		grid-template-columns: 1fr;
-	}
 }
 
 /* artifact preview panel (right side-over) */
