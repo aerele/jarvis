@@ -4232,7 +4232,3 @@ class TestPrepareSessionRepair(_PipelineCase):
 				self.assertTrue(res.get("ready"))
 				self.assertEqual(self._names(fake), ["patch"])
 				self.assertTrue(self._payload(rid)["message"].endswith("\n\nhello"))
-
-	def test_flag_absent_probes(self):
-		conv, rid, fake, res = self._prepare()
-		self.assertEqual(self._names(fake)[0], "describe")

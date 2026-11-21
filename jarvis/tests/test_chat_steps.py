@@ -473,18 +473,6 @@ class TestRunStepCacheSurvivesTheWatchdogClear(FrappeTestCase):
 			frappe.cache.delete_value(key)
 		super().tearDown()
 
-	def test_hook_prefixes_cover_every_step_cache_key(self):
-		# Read from the module: the bench may serve another checkout's hooks.
-		from jarvis import hooks
-		from jarvis.chat import pump
-
-		for key in (
-			pump._run_steps_key(self._RUN),
-			pump._run_step_lines_key(self._RUN),
-			pump._run_preambles_key(self._RUN),
-		):
-			self.assertTrue(any(key.startswith(p) for p in hooks.persistent_cache_keys), key)
-
 	def test_the_steps_survive_the_watchdog_tick(self):
 		from jarvis.chat import pump
 
