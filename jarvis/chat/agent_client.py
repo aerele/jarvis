@@ -1305,6 +1305,21 @@ class AgentSession:
 		)
 		return res.get("payload") or {}
 
+	def artifact_download_url(
+		self, session_key: str, artifact_id: str, *, timeout_s: float = 15
+	) -> str | None:
+		"""``artifacts.download`` for a managed outgoing media artifact: the gateway answers with a
+		short-lived path carrying a ``mediaTicket`` (and its expiry). The ticket is the authority
+		for the HTTP GET, which sends no other credential. None when the answer has no such path."""
+		res = self._request(
+			"artifacts.download",
+			{"sessionKey": session_key, "artifactId": artifact_id},
+			timeout_s=timeout_s,
+		)
+		payload = res.get("payload") or res
+		path = payload.get("url") if isinstance(payload, dict) else None
+		return path if isinstance(path, str) and path.startswith("/api/chat/media/outgoing/") else None
+
 	def get_session_messages(
 		self,
 		session_key: str,

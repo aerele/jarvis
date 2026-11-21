@@ -281,3 +281,92 @@ class TestSeedingIsIdempotent(unittest.TestCase):
 			)
 		self.assertEqual(out, [])
 		fetch.assert_not_called()
+
+
+def _resp(status, ctype="image/png", body=b""):
+	resp = MagicMock(status_code=status, headers={"Content-Type": ctype})
+	resp.iter_content.return_value = [body]
+	resp.__enter__.return_value = resp
+	return resp
+
+
+class TestTicketedMediaOnTheNewGateway(unittest.TestCase):
+	PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 32
+	TICKET = URL + "?mediaTicket=abc"
+
+	def _fetch(self, responses, ticket=TICKET, mime="image/png"):
+		from jarvis.chat import generated_media
+
+		calls = []
+
+		def get(full, headers=None, **kw):
+			calls.append((full, dict(headers or {})))
+			return responses.pop(0)
+
+		with (
+			patch("requests.get", side_effect=get),
+			patch("jarvis.chat.canvas._http_base", return_value="http://gw"),
+			patch.object(generated_media, "_ticket_path", return_value=ticket) as ticket_path,
+			patch.object(generated_media.frappe, "logger"),
+		):
+			out = generated_media.fetch_media_url("http://gw", "tok", URL, mime_type=mime)
+		return out, calls, ticket_path
+
+	def test_a_401_on_the_bearer_falls_back_to_the_ticketed_url_without_a_credential(self):
+		out, calls, ticket_path = self._fetch([_resp(401, "application/json"), _resp(200, body=self.PNG)])
+		self.assertEqual(out, self.PNG)
+		ticket_path.assert_called_once()
+		self.assertEqual(calls[0][1], {"Authorization": "Bearer tok"})
+		self.assertEqual(calls[1], ("http://gw" + self.TICKET, {}))
+
+	def test_a_gateway_that_accepts_the_bearer_never_asks_for_a_ticket(self):
+		out, calls, ticket_path = self._fetch([_resp(200, body=self.PNG)])
+		self.assertEqual(out, self.PNG)
+		ticket_path.assert_not_called()
+		self.assertEqual(len(calls), 1)
+
+	def test_no_ticket_from_the_gateway_means_no_image_and_other_statuses_are_not_retried(self):
+		out, calls, _ = self._fetch([_resp(401, "application/json")], ticket=None)
+		self.assertIsNone(out)
+		out, calls, ticket_path = self._fetch([_resp(404, "text/plain")])
+		self.assertIsNone(out)
+		ticket_path.assert_not_called()
+
+	def test_the_ticket_request_names_the_artifact_by_family_and_decodes_the_session_key(self):
+		from jarvis.chat import agent_session_pool, generated_media
+		from jarvis.chat.agent_client import AgentSession
+
+		session = object.__new__(AgentSession)
+		asked = []
+
+		def request(method, params, timeout_s=None):
+			asked.append((method, params))
+			if params["artifactId"].startswith("artifact_managed_media_"):
+				raise RuntimeError("not a media artifact")
+			return {"payload": {"url": URL + "?mediaTicket=t", "expiresAt": "x"}}
+
+		session._request = request
+
+		class _Ctx:
+			def __enter__(self_inner):
+				return session
+
+			def __exit__(self_inner, *a):
+				return False
+
+		attachment = URL.split("/")[-2]
+		url = URL.replace("jarvis-chat-u-1", "agent%3Amain%3Adashboard%3Au1")
+		with patch.object(agent_session_pool, "checkout", return_value=_Ctx()):
+			path = generated_media._ticket_path("http://gw", url, "video/mp4")
+		self.assertEqual(path, URL + "?mediaTicket=t")
+		self.assertEqual(
+			[a[1]["artifactId"][:23] for a in asked], ["artifact_managed_media_", "artifact_managed_image_"]
+		)
+		self.assertEqual(asked[0][0], "artifacts.download")
+		self.assertEqual(asked[0][1]["sessionKey"], "agent:main:dashboard:u1")
+		self.assertTrue(asked[0][1]["artifactId"].endswith(attachment))
+
+	def test_a_url_that_is_not_a_managed_outgoing_path_gets_no_ticket(self):
+		from jarvis.chat import generated_media
+
+		self.assertIsNone(generated_media._ticket_path("http://gw", "/other/path", "image/png"))

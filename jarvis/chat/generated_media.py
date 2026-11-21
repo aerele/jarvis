@@ -476,6 +476,79 @@ def _media_fetch_failed(url: str, reason: str) -> None:
 	frappe.logger("jarvis").warning("gateway media fetch failed: %s (%s)", _media_url_id(url), reason)
 
 
+_OUTGOING_URL_RE = re.compile(r"^/api/chat/media/outgoing/([^/]+)/([0-9a-f-]{36})/full")
+
+
+def _get_media_bytes(base: str, path: str, headers: dict, url: str, mime_type: str | None):
+	"""One GET of a media path. Returns ``(status, bytes | None)``; the bytes are None for any
+	response that is not an acceptable image/declared-type body (the reason is logged)."""
+	import requests
+
+	try:
+		with requests.get(
+			f"{base}{path}", headers=headers, timeout=15, stream=True, allow_redirects=False
+		) as r:
+			if r.status_code != 200:
+				_media_fetch_failed(url, f"status {r.status_code}")
+				return r.status_code, None
+			ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+			generic = ctype in ("application/octet-stream", "binary/octet-stream", "")
+			declared_image = (mime_type or "").lower().startswith("image/")
+			if not (ctype.startswith("image/") or (mime_type and ctype == mime_type.lower())) and not (
+				generic and declared_image
+			):
+				_media_fetch_failed(url, f"content-type {ctype}")
+				return 200, None
+			buf = bytearray()
+			for chunk in r.iter_content(64 * 1024):
+				buf += chunk
+				if len(buf) > _MAX_MEDIA_URL_BYTES:
+					_media_fetch_failed(url, "too large")
+					return 200, None
+			if generic and not _looks_like_image(bytes(buf[:16])):
+				_media_fetch_failed(url, "generic content-type and not an image")
+				return 200, None
+	except Exception as e:
+		_media_fetch_failed(url, type(e).__name__)
+		return 0, None
+	return 200, bytes(buf) or None
+
+
+def _ticket_path(agent_url: str, url: str, mime_type: str | None) -> str | None:
+	"""A short-lived, ticketed path for a managed outgoing media file.
+
+	Newer gateways (2026.11) no longer serve ``/api/chat/media/outgoing/...`` to a paired device's
+	bearer: the file is requested over the authenticated socket (``artifacts.download``, a read
+	method) and the answer carries a URL with a ``mediaTicket`` that is itself the authority, so
+	the GET sends no credential. The artifact id is ``artifact_managed_image_<attachment id>``
+	for an image and ``artifact_managed_media_<attachment id>`` for audio, video and the rest.
+	None when the url is not a managed outgoing one or the gateway does not answer."""
+	from urllib.parse import unquote
+
+	from jarvis.chat import agent_session_pool
+
+	m = _OUTGOING_URL_RE.match(url or "")
+	if not m:
+		return None
+	session_key, attachment = unquote(m.group(1)), m.group(2)
+	families = (
+		("media", "image") if mime_type and not mime_type.lower().startswith("image/") else ("image", "media")
+	)
+	gateway = (agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
+	try:
+		with agent_session_pool.checkout(gateway) as sess:
+			for family in families:
+				try:
+					path = sess.artifact_download_url(session_key, f"artifact_managed_{family}_{attachment}")
+				except Exception:
+					continue
+				if path:
+					return path
+	except Exception:
+		return None
+	return None
+
+
 def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | None = None) -> bytes | None:
 	"""GET one gateway-attached media block from the tenant's own gateway
 	(binary-safe, redirect-disabled, size-bounded). ``url`` is the RELATIVE
@@ -484,47 +557,24 @@ def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | No
 	response whose content-type is neither ``image/*`` nor the block's own
 	declared ``mime_type`` (the gateway naming one thing and serving another is
 	itself a signal not to trust the body). A generic binary content-type is accepted
-	only for a block that declares an image type, and only when the bytes ARE an image."""
-	import requests
+	only for a block that declares an image type, and only when the bytes ARE an image.
 
+	Auth: the device bearer first (2026.9.3 and earlier serve the route to it). A 401/403 means a
+	newer gateway: ask for a ticketed URL over the socket (``_ticket_path``) and GET that."""
 	from jarvis.chat.canvas import _http_base
 
 	base = _http_base(agent_url)
 	if not base or not token:
 		_media_fetch_failed(url, "no gateway address or token")
 		return None
-	try:
-		with requests.get(
-			f"{base}{url}",
-			headers={"Authorization": f"Bearer {token}"},
-			timeout=15,
-			stream=True,
-			allow_redirects=False,
-		) as r:
-			if r.status_code != 200:
-				_media_fetch_failed(url, f"status {r.status_code}")
-				return None
-			ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-			generic = ctype in ("application/octet-stream", "binary/octet-stream", "")
-			declared_image = (mime_type or "").lower().startswith("image/")
-			if not (ctype.startswith("image/") or (mime_type and ctype == mime_type.lower())) and not (
-				generic and declared_image
-			):
-				_media_fetch_failed(url, f"content-type {ctype}")
-				return None
-			buf = bytearray()
-			for chunk in r.iter_content(64 * 1024):
-				buf += chunk
-				if len(buf) > _MAX_MEDIA_URL_BYTES:
-					_media_fetch_failed(url, "too large")
-					return None
-			if generic and not _looks_like_image(bytes(buf[:16])):
-				_media_fetch_failed(url, "generic content-type and not an image")
-				return None
-	except Exception as e:
-		_media_fetch_failed(url, type(e).__name__)
+	status, body = _get_media_bytes(base, url, {"Authorization": f"Bearer {token}"}, url, mime_type)
+	if body is not None or status not in (401, 403):
+		return body
+	ticketed = _ticket_path(agent_url, url, mime_type)
+	if not ticketed:
+		_media_fetch_failed(url, "no ticketed url from the gateway")
 		return None
-	return bytes(buf) or None
+	return _get_media_bytes(base, ticketed, {}, url, mime_type)[1]
 
 
 def _media_url_filename(url: str, mime_type: str | None) -> str:
