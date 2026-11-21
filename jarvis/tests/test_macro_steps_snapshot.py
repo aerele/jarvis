@@ -432,6 +432,7 @@ class TestARunWithoutASnapshot(SnapshotBase):
 		sent.assert_not_called()
 		row = self._run(run)
 		self.assertEqual((row.status, row.error), ("failed", macros._MACRO_CHANGED_ERROR))
+		self.assertEqual(frappe.db.get_value(RUN, run, "capacity_attempts"), 0)
 
 	def _unreadable(self, run):
 		frappe.db.set_value(RUN, run, FIELD, "{not json", update_modified=False)
