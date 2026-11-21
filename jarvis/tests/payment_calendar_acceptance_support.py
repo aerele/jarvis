@@ -17,7 +17,6 @@ import time
 import traceback
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
 
 import frappe
 from frappe.model.meta import get_field_precision
@@ -26,15 +25,13 @@ from frappe.utils import add_days, add_months, flt, get_first_day, get_last_day
 from pypika.functions import Cast
 
 from jarvis.payment_calendar import builtin_reader
-from jarvis.payment_calendar import sources as today_sources
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable, ReaderFallback
-from jarvis.tests.payment_calendar_differential import _canonical, _ids
+from jarvis.payment_calendar.shadow import canonical, canonical_ids, today_unguarded
 from jarvis.tests.payment_calendar_fixtures import is_calendar_test_site
 
 TEST_SITE = "test_jarvis"
 PLAYGROUND_SITE = "jarvis_playground.localhost"
 SIDES = ("Receivable", "Payable")
-LIFTED = 10**12
 REPO = Path(__file__).resolve().parents[2]
 ROW_IDENTITY = ("voucher_type", "voucher_no", "party", "account", "term", "due_date")
 EXCLUDED_IDENTITY = ("voucher_type", "voucher_no", "party_type", "party")
@@ -230,12 +227,8 @@ def attempt(function, *args, **kwargs):
 
 
 def today_lifted(*args):
-	"""Today's read with its size guards lifted: the oracle of the reader at any company size."""
-	with (
-		patch.object(today_sources, "MAX_VOUCHERS", LIFTED),
-		patch.object(today_sources, "MAX_LEDGER_ROWS", LIFTED),
-	):
-		return today_sources.read_obligations(*args)
+	"""Today's read with its size guards lifted: the oracle of the reader at any company size. The shadow's lift."""
+	return today_unguarded(*args)
 
 
 def error_label(error) -> str:
@@ -270,7 +263,7 @@ def compare_reads(reader, today) -> dict:
 	found = result_diff(result, expected)
 	found["outcome"] = "compared"
 	found["ids"] = "equal"
-	if found["diffs"] == 0 and _ids(result) != _ids(expected):
+	if found["diffs"] == 0 and canonical_ids(result) != canonical_ids(expected):
 		# An id is a position in the whole result: an id difference counts as a difference, like a row's.
 		found["ids"] = "differ"
 		found["diffs"] += 1
@@ -290,7 +283,7 @@ def result_diff(result: dict, expected: dict) -> dict:
 		found = _section_diff(result.get(section, []), expected.get(section, []), identity)
 		details[section] = found
 		diffs += len(found["missing"]) + len(found["extra"]) + len(found["changed"])
-	if diffs == 0 and _canonical(result) != _canonical(expected):
+	if diffs == 0 and canonical(result) != canonical(expected):
 		details["unclassified"] = True
 		diffs = 1
 	return {"diffs": diffs, "details": details}

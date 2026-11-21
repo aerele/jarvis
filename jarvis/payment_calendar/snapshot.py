@@ -7,11 +7,12 @@ from time import monotonic
 
 import frappe
 
+from jarvis.payment_calendar import read_log, routing
 from jarvis.payment_calendar import sources as obligation_sources
 from jarvis.payment_calendar.access import authorize_scope
 from jarvis.payment_calendar.banks import read_bank_balances
 from jarvis.payment_calendar.compatibility import source_profile
-from jarvis.payment_calendar.errors import CalendarSourceUnavailable
+from jarvis.payment_calendar.errors import TIMEOUTS, CalendarSourceUnavailable
 from jarvis.payment_calendar.projection import horizon_summary, project_snapshot
 from jarvis.payment_calendar.sources import read_obligations
 from jarvis.payment_calendar.store import RESULT_SCHEMA
@@ -226,8 +227,44 @@ def _horizon(scope, sources, bank, floor, precision):
 
 
 def collect(scope: dict, fingerprint: str) -> dict:
-	"""All financial sources share the fixed view; fresh policy also fences publish."""
-	started, profile = monotonic(), source_profile()
+	"""All financial sources share the fixed view; fresh policy also fences publish.
+
+	The routed sides leave records (`routing.read_side`); they are logged in a `finally` after the view
+	has ended, so a job that then fails still reports, and no log row is written inside the view.
+	"""
+	started, outcomes = monotonic(), []
+	try:
+		return _collect(scope, fingerprint, started, outcomes)
+	finally:
+		_write_outcomes(outcomes, started)
+
+
+def _write_outcomes(outcomes: list[dict], started: float) -> None:
+	"""Stamp the records with the view length and the reader build, then log them. Never raises."""
+	try:
+		view_ms = elapsed_ms(started)
+		build = _reader_build() if any(record.get("routed") for record in outcomes) else None
+		for record in outcomes:
+			record.update(view_ms=view_ms, reader_build=build)
+		read_log.reader_outcomes(outcomes, routing._today())
+	except TIMEOUTS:
+		raise
+	except Exception:
+		frappe.logger("payment_calendar").warning("reader_outcome_unavailable")
+
+
+def _reader_build() -> str | None:
+	"""The build id of the reader code, or None: a failed lookup must not drop the records."""
+	try:
+		return routing.reader_build()[:12]
+	except TIMEOUTS:
+		raise
+	except Exception:
+		return None
+
+
+def _collect(scope: dict, fingerprint: str, started: float, outcomes: list[dict]) -> dict:
+	profile = source_profile()
 	with consistent_read() as hits:
 		cutoff = datetime.now(timezone.utc).isoformat()
 		proof = authorize_scope(scope, expected_fingerprint=fingerprint)
@@ -244,8 +281,16 @@ def collect(scope: dict, fingerprint: str) -> dict:
 				unavailable[side] = "forbidden"
 				continue
 			try:
-				sources[side] = read_obligations(
-					scope["company"], side, scope["anchor"], scope["window_start"], scope["window_end"]
+				# Today's read decides; the router tries the reader only after a `too_large` refusal.
+				sources[side] = routing.read_side(
+					read_obligations,
+					scope["company"],
+					side,
+					scope["anchor"],
+					scope["window_start"],
+					scope["window_end"],
+					started=started,
+					outcomes=outcomes,
 				)
 				if proof["scope_reasons"]:
 					sources[side]["complete_for_company"] = False

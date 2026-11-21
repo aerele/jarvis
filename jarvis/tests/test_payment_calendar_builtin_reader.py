@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from inspect import getsource
 from pathlib import Path
+from time import monotonic, sleep
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -19,7 +20,14 @@ import frappe
 from frappe.utils import add_days, flt, nowdate
 from pypika import Order
 
-from jarvis.payment_calendar import builtin_reader, compatibility, eligibility, snapshot, sources
+from jarvis.payment_calendar import (
+	builtin_reader,
+	compatibility,
+	eligibility,
+	permissions,
+	snapshot,
+	sources,
+)
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable, ReaderFallback
 from jarvis.tests import _erpnext_masters as masters
 from jarvis.tests.payment_calendar_differential import _assert_equal, _canonical
@@ -1588,6 +1596,7 @@ class TestBuiltinReaderLimits(ReaderCase):
 					with self.assertRaises(ReaderFallback) as raised:
 						self.reader_result("Payable")
 				self.assertEqual(raised.exception.reason, "reader_error")
+				self.assertEqual(raised.exception.detail, ("ledger_index_missing",))
 
 	def test_the_composite_ledger_indexes_exist_on_the_test_site(self):
 		for index in builtin_reader.LEDGER_INDEXES:
@@ -1609,6 +1618,7 @@ class TestBuiltinReaderLimits(ReaderCase):
 		with spy, self.assertRaises(ReaderFallback) as raised:
 			builtin_reader.collation_ranks([["a", "b"]], "utf8mb4_bin; DROP TABLE x")
 		self.assertEqual(raised.exception.reason, "reader_error")
+		self.assertEqual(raised.exception.detail, ("unsafe_collation",))
 		self.assertEqual(queries, [])
 		with patch.object(builtin_reader, "_COLLATIONS", {}):
 			with patch.object(frappe.db, "sql", return_value=[("party", "bad name")]):
@@ -1636,6 +1646,16 @@ class TestBuiltinReaderLimits(ReaderCase):
 		with patch.object(frappe, "get_all", return_value=[]), self.assertRaises(ReaderFallback) as raised:
 			report._side_accounts()
 		self.assertEqual(raised.exception.reason, "reader_error")
+		self.assertEqual(raised.exception.detail, ("no_side_accounts",))
+
+	def test_the_multi_account_read_refuses_with_a_detail_off_mariadb(self):
+		report_class = builtin_reader._builtin_class()
+		report = report_class.__new__(report_class)
+		with patch.object(frappe.db, "db_type", "postgres"), self.assertRaises(ReaderFallback) as raised:
+			report._multi_account()
+		self.assertEqual(
+			(raised.exception.reason, raised.exception.detail), ("reader_error", ("not_mariadb",))
+		)
 
 	def test_the_rows_a_missing_key_builds_follow_the_filters(self):
 		"""`_creates_row` mirrors upstream; two of its arms are dead under the engine's fixed filters."""
@@ -2223,6 +2243,354 @@ class TestBuiltinReaderEntry(ReaderCase):
 				self.assertEqual(stats["control"]["passed"], not fails)
 
 
+class TestPinCheckErrors(ReaderCase):
+	"""Any error of the pin check is a pin drift; a lost view is not special (the view's exit check fails the job)."""
+
+	def test_any_failed_statement_in_the_pin_check_is_a_pin_drift(self):
+		for error in (
+			frappe.db.OperationalError(1054, "Unknown column"),
+			frappe.db.OperationalError(2013, "lost"),
+		):
+			with self.subTest(error.args[0]):
+				with patch.object(compatibility, "reader_pin_drift", side_effect=error):
+					with self.assertRaises(ReaderFallback) as raised:
+						builtin_reader.require_supported_source()
+				self.assertEqual(raised.exception.reason, "pin_drift")
+				self.assertIs(raised.exception.__cause__, error)
+
+
+class FakeClock:
+	"""A `monotonic` that moves only when a test says so."""
+
+	def __init__(self, now=0.0):
+		self.now = now
+
+	def __call__(self):
+		return self.now
+
+
+class TestReaderDeadline(ReaderCase):
+	"""The reader's own time limit: a cooperative check that ends in a fallback, never a `TimeoutError`."""
+
+	def entry(self, side, **kwargs):
+		start, end = self.window()
+		return builtin_reader.read_obligations(self.fx.company, side, self.fx.today, start, end, **kwargs)
+
+	def test_a_past_deadline_falls_back_before_the_ledger_control(self):
+		self.invoice("Receivable")
+		self.sync()
+		stats = {}
+		with patch.object(builtin_reader, "ledger_control") as control:
+			with self.assertRaises(ReaderFallback) as raised:
+				self.entry("Receivable", stats=stats, deadline=monotonic() - 1)
+		control.assert_not_called()
+		self.assertEqual(raised.exception.reason, "deadline")
+		self.assertNotIsInstance(raised.exception, TimeoutError)
+		self.assertEqual(raised.exception.refusal_code, "too_large")
+		self.assertEqual(stats["fallback"], "deadline")
+
+	def test_no_deadline_and_a_far_deadline_change_nothing(self):
+		for side in SIDES:
+			with self.subTest(side):
+				self.invoice(side, (100,), paid=30)
+				self.sync()
+				expected = self.today_result(side)
+				for deadline in (None, monotonic() + 3600):
+					with self.subTest(deadline=deadline):
+						actual = self.entry(side, deadline=deadline)
+						_assert_equal(
+							_canonical(actual), _canonical(expected), "the deadline changed the read"
+						)
+						self.assertEqual(
+							[r["id"] for r in actual["rows"]], [r["id"] for r in expected["rows"]]
+						)
+
+	def test_a_deadline_crossed_in_a_phase_stops_at_the_next_timed_step(self):
+		self.invoice("Receivable")
+		self.sync()
+		clock = FakeClock()
+		control = builtin_reader.ledger_control
+
+		def slow_control(*args, **kwargs):
+			result = control(*args, **kwargs)
+			clock.now = 100
+			return result
+
+		report_class = builtin_reader._builtin_class()
+		with (
+			patch.object(builtin_reader, "monotonic", clock),
+			patch.object(builtin_reader, "ledger_control", slow_control),
+			patch.object(report_class, "_discover") as discover,
+			self.assertRaises(ReaderFallback) as raised,
+		):
+			self.entry("Receivable", deadline=50)
+		discover.assert_not_called()
+		self.assertEqual(raised.exception.reason, "deadline")
+
+	def test_a_deadline_crossed_in_the_invoice_line_loop_stops_the_next_chunk(self):
+		for _ in range(3):
+			self.invoice("Receivable", (100,))
+		self.sync()
+		clock, reads = FakeClock(), []
+		report_class = builtin_reader._builtin_class()
+		read = report_class._read
+
+		def counting_read(engine, criterion):
+			reads.append(criterion)
+			result = read(engine, criterion)
+			clock.now = 100
+			return result
+
+		with (
+			patch.object(builtin_reader, "monotonic", clock),
+			patch.object(builtin_reader, "CHUNK", 1),
+			patch.object(report_class, "_read", counting_read),
+			self.assertRaises(ReaderFallback) as raised,
+		):
+			self.entry("Receivable", deadline=50)
+		self.assertEqual(raised.exception.reason, "deadline")
+		self.assertEqual(len(reads), 1, "a chunk was read after the deadline")
+
+	def test_a_deadline_crossed_in_the_invoice_detail_loop_stops_the_next_chunk(self):
+		for _ in range(3):
+			self.invoice("Receivable", (100,))
+		self.sync()
+		clock, details = FakeClock(), []
+		sql = frappe.db.sql
+
+		def spy(query, *args, **kwargs):
+			result = sql(query, *args, **kwargs)
+			if "`po_no`" in str(query) and "`tabSales Invoice`" in str(query):
+				details.append(str(query))
+				clock.now = 100
+			return result
+
+		with (
+			patch.object(builtin_reader, "monotonic", clock),
+			patch.object(builtin_reader, "DETAIL_CHUNK", 1),
+			patch.object(frappe.db, "sql", spy),
+			self.assertRaises(ReaderFallback) as raised,
+		):
+			self.entry("Receivable", deadline=50)
+		self.assertEqual(raised.exception.reason, "deadline")
+		self.assertEqual(len(details), 1, "a detail chunk was read after the deadline")
+
+
+def fake_engine(data=0, excluded=0, terms=0):
+	"""An engine with only what the row cap reads."""
+	return SimpleNamespace(
+		data=[object()] * data,
+		excluded=[object()] * excluded,
+		terms={("k", index): [object()] for index in range(terms)},
+		reader_stats={"counts": {}, "timings_ms": {}},
+	)
+
+
+class TestRowCap(TestCase):
+	def test_the_cap_counts_data_excluded_rows_and_terms_and_is_exclusive(self):
+		engine = fake_engine(data=2, excluded=2, terms=2)
+		with patch.object(builtin_reader, "READER_MAX_ROWS", 6):
+			builtin_reader._check_row_cap(engine)
+		self.assertEqual(engine.reader_stats["counts"]["assemble_rows"], 6)
+		with patch.object(builtin_reader, "READER_MAX_ROWS", 5), self.assertRaises(ReaderFallback) as raised:
+			builtin_reader._check_row_cap(engine)
+		self.assertEqual(raised.exception.reason, "assemble_budget")
+
+	def test_there_is_no_estimator_left(self):
+		for name in (
+			"_check_assemble_budget",
+			"_measured_hook_ms",
+			"HOOKED_CHECK_MS",
+			"PLAIN_CHECK_MS",
+			"HOOK_COST_MARGIN",
+			"CALIBRATION_CHECKS",
+			"CALIBRATION_S",
+		):
+			self.assertFalse(hasattr(builtin_reader, name), name)
+
+
+class TestPermissionDeadline(ReaderCase):
+	"""`sources._assemble` is held to the reader's time inside its per-document permission checks."""
+
+	def entry(self, side="Receivable", **kwargs):
+		start, end = self.window()
+		return builtin_reader.read_obligations(self.fx.company, side, self.fx.today, start, end, **kwargs)
+
+	def setUp(self):
+		super().setUp()
+		for _ in range(3):
+			self.invoice("Receivable", (100,))
+		self.sync()
+		self.set_hooks({"*": ["app.hooks.allow"]})
+
+	def set_hooks(self, hooks):
+		"""The registered has_permission hooks, as the wrapper and `visible_names` both see them."""
+		real = permissions.effective_hooks
+
+		def effective(name, user=None):
+			# Only the has_permission kind is replaced: the scope rule reads the query hooks through the same function.
+			return hooks if name == "has_permission" else real(name, user)
+
+		for target in (builtin_reader, permissions):
+			patcher = patch.object(target, "effective_hooks", effective)
+			patcher.start()
+			self.addCleanup(patcher.stop)
+
+	def test_a_slow_hook_stops_at_the_hard_stop_plus_one_check(self):
+		def slow(*args, **kwargs):
+			sleep(0.05)
+			return True
+
+		stop = 0.3
+		started = monotonic()
+		with (
+			patch("frappe.has_permission", slow),
+			patch.object(builtin_reader, "ASSEMBLE_GRACE_S", stop),
+			self.assertRaises(ReaderFallback) as raised,
+		):
+			# The reader's own deadline is already behind us once its read is done: only the grace is left.
+			self.entry(deadline=started)
+		self.assertEqual(raised.exception.reason, "deadline")
+		self.assertNotIsInstance(raised.exception, TimeoutError)
+		self.assertLess(monotonic() - started, 30, "the whole read is bounded")
+
+	def test_the_stop_is_exact_on_a_fake_clock(self):
+		for _ in range(6):
+			self.invoice("Receivable", (100,))
+		self.sync()
+		clock, calls = FakeClock(48.0), []
+
+		def check(*args, **kwargs):
+			calls.append(clock.now)
+			clock.now += 1.0
+			return True
+
+		with (
+			patch("frappe.has_permission", check),
+			patch.object(builtin_reader, "monotonic", clock),
+			patch.object(builtin_reader, "ASSEMBLE_GRACE_S", 2),
+			self.assertRaises(ReaderFallback) as raised,
+		):
+			self.entry(deadline=50)
+		self.assertEqual(raised.exception.reason, "deadline")
+		# The hard stop is 50 + 2: the checks at 48, 49, 50 and 51 run, the one at 52 is refused.
+		self.assertEqual(calls, [48.0, 49.0, 50.0, 51.0])
+
+	def test_without_a_hook_nothing_is_wrapped(self):
+		seen = []
+		real = sources._assemble
+
+		def spy(*args, **kwargs):
+			seen.append(frappe.has_permission)
+			return real(*args, **kwargs)
+
+		original = frappe.has_permission
+		self.set_hooks({})
+		with patch.object(sources, "_assemble", spy):
+			self.entry(deadline=monotonic() + 60)
+		self.assertEqual(seen, [original], "no wrapper cost without a hook")
+
+	def test_with_a_hook_the_wrapper_is_installed_only_during_assemble_and_removed_after(self):
+		seen = []
+		real = sources._assemble
+
+		def spy(*args, **kwargs):
+			seen.append(frappe.has_permission)
+			return real(*args, **kwargs)
+
+		original = frappe.has_permission
+		with patch.object(sources, "_assemble", spy):
+			self.entry(deadline=monotonic() + 60)
+		self.assertNotEqual(seen[0], original)
+		self.assertIs(frappe.has_permission, original)
+
+	def test_the_wrapper_is_removed_when_the_read_stops(self):
+		original = frappe.has_permission
+		with self.assertRaises(ReaderFallback):
+			self.entry(deadline=monotonic() - 100)
+		self.assertIs(frappe.has_permission, original)
+
+	def test_when_in_time_visible_names_runs_for_every_row_and_the_result_is_todays(self):
+		"""I1: the filter is never skipped while time lasts."""
+		calls = []
+		real = permissions.visible_names
+
+		def spy(doctype, names, filters=None):
+			calls.append((doctype, tuple(sorted(set(names)))))
+			return real(doctype, names, filters)
+
+		expected = self.today_result("Receivable")
+		with patch.object(sources, "visible_names", spy):
+			actual = self.entry(deadline=monotonic() + 60)
+		_assert_equal(_canonical(actual), _canonical(expected), "the deadline wrapper changed the read")
+		vouchers = {row["voucher_no"] for row in actual["rows"]}
+		checked = {name for doctype, names in calls if doctype == "Sales Invoice" for name in names}
+		self.assertLessEqual(vouchers, checked)
+		self.assertTrue(calls)
+
+	def test_a_past_stop_raises_in_the_permission_step_after_the_read_completed(self):
+		real = sources._assemble
+		inside = []
+		clock = FakeClock()
+
+		def spy(*args, **kwargs):
+			inside.append(True)
+			return real(*args, **kwargs)
+
+		# The reader's own steps see a far deadline; only the checks inside `_assemble` see the clock jump.
+		def jump(*args, **kwargs):
+			if inside:
+				clock.now = 10_000
+			return True
+
+		with (
+			patch.object(builtin_reader, "monotonic", clock),
+			patch("frappe.has_permission", jump),
+			patch.object(sources, "_assemble", spy),
+			self.assertRaises(ReaderFallback) as raised,
+		):
+			self.entry(deadline=50)
+		self.assertEqual(raised.exception.reason, "deadline")
+		self.assertTrue(inside, "the read got as far as the permission filter")
+
+
+class TestRowCapInTheRead(ReaderCase):
+	"""The cap sits between the engine and `sources._assemble`."""
+
+	def entry(self, side, **kwargs):
+		start, end = self.window()
+		return builtin_reader.read_obligations(self.fx.company, side, self.fx.today, start, end, **kwargs)
+
+	def test_a_refused_cap_never_reaches_assemble(self):
+		self.invoice("Receivable", (100,))
+		self.sync()
+		stats = {}
+		with (
+			patch.object(builtin_reader, "READER_MAX_ROWS", 0),
+			patch.object(sources, "_assemble", wraps=sources._assemble) as assemble,
+			self.assertRaises(ReaderFallback) as raised,
+		):
+			self.entry("Receivable", stats=stats, deadline=monotonic() + 30)
+		assemble.assert_not_called()
+		self.assertEqual(raised.exception.reason, "assemble_budget")
+		self.assertEqual(stats["fallback"], "assemble_budget")
+
+	def test_within_the_cap_the_read_is_assembled_and_equals_today(self):
+		self.invoice("Receivable", (100,), paid=30)
+		self.sync()
+		expected = self.today_result("Receivable")
+		with patch.object(sources, "_assemble", wraps=sources._assemble) as assemble:
+			actual = self.entry("Receivable", deadline=monotonic() + 30)
+		assemble.assert_called_once()
+		_assert_equal(_canonical(actual), _canonical(expected), "the cap changed the read")
+
+	def test_without_a_deadline_there_is_no_cap(self):
+		self.invoice("Receivable", (100,))
+		self.sync()
+		with patch.object(builtin_reader, "READER_MAX_ROWS", 0):
+			self.assertTrue(self.entry("Receivable")["rows"])
+
+
 class TestReaderTransactions(TestCase):
 	"""Committed fixtures: `consistent_read` rolls back first, so savepoint fixtures would vanish."""
 
@@ -2323,12 +2691,12 @@ class TestReaderInsideCollectView(TestCase):
 		self.assertIsNone(self.contract_failure(builtin_reader.read_obligations))
 
 
-# Names of the modules that must stay unwired in S1.
+# Names of the modules that only the S2 router and the shadow may use (T8 pins the rest of the wiring).
 UNWIRED = ("builtin_reader", "eligibility")
 DOTTED_PATH = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)+")
 
 
-def wiring_references(source: str) -> list[str]:
+def wiring_references(source: str, modules: tuple[str, ...] = UNWIRED) -> list[str]:
 	"""Where `source` imports or names an unwired module: an import, or a dotted-path string.
 
 	A dotted-path string is how hooks.py and `frappe.enqueue` call code without importing it; a docstring or
@@ -2345,11 +2713,45 @@ def wiring_references(source: str) -> list[str]:
 			names = [node.value] if DOTTED_PATH.fullmatch(node.value) else []
 		else:
 			continue
-		found += [name for name in names if set(name.split(".")) & set(UNWIRED)]
+		found += [name for name in names if set(name.split(".")) & set(modules)]
 	return found
 
 
-class TestReaderIsNotWired(TestCase):
+# The payment-calendar modules that carry the S2 wiring; `snapshot` may import `routing` and nothing else of them.
+READER_WIRING = ("routing", "shadow", "builtin_reader", "eligibility")
+
+
+def imported_wiring_modules(source: str) -> set[str]:
+	"""The READER_WIRING modules that `source` imports (not strings: those are how hooks and jobs name code)."""
+	found = set()
+	for node in ast.walk(ast.parse(source)):
+		if isinstance(node, ast.Import):
+			names = [alias.name for alias in node.names]
+		elif isinstance(node, ast.ImportFrom):
+			module = node.module or ""
+			names = [module, *(f"{module}.{alias.name}" for alias in node.names)]
+			if node.level:
+				names += [alias.name for alias in node.names]
+		else:
+			continue
+		found |= {part for name in names for part in name.split(".")} & set(READER_WIRING)
+	return found
+
+
+def scheduler_entries(value) -> list[str]:
+	"""Every string under `scheduler_events` that names a payment-calendar module."""
+	if isinstance(value, str):
+		return [value] if "payment_calendar" in value else []
+	if isinstance(value, dict):
+		value = list(value.values())
+	return (
+		[name for item in value for name in scheduler_entries(item)]
+		if isinstance(value, (list, tuple))
+		else []
+	)
+
+
+class TestReaderCallers(TestCase):
 	def test_no_runtime_module_imports_or_names_the_reader(self):
 		app = Path(builtin_reader.__file__).resolve().parents[1]
 		own = {Path(builtin_reader.__file__).resolve(), Path(eligibility.__file__).resolve()}
@@ -2364,7 +2766,76 @@ class TestReaderIsNotWired(TestCase):
 				offenders[str(path.relative_to(app))] = found
 		self.assertGreater(scanned, 100)
 		self.assertTrue((app / "hooks.py").exists())
-		self.assertEqual(offenders, {})
+		# S2: the router (`routing`) and the shadow are the only modules that name the reader.
+		self.assertEqual(
+			set(offenders) - {"payment_calendar/routing.py", "payment_calendar/shadow.py"}, set()
+		)
+		self.assertIn("payment_calendar/routing.py", offenders)
+
+	def test_only_hooks_names_the_shadow_and_nothing_imports_it(self):
+		app = Path(builtin_reader.__file__).resolve().parents[1]
+		shadow_file = Path(app / "payment_calendar" / "shadow.py").resolve()
+		offenders = {}
+		for path in sorted(app.rglob("*.py")):
+			path = path.resolve()
+			if "tests" in path.relative_to(app).parts or path == shadow_file:
+				continue
+			found = wiring_references(path.read_text(), ("shadow",))
+			if found:
+				offenders[str(path.relative_to(app))] = found
+		self.assertEqual(offenders, {"hooks.py": ["jarvis.payment_calendar.shadow.dispatch"]})
+
+	def test_hooks_run_the_shadow_from_exactly_one_scheduler_entry_and_name_nothing_else_of_the_reader(self):
+		from jarvis import hooks
+
+		source = (Path(hooks.__file__)).read_text()
+		self.assertEqual(wiring_references(source, ("builtin_reader", "eligibility", "routing")), [])
+		self.assertEqual(
+			scheduler_entries(hooks.scheduler_events), ["jarvis.payment_calendar.shadow.dispatch"]
+		)
+		crons = [
+			cron
+			for cron, methods in hooks.scheduler_events["cron"].items()
+			if "jarvis.payment_calendar.shadow.dispatch" in methods
+		]
+		self.assertEqual(crons, ["*/15 2-5 * * *"])
+		self.assertEqual(source.count("payment_calendar.shadow"), 1)
+
+	def test_snapshot_imports_the_router_and_none_of_the_other_wiring(self):
+		app = Path(builtin_reader.__file__).resolve().parents[1]
+		self.assertEqual(
+			imported_wiring_modules((app / "payment_calendar" / "snapshot.py").read_text()), {"routing"}
+		)
+		# The router never imports the shadow: the shadow imports the router.
+		self.assertNotIn(
+			"shadow", imported_wiring_modules((app / "payment_calendar" / "routing.py").read_text())
+		)
+
+	def test_the_import_and_hook_scans_see_each_way_to_wire(self):
+		imports = {
+			"from-import": (
+				"from jarvis.payment_calendar import routing, builtin_reader",
+				{"routing", "builtin_reader"},
+			),
+			"from-module": ("from jarvis.payment_calendar.shadow import dispatch", {"shadow"}),
+			"import": ("import jarvis.payment_calendar.eligibility", {"eligibility"}),
+			"relative": ("from . import builtin_reader", {"builtin_reader"}),
+			"nested": ("def f():\n\tfrom jarvis.payment_calendar import shadow", {"shadow"}),
+			"none": ("from jarvis.payment_calendar import sources", set()),
+		}
+		for label, (source, expected) in imports.items():
+			with self.subTest(label):
+				self.assertEqual(imported_wiring_modules(source), expected)
+		events = {
+			"cron": {
+				"* * * * *": ["jarvis.payment_calendar.shadow.dispatch", "x.y"],
+				"daily": ["jarvis.payment_calendar.other.f"],
+			}
+		}
+		self.assertEqual(
+			scheduler_entries(events),
+			["jarvis.payment_calendar.shadow.dispatch", "jarvis.payment_calendar.other.f"],
+		)
 
 	def test_the_scan_sees_every_way_to_wire_a_module(self):
 		wired = {

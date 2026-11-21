@@ -127,13 +127,18 @@ class TestIneligibilityReasons(TestCase):
 				["permission_hook"],
 			),
 			(
-				"unaudited has_permission hook on Employee",
+				"unaudited has_permission hook on Employee (I1: rows pass visible_names)",
 				{"hooks": {"has_permission": {"Employee": ["app.hooks.narrow"]}}},
-				["permission_hook"],
+				[],
 			),
 			(
-				"unaudited wildcard hook",
+				"unaudited wildcard has_permission hook (I1: rows pass visible_names)",
 				{"hooks": {"has_permission": {"*": ["app.hooks.narrow"]}}},
+				[],
+			),
+			(
+				"unaudited wildcard query hook",
+				{"hooks": {"permission_query_conditions": {"*": ["app.hooks.narrow"]}}},
 				["permission_hook"],
 			),
 			(
@@ -164,8 +169,18 @@ class TestIneligibilityReasons(TestCase):
 				["permission_hook"],
 			),
 			(
-				"audited function registered as the wrong kind",
+				"audited query function registered as the has_permission kind",
 				{"hooks": {"has_permission": {"*": [AUDITED_QUERY]}}},
+				[],
+			),
+			(
+				"audited has_permission hooks with unaudited sources",
+				{"hooks": {"has_permission": {"*": [AUDITED_PERMISSION]}}, "audited_sources_ok": False},
+				[],
+			),
+			(
+				"audited has_permission function registered as the query kind",
+				{"hooks": {"permission_query_conditions": {"*": [AUDITED_PERMISSION]}}},
 				["permission_hook"],
 			),
 			(
@@ -174,8 +189,13 @@ class TestIneligibilityReasons(TestCase):
 				[],
 			),
 			(
-				"hook of an unknown shape",
+				"has_permission hook of an unknown shape",
 				{"hooks": {"has_permission": {"Customer": [1]}}},
+				[],
+			),
+			(
+				"query hook of an unknown shape",
+				{"hooks": {"permission_query_conditions": {"Customer": [1]}}},
 				["permission_hook"],
 			),
 			("hooks of an unknown shape", {"hooks": None}, ["permission_hook"]),
@@ -191,14 +211,22 @@ class TestIneligibilityReasons(TestCase):
 			with self.subTest(label):
 				self.assertEqual(eligibility.ineligibility_reasons(**inputs(**overrides)), expected)
 
-	def test_guarded_doctypes_are_each_checked_for_hooks(self):
+	def test_guarded_doctypes_are_each_checked_for_query_hooks(self):
 		for doctype in eligibility.GUARDED_DOCTYPES:
-			for kind in ("permission_query_conditions", "has_permission"):
-				with self.subTest(doctype=doctype, kind=kind):
-					hooks = {kind: {doctype: ["app.hooks.narrow"]}}
-					self.assertEqual(
-						eligibility.ineligibility_reasons(**inputs(hooks=hooks)), ["permission_hook"]
-					)
+			with self.subTest(doctype=doctype):
+				hooks = {"permission_query_conditions": {doctype: ["app.hooks.narrow"]}}
+				self.assertEqual(
+					eligibility.ineligibility_reasons(**inputs(hooks=hooks)), ["permission_hook"]
+				)
+
+	def test_no_has_permission_hook_makes_a_user_ineligible(self):
+		"""I1: the reader's rows reach a user only through `sources._assemble` -> `visible_names`, which
+		runs every `has_permission` hook in the user's own session. A hook on any doctype is therefore
+		not an eligibility reason (O1 = A)."""
+		for doctype in eligibility.GUARDED_DOCTYPES:
+			with self.subTest(doctype=doctype):
+				hooks = {"has_permission": {doctype: ["app.hooks.narrow"]}}
+				self.assertEqual(eligibility.ineligibility_reasons(**inputs(hooks=hooks)), [])
 
 	def test_the_audited_source_names_are_derived_from_the_audited_hooks(self):
 		every_path = {path for paths in eligibility.AUDITED_HOOKS.values() for path in paths}
@@ -330,11 +358,22 @@ class TestReaderIneligibility(TestCase):
 		frappe.set_user(user)
 		self.assertIn("user_permission", self.reasons())
 
-	def test_a_company_permission_allowing_the_company_is_eligible(self):
+	def test_a_company_permission_allowing_the_company_is_eligible_with_no_report_columns(self):
 		user = self.fx.user()
 		self.permit(user, "Company", self.fx.company)
 		frappe.set_user(user)
 		self.assertEqual(self.reasons(), [])
+
+	def test_a_company_permission_allowing_the_company_is_ineligible_with_the_reports_columns(self):
+		"""By design in S2: the report's Account and Project columns get a Company match filter."""
+		user = self.fx.user()
+		self.permit(user, "Company", self.fx.company)
+		frappe.set_user(user)
+		columns = [
+			{"fieldtype": "Link", "options": "Account"},
+			{"fieldtype": "Link", "options": "Project"},
+		]
+		self.assertEqual(self.reasons(columns), ["column_filter"])
 
 	def test_a_company_permission_for_another_company_is_ineligible(self):
 		user = self.fx.user()
@@ -435,6 +474,57 @@ class TestReaderIneligibility(TestCase):
 	def test_an_error_in_the_rule_table_is_unknown(self):
 		with patch.object(eligibility, "ineligibility_reasons", side_effect=TypeError("boom")):
 			self.assert_unknown(TypeError)
+
+	def hooks_patch(self, **registered):
+		"""`frappe.get_hooks` with the given hook kinds registered, every other call real."""
+		real = frappe.get_hooks
+
+		def get_hooks(kind=None, *args, **kwargs):
+			return registered[kind] if kind in registered else real(kind, *args, **kwargs)
+
+		return patch("frappe.get_hooks", get_hooks)
+
+	def eligible_user(self):
+		"""A non-Administrator whose scope is complete: a Company permission that allows the fixture company."""
+		user = self.fx.user()
+		self.permit(user, "Company", self.fx.company)
+		frappe.set_user(user)
+		self.assertNotEqual(frappe.session.user, "Administrator")
+		self.assertEqual(self.reasons(), [])
+		return user
+
+	def test_an_unaudited_wildcard_has_permission_hook_alone_leaves_a_user_eligible(self):
+		self.eligible_user()
+		with self.hooks_patch(has_permission={"*": ["app.hooks.narrow"]}):
+			self.assertEqual(self.reasons(), [])
+
+	def test_an_unaudited_query_hook_makes_a_user_ineligible(self):
+		self.eligible_user()
+		# The scope rule sees a query hook too, so `incomplete_scope` comes with it.
+		for registered in ({"*": ["app.hooks.narrow"]}, {"Sales Invoice": ["app.hooks.narrow"]}):
+			with self.subTest(registered), self.hooks_patch(permission_query_conditions=registered):
+				self.assertEqual(self.reasons(), ["incomplete_scope", "permission_hook"])
+
+	def test_a_server_script_query_makes_a_non_administrator_ineligible(self):
+		self.eligible_user()
+		with patch.object(
+			eligibility,
+			"get_server_script_map",
+			return_value={"permission_query": {"Sales Invoice": "narrow sales"}},
+		):
+			self.assertEqual(self.reasons(), ["permission_hook"])
+
+	def test_any_failed_statement_in_the_eligibility_reads_is_unknown(self):
+		for failed in (
+			frappe.db.OperationalError(1054, "Unknown column"),
+			frappe.db.OperationalError(2013, "lost"),
+		):
+			with self.subTest(failed.args[0]):
+				with patch("jarvis.payment_calendar.eligibility.get_user_permissions", side_effect=failed):
+					self.assert_unknown(frappe.db.OperationalError)
+				self.pin_drift.side_effect = failed
+				self.assert_unknown(frappe.db.OperationalError)
+				self.pin_drift.side_effect = None
 
 	def test_a_job_deadline_is_not_an_unknown_state(self):
 		from rq.timeouts import JobTimeoutException

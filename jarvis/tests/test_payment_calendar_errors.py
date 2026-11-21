@@ -42,3 +42,9 @@ class TestSafeDetail(TestCase):
 		self.assertEqual(errors.safe_detail(CalendarSourceUnavailable("too_large")), "too_large")
 		self.assertIsNone(errors.safe_detail(frappe.ValidationError("PRIVATE")))
 		self.assertIsNone(errors.safe_detail(CalendarSourceUnavailable("PRIVATE")))
+
+
+class TestNoViewLostHelper(TestCase):
+	def test_a_lost_view_has_no_special_case_in_the_error_module(self):
+		"""`consistent_read`'s exit check fails the job; no re-raise site classifies errors (owner A2)."""
+		self.assertFalse(hasattr(errors, "is_view_lost"))

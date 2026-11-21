@@ -8,17 +8,14 @@ error). Tests that cannot be compared opt out with `@no_oracle_compare(reason)`.
 oracle of the reader). It accepts no difference: the result, the row ids and the row order must all be equal.
 """
 
-import json
 from collections import Counter
-from functools import wraps
 from unittest import TestCase
-from unittest.mock import patch
 
-import frappe
-
-from jarvis.payment_calendar import builtin_reader, compatibility
-from jarvis.payment_calendar import sources as today_sources
+from jarvis.payment_calendar import compatibility
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable, ReaderFallback
+from jarvis.payment_calendar.shadow import LIFTED, lifted_guards
+from jarvis.payment_calendar.shadow import canonical as _canonical
+from jarvis.payment_calendar.shadow import canonical_ids as _ids
 from jarvis.tests.payment_calendar_fixtures import sync_outstanding
 from jarvis.tests.payment_calendar_oracle_1a import oracle_read_obligations
 
@@ -31,7 +28,6 @@ TALLY = {"compared": 0, "refusals": 0, "accepted_changes": 0}
 # refused `too_large`, so the reader was compared with today's read under lifted guards. `fallbacks`: declared
 # fallbacks by reason.
 READER_TALLY = {"compared": 0, "refusals": 0, "lifted": 0, "fallbacks": Counter()}
-LIFTED = 10**12
 
 
 def no_oracle_compare(reason: str):
@@ -86,13 +82,6 @@ def _compare_errors(real_error, oracle_error, frozen, accept_change=True):
 	)
 
 
-def _canonical(result):
-	"""Rows in a fixed order without their ids (an id encodes the pre-sort position); the rest as is."""
-	rows = [{key: value for key, value in row.items() if key != "id"} for row in result["rows"]]
-	rows.sort(key=lambda row: json.dumps(row, sort_keys=True, default=str))
-	return {**result, "rows": rows}
-
-
 def _assert_equal(actual, expected, message):
 	case = TestCase()
 	case.maxDiff = None
@@ -145,10 +134,7 @@ def compare_reader_with_today(reader, today, *, sync=sync_outstanding, expected_
 		too_large = isinstance(today_error, CalendarSourceUnavailable) and today_error.code == "too_large"
 		expected, expected_error = today_result, today_error
 		if too_large:
-			with (
-				patch.object(today_sources, "MAX_VOUCHERS", LIFTED),
-				patch.object(today_sources, "MAX_LEDGER_ROWS", LIFTED),
-			):
+			with lifted_guards():
 				expected, expected_error = _attempt(today, args, kwargs)
 		_compare_outcomes((reader_result, reader_error), (expected, expected_error))
 		if too_large:
@@ -170,14 +156,3 @@ def _compare_outcomes(actual, expected):
 		return
 	_assert_equal(_canonical(result), _canonical(expected_result), "reader result differs from today's read")
 	_assert_equal(_ids(result), _ids(expected_result), "row ids differ from today's read")
-
-
-def _ids(result):
-	"""Each row's id by the row without its id; identical rows hold their ids as a sorted list."""
-	ids = {}
-	for row in result["rows"]:
-		body = json.dumps(
-			{key: value for key, value in row.items() if key != "id"}, sort_keys=True, default=str
-		)
-		ids.setdefault(body, []).append(row["id"])
-	return {body: sorted(values) for body, values in ids.items()}

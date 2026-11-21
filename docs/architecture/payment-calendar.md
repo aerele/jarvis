@@ -193,14 +193,13 @@ Bump procedure when ERPNext changes a pinned method:
 The pin is computed against the ERPNext source of the CI base image (`version-16` head) and the
 local release; accept both when they differ.
 
-## Built-in reader (S1, not wired)
+## Built-in reader (S1)
 
 `jarvis/payment_calendar/builtin_reader.py` reads the same obligations as `sources.read_obligations`
 without the full-history ledger scan and without the size guards (`MAX_LEDGER_ROWS`, `MAX_VOUCHERS`).
-Nothing calls it except tests and the manual acceptance functions below: there is no flag, hook,
-scheduler entry or API change, and a test (`TestReaderIsNotWired`) fails if a runtime module imports or
-names `builtin_reader` or `eligibility`. Slice S2 adds the routing; until then today's read serves every
-request.
+Only the S2 router and the shadow job (see "Reader routing (S2)") call it, besides tests and the manual
+acceptance functions below, and a test (`TestReaderCallers`) fails if any other runtime module imports or
+names `builtin_reader` or `eligibility`. With the mode `off` (the default) today's read serves every request.
 
 **What it reads.** The reader is a subclass of today's `CalendarReport` and replaces only the ledger fetch
 inside ERPNext's `get_data`. It then runs ERPNext's own `init_voucher_balance` and
@@ -243,8 +242,10 @@ checks, the ledger indexes) and is not tested on another database. Elsewhere it 
 **Eligibility** (`jarvis/payment_calendar/eligibility.py`, fail closed). The reader reads without the
 report's per-user narrowing, so it serves only a user for whom that narrowing removes nothing. The
 reasons for `ineligible` are: an incomplete scope, a User Permission on a doctype the report links to,
-a Company permission that excludes the company or a company restriction, an unaudited permission hook,
-and a column match filter. A masked or permlevel-restricted field among those the reader reads on Sales
+a Company permission that excludes the company or a company restriction, a permission query hook or a
+Server Script permission query on a doctype the report reads, and a column match filter (a Company
+permission that allows the company adds one on the Account and Project columns, so it refuses too). A
+`has_permission` hook is no reason: its answer is applied to every row afterwards (invariant I1, below). A masked or permlevel-restricted field among those the reader reads on Sales
 Invoice, Purchase Invoice, Journal Entry and Payment Entry has no reason of its own: it gives the same
 `column_filter` reason as a column match filter. Any exception while checking gives
 `eligibility_unknown`.
@@ -252,8 +253,9 @@ Invoice, Purchase Invoice, Journal Entry and Payment Entry has no reason of its 
 **Fallbacks.** The reader raises `ReaderFallback(reason)`, never a refusal. A fallback means "run today's
 read"; it is not a `CalendarSourceUnavailable`, so it cannot be mistaken for a refusal. The reasons are
 `ineligible`, `eligibility_unknown`, `unsupported_major`, `pin_drift`, `sales_person_scope`,
-`control_total`, `rekey_unresolved`, `too_many_lines` and `reader_error` (a programming error in
-reader-only code). `too_many_lines` means the ledger of the side has more lines than the reader may hold
+`control_total`, `rekey_unresolved`, `too_many_lines`, `deadline` (the reader passed its limit, also inside
+the permission filter), `assemble_budget` (more rows than `READER_MAX_ROWS` for the permission filter to
+hold) and `reader_error` (a programming error in reader-only code). `too_many_lines` means the ledger of the side has more lines than the reader may hold
 in memory (a cap on the lines of the generic voucher types, on the total, and on the parties ranked, see
 `builtin_reader`); it is a memory guard, not an error, and today's read serves the request instead. The
 reader's own refusals are today's: it has the same input checks, books gate and error mapping, and the
@@ -263,8 +265,8 @@ same codes, except that it never gives `too_large`.
 fills `d["fallback"]` with the reason (and `d["fallback_detail"]`, a tuple of fixed strings such as the
 names of drifted pins or the eligibility reason codes, never a data value) before it raises, also when the
 failure comes before the engine exists. A caller that catches `ReaderFallback` can therefore log the reason,
-the detail and the timings. No caller does this yet: S2 wires the routing and the log line, and until
-then nothing is observable in production because the reader is not called.
+the detail and the timings. `routing.read_side` is that caller: it records the reason, the detail, the
+cause class and the timings, and `read_log.reader_outcomes` counts and logs them (see "Reader routing (S2)").
 
 **Known fallback causes.**
 
@@ -320,7 +322,7 @@ summary, the full result is the JSON file.
 | `timing` | `jarvis_playground.localhost`, session READ ONLY; `skip_eligibility` (below) | AC-12 at a real company: run 1 per side cold (cache cleared), later runs warm; per-step timings, including control aggregate, `due_window` (D6) and `multi` (D8); memory of each read |
 | `timing_guard_size` | `test_jarvis` | AC-12 (no-regression rule) at 10,000 vouchers and 100,000 ledger rows per side, settled due dates inside the window, unreferenced Payment Entry and Journal Entry lines; the fixture is raw-inserted in a savepoint and rolled back. Per side and run it times the reader and today's `read_obligations` (size guards lifted as in the differential) back to back, each in a forked child, alternating the order (reader first on odd runs, today first on even runs); the summary has `no_regression` and `no_regression_median` |
 
-**`skip_eligibility`.** `playground` and `timing` take an acceptance-only option `skip_eligibility` (default `False`). When `True` the function refuses unless the session user is Administrator, then runs the reader with its eligibility call patched to report no reason for the duration of the read; the summary and the output carry `eligibility_skipped: true`. Every other guard stays (site check first, READ ONLY session, `consistent_read`, no writes, HMAC output). Why: on the playground site another app registers a `has_permission` hook (`<other_app>.access.has_permission`) for a voucher or party doctype. The eligibility gate cannot audit it and, correctly, fails closed, so every user is ineligible and both sides fall back with `ineligible` and compare nothing. The AC-10 run is therefore an exactness check of the reader against today's read, not an eligibility check (the eligibility tests cover that); the timing run then has a trivial `eligibility` step.
+**`skip_eligibility`.** `playground` and `timing` take an acceptance-only option `skip_eligibility` (default `False`). When `True` the function refuses unless the session user is Administrator, then runs the reader with its eligibility call patched to report no reason for the duration of the read; the summary and the output carry `eligibility_skipped: true`. Every other guard stays (site check first, READ ONLY session, `consistent_read`, no writes, HMAC output). Why: on a site where another app registers a permission query hook (`permission_query_conditions`, for example `<other_app>.access.get_permission_query_conditions`) for a voucher or party doctype, the eligibility gate cannot audit it and, correctly, fails closed, so every user is ineligible and both sides fall back with `ineligible` and compare nothing. (A `has_permission` hook needs no bypass: since I1 it is not an eligibility rule, because its answer is applied to every row afterwards.) The AC-10 run is therefore an exactness check of the reader against today's read, not an eligibility check (the eligibility tests cover that); the timing run then has a trivial `eligibility` step.
 
 **No-regression rule (AC-12, guard size).** At the guard size (worst case) the reader must be no slower than today's read measured under the same load; at a real company size it must take 30 s or less. A time of today's read taken at another moment is not comparable on a shared machine, so `timing_guard_size` measures both reads back to back for each run and side, in forked children (the same method as for the reader), and alternates which read goes first: the first read of a pair finds the MariaDB buffer pool colder than the second, and the alternation cancels that bias. Per run it records both seconds and both read growths (`today` holds today's record). `per_side` in the summary has the max and median of each, the `order` of the runs and the outcome of today's read.
 
@@ -344,6 +346,265 @@ PYTHONPATH=$W bench --site test_jarvis execute jarvis.tests.payment_calendar_rea
 The gate reads the JSON: `eligibility_skipped` is stated, `diffs == 0`, `fallbacks` empty, `control_passed`, `max_seconds <= 30` and
 `served` (playground company); at guard size `no_regression` is true (max of the reader <= max of today's read on every side; `no_regression_median` is the same by median). "Cold" means the first read after `frappe.clear_cache()` in a fresh process; the MariaDB buffer
 pool is not flushed. The accepted fallback rate is the stale-header count the playground run records.
+
+## Reader routing (S2)
+
+Slice S2 wires the built-in reader into `snapshot.collect` for one case: today's read refused `too_large`. A
+side that today serves is read exactly as before. The router is `routing.read_side`; the nightly comparison is
+`shadow.py`. `sources.py` does not change, and S2 never emits `history_too_large`.
+
+**Order of conditions.** `collect` calls `routing.read_side(read_obligations, ...)` for each side with the
+job's start time and an outcomes list. The first condition that fails ends in a fresh `too_large` (raised
+outside the `except` that caught today's refusal, so no frame of today's engine stays reachable):
+
+1. Today's read runs. If it serves, the side is served and no setting is read. A refusal other than
+   `too_large` is raised as it is.
+2. The mode is read first, alone: `reader_settings(lists_when_off=False)` returns at once on `off` without reading
+   the two lists. With `off`, or with a company that is not on the served list, nothing else runs: nothing is
+   counted, logged or probed (`settings`, not counted).
+3. The Frappe major must be 16 (`v15`) and the site must have an `encryption_key` (`no_key`). The router never
+   calls `get_encryption_key`, which would write `site_config.json`.
+4. Budget: at most 90 s since the job started (`budget`).
+5. Failure memo: no memo for this company and side (`memo`).
+6. In-flight marker (`jarvis:pcal:reader:inflight:<digest>:<side>`): a `SET NX` with the job's token on a key per
+   company and side. A second job that finds it
+   answers `busy` and remembers nothing, so two users who open the calendar together are not turned away for
+   minutes because of one slow reader.
+7. Probe: no more than `READER_LEDGER_CAP` ledger rows (`probe`); the cap is 100,000, the same figure as today's `sources.MAX_LEDGER_ROWS` and as the shadow's cap, so the reader serves no ledger that the shadow cannot compare. A probe that says
+   "too big" sets the short memo; a probe that fails (`probe_error:<class>`) leaves today's refusal and sets no memo.
+8. Slot: one of two site slots (`jarvis:pcal:reader:slot:<n>`, random token, released by a compare-and-delete
+   script) is free (`busy`).
+9. The reader runs, with a deadline of the smaller of 30 s and what is left of the 120 s view.
+
+**In-flight marker and failure memo.** They are two keys. The in-flight marker and the slots live for
+`SLOT_TTL_S` (the RQ job limit plus a margin, 420 s) so that a job killed mid-read cannot hold them longer.
+The failure memo is set only after a bad read, never before it:
+
+| Outcome of the reader | Memo |
+| --- | --- |
+| served, a refusal (today's codes), `ineligible`, `sales_person_scope` | none |
+| `deadline`, `assemble_budget`, `too_many_lines`, an unexpected exception, a job timeout (RQ's exception raised inside the job) | 30 minutes (`MEMO_TTL_S`) |
+| `control_total`, `rekey_unresolved`, `reader_error`, `pin_drift`, `unsupported_major`, `eligibility_unknown` | 5 minutes (`SHORT_MEMO_TTL_S`): the read repeats identically until something changes |
+| `deadline` when the late view cut the reader's limit below 30 s | none: the reader was not slow |
+
+A job that is hard-killed (the process dies, so no code runs after it) leaves only the in-flight marker and its slot, until their TTL (420 s): the next job for that company and side answers `busy`. It sets no memo, because the memo is written by a live process after a bad read. A job timeout is different: RQ raises it inside the job, so the router records it and sets the 30-minute memo.
+
+**Errors and the lost view.** A job timeout (`TIMEOUTS`) always propagates: the job ends, the record says which
+side the reader was on (`reader_exception:<class>`), and the memo is set. Every other error of the reader,
+a database error included, refuses the side as today's `too_large` and is recorded by its class
+(`reader_exception:<class>`; a failed statement is also `fallback:reader_error`, with the class as its cause).
+The reader never needs to tell a lost connection from a failed statement: `consistent_read` checks at its exit
+that the view is the same transaction and still open, and fails the job when it is not, whatever the reader
+swallowed. A test proves it with a reader that swallows a lost connection.
+
+**Modes and lists.** Jarvis Settings has three hidden fields, changed only by an Administrator
+(`_ADMIN_ONLY_FIELDS`; a System Manager is refused even after a permission self-grant):
+
+| Field | Meaning |
+| --- | --- |
+| `payment_calendar_reader` | `off` (default), `shadow` or `on` |
+| `payment_calendar_reader_companies` | the served list: companies the reader serves when the mode is `on` |
+| `payment_calendar_reader_shadow_companies` | the shadow list: companies the nightly job compares and never serves |
+
+Each list is one exact company name per line; lines are stripped and blanks dropped. A save checks only the
+lines added in that save, so a company deleted later never blocks an unrelated save. `reader_settings()` reads
+fresh on every call and returns `off` for a missing field, an unknown value or any error. In `off` and
+`shadow` no served side is read by the reader and no setting is read on a side that today serves. On a side
+that today refuses `too_large` the router reads the mode (one SELECT) and the two lists only when the mode is
+not `off`. The shadow job compares the union of both lists and also runs while the mode is `on`. A save that
+changes only these fields is inert: it enqueues no LLM sync, and it skips the retry of a failed sync that any
+other save performs.
+
+**Caps and budgets.**
+
+| Limit | Value |
+| --- | --- |
+| Budget before the reader starts | 90 s from the job start |
+| Whole snapshot view | 120 s (the reader's limit is cut to what is left) |
+| Reader limit per side | 30 s, plus a hard stop 5 s later inside the permission filter |
+| Probe cap | `READER_LEDGER_CAP` 100,000 ledger rows (= `sources.MAX_LEDGER_ROWS` = the shadow's cap) |
+| Rows after the engine | `READER_MAX_ROWS` 50,000 (a memory guard: `assemble_budget`; AC-4 sets it from the snapshot bytes) |
+| Slots | 2 per site |
+| Failure memo | 30 minutes, or 5 minutes for a deterministic fallback or a probe over the cap |
+| Slot and in-flight marker | 420 s |
+
+**The exact deadline in the permission step.** The permission filter (`sources._assemble` -> `visible_names`)
+always runs in full: that is invariant I1. Its time is held to the reader's limit exactly, not by an estimate:
+while `_assemble` runs and only then, `frappe.has_permission` is wrapped, and each per-document check raises
+`ReaderFallback("deadline")` once the hard stop (the deadline plus 5 s, `ASSEMBLE_GRACE_S`) has passed. The
+wrapper answers every check as before. It is installed only when a `has_permission` hook is registered, because
+without one `visible_names` makes no per-document check, so a user with no hook pays nothing for it. No cost
+estimate, calibration or hook timing exists any more. The worst view is about the deadline plus 5 s plus one
+check, below the 300 s job limit.
+
+**Invariant I1.** The reader's rows reach a user only through `sources._assemble` -> `visible_names`, which
+runs every `has_permission` hook per voucher and party in that user's own session (the snapshot job runs as
+the actor). For that reason `has_permission` hooks are not an eligibility rule. Any path that skips this
+step (cache rows, shared generations, a stored snapshot served to other users) must bring the
+`has_permission` rule back. Query hooks, Server Script permission queries, User Permissions, owner-only
+roles, masked or permlevel-restricted fields and match filters on the report's columns stay: nothing after
+the reader re-applies them. By design in S2 a user whose Company permission allows the company is refused
+too: the report adds a Company match filter to its Account and Project columns, eligibility says
+`column_filter`, and today's `too_large` stands. A support person sees it as the counter
+`ineligible:column_filter` in `shadow.status()` (below). A later slice may relax this.
+
+**Logs, counters and Error Log classes.** `read_log.reader_outcomes` runs in a `finally` after the view and
+never raises. Every line, key and row names a company only by `company_digest` (a keyed HMAC of the site's
+encryption key, domain `pcal-ops`, 16 hex) and holds fixed words and numbers: no `str(exc)`, no traceback.
+`shadow.status()` maps a digest back to its company on the console.
+
+Production logs at ERROR level: the INFO and WARNING lines (`reader_outcome`, `shadow_unit`,
+`reader_view_slow` and the `*_unavailable` lines) are not visible there. The signals in production are the day
+counters, the Error Log rows and `shadow.status()`.
+
+- A day counter per company and class, `jarvis:pcal:reader:day:<digest>:<date>` (Redis hash, `HINCRBY` raw
+  integers, TTL 35 days; the date comes from `routing._today()`, which `shadow._today()` uses too).
+- Counted only (no Error Log row): `served`; the fallbacks `ineligible`, `ineligible:<reason>` (for example
+  `ineligible:column_filter`) and `sales_person_scope`; `probe_error:<class>`; and the router steps `v15`,
+  `no_key`, `budget`, `memo`, `probe`, `busy` and `cache`. The `settings` step is not counted.
+- Error Log "Payment Calendar reader failure", one row per company, class and rolling 24 hours (not per calendar
+  day), none when the cache cannot answer: `fallback:<reason>` for `control_total`, `rekey_unresolved`,
+  `reader_error`, `pin_drift`, `unsupported_major`, `eligibility_unknown`, `too_many_lines`, `deadline` and
+  `assemble_budget`; `reader_refused:<code>`; `reader_exception:<class>` (a timeout included). A row names the
+  cause class of a `reader_error`.
+- Error Log "Payment Calendar reader daily": `shadow.dispatch` writes it for yesterday when any counter other
+  than `served` is above 0, once per company and date, before it checks the mode. The text is
+  `read_log.daily_report`: every counter, `served` included, `failures` (the sum of the failure classes above and
+  of `probe_error:<class>`), and `listed_but_missing=1` for a company on a list that no Company has (a renamed or
+  deleted company, which is never served; `routing.listed_but_missing`). A company that is never served (too big,
+  ineligible, busy, missing) is as visible as one that fails.
+- Error Log "Payment Calendar reader shadow diff": one per company and night when a unit differs or fails with
+  an unexpected error.
+- Error Log "Payment Calendar reader shadow fallback": one per company, night and reason when a unit could not
+  be compared because of `fallback:<reason>`, `ineligible`, `shadow_too_large` or `rss_cap`.
+- Error Log "Payment Calendar reader shadow incomplete": a unit killed (`killed`), units cut by the night's
+  budget (`time_cap`) or a company list that changed (`units_changed`, `units_changed_again`).
+
+| Reason | Action |
+| --- | --- |
+| `ineligible`, `sales_person_scope` | none; the user's rules keep today's refusal. `ineligible:column_filter` is also what a Company-permission user gets, by design |
+| `pin_drift`, `unsupported_major` | an ERPNext source changed: audit it and bump the pin; a bump needs a restart of the workers, and until then the side stays refused |
+| `control_total`, `rekey_unresolved`, `reader_error`, `reader_exception:*`, `eligibility_unknown` | a defect or stale data: the row names the cause class; take the company off the served list and file it |
+| `reader_refused:<code>` | the reader gave today's own refusal for this data; compare with today's read |
+| `deadline`, `assemble_budget`, `too_many_lines` | the company is too big for the limits; figures stay "unavailable" |
+| `busy`, `memo`, `budget`, `probe`, `cache` | expected under load; a memo clears in 30 minutes (5 for a deterministic one); `cache` means Redis did not answer |
+| `v15`, `no_key` | the site cannot run the reader: nothing to do until it is a v16 site with an `encryption_key` |
+
+**Shadow.** One cron entry, `"*/15 2-5 * * *"` -> `shadow.dispatch`, starts or resumes the night's chain from
+02:00 to 05:59 site time. A unit is one company, one side and one scope (previous, current and next month and
+the legacy window). One RQ job (`long` queue, 600 s, `job_id` `pcal-shadow:<date>:<n>`) runs one unit under
+the lease `jarvis:pcal:shadow:lease` (900 s, so a job RQ kills late cannot outlive it), then enqueues the next.
+The start company rotates by one each night, so a company late in the order is not starved every night by the
+night's budget. A unit runs both reads, today's with its guards lifted and the reader, as Administrator in one
+`consistent_read()` view, and stores a record (counts and digests, never names) after the view. The night's
+budget is 1,800 s; later units record `time_cap`. A unit with an in-progress marker and no lease was killed and
+is recorded as `killed`. The night hash stores a keyed digest of the company list: a list that changes during
+the night restarts the night once; a second change stops it with an Error Log row.
+
+- A unit above `SHADOW_LEDGER_CAP` (today's own ledger guard, 100,000 rows) is not compared
+  (`shadow_too_large`): the oracle holds the whole ledger in memory on the one `long` worker. A process
+  above 800 MB is checked before the oracle and after it (`rss_cap`). A reader that took past 30 s is
+  `would_deadline`.
+- A database error (a lost connection, a deadlock, a query timeout) is not a result: the unit is recorded
+  `error_transient` in the state `retry` and is run again after the chain, up to two runs in all, within the
+  night's budget. It writes no diff row and is not a diff; it counts as "not compared" in the gate.
+- A job timeout leaves the marker and raises a fresh exception from the unit, so a traceback with locals (the
+  runner stores one in developer mode) carries no company, party or voucher name.
+
+The shadow proves data exactness for Administrator only; the per-user proof is the reply matrix test and the
+visitor flow.
+
+**The gate.** `shadow.summary(days=7)` passes a company when, for every side and scope, at least 7 nights hold a
+`compared` record on the deployed reader build (`routing.reader_build()`: a hash of the figure-deciding
+modules, listed in `routing.FIGURE_MODULES` (`books`, `builtin_reader`, `compatibility`, `eligibility`, `errors`,
+`permissions`, `reconciliation`, `scope` and `sources`), and the Frappe and ERPNext versions, computed once per process; a
+test makes every `jarvis/payment_calendar/*.py` file a figure module or not), and the period has no diff or
+error row, no `would_deadline` and no `deadline` or `assemble_budget` fallback. The period is tonight and the 7
+nights before it, so a missing tonight never fails the gate. `missing` lists the side and scope that lack
+nights, and `reasons` counts why the units that were not compared were not. A change to a figure module starts
+the count again.
+
+The nights and the day counters live in `redis_cache` (no persistence, an LRU eviction policy): a Redis restart
+or an eviction silently resets the count. That fails safe (the gate then says "missing"), but it is not
+durable. Only the Error Log rows are in the database, so the pilot clock can restart. The gate does not check
+that the nights saw new postings: the operator does.
+
+**Status command.** For an operator without a console session:
+
+```
+bench --site <site> execute jarvis.payment_calendar.shadow.status
+```
+
+It prints the mode, the build, both lists, the digest that the Error Log rows carry for each company (digest =
+company name; names appear here and nowhere in a log, key or row), today's and yesterday's counters, and the
+gate per company with the side and scope that lack nights and the reasons. Use it to answer "why does this user
+see unavailable" (`ineligible:*` counters), "is the shadow running" and "may this company be served".
+
+**Runbook.**
+
+- Deploy: migrate the site (or `frappe.reload_doc("jarvis", "doctype", "jarvis_settings")`) first, then restart
+  the workers and the scheduler (the cron entry is new). Without the migrate the three fields are not in the
+  meta: a `save()` ignores them silently and `reader_settings()` stays `off`. After the migrate check that the
+  Scheduled Job Type for `jarvis.payment_calendar.shadow.dispatch` exists. A pin bump also needs a worker
+  restart. A deploy by overlay patch (a diff applied to the live checkout) does not migrate: do the migrate or
+  the reload step as well.
+- Switch it on or off, as Administrator, through `save()` so that the Version history keeps the change. Never
+  use `frappe.db.set_single_value`: it bypasses validation and history. Shadow first:
+
+```
+# bench --site <site> console
+frappe.set_user("Administrator")
+settings = frappe.get_single("Jarvis Settings")
+settings.payment_calendar_reader = "shadow"   # off | shadow | on
+settings.payment_calendar_reader_shadow_companies = "<company>"
+settings.payment_calendar_reader_companies = ""
+settings.save()
+frappe.db.commit()
+from jarvis.payment_calendar import routing
+print(routing.reader_settings())   # read it back: the mode and both lists as the router will see them
+```
+
+  The playground, whose figures are already proven equal, goes straight to `on` with the company on the served
+  list (the owner's decision), the same way:
+
+```
+settings = frappe.get_single("Jarvis Settings")
+settings.payment_calendar_reader = "on"
+settings.payment_calendar_reader_companies = "<company>"
+settings.save()
+frappe.db.commit()
+print(routing.reader_settings())
+```
+
+- A customer company: shadow list with mode `shadow`, then wait for `shadow.summary()` (or `shadow.status`) to
+  pass on the deployed build, check that the nights saw new postings, then move the company to the served list
+  and set the mode to `on`.
+- A shadow diff while the mode is `on`: remove the company from the served list at once (R0 below), then
+  compare the diff row's digest and build with `shadow.status`. Nothing ties the served list to the gate by
+  code, and the row can appear up to a day plus the next night after the cause.
+- Rollback needs no restart for R0 and R1. R0: remove the company from the served list. R1: set the mode to
+  `off`. The next job reads `off`; a snapshot already published stays until its `RESULT_TTL` (300 s) ends, so
+  allow about 5 minutes. R2: revert the release, then migrate and restart: the revert removes the cron entry
+  but the Scheduled Job Type row stays until a migrate, and the scheduler would enqueue a method that no
+  longer exists every 15 minutes between 02:00 and 05:59. The Redis keys expire and the Error Log rows stay.
+- Stacking: the reader (S1, #2796) must be merged, or backported to the hotfix branch, before S2. Check the
+  `modified` line of `jarvis_settings.json` on each branch: it must be later than every other PR that edits
+  that file, or a site that migrated the other one skips the new fields.
+- Support note: figures can go back to "unavailable" after `deadline`, `assemble_budget` or `pin_drift`.
+
+**Acceptance runs (S2).** Test code, never called at runtime; run through `bench execute` like the S1 runs.
+
+| Function | Site | What it does |
+| --- | --- | --- |
+| `routed_playground(company, out, user)` | `jarvis_playground.localhost`, READ ONLY session | AC-9: both sides through the router as `user` (a visitor or Administrator) with the mode patched on, each compared with today's lifted read, ids included; records the path and the timings. The router's slot and memo keys are deleted at the end; nothing is written to the database |
+| `shadow_once(company, out)` | `jarvis_playground.localhost`, READ ONLY session | AC-11: every shadow unit of the company once under the lease; writes no record, Error Log row or setting; deletes the lease key |
+| `limits_at_guard_size(out, user)` | `test_jarvis` | AC-4: at 10,001 vouchers per side, as a non-Administrator user with a read-neutral `"*"` hook (patched `frappe.get_hooks`): a reader deadline of 1 s, both sides through the router (job time, peak memory, snapshot bytes), and the same at `READER_LEDGER_CAP` rows (peak memory, longest statement). Timings are recorded as numbers and flags, never asserted by a test. The fixture is rolled back |
+
+```
+PYTHONPATH=$W bench --site jarvis_playground.localhost execute jarvis.tests.payment_calendar_reader_acceptance.routed_playground --kwargs "{'company': '<company>', 'out': '$O/routed-playground.json', 'user': '<user>'}"
+PYTHONPATH=$W bench --site jarvis_playground.localhost execute jarvis.tests.payment_calendar_reader_acceptance.shadow_once --kwargs "{'company': '<company>', 'out': '$O/shadow-once.json'}"
+PYTHONPATH=$W bench --site test_jarvis execute jarvis.tests.payment_calendar_reader_acceptance.limits_at_guard_size --kwargs "{'out': '$O/limits-guard.json'}"
+```
 
 ## Company floor and coherent reads
 

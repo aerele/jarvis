@@ -32,8 +32,8 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days, add_months, get_first_day, get_last_day
 
 from jarvis.payment_calendar import builtin_reader
-from jarvis.payment_calendar import sources as today_sources
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
+from jarvis.payment_calendar.shadow import today_unguarded
 from jarvis.tests import _erpnext_masters as masters
 from jarvis.tests import payment_calendar_drift as drift_module
 from jarvis.tests.payment_calendar_differential import READER_TALLY, compare_reader_with_today
@@ -63,15 +63,10 @@ REQUIRED_KINDS = {
 # A controller error rolls its operation back and is counted. More than this means an operation is broken.
 MAX_FAILURES = 4
 SIDES = ("Receivable", "Payable")
-LIFTED = 10**12
 
 
 def today_with_lifted_guards(*args):
-	with (
-		patch.object(today_sources, "MAX_VOUCHERS", LIFTED),
-		patch.object(today_sources, "MAX_LEDGER_ROWS", LIFTED),
-	):
-		return today_sources.read_obligations(*args)
+	return today_unguarded(*args)
 
 
 def window(anchor: date) -> tuple[str, str]:
