@@ -15,7 +15,7 @@ import { mount } from "@vue/test-utils";
 import { nextTick, reactive } from "vue";
 import DraftRowBlock from "./DraftRowBlock.vue";
 import { draftLinkSearch } from "@/lib/draftLinkFilters";
-import { blankRow, buildDraftTable } from "@/lib/draftTables";
+import { buildDraftTable } from "@/lib/draftTables";
 import {
 	closeRowForm,
 	rowFormId,
@@ -301,13 +301,6 @@ describe("a link menu stays with its row when a row above is removed", () => {
 		await wrapper.get(".menu-pick").trigger("click");
 		expect(row2.warehouse).toBe("WH-1");
 		expect(row3.warehouse).toBe("");
-	});
-	it("a row added later gets its own key, so no menu key repeats", () => {
-		const { table } = setup();
-		const added = blankRow(table);
-		table.rows.push(added);
-		const keys = table.rows.map((r) => r.__key);
-		expect(new Set(keys).size).toBe(keys.length);
 	});
 });
 

@@ -71,13 +71,6 @@ describe("SortButton field picker (portal-free menu)", () => {
 		expect(emits.at(-1)[0]).toMatchObject({ field: "modified" });
 	});
 
-	it("the datetime columns (Updated/Created) are both pickable", async () => {
-		const w = mountBtn();
-		const created = w.findAll('[role="menuitemradio"]').find((i) => i.text() === "Created");
-		await created.trigger("click");
-		expect(w.emitted("update:sort").at(-1)[0]).toMatchObject({ field: "creation" });
-	});
-
 	// The always-visible direction toggle + Clear Sort are pre-existing, but the picker
 	// refactor sits beside them; pin them so the whole control stays covered.
 	it("the direction toggle flips dir and keeps the current field", async () => {

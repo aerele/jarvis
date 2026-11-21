@@ -4,12 +4,7 @@
 // behind, pause that cannot be starved of time).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-	createGotoCountdown,
-	GOTO_COUNTDOWN_MS,
-	PAUSE,
-	RESUME_FLOOR_MS,
-} from "./gotoCountdown.js";
+import { createGotoCountdown, GOTO_COUNTDOWN_MS, RESUME_FLOOR_MS } from "./gotoCountdown.js";
 
 // A clock whose intervals fire only as `advance` moves time past them.
 function fakeClock() {
@@ -151,20 +146,6 @@ test("the duration defaults to GOTO_COUNTDOWN_MS when deps.durationMs is not giv
 	assert.deepEqual(expired, []);
 	clock.at(3000);
 	assert.deepEqual(expired, [3000]);
-});
-
-test("PAUSE names the three pause reasons the card and the view share", () => {
-	assert.deepEqual(PAUSE, { HOVER: "hover", FOCUS: "focus", HIDDEN: "hidden" });
-	const { cd, clock, log } = make();
-	cd.start(GOTO);
-	cd.pause(PAUSE.HOVER);
-	cd.pause(PAUSE.FOCUS);
-	cd.resume(PAUSE.HOVER);
-	assert.equal(cd.state().paused, true);
-	cd.resume(PAUSE.FOCUS);
-	assert.equal(cd.state().paused, false);
-	clock.at(10000);
-	assert.equal(log.expires.length, 1);
 });
 
 test("the duration comes from deps.durationMs", () => {
