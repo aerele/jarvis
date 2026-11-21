@@ -479,50 +479,77 @@ def _media_fetch_failed(url: str, reason: str) -> None:
 _OUTGOING_URL_RE = re.compile(r"^/api/chat/media/outgoing/([^/]+)/([0-9a-f-]{36})/full")
 
 
-def _get_media_bytes(base: str, path: str, headers: dict, url: str, mime_type: str | None):
+def _get_media_bytes(
+	base: str,
+	path: str,
+	headers: dict,
+	url: str,
+	mime_type: str | None,
+	*,
+	quiet: bool = False,
+	timeout_s: float = 15,
+):
 	"""One GET of a media path. Returns ``(status, bytes | None)``; the bytes are None for any
-	response that is not an acceptable image/declared-type body (the reason is logged)."""
+	response that is not an acceptable image/declared-type body (the reason is logged unless
+	``quiet``: the caller reports the whole fetch when a fallback follows)."""
 	import requests
+
+	def fail(reason):
+		if not quiet:
+			_media_fetch_failed(url, reason)
 
 	try:
 		with requests.get(
-			f"{base}{path}", headers=headers, timeout=15, stream=True, allow_redirects=False
+			f"{base}{path}", headers=headers, timeout=timeout_s, stream=True, allow_redirects=False
 		) as r:
 			if r.status_code != 200:
-				_media_fetch_failed(url, f"status {r.status_code}")
+				fail(f"status {r.status_code}")
 				return r.status_code, None
 			ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+			if "svg" in ctype or "svg" in (mime_type or "").lower():
+				fail("svg is not accepted")
+				return 200, None
 			generic = ctype in ("application/octet-stream", "binary/octet-stream", "")
 			declared_image = (mime_type or "").lower().startswith("image/")
 			if not (ctype.startswith("image/") or (mime_type and ctype == mime_type.lower())) and not (
 				generic and declared_image
 			):
-				_media_fetch_failed(url, f"content-type {ctype}")
+				fail(f"content-type {ctype}")
 				return 200, None
 			buf = bytearray()
 			for chunk in r.iter_content(64 * 1024):
 				buf += chunk
 				if len(buf) > _MAX_MEDIA_URL_BYTES:
-					_media_fetch_failed(url, "too large")
+					fail("too large")
 					return 200, None
 			if generic and not _looks_like_image(bytes(buf[:16])):
-				_media_fetch_failed(url, "generic content-type and not an image")
+				fail("generic content-type and not an image")
 				return 200, None
 	except Exception as e:
-		_media_fetch_failed(url, type(e).__name__)
+		fail(type(e).__name__)
 		return 0, None
 	return 200, bytes(buf) or None
 
 
-def _ticket_path(agent_url: str, url: str, mime_type: str | None) -> str | None:
+_TICKET_BUDGET_S = 12.0
+_TICKET_RPC_TIMEOUT_S = 6.0
+_TICKET_GET_TIMEOUT_S = 10.0
+
+
+def _ticket_path(
+	agent_url: str, url: str, mime_type: str | None, expected_session_key: str | None = None
+) -> str | None:
 	"""A short-lived, ticketed path for a managed outgoing media file.
 
 	Newer gateways (2026.11) no longer serve ``/api/chat/media/outgoing/...`` to a paired device's
 	bearer: the file is requested over the authenticated socket (``artifacts.download``, a read
 	method) and the answer carries a URL with a ``mediaTicket`` that is itself the authority, so
-	the GET sends no credential. The artifact id is ``artifact_managed_image_<attachment id>``
+	the GET sends no other credential. The artifact id is ``artifact_managed_image_<attachment id>``
 	for an image and ``artifact_managed_media_<attachment id>`` for audio, video and the rest.
-	None when the url is not a managed outgoing one or the gateway does not answer."""
+	The session key in the url must be the conversation's own (``expected_session_key``) before
+	anything is asked. At most ``_TICKET_BUDGET_S`` is spent. None when the url is not a managed
+	outgoing one, names another session, or the gateway does not answer."""
+	import time
 	from urllib.parse import unquote
 
 	from jarvis.chat import agent_session_pool
@@ -531,15 +558,25 @@ def _ticket_path(agent_url: str, url: str, mime_type: str | None) -> str | None:
 	if not m:
 		return None
 	session_key, attachment = unquote(m.group(1)), m.group(2)
+	if expected_session_key and session_key != expected_session_key:
+		return None
 	families = (
 		("media", "image") if mime_type and not mime_type.lower().startswith("image/") else ("image", "media")
 	)
 	gateway = (agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
+	deadline = time.monotonic() + _TICKET_BUDGET_S
 	try:
 		with agent_session_pool.checkout(gateway) as sess:
 			for family in families:
+				remaining = deadline - time.monotonic()
+				if remaining <= 1:
+					break
 				try:
-					path = sess.artifact_download_url(session_key, f"artifact_managed_{family}_{attachment}")
+					path = sess.artifact_download_url(
+						session_key,
+						f"artifact_managed_{family}_{attachment}",
+						timeout_s=min(_TICKET_RPC_TIMEOUT_S, remaining),
+					)
 				except Exception:
 					continue
 				if path:
@@ -549,7 +586,14 @@ def _ticket_path(agent_url: str, url: str, mime_type: str | None) -> str | None:
 	return None
 
 
-def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | None = None) -> bytes | None:
+def fetch_media_url(
+	agent_url: str,
+	token: str,
+	url: str,
+	*,
+	mime_type: str | None = None,
+	expected_session_key: str | None = None,
+) -> bytes | None:
 	"""GET one gateway-attached media block from the tenant's own gateway
 	(binary-safe, redirect-disabled, size-bounded). ``url`` is the RELATIVE
 	path the runtime put on the content block - validated by the caller
@@ -567,14 +611,19 @@ def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | No
 	if not base or not token:
 		_media_fetch_failed(url, "no gateway address or token")
 		return None
-	status, body = _get_media_bytes(base, url, {"Authorization": f"Bearer {token}"}, url, mime_type)
-	if body is not None or status not in (401, 403):
+	status, body = _get_media_bytes(
+		base, url, {"Authorization": f"Bearer {token}"}, url, mime_type, quiet=True
+	)
+	if body is not None:
 		return body
-	ticketed = _ticket_path(agent_url, url, mime_type)
-	if not ticketed:
-		_media_fetch_failed(url, "no ticketed url from the gateway")
+	if status not in (401, 403):
+		_media_fetch_failed(url, f"status {status}" if status else "no response")
 		return None
-	return _get_media_bytes(base, ticketed, {}, url, mime_type)[1]
+	ticketed = _ticket_path(agent_url, url, mime_type, expected_session_key)
+	if not ticketed:
+		_media_fetch_failed(url, f"status {status}, no ticketed url from the gateway")
+		return None
+	return _get_media_bytes(base, ticketed, {}, url, mime_type, timeout_s=_TICKET_GET_TIMEOUT_S)[1]
 
 
 def _media_url_filename(url: str, mime_type: str | None) -> str:
@@ -596,6 +645,14 @@ def _canvas_type_for_mime(mime_type: str | None) -> str:
 	return "file"
 
 
+def _conversation_session_key(assistant_msg_name: str) -> str | None:
+	"""The gateway session key of the conversation this message belongs to."""
+	conversation = frappe.db.get_value(MSG, assistant_msg_name, "conversation")
+	if not conversation:
+		return None
+	return frappe.db.get_value("Jarvis Conversation", conversation, "session_key") or None
+
+
 def seed_media_urls(assistant_msg_name: str, agent_url: str, token: str, items: list[dict]) -> list[dict]:
 	"""Fetch each gateway-attached media block (``items`` = ``[{"url", "mime_type"},
 	...]``, from ``agent_client._chat_final_media_urls``), save it as a private
@@ -609,6 +666,7 @@ def seed_media_urls(assistant_msg_name: str, agent_url: str, token: str, items: 
 	if not items:
 		return []
 	seen = _existing_media_sources(assistant_msg_name)
+	session_key = _conversation_session_key(assistant_msg_name)
 	new_items: list[dict] = []
 	failures = 0
 	for item in items:
@@ -619,7 +677,9 @@ def seed_media_urls(assistant_msg_name: str, agent_url: str, token: str, items: 
 		key = _media_url_id(url)
 		if key in seen:
 			continue
-		content = fetch_media_url(agent_url, token, url, mime_type=mime_type)
+		content = fetch_media_url(
+			agent_url, token, url, mime_type=mime_type, expected_session_key=session_key
+		)
 		if not content:
 			failures += 1
 			continue

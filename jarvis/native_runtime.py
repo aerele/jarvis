@@ -94,10 +94,23 @@ def _refresh_proxy_active() -> None:
 		frappe.db.set_single_value(SETTINGS, "proxy_active", wanted, update_modified=False)
 
 
+REFRESH_MIN_INTERVAL_S = 60
+_REFRESH_CACHE_KEY = "jarvis:runtime_facts_refreshed"
+
+
 def refresh_from_admin() -> bool:
 	"""Read the two facts from admin now, through the same connection read the daily sync
 	uses, and store them. For the moment a pin is refused and the stored facts may lag a
-	flip by up to one heartbeat. True when the read and the store worked. Never raises."""
+	flip by up to one heartbeat. At most once a minute per site, so a pin that stays refused
+	does not cost an admin round trip every turn. True when the read and the store worked.
+	Never raises."""
+	try:
+		cache = frappe.cache()
+		if cache.get_value(_REFRESH_CACHE_KEY):
+			return False
+		cache.set_value(_REFRESH_CACHE_KEY, 1, expires_in_sec=REFRESH_MIN_INTERVAL_S)
+	except Exception:
+		pass  # no cache, no throttle
 	try:
 		from jarvis import admin_client
 

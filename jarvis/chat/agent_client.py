@@ -653,6 +653,13 @@ _MEDIA_URL_RE = re.compile(r"^/api/chat/media/outgoing/[A-Za-z0-9%._~:@-]+/[0-9a
 _MAX_MEDIA_URLS_PER_TURN = 8
 
 
+# The path an ``artifacts.download`` answer may carry: the outgoing media route for one
+# session and attachment, optionally with the ``mediaTicket`` query.
+_TICKET_PATH_RE = re.compile(
+	r"^/api/chat/media/outgoing/([A-Za-z0-9%._~:@-]+)/([0-9a-f-]{36})/full(\?mediaTicket=[A-Za-z0-9%._~=&-]+)?$"
+)
+
+
 def _valid_media_url(url) -> bool:
 	if not isinstance(url, str) or not url:
 		return False
@@ -1310,7 +1317,11 @@ class AgentSession:
 	) -> str | None:
 		"""``artifacts.download`` for a managed outgoing media artifact: the gateway answers with a
 		short-lived path carrying a ``mediaTicket`` (and its expiry). The ticket is the authority
-		for the HTTP GET, which sends no other credential. None when the answer has no such path."""
+		for the HTTP GET, which sends no other credential. The path is accepted only when it is a
+		plain outgoing-media path for the SAME session key and attachment that were asked for
+		(no traversal, scheme or host); otherwise None."""
+		from urllib.parse import unquote
+
 		res = self._request(
 			"artifacts.download",
 			{"sessionKey": session_key, "artifactId": artifact_id},
@@ -1318,7 +1329,13 @@ class AgentSession:
 		)
 		payload = res.get("payload") or res
 		path = payload.get("url") if isinstance(payload, dict) else None
-		return path if isinstance(path, str) and path.startswith("/api/chat/media/outgoing/") else None
+		if not isinstance(path, str) or ".." in path or "\\" in path or "//" in path.split("?", 1)[0]:
+			return None
+		m = _TICKET_PATH_RE.match(path)
+		attachment = artifact_id.rsplit("_", 1)[-1]
+		if not m or unquote(m.group(1)) != session_key or m.group(2) != attachment:
+			return None
+		return path
 
 	def get_session_messages(
 		self,

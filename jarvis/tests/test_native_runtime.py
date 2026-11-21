@@ -487,6 +487,32 @@ class TestPinSelfHealWhenFactsAreStale(unittest.TestCase):
 		self.assertIs(raised, changed)
 		refresh.assert_not_called()
 
+	def test_leave_alone_after_a_refresh_is_not_a_retry_and_never_a_reset(self):
+		sess = MagicMock()
+		sess.set_session_model.side_effect = [self._refused()]
+		with (
+			patch("jarvis.native_runtime.refresh_from_admin", return_value=True),
+			patch.object(turn_handler, "_session_model_patch", return_value=(False, None)),
+		):
+			with self.assertRaises(Exception):
+				turn_handler.set_session_model_refreshing(sess, "k", frappe._dict(), "openai_compat/gpt-5.5")
+		self.assertEqual(sess.set_session_model.call_count, 1)  # no null (reset) patch sent
+
+	def test_the_refresh_is_throttled_to_once_a_minute(self):
+		cache = MagicMock()
+		cache.get_value.return_value = None
+		with (
+			patch.object(native_runtime.frappe, "cache", return_value=cache),
+			patch("jarvis.admin_client.get_connection", return_value={}) as read,
+			patch.object(native_runtime, "persist"),
+		):
+			self.assertTrue(native_runtime.refresh_from_admin())
+			cache.set_value.assert_called_once()
+			self.assertEqual(cache.set_value.call_args.kwargs["expires_in_sec"], 60)
+			cache.get_value.return_value = 1
+			self.assertFalse(native_runtime.refresh_from_admin())
+		read.assert_called_once()
+
 	def test_refresh_from_admin_stores_the_connection_facts_and_never_raises(self):
 		reply = {"native_subscription_pool": True, "agent_runtime_version": "2026.11.5"}
 		with (

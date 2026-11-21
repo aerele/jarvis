@@ -118,7 +118,14 @@ _YIELD_MEDIA_POLL_TIMEOUT_S = 20.0
 # ``persist_async_media`` waits for it in SHORT SLICES, each its own job on the lane the turn
 # itself rides, re-enqueueing itself until the bound, so no worker is held for minutes and the
 # first slice is not queued behind long jobs.
-ASYNC_MEDIA_POLL_TIMEOUT_S = 180.0
+ASYNC_MEDIA_POLL_TIMEOUT_S = 180.0  # image generation's own timeout
+# Video and music run longer than an image does.
+ASYNC_MEDIA_LONG_POLL_TIMEOUT_S = 600.0
+_ASYNC_MEDIA_LONG_TOOLS = frozenset({"video_generate", "music_generate"})
+# Tool statuses that mean the tool started and did not end badly (denied, cancelled, failed...).
+_ASYNC_MEDIA_STARTED_STATUSES = frozenset(
+	{"", "running", "started", "pending", "in_progress", "completed", "complete", "success", "ok", "done"}
+)
 ASYNC_MEDIA_SLICE_S = 8.0
 ASYNC_MEDIA_JOB_TIMEOUT_S = 60.0
 # A fetch of the file can fail transiently; give the seeding a few tries, not the whole bound.
@@ -357,7 +364,9 @@ def _message_timestamp_ms(message: dict) -> int | None:
 	return None
 
 
-def _scan_history_for_media(messages: list, turn_start_ms: int) -> tuple[list[str], list[dict]]:
+def _scan_history_for_media(
+	messages: list, turn_start_ms: int, until_ms: int | None = None
+) -> tuple[list[str], list[dict]]:
 	"""Scan a chat.history transcript for the yielded turn's actual media,
 	restricted to ASSISTANT messages at/after this turn's start. Prefers a
 	``MEDIA:`` path over a content-block url for the SAME delivery (the live
@@ -373,7 +382,7 @@ def _scan_history_for_media(messages: list, turn_start_ms: int) -> tuple[list[st
 		if not isinstance(m, dict) or (m.get("role") or "").lower() != "assistant":
 			continue
 		ts = _message_timestamp_ms(m)
-		if ts is not None and ts < turn_start_ms:
+		if ts is not None and (ts < turn_start_ms or (until_ms is not None and ts >= until_ms)):
 			continue
 		payload = {"message": m}
 		text = _chat_final_text(payload) or ""
@@ -384,7 +393,7 @@ def _scan_history_for_media(messages: list, turn_start_ms: int) -> tuple[list[st
 
 
 def _harvest_post_yield_media(
-	conversation_id: str, turn_start_ms: int, timeout_s: float | None = None
+	conversation_id: str, turn_start_ms: int, timeout_s: float | None = None, until_ms: int | None = None
 ) -> tuple[list[str], list[dict]]:
 	"""Poll the session's display transcript (chat.history) for the deferred-
 	reply yield's actual media - it arrives as separate transcript messages
@@ -408,7 +417,7 @@ def _harvest_post_yield_media(
 				history = sess.get_history(session_key, limit=20)
 		except Exception:
 			history = {}
-		rels, urls = _scan_history_for_media(history.get("messages") or [], turn_start_ms)
+		rels, urls = _scan_history_for_media(history.get("messages") or [], turn_start_ms, until_ms)
 		if rels or urls:
 			return rels, urls
 		if time.monotonic() >= deadline:
@@ -416,30 +425,69 @@ def _harvest_post_yield_media(
 		time.sleep(_YIELD_MEDIA_POLL_INTERVAL_S)
 
 
-def _async_media_tool_rows(assistant_msg_name: str, conversation_id: str) -> list[dict]:
-	"""Tool rows of this turn for a media tool that started a background task and did not
-	fail. The relay surfaces only a tool's ``status``, not its result details, so "started
-	and not failed" is the signal; a media tool that finished in the foreground has already
-	put its media on the final, which the caller checks first."""
-	from jarvis.chat.agent_client import MEDIA_GEN_TOOL_NAMES
-
+def _turn_window(assistant_msg_name: str, conversation_id: str) -> tuple[dict | None, int | None, int | None]:
+	"""``(assistant row, seq of the next user/assistant message, its time in epoch ms)``: the
+	turn's window ends where the conversation's next message starts, so a later turn's media
+	tool or image is never taken for this one. The next message is None while the turn is last."""
 	am = frappe.db.get_value(MSG, assistant_msg_name, ["seq", "creation"], as_dict=True)
 	if not am:
-		return []
+		return None, None, None
 	# System context (the settle / finalize job), scoped to one conversation: get_all is right.
+	nxt = frappe.get_all(
+		MSG,
+		filters={
+			"conversation": conversation_id,
+			"role": ["in", ["user", "assistant"]],
+			"seq": [">", am.seq],
+		},
+		fields=["seq", "creation"],
+		order_by="seq asc",
+		limit_page_length=1,
+	)
+	if not nxt:
+		return am, None, None
+	until_ms = None
+	try:
+		from zoneinfo import ZoneInfo
+
+		dt = frappe.utils.get_datetime(nxt[0]["creation"])
+		until_ms = int(dt.replace(tzinfo=ZoneInfo(frappe.utils.get_system_timezone())).timestamp() * 1000)
+	except Exception:
+		pass
+	return am, nxt[0]["seq"], until_ms
+
+
+def _async_media_tool_rows(assistant_msg_name: str, conversation_id: str) -> list[dict]:
+	"""This turn's tool rows for a media tool that started a background task and did not end
+	badly. The relay surfaces only a tool's ``status``, not its result details, so "started
+	and not failed, denied or cancelled" is the signal; a media tool that finished in the
+	foreground has already put its media on the final, which the caller checks first. Rows of
+	the conversation's next turn are not this turn's and are left out."""
+	from jarvis.chat.agent_client import MEDIA_GEN_TOOL_NAMES
+
+	am, next_seq, _until = _turn_window(assistant_msg_name, conversation_id)
+	if not am:
+		return []
+	seq_filter = [">", am.seq] if next_seq is None else ["between", [am.seq + 1, next_seq - 1]]
 	rows = frappe.get_all(
 		MSG,
 		filters={
 			"conversation": conversation_id,
 			"role": "tool",
 			"tool_name": ["in", list(MEDIA_GEN_TOOL_NAMES)],
-			"seq": [">", am.seq],
+			"seq": seq_filter,
 			"creation": [">=", am.creation],
 		},
 		fields=["name", "tool_status", "tool_name", "tool_call_id"],
 		limit_page_length=20,
 	)
-	return [r for r in rows if (r.get("tool_status") or "").lower() not in ("error", "failed")]
+	return [r for r in rows if (r.get("tool_status") or "").lower() in _ASYNC_MEDIA_STARTED_STATUSES]
+
+
+def _async_media_bound_s(rows: list[dict]) -> float:
+	"""How long to wait for this turn's media: the longest bound among its media tools."""
+	long_tool = any(r.get("tool_name") in _ASYNC_MEDIA_LONG_TOOLS for r in rows)
+	return ASYNC_MEDIA_LONG_POLL_TIMEOUT_S if long_tool else ASYNC_MEDIA_POLL_TIMEOUT_S
 
 
 def _maybe_start_async_media_harvest(
@@ -458,7 +506,8 @@ def _maybe_start_async_media_harvest(
 	if yield_continuation or media_rels or media_urls:
 		return
 	try:
-		if not _async_media_tool_rows(assistant_msg_name, conversation_id):
+		rows = _async_media_tool_rows(assistant_msg_name, conversation_id)
+		if not rows:
 			return
 		_enqueue_async_media_slice(
 			assistant_msg_name,
@@ -466,7 +515,7 @@ def _maybe_start_async_media_harvest(
 			user,
 			run_id,
 			turn_start_ms,
-			deadline_ms=int(time.time() * 1000) + int(ASYNC_MEDIA_POLL_TIMEOUT_S * 1000),
+			deadline_ms=int(time.time() * 1000) + int(_async_media_bound_s(rows) * 1000),
 			slice_no=0,
 			seed_attempts=0,
 		)
@@ -512,39 +561,76 @@ def persist_async_media(
 	seed_attempts: int = 0,
 ) -> None:
 	"""Background job, one short slice: look (for ``ASYNC_MEDIA_SLICE_S``) for the media a
-	detached tool's task adds to the session transcript and seed it onto the turn's assistant
-	message through the same seeders as the settle path. Nothing yet, or a failed fetch: enqueue
-	the next slice until ``deadline_ms``. At the end (seeded, or the bound) close the tool rows.
-	Idempotent: the seeders dedup on the attachment id. No explicit commit: the job runner
-	commits on success and each seeder commits its own writes. Never raises."""
+	detached tool's task adds to the session transcript within THIS turn's window, and seed it
+	onto the turn's assistant message through the same seeders as the settle path. Not there
+	yet, or the fetch failed, or the slice itself failed: the next slice is enqueued (in a
+	``finally``, so a fault cannot end the chain) until ``deadline_ms``. At the end (seeded, or
+	the bound) the tool rows are closed. Idempotent: the seeders dedup on the attachment id. No
+	explicit commit: the job runner commits on success and each seeder commits its own writes.
+	Never raises."""
 	try:
-		from jarvis.chat import generated_media
 		from jarvis.chat.agent_scope import assert_fefo_message_artifact_scope
 
 		assert_fefo_message_artifact_scope(assistant_msg_name)
+	except Exception:
+		frappe.log_error(title="chat worker: async media persist refused", message=frappe.get_traceback())
+		return  # a refused scope is permanent: no successor
+	if deadline_ms is None:
+		deadline_ms = int(time.time() * 1000) + int(ASYNC_MEDIA_POLL_TIMEOUT_S * 1000)
+	rows: list[dict] = []
+	done = False
+	try:
+		from jarvis.chat import generated_media
+
 		rows = _async_media_tool_rows(assistant_msg_name, conversation_id)
 		if not rows:
+			done = True
 			return
-		if deadline_ms is None:
-			deadline_ms = int(time.time() * 1000) + int(ASYNC_MEDIA_POLL_TIMEOUT_S * 1000)
+		_am, _next_seq, until_ms = _turn_window(assistant_msg_name, conversation_id)
 		media_rels, media_urls = _harvest_post_yield_media(
-			conversation_id, turn_start_ms, timeout_s=ASYNC_MEDIA_SLICE_S
+			conversation_id, turn_start_ms, timeout_s=ASYNC_MEDIA_SLICE_S, until_ms=until_ms
 		)
-		seeded = False
 		if media_rels or media_urls:
+			seed_attempts += 1
 			settings = frappe.get_single("Jarvis Settings")
 			_seed_gateway_media(
 				assistant_msg_name, conversation_id, user, run_id, media_rels, media_urls, settings
 			)
 			have = generated_media._existing_media_sources(assistant_msg_name)
-			seeded = bool(media_rels) or all(
-				generated_media._media_url_id(u["url"]) in have for u in media_urls
-			)
-			seed_attempts += 1
-		more = (
-			not seeded and int(time.time() * 1000) < deadline_ms and seed_attempts < ASYNC_MEDIA_SEED_ATTEMPTS
-		)
-		if more:
+			ids = [generated_media._media_dedup_key(r) for r in media_rels] + [
+				generated_media._media_url_id(u["url"]) for u in media_urls
+			]
+			if all(i in have for i in ids):
+				done = True
+		if done or seed_attempts >= ASYNC_MEDIA_SEED_ATTEMPTS or int(time.time() * 1000) >= deadline_ms:
+			done = True
+			_close_media_tool_rows(rows, conversation_id, user, run_id)
+	except Exception:
+		seed_attempts += 1
+		frappe.log_error(title="chat worker: async media persist failed", message=frappe.get_traceback())
+	finally:
+		if not done:
+			_continue_or_close(
+				rows, assistant_msg_name, conversation_id, user, run_id, turn_start_ms,
+				deadline_ms, slice_no, seed_attempts,
+			)  # fmt: skip
+
+
+def _continue_or_close(
+	rows,
+	assistant_msg_name,
+	conversation_id,
+	user,
+	run_id,
+	turn_start_ms,
+	deadline_ms,
+	slice_no,
+	seed_attempts,
+) -> None:
+	"""The end of a slice that did not finish: enqueue the next slice, or, past the bound or
+	out of seeding attempts, close the tool rows instead. Never raises."""
+	try:
+		if int(time.time() * 1000) < deadline_ms and seed_attempts < ASYNC_MEDIA_SEED_ATTEMPTS:
 			_enqueue_async_media_slice(
 				assistant_msg_name,
 				conversation_id,
@@ -555,10 +641,10 @@ def persist_async_media(
 				slice_no=slice_no + 1,
 				seed_attempts=seed_attempts,
 			)
-			return
-		_close_media_tool_rows(rows, conversation_id, user, run_id)
+		else:
+			_close_media_tool_rows(rows, conversation_id, user, run_id)
 	except Exception:
-		frappe.log_error(title="chat worker: async media persist failed", message=frappe.get_traceback())
+		frappe.log_error(title="chat worker: async media continuation failed", message=frappe.get_traceback())
 
 
 def _close_media_tool_rows(rows: list[dict], conversation_id: str, user: str, run_id: str) -> None:
@@ -1036,8 +1122,10 @@ def set_session_model_refreshing(sess, session_key: str, conv, model_ref) -> Non
 	except AgentUnreachableError as err:
 		if not is_definitive_refusal(err) or is_session_changed(err) or not refresh_from_admin():
 			raise
-		_, fresh = _session_model_patch(conv)
-		if fresh == model_ref:
+		should_patch, fresh = _session_model_patch(conv)
+		# "Leave alone" and an unchanged pin are not a reason to retry (a None here would
+		# be a RESET, which drops the user's pin).
+		if not should_patch or fresh is None or fresh == model_ref:
 			raise
 		sess.set_session_model(session_key, fresh)
 
