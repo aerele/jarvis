@@ -1,8 +1,7 @@
 // Real executable tests for the shared ```jarvis-ask contract (chatAsk.js), plus
 // source assertions fencing the ONE renderer it feeds. Plain node built-ins
 // (node:test + node:assert), like eventFence.test.js / voiceSendGlue.test.js.
-// Run directly (`node --test chatAsk.test.js`) or via the python suite
-// (jarvis/tests/test_chat_ask_client.py subprocess-runs it every CI run).
+// Run directly (`node --test chatAsk.test.js`) or via `npm run test:node`.
 //
 // What is being defended: the clarifying-question cards used to exist only
 // inside ChatView, and the Dashboards builder pane DELETED the block instead of
