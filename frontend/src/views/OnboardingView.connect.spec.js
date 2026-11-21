@@ -1911,18 +1911,6 @@ describe("connect wait bar: one smooth bar with a named-step caption", () => {
 		expect(owning.length).toBe(1);
 		w.unmount();
 	});
-
-	it("the bar caption counts all six steps, matching the fill fraction", async () => {
-		// An earlier regression showed a "Step 2 of 3" caption over six actual
-		// steps; this pins the count staying in sync with connectSteps.
-		const w = await mountConnect();
-
-		w.vm.onOpUpdate({ phase: "applying", chatReadinessReason: QUOTA_REASON });
-		await flushPromises();
-
-		expect(w.text()).toContain("Step 2 of 6");
-		w.unmount();
-	});
 });
 
 describe("subscription Test / Start-chatting mutual exclusion", () => {

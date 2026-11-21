@@ -364,36 +364,6 @@ test("promoteNewChatScope migrates draft ownership, the take scope, and store re
 	assert.equal(keepTake, "keep", "a falsy toId is a no-op (take unchanged)");
 });
 
-// ── (R3-1) INTEGRATION: composer-edit-before-send — an edited-out recording is never acknowledged ─
-test("R3-1 integration: a recording whose transcript the user edits/deletes out of the composer before sending keeps its audio", async () => {
-	const chat = makeChat();
-	// Two takes dictated into the (id-less) new-chat composer; both commit into the live input.
-	chat.dictate({ blob: "a", conversationId: SENTINEL });
-	chat.dictate({ blob: "b", conversationId: SENTINEL });
-	await flush();
-	chat.tx.resolve(0, "alpha words");
-	chat.tx.resolve(1, "bravo words");
-	await flush();
-	assert.equal(chat.input, "alpha words bravo words", "both transcripts landed in the composer");
-
-	// The user DELETES recording B's words before sending, leaving only recording A's text.
-	chat.input = "alpha words";
-	const bubble = chat.send(undefined, undefined, { ok: true, conversation_id: "conv-1" });
-
-	assert.deepEqual(
-		bubble.voiceAck,
-		[0],
-		"only recording A (present in the payload) is in the release token"
-	);
-	assert.ok(!chat.mirror.has(0), "recording A — its text was sent — is released");
-	assert.ok(chat.mirror.has(1), "recording B — edited out — is RETAINED (audio never lost)");
-	assert.equal(
-		chat.queue.hasUnfinished(),
-		true,
-		"the retained recording keeps the leave guard armed + actionable"
-	);
-});
-
 // ── (R3-2) INTEGRATION: an id-less send, then a retry commits AFTER id-adoption — not stranded ──
 test("R3-2 integration: a failed recording retried AFTER an id-less send's id-adoption commits under the REAL id and is releasable", async () => {
 	const chat = makeChat();

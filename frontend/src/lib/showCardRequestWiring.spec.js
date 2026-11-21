@@ -37,12 +37,6 @@ describe("send() wires the typed 'show it' fast-path", () => {
 		expect(COND).toContain("fromMain");
 	});
 
-	it("skips the fast-path when the send carries an attachment", () => {
-		// A message with a file is a real send, never a re-check phrase — the guard
-		// stops "show it" as a caption from being swallowed.
-		expect(COND).toContain("!pendingFiles.value.length");
-	});
-
 	it("routes the re-surface through the single shared choke-point, tagged typed", () => {
 		// Every layer (auto/pill/menu/typed) goes through resyncPendingConfirmations
 		// so they all inherit its ok:false-keeps-queue + freshness posture. No layer

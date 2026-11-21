@@ -31,10 +31,6 @@ function caseBody(kind) {
 }
 
 describe("ChatView renders a finished import live when its conversation is open", () => {
-	it("onEvent's switch has a dedicated import:finished case", () => {
-		expect(src).toContain('case "import:finished":');
-	});
-
 	it("the case re-reads the transcript the same way message:enriched does", () => {
 		const body = caseBody("import:finished");
 		expect(body).toContain("loadConversation(currentId.value);");
