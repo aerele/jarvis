@@ -2,10 +2,9 @@
 // (Skills-area promotion surfacing, ruling 2 + Codex CDX-SP-2). Plain node
 // built-ins (node:test + node:assert) — no external framework, the
 // eventFence.test.js precedent. Run directly
-// (`node --test promotionBudget.test.js`) or via the python suite:
-// jarvis/tests/test_promotion_budget_client.py subprocess-runs this so the
-// budget-warning contract lives in the suite forever. `node --test` exits
-// non-zero on any failed assertion, which the python runner asserts.
+// (`node --test promotionBudget.test.js`) or via `npm run test:node`, so the
+// budget-warning contract is enforced by CI. `node --test` exits non-zero on
+// any failed assertion.
 //
 // The DISPLACEMENT truth (which skill is dropped, given `skill_name asc` order) is
 // computed SERVER-SIDE in custom_skills.project_org_promotion_push and proven in
