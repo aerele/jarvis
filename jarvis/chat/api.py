@@ -781,6 +781,9 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 		"canvas",
 		# The live steps the reply showed, saved at settlement: [{text, at}].
 		"steps",
+		# The user's likely next messages, offered as chips under the latest reply
+		# (jarvis.chat.suggest_replies): {replies, multi_select}, or empty.
+		"suggested_replies",
 		"reply_duration_ms",
 		# jarvis#560: which model actually produced each reply. The SPA renders it
 		# on the bubble only when it differs from what the header pill implies, so
@@ -834,8 +837,14 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 	_live_turn_steps(messages)
 	if paged:
 		_compact_tool_results(rows)
-	# canvas + steps + pending_card are stored as JSON strings; hand the UI real objects (or None).
+	# canvas + steps + pending_card + suggested_replies are stored as JSON strings; hand the
+	# UI real objects (or None).
 	for m in rows:
+		if m.get("suggested_replies"):
+			try:
+				m["suggested_replies"] = frappe.parse_json(m["suggested_replies"])
+			except Exception:
+				m["suggested_replies"] = None
 		if m.get("steps"):
 			try:
 				m["steps"] = frappe.parse_json(m["steps"])

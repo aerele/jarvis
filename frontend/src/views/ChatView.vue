@@ -2106,6 +2106,16 @@
 										</button>
 									</div>
 								</div>
+								<!-- the user's likely next messages, under the latest reply only
+								     (jarvis.chat.suggest_replies); a tap sends one -->
+								<SuggestedReplies
+									v-if="suggestionsFor(m)"
+									:key="'sr-' + m.name"
+									:replies="suggestionsFor(m).replies"
+									:multiSelect="suggestionsFor(m).multi_select"
+									:disabled="busy"
+									@send="sendSuggestion($event, m.name)"
+								/>
 								<FeedbackBar
 									v-if="feedbackViewIsCurrent(m)"
 									@rate="onFeedbackRate($event, feedbackViewFor(m))"
@@ -4596,6 +4606,7 @@ import SheetCharts from "@/components/SheetCharts.vue";
 import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
+import SuggestedReplies from "@/components/chat/SuggestedReplies.vue";
 import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
 import FileBoxSheetReview from "@/components/chat/FileBoxSheetReview.vue";
 import { useFileBoxWaits } from "@/composables/useFileBoxWaits";
@@ -8004,6 +8015,23 @@ function answerConfirm(ok, label, messageId) {
 function answerAsk(answer, messageId) {
 	if (!messageActionIsCurrent(captureChatView(messageId || ""))) return;
 	send(answer);
+}
+
+// Suggested replies (jarvis.chat.suggest_replies, after Frappe Flow): the user's likely
+// next messages, stored on the reply and pushed over realtime (message:replies). Shown
+// under the LATEST finished reply only (_lastAssistant: none mid-turn), and not while
+// that reply already offers its own next step: a clarifying question (AskCard), a
+// confirmation card or an unsaved draft. A tap sends the text as the next message.
+function suggestionsFor(m) {
+	if (!m || m !== _lastAssistant.value) return null;
+	const s = m.suggested_replies;
+	if (!s || !Array.isArray(s.replies) || !s.replies.length) return null;
+	if (activeAsk.value || visiblePendingActions.value.length || _liveDraft.value) return null;
+	return s;
+}
+function sendSuggestion(text, messageId) {
+	if (!text || !messageActionIsCurrent(captureChatView(messageId || ""))) return;
+	send(text);
 }
 
 // --- Field-control helpers shared by the confirm card and the record draft
@@ -13278,6 +13306,14 @@ function onEvent(p) {
 			// in the composer): see giveUpGotoAtRunEnd. A repeat does nothing here.
 			const nothingStarted = !countdown && !gotoRepeat;
 			if (nothingStarted) giveUpGotoAtRunEnd(p, goto);
+			break;
+		}
+		case "message:replies": {
+			// The suggested replies landed for a reply in this chat (a short-queue job,
+			// seconds after run:end). Set them on the row in place: no reload.
+			const m = messages.value.find((x) => x.name === p.message_id);
+			if (m && Array.isArray(p.replies))
+				m.suggested_replies = { replies: p.replies, multi_select: !!p.multi_select };
 			break;
 		}
 		case "message:enriched": {
