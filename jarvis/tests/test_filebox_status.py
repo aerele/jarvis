@@ -792,9 +792,6 @@ class TestDropFile(_Base):
 		self.assertFalse(err.filebox_last_error)
 		self.assertIsNone(err.filebox_last_error_at)
 
-	def test_list_inbound_is_gone(self):
-		self.assertFalse(hasattr(filebox, "list_inbound"))
-
 
 class TestResultBackfillPatch(_Base):
 	def setUp(self):

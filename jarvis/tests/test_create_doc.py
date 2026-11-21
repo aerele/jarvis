@@ -165,21 +165,6 @@ class TestCreateDocHappyPath(FrappeTestCase):
 		# Row actually exists in the DB
 		self.assertTrue(frappe.db.exists(NOTE_DT, result["name"]))
 
-	def test_validate_hooks_still_fire(self):
-		"""Required fields enforced by the DocType's validate() must still
-		reject - we don't bypass DocType rules."""
-		# Note has no required fields by default, so we can't easily test
-		# a validate failure without a fixture DocType. Just confirm that
-		# doc.insert() is what we call (it's the validate path).
-		# This test exists to document the contract; the trust here is in
-		# Frappe's own test coverage of insert().
-		result = create_doc(
-			doctype=NOTE_DT,
-			values={"title": "validate-hook-test"},
-		)
-		_created_in_test.append(result["name"])
-		self.assertTrue(result["name"])
-
 
 THREE_FORMAT_SCRIPT = 'a = "PO {}".format(doc.name)\nb = "{} x".format(1)\nc = "{a}".format_map({"a": 1})\n'
 

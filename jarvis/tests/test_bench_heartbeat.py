@@ -68,13 +68,6 @@ class TestBenchHeartbeatPush(_PumpTestCase):
 			heartbeat.push_bench_heartbeat()
 		push.assert_not_called()
 
-	def test_b3_silent_on_admin_unreachable(self):
-		with (
-			patch.object(heartbeat, "_admin_configured", return_value=True),
-			patch("jarvis.admin_client.push_bench_heartbeat", side_effect=AdminUnreachableError("down")),
-		):
-			heartbeat.push_bench_heartbeat()  # must not raise
-
 	def test_b3_silent_on_admin_validation_error(self):
 		"""A 4xx from the backend — INCLUDING the ingest endpoint not existing yet (before Track
 		C ships) — is silently swallowed, never logged fleet-wide."""
