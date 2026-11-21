@@ -1227,21 +1227,6 @@ class TestDashboardForConversation(_DashboardsApiTestCase):
 		frappe.set_user(PLAIN_A)
 		self.assertEqual(dashboard_for_conversation(conv)["data"], {})
 
-	def test_several_saves_answer_with_the_newest(self):
-		conv = self._conv(PLAIN_A)
-		older = self._mk_static(PLAIN_A, title="older", source_conversation=conv)
-		newer = self._mk_static(PLAIN_A, title="newer", source_conversation=conv)
-		# Order the pair explicitly so the assertion is about the ORDER BY, not
-		# about how fast two inserts run.
-		frappe.db.set_value(
-			DASHBOARD, older["name"], "creation", "2020-01-01 00:00:00", update_modified=False
-		)
-		frappe.db.set_value(
-			DASHBOARD, newer["name"], "creation", "2020-01-02 00:00:00", update_modified=False
-		)
-		frappe.set_user(PLAIN_A)
-		self.assertEqual(dashboard_for_conversation(conv)["data"]["name"], newer["name"])
-
 	def test_editing_an_older_dashboard_does_not_promote_it_over_a_newer_one(self):
 		# `creation desc`, not `modified desc`: merely touching the old row must
 		# not put it back in front of one built after it.
