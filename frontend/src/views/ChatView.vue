@@ -18036,9 +18036,10 @@ onUnmounted(() => {
 }
 /* A card or note right after a reply belongs to that reply: it sits 8px under the reply's hover
    row (time, copy), not a full thread gap (26px) below it. The hover row keeps its place. Only the
-   first one after a reply moves; the next items keep the thread gap. */
+   first one after a reply moves; the next items keep the thread gap. A reply with no hover row
+   (still streaming) is left alone: there the row's own height is not there to keep the distance. */
 .jv-thread-inner
-	> .jv-amsg
+	> .jv-amsg:has(.jv-metabar:not(:empty))
 	+ :is(.jv-receipt, .jv-toolfail, .jv-action, .jv-tool-draft, .jv-fbw, .jv-rrc) {
 	margin-top: -18px;
 }
