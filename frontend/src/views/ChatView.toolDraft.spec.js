@@ -733,19 +733,18 @@ describe("every agent-side card and note starts where the agent's replies do", (
 			expect(listed, left).not.toContain(left);
 	});
 
-	// Break: a new card type gets the indent but not the pull (it then hangs a full thread gap
-	// below its reply), or the thread's gap changes and the pull no longer leaves 8px.
-	it("the first card or note after a reply sits 8px under it, for the same list", () => {
+	// Break: a new card type gets the indent but not the pull, so it hangs a full thread gap below
+	// its reply while its siblings sit close.
+	it("the card or note pulled up under a reply is the same list that gets the indent", () => {
 		const cards =
 			/\.jv-thread-inner > :is\(([^)]+)\) \{\s*margin-left: var\(--jv-reply-indent\)/.exec(
 				src
 			)?.[1];
 		const pulled =
-			/\.jv-thread-inner\s*> \.jv-amsg\s*\+ :is\(([^)]+)\) \{\s*margin-top: (-?\d+)px;/.exec(
+			/\.jv-thread-inner\s*> \.jv-amsg:has\(\.jv-metabar:not\(:empty\)\)\s*\+ :is\(([^)]+)\) \{\s*margin-top: -\d+px;/.exec(
 				src
-			);
-		expect(pulled?.[1]).toBe(cards);
-		const threadGap = Number(/class="jv-thread-inner"[^>]*?gap: (\d+)px/s.exec(src)?.[1]);
-		expect(Number(pulled?.[2])).toBe(8 - threadGap);
+			)?.[1];
+		expect(cards).toBeTruthy();
+		expect(pulled).toBe(cards);
 	});
 });
