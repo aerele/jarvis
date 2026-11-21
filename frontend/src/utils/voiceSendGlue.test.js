@@ -24,8 +24,7 @@
 // A dictation is now ONE recording transcribed in ONE call, so each take below is begin → one
 // timeslice fragment → finish, exactly as useDictationRecorder drives it.
 //
-// Run: `node --test voiceSendGlue.test.js`, or via the python suite
-// (jarvis/tests/test_voice_send_glue_client.py subprocess-runs it so the contract holds every CI run).
+// Run: `node --test voiceSendGlue.test.js`, or via `npm run test:node`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
