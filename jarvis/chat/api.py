@@ -839,10 +839,16 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 		_compact_tool_results(rows)
 	# canvas + steps + pending_card + suggested_replies are stored as JSON strings; hand the
 	# UI real objects (or None).
+	from jarvis.chat.suggest_replies import user_enabled
+
+	show_suggestions = user_enabled(frappe.session.user)
 	for m in rows:
 		if m.get("suggested_replies"):
 			try:
-				m["suggested_replies"] = frappe.parse_json(m["suggested_replies"])
+				# A user who switched suggestions off sees none, also ones stored before.
+				m["suggested_replies"] = (
+					frappe.parse_json(m["suggested_replies"]) if show_suggestions else None
+				)
 			except Exception:
 				m["suggested_replies"] = None
 		if m.get("steps"):

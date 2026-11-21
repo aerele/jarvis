@@ -4607,6 +4607,7 @@ import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
 import SuggestedReplies from "@/components/chat/SuggestedReplies.vue";
+import { suggestRepliesOn } from "@/lib/suggestRepliesPref";
 import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
 import FileBoxSheetReview from "@/components/chat/FileBoxSheetReview.vue";
 import { useFileBoxWaits } from "@/composables/useFileBoxWaits";
@@ -8023,7 +8024,7 @@ function answerAsk(answer, messageId) {
 // that reply already offers its own next step: a clarifying question (AskCard), a
 // confirmation card or an unsaved draft. A tap sends the text as the next message.
 function suggestionsFor(m) {
-	if (!m || m !== _lastAssistant.value) return null;
+	if (!suggestRepliesOn.value || !m || m !== _lastAssistant.value) return null;
 	const s = m.suggested_replies;
 	if (!s || !Array.isArray(s.replies) || !s.replies.length) return null;
 	if (activeAsk.value || visiblePendingActions.value.length || _liveDraft.value) return null;

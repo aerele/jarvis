@@ -13,6 +13,10 @@ How this differs from Flow, and why:
     the same kind of silent one-shot turn auto-titling and the new-chat suggestions use
     (``jarvis.chat.title._generate_via_gateway``), on its own session, with the end of the
     conversation (a bounded excerpt of the visible user / assistant text) in the prompt.
+  - **Two switches**: the site's (Jarvis Settings > Suggest follow-up replies) and each
+    user's own (Jarvis User Settings.suggest_replies, in their chat settings); both on by
+    default. A user who turned theirs off gets no model call, and the chat history
+    leaves out the ones already stored (``api._conversation_history``).
   - **Skipped where a one-shot is costly or redundant**: on the Claude plan a one-shot starts
     its own claude-cli process (``one_shot_runs_on_claude_plan``, as titles skip it); a reply
     that asks its own question (a ``jarvis-ask`` card) already offers the answers; a parked
@@ -137,11 +141,25 @@ def enabled() -> bool:
 	return True if not rows or rows[0][0] is None else bool(frappe.utils.cint(rows[0][0]))
 
 
+def user_enabled(user: str | None) -> bool:
+	"""The user's own switch (Jarvis User Settings.suggest_replies). On by default: no
+	settings row yet, or a site before the column arrived, reads as on."""
+	if not user:
+		return True
+	try:
+		value = frappe.db.get_value("Jarvis User Settings", {"user": user}, "suggest_replies")
+	except Exception:
+		return True
+	return True if value is None else bool(frappe.utils.cint(value))
+
+
 def skip_reason(conversation: str, message: str, owner: str | None) -> str | None:
 	"""Why ``message`` gets no suggestions, or None. Re-checked by the job just before it
 	stores, since the user may have moved on while the model answered."""
 	if not enabled():
 		return "disabled"
+	if not user_enabled(owner):
+		return "user_off"
 	from jarvis.chat.collaboration import is_collaborative
 
 	if is_collaborative(conversation):

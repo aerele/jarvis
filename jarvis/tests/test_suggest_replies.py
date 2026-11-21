@@ -79,6 +79,37 @@ class TestEnabled(FrappeTestCase):
 				self.assertIs(sr.enabled(), expected, stored)
 
 
+class TestUserSwitch(FrappeTestCase):
+	def test_on_unless_the_user_switched_it_off(self):
+		for stored, expected in ((None, True), (1, True), ("1", True), (0, False), ("0", False)):
+			with patch.object(sr.frappe.db, "get_value", return_value=stored):
+				self.assertIs(sr.user_enabled("u@example.com"), expected, stored)
+		self.assertIs(sr.user_enabled(None), True)
+		with patch.object(sr.frappe.db, "get_value", side_effect=Exception("no column yet")):
+			self.assertIs(sr.user_enabled("u@example.com"), True)
+
+	def test_a_user_who_switched_off_gets_no_model_call(self):
+		with (
+			patch.object(sr, "enabled", return_value=True),
+			patch.object(sr, "user_enabled", return_value=False),
+		):
+			self.assertEqual(sr.skip_reason("C1", "R1", "u@example.com"), "user_off")
+
+	def test_the_settings_api_reads_and_writes_the_switch(self):
+		from jarvis.chat import user_settings_api as usa
+
+		doc = frappe._dict(user="u@example.com", suggest_replies=1, save=MagicMock())
+		with (
+			patch.object(usa, "require_jarvis_access"),
+			patch.object(usa.usage, "get_or_create_user_settings", return_value=doc),
+			patch.object(
+				usa, "_settings_payload", side_effect=lambda d: {"suggest_replies": d.suggest_replies}
+			),
+		):
+			self.assertEqual(usa.update_my_settings(suggest_replies=0)["data"], {"suggest_replies": 0})
+			self.assertEqual(usa.update_my_settings(suggest_replies="1")["data"], {"suggest_replies": 1})
+
+
 class TestSkipReason(FrappeTestCase):
 	def _reason(self, rows, *, enabled=True, shared=False, pending=None, message="R1"):
 		with (

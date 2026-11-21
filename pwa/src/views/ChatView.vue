@@ -88,6 +88,7 @@ import { cleanQuote, quoteMarkdown, splitQuote } from "@jsshared/reply_quote.mjs
 import SelectionActions from "@shared/components/chat/SelectionActions.vue";
 import ReplyQuote from "@shared/components/chat/ReplyQuote.vue";
 import SuggestedReplies from "@shared/components/chat/SuggestedReplies.vue";
+import { suggestRepliesOn } from "@shared/lib/suggestRepliesPref";
 import { createReader } from "@jsshared/read_aloud.mjs";
 import {
 	boundedDelivery,
@@ -1123,7 +1124,8 @@ function onVisible() {
 // under the LAST reply only, and not while a reply streams, a message is on its way, a
 // confirmation waits or a draft card is up (each is already the next step).
 function suggestionsFor(it) {
-	if (!it?.msg || live.value || sending.value || pending.value.length) return null;
+	if (!suggestRepliesOn.value || !it?.msg || live.value || sending.value || pending.value.length)
+		return null;
 	const a = anchor.value;
 	if (a && (a.action || a.bad)) return null;
 	const last = items.value[items.value.length - 1];
