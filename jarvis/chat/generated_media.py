@@ -462,6 +462,20 @@ def _media_url_id(url: str) -> str:
 	return m.group(1) if m else url
 
 
+_IMAGE_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"GIF87a", b"GIF89a")
+
+
+def _looks_like_image(head: bytes) -> bool:
+	"""PNG, JPEG, GIF, or WebP (RIFF....WEBP) by its first bytes."""
+	return head.startswith(_IMAGE_MAGIC) or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+
+
+def _media_fetch_failed(url: str, reason: str) -> None:
+	"""Say WHY a fetch came back empty: the caller only logs "empty". The attachment id and
+	the reason only, never the token or the gateway address."""
+	frappe.logger("jarvis").warning("gateway media fetch failed: %s (%s)", _media_url_id(url), reason)
+
+
 def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | None = None) -> bytes | None:
 	"""GET one gateway-attached media block from the tenant's own gateway
 	(binary-safe, redirect-disabled, size-bounded). ``url`` is the RELATIVE
@@ -469,13 +483,15 @@ def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | No
 	(``agent_client._valid_media_url``) before it ever reaches here. Rejects a
 	response whose content-type is neither ``image/*`` nor the block's own
 	declared ``mime_type`` (the gateway naming one thing and serving another is
-	itself a signal not to trust the body)."""
+	itself a signal not to trust the body). A generic binary content-type is accepted
+	only for a block that declares an image type, and only when the bytes ARE an image."""
 	import requests
 
 	from jarvis.chat.canvas import _http_base
 
 	base = _http_base(agent_url)
 	if not base or not token:
+		_media_fetch_failed(url, "no gateway address or token")
 		return None
 	try:
 		with requests.get(
@@ -486,16 +502,27 @@ def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | No
 			allow_redirects=False,
 		) as r:
 			if r.status_code != 200:
+				_media_fetch_failed(url, f"status {r.status_code}")
 				return None
 			ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-			if not (ctype.startswith("image/") or (mime_type and ctype == mime_type.lower())):
+			generic = ctype in ("application/octet-stream", "binary/octet-stream", "")
+			declared_image = (mime_type or "").lower().startswith("image/")
+			if not (ctype.startswith("image/") or (mime_type and ctype == mime_type.lower())) and not (
+				generic and declared_image
+			):
+				_media_fetch_failed(url, f"content-type {ctype}")
 				return None
 			buf = bytearray()
 			for chunk in r.iter_content(64 * 1024):
 				buf += chunk
 				if len(buf) > _MAX_MEDIA_URL_BYTES:
+					_media_fetch_failed(url, "too large")
 					return None
-	except Exception:
+			if generic and not _looks_like_image(bytes(buf[:16])):
+				_media_fetch_failed(url, "generic content-type and not an image")
+				return None
+	except Exception as e:
+		_media_fetch_failed(url, type(e).__name__)
 		return None
 	return bytes(buf) or None
 

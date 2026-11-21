@@ -2,6 +2,7 @@
 runtime appends the finished image to the session transcript later. A background job polls for
 it and seeds it once. The 2026.9.3 yield path keeps harvesting inline and starts no job."""
 
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -116,15 +117,19 @@ class TestTrigger(unittest.TestCase):
 			turn_handler._maybe_start_async_media_harvest("M", "C", "u@x", "run", START_MS, **args)
 		return enq
 
-	def test_a_normal_final_after_a_started_media_tool_enqueues_one_deduped_job(self):
-		enq = self._start([{"name": "T1", "tool_status": "running"}])
+	def test_a_normal_final_after_a_started_media_tool_enqueues_the_first_slice_on_the_turn_lane(self):
+		with patch("jarvis.chat.pump._control_queue", return_value="short"):
+			enq = self._start([{"name": "T1", "tool_status": "running"}])
 		enq.assert_called_once()
 		kw = enq.call_args.kwargs
 		self.assertEqual(enq.call_args.args[0], "jarvis.chat.turn_handler.persist_async_media")
+		# The lane the turn rides, never `long` (served last on a one-worker bench).
 		self.assertEqual(
-			(kw["queue"], kw["job_id"], kw["deduplicate"]), ("long", "jarvis-async-media::M", True)
+			(kw["queue"], kw["job_id"], kw["deduplicate"]), ("short", "jarvis-async-media::M::s0", True)
 		)
-		self.assertEqual(kw["timeout"], turn_handler.ASYNC_MEDIA_POLL_TIMEOUT_S + 60)
+		self.assertEqual(kw["timeout"], turn_handler.ASYNC_MEDIA_JOB_TIMEOUT_S)
+		self.assertLess(turn_handler.ASYNC_MEDIA_JOB_TIMEOUT_S, 120)
+		self.assertGreater(kw["deadline_ms"], int(time.time() * 1000))
 
 	def test_no_media_tool_no_job(self):
 		self._start([]).assert_not_called()
@@ -151,51 +156,114 @@ class TestTrigger(unittest.TestCase):
 
 
 class TestJob(unittest.TestCase):
-	def _run(self, histories, rows=None, timeout_s=0.01):
+	def _run(self, histories, *, have=(), deadline_ms=None, seed_attempts=0, rows=None):
 		rows = (
 			rows
 			if rows is not None
 			else [{"name": "T1", "tool_status": "running", "tool_name": "image_generate"}]
 		)
 		pool = _Pool(histories)
+		from jarvis.chat import generated_media
+
 		with (
 			patch("jarvis.chat.agent_scope.assert_fefo_message_artifact_scope"),
 			patch.object(turn_handler, "_async_media_tool_rows", return_value=rows),
-			patch.object(turn_handler, "ASYNC_MEDIA_POLL_TIMEOUT_S", timeout_s),
+			patch.object(turn_handler, "ASYNC_MEDIA_SLICE_S", 0),
 			patch("jarvis.chat.agent_session_pool.checkout", pool.checkout),
 			patch.object(turn_handler.frappe.db, "get_value", return_value="jarvis-chat-u-1"),
 			patch.object(turn_handler.frappe.db, "set_value") as set_value,
 			patch.object(turn_handler.frappe, "get_single", return_value=frappe._dict(agent_url="http://gw")),
 			patch.object(turn_handler.time, "sleep"),
 			patch("jarvis.chat.generated_media.detect_media_paths", return_value=[]),
+			patch.object(generated_media, "_existing_media_sources", return_value=set(have)),
 			patch.object(turn_handler, "_seed_gateway_media") as seed,
+			patch.object(turn_handler, "_enqueue_async_media_slice") as nxt,
 			patch.object(turn_handler, "_publish_to_user") as publish,
 		):
-			turn_handler.persist_async_media("M", "C", "u@x", "run", START_MS)
-		return seed, set_value, publish
+			turn_handler.persist_async_media(
+				"M",
+				"C",
+				"u@x",
+				"run",
+				START_MS,
+				deadline_ms=deadline_ms or int(time.time() * 1000) + 60_000,
+				slice_no=2,
+				seed_attempts=seed_attempts,
+			)
+		return seed, set_value, publish, nxt
+
+	def _have(self):
+		from jarvis.chat import generated_media
+
+		return [generated_media._media_url_id(URL)]
 
 	def test_the_image_is_seeded_once_and_the_tool_row_is_closed(self):
-		seed, set_value, publish = self._run([_history()])
+		seed, set_value, publish, nxt = self._run([_history()], have=self._have())
 		seed.assert_called_once()
 		self.assertEqual(seed.call_args.args[5], [{"url": URL, "mime_type": "image/png"}])
 		self.assertEqual(set_value.call_args.args[2]["tool_status"], "completed")
 		self.assertEqual(publish.call_args.args[1]["kind"], "tool:end")
+		nxt.assert_not_called()
 
-	def test_a_second_run_over_the_same_history_goes_through_the_deduping_seeder(self):
-		# The seeder dedups on the attachment id; the job's part is to hand it the same url.
-		for _ in range(2):
-			seed, _, _ = self._run([_history()])
-			self.assertEqual(seed.call_args.args[5][0]["url"], URL)
-
-	def test_no_image_by_the_bound_seeds_nothing_but_still_closes_the_row(self):
-		seed, set_value, _ = self._run([_history(with_image=False)], timeout_s=0)
+	def test_nothing_yet_enqueues_the_next_slice_and_keeps_the_row_open(self):
+		seed, set_value, _, nxt = self._run([_history(with_image=False)])
 		seed.assert_not_called()
+		set_value.assert_not_called()
+		self.assertEqual(nxt.call_args.kwargs["slice_no"], 3)
+
+	def test_the_bound_closes_the_row_instead_of_enqueueing_again(self):
+		seed, set_value, _, nxt = self._run([_history(with_image=False)], deadline_ms=1)
+		nxt.assert_not_called()
+		self.assertEqual(set_value.call_args.args[2]["tool_status"], "completed")
+
+	def test_a_failed_fetch_is_retried_in_a_later_slice_but_only_a_few_times(self):
+		# The image is in the transcript, but the seeder could not save it (nothing on the canvas).
+		seed, set_value, _, nxt = self._run([_history()], have=[])
+		seed.assert_called_once()
+		self.assertEqual(nxt.call_args.kwargs["seed_attempts"], 1)
+		_, set_value, _, nxt = self._run(
+			[_history()], have=[], seed_attempts=turn_handler.ASYNC_MEDIA_SEED_ATTEMPTS - 1
+		)
+		nxt.assert_not_called()
 		self.assertEqual(set_value.call_args.args[2]["tool_status"], "completed")
 
 	def test_no_media_tool_row_means_no_polling(self):
-		seed, set_value, _ = self._run([_history()], rows=[])
+		seed, set_value, _, nxt = self._run([_history()], rows=[])
 		seed.assert_not_called()
 		set_value.assert_not_called()
+		nxt.assert_not_called()
+
+
+class TestFetchAcceptsWhatTheGatewayServes(unittest.TestCase):
+	PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 32
+
+	def _fetch(self, status=200, ctype="image/png", body=None):
+		from jarvis.chat import generated_media
+
+		resp = MagicMock(status_code=status, headers={"Content-Type": ctype})
+		resp.iter_content.return_value = [self.PNG if body is None else body]
+		resp.__enter__.return_value = resp
+		with (
+			patch("requests.get", return_value=resp),
+			patch("jarvis.chat.canvas._http_base", return_value="http://gw"),
+			patch.object(generated_media.frappe, "logger") as logger,
+		):
+			out = generated_media.fetch_media_url("http://gw", "tok", URL, mime_type="image/png")
+		return out, logger
+
+	def test_a_normal_image_response(self):
+		self.assertEqual(self._fetch()[0], self.PNG)
+
+	def test_a_generic_binary_type_is_accepted_only_for_real_image_bytes(self):
+		self.assertEqual(self._fetch(ctype="application/octet-stream")[0], self.PNG)
+		self.assertIsNone(self._fetch(ctype="application/octet-stream", body=b"<html>nope</html>")[0])
+
+	def test_a_failure_says_why_without_the_token(self):
+		out, logger = self._fetch(status=404)
+		self.assertIsNone(out)
+		message = " ".join(str(a) for a in logger.return_value.warning.call_args.args)
+		self.assertIn("status 404", message)
+		self.assertNotIn("tok", message.replace("attachment", ""))
 
 
 class TestSeedingIsIdempotent(unittest.TestCase):

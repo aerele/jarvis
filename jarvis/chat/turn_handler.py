@@ -115,9 +115,14 @@ _YIELD_MEDIA_POLL_TIMEOUT_S = 20.0
 # Newer runtimes (2026.11) do not yield the run when a media tool starts its background
 # task: the first run ends with a normal final and the runtime appends the finished media
 # to the transcript on its own, up to the tool's own timeout (180 s for an image) later.
-# ``persist_async_media`` polls for it in a background job, never in the settle path.
+# ``persist_async_media`` waits for it in SHORT SLICES, each its own job on the lane the turn
+# itself rides, re-enqueueing itself until the bound, so no worker is held for minutes and the
+# first slice is not queued behind long jobs.
 ASYNC_MEDIA_POLL_TIMEOUT_S = 180.0
-ASYNC_MEDIA_JOB_TIMEOUT_S = ASYNC_MEDIA_POLL_TIMEOUT_S + 60.0
+ASYNC_MEDIA_SLICE_S = 8.0
+ASYNC_MEDIA_JOB_TIMEOUT_S = 60.0
+# A fetch of the file can fail transiently; give the seeding a few tries, not the whole bound.
+ASYNC_MEDIA_SEED_ATTEMPTS = 3
 
 
 def persist_rich_outputs(
@@ -455,45 +460,102 @@ def _maybe_start_async_media_harvest(
 	try:
 		if not _async_media_tool_rows(assistant_msg_name, conversation_id):
 			return
-		frappe.enqueue(
-			"jarvis.chat.turn_handler.persist_async_media",
-			queue="long",
-			timeout=ASYNC_MEDIA_JOB_TIMEOUT_S,
-			job_id=f"jarvis-async-media::{assistant_msg_name}",
-			deduplicate=True,
-			assistant_msg_name=assistant_msg_name,
-			conversation_id=conversation_id,
-			user=user,
-			run_id=run_id,
-			turn_start_ms=turn_start_ms,
+		_enqueue_async_media_slice(
+			assistant_msg_name,
+			conversation_id,
+			user,
+			run_id,
+			turn_start_ms,
+			deadline_ms=int(time.time() * 1000) + int(ASYNC_MEDIA_POLL_TIMEOUT_S * 1000),
+			slice_no=0,
+			seed_attempts=0,
 		)
 	except Exception:
 		frappe.log_error(title="chat worker: async media enqueue failed", message=frappe.get_traceback())
 
 
-def persist_async_media(
-	assistant_msg_name: str, conversation_id: str, user: str, run_id: str, turn_start_ms: int
+def _enqueue_async_media_slice(
+	assistant_msg_name, conversation_id, user, run_id, turn_start_ms, *, deadline_ms, slice_no, seed_attempts
 ) -> None:
-	"""Background job: wait (bounded) for the media a detached tool's task adds to the
-	session transcript, seed it onto the turn's assistant message through the same seeders as
-	the settle path, and close the tool rows. Idempotent: the seeders dedup on the attachment
-	id, so a second run adds nothing. No explicit commit: the job runner commits on success,
-	and each seeder commits its own writes. Never raises."""
+	"""One slice of the async media wait. Rides the lane the turn's own control jobs use
+	(a live ``jarvis_chat`` lane, else ``short``): on a bench with one general worker the
+	``long`` queue is served last and the first slice waited behind scheduled jobs for a
+	minute. The job id carries the slice number, so the trigger is deduped per message while
+	a slice can still enqueue its successor."""
+	from jarvis.chat.pump import _control_queue
+
+	frappe.enqueue(
+		"jarvis.chat.turn_handler.persist_async_media",
+		queue=_control_queue(),
+		timeout=ASYNC_MEDIA_JOB_TIMEOUT_S,
+		job_id=f"jarvis-async-media::{assistant_msg_name}::s{slice_no}",
+		deduplicate=True,
+		assistant_msg_name=assistant_msg_name,
+		conversation_id=conversation_id,
+		user=user,
+		run_id=run_id,
+		turn_start_ms=turn_start_ms,
+		deadline_ms=deadline_ms,
+		slice_no=slice_no,
+		seed_attempts=seed_attempts,
+	)
+
+
+def persist_async_media(
+	assistant_msg_name: str,
+	conversation_id: str,
+	user: str,
+	run_id: str,
+	turn_start_ms: int,
+	deadline_ms: int | None = None,
+	slice_no: int = 0,
+	seed_attempts: int = 0,
+) -> None:
+	"""Background job, one short slice: look (for ``ASYNC_MEDIA_SLICE_S``) for the media a
+	detached tool's task adds to the session transcript and seed it onto the turn's assistant
+	message through the same seeders as the settle path. Nothing yet, or a failed fetch: enqueue
+	the next slice until ``deadline_ms``. At the end (seeded, or the bound) close the tool rows.
+	Idempotent: the seeders dedup on the attachment id. No explicit commit: the job runner
+	commits on success and each seeder commits its own writes. Never raises."""
 	try:
+		from jarvis.chat import generated_media
 		from jarvis.chat.agent_scope import assert_fefo_message_artifact_scope
 
 		assert_fefo_message_artifact_scope(assistant_msg_name)
 		rows = _async_media_tool_rows(assistant_msg_name, conversation_id)
 		if not rows:
 			return
+		if deadline_ms is None:
+			deadline_ms = int(time.time() * 1000) + int(ASYNC_MEDIA_POLL_TIMEOUT_S * 1000)
 		media_rels, media_urls = _harvest_post_yield_media(
-			conversation_id, turn_start_ms, timeout_s=ASYNC_MEDIA_POLL_TIMEOUT_S
+			conversation_id, turn_start_ms, timeout_s=ASYNC_MEDIA_SLICE_S
 		)
+		seeded = False
 		if media_rels or media_urls:
 			settings = frappe.get_single("Jarvis Settings")
 			_seed_gateway_media(
 				assistant_msg_name, conversation_id, user, run_id, media_rels, media_urls, settings
 			)
+			have = generated_media._existing_media_sources(assistant_msg_name)
+			seeded = bool(media_rels) or all(
+				generated_media._media_url_id(u["url"]) in have for u in media_urls
+			)
+			seed_attempts += 1
+		more = (
+			not seeded and int(time.time() * 1000) < deadline_ms and seed_attempts < ASYNC_MEDIA_SEED_ATTEMPTS
+		)
+		if more:
+			_enqueue_async_media_slice(
+				assistant_msg_name,
+				conversation_id,
+				user,
+				run_id,
+				turn_start_ms,
+				deadline_ms=deadline_ms,
+				slice_no=slice_no + 1,
+				seed_attempts=seed_attempts,
+			)
+			return
 		_close_media_tool_rows(rows, conversation_id, user, run_id)
 	except Exception:
 		frappe.log_error(title="chat worker: async media persist failed", message=frappe.get_traceback())
