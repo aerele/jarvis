@@ -160,15 +160,6 @@ describe("grouped chat download menu", () => {
 		expect(menu.downloadMenuOption.value.label).toBe("Download");
 		expect(identities()).toEqual(["download", "pdf", "md"]);
 	});
-	it("offers one Download action with PDF and Markdown choices without starting a request", () => {
-		const menu = useConversationExport(() => "grouped-chat");
-		expect(menu.downloadMenuOption.value.label).toBe("Download");
-		expect(menu.downloadMenuOption.value.submenu.map((option) => option.label)).toEqual([
-			"PDF",
-			"Markdown",
-		]);
-		expect(downloadConversation).not.toHaveBeenCalled();
-	});
 	it.each([
 		["pdf", 0, "Preparing PDF…"],
 		["md", 1, "Preparing Markdown…"],
@@ -181,6 +172,8 @@ describe("grouped chat download menu", () => {
 			);
 			const row = useConversationExport(() => "grouped-" + format);
 			const header = useConversationExport(() => "grouped-" + format);
+			expect(row.downloadMenuOption.value.label).toBe("Download");
+			expect(downloadConversation).not.toHaveBeenCalled();
 			const request = row.downloadMenuOption.value.submenu[index].onClick();
 			try {
 				expect(downloadConversation).toHaveBeenCalledWith("grouped-" + format, format);
