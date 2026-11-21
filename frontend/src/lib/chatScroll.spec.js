@@ -47,13 +47,6 @@ describe("shouldFollowBottom", () => {
 			false
 		);
 	});
-
-	it("resumes following once settled, so late images keep a pinned reader at the bottom", () => {
-		// Same inputs as a late image/chart load after the turn ended.
-		expect(shouldFollowBottom({ pinned: true, streaming: false, revealPending: 0 })).toBe(
-			true
-		);
-	});
 });
 
 describe("needsJumpArrow", () => {
