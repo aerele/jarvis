@@ -112,6 +112,13 @@ _ACK_TIMEOUT_CEILING_S = 180.0
 _YIELD_MEDIA_POLL_INTERVAL_S = 2.0
 _YIELD_MEDIA_POLL_TIMEOUT_S = 20.0
 
+# Newer runtimes (2026.11) do not yield the run when a media tool starts its background
+# task: the first run ends with a normal final and the runtime appends the finished media
+# to the transcript on its own, up to the tool's own timeout (180 s for an image) later.
+# ``persist_async_media`` polls for it in a background job, never in the settle path.
+ASYNC_MEDIA_POLL_TIMEOUT_S = 180.0
+ASYNC_MEDIA_JOB_TIMEOUT_S = ASYNC_MEDIA_POLL_TIMEOUT_S + 60.0
+
 
 def persist_rich_outputs(
 	assistant_msg_name: str,
@@ -228,6 +235,26 @@ def persist_rich_outputs(
 			message=frappe.get_traceback(),
 		)
 
+	_seed_gateway_media(assistant_msg_name, conversation_id, user, run_id, media_rels, media_urls, settings)
+
+	_maybe_start_async_media_harvest(
+		assistant_msg_name,
+		conversation_id,
+		user,
+		run_id,
+		turn_start_ms,
+		media_rels,
+		media_urls,
+		yield_continuation,
+	)
+
+
+def _seed_gateway_media(
+	assistant_msg_name, conversation_id, user, run_id, media_rels, media_urls, settings
+) -> None:
+	"""Seed native ``MEDIA:`` paths and gateway-attached media blocks onto the assistant
+	message and publish the cumulative canvas. Shared by ``persist_rich_outputs`` and the
+	async media job; idempotent (the seeders dedup on the attachment id). Never raises."""
 	# Native media (MEDIA: marker): the agent's native image tool writes to the
 	# agent media store and emits a MEDIA:<path> marker; it's detected + the
 	# line stripped upstream (before egress), with the path(s) threaded here as
@@ -351,7 +378,9 @@ def _scan_history_for_media(messages: list, turn_start_ms: int) -> tuple[list[st
 	return (rels, []) if rels else ([], urls)
 
 
-def _harvest_post_yield_media(conversation_id: str, turn_start_ms: int) -> tuple[list[str], list[dict]]:
+def _harvest_post_yield_media(
+	conversation_id: str, turn_start_ms: int, timeout_s: float | None = None
+) -> tuple[list[str], list[dict]]:
 	"""Poll the session's display transcript (chat.history) for the deferred-
 	reply yield's actual media - it arrives as separate transcript messages
 	AFTER the continuation's own final, past the point relay_turn_events /
@@ -367,7 +396,7 @@ def _harvest_post_yield_media(conversation_id: str, turn_start_ms: int) -> tuple
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	if not session_key or not gateway_url:
 		return [], []
-	deadline = time.monotonic() + _YIELD_MEDIA_POLL_TIMEOUT_S
+	deadline = time.monotonic() + (_YIELD_MEDIA_POLL_TIMEOUT_S if timeout_s is None else timeout_s)
 	while True:
 		try:
 			with agent_session_pool.checkout(gateway_url) as sess:
@@ -380,6 +409,114 @@ def _harvest_post_yield_media(conversation_id: str, turn_start_ms: int) -> tuple
 		if time.monotonic() >= deadline:
 			return [], []
 		time.sleep(_YIELD_MEDIA_POLL_INTERVAL_S)
+
+
+def _async_media_tool_rows(assistant_msg_name: str, conversation_id: str) -> list[dict]:
+	"""Tool rows of this turn for a media tool that started a background task and did not
+	fail. The relay surfaces only a tool's ``status``, not its result details, so "started
+	and not failed" is the signal; a media tool that finished in the foreground has already
+	put its media on the final, which the caller checks first."""
+	from jarvis.chat.agent_client import MEDIA_GEN_TOOL_NAMES
+
+	am = frappe.db.get_value(MSG, assistant_msg_name, ["seq", "creation"], as_dict=True)
+	if not am:
+		return []
+	# System context (the settle / finalize job), scoped to one conversation: get_all is right.
+	rows = frappe.get_all(
+		MSG,
+		filters={
+			"conversation": conversation_id,
+			"role": "tool",
+			"tool_name": ["in", list(MEDIA_GEN_TOOL_NAMES)],
+			"seq": [">", am.seq],
+			"creation": [">=", am.creation],
+		},
+		fields=["name", "tool_status", "tool_name", "tool_call_id"],
+		limit_page_length=20,
+	)
+	return [r for r in rows if (r.get("tool_status") or "").lower() not in ("error", "failed")]
+
+
+def _maybe_start_async_media_harvest(
+	assistant_msg_name,
+	conversation_id,
+	user,
+	run_id,
+	turn_start_ms,
+	media_rels,
+	media_urls,
+	yield_continuation,
+) -> None:
+	"""Start the background media harvest for a turn that settled normally after a media
+	tool began a background task (runtime 2026.11). The yield path (2026.9.3) is left alone:
+	it parks the turn and harvests inline. One job per assistant message. Never raises."""
+	if yield_continuation or media_rels or media_urls:
+		return
+	try:
+		if not _async_media_tool_rows(assistant_msg_name, conversation_id):
+			return
+		frappe.enqueue(
+			"jarvis.chat.turn_handler.persist_async_media",
+			queue="long",
+			timeout=ASYNC_MEDIA_JOB_TIMEOUT_S,
+			job_id=f"jarvis-async-media::{assistant_msg_name}",
+			deduplicate=True,
+			assistant_msg_name=assistant_msg_name,
+			conversation_id=conversation_id,
+			user=user,
+			run_id=run_id,
+			turn_start_ms=turn_start_ms,
+		)
+	except Exception:
+		frappe.log_error(title="chat worker: async media enqueue failed", message=frappe.get_traceback())
+
+
+def persist_async_media(
+	assistant_msg_name: str, conversation_id: str, user: str, run_id: str, turn_start_ms: int
+) -> None:
+	"""Background job: wait (bounded) for the media a detached tool's task adds to the
+	session transcript, seed it onto the turn's assistant message through the same seeders as
+	the settle path, and close the tool rows. Idempotent: the seeders dedup on the attachment
+	id, so a second run adds nothing. No explicit commit: the job runner commits on success,
+	and each seeder commits its own writes. Never raises."""
+	try:
+		from jarvis.chat.agent_scope import assert_fefo_message_artifact_scope
+
+		assert_fefo_message_artifact_scope(assistant_msg_name)
+		rows = _async_media_tool_rows(assistant_msg_name, conversation_id)
+		if not rows:
+			return
+		media_rels, media_urls = _harvest_post_yield_media(
+			conversation_id, turn_start_ms, timeout_s=ASYNC_MEDIA_POLL_TIMEOUT_S
+		)
+		if media_rels or media_urls:
+			settings = frappe.get_single("Jarvis Settings")
+			_seed_gateway_media(
+				assistant_msg_name, conversation_id, user, run_id, media_rels, media_urls, settings
+			)
+		_close_media_tool_rows(rows, conversation_id, user, run_id)
+	except Exception:
+		frappe.log_error(title="chat worker: async media persist failed", message=frappe.get_traceback())
+
+
+def _close_media_tool_rows(rows: list[dict], conversation_id: str, user: str, run_id: str) -> None:
+	"""A detached tool's row must not stay "calling ...": mark it completed and tell the UI."""
+	for r in rows:
+		if (r.get("tool_status") or "").lower() == "completed":
+			continue
+		frappe.db.set_value(MSG, r["name"], {"tool_status": "completed", "streaming": 0})
+		_publish_to_user(
+			user,
+			{
+				"kind": "tool:end",
+				"conversation_id": conversation_id,
+				"message_id": r["name"],
+				"tool_name": r.get("tool_name"),
+				"tool_call_id": r.get("tool_call_id"),
+				"status": "completed",
+				"run_id": run_id,
+			},
+		)
 
 
 def _publish_to_user(user, payload):
