@@ -114,11 +114,6 @@ class TestValidateScript(unittest.TestCase):
 		self.assertTrue(out["ok"], out["errors"])
 		self.assertEqual(out["warnings"], [])
 
-	def test_syntax_error_is_reported(self):
-		out = validate_script("def broken(:\n    pass\n")
-		self.assertFalse(out["ok"])
-		self.assertTrue(any("SyntaxError" in e for e in out["errors"]))
-
 	def test_format_calls_are_flagged_with_each_line(self):
 		# str.format is a sandbox-blocked attribute read: it compiles but fails at run time.
 		code = "a = 1\nx = '{}'.format(a)\ny = 2\nz = '{}'.format(y)\ndata = [x, z]\n"

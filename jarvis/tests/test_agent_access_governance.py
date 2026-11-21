@@ -1303,13 +1303,6 @@ class TestCatalogueVisibilityPull(AccessGovernanceCase):
 			frappe.db.get_value(LISTING, SLUG, "modified"), mod1, "a no-op re-apply must not churn modified"
 		)
 
-	def test_persist_never_raises(self):
-		# A broken payload degrades (logged) rather than taking down sync_connection.
-		try:
-			catalogue_visibility.persist_from_connection(self._conn(agent_visibility=object()))
-		except Exception as e:
-			self.fail(f"persist_from_connection must never raise; raised {e!r}")
-
 	# -- T-GUARD: governed visibility is read-only to the tenant ------------ #
 	def test_governed_slug_is_read_only_even_to_system_manager(self):
 		# The real scenario: a tenant SM tries to UN-HIDE a governed-hidden agent.

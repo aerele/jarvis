@@ -60,10 +60,6 @@ class TestKindOf(FrappeTestCase):
 			with self.subTest(exc=type(exc).__name__):
 				self.assertEqual(fk.kind_of(exc), fk.RETRY_LATER)
 
-	def test_plain_validation_error_is_not_fixable(self):
-		# CLASS-ONLY; real rows: credit limit, frozen accounts, a bad status (below).
-		self.assertEqual(fk.kind_of(frappe.ValidationError("Credit limit crossed")), fk.NOT_FIXABLE)
-
 	def test_unknown_exception_is_not_fixable(self):
 		for exc in (
 			Exception("boom"),

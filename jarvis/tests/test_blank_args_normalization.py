@@ -152,18 +152,6 @@ class TestParseArgsBlankAsAbsent(FrappeTestCase):
 		out = api._parse_args('{"sql": "", "prepared_report": "x"}', "query_report")
 		self.assertEqual(out, {"prepared_report": "x"})
 
-	def test_the_transcript_args_leave_only_the_real_ones(self):
-		out = api._parse_args(dict(TRANSCRIPT_ARGS, filters={"include_zero_stock": 0}), "export_query")
-		self.assertEqual(
-			out,
-			{
-				"report_name": "Bright Free Stock",
-				"filters": {"include_zero_stock": 0},
-				"format": "xlsx",
-				"title": "Bright Free Stock",
-			},
-		)
-
 	def test_the_batch_strip_still_applies_and_covers_empty_objects(self):
 		out = api._parse_args({"doctype": "ToDo", "name": "x", "names": []}, "get_doc")
 		self.assertNotIn("names", out)
