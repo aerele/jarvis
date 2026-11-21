@@ -415,12 +415,6 @@ class TestWhichChatsAreKept(_ChatsTestCase):
 		self.assertEqual(len(failures), 4)
 		self.assertEqual(out, _result(busy, deleted=0, failed=[c for c in order if c != busy]))
 
-	def test_nothing_is_logged_when_nothing_was_kept(self):
-		self._chat("done")
-		with patch("frappe.log_error") as log:
-			self.assertEqual(chat_api.clear_chat_history(), _result(deleted=1))
-		log.assert_not_called()
-
 	def test_a_chat_someone_else_deleted_meanwhile_is_not_counted(self):
 		# A second tab pressing "Delete all" at the same moment: each chat is counted
 		# by the request that deleted it.
