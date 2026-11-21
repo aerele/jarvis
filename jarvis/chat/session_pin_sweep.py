@@ -100,6 +100,8 @@ from dataclasses import dataclass, field
 
 import frappe
 
+from jarvis.chat.gateway_ids import provider_from_gateway
+
 logger = logging.getLogger(__name__)
 
 CONV = "Jarvis Conversation"
@@ -431,7 +433,7 @@ def _model_ref(row: dict) -> str:
 	"""``"provider/model"`` for a sessions.list row or its defaults block, or ""
 	when the gateway resolved neither. Comparison is case-folded; agent ids
 	are lowercase but nothing guarantees it."""
-	provider = (row.get("modelProvider") or "").strip().casefold()
+	provider = provider_from_gateway((row.get("modelProvider") or "").strip()).casefold()
 	model = (row.get("model") or "").strip().casefold()
 	if not model:
 		return ""

@@ -290,7 +290,7 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 			# instruction that walks back a stale pin. See _session_model_patch.
 			if patch_session_model:
 				try:
-					sess.set_session_model(session_key, session_model_ref)
+					turn_handler.set_session_model_refreshing(sess, session_key, conv, session_model_ref)
 				except AgentUnreachableError:
 					raise
 				except Exception:
