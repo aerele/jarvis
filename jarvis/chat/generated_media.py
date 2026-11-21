@@ -677,9 +677,10 @@ def seed_media_urls(assistant_msg_name: str, agent_url: str, token: str, items: 
 		key = _media_url_id(url)
 		if key in seen:
 			continue
-		content = fetch_media_url(
-			agent_url, token, url, mime_type=mime_type, expected_session_key=session_key
-		)
+		# No known session key means "do not check" (the ticket fallback then trusts the url's
+		# own key, as the bearer path always did); every caller goes through here.
+		extra = {"expected_session_key": session_key} if session_key else {}
+		content = fetch_media_url(agent_url, token, url, mime_type=mime_type, **extra)
 		if not content:
 			failures += 1
 			continue

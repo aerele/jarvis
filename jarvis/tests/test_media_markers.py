@@ -332,6 +332,13 @@ class TestSeedMedia(unittest.TestCase):
 		self.assertEqual(it["title"], "Black Hole")  # uuid + ext stripped
 		self.assertTrue(it["file_url"].startswith("/private/files/jarvis-media-"))
 
+	def test_the_conversations_session_key_is_passed_to_the_fetch_when_known(self):
+		ps = self._patch_db(existing_canvas=None)
+		with ps[0], ps[1], ps[2], ps[3], patch.object(gm, "fetch_media_url", return_value=b"PNG") as fm:
+			with patch.object(gm, "_conversation_session_key", return_value="agent:main:dashboard:u1"):
+				gm.seed_media_urls("MSG-1", "ws://h:1", "tok", [_URL_ITEM])
+		self.assertEqual(fm.call_args.kwargs["expected_session_key"], "agent:main:dashboard:u1")
+
 	def test_skips_failed_fetch_and_logs(self):
 		ps = self._patch_db(existing_canvas=None)
 		with (
