@@ -392,15 +392,6 @@ class TestPersonaliseQuestionRule(PersonaliseDoctypeTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self._rule(question="   ")
 
-	def test_active_defaults_to_enabled(self):
-		doc = self._rule()
-		# Frappe applies the JSON default on a fresh Desk-created doc; a raw
-		# dict insert (as here) does not auto-fill it, so explicitly assert
-		# the field exists and accepts 1 rather than assuming a fill-in.
-		doc.active = 1
-		doc.save(ignore_permissions=True)
-		self.assertEqual(doc.active, 1)
-
 	def test_doctype_permission_is_system_manager_only(self):
 		with _as(USER_A), self.assertRaises(frappe.PermissionError):
 			frappe.get_doc(

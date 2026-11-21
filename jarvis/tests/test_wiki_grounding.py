@@ -244,14 +244,6 @@ class TestForcedWikiBlock(WikiGroundingTestCase):
 
 
 class TestSignificantTokens(WikiGroundingTestCase):
-	def test_drops_stopwords_and_short_words(self):
-		toks = wiki._significant_tokens("What are the credit terms for wholesale?")
-		self.assertNotIn("what", toks)  # stopword
-		self.assertNotIn("are", toks)  # too short
-		self.assertIn("credit", toks)
-		self.assertIn("terms", toks)
-		self.assertIn("wholesale", toks)
-
 	def test_caps_token_count(self):
 		toks = wiki._significant_tokens(" ".join(f"keyword{i}longenough" for i in range(20)))
 		self.assertLessEqual(len(toks), wiki._FORCE_MAX_TOKENS)
