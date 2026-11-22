@@ -359,9 +359,11 @@ class TestClaudeMemberOnANativePool(unittest.TestCase):
 		errors = self._errors(models, native_subscription_pool=1)
 		self.assertFalse([e for e in errors if "Claude can be combined" in e])
 
-	def test_kimi_is_still_refused_with_claude_on_a_native_tenant(self):
+	def test_the_proxy_era_combination_rule_no_longer_judges_kimi_next_to_claude_on_native(self):
+		# Whether the runtime can serve a Kimi sign-in is admin's native check (no Kimi sign-in
+		# exists in the runtime); the app no longer applies the proxy-era combination rule.
 		models = [self._claude(0), _sub("kimi-k2", "kimi", order=1)]
-		self.assertTrue(
+		self.assertFalse(
 			[e for e in self._errors(models, native_subscription_pool=1) if "Claude can be combined" in e]
 		)
 
@@ -566,3 +568,35 @@ class TestNativePoolShapesPassTheAppChecks(unittest.TestCase):
 		):
 			out = onboarding.get_llm_config()
 		self.assertIs(out["native_subscription_pool"], True)
+
+
+class TestProxyEraRulesAreGoneOnNative(unittest.TestCase):
+	def _errors(self, models, native):
+		return pool_serialize.validate_models(_settings(models, native_subscription_pool=1 if native else 0))
+
+	def test_claude_in_the_middle_and_next_to_xai_validate_only_on_native(self):
+		def claude():
+			return _sub("claude-opus-5", "anthropic", order=1, accounts=[_acct("anthropic", "C1")])
+
+		models = [
+			_sub("gpt-5.6-terra", "openai", order=0, accounts=[_acct("openai", "O1")]),
+			claude(),
+			_sub("grok-4.3", "xai", order=2, accounts=[_acct("xai", "X1")]),
+		]
+		sidecar = self._errors(models, native=False)
+		native = self._errors(models, native=True)
+		self.assertTrue([e for e in sidecar if "first or last" in e or "combined" in e])
+		self.assertFalse([e for e in native if "first or last" in e or "combined" in e])
+
+	def test_one_claude_row_and_one_account_still_hold_on_native(self):
+		two = [
+			_sub("claude-opus-5", "anthropic", order=0, accounts=[_acct("anthropic", "C1")]),
+			_sub("claude-sonnet-5", "anthropic", order=1, accounts=[_acct("anthropic", "C2")]),
+		]
+		self.assertTrue([e for e in self._errors(two, True) if "Only one Claude" in e])
+
+	def test_the_chain_keeps_every_member_in_the_customers_order_with_no_cap(self):
+		models = [_sub(f"m{i}", "openai", order=i, accounts=[_acct("openai", f"O{i}")]) for i in range(12)]
+		spec, _keys, _blobs = pool_serialize.build_pool_payload(_settings(models, native_subscription_pool=1))
+		self.assertEqual([m["model"] for m in spec["models"]], [f"m{i}" for i in range(12)])
+		self.assertEqual([m["order"] for m in spec["models"]], list(range(12)))

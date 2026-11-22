@@ -834,18 +834,13 @@ def validate_models(settings) -> list:
 		for m in ordered_enabled
 		if _credential_type(m) == "subscription" and _subscription_upstream(m) != "anthropic"
 	]
-	if claude_positions and other_subscriptions:
-		# A native tenant serves ChatGPT and xAI sign-ins as profiles of its own and the
-		# Claude member at any position; only a sidecar pool needs the narrower rules.
-		native = is_native_pool(settings)
-		allowed = {"openai", "xai"} if native else {"openai"}
-		if any(upstream not in allowed for upstream in other_subscriptions):
-			errors.append(
-				"Claude can be combined only with ChatGPT, xAI or API keys for now."
-				if native
-				else "Claude can be combined only with ChatGPT or API keys for now."
-			)
-		if not native and claude_positions[0] not in (0, len(ordered_enabled) - 1):
+	# Claude next to other sign-ins: both rules below exist only because of how the proxy sidecars
+	# collapsed several sign-ins into one route. A native tenant (the agent runtime does the
+	# failover) has no such limit: any combination, at any position, is the customer's order.
+	if claude_positions and other_subscriptions and not is_native_pool(settings):
+		if any(upstream != "openai" for upstream in other_subscriptions):
+			errors.append("Claude can be combined only with ChatGPT or API keys for now.")
+		if claude_positions[0] not in (0, len(ordered_enabled) - 1):
 			errors.append("Claude runs outside the proxy. Keep it first or last.")
 
 	return errors

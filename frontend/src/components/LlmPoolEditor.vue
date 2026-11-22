@@ -5311,7 +5311,11 @@ function buildSavePayload({ exclude = null } = {}) {
 			return { error: "Connect your account to continue." };
 		}
 	}
-	const v = validatePool(saveModels, savePreset);
+	const v = validatePool(
+		saveModels,
+		savePreset,
+		!!(cfg.value && cfg.value.native_subscription_pool)
+	);
 	if (!v.ok) return { error: v.error };
 	return { models: saveModels, preset: savePreset };
 }

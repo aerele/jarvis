@@ -1190,3 +1190,30 @@ test("poolBackstopWarning: a native tenant never needs an API-key backstop", () 
 	assert.equal(poolBackstopWarning(models, false), poolBackstopWarning(models));
 	assert.equal(poolBackstopWarning(models, true), "");
 });
+
+test("validatePool: the proxy-era Claude combination and position rules are skipped on a native tenant", () => {
+	const claude = {
+		provider: "Anthropic",
+		model: "claude-opus-5",
+		subscription: { accounts: [{ upstream: "anthropic", account_ref: "C1" }] },
+	};
+	const chatgpt = {
+		provider: "OpenAI",
+		model: "gpt-5.6-terra",
+		subscription: { accounts: [{ upstream: "openai", account_ref: "O1" }] },
+	};
+	const grok = {
+		provider: "xAI Grok",
+		model: "grok-4.3",
+		subscription: { accounts: [{ upstream: "xai", account_ref: "X1" }] },
+	};
+	// Claude in the middle, and next to xAI: refused with the proxy, allowed natively.
+	assert.equal(validatePool([chatgpt, claude, grok], null).ok, false);
+	assert.equal(validatePool([chatgpt, claude, grok], null, true).ok, true);
+	// "one Claude model, one account" is the runtime's own limit and stays on both.
+	const twoClaude = [
+		claude,
+		{ ...claude, subscription: { accounts: [{ upstream: "anthropic", account_ref: "C2" }] } },
+	];
+	assert.equal(validatePool(twoClaude, null, true).ok, false);
+});

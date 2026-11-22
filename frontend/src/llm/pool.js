@@ -121,7 +121,11 @@ export function subModelSuggestions(apiSubscriptionModels) {
 export function defaultSubscriptionModel(upstream, catalog) {
 	return ((catalog || {})[upstream] || [])[0] || "";
 }
-export function validatePool(models, preset) {
+// `native`: a tenant on the agent runtime's own failover. The Claude combination and position
+// rules below exist only because of how the proxy sidecars collapsed several sign-ins into one
+// route, so they are skipped there; "one Claude model, one account" stays (the runtime's Claude
+// CLI holds one login).
+export function validatePool(models, preset, native = false) {
 	if (!Array.isArray(models) || models.length === 0)
 		return { ok: false, error: "Add at least one model." };
 	const subscriptionUpstream = (m) => {
@@ -186,7 +190,7 @@ export function validatePool(models, preset) {
 	const otherSubscriptions = models.filter(
 		(m) => m && m.subscription && subscriptionUpstream(m) !== "anthropic"
 	);
-	if (claudeIndexes.length && otherSubscriptions.length) {
+	if (!native && claudeIndexes.length && otherSubscriptions.length) {
 		if (otherSubscriptions.some((m) => subscriptionUpstream(m) !== "openai"))
 			return {
 				ok: false,
