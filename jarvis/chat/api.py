@@ -683,6 +683,8 @@ def create_or_focus_empty(origin_page: str = "") -> str:
 	# the file_box confirm-card bypass (jarvis.api.call_tool auto-applies reversible
 	# writes on file_box convs) and adopt a stray File. Exclude both, mirroring
 	# session_lifecycle._reap_empty (which now spares such rows from reaping too).
+	# An empty chat opened on a user agent is not a blank chat either: reusing it
+	# would send a New Chat to that agent (jarvis.chat.user_agents).
 	empty = frappe.db.sql(
 		"""
 		SELECT c.name
@@ -690,6 +692,7 @@ def create_or_focus_empty(origin_page: str = "") -> str:
 		WHERE c.owner = %s AND c.status = 'Active'
 		  AND COALESCE(c.origin_page, '') = %s
 		  AND c.file_box = 0
+		  AND COALESCE(c.session_key, '') NOT LIKE 'agent:agent-u-%%'
 		  AND NOT EXISTS (
 		    SELECT 1 FROM `tabJarvis Chat Message` m
 		    WHERE m.conversation = c.name
@@ -2611,6 +2614,10 @@ def send_message(
 		}
 
 	_reject_send_into_armed_conversation(conv_doc)
+	# A chat bound to a user agent runs only while that agent is usable by its owner.
+	from jarvis.chat.user_agents import refuse_send
+
+	refuse_send(conv_doc)
 
 	# Every field this send changes on the conversation row is collected here and
 	# persisted as ONE locked, targeted write (see below, right before
@@ -4878,7 +4885,7 @@ def _enqueue_turn(
 	# empty (nothing written by THIS function yet) by the time the conversation
 	# write below runs.
 	if not hidden and not conv_doc.session_key:
-		stage("session_key", _ensure_session_key(conv_doc.owner))
+		stage("session_key", _ensure_session_key(conv_doc.owner, user_agent=conv_doc.get("user_agent")))
 
 	stage("last_active_at", frappe.utils.now())
 
@@ -5472,7 +5479,9 @@ def _pushed_profile_slugs(settings) -> set[str]:
 	return {p.get("slug") for p in (pushed or []) if isinstance(p, dict) and p.get("slug")}
 
 
-def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile: bool = False) -> str:
+def _ensure_session_key(
+	user: str, sess: AgentSession | None = None, *, profile: bool = False, user_agent: str | None = None
+) -> str:
 	"""Create an agent session for `user`, persist the Chat Session row,
 	and return the session_key. Caller is responsible for storing it on the
 	parent Conversation row.
@@ -5509,7 +5518,19 @@ def _ensure_session_key(user: str, sess: AgentSession | None = None, *, profile:
 	falls through to exactly today's path. Either way the Chat Session row
 	records which profile was picked (main/full when none) in the same
 	insert - the observability hook for this pick (spec §9).
+
+	``user_agent`` (keyword-only): the conversation's bound agent id. A chat
+	bound to a user agent always gets a key addressing that agent again, never
+	the main agent or a profile; it throws when the agent is gone, off or not
+	``user``'s (``user_agents.mint_for_conversation``).
 	"""
+	if user_agent:
+		from jarvis.chat import user_agents
+
+		session_key = user_agents.mint_for_conversation(user_agent, user)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- session row visible before dispatch
+		return session_key
+
 	settings = frappe.get_single("Jarvis Settings")
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 

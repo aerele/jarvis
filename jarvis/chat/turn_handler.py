@@ -2035,7 +2035,9 @@ def handle_chat_send(payload: dict) -> None:
 					# reached for a genuine first turn of interactive chat - a
 					# macro/scheduled turn always mints its session eagerly at
 					# api._enqueue_turn, before this worker path runs at all.
-					conv.session_key = _ensure_session_key(chat_user, sess=sess, profile=True)
+					conv.session_key = _ensure_session_key(
+						chat_user, sess=sess, profile=True, user_agent=conv.get("user_agent")
+					)
 					frappe.db.set_value(CONV, conversation_id, "session_key", conv.session_key)
 					frappe.db.commit()
 					session_create_ms = int((time.monotonic() - t_sess) * 1000)
