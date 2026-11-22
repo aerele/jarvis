@@ -23,6 +23,10 @@ const agentsApi = vi.hoisted(() => ({
 }));
 vi.mock("@/api/agents", () => agentsApi);
 
+// The My agents probe. Unset (undefined) reads as "off", like a site with the flag off.
+const userAgentsApi = vi.hoisted(() => ({ listUserAgents: vi.fn() }));
+vi.mock("@/api/userAgents", () => userAgentsApi);
+
 const router = vi.hoisted(() => ({ push: vi.fn() }));
 const route = vi.hoisted(() => ({ hash: "", name: "AgentsList", query: {}, params: {} }));
 // jarvis#1062 E2E defect: AgentsList.vue no longer imports onBeforeRouteLeave
@@ -80,6 +84,13 @@ vi.mock("@/components/LayoutHeader.vue", () => ({
 }));
 vi.mock("./AgentActivityTab.vue", () => ({
 	default: { name: "AgentActivityTab", template: "<div>activity feed</div>" },
+}));
+vi.mock("./MyAgentsTab.vue", () => ({
+	default: {
+		name: "MyAgentsTab",
+		props: ["agents", "maxAgents"],
+		template: `<div class="my-agents">{{ agents.length }} of {{ maxAgents }}</div>`,
+	},
 }));
 
 import AgentsList from "./AgentsList.vue";
@@ -370,5 +381,72 @@ describe("Installed tab empty state names Administrator (jarvis#1062 P2-9)", () 
 		} finally {
 			session.user = original;
 		}
+	});
+});
+
+// User agents v1: the My agents tab exists only while the site has them turned on.
+describe("My agents tab", () => {
+	const on = { enabled: true, max_agents: 5, agents: [{ name: "UA-1", agent_name: "Stock" }] };
+
+	it("is hidden while the site has user agents off", async () => {
+		userAgentsApi.listUserAgents.mockResolvedValue({
+			enabled: false,
+			max_agents: 5,
+			agents: [],
+		});
+		const plain = await mountList({ caps: { review: false, admin: false } });
+		expect(tabLabels(plain)).toEqual(["Agents", "Activity"]);
+		const admin = await mountList({ caps: { review: true, admin: true } });
+		expect(tabLabels(admin)).toEqual(["Featured", "Available", "Installed", "Activity"]);
+	});
+
+	it("is hidden when the probe fails", async () => {
+		userAgentsApi.listUserAgents.mockRejectedValue(new Error("offline"));
+		const w = await mountList({ caps: { review: false, admin: false } });
+		expect(tabLabels(w)).toEqual(["Agents", "Activity"]);
+	});
+
+	it("sits before Activity once the site has them on", async () => {
+		userAgentsApi.listUserAgents.mockResolvedValue(on);
+		const plain = await mountList({ caps: { review: false, admin: false } });
+		expect(tabLabels(plain)).toEqual(["Agents", "My agents", "Activity"]);
+		const admin = await mountList({ caps: { review: true, admin: true } });
+		expect(tabLabels(admin)).toEqual([
+			"Featured",
+			"Available",
+			"Installed",
+			"My agents",
+			"Activity",
+		]);
+	});
+
+	it("opens on #mine and hands the tab the agents", async () => {
+		userAgentsApi.listUserAgents.mockResolvedValue(on);
+		const w = await mountList({ caps: { review: false, admin: false }, hash: "#mine" });
+		expect(selectedTabLabel(w)).toBe("My agents");
+		expect(w.get(".my-agents").text()).toBe("1 of 5");
+		// The catalog grid is not fetched for it.
+		expect(agentsApi.listAgentsPage).not.toHaveBeenCalledWith(
+			expect.objectContaining({ tab: "mine" })
+		);
+	});
+
+	it("falls back to the default tab when #mine is opened with the feature off", async () => {
+		userAgentsApi.listUserAgents.mockResolvedValue({
+			enabled: false,
+			max_agents: 5,
+			agents: [],
+		});
+		const w = await mountList({ caps: { review: false, admin: false }, hash: "#mine" });
+		expect(selectedTabLabel(w)).toBe("Agents");
+		expect(w.find(".my-agents").exists()).toBe(false);
+	});
+
+	it("switches to the tab and records it in the address", async () => {
+		userAgentsApi.listUserAgents.mockResolvedValue(on);
+		const w = await mountList({ caps: { review: false, admin: false } });
+		await tabButtons(w)[1].trigger("click");
+		expect(router.push).toHaveBeenCalledWith({ hash: "#mine" });
+		expect(w.find(".my-agents").exists()).toBe(true);
 	});
 });

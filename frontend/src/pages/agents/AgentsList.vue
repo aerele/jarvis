@@ -64,6 +64,20 @@
 		<!-- Activity: self-contained feed (own search + pagination) -->
 		<AgentActivityTab v-if="tab === 'activity'" class="min-h-0 flex-1" />
 
+		<!-- My agents: the user's own agents; the tab exists only while the site has
+		     them turned on (list_user_agents says so) -->
+		<MyAgentsTab
+			v-else-if="tab === 'mine'"
+			class="min-h-0 flex-1"
+			:agents="myAgents.agents.value"
+			:max-agents="myAgents.maxAgents.value"
+			:loading="myAgents.loading.value"
+			:error="myAgents.error.value"
+			@reload="myAgents.load()"
+			@upsert="myAgents.upsert"
+			@remove="myAgents.remove"
+		/>
+
 		<!-- Featured / Available / Installed: search · category · sort → card grid -->
 		<template v-else>
 			<div class="flex flex-wrap items-center gap-2 px-5 pt-4">
@@ -272,6 +286,8 @@
 //     {rows,total,has_more,...}) with a Category select + a single sort choice
 //     (Most installed / Recently updated / Name). No ratings - deliberately
 //     deferred.
+//   My agents (#mine) - the user's own agents (MyAgentsTab), offered only while
+//     list_user_agents says the site has them turned on.
 //   Activity - the owner's lifecycle feed (AgentActivityTab, self-contained).
 // Reviewer/SM header action: prominent "Apply catalog changes" driven by
 // get_agents_sync_status().dirty (install/uninstall/enable since the last
@@ -296,8 +312,10 @@ import {
 import LayoutHeader from "@/components/LayoutHeader.vue";
 import TabBar from "@/components/list/TabBar.vue";
 import AgentActivityTab from "./AgentActivityTab.vue";
+import MyAgentsTab from "./MyAgentsTab.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { useListPage } from "@/composables/useListPage";
+import { useUserAgents } from "@/composables/useUserAgents";
 import * as api from "@/api";
 import * as agentsApi from "@/api/agents";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
@@ -341,7 +359,14 @@ const PLAIN_TABS = [
 	{ label: "Agents", value: "available" },
 	{ label: "Activity", value: "activity" },
 ];
-const TABS = computed(() => (isPrivileged.value ? FULL_TABS : PLAIN_TABS));
+// "My agents" sits before Activity, and only while the site has user agents turned on.
+const MINE_TAB = { label: "My agents", value: "mine" };
+const myAgents = useUserAgents();
+const TABS = computed(() => {
+	const base = isPrivileged.value ? FULL_TABS : PLAIN_TABS;
+	if (!myAgents.enabled.value) return base;
+	return [...base.slice(0, -1), MINE_TAB, ...base.slice(-1)];
+});
 const AGENT_TABS = ["featured", "available", "installed"];
 
 const tab = ref("featured");
@@ -372,6 +397,9 @@ watch(
 // caller who turns out to be privileged gets Featured back instead of being
 // stuck on the plain default.
 watch(isPrivileged, () => applyHash());
+// Same for the My agents tab: its probe lands after the first applyHash(), so a deep
+// link to #mine selects it once it exists, and a site with user agents off never shows it.
+watch(myAgents.enabled, () => applyHash());
 
 // ── catalog list: useListPage adapter over list_agents_page ─────────────────
 // The adapter closes over tab/category/sortChoice and maps useListPage's
@@ -406,7 +434,7 @@ const { rows, total, loading, error, search, pageLength, resetLoad, loadMore } =
 // tab/category/sort changes refetch page 1 (search/page-length are handled
 // inside useListPage); switching TO activity is a no-op for the grid
 watch([tab, category, sortChoice], ([t]) => {
-	if (t === "activity") return;
+	if (t === "activity" || t === "mine") return;
 	resetLoad();
 });
 
@@ -602,6 +630,7 @@ async function applyCatalog() {
 onMounted(() => {
 	probeCaps();
 	loadCategories();
+	myAgents.load();
 });
 onBeforeUnmount(() => {
 	stopSyncPoll();
