@@ -710,9 +710,22 @@ class TestRealSettings(TestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
+		previous = frappe.conf.get("encryption_key")
+
+		def restore_key():
+			if previous is None:
+				frappe.conf.pop("encryption_key", None)
+			else:
+				frappe.conf["encryption_key"] = previous
+
+		cls.addClassCleanup(restore_key)
 		frappe.set_user("Administrator")
 		frappe.reload_doc("jarvis", "doctype", "jarvis_settings")
 		frappe.clear_cache(doctype=routing.SETTINGS_DOCTYPE)
+
+	def setUp(self):
+		# Frappe replaces local.conf at class cleanup, so set the key on the current config.
+		frappe.conf["encryption_key"] = KEY
 
 	def tearDown(self):
 		frappe.db.rollback()

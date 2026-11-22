@@ -32,6 +32,27 @@ from jarvis.tests.payment_calendar_fixtures import (
 )
 
 SIDES = ("Receivable", "Payable")
+TEST_KEY = "t" * 44
+
+
+def use_test_key(case):
+	"""A fixed encryption key for this test: a CI site has none, and every digest needs one.
+
+	Set on `frappe.conf` directly (a patcher would be stopped by `patch.stopall`) and put back by a cleanup that
+	is registered first, so it runs last and the digest-based cleanups still have the key. Never written to site_config.
+	"""
+	previous = frappe.conf.get("encryption_key")
+	frappe.conf["encryption_key"] = TEST_KEY
+
+	def restore():
+		if previous is None:
+			frappe.conf.pop("encryption_key", None)
+		else:
+			frappe.conf["encryption_key"] = previous
+
+	case.addCleanup(restore)
+
+
 CALLS = {
 	"playground": {"company": "X"},
 	"timing": {"company": "X"},
@@ -59,6 +80,10 @@ HARNESS = (
 	"import json, sys, frappe\n"
 	"frappe.init(sys.argv[1], sites_path=sys.argv[2])\n"
 	"frappe.connect()\n"
+	# The key is set from the parent's environment, never written to site_config: a CI site has none, and the
+	# digests of the child (memo keys, summaries) must be the parent's.
+	"import os\n"
+	"if os.environ.get('PCAL_TEST_KEY'): frappe.conf['encryption_key'] = os.environ['PCAL_TEST_KEY']\n"
 	"from jarvis.tests.test_payment_calendar_reader_acceptance import PROBES\n"
 	"print('RESULT:' + json.dumps(PROBES[sys.argv[3]](**json.loads(sys.argv[4])), default=str))\n"
 )
@@ -72,6 +97,7 @@ def in_fresh_process(probe: str, **kwargs):
 		capture_output=True,
 		text=True,
 		timeout=600,
+		env={**os.environ, "PCAL_TEST_KEY": frappe.conf.get("encryption_key") or ""},
 	)
 	if done.returncode != 0:
 		raise AssertionError(f"probe {probe} failed ({done.returncode}):\n{done.stderr[-3000:]}")
@@ -314,6 +340,9 @@ class TestAcceptanceSiteGuards(TestCase):
 
 
 class TestResultDiff(TestCase):
+	def setUp(self):
+		use_test_key(self)
+
 	def test_the_content_diff_leaves_ids_to_the_comparison_that_counts_them(self):
 		found = result_diff(result(row(id="a")), result(row(id="b")))
 		self.assertEqual(found["diffs"], 0)
@@ -349,6 +378,7 @@ class TestAcceptanceRuns(TestCase):
 	"""Committed fixtures with cleanup: `consistent_read` rolls back first, so a savepoint would not survive."""
 
 	def setUp(self):
+		use_test_key(self)
 		require_calendar_test_site()
 		frappe.set_user("Administrator")
 		self.out = Path(tempfile.mkdtemp()) / "out.json"
@@ -529,6 +559,9 @@ class TestAcceptanceRuns(TestCase):
 
 
 class TestRoutedAcceptancePure(TestCase):
+	def setUp(self):
+		use_test_key(self)
+
 	def test_the_neutral_hook_is_added_beside_the_real_ones_and_hides_nothing(self):
 		from jarvis.tests import payment_calendar_routed_support as support
 
@@ -716,6 +749,7 @@ class TestRoutedAcceptanceRuns(TestCase):
 	"""Committed fixtures with cleanup, as `TestAcceptanceRuns`: the routed and shadow runs open read views."""
 
 	def setUp(self):
+		use_test_key(self)
 		require_calendar_test_site()
 		frappe.set_user("Administrator")
 		self.out = Path(tempfile.mkdtemp()) / "out.json"
@@ -765,6 +799,7 @@ class TestRoutedAcceptanceRuns(TestCase):
 		from jarvis.payment_calendar import sources
 
 		before = self.error_rows()
+		mode_before = frappe.db.get_single_value("Jarvis Settings", "payment_calendar_reader", cache=False)
 		with self.here(), patch.object(sources, "MAX_VOUCHERS", 0):
 			summary = acceptance.routed_playground(
 				self.fx.company, str(self.out), "Administrator", anchor=self.fx.today
@@ -781,9 +816,9 @@ class TestRoutedAcceptanceRuns(TestCase):
 				frappe.cache.execute_command("EXISTS", routing.inflight_key(self.fx.company, side))
 			)
 			self.assertFalse(frappe.cache.execute_command("EXISTS", routing.memo_key(self.fx.company, side)))
-		self.assertNotIn(
-			frappe.db.get_single_value("Jarvis Settings", "payment_calendar_reader", cache=False),
-			("on", "shadow"),
+		# The run changed no setting: whatever the site had (a configured site may have `on`), it still has.
+		self.assertEqual(
+			frappe.db.get_single_value("Jarvis Settings", "payment_calendar_reader", cache=False), mode_before
 		)
 
 	def test_routed_cleanup_keeps_a_live_workers_slot_and_a_replaced_token(self):

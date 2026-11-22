@@ -127,6 +127,14 @@ def _remove_made_companies():
 	frappe.db.commit()
 
 
+_start_settings = []
+
+
+def setUpModule():
+	# The reader switch as the site has it now: the last test checks that the run left it as it was.
+	_start_settings.append(routing.reader_settings())
+
+
 class RoutingSettingsCase(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):
@@ -284,10 +292,12 @@ class TestReaderSettingsRead(RoutingSettingsCase):
 	def test_a_default_read_inside_the_view_gives_off_and_leaves_the_view_unbroken(self):
 		# The fields hold no row on a site that never saved them; the view starts with a cold meta.
 		frappe.clear_cache(doctype=SETTINGS)
+		saved = routing.reader_settings()  # the committed value, whatever this site has
+		frappe.clear_cache(doctype=SETTINGS)
 		with consistent_read():
-			self.assertEqual(routing.reader_settings(), routing.ReaderSettings("off", (), ()))
+			self.assertEqual(routing.reader_settings(), saved)
 			# A second read in the same view, with the meta now cached.
-			self.assertEqual(routing.reader_settings().mode, "off")
+			self.assertEqual(routing.reader_settings(), saved)
 
 
 class TestReaderSettingsSave(RoutingSettingsCase):
@@ -305,13 +315,14 @@ class TestReaderSettingsSave(RoutingSettingsCase):
 
 	def test_a_system_manager_save_cannot_change_any_field(self):
 		(company,) = _companies(1)
+		before = routing.reader_settings()  # whatever the site has saved: the saves below must not change it
 		for field, value in ((MODE, "on"), (SERVED, company), (SHADOW, company)):
 			with _as(SYSMAN), patch("frappe.enqueue"):
 				settings = frappe.get_single(SETTINGS)
 				settings.set(field, value)
 				settings.save()
 			self.assertNotEqual(_stored(field), value, field)
-		self.assertEqual(routing.reader_settings().mode, "off")
+		self.assertEqual(routing.reader_settings(), before)
 
 	def test_a_self_granted_permlevel_write_is_still_refused(self):
 		from frappe import permissions as frappe_permissions
@@ -508,5 +519,5 @@ class TestReaderBuild(FrappeTestCase):
 class TestZZNoModeLeftBehind(FrappeTestCase):
 	"""Runs last in the module (alphabetical): the site must read off after the suite."""
 
-	def test_the_mode_reads_off(self):
-		self.assertEqual(routing.reader_settings().mode, "off")
+	def test_the_mode_is_as_the_site_had_it(self):
+		self.assertEqual(routing.reader_settings(), _start_settings[-1])

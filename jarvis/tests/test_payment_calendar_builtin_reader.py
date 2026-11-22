@@ -192,7 +192,21 @@ class TestFixtureUpkeep(TestCase):
 		yen = self.fx.invoice((100.456,), side="Receivable")
 		frappe.db.set_value("Sales Invoice", yen, "party_account_currency", "JPY")
 		rupee = self.fx.invoice((100.456,), side="Receivable")
-		with patch.object(frappe, "get_system_settings", settings):
+		real_get_value = frappe.db.get_value
+		formats = {"JPY": "#,###", "INR": "#,##,###.##"}
+
+		def get_value(doctype, *args, **kwargs):
+			# The two currency formats this test is about, whatever the site's Currency rows say.
+			if doctype == "Currency" and args and args[0] in formats and "number_format" in args[1:2]:
+				return formats[args[0]]
+			return real_get_value(doctype, *args, **kwargs)
+
+		# No explicit global currency precision either: it would override the currency format.
+		with (
+			patch.object(frappe, "get_system_settings", settings),
+			patch.object(frappe.model.meta, "get_currency_precision", return_value=None),
+			patch.object(frappe.db, "get_value", get_value),
+		):
 			self.assertEqual(sync_outstanding(self.fx.company), 2)
 		self.assertEqual(self.header("Sales Invoice", yen), 100)
 		self.assertEqual(self.header("Sales Invoice", rupee), 100.46)

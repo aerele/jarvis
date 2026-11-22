@@ -197,6 +197,7 @@ class TestReaderDrift(FrappeTestCase):
 		from frappe.utils import data as frappe_data
 
 		name = "jarvis_pcal_clock_probe"
+		real_now_datetime = frappe_data.now_datetime
 		with frozen_clock(FROZEN):
 			module = types.ModuleType(name)
 			module.now_datetime = frappe_data.now_datetime  # a lazy `from frappe.utils import now_datetime`
@@ -204,8 +205,14 @@ class TestReaderDrift(FrappeTestCase):
 			self.assertEqual(module.now_datetime().year, 2025)
 			self.assertEqual(frappe_data.nowdate(), "2025-06-16")
 		try:
-			self.assertIs(module.now_datetime, frappe_data.now_datetime)
-			self.assertNotEqual(frappe_data.nowdate(), "2025-06-16")
+			# By identity, not by date: a run on the frozen date itself must pass too.
+			self.assertIs(module.now_datetime, real_now_datetime)
+			self.assertIs(frappe_data.now_datetime, real_now_datetime)
+			# Read the real date on both sides of nowdate to allow a midnight change.
+			before_date = real_now_datetime().date().isoformat()
+			restored_date = frappe_data.nowdate()
+			after_date = real_now_datetime().date().isoformat()
+			self.assertIn(restored_date, {before_date, after_date})
 		finally:
 			sys.modules.pop(name, None)
 		importlib.invalidate_caches()

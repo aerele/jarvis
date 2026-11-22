@@ -10,7 +10,7 @@ Run ONLY on the test site:
 import io
 import json
 import traceback
-from contextlib import contextmanager, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 from time import time
 from types import SimpleNamespace
 from unittest import TestCase
@@ -24,6 +24,7 @@ from rq.timeouts import JobTimeoutException
 from jarvis.payment_calendar import read_log, routing, shadow, shadow_state
 from jarvis.payment_calendar import sources as today_sources
 from jarvis.payment_calendar.errors import TIMEOUTS, CalendarSourceUnavailable, ReaderFallback
+from jarvis.tests.payment_calendar_drift import frozen_clock
 from jarvis.tests.payment_calendar_fixtures import (
 	CalendarFixtures,
 	require_calendar_test_site,
@@ -51,6 +52,7 @@ def key_prefix():
 
 MODULE_KEY = "k" * 44
 _site_key = []
+_start_settings = []
 
 
 def setUpModule():
@@ -62,6 +64,8 @@ def setUpModule():
 	"""
 	_site_key.append(frappe.conf.get("encryption_key"))
 	frappe.conf["encryption_key"] = MODULE_KEY
+	# The reader switch as the site has it now: the last test checks that the run left it as it was.
+	_start_settings.append(routing.reader_settings())
 
 
 def tearDownModule():
@@ -950,8 +954,17 @@ class TestMeasure(ShadowCase):
 		self.clock = Clock()
 		self.events = []
 		self.in_view = False
-		self.company = frappe.get_all("Company", pluck="name", limit=1)[0]
+		# `normalize_scope` checks that the company exists: a CI site has none, so this test makes one (bare, in
+		# its own transaction; the commit is patched and the rows are deleted at the end).
+		require_calendar_test_site()
+		self.fx = CalendarFixtures()
+		self.addCleanup(self.drop_fixture_rows)
+		self.company = self.fx.company
 		self.addCleanup(purge_real_keys, self.company)
+		# One date for the fixtures, the scope check and the month assertions: a run over midnight keeps it.
+		clock = ExitStack()
+		clock.enter_context(frozen_clock(frappe.utils.now()[:19]))
+		self.addCleanup(clock.close)
 		patch.object(shadow, "_today", frappe.utils.nowdate).start()  # normalize_scope checks the real date
 		patch.object(shadow, "monotonic", self.clock).start()
 		patch.object(routing, "monotonic", self.clock).start()  # routing._ms times the reads
@@ -962,6 +975,10 @@ class TestMeasure(ShadowCase):
 		self.reader = MagicMock(side_effect=self.read_reader)
 		patch.object(shadow, "today_unguarded", self.today).start()
 		patch.object(shadow.builtin_reader, "read_obligations", self.reader).start()
+
+	def drop_fixture_rows(self):
+		for doctype, name in reversed(self.fx.created):
+			frappe.db.delete(doctype, {"name": name})
 
 	@contextmanager
 	def view(self):
@@ -1562,4 +1579,4 @@ class TestZZNothingLeftBehind(FrappeTestCase):
 			self.assertEqual(frappe.cache.get_keys(shadow_state.lease_key()), [])
 			self.assertEqual(frappe.cache.get_keys(shadow_state.night_key("")), [])
 		self.assertEqual(frappe.cache.get_keys(TEST_PREFIX), [])
-		self.assertEqual(routing.reader_settings().mode, "off")
+		self.assertEqual(routing.reader_settings(), _start_settings[-1])

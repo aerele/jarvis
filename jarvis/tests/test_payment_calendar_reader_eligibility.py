@@ -369,10 +369,12 @@ class TestReaderIneligibility(TestCase):
 
 	def test_a_permission_on_a_linked_header_doctype_is_ineligible(self):
 		user = self.fx.user()
-		warehouse = frappe.get_all("Warehouse", pluck="name", limit=1)
-		if not warehouse:
-			self.skipTest("the site has no Warehouse")
-		self.permit(user, "Warehouse", warehouse[0])
+		# A bare warehouse of the fixture company, in this test's savepoint: a CI site has none, and the
+		# check must not be skipped there.
+		warehouse = self.fx.insert(
+			"Warehouse", "Warehouse", warehouse_name="Warehouse", company=self.fx.company, is_group=0
+		)
+		self.permit(user, "Warehouse", warehouse)
 		frappe.set_user(user)
 		self.assertIn("user_permission", self.reasons())
 

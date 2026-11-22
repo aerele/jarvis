@@ -1,5 +1,6 @@
 """Month boundaries and financial carry use the real permission/report path."""
 
+from contextlib import ExitStack
 from decimal import Decimal
 from unittest import TestCase
 from unittest.mock import patch
@@ -10,11 +11,20 @@ from frappe.utils import add_days, add_months, get_first_day, get_last_day, nowd
 from jarvis.payment_calendar import api, scope, snapshot
 from jarvis.payment_calendar.access import ScopeChanged, authorize_scope
 from jarvis.payment_calendar.projection import project_snapshot, upcoming_days
+from jarvis.tests.payment_calendar_drift import frozen_clock
 from jarvis.tests.payment_calendar_fixtures import CalendarFixtures, require_calendar_test_site
+
+
+def freeze_the_day(case):
+	"""The site clock stays at the moment the test began: a run over midnight keeps one anchor and one month."""
+	clock = ExitStack()
+	clock.enter_context(frozen_clock(frappe.utils.now()[:19]))
+	case.addCleanup(clock.close)
 
 
 class TestPaymentCalendarMonth(TestCase):
 	def setUp(self):
+		freeze_the_day(self)
 		require_calendar_test_site()
 		frappe.set_user("Administrator")
 		frappe.db.savepoint("calendar_month")
@@ -118,8 +128,11 @@ from jarvis.tests import test_payment_calendar_snapshot as snapshot_fixtures
 
 
 class TestPaymentCalendarMonthSnapshot(TestCase):
-	setUp = snapshot_fixtures.TestPaymentCalendarSnapshot.setUp
 	tearDown = snapshot_fixtures.TestPaymentCalendarSnapshot.tearDown
+
+	def setUp(self):
+		freeze_the_day(self)
+		snapshot_fixtures.TestPaymentCalendarSnapshot.setUp(self)
 
 	def test_month_projection_matches_full_snapshot_for_each_selected_day_and_carry(self):
 		from jarvis.payment_calendar.settings import update_safety_floor

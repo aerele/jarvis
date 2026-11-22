@@ -219,12 +219,14 @@ class TestPaymentCalendarSnapshot(TestCase):
 				frappe.client_cache.delete_value("defaults::__default")
 
 		original = get()
+		# A stale value that differs from the site's real precision, whatever that is.
+		stale = 7 if get_currency_precision() != 7 else 6
 		try:
-			set_value(frappe._dict(currency_precision="7"))
+			set_value(frappe._dict(currency_precision=str(stale)))
 			with snapshot.consistent_read() as hits:
-				self.assertNotEqual(get_currency_precision(), 7)
+				self.assertNotEqual(get_currency_precision(), stale)
 				self.assertIn(profile.defaults_cache_hit, hits)
-			self.assertEqual(get().currency_precision, "7")
+			self.assertEqual(get().currency_precision, str(stale))
 		finally:
 			delete()
 			if original is not None:
