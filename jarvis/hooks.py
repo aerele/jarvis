@@ -412,6 +412,11 @@ scheduler_events = {
 			# SWEEP_TIME_BUDGET_S.
 			# Cheap no-op (one query on a small table) when nothing is due.
 			"jarvis.chat.agent_scheduler.run_due_agent_audits",
+			# Start any user agents whose schedule is due, each as its owner, in a new
+			# chat bound to the agent. Fails closed for Administrator, Guest, disabled
+			# owners and the site flag off. No-op while Jarvis Settings.enable_user_agents
+			# is off. See jarvis/chat/user_agent_scheduler.py.
+			"jarvis.chat.user_agent_scheduler.run_due_user_agents",
 			# Feedback outbox retry (admin-v2#715 F17): re-send stored feedback that
 			# admin has not acknowledged yet, with backoff, at most 6 rows a run, and
 			# stop at the first transient failure. Self-gating (skips a bench with no
