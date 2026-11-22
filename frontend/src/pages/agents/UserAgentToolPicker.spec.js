@@ -3,7 +3,11 @@ import { mount } from "@vue/test-utils";
 
 vi.mock("frappe-ui", () => ({
 	Badge: { props: ["label"], template: `<span class="badge">{{ label }}</span>` },
-	FeatherIcon: { template: "<i />" },
+	Checkbox: {
+		props: ["label", "modelValue", "disabled"],
+		emits: ["update:modelValue"],
+		template: `<label class="tool"><input type="checkbox" :checked="modelValue" :disabled="disabled" @change="$emit('update:modelValue', $event.target.checked)" />{{ label }}</label>`,
+	},
 	FormControl: {
 		props: ["modelValue", "placeholder"],
 		emits: ["update:modelValue"],
@@ -31,7 +35,7 @@ const groups = [
 
 const mountPicker = (props = {}) =>
 	mount(UserAgentToolPicker, { props: { groups, modelValue: [], maxTools: 2, ...props } });
-const rows = (w) => w.findAll('[role="checkbox"]');
+const rows = (w) => w.findAll('.tool input[type="checkbox"]');
 
 describe("UserAgentToolPicker", () => {
 	it("lists the tools grouped by app, marking the ones that write", () => {
@@ -54,9 +58,10 @@ describe("UserAgentToolPicker", () => {
 	it("emits the picked ids and shows the count against the maximum", async () => {
 		const w = mountPicker({ modelValue: ["get_list"] });
 		expect(w.text()).toContain("1 of 2 tools picked");
-		await rows(w)[1].trigger("click");
+		expect(rows(w)[0].element.checked).toBe(true);
+		await rows(w)[1].setValue(true);
 		expect(w.emitted("update:modelValue")[0][0]).toEqual(["get_list", "create_doc"]);
-		await rows(w)[0].trigger("click");
+		await rows(w)[0].setValue(false);
 		expect(w.emitted("update:modelValue")[1][0]).toEqual([]);
 	});
 

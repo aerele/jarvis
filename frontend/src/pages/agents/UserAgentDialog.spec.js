@@ -37,6 +37,11 @@ vi.mock("frappe-ui", () => ({
 	},
 	Badge: { props: ["label"], template: "<span>{{ label }}</span>" },
 	FeatherIcon: { template: "<i />" },
+	Checkbox: {
+		props: ["label", "modelValue", "disabled"],
+		emits: ["update:modelValue"],
+		template: `<label class="tool"><input type="checkbox" :checked="modelValue" :disabled="disabled" @change="$emit('update:modelValue', $event.target.checked)" />{{ label }}</label>`,
+	},
 	dayjs: () => ({ format: () => "" }),
 }));
 
@@ -122,7 +127,7 @@ describe("UserAgentDialog: a new agent", () => {
 		const w = await open();
 		await field(w, "Name").setValue("  Overdue invoices ");
 		await field(w, "Instructions").setValue("List overdue invoices.");
-		await w.findAll('[role="checkbox"]')[0].trigger("click");
+		await w.findAll('.tool input[type="checkbox"]')[0].setValue(true);
 		await w.get('.switch[data-label="Can run code and work with files"] input').setValue(true);
 		await button(w, "Create agent").trigger("click");
 		await flushPromises();

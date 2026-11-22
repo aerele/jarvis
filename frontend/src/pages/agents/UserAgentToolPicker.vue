@@ -1,10 +1,9 @@
 <template>
 	<div class="flex flex-col gap-1">
 		<span class="block text-xs text-ink-gray-5">Tools</span>
-		<!-- Search box and an inline list of toggles, grouped by app: the roles picker's
-		     shape (SkillRolesField). Not the frappe-ui Autocomplete, whose search popover
-		     is portaled outside a Dialog and cannot be clicked there
-		     (PromotionRequestDialog). -->
+		<!-- Search box and an inline list of frappe-ui Checkboxes, grouped by app. Not the
+		     frappe-ui Autocomplete, whose search popover is portaled outside a Dialog and
+		     cannot be clicked there (PromotionRequestDialog). -->
 		<FormControl
 			type="text"
 			placeholder="Search tools"
@@ -17,36 +16,27 @@
 				<div class="bg-surface-gray-1 px-3 py-1 text-xs font-medium text-ink-gray-6">
 					{{ g.label }}
 				</div>
-				<button
+				<div
 					v-for="t in g.tools"
 					:key="t.id"
-					type="button"
-					role="checkbox"
-					:aria-checked="isPicked(t.id)"
-					:disabled="disabled || (!isPicked(t.id) && atMax)"
-					class="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm hover:bg-surface-gray-2 disabled:opacity-50"
-					:class="
-						isPicked(t.id)
-							? 'bg-surface-gray-3 font-medium text-ink-gray-9'
-							: 'text-ink-gray-7'
-					"
-					@click="toggle(t.id)"
+					class="jv-ua-tool flex items-center justify-between gap-2 px-1 hover:bg-surface-gray-2"
 				>
-					<span class="flex min-w-0 items-center gap-2">
-						<span class="truncate">{{ t.label }}</span>
-						<Badge
-							v-if="t.kind === 'write'"
-							variant="subtle"
-							theme="gray"
-							label="Writes"
-						/>
-					</span>
-					<FeatherIcon
-						v-if="isPicked(t.id)"
-						name="check"
-						class="h-4 w-4 shrink-0 text-ink-gray-7"
+					<Checkbox
+						class="min-w-0"
+						padding
+						:label="t.label"
+						:modelValue="isPicked(t.id)"
+						:disabled="disabled || (!isPicked(t.id) && atMax)"
+						@update:modelValue="(on) => setPicked(t.id, on)"
 					/>
-				</button>
+					<Badge
+						v-if="t.kind === 'write'"
+						class="mr-2 shrink-0"
+						variant="subtle"
+						theme="gray"
+						label="Writes"
+					/>
+				</div>
 			</template>
 			<p v-if="loading" class="px-3 py-2 text-p-sm text-ink-gray-5">Loading tools...</p>
 			<p v-else-if="!visibleGroups.length" class="px-3 py-2 text-p-sm text-ink-gray-5">
@@ -64,7 +54,7 @@
 // The tools picker of the My agents dialog. `groups` is list_pickable_tools().groups
 // ([{app, label, tools: [{id, label, kind}]}]); the model is the list of picked ids.
 import { computed, ref } from "vue";
-import { Badge, FeatherIcon, FormControl } from "frappe-ui";
+import { Badge, Checkbox, FormControl } from "frappe-ui";
 
 const props = defineProps({
 	modelValue: { type: Array, default: () => [] },
@@ -91,14 +81,14 @@ const visibleGroups = computed(() => {
 		.filter((g) => g.tools.length);
 });
 
-function toggle(id) {
+function setPicked(id, on) {
 	if (props.disabled) return;
-	if (isPicked(id)) {
+	if (!on) {
 		emit(
 			"update:modelValue",
 			props.modelValue.filter((x) => x !== id)
 		);
-	} else if (!atMax.value) {
+	} else if (!isPicked(id) && !atMax.value) {
 		emit("update:modelValue", [...props.modelValue, id]);
 	}
 }
