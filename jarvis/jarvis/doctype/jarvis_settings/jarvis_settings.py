@@ -856,9 +856,23 @@ class JarvisSettings(Document):
 			):
 				self.llm_api_key = api_key_val
 
+	def _refuse_new_kimi_sign_in(self):
+		"""No NEW Kimi sign-in account (see ``pool_serialize.KIMI_SIGNIN_REMOVED_MESSAGE``); a saved
+		one keeps working. Runs in ``validate``, not ``on_update``: here the saved rows still read
+		their OLD encrypted accounts, while after the save both documents read the new ones and the
+		comparison would see no difference."""
+		from jarvis.jarvis.pool_serialize import new_kimi_subscription_errors
+
+		if not self.get("models"):
+			return
+		errors = new_kimi_subscription_errors(self, self.get_doc_before_save())
+		if errors:
+			frappe.throw("<br>".join(errors), title="LLM Configuration")
+
 	def validate(self):
 		self._preserve_agent_catalog_state()
 		self._guard_admin_only_fields()
+		self._refuse_new_kimi_sign_in()
 		# #731: a genuine ON -> OFF flip of the wiki toggle enqueues a container
 		# scrub in on_update. Capture the change here, the same way
 		# llm_auth_mode_changed is captured below: has_value_changed compares the
@@ -1285,14 +1299,11 @@ class JarvisSettings(Document):
 			compute_pool_mode,
 			compute_proxy_active,
 			lone_direct_handover_due,
-			new_kimi_subscription_errors,
 			validate_models,
 		)
 
 		# Step 1: Validate first — clean error before any state mutation.
 		errors = validate_models(self)
-		if not errors:
-			errors = new_kimi_subscription_errors(self, self.get_doc_before_save())
 		if errors:
 			frappe.throw("<br>".join(errors), title="LLM Configuration")
 

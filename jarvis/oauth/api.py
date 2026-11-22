@@ -745,6 +745,13 @@ def poll_pool_account_signin(nonce: str) -> dict:
 		return _err("unknown_nonce", "nonce not recognized")
 
 	p = get_provider(entry["provider"])
+	if p.get("agent_provider") == "kimi":
+		# A Kimi device flow begun before the sign-in was withdrawn cannot finish: nothing new may
+		# be minted. A saved Kimi account is unaffected (the token is not touched here).
+		from jarvis.jarvis.pool_serialize import KIMI_SIGNIN_REMOVED_MESSAGE
+
+		frappe.cache.hdel(_CACHE_KEY, nonce)
+		return _err("kimi_signin_removed", KIMI_SIGNIN_REMOVED_MESSAGE)
 	headers = dict(p.get("device_headers") or {})
 	headers["X-Msh-Device-Id"] = entry.get("device_id", "")
 	try:

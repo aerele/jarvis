@@ -1370,7 +1370,8 @@ class _MockResp:
 
 
 class TestKimiDeviceFlow(_OAuthApiBase):
-	"""Phase 2: Kimi (Moonshot) device-code pool capture (begin + poll)."""
+	"""Kimi (Moonshot) device-code sign-in is withdrawn: nothing new can be started or finished.
+	A saved Kimi account keeps working (its token is not touched here)."""
 
 	_DEV = {
 		"device_code": "DC",
@@ -1380,76 +1381,34 @@ class TestKimiDeviceFlow(_OAuthApiBase):
 		"expires_in": 900,
 	}
 
-	def _begin(self):
+	def _in_flight(self):
+		"""A device flow as one begun BEFORE the withdrawal left it in the cache."""
 		with patch("jarvis.oauth.api.requests.post", return_value=_MockResp(200, dict(self._DEV))):
-			return oauth_api.begin_pool_account_signin("Kimi (Moonshot)", "kimi-k2.7-code")
+			res = oauth_api._begin_device_signin("Kimi (Moonshot)", "kimi-k2.7-code")
+		return res["data"]["nonce"]
 
-	def test_begin_returns_device_flow_and_caches_device_code(self):
-		res = self._begin()
-		self.assertTrue(res["ok"])
-		d = res["data"]
-		self.assertTrue(d["device_flow"])
-		self.assertEqual(d["user_code"], "ABCD-EFGH")
-		self.assertTrue(d["nonce"])
-		# device_code is cached server-side, NOT returned to the browser
-		self.assertNotIn("device_code", d)
-		entry = frappe.cache.hget(_CACHE_KEY, d["nonce"])
-		self.assertEqual(entry["device_code"], "DC")
-		self.assertTrue(entry.get("pool") and entry.get("device"))
-
-	def test_poll_pending_keeps_nonce_alive(self):
-		nonce = self._begin()["data"]["nonce"]
-		with patch(
-			"jarvis.oauth.api.requests.post", return_value=_MockResp(400, {"error": "authorization_pending"})
-		):
-			res = oauth_api.poll_pool_account_signin(nonce)
-		self.assertTrue(res["ok"])
-		self.assertEqual(res["data"]["status"], "pending")
-		self.assertIsNotNone(frappe.cache.hget(_CACHE_KEY, nonce))  # keep polling
-
-	def test_poll_success_returns_kimi_device_blob(self):
-		nonce = self._begin()["data"]["nonce"]
-		token = {
-			"access_token": "KAT",
-			"refresh_token": "KRT",
-			"token_type": "Bearer",
-			"scope": "kimi:coding",
-			"expires_in": 3600,
-		}
-		with patch("jarvis.oauth.api.requests.post", return_value=_MockResp(200, token)):
-			res = oauth_api.poll_pool_account_signin(nonce)
-		self.assertTrue(res["ok"])
-		d = res["data"]
-		self.assertEqual(d["status"], "ok")
-		self.assertTrue(d["account_ref"].startswith("SUB_"))
-		# Plan-05 D2 (P0-04): capture_id, not the raw blob.
-		self.assertTrue(d["capture_id"].startswith("oacap_"))
-		self.assertNotIn("oauth_blob", d)
-		for secret in ("KAT", "KRT"):
-			self.assertNotIn(secret, json.dumps(d))
-		# The blob was persisted ENCRYPTED and decrypts to the Kimi device shape.
-		from frappe.utils.password import get_decrypted_password
-
-		name = frappe.db.get_value("Jarvis Pending OAuth Capture", {"capture_id": d["capture_id"]}, "name")
-		blob = json.loads(
-			get_decrypted_password("Jarvis Pending OAuth Capture", name, "encrypted_oauth_blob")
-		)
-		# agent blob shape the fleet oauth_blob_to_cliproxy_kimi transform consumes
-		self.assertEqual(blob["provider"], "kimi")
-		self.assertEqual(blob["access"], "KAT")
-		self.assertEqual(blob["refresh"], "KRT")
-		self.assertEqual(blob["scope"], "kimi:coding")
-		self.assertTrue(blob["device_id"])  # minted at begin
-		self.assertNotIn("id_token", blob)  # device flow has none
-		frappe.delete_doc("Jarvis Pending OAuth Capture", name, force=True, ignore_permissions=True)
-		self.assertIsNone(frappe.cache.hget(_CACHE_KEY, nonce))  # nonce consumed
-
-	def test_poll_expired_burns_nonce(self):
-		nonce = self._begin()["data"]["nonce"]
-		with patch("jarvis.oauth.api.requests.post", return_value=_MockResp(400, {"error": "expired_token"})):
-			res = oauth_api.poll_pool_account_signin(nonce)
+	def test_begin_is_refused_with_the_membership_key_message_and_calls_no_provider(self):
+		with patch("jarvis.oauth.api.requests.post") as post:
+			res = oauth_api.begin_pool_account_signin("Kimi (Moonshot)", "kimi-k2.7-code")
+		post.assert_not_called()
 		self.assertFalse(res["ok"])
-		self.assertIsNone(frappe.cache.hget(_CACHE_KEY, nonce))  # terminal -> burned
+		self.assertEqual(res["error"]["code"], "kimi_signin_removed")
+		for part in ("OpenAI-Compatible", "https://api.kimi.com/coding/v1", "kimi-for-coding"):
+			self.assertIn(part, res["error"]["message"])
+
+	def test_poll_of_an_in_flight_flow_is_refused_and_burns_the_nonce(self):
+		nonce = self._in_flight()
+		token = {"access_token": "KAT", "refresh_token": "KRT", "token_type": "Bearer", "expires_in": 3600}
+		with patch("jarvis.oauth.api.requests.post", return_value=_MockResp(200, token)) as post:
+			res = oauth_api.poll_pool_account_signin(nonce)
+		post.assert_not_called()  # the provider is never asked, so no token is minted
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["code"], "kimi_signin_removed")
+		self.assertIsNone(frappe.cache.hget(_CACHE_KEY, nonce))
+		self.assertFalse(
+			frappe.db.exists("Jarvis Pending OAuth Capture", {"provider": "Kimi (Moonshot)"}),
+			"no Kimi capture may be created",
+		)
 
 	def test_begin_paste_signin_rejects_device_provider(self):
 		# Review finding [2]: the DIRECT paste-back path must not KeyError on a
@@ -1461,7 +1420,7 @@ class TestKimiDeviceFlow(_OAuthApiBase):
 	def test_complete_pool_rejects_device_nonce(self):
 		# Review finding [3]: a device nonce (no state/verifier) routed to
 		# complete_pool_account_signin must return unknown_nonce, not KeyError-500.
-		nonce = self._begin()["data"]["nonce"]
+		nonce = self._in_flight()
 		res = oauth_api.complete_pool_account_signin(nonce, "http://x/cb?code=A&state=B")
 		self.assertFalse(res["ok"])
 		self.assertEqual(res["error"]["code"], "unknown_nonce")

@@ -285,7 +285,7 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 		self.assertIn("missing llm_provider", s.last_sync_status)
 
 	def test_one_unrenderable_subscription_model_is_still_proxy(self):
-		"""Kimi has no agent-native auth flow → still needs cliproxy → the
+		"""xAI has no fleet-template arm on a sidecar tenant → still needs cliproxy → the
 		proxy pool path, NOT the direct llm-creds path (#200 review #1)."""
 		pool_calls = []
 		with (
@@ -297,18 +297,18 @@ class TestSaveLlmPool(_RT3SettingsTestCase):
 			patch("jarvis.admin_client.post_update_llm_creds") as creds,
 		):
 			onboarding.save_llm_pool(
-				frappe.as_json(self._lone_subscription_models(upstream="kimi", provider="kimi")),
+				frappe.as_json(self._lone_subscription_models(upstream="xai", provider="xai")),
 				preset=None,
 				routing_mode="failover",
 			)
-		self.assertTrue(pool_calls, "a lone Kimi subscription must still route to the proxy pool path")
+		self.assertTrue(pool_calls, "a lone xAI subscription must still route to the proxy pool path")
 		blob.assert_not_called()
 		creds.assert_not_called()
 		s = frappe.get_single("Jarvis Settings")
 		self.assertEqual(int(s.proxy_active or 0), 1)
 		# The account's blob reaches the pool push (served via cliproxy).
 		self.assertEqual(
-			pool_calls[0]["oauth_blobs"].get("SUB_deadbeef"), {"provider": "kimi", "refresh_token": "rt"}
+			pool_calls[0]["oauth_blobs"].get("SUB_deadbeef"), {"provider": "xai", "refresh_token": "rt"}
 		)
 
 	def test_legacy_preset_value_normalized_by_patch(self):

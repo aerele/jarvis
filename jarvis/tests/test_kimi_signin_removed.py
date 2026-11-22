@@ -100,3 +100,51 @@ class TestKimiByApiKeyStillValidates(unittest.TestCase):
 		self.assertEqual(spec["models"][0]["base_url"], "https://api.kimi.com/coding/v1")
 		self.assertEqual(spec["models"][0]["model"], "kimi-for-coding")
 		self.assertIn("sk-kimi-test", keys.values())
+
+
+class TestTheCheckRunsOnTheSavedDocumentCorrectly(unittest.TestCase):
+	"""The check lives in the Settings ``validate`` hook, where the saved rows still read their
+	old accounts; it must treat a first-ever save (no saved document) like any other."""
+
+	@staticmethod
+	def _doc(models, before):
+		from types import SimpleNamespace
+
+		doc = SimpleNamespace(
+			models=models,
+			preset=None,
+			routing_mode="failover",
+			get_doc_before_save=lambda: before,
+		)
+		doc.get = lambda key, default=None: getattr(doc, key, default)
+		return doc
+
+	@staticmethod
+	def _run(doc):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		with patch.object(frappe, "throw", side_effect=frappe.ValidationError("refused")) as throw:
+			try:
+				JarvisSettings._refuse_new_kimi_sign_in(doc)
+			except frappe.ValidationError:
+				return throw
+		return throw
+
+	def test_a_first_ever_save_with_non_kimi_rows_passes(self):
+		throw = self._run(
+			self._doc([_sub("gpt-5.5", "openai", ("O1",)), _sub("grok-4", "xai", ("X1",), 1)], None)
+		)
+		throw.assert_not_called()
+
+	def test_a_first_ever_save_with_a_kimi_sign_in_is_refused(self):
+		throw = self._run(self._doc([_sub()], None))
+		throw.assert_called_once()
+		self.assertIn("membership key", throw.call_args.args[0])
+
+	def test_a_resaved_pool_with_its_saved_kimi_account_passes_and_a_new_one_does_not(self):
+		before = _settings([_sub(refs=("K1",))])
+		self._run(self._doc([_sub(refs=("K1",))], before)).assert_not_called()
+		self._run(self._doc([_sub(refs=("K1", "K2"))], before)).assert_called_once()
+
+	def test_a_settings_save_with_no_pool_rows_is_not_checked(self):
+		self._run(self._doc([], None)).assert_not_called()
