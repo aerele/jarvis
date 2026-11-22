@@ -20,6 +20,7 @@
   "intake_daily_cap",
   "budgets_col",
   "macro_step_budget_monthly",
+  "enable_user_agents",
   "enforce_agent_min_model",
   "intake_daily_cap_per_user",
   "branding_section",
@@ -287,6 +288,13 @@
    "fieldname": "macro_step_budget_monthly",
    "fieldtype": "Int",
    "label": "Scheduled Macro Step Budget (monthly, per owner)"
+  },
+  {
+   "default": "0",
+   "description": "Lets each Jarvis user build up to 5 agents of their own on the Agents page. Each agent runs as its owner, with only the tools the owner picked. Needs runtime 2026.11.0 or newer, and the control plane must allow it for this workspace. Off (default): every user agent endpoint refuses and no agent chats or schedules run.",
+   "fieldname": "enable_user_agents",
+   "fieldtype": "Check",
+   "label": "Enable user agents"
   },
   {
    "default": "0",
@@ -1555,5 +1563,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-13 19:00:00.000000"
+ "modified": "2026-11-22 10:00:00.000000"
 }

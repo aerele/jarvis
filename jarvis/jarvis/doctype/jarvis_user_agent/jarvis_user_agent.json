@@ -1,0 +1,265 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-11-22 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "agent_name",
+  "agent_id",
+  "enabled",
+  "allow_shell",
+  "description",
+  "instructions",
+  "tools_json",
+  "sync_section",
+  "sync_status",
+  "sync_error",
+  "sync_error_message",
+  "sync_col",
+  "synced_at",
+  "schedule_section",
+  "schedule_enabled",
+  "schedule_frequency",
+  "schedule_weekday",
+  "schedule_day_of_month",
+  "schedule_time",
+  "schedule_prompt",
+  "schedule_col",
+  "next_run_at",
+  "last_run_at",
+  "last_run_status",
+  "last_run_error",
+  "last_run_message",
+  "last_run_conversation"
+ ],
+ "fields": [
+  {
+   "fieldname": "agent_name",
+   "fieldtype": "Data",
+   "label": "Agent name",
+   "reqd": 1,
+   "length": 140,
+   "in_list_view": 1,
+   "description": "What the owner calls this agent. Shown on the Agents page and as the chat title."
+  },
+  {
+   "fieldname": "agent_id",
+   "fieldtype": "Data",
+   "label": "Agent ID",
+   "unique": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "in_list_view": 1,
+   "description": "Runtime id, agent-u- followed by 10 lowercase hex characters. Set once on insert and never changed."
+  },
+  {
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled",
+   "default": "1",
+   "description": "Off: the agent is removed from the runtime, its chats and schedule stop."
+  },
+  {
+   "fieldname": "allow_shell",
+   "fieldtype": "Check",
+   "label": "Allow shell and files",
+   "default": "0",
+   "description": "On: the agent also gets a shell and file tools inside this workspace's sandbox. Off: no shell and no file writes."
+  },
+  {
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description",
+   "description": "Optional one-line summary, at most 1,000 characters."
+  },
+  {
+   "fieldname": "instructions",
+   "fieldtype": "Long Text",
+   "label": "Instructions",
+   "reqd": 1,
+   "description": "What the agent does, in the owner's words. At most 12,000 characters."
+  },
+  {
+   "fieldname": "tools_json",
+   "fieldtype": "JSON",
+   "label": "Tools",
+   "description": "JSON list of the tool ids the owner picked (bare names such as get_list). Only these tools can run in this agent's chats."
+  },
+  {
+   "fieldname": "sync_section",
+   "fieldtype": "Section Break",
+   "label": "Runtime sync"
+  },
+  {
+   "fieldname": "sync_status",
+   "fieldtype": "Select",
+   "label": "Sync status",
+   "options": "Pending\nSynced\nFailed",
+   "default": "Pending",
+   "read_only": 1,
+   "no_copy": 1,
+   "in_list_view": 1,
+   "description": "Synced: the runtime has this agent as saved. Pending: a change is on its way. Failed: the last change did not reach the runtime."
+  },
+  {
+   "fieldname": "sync_error",
+   "fieldtype": "Data",
+   "label": "Sync error code",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Machine code of the last failed sync, empty when the last sync worked."
+  },
+  {
+   "fieldname": "sync_error_message",
+   "fieldtype": "Small Text",
+   "label": "Sync error",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "What went wrong with the last sync and what to do next."
+  },
+  {
+   "fieldname": "sync_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "synced_at",
+   "fieldtype": "Datetime",
+   "label": "Synced at",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "When the runtime last confirmed this agent. Empty until the first successful sync; chats need it."
+  },
+  {
+   "fieldname": "schedule_section",
+   "fieldtype": "Section Break",
+   "label": "Schedule"
+  },
+  {
+   "fieldname": "schedule_enabled",
+   "fieldtype": "Check",
+   "label": "Run on a schedule",
+   "default": "0"
+  },
+  {
+   "fieldname": "schedule_frequency",
+   "fieldtype": "Select",
+   "label": "Frequency",
+   "options": "daily\nweekly\nmonthly",
+   "default": "daily",
+   "depends_on": "eval:doc.schedule_enabled"
+  },
+  {
+   "fieldname": "schedule_weekday",
+   "fieldtype": "Select",
+   "label": "Day of week",
+   "options": "\nMonday\nTuesday\nWednesday\nThursday\nFriday\nSaturday\nSunday",
+   "depends_on": "eval:doc.schedule_enabled && doc.schedule_frequency=='weekly'"
+  },
+  {
+   "fieldname": "schedule_day_of_month",
+   "fieldtype": "Int",
+   "label": "Day of month",
+   "depends_on": "eval:doc.schedule_enabled && doc.schedule_frequency=='monthly'",
+   "description": "1 to 31, clamped to the last day of short months."
+  },
+  {
+   "fieldname": "schedule_time",
+   "fieldtype": "Time",
+   "label": "Time of day",
+   "depends_on": "eval:doc.schedule_enabled",
+   "description": "Local time the scheduled run starts (09:00 when empty)."
+  },
+  {
+   "fieldname": "schedule_prompt",
+   "fieldtype": "Small Text",
+   "label": "Scheduled prompt",
+   "depends_on": "eval:doc.schedule_enabled",
+   "description": "The message the agent receives on each scheduled run. At most 4,000 characters."
+  },
+  {
+   "fieldname": "schedule_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "next_run_at",
+   "fieldtype": "Datetime",
+   "label": "Next run at",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "last_run_at",
+   "fieldtype": "Datetime",
+   "label": "Last run at",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "last_run_status",
+   "fieldtype": "Select",
+   "label": "Last run status",
+   "options": "\nStarted\nFailed",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "last_run_error",
+   "fieldtype": "Data",
+   "label": "Last run error code",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "last_run_message",
+   "fieldtype": "Small Text",
+   "label": "Last run error",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "last_run_conversation",
+   "fieldtype": "Link",
+   "label": "Last run chat",
+   "options": "Jarvis Conversation",
+   "read_only": 1,
+   "no_copy": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-22 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis User Agent",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "if_owner": 1,
+   "read": 1,
+   "role": "Jarvis User",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "agent_name",
+ "track_changes": 1
+}

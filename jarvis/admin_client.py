@@ -1922,6 +1922,29 @@ def post_push_role_profiles(role_profiles: list[dict]) -> dict:
 	)
 
 
+def post_push_user_agents(user_agents: list[dict]) -> dict:
+	"""POST the FULL set of enabled user agents to admin -> fleet -> container
+	(``push_user_agents``, fleet contract 1.57). Anything not listed is removed, so
+	an empty list removes every user agent.
+
+	``user_agents`` is the list built by ``jarvis.chat.user_agent_sync.build_payload``
+	(each ``{id, body, tools_allow, sandbox, timeout_s}``). Returns admin's ``data``:
+	``{action: "hot-apply" | "restart" | "noop", user_agents: [ids], sandbox}``.
+
+	Raises:
+		AdminContractError (400/409, carries ``code``: ``InvalidUserAgents``,
+		``NoRunningTenant``, ``user_agents_disabled``, ``user_agents_unsupported_fleet``,
+		``user_agents_unsupported_image``, ``sandbox_image_unconfigured``,
+		``apply_in_progress``), AdminRateLimitedError (429), AdminUnreachableError
+		(502 ``FleetError`` and transport failures), AdminAuthError.
+	"""
+	return _post(
+		path=_m("api.tenant.push_user_agents"),
+		body={"user_agents": user_agents},
+		timeout_s=180,
+	)
+
+
 def post_agent_run(run_id: str, agent_id: str, session_key: str, message: str, timeout_s: int = 600) -> dict:
 	"""Dispatch ONE marketplace-agent delegate turn: bench → admin → fleet → the
 	customer's container (Phase 2C run relay).
