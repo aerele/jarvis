@@ -58,12 +58,19 @@ class TestProxyActive(unittest.TestCase):
 		self.assertTrue(pool_serialize.compute_proxy_active(_settings(models, native_subscription_pool=0)))
 		self.assertFalse(pool_serialize.compute_proxy_active(_settings(models, native_subscription_pool=1)))
 
-	def test_xai_is_a_renderer_upstream_only_on_a_native_tenant(self):
-		lone = [_sub("grok-4", "xai")]
-		self.assertFalse(pool_serialize._lone_direct_capable(_settings(lone)))
-		self.assertTrue(pool_serialize._lone_direct_capable(_settings(lone, native_subscription_pool=1)))
-		self.assertTrue(pool_serialize._upstream_has_renderer("openai"))
-		self.assertFalse(pool_serialize._upstream_has_renderer("xai"))
+	def test_a_native_tenant_has_no_direct_leg_for_a_lone_sign_in(self):
+		# The direct sign-in routes are refused for a native tenant (409 native_pool_owns_sign_ins),
+		# so a lone ChatGPT or xAI sign-in takes the pool push like every other pool.
+		for upstream in ("openai", "xai"):
+			lone = [_sub("m", upstream, accounts=[_acct(upstream, "R1")])]
+			native = _settings(lone, native_subscription_pool=1)
+			self.assertFalse(pool_serialize._lone_direct_capable(native))
+			self.assertTrue(pool_serialize.compute_pool_mode(native))
+			self.assertFalse(pool_serialize.compute_proxy_active(native))
+		# a sidecar tenant is unchanged: a lone ChatGPT sign-in is direct-capable, xAI is not
+		openai = _settings([_sub("m", "openai", accounts=[_acct("openai", "R1")])])
+		self.assertTrue(pool_serialize._lone_direct_capable(openai))
+		self.assertFalse(pool_serialize._lone_direct_capable(_settings([_sub("grok-4", "xai")])))
 
 	def test_two_accounts_on_one_model_still_take_the_pool_leg_on_a_native_tenant(self):
 		# The direct leg holds one sign-in, so rotation needs the pool leg on either kind of tenant.

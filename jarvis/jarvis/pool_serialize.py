@@ -546,6 +546,10 @@ def _lone_direct_capable(settings) -> bool:
 	  clears it - see ``onboarding._DISCONNECTED_LLM_FIELDS``) before
 	  reconnecting.
 	"""
+	# A native tenant has no direct leg: its sign-ins belong to the pool, and fleet refuses the
+	# direct sign-in routes (409 native_pool_owns_sign_ins). Everything goes through the pool push.
+	if is_native_pool(settings):
+		return False
 	return _lone_direct_shape(settings) and not bool(getattr(settings, "llm_pool_synced_at", None))
 
 
