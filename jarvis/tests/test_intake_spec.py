@@ -119,6 +119,44 @@ class TestIntakeSpec(FrappeTestCase):
 			self._coverage([], {}, fields)  # source neither read nor defaulted: nothing to fetch from
 		self.assertIn("customer_name", str(ctx.exception))
 
+	def _column_coverage(self, columns):
+		"""Strict coverage of an items table whose required item_name is fetched from item_code."""
+		D = frappe._dict
+		child = D(
+			fields=[
+				D(fieldname="item_code", fieldtype="Link", reqd=1, read_only=0, default=None),
+				D(
+					fieldname="item_name",
+					fieldtype="Data",
+					reqd=1,
+					read_only=0,
+					default=None,
+					fetch_from="item_code.item_name",
+				),
+			]
+		)
+		parent = D(fields=[D(fieldname="items", fieldtype="Table", options="Row", reqd=0)])
+		s = intake_spec.IntakeSpec(
+			target="Doc",
+			fields=[],
+			table={"fieldname": "items", "columns": columns},
+			match=[],
+			defaults={},
+			instructions="",
+			allow_incomplete=False,
+		)
+		with (
+			mock.patch("frappe.get_meta", side_effect=lambda d: parent if d == "Doc" else child),
+			mock.patch.object(intake_spec, "_child_doctype", return_value="Row"),
+		):
+			intake_spec._validate_coverage(s, parent)
+
+	def test_required_column_fetched_from_a_read_column_is_covered(self):
+		self._column_coverage(["item_code"])  # item_name follows item_code on insert
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._column_coverage([])  # nothing to fetch from
+		self.assertIn("items.item_name", str(ctx.exception))
+
 	def test_mandatory_attach_field_is_refused_with_its_own_message(self):
 		fields = [
 			{"fieldname": "title", "fieldtype": "Data"},
