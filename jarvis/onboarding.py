@@ -2859,6 +2859,8 @@ def get_llm_config() -> dict:
 		"preset": s.get("preset") or "",
 		"routing_mode": s.get("routing_mode") or "failover",
 		"proxy_active": bool(s.get("proxy_active")),
+		# Lets the editor skip proxy-only hints (the API-key backstop) on a native tenant.
+		"native_subscription_pool": native_runtime.is_native_pool(s),
 	}
 
 

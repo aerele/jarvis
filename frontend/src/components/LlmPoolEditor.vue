@@ -3205,7 +3205,8 @@ const saveBlocked = computed(() => !!selectedPreset.value && missingVendors.valu
 // still fires from the add/connect panel before any OAuth account exists.
 const backstopWarning = computed(() =>
 	poolBackstopWarning(
-		rows.value.filter((r) => r.credentialType === "subscription" || !isRowEmpty(r))
+		rows.value.filter((r) => r.credentialType === "subscription" || !isRowEmpty(r)),
+		!!(cfg.value && cfg.value.native_subscription_pool)
 	)
 );
 

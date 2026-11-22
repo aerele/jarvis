@@ -524,3 +524,45 @@ class TestPinSelfHealWhenFactsAreStale(unittest.TestCase):
 		persist.assert_called_once_with(reply)
 		with patch("jarvis.admin_client.get_connection", side_effect=RuntimeError("down")):
 			self.assertFalse(native_runtime.refresh_from_admin())
+
+
+class TestNativePoolShapesPassTheAppChecks(unittest.TestCase):
+	def _errors(self, models, native=True):
+		return pool_serialize.validate_models(_settings(models, native_subscription_pool=1 if native else 0))
+
+	def test_two_sign_in_kinds_with_no_api_key_have_no_app_side_backstop_rule(self):
+		models = [
+			_sub("gpt-5.6-terra", "openai", order=0, accounts=[_acct("openai", "O1")]),
+			_sub("grok-4.3", "xai", order=1, accounts=[_acct("xai", "X1")]),
+		]
+		self.assertEqual(self._errors(models), [])
+		self.assertEqual(self._errors(models, native=False), [])  # the rule is admin's, not the app's
+
+	def test_xai_alone_xai_with_claude_and_claude_removed(self):
+		self.assertEqual(self._errors([_sub("grok-4.3", "xai", accounts=[_acct("xai", "X1")])]), [])
+		# xAI next to a Claude member: none of the position or combination rules apply on native
+		# (the Claude credential itself is a separate check, not exercised here).
+		claude = _sub("claude-opus-5", "anthropic", order=0, accounts=[_acct("anthropic", "C1")])
+		xai = _sub("grok-4.3", "xai", order=1, accounts=[_acct("xai", "X1")])
+		errors = self._errors([claude, xai])
+		self.assertFalse(
+			[e for e in errors if "combined" in e or "first or last" in e or "backstop" in e.lower()]
+		)
+		# the Claude member removed again leaves a plain pool that validates
+		self.assertEqual(
+			self._errors([_sub("gpt-5.6-terra", "openai", accounts=[_acct("openai", "O1")])]), []
+		)
+
+	def test_get_llm_config_carries_the_native_flag(self):
+		from jarvis import onboarding
+
+		with (
+			patch.object(onboarding, "require_jarvis_admin"),
+			patch.object(
+				onboarding.frappe,
+				"get_single",
+				return_value=_settings([], native_subscription_pool=1, proxy_active=0),
+			),
+		):
+			out = onboarding.get_llm_config()
+		self.assertIs(out["native_subscription_pool"], True)

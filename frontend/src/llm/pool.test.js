@@ -1180,3 +1180,13 @@ test("isContainerOnlyRow: ollama and vllm keep their carve-out with no base url"
 	assert.equal(isContainerOnlyRow({ provider: "vLLM (local)", baseUrl: "" }), true);
 	assert.equal(isContainerOnlyRow(null), false);
 });
+
+test("poolBackstopWarning: a native tenant never needs an API-key backstop", () => {
+	const models = [
+		{ credentialType: "subscription", upstream: "openai" },
+		{ credentialType: "subscription", upstream: "xai" },
+	];
+	assert.match(poolBackstopWarning(models), /backstop/i);
+	assert.equal(poolBackstopWarning(models, false), poolBackstopWarning(models));
+	assert.equal(poolBackstopWarning(models, true), "");
+});

@@ -222,7 +222,11 @@ export function validatePool(models, preset) {
 // validatePool/save shape (a `subscription` object, upstream only on its
 // accounts) - so a caller can pass rows straight from the editor with no
 // normalization step.
-export function poolBackstopWarning(models) {
+//
+// A NATIVE tenant (`native` true: the agent runtime does failover and account rotation itself, no
+// proxy sidecars) needs no API-key leg, so it never warns.
+export function poolBackstopWarning(models, native = false) {
+	if (native) return "";
 	const list = Array.isArray(models) ? models : [];
 	const isSubscription = (m) =>
 		!!(
