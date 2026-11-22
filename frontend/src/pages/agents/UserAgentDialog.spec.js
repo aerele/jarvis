@@ -274,6 +274,22 @@ describe("UserAgentDialog: an existing agent", () => {
 		expect(w.emitted("saved")[0][0].sync.status).toBe("Synced");
 	});
 
+	it("shows a support sentence with its code", async () => {
+		const message =
+			"Jarvis could not set up this agent on your workspace. Contact support and share this code: sandbox_users_failed.";
+		const w = await open({
+			agent: agent({
+				sync: {
+					status: "Failed",
+					error: "sandbox_users_failed",
+					message,
+					synced_at: null,
+				},
+			}),
+		});
+		expect(w.get(".error").text()).toBe(message);
+	});
+
 	it("offers no retry when the sync is fine", async () => {
 		const w = await open({ agent: agent() });
 		expect(button(w, "Retry sync")).toBeUndefined();

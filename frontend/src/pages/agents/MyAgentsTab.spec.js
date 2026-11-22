@@ -152,6 +152,18 @@ describe("MyAgentsTab: rows", () => {
 		expect(row(w, "c").text()).toContain(message);
 	});
 
+	it("shows a support sentence whole, with its code", () => {
+		const message =
+			"Jarvis could not set up this agent on your workspace. Contact support and share this code: sandbox_keygen_failed.";
+		const w = mountTab({ agents: [agent("d", { sync: syncOf("Failed", message) })] });
+		const line = row(w, "d")
+			.findAll("div")
+			.find((d) => d.text() === message);
+		expect(line).toBeTruthy();
+		expect(line.classes()).not.toContain("truncate");
+		expect(line.text()).toContain("sandbox_keygen_failed");
+	});
+
 	it("summarises the schedule and the last run", () => {
 		const w = mountTab({
 			agents: [

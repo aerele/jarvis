@@ -82,11 +82,11 @@
 									{{ row.agent_name }}
 								</div>
 								<!-- The stored sentence is text, not a tooltip: it has to be
-								     readable without hovering. -->
+								     readable without hovering, and it wraps rather than
+								     truncates, so a support code at its end stays visible. -->
 								<div
 									v-if="syncMessage(row)"
-									class="truncate text-sm text-ink-red-4"
-									:title="syncMessage(row)"
+									class="whitespace-normal break-words text-sm text-ink-red-4"
 								>
 									{{ syncMessage(row) }}
 								</div>
