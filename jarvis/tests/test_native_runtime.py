@@ -367,9 +367,10 @@ class TestClaudeMemberOnANativePool(unittest.TestCase):
 			[e for e in self._errors(models, native_subscription_pool=1) if "Claude can be combined" in e]
 		)
 
-	def test_one_claude_row_and_one_account_still_apply_on_native(self):
+	def test_one_claude_account_per_row_still_applies_on_native(self):
+		# Several Claude models on the one login are fine on native (see TestNativeClaudeAndSignInIdRules).
 		two_rows = [self._claude(0), self._claude(1)]
-		self.assertIn(
+		self.assertNotIn(
 			"Only one Claude subscription model is supported per pool.",
 			self._errors(two_rows, native_subscription_pool=1),
 		)
@@ -593,7 +594,7 @@ class TestProxyEraRulesAreGoneOnNative(unittest.TestCase):
 			_sub("claude-opus-5", "anthropic", order=0, accounts=[_acct("anthropic", "C1")]),
 			_sub("claude-sonnet-5", "anthropic", order=1, accounts=[_acct("anthropic", "C2")]),
 		]
-		self.assertTrue([e for e in self._errors(two, True) if "Only one Claude" in e])
+		self.assertTrue([e for e in self._errors(two, True) if "one Claude account" in e])
 
 	def test_the_chain_keeps_every_member_in_the_customers_order_with_no_cap(self):
 		models = [_sub(f"m{i}", "openai", order=i, accounts=[_acct("openai", f"O{i}")]) for i in range(12)]
@@ -704,3 +705,83 @@ class TestEveryNativePickNamesItsOwnProvider(unittest.TestCase):
 			self.assertEqual(
 				turn_handler._resolve_model_and_provider(frappe._dict(model_override="")), ("", None)
 			)
+
+
+class TestKeyedRowNumberingMatchesFleet(unittest.TestCase):
+	"""The cases fleet pins in test_keyed_row_numbering_rule_on_native."""
+
+	def _rows(self):
+		return [
+			_keyrow("gpt-5.5", "openai", 1),
+			_keyrow("deepseek-chat", "deepseek", 1),
+			_keyrow("Qwen/Qwen3", "openai_compat", 1),
+			_sub("claude-opus-5", "anthropic", order=0, accounts=[_acct("anthropic", "C1")]),
+			_keyrow("claude-opus-5", "anthropic", 2, enabled=0),
+			_keyrow("claude-sonnet-5", "anthropic", 0),
+			_keyrow("gpt-image-1.5", "openai", 0),
+			_sub("gpt-5.6-terra", "openai", order=0, accounts=[_acct("openai", "O1")]),
+			_keyrow("deepseek-chat", "deepseek", 1),
+		]
+
+	def _provider(self, model):
+		return turn_handler._native_pick_provider(_settings(self._rows(), native_subscription_pool=1), model)
+
+	def test_ids_follow_the_fleets_order_and_one_counter(self):
+		self.assertEqual(
+			self._provider("claude-sonnet-5"), "anthropic-0"
+		)  # order 0, "anthropic" < "anthropic_cli"
+		self.assertEqual(self._provider("Qwen/Qwen3"), "openai_compat-1")  # sorts as compat-qwen-qwen3
+		self.assertEqual(self._provider("deepseek-chat"), "deepseek-2")  # first of a full tie
+		self.assertEqual(self._provider("gpt-5.5"), "openai-4")  # the tied twin took 3
+		self.assertEqual(self._provider("gpt-5.6-terra"), "openai")  # sign-in: no number
+		self.assertEqual(self._provider("claude-opus-5"), "anthropic")  # the Claude member: no number
+		self.assertIsNone(self._provider("gpt-image-1.5"))  # image rows are never picked as chat
+
+	def test_zai_sorts_by_its_own_name_and_a_stored_order_tie_is_stable(self):
+		rows = [
+			_keyrow("glm-4.6", "zai", 0),
+			_keyrow("aaa", "openai_compat", 0),
+			_keyrow("zzz", "anthropic", 0),
+		]
+		settings = _settings(rows, native_subscription_pool=1)
+		# The app sends a z.ai row on the openai_compat transport (pool_serialize._wire_provider), so
+		# the fleet sorts it as compat-<model> and names it openai_compat-<n>.
+		# sort names: anthropic < compat-aaa < compat-glm-4.6
+		self.assertEqual(turn_handler._native_pick_provider(settings, "zzz"), "anthropic-0")
+		self.assertEqual(turn_handler._native_pick_provider(settings, "aaa"), "openai_compat-1")
+		self.assertEqual(turn_handler._native_pick_provider(settings, "glm-4.6"), "openai_compat-2")
+
+
+class TestNativeClaudeAndSignInIdRules(unittest.TestCase):
+	def _errors(self, models):
+		return pool_serialize.validate_models(_settings(models, native_subscription_pool=1))
+
+	def _claude(self, model, ref, order=0):
+		return _sub(model, "anthropic", order=order, accounts=[_acct("anthropic", ref)])
+
+	def test_any_number_of_claude_models_on_one_login(self):
+		models = [self._claude("claude-opus-5", "C1", 0), self._claude("claude-sonnet-5", "C1", 1)]
+		self.assertEqual(
+			[e for e in self._errors(models) if "one Claude account" in e or "Duplicate" in e], []
+		)
+
+	def test_a_second_claude_login_is_refused(self):
+		models = [self._claude("claude-opus-5", "C1", 0), self._claude("claude-sonnet-5", "C2", 1)]
+		self.assertTrue([e for e in self._errors(models) if "one Claude account" in e])
+
+	def test_the_claude_id_has_a_shape_and_no_list(self):
+		self.assertEqual(
+			[e for e in self._errors([self._claude("claude-opus-9.9-x", "C1")]) if "Claude model id" in e], []
+		)
+		self.assertTrue([e for e in self._errors([self._claude("gpt-5.5", "C1")]) if "Claude model id" in e])
+
+	def test_chatgpt_and_xai_ids_are_shape_checked_only(self):
+		ok = [_sub("grok-9-brand-new", "xai", accounts=[_acct("xai", "X1")])]
+		self.assertEqual([e for e in self._errors(ok) if "sign-in model id" in e], [])
+		bad = [_sub("openai/gpt-5.5", "openai", accounts=[_acct("openai", "O1")])]
+		self.assertTrue([e for e in self._errors(bad) if "sign-in model id" in e])
+
+	def test_a_sidecar_pool_keeps_one_claude_row(self):
+		two = [self._claude("claude-opus-5", "C1", 0), self._claude("claude-sonnet-5", "C2", 1)]
+		errors = pool_serialize.validate_models(_settings(two, native_subscription_pool=0))
+		self.assertTrue([e for e in errors if "Only one Claude" in e])

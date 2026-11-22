@@ -9,6 +9,7 @@ All functions here are defensive: no function raises on bad input.
 """
 
 import json
+import re
 
 from jarvis.native_runtime import is_native_pool
 
@@ -331,6 +332,10 @@ def compute_pool_mode(settings) -> bool:
 	if has_subscription_model(settings) and not _lone_direct_capable(settings):
 		return True
 	return False
+
+
+# A Claude model id on the native pool: a shape check, no pinned list (the runtime decides).
+_CLAUDE_MODEL_RE = re.compile(r"^claude-[a-z0-9][a-z0-9.-]*$")
 
 
 def has_native_claude_subscription(settings) -> bool:
@@ -676,6 +681,8 @@ def validate_models(settings) -> list:
 	"""
 	errors = []
 	seen_account_refs = {}  # account_ref -> model index (for duplicate detection)
+	seen_ref_upstream = {}  # account_ref -> upstream (a native pool may reuse one Claude login)
+	native = is_native_pool(settings)
 
 	# If models has rows but ALL are disabled → at least 1 must be enabled.
 	if settings.models:
@@ -798,12 +805,20 @@ def validate_models(settings) -> list:
 				# Duplicate account_ref detection
 				if acc_ref:
 					if acc_ref in seen_account_refs:
-						errors.append(
-							f"Duplicate account_ref '{acc_ref}' found in {label} account[{j}]"
-							f" (also in Model[{seen_account_refs[acc_ref]}])"
+						# On a native pool several Claude models may share the one Claude login.
+						shared_claude = (
+							native
+							and upstream == "anthropic"
+							and seen_ref_upstream.get(acc_ref) == "anthropic"
 						)
+						if not shared_claude:
+							errors.append(
+								f"Duplicate account_ref '{acc_ref}' found in {label} account[{j}]"
+								f" (also in Model[{seen_account_refs[acc_ref]}])"
+							)
 					else:
 						seen_account_refs[acc_ref] = i
+						seen_ref_upstream[acc_ref] = upstream
 
 			# Mixed upstreams within one subscription model
 			if len(upstreams) > 1:
@@ -822,7 +837,27 @@ def validate_models(settings) -> list:
 		for i, m in enumerate(ordered_enabled)
 		if _credential_type(m) == "subscription" and _subscription_upstream(m) == "anthropic"
 	]
-	if len(claude_positions) > 1:
+	if native:
+		# The Claude backend owns one login per container: any number of Claude MODELS, one account.
+		refs = {
+			(_field(a, "account_ref") or "").strip()
+			for pos in claude_positions
+			for a in _model_accounts(ordered_enabled[pos])
+		} - {""}
+		if len(refs) > 1:
+			errors.append("A pool supports one Claude account; use the same sign-in for every Claude model.")
+		for pos in claude_positions:
+			model_id = (_field(ordered_enabled[pos], "model") or "").strip()
+			if not _CLAUDE_MODEL_RE.match(model_id):
+				errors.append(f"'{model_id}' is not a Claude model id.")
+		# ChatGPT and xAI sign-in model ids have no list on the native pool (the runtime decides at
+		# turn time); only their shape is checked.
+		for m in ordered_enabled:
+			if _credential_type(m) == "subscription" and _subscription_upstream(m) != "anthropic":
+				model_id = (_field(m, "model") or "").strip()
+				if not model_id or "/" in model_id:
+					errors.append(f"'{model_id}' is not a valid sign-in model id (no slash, not empty).")
+	elif len(claude_positions) > 1:
 		errors.append("Only one Claude subscription model is supported per pool.")
 	for pos in claude_positions:
 		if len(_model_accounts(ordered_enabled[pos])) != 1:

@@ -888,28 +888,48 @@ def _is_proxy_subscription_pick(settings, model_id: str) -> bool:
 	)
 
 
+_COMPAT_SORT_PREFIX = {"openai_compat": "compat", "zai": "zai"}
+
+
 def _native_pick_provider(settings, model_id: str) -> str | None:
 	"""The gateway provider id of the FIRST enabled pool row (in pool order) that serves
 	``model_id`` on a native tenant, or None when no row does.
 
 	* a chat sign-in row: its upstream (``openai``, ``xai``, ``anthropic`` for the Claude member);
-	* an API-key row: the id the fleet renders for it, ``<provider>-<n>``, where ``n`` counts the
-	  enabled API-key chat rows (no sign-ins, no Claude member, no image models) in the fleet's
-	  order, disabled rows excluded, so it matches the fleet's numbering after a reorder or a
-	  disable.
-	The 2026.11 provider-id rename is applied last, by ``gateway_ids`` at the write."""
+	* an API-key row: ``<the row's own provider>-<n>``, mirroring the fleet's numbering EXACTLY:
+	  enabled rows sorted by ``(order, sort name, model)``, stable (a full tie keeps the stored
+	  order); the sort name is the provider, except ``openai_compat`` sorts as ``compat-<model>``
+	  and ``zai`` as ``zai-<model>`` (lowercased, ``/`` and space become ``-``), a sign-in row as
+	  ``cliproxy-subs`` and the Claude member as ``anthropic_cli``; ``n`` is ONE counter over all
+	  providers, counting only enabled, non-image API-key rows (sign-ins, the Claude member, image
+	  and disabled rows take no number).
+	The 2026.11 provider-id rename (``gateway_ids``) is applied last, at the write."""
 	from jarvis.jarvis.pool_serialize import (
 		_credential_type,
 		_enabled_models,
 		_field,
-		_fleet_sort_key,
+		_int,
 		_subscription_upstream,
 		_wire_provider,
 		normalize_provider,
 	)
 
+	def sort_name(m, provider):
+		if _credential_type(m) == "subscription":
+			return "anthropic_cli" if _subscription_upstream(m) == "anthropic" else "cliproxy-subs"
+		prefix = _COMPAT_SORT_PREFIX.get(provider)
+		name = (_field(m, "model") or "").strip()
+		return f"{prefix}-{name}".lower().replace("/", "-").replace(" ", "-") if prefix else provider
+
+	def provider_of(m):
+		return _wire_provider(normalize_provider(_field(m, "provider")))
+
+	rows = sorted(
+		_enabled_models(settings),
+		key=lambda m: (_int(_field(m, "order")), sort_name(m, provider_of(m)), (_field(m, "model") or "")),
+	)
 	index = 0
-	for m in sorted(_enabled_models(settings), key=_fleet_sort_key):
+	for m in rows:
 		name = (_field(m, "model") or "").strip()
 		if _credential_type(m) == "subscription":
 			if name == model_id:
@@ -917,7 +937,7 @@ def _native_pick_provider(settings, model_id: str) -> str | None:
 			continue
 		if _is_image_model_id(name):
 			continue
-		provider = _wire_provider(normalize_provider(_field(m, "provider")))
+		provider = provider_of(m)
 		if name == model_id:
 			return f"{provider}-{index}"
 		index += 1

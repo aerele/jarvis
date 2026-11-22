@@ -1210,10 +1210,17 @@ test("validatePool: the proxy-era Claude combination and position rules are skip
 	// Claude in the middle, and next to xAI: refused with the proxy, allowed natively.
 	assert.equal(validatePool([chatgpt, claude, grok], null).ok, false);
 	assert.equal(validatePool([chatgpt, claude, grok], null, true).ok, true);
-	// "one Claude model, one account" is the runtime's own limit and stays on both.
-	const twoClaude = [
-		claude,
-		{ ...claude, subscription: { accounts: [{ upstream: "anthropic", account_ref: "C2" }] } },
-	];
-	assert.equal(validatePool(twoClaude, null, true).ok, false);
+	// One Claude LOGIN: several Claude models on it are fine natively, a second login is not.
+	const second = {
+		...claude,
+		model: "claude-sonnet-5",
+		subscription: { accounts: [{ upstream: "anthropic", account_ref: "C1" }] },
+	};
+	assert.equal(validatePool([claude, second], null, true).ok, true);
+	assert.equal(validatePool([claude, second], null, false).ok, false);
+	const other = {
+		...second,
+		subscription: { accounts: [{ upstream: "anthropic", account_ref: "C2" }] },
+	};
+	assert.equal(validatePool([claude, other], null, true).ok, false);
 });

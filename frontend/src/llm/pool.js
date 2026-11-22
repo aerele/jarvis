@@ -123,8 +123,8 @@ export function defaultSubscriptionModel(upstream, catalog) {
 }
 // `native`: a tenant on the agent runtime's own failover. The Claude combination and position
 // rules below exist only because of how the proxy sidecars collapsed several sign-ins into one
-// route, so they are skipped there; "one Claude model, one account" stays (the runtime's Claude
-// CLI holds one login).
+// route, so they are skipped there. The Claude backend owns one login: on a native tenant any
+// number of Claude models may share ONE account, and each Claude row still has exactly one.
 export function validatePool(models, preset, native = false) {
 	if (!Array.isArray(models) || models.length === 0)
 		return { ok: false, error: "Add at least one model." };
@@ -185,7 +185,23 @@ export function validatePool(models, preset, native = false) {
 	const claudeIndexes = models
 		.map((m, i) => (m && m.subscription && subscriptionUpstream(m) === "anthropic" ? i : -1))
 		.filter((i) => i >= 0);
-	if (claudeIndexes.length > 1)
+	if (native) {
+		// The Claude backend owns one login per container: any number of Claude MODELS, one account.
+		const refs = new Set(
+			claudeIndexes
+				.flatMap((i) =>
+					(models[i].subscription.accounts || []).map((a) =>
+						(a.account_ref || "").trim()
+					)
+				)
+				.filter(Boolean)
+		);
+		if (refs.size > 1)
+			return {
+				ok: false,
+				error: "A pool supports one Claude account; use the same sign-in for every Claude model.",
+			};
+	} else if (claudeIndexes.length > 1)
 		return { ok: false, error: "Only one Claude subscription model is supported per pool." };
 	const otherSubscriptions = models.filter(
 		(m) => m && m.subscription && subscriptionUpstream(m) !== "anthropic"
