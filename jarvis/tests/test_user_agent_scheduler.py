@@ -171,14 +171,44 @@ class TestUserAgentSweep(UserAgentCase):
 		self.assertEqual(committed, [True])
 		self.assertGreater(self.state(row.name).next_run_at, now_datetime())
 
-	def test_a_full_queue_is_recorded(self):
+	def test_a_full_queue_is_recorded_and_its_empty_chat_removed(self):
 		row = self.scheduled()
 		self.enqueue.return_value = {"ok": False, "overloaded": True}
+		before = frappe.db.count(CONV, {"owner": OWNER})
+		sessions = frappe.db.count("Jarvis Chat Session", {"user": OWNER})
 		user_agent_scheduler.run_due_user_agents()
-		self.assertEqual(self.state(row.name).last_run_error, "overloaded")
+		state = self.state(row.name)
+		self.assertEqual(state.last_run_error, "overloaded")
+		self.assertFalse(state.last_run_conversation)
+		self.assertEqual(frappe.db.count(CONV, {"owner": OWNER}), before)
+		self.assertEqual(frappe.db.count("Jarvis Chat Session", {"user": OWNER}), sessions)
+
+	def test_run_now_on_a_full_queue_refuses_and_leaves_no_chat(self):
+		row = self.scheduled(due=False)
+		self.enqueue.return_value = {"ok": False, "overloaded": True}
+		before = frappe.db.count(CONV, {"owner": OWNER})
+		with _as(OWNER), self.assertRaises(frappe.ValidationError):
+			user_agents_api.run_user_agent_now(row.name, prompt="Run it now")
+		self.assertEqual(frappe.db.count(CONV, {"owner": OWNER}), before)
+		self.assertFalse(self.state(row.name).last_run_conversation)
+
+	def test_the_sweep_reads_neither_instructions_nor_tools(self):
+		self.scheduled()
+		with patch.object(frappe, "get_all", wraps=frappe.get_all) as get_all:
+			user_agent_scheduler.run_due_user_agents()
+		sweep = [c for c in get_all.call_args_list if c.args and c.args[0] == DOCTYPE]
+		fields = set(sweep[0].kwargs["fields"])
+		self.assertFalse(fields & {"*", "instructions", "tools_json", "description"})
 
 	def test_a_never_synced_agent_does_not_run(self):
 		row = self.scheduled(synced=False)
+		user_agent_scheduler.run_due_user_agents()
+		self.enqueue.assert_not_called()
+		self.assertEqual(self.state(row.name).last_run_error, "not_synced")
+
+	def test_an_agent_whose_latest_change_is_pending_does_not_run(self):
+		row = self.scheduled()
+		frappe.db.set_value(DOCTYPE, row.name, "sync_status", "Pending")
 		user_agent_scheduler.run_due_user_agents()
 		self.enqueue.assert_not_called()
 		self.assertEqual(self.state(row.name).last_run_error, "not_synced")
@@ -188,6 +218,14 @@ class TestUserAgentSweep(UserAgentCase):
 		stale = frappe._dict(row)
 		frappe.db.set_value(DOCTYPE, row.name, "next_run_at", add_to_date(now_datetime(), minutes=-1))
 		self.assertFalse(user_agent_scheduler._claim(stale, now_datetime()))
+
+	def test_a_due_slot_is_claimed_once(self):
+		row = self.scheduled()
+		now = now_datetime()
+		self.assertTrue(user_agent_scheduler._claim(row, now))
+		self.assertGreater(self.state(row.name).next_run_at, now)
+		# The same stale row a second sweep read: the slot has moved, so it backs off.
+		self.assertFalse(user_agent_scheduler._claim(row, now))
 
 	def test_run_now_starts_an_attended_run_without_moving_the_schedule(self):
 		row = self.scheduled(due=False)

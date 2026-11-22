@@ -24,13 +24,28 @@ not retried: the agent runs again at its next scheduled time.
 from __future__ import annotations
 
 import frappe
-from frappe.utils import now_datetime
+from frappe.utils import get_datetime, now_datetime
 
 from jarvis._session import impersonate
 from jarvis.chat import user_agents
 
 DOCTYPE = user_agents.DOCTYPE
 SWEEP_MAX_PER_TICK = 25
+# What _sweep_one and start_run read: never the instructions or the tool list.
+_SWEEP_FIELDS = (
+	"name",
+	"owner",
+	"enabled",
+	"agent_id",
+	"agent_name",
+	"sync_status",
+	"schedule_frequency",
+	"schedule_time",
+	"schedule_weekday",
+	"schedule_day_of_month",
+	"schedule_prompt",
+	"next_run_at",
+)
 
 _NEXT = " It will run again at its next scheduled time."
 _SENTENCES = {
@@ -38,7 +53,11 @@ _SENTENCES = {
 		"Scheduled run skipped: this agent's owner may not run unattended work (Administrator, "
 		"a disabled account or no Jarvis access). The schedule was switched off."
 	),
-	"not_synced": "Scheduled run skipped: the agent is not on the runtime yet. Use Retry sync." + _NEXT,
+	"not_synced": (
+		"Scheduled run skipped: the agent's latest changes are not on the runtime yet. "
+		"Wait for its sync to finish, or use Retry sync."
+	)
+	+ _NEXT,
 	"usage_limit": "Scheduled run skipped: your monthly usage limit is reached." + _NEXT,
 	"subscription_suspended": "Scheduled run skipped: the subscription does not include chat right now."
 	+ _NEXT,
@@ -62,7 +81,7 @@ def run_due_user_agents() -> None:
 	due = frappe.get_all(
 		DOCTYPE,
 		filters={"schedule_enabled": 1, "next_run_at": ["<=", now]},
-		fields=["*"],
+		fields=list(_SWEEP_FIELDS),
 		order_by="next_run_at asc, name asc",
 		limit=SWEEP_MAX_PER_TICK,
 	)
@@ -81,16 +100,28 @@ def run_due_user_agents() -> None:
 
 def start_run(row, prompt: str, *, scheduled: bool) -> dict:
 	"""Open a new chat on agent ``row`` and send ``prompt`` as its first turn. Runs
-	as the current user, who must be the owner. Returns ``{ok, conversation}`` or
-	``{ok: False, code}`` when the turn could not be queued."""
+	as the current user, who must be the owner. Returns ``{ok, conversation, run_id}``,
+	or ``{ok: False, code}`` when the turn could not be queued: the chat opened for
+	it is then removed again, so nothing links to a chat that never ran."""
 	from jarvis.chat import api as chat_api
 
 	conversation = user_agents.open_conversation(row, agent_initiated=scheduled)
-	frappe.db.set_value(DOCTYPE, row.name, "last_run_conversation", conversation, update_modified=False)
 	out = chat_api._enqueue_turn(conversation, prompt, origin="macro", interactive=not scheduled) or {}
 	if out.get("ok") is False:
-		return {"ok": False, "code": "overloaded", "conversation": conversation}
+		discard_conversation(conversation)
+		return {"ok": False, "code": "overloaded"}
 	return {"ok": True, "conversation": conversation, "run_id": out.get("run_id")}
+
+
+def discard_conversation(conversation: str) -> None:
+	"""Remove a bound chat whose first turn was refused, with its Chat Session row.
+	Left alone when any message made it in (the turn may have gone out after all)."""
+	if frappe.db.exists("Jarvis Chat Message", {"conversation": conversation}):
+		return
+	key = frappe.db.get_value(user_agents.CONV, conversation, "session_key")
+	if key:
+		frappe.db.delete(user_agents.CHAT_SESSION, {"session_key": key})
+	frappe.db.delete(user_agents.CONV, {"name": conversation})
 
 
 def entitlement_code(owner: str) -> str | None:
@@ -122,7 +153,7 @@ def _sweep_one(row, now) -> None:
 	# The claim must survive a failed launch's rollback, or the slot comes due again
 	# on the next sweep and fails (and notifies) every five minutes.
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release the claimed slot row
-	code = None if row.synced_at else "not_synced"
+	code = None if user_agents.is_ready(row) else "not_synced"
 	code = code or entitlement_code(row.owner)
 	if code:
 		_record(row, now, code)
@@ -158,9 +189,16 @@ def stamp_started(name: str, now, conversation: str) -> None:
 
 def _claim(row, now) -> bool:
 	"""Move ``next_run_at`` to the next slot, only while it still holds the value
-	the sweep read. True when this sweep took the slot."""
+	the sweep read. True when this sweep took the slot.
+
+	A locking read (``for_update``) of the row, as ``macro_scheduler._claim_slot``
+	does: a second sweep holding the same stale row waits for the first one's
+	commit, then reads the moved slot and backs off. The caller commits."""
 	from jarvis.chat.macro_scheduler import compute_next_run
 
+	current = frappe.db.get_value(DOCTYPE, row.name, "next_run_at", for_update=True)
+	if not current or not row.next_run_at or get_datetime(current) != get_datetime(row.next_run_at):
+		return False
 	nxt = compute_next_run(
 		row.schedule_frequency,
 		row.schedule_time,
@@ -168,12 +206,8 @@ def _claim(row, now) -> bool:
 		weekday=row.schedule_weekday,
 		day_of_month=row.schedule_day_of_month,
 	)
-	table = frappe.qb.DocType(DOCTYPE)
-	frappe.qb.update(table).set(table.next_run_at, nxt).where(
-		(table.name == row.name) & (table.next_run_at == row.next_run_at)
-	).run()
-	cursor = getattr(frappe.db, "_cursor", None)
-	return bool(cursor and cursor.rowcount == 1)
+	frappe.db.set_value(DOCTYPE, row.name, "next_run_at", nxt, update_modified=False)
+	return True
 
 
 def _record(row, now, code: str, *, notify: bool = True) -> None:

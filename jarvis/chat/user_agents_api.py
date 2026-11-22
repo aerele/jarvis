@@ -38,7 +38,7 @@ The ``Agent`` shape every write returns (and ``list_user_agents`` lists)::
             "message": str,
             "conversation": str | None,
         },
-        "ready": bool,  # enabled and synced at least once: Chat / Run now work
+        "ready": bool,  # enabled and sync.status Synced: Chat / Run now work
     }
 """
 
@@ -259,6 +259,9 @@ def run_user_agent_now(name: str, prompt: str | None = None) -> dict:
 		frappe.throw(_RUN_SENTENCES.get(code) or _("This agent cannot run right now. Try again later."))
 	out = user_agent_scheduler.start_run(row, text, scheduled=False)
 	if not out.get("ok"):
+		# The removal of the chat opened for this run must outlive the refusal's
+		# rollback of the request.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- keep the cleanup before the refusal
 		frappe.throw(_RUN_SENTENCES["overloaded"])
 	user_agent_scheduler.stamp_started(row.name, now_datetime(), out["conversation"])
 	return {"conversation": out["conversation"], "run_id": out.get("run_id")}
@@ -331,7 +334,7 @@ def _shape(row) -> dict:
 			"message": row.last_run_message or "",
 			"conversation": row.last_run_conversation or None,
 		},
-		"ready": bool(cint(row.enabled) and row.synced_at),
+		"ready": user_agents.is_ready(row),
 	}
 
 
