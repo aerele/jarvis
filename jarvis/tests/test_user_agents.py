@@ -8,7 +8,12 @@ from unittest.mock import patch
 import frappe
 
 from jarvis.chat import user_agent_sync, user_agents, user_agents_api
-from jarvis.exceptions import AdminContractError, AdminRateLimitedError, AdminUnreachableError
+from jarvis.exceptions import (
+	AdminContractError,
+	AdminRateLimitedError,
+	AdminUnreachableError,
+	AdminValidationError,
+)
 from jarvis.tests._user_agent_helpers import DOCTYPE, OTHER, OWNER, UserAgentCase, _as
 
 CONV = "Jarvis Conversation"
@@ -187,11 +192,7 @@ class TestStartChat(UserAgentCase):
 		self.assertRegex(
 			conv.session_key, rf"^agent:{row.agent_id}:dashboard:jarvis-chat-ua-owner-example-com-\d+$"
 		)
-		session = frappe.db.get_value(
-			SESSION, {"session_key": conv.session_key}, ["user", "profile_agent_id"], as_dict=True
-		)
-		self.assertEqual(session.user, OWNER)
-		self.assertEqual(session.profile_agent_id, row.agent_id)
+		self.assertEqual(frappe.db.get_value(SESSION, {"session_key": conv.session_key}, "user"), OWNER)
 
 	def test_an_unsynced_or_disabled_agent_cannot_chat(self):
 		pending = self.make_agent(synced=False)
@@ -217,6 +218,22 @@ class TestStartChat(UserAgentCase):
 			bound = user_agents_api.start_user_agent_chat(row.name)["conversation"]
 			fresh = chat_api.create_or_focus_empty()
 		self.assertNotEqual(fresh, bound)
+
+	def test_only_a_real_agent_id_binds_a_conversation(self):
+		from types import SimpleNamespace
+		from unittest.mock import MagicMock
+
+		self.assertEqual(
+			user_agents.bound_agent(frappe._dict(user_agent="agent-u-0123456789")), "agent-u-0123456789"
+		)
+		for conv in (
+			frappe._dict(),
+			SimpleNamespace(session_key="k"),
+			MagicMock(),
+			frappe._dict(user_agent=5),
+		):
+			with self.subTest(conv=type(conv).__name__):
+				self.assertIsNone(user_agents.bound_agent(conv))
 
 	def test_an_agent_chat_cannot_be_shared(self):
 		from jarvis.chat import sharing
@@ -283,6 +300,33 @@ class TestSync(UserAgentCase):
 				self.assertEqual((state.sync_status, state.sync_error), (status, code))
 				self.assertTrue(state.sync_error_message.endswith("."))
 				frappe.db.delete(DOCTYPE, row.name)
+
+	def test_a_row_changed_during_the_last_send_stays_pending(self):
+		row = self.make_agent(synced=False)
+		sends = []
+
+		def push(user_agents):
+			sends.append(user_agents)
+			# Every send sees a newer save, so the job runs out of sends.
+			frappe.db.set_value(DOCTYPE, row.name, "instructions", f"Version {len(sends)}")
+			return {"user_agents": [row.agent_id]}
+
+		with (
+			patch("jarvis.admin_client.post_push_user_agents", side_effect=push),
+			patch.object(frappe.db, "commit"),
+		):
+			user_agent_sync.run_sync()
+		self.assertEqual(len(sends), 3)
+		state = frappe.db.get_value(DOCTYPE, row.name, ["sync_status", "sync_error"], as_dict=True)
+		self.assertEqual((state.sync_status, state.sync_error), ("Pending", "changed_during_sync"))
+
+	def test_an_admin_without_the_endpoint_reads_as_outdated(self):
+		exc = AdminValidationError(
+			"Failed to get method for command jarvis_admin_v2.api.tenant.push_user_agents",
+			exc_type="ValidationError",
+		)
+		self.assertEqual(user_agent_sync.classify(exc), "admin_outdated")
+		self.assertEqual(user_agent_sync.classify(AdminValidationError("bad")), "InvalidUserAgents")
 
 	def test_a_failure_leaves_synced_rows_synced(self):
 		synced = self.make_agent()

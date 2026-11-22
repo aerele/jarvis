@@ -4885,7 +4885,9 @@ def _enqueue_turn(
 	# empty (nothing written by THIS function yet) by the time the conversation
 	# write below runs.
 	if not hidden and not conv_doc.session_key:
-		stage("session_key", _ensure_session_key(conv_doc.owner, user_agent=conv_doc.get("user_agent")))
+		from jarvis.chat.user_agents import bound_agent
+
+		stage("session_key", _ensure_session_key(conv_doc.owner, user_agent=bound_agent(conv_doc)))
 
 	stage("last_active_at", frappe.utils.now())
 

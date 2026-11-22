@@ -27,7 +27,7 @@ The ``Agent`` shape every write returns (and ``list_user_agents`` lists)::
             "frequency": "daily" | "weekly" | "monthly",
             "weekday": str,
             "day_of_month": int | None,
-            "time": str | None,
+            "time": str | None,  # "HH:MM:SS"
             "prompt": str,
             "next_run_at": str | None,
         },
@@ -58,6 +58,9 @@ _RUN_SENTENCES = {
 	"subscription_suspended": "The subscription does not include chat right now, so the agent cannot run.",
 	"llm_not_configured": "No AI model connection is set up. Connect a model first.",
 	"overloaded": "Jarvis is too busy to start this run. Try again in a minute.",
+	"release_update_required": "A Jarvis update is rolling out on this workspace. Try again shortly.",
+	"workspace_resetting": "The workspace is being rebuilt. Try again shortly.",
+	"maintenance": "This workspace is being upgraded. Try again shortly.",
 }
 
 
@@ -253,7 +256,7 @@ def run_user_agent_now(name: str, prompt: str | None = None) -> dict:
 		frappe.throw(_("The prompt can be at most 4,000 characters. Shorten it and try again."))
 	code = user_agent_scheduler.entitlement_code(frappe.session.user)
 	if code:
-		frappe.throw(_RUN_SENTENCES.get(code) or _("This agent cannot run right now ({0}).").format(code))
+		frappe.throw(_RUN_SENTENCES.get(code) or _("This agent cannot run right now. Try again later."))
 	out = user_agent_scheduler.start_run(row, text, scheduled=False)
 	if not out.get("ok"):
 		frappe.throw(_RUN_SENTENCES["overloaded"])
@@ -317,7 +320,7 @@ def _shape(row) -> dict:
 			"frequency": row.schedule_frequency or "daily",
 			"weekday": row.schedule_weekday or "",
 			"day_of_month": row.schedule_day_of_month or None,
-			"time": str(row.schedule_time) if row.schedule_time else None,
+			"time": _time_str(row.schedule_time),
 			"prompt": row.schedule_prompt or "",
 			"next_run_at": _iso(row.next_run_at),
 		},
@@ -330,6 +333,14 @@ def _shape(row) -> dict:
 		},
 		"ready": bool(cint(row.enabled) and row.synced_at),
 	}
+
+
+def _time_str(value) -> str | None:
+	"""A Time field as "HH:MM:SS" (the database hands back a timedelta)."""
+	if not value:
+		return None
+	seconds = int(frappe.utils.get_timedelta(value).total_seconds())
+	return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
 def _iso(value) -> str | None:

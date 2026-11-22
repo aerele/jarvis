@@ -19,7 +19,7 @@ class TestUserAgentSweep(UserAgentCase):
 		self.enqueue = self._start(
 			patch("jarvis.chat.api._enqueue_turn", return_value={"run_id": "r1", "message_id": "m1"})
 		)
-		self._start(patch.object(frappe.db, "commit"))
+		self.commit = self._start(patch.object(frappe.db, "commit"))
 		self._start(patch.object(frappe.db, "rollback"))
 		self._start(patch("jarvis.chat.user_agent_scheduler.entitlement_code", return_value=None))
 
@@ -155,6 +155,21 @@ class TestUserAgentSweep(UserAgentCase):
 			user_agent_scheduler.run_due_user_agents()
 		errors = {self.state(n).last_run_error or "" for n in (first.name, second.name)}
 		self.assertEqual(errors, {"dispatch_failed", ""})
+
+	def test_the_claim_is_committed_before_the_turn_is_sent(self):
+		row = self.scheduled()
+		committed = []
+
+		def enqueue(conversation, prompt, **kw):
+			committed.append(self.commit.called)
+			raise RuntimeError("gateway down")
+
+		self.enqueue.side_effect = enqueue
+		self.commit.reset_mock()
+		with patch.object(frappe, "log_error"):
+			user_agent_scheduler.run_due_user_agents()
+		self.assertEqual(committed, [True])
+		self.assertGreater(self.state(row.name).next_run_at, now_datetime())
 
 	def test_a_full_queue_is_recorded(self):
 		row = self.scheduled()

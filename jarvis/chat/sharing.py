@@ -256,7 +256,9 @@ def _set_shares(conversation: str, wanted: set[str]) -> dict:
 		frappe.throw(_("Only the owner can share this chat."), frappe.PermissionError)
 	# A shared chat runs on its participants' own agents, so a chat with a user agent
 	# would silently stop being one. Agents are owner-only in v1.
-	if wanted and doc.get("user_agent"):
+	from jarvis.chat.user_agents import bound_agent
+
+	if wanted and bound_agent(doc):
 		frappe.throw(_("Chats with your own agents cannot be shared yet."), frappe.PermissionError)
 	# Synchronize additions with User saves/deletes before taking share-row
 	# locks, including users removed while the initial owner gate was waiting.

@@ -194,7 +194,6 @@ def mint_session(agent_id: str, user: str) -> str:
 			"session_key": key,
 			"user": user,
 			"chat_device_id": (settings.chat_device_id or "").strip(),
-			"profile_agent_id": agent_id,
 		}
 	).insert(ignore_permissions=True)
 	return key
@@ -232,10 +231,18 @@ def open_conversation(row, *, agent_initiated: bool = False) -> str:
 	return conv.name
 
 
+def bound_agent(conv) -> str | None:
+	"""The agent id a conversation is bound to, or None for a normal chat. Only a
+	non-empty string counts, so a stand-in conversation object reads as unbound."""
+	getter = getattr(conv, "get", None)
+	value = getter("user_agent") if callable(getter) else getattr(conv, "user_agent", None)
+	return value if isinstance(value, str) and value else None
+
+
 def refuse_send(conv_doc) -> None:
 	"""``send_message`` guard: a chat bound to an agent only runs while that agent
 	is usable by the chat's owner."""
-	agent_id = conv_doc.get("user_agent")
+	agent_id = bound_agent(conv_doc)
 	if not agent_id:
 		return
 	require_enabled()
@@ -250,7 +257,7 @@ def tool_refusal(session_key: str | None, user: str, tool: str) -> str | None:
 	string check, no query). For a user agent key: a refusal sentence unless the
 	flag is on, the agent exists, is enabled, is owned by the session ``user`` and
 	the tool is one its owner picked. One indexed read per request at most."""
-	key = session_key or ""
+	key = session_key if isinstance(session_key, str) else ""
 	if not key.startswith(SESSION_PREFIX):
 		return None
 	match = SESSION_RE.match(key)

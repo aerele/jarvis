@@ -19,8 +19,6 @@ has them as they were.
 
 from __future__ import annotations
 
-import time
-
 import frappe
 from frappe.utils import cint, now_datetime
 
@@ -31,7 +29,6 @@ JOB_ID = "jarvis_user_agents_sync"
 _LOCK = "jarvis:user_agents_sync"
 TIMEOUT_S = 900
 _MAX_SENDS = 3
-_RESEND_WITHIN_S = 60
 MAX_BODY = 20000
 
 _BRIEF = """You are "{name}", an agent a Jarvis user built for their own work.{description}
@@ -48,7 +45,9 @@ Your owner's instructions:
 _NO_SHELL = "- You have no shell and cannot write files."
 _SHELL = "- Your shell and files live in your own sandbox. Keep work there."
 
-RETRYABLE = frozenset({"apply_in_progress", "RateLimitExceeded", "FleetError", "admin_unreachable"})
+RETRYABLE = frozenset(
+	{"apply_in_progress", "RateLimitExceeded", "FleetError", "admin_unreachable", "changed_during_sync"}
+)
 _SENTENCES = {
 	"InvalidUserAgents": "The runtime refused this agent's settings. Check its instructions and tools, then save again.",
 	"NoRunningTenant": "Your Jarvis workspace is not running right now. Use Retry sync once it is back.",
@@ -61,6 +60,8 @@ _SENTENCES = {
 	"FleetError": "Jarvis could not apply this agent to your workspace. Use Retry sync in a minute.",
 	"admin_unreachable": "Jarvis could not reach your workspace to apply this agent. Use Retry sync in a minute.",
 	"admin_auth": "This site is not connected to Jarvis. Ask your Jarvis admin to reconnect it, then use Retry sync.",
+	"admin_outdated": "This workspace's control plane cannot apply custom agents yet. Ask support to update it, then use Retry sync.",
+	"changed_during_sync": "This agent changed while it was being applied. Use Retry sync to send the latest version.",
 	"runtime_missing": "The runtime did not confirm this agent. Use Retry sync, and contact support if it keeps failing.",
 	"unexpected": "Something went wrong while applying this agent. Use Retry sync, and contact support if it keeps failing.",
 }
@@ -137,6 +138,12 @@ def classify(exc: BaseException) -> str:
 		return "admin_auth"
 	code = str(getattr(exc, "code", "") or "")
 	if isinstance(exc, AdminValidationError):
+		from jarvis.admin_client import is_method_not_found
+
+		# An admin without push_user_agents yet answers Frappe's own "no such
+		# method", which carries no code.
+		if not code and is_method_not_found(exc):
+			return "admin_outdated"
 		return code or "InvalidUserAgents"
 	if isinstance(exc, AdminUnreachableError):
 		return code or "admin_unreachable"
@@ -145,7 +152,7 @@ def classify(exc: BaseException) -> str:
 
 def sentence_for(code: str) -> str:
 	return _SENTENCES.get(code) or (
-		f"The runtime refused this change ({code}). Use Retry sync, and contact support if it keeps failing."
+		"The runtime refused this change. Use Retry sync, and contact support if it keeps failing."
 	)
 
 
@@ -162,34 +169,41 @@ def _entry(row) -> dict:
 
 
 def _send_until_settled() -> tuple[list, dict]:
+	"""Send, and send again while the set changed during the send. At most
+	_MAX_SENDS sends of up to 180 s each, inside the job's TIMEOUT_S. A set still
+	changing after the last one is recorded per row (``_record_success``)."""
 	from jarvis import admin_client
 
-	began = time.monotonic()
 	payload = build_payload()
 	result: dict = {}
 	for sends in range(1, _MAX_SENDS + 1):
 		result = admin_client.post_push_user_agents(user_agents=payload) or {}
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- see rows saved during the send
 		fresh = build_payload()
-		if fresh == payload or sends == _MAX_SENDS or time.monotonic() - began > _RESEND_WITHIN_S:
-			return payload, result
+		if fresh == payload or sends == _MAX_SENDS:
+			break
 		payload = fresh
 	return payload, result
 
 
 def _record_success(payload: list, result: dict) -> None:
-	sent = {entry["id"] for entry in payload}
+	"""Each row against what was SENT, not what it holds now: a row saved after the
+	last send is not on the runtime yet, so it stays Pending with a retryable code."""
+	sent = {entry["id"]: entry for entry in payload}
+	current = {entry["id"]: entry for entry in build_payload()}
 	confirmed = result.get("user_agents") if isinstance(result, dict) else None
-	confirmed = set(confirmed) if isinstance(confirmed, list) else sent
+	confirmed = set(confirmed) if isinstance(confirmed, list) else set(sent)
 	now = now_datetime()
 	# System context: the outcome lands on every owner's rows.
-	for row in frappe.get_all(DOCTYPE, fields=["name", "agent_id", "enabled"]):
-		if row.agent_id in sent and row.agent_id not in confirmed:
-			_set(row.name, "Failed", "runtime_missing")
-		elif row.agent_id in sent:
-			_set(row.name, "Synced", "", synced_at=now)
-		elif not cint(row.enabled):
+	for row in frappe.get_all(DOCTYPE, fields=["name", "agent_id"]):
+		if sent.get(row.agent_id) != current.get(row.agent_id):
+			_set(row.name, "Pending", "changed_during_sync")
+		elif row.agent_id not in sent:
 			_set(row.name, "Synced", "")
+		elif row.agent_id not in confirmed:
+			_set(row.name, "Failed", "runtime_missing")
+		else:
+			_set(row.name, "Synced", "", synced_at=now)
 
 
 def _record_failure(code: str) -> None:

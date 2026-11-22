@@ -2029,6 +2029,7 @@ def handle_chat_send(payload: dict) -> None:
 				# identity in lockstep with the [Context:] bracket above.
 				if not conv.session_key:
 					from jarvis.chat.api import _ensure_session_key
+					from jarvis.chat.user_agents import bound_agent
 
 					t_sess = time.monotonic()
 					# profile=True: this deferred creation point is only ever
@@ -2036,7 +2037,7 @@ def handle_chat_send(payload: dict) -> None:
 					# macro/scheduled turn always mints its session eagerly at
 					# api._enqueue_turn, before this worker path runs at all.
 					conv.session_key = _ensure_session_key(
-						chat_user, sess=sess, profile=True, user_agent=conv.get("user_agent")
+						chat_user, sess=sess, profile=True, user_agent=bound_agent(conv)
 					)
 					frappe.db.set_value(CONV, conversation_id, "session_key", conv.session_key)
 					frappe.db.commit()

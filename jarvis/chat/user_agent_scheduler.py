@@ -43,6 +43,11 @@ _SENTENCES = {
 	"subscription_suspended": "Scheduled run skipped: the subscription does not include chat right now."
 	+ _NEXT,
 	"llm_not_configured": "Scheduled run skipped: no AI model connection is set up." + _NEXT,
+	"release_update_required": "Scheduled run skipped: a Jarvis update is rolling out on this workspace."
+	+ _NEXT,
+	"workspace_resetting": "Scheduled run skipped: the workspace is being rebuilt." + _NEXT,
+	"maintenance": "Scheduled run skipped: this workspace is being upgraded." + _NEXT,
+	"site_is_copy": "Scheduled run skipped: this site is a restored copy and cannot reach Jarvis." + _NEXT,
 	"overloaded": "Scheduled run skipped: Jarvis was too busy to start it." + _NEXT,
 	"dispatch_failed": "Scheduled run could not be started." + _NEXT,
 }
@@ -97,7 +102,7 @@ def entitlement_code(owner: str) -> str | None:
 
 
 def sentence_for(code: str) -> str:
-	return _SENTENCES.get(code) or f"Scheduled run skipped: {code}.{_NEXT}"
+	return _SENTENCES.get(code) or "Scheduled run skipped: Jarvis cannot run it right now." + _NEXT
 
 
 def _sweep_one(row, now) -> None:
@@ -114,6 +119,9 @@ def _sweep_one(row, now) -> None:
 		return
 	if not _claim(row, now):
 		return
+	# The claim must survive a failed launch's rollback, or the slot comes due again
+	# on the next sweep and fails (and notifies) every five minutes.
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- release the claimed slot row
 	code = None if row.synced_at else "not_synced"
 	code = code or entitlement_code(row.owner)
 	if code:
