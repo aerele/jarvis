@@ -95,6 +95,14 @@ class TestUserAgentRules(UserAgentCase):
 			doc.tools_json = '["get_list", "delete_doc"]'
 			doc.save()
 
+	def test_a_workspace_reset_with_data_wipes_the_agents(self):
+		from jarvis import onboarding
+
+		wipe = list(onboarding._WIPE_DOCTYPES)
+		self.assertIn(DOCTYPE, wipe)
+		# Their last-run chats go too, so no link outlives the reset.
+		self.assertIn("Jarvis Conversation", wipe)
+
 	def test_schedule_needs_a_prompt_and_gets_a_next_run(self):
 		row = self.make_agent()
 		with _as(OWNER):
