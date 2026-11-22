@@ -140,6 +140,9 @@ def ineligibility_reasons(
 	# A User Permission on a doctype nothing links to narrows nothing; Company is judged below.
 	if any(doctype != "Company" and doctype in linked_doctypes for doctype in user_permissions):
 		reasons.add("user_permission")
+	# Scoped Company permissions can narrow today's reads differently from the reader's reads.
+	if any(permission.get("applicable_for") for permission in user_permissions.get("Company", [])):
+		reasons.add("scoped_company_permission")
 	if allowed_companies is not None:
 		if company not in allowed_companies:
 			reasons.add("company_permission")

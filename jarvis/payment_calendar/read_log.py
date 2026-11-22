@@ -137,6 +137,8 @@ def _first_in_window(operation: str, exception_class: str, window: int):
 	try:
 		key = frappe.cache.make_key(f"jarvis:pcal:errlog:{operation}:{exception_class}")
 		return key if frappe.cache.execute_command("SET", key, "1", "NX", "EX", window) else False
+	except TIMEOUTS:
+		raise
 	except Exception:
 		return None
 
@@ -144,6 +146,8 @@ def _first_in_window(operation: str, exception_class: str, window: int):
 def _free_window(key) -> None:
 	try:
 		frappe.cache.execute_command("DEL", key)
+	except TIMEOUTS:
+		raise
 	except Exception:
 		pass
 

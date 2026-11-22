@@ -185,8 +185,13 @@ def read_side(
 	`started` is the `monotonic()` reading when the job began; `outcomes` receives one record per call (no
 	names, no text from an error): the path taken, the step or fallback that refused, and the timings.
 	"""
+	from jarvis.payment_calendar.snapshot import view_is_broken
+
 	record = {"side": side, "path": "today", "outcome": "refused", "company_digest": _digest(company)}
 	outcomes.append(record)
+	if view_is_broken():
+		record.update(routed=True, step="view_broken", today_ms=0)
+		raise CalendarSourceUnavailable("too_large") from None
 	began = monotonic()
 	try:
 		result = today_read(company, side, as_of, window_start, window_end)

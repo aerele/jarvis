@@ -82,6 +82,23 @@ class TestIneligibilityReasons(TestCase):
 				[],
 			),
 			(
+				"Company permission scoped to Sales Invoice",
+				{
+					"user_permissions": {"Company": [{"applicable_for": "Sales Invoice"}]},
+					"allowed_companies": {COMPANY},
+				},
+				["scoped_company_permission"],
+			),
+			(
+				"global Company permission with report column filters",
+				{
+					"user_permissions": {"Company": [{"applicable_for": ""}]},
+					"allowed_companies": {COMPANY},
+					"column_match_filters": {"Account": [{"Company": [COMPANY]}]},
+				},
+				["column_filter"],
+			),
+			(
 				"Company permission allowing only another company",
 				{"user_permissions": {"Company": [{}]}, "allowed_companies": {"Other"}},
 				["company_permission"],
@@ -302,14 +319,15 @@ class TestReaderIneligibility(TestCase):
 	def reasons(self, columns=()):
 		return eligibility.reader_ineligibility(self.fx.company, "Receivable", list(columns))
 
-	def permit(self, user, allow, value):
+	def permit(self, user, allow, value, *, applicable_for=""):
 		frappe.get_doc(
 			{
 				"doctype": "User Permission",
 				"user": user,
 				"allow": allow,
 				"for_value": value,
-				"apply_to_all_doctypes": 1,
+				"apply_to_all_doctypes": not applicable_for,
+				"applicable_for": applicable_for,
 			}
 		).insert(ignore_permissions=True)
 		frappe.clear_cache(user=user)
@@ -374,6 +392,24 @@ class TestReaderIneligibility(TestCase):
 			{"fieldtype": "Link", "options": "Project"},
 		]
 		self.assertEqual(self.reasons(columns), ["column_filter"])
+
+	def test_company_permission_scope_for_a_non_administrator(self):
+		columns = [
+			{"fieldtype": "Link", "options": "Account"},
+			{"fieldtype": "Link", "options": "Project"},
+		]
+		for applicable_for, expected in (
+			("Sales Invoice", ["company_permission", "scoped_company_permission"]),
+			("Company", ["scoped_company_permission"]),
+			("", ["column_filter"]),
+		):
+			with self.subTest(applicable_for=applicable_for):
+				frappe.set_user("Administrator")
+				user = self.fx.user()
+				self.permit(user, "Company", self.fx.company, applicable_for=applicable_for)
+				frappe.set_user(user)
+				self.assertNotEqual(frappe.session.user, "Administrator")
+				self.assertEqual(self.reasons(columns), expected)
 
 	def test_a_company_permission_for_another_company_is_ineligible(self):
 		user = self.fx.user()

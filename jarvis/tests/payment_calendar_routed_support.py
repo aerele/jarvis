@@ -9,6 +9,7 @@ the lease key only while it runs.
 from __future__ import annotations
 
 import json
+import secrets
 import time
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -129,14 +130,34 @@ def session_user(user: str):
 		frappe.set_user(original)
 
 
-def clear_routing_keys(company: str) -> int:
-	"""Delete this company's memos; return how many existed.
+def clear_routing_keys(company: str, owned: dict[bytes, str]) -> int:
+	"""Delete this run's memos only while their tokens still match; return the number deleted.
 
 	`read_side` releases its slots and in-flight keys in `finally`, with a token check.
 	A slot that remains can belong to a live worker, so cleanup must leave it alone.
 	"""
 	keys = [routing.memo_key(company, side) for side in SIDES]
-	return sum(int(frappe.cache.execute_command("DEL", key)) for key in keys)
+	return sum(int(frappe.cache.eval(routing._RELEASE, 1, key, owned[key])) for key in keys if key in owned)
+
+
+@contextmanager
+def owned_routing_memos(company: str):
+	"""Track this run's memo tokens, including fallbacks, so cleanup cannot delete another worker's memo."""
+	owned = {}
+	keys = {routing.memo_key(company, side) for side in SIDES}
+	original = routing._remember
+
+	def remember(key, ttl, value="1"):
+		if key in keys:
+			value = secrets.token_hex(16) if value == "1" else value
+			owned[key] = value
+		return original(key, ttl, value)
+
+	try:
+		with patch.object(routing, "_remember", remember):
+			yield
+	finally:
+		clear_routing_keys(company, owned)
 
 
 # ---------------------------------------------------------------------------------- routed playground
@@ -147,12 +168,9 @@ def routed_sides(company: str, anchor: str, user: str) -> dict[str, dict]:
 
 	The caller holds a READ ONLY session. The mode is patched on for `company`.
 	"""
-	try:
-		with session_user(user), mode_on(company), snapshot.consistent_read():
-			started = time.monotonic()
-			return {side: _routed_side(company, side, anchor, started) for side in SIDES}
-	finally:
-		clear_routing_keys(company)
+	with owned_routing_memos(company), session_user(user), mode_on(company), snapshot.consistent_read():
+		started = time.monotonic()
+		return {side: _routed_side(company, side, anchor, started) for side in SIDES}
 
 
 def _routed_side(company: str, side: str, anchor: str, started: float) -> dict:
@@ -254,6 +272,7 @@ def routed_job(company: str, anchors: dict[str, tuple], user: str) -> dict:
 	outcomes: list[dict] = []
 	started, sides = time.monotonic(), {}
 	with (
+		owned_routing_memos(company),
 		session_user(user),
 		neutral_wildcard_hook(),
 		mode_on(company),

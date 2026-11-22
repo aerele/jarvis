@@ -18,7 +18,7 @@ from unittest.mock import MagicMock, patch
 import frappe
 from rq.timeouts import JobTimeoutException
 
-from jarvis.payment_calendar import read_log, routing, sources, store
+from jarvis.payment_calendar import read_log, routing, snapshot, sources, store
 from jarvis.payment_calendar.errors import READER_FALLBACK_REASONS, CalendarSourceUnavailable, ReaderFallback
 
 COMPANY = "Router Test Company"
@@ -105,6 +105,29 @@ class RouterCase(TestCase):
 
 
 class TestWhenTodayServesOrRefusesOtherwise(RouterCase):
+	def test_a_poisoned_view_skips_the_next_side_and_counts_a_fresh_refusal(self):
+		self.reader.side_effect = frappe.QueryDeadlockError("deadlock")
+		with self.assertRaises(CalendarSourceUnavailable) as view_error:
+			with snapshot.consistent_read():
+				first = self.refusal()
+				self.reader.reset_mock()
+				second = self.refusal(args=(COMPANY, "Payable", *ARGS[2:]))
+		self.assertEqual(view_error.exception.code, "source_changed")
+		self.reader.assert_not_called()
+		self.today.assert_called_once_with(*ARGS)
+		self.settings.assert_called_once()
+		self.probe.assert_called_once()
+		self.assertIsNot(first, second)
+		self.assertIsNone(second.__context__)
+		self.assertEqual(self.outcomes[-1]["step"], "view_broken")
+		with patch.object(read_log, "_count") as count, patch.object(frappe, "log_error") as log_error:
+			read_log.reader_outcomes([self.outcomes[-1]], "2031-04-01")
+		count.assert_called_once_with(read_log.company_digest(COMPANY), "2031-04-01", "view_broken")
+		log_error.assert_not_called()
+		self.reader.side_effect = None
+		with snapshot.consistent_read():
+			self.assertIs(self.route(args=(COMPANY, "Payable", *ARGS[2:])), READER_RESULT)
+
 	def test_a_served_side_is_todays_result_and_nothing_else_is_read(self):
 		self.today.side_effect = None
 		self.today.return_value = TODAY_RESULT

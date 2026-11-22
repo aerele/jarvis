@@ -387,6 +387,8 @@ The failure memo is set only after a bad read, never before it:
 | `control_total`, `rekey_unresolved`, `reader_error`, `pin_drift`, `unsupported_major`, `eligibility_unknown` | 5 minutes (`SHORT_MEMO_TTL_S`): the read repeats identically until something changes |
 | `deadline` when the late view cut the reader's limit below 30 s | none: the reader was not slow |
 
+A deterministic reader refusal (`CalendarSourceUnavailable`) deletes the memo, so each new job repeats the read.
+
 A job that is hard-killed (the process dies, so no code runs after it) leaves only the in-flight marker and its slot, until their TTL (420 s): the next job for that company and side answers `busy`. It sets no memo, because the memo is written by a live process after a bad read. A job timeout is different: RQ raises it inside the job, so the router records it and sets the 30-minute memo.
 
 **Errors and the lost view.** A job timeout (`TIMEOUTS`) always propagates: the job ends, the record says which
@@ -443,9 +445,10 @@ the actor). For that reason `has_permission` hooks are not an eligibility rule. 
 step (cache rows, shared generations, a stored snapshot served to other users) must bring the
 `has_permission` rule back. Query hooks, Server Script permission queries, User Permissions, owner-only
 roles, masked or permlevel-restricted fields and match filters on the report's columns stay: nothing after
-the reader re-applies them. By design in S2 a user whose Company permission allows the company is refused
-too: the report adds a Company match filter to its Account and Project columns, eligibility says
-`column_filter`, and today's `too_large` stands. A support person sees it as the counter
+the reader re-applies them. In S2, Company permissions with `applicable_for` set cause
+`scoped_company_permission`, and permissions for all document types that allow the company still cause
+`column_filter` through Account and Project match filters, so today's `too_large` stays for both. A support
+person sees it as the counter
 `ineligible:column_filter` in `shadow.status()` (below). A later slice may relax this.
 
 **Logs, counters and Error Log classes.** `read_log.reader_outcomes` runs in a `finally` after the view and

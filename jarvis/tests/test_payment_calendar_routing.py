@@ -105,6 +105,11 @@ class RoutingSettingsCase(FrappeTestCase):
 
 	def setUp(self):
 		frappe.set_user("Administrator")
+		# The settings save runs the unified LLM path when a model row or a preset exists, and a test earlier in a
+		# shard can leave one (an enabled model with no key refuses every save). These tests are about the reader
+		# fields, so they start from the plain state, inside this test's transaction (rolled back in tearDown).
+		frappe.db.delete("Jarvis LLM Pool Model", {"parent": SETTINGS, "parenttype": SETTINGS})
+		frappe.db.set_single_value(SETTINGS, "preset", "")
 
 	def tearDown(self):
 		frappe.set_user("Administrator")

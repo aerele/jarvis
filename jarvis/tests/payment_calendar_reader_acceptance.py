@@ -198,8 +198,6 @@ def limits_at_guard_size(
 				)
 	finally:
 		_clean_up(GUARD_SAVEPOINT)
-		for company in companies:
-			routed.clear_routing_keys(company)
 	leftover = sum(frappe.db.count("Payment Ledger Entry", {"company": company}) for company in companies)
 	summary = {
 		"site": "test_jarvis guard size",

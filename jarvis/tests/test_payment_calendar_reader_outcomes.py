@@ -14,7 +14,7 @@ import frappe
 from rq.timeouts import JobTimeoutException
 
 from jarvis.payment_calendar import read_log, routing
-from jarvis.payment_calendar.errors import READER_FALLBACK_REASONS
+from jarvis.payment_calendar.errors import READER_FALLBACK_REASONS, TIMEOUTS
 
 COMPANY = "Outcome Test Company"
 SECRET = "ACME-PRIVATE-PARTY-4711"
@@ -369,6 +369,32 @@ class TestWaveOneClasses(OutcomeCase):
 
 
 class TestErrorLogWindow(OutcomeCase):
+	def test_a_job_timeout_while_claiming_the_window_stops_before_the_insert(self):
+		for timeout in TIMEOUTS:
+			with self.subTest(timeout.__name__):
+				with patch.object(frappe.cache, "execute_command", side_effect=timeout("job deadline")):
+					with self.assertRaises(timeout):
+						read_log.error_log_once(
+							"T", "m", f"reader:{self.digest}:x", "reader", when_cache_down=False
+						)
+		self.log_error.assert_not_called()
+
+	def test_a_job_timeout_while_freeing_the_window_propagates(self):
+		self.log_error.side_effect = RuntimeError("db blip")
+		for timeout in TIMEOUTS:
+			with self.subTest(timeout.__name__):
+
+				def command(operation, *args):
+					if operation == "DEL":
+						raise timeout("job deadline")
+					return True
+
+				with patch.object(frappe.cache, "execute_command", side_effect=command):
+					with self.assertRaises(timeout):
+						read_log.error_log_once(
+							"T", "m", f"reader:{self.digest}:x", "reader", when_cache_down=False
+						)
+
 	def test_a_failed_insert_frees_the_window_so_the_next_failure_writes_the_row(self):
 		self.log_error.side_effect = RuntimeError("db blip")
 		with self.assertRaises(RuntimeError):

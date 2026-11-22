@@ -126,14 +126,15 @@ class MatrixCase(TestCase):
 		frappe.db.commit()
 		return user
 
-	def permit(self, user, allow, value):
+	def permit(self, user, allow, value, *, applicable_for=""):
 		frappe.get_doc(
 			{
 				"doctype": "User Permission",
 				"user": user,
 				"allow": allow,
 				"for_value": value,
-				"apply_to_all_doctypes": 1,
+				"apply_to_all_doctypes": not applicable_for,
+				"applicable_for": applicable_for,
 			}
 		).insert(ignore_permissions=True)
 		frappe.clear_cache(user=user)
@@ -259,6 +260,81 @@ class TestRoutedReplyMatchesToday(MatrixCase):
 		"""By design in S2: an allowing Company permission adds match filters on the report's Account and
 		Project columns, so eligibility refuses (`column_filter`) and today's `too_large` stands."""
 		self.assert_refused_like_today(self.new_user(company_permission=True))
+
+	def test_scoped_company_permissions_refuse_before_the_ledger_read(self):
+		user = self.new_user()
+		self.assertNotEqual(user, "Administrator")
+		# Company access stays valid, while invoice details have a separate Company permission.
+		for applicable_for in ("Company", "Sales Invoice"):
+			self.permit(user, "Company", self.fx.company, applicable_for=applicable_for)
+		frappe.db.commit()
+		with (
+			self.spies() as spy,
+			patch.object(
+				routing.builtin_reader, "ledger_control", wraps=routing.builtin_reader.ledger_control
+			) as ledger,
+			patch.object(read_log, "reader_outcomes", wraps=read_log.reader_outcomes) as outcomes,
+		):
+			routed = self.collect(user, mode="on", guard="above")
+		for side in SIDES:
+			self.assertIsNone(routed[1]["sources"][side], side)
+			self.assertEqual(routed[1]["unavailable"][side], "too_large", side)
+		self.assertEqual(spy.served, [])
+		spy.assemble.assert_not_called()
+		ledger.assert_not_called()
+		self.assertEqual(
+			{record["side"]: record.get("fallback_detail") for record in outcomes.call_args.args[0]},
+			{side: ["scoped_company_permission"] for side in SIDES},
+		)
+
+	def test_the_two_company_permissions_leak_case_is_refused_and_the_reader_never_runs(self):
+		"""AC-S1 (the S2b plan-check BLOCKER): Company=A for the Company and Company=B for Payment Ledger Entry.
+
+		The user may open company A, but today's ledger read narrows A's lines by the Payment Ledger Entry
+		permission (only B), so today's lifted read returns NOTHING of A. The reader must refuse this user up
+		front, with the reason `scoped_company_permission`, and read no ledger line. (Without that refusal the
+		reader's own control total happens to stop this exact read today, as `control_total`; the explicit
+		refusal does not depend on that, and the recorded reason pins it.)
+		"""
+		other = CalendarFixtures()
+		self.fx.created.extend(other.created)
+		user = self.new_user()
+		self.permit(user, "Company", self.fx.company, applicable_for="Company")
+		self.permit(user, "Company", other.company, applicable_for="Payment Ledger Entry")
+		frappe.db.commit()
+
+		frappe.set_user(user)
+		try:
+			scope = normalize_scope(self.fx.company, [])
+			for side in SIDES:
+				args = (self.fx.company, side, scope["anchor"], scope["window_start"], scope["window_end"])
+				self.assertEqual(
+					shadow.today_unguarded(*args)["rows"], [], f"today's read of {side} is empty"
+				)
+		finally:
+			frappe.set_user("Administrator")
+
+		with (
+			self.spies() as spy,
+			patch.object(
+				routing.builtin_reader, "ledger_control", wraps=routing.builtin_reader.ledger_control
+			) as ledger,
+			patch.object(read_log, "reader_outcomes", wraps=read_log.reader_outcomes) as outcomes,
+			# Above today's LEDGER-ROW guard: that probe counts every line of the company, not the user's, so
+			# it refuses (`too_large`) even though this user sees no voucher (a voucher-count guard would not).
+			patch.object(sources, "MAX_LEDGER_ROWS", 0),
+		):
+			routed = self.collect(user, mode="on", guard="none")
+		for side in SIDES:
+			self.assertIsNone(routed[1]["sources"][side], side)
+			self.assertEqual(routed[1]["unavailable"][side], "too_large", side)
+		self.assertEqual(spy.served, [], "the reader returned rows")
+		spy.assemble.assert_not_called()
+		ledger.assert_not_called()  # eligibility refused before any ledger statement
+		records = {record["side"]: record for record in outcomes.call_args.args[0]}
+		for side in SIDES:
+			self.assertEqual(records[side]["fallback"], "ineligible", side)
+			self.assertIn("scoped_company_permission", records[side]["fallback_detail"], side)
 
 	def test_a_company_permission_for_another_company_cannot_open_the_scope(self):
 		other = CalendarFixtures()

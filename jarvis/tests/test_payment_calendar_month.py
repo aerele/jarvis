@@ -173,7 +173,8 @@ class TestPaymentCalendarMonthSnapshot(TestCase):
 		self.assertEqual(full["schema"], 2)
 		self.assertNotIn("month", full["projection"])
 		self.assertIsNone(full["projection"]["month_totals"])
-		month = nowdate()[:7]
+		# The fixture term is due 10 days from today: take that day's month, or a late-month run finds no row.
+		month = add_days(nowdate(), 10)[:7]
 		monthly = scope.normalize_scope(self.fx.company, [self.fx.bank], month=month)
 		value = snapshot.collect(monthly, authorize_scope(monthly)["fingerprint"])
 		self.assertEqual(value["schema"], 2)

@@ -49,8 +49,29 @@ def key_prefix():
 	return patch.object(shadow_state, "PREFIX", TEST_PREFIX).start()
 
 
+MODULE_KEY = "k" * 44
+_site_key = []
+
+
+def setUpModule():
+	"""The CI site has no `encryption_key`; every digest needs one. Set for the whole module.
+
+	It is set on `frappe.conf` directly, not with a patcher: the cases call `patch.stopall`, which would stop it.
+	The explicit no-key tests patch an empty key themselves and put this one back.
+	"""
+	_site_key.append(frappe.conf.get("encryption_key"))
+	frappe.conf["encryption_key"] = MODULE_KEY
+
+
 def tearDownModule():
-	purge_keys()
+	try:
+		purge_keys()
+	finally:
+		original = _site_key.pop() if _site_key else None
+		if original is None:
+			frappe.conf.pop("encryption_key", None)
+		else:
+			frappe.conf["encryption_key"] = original
 
 
 def settings(mode="shadow", served=(), shadow_list=(COMPANY_A, COMPANY_B)):

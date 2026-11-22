@@ -555,7 +555,7 @@ class TestRoutedAcceptancePure(TestCase):
 		self.assertGreaterEqual(seen["max_seconds"], 0.05)
 		self.assertLess(seen["max_seconds"], 5)
 
-	def test_cleanup_keeps_other_workers_slots_and_deletes_only_this_companys_memos(self):
+	def test_cleanup_keeps_other_workers_slots_and_deletes_only_owned_memos(self):
 		from jarvis.payment_calendar import routing
 		from jarvis.tests import payment_calendar_routed_support as support
 
@@ -568,11 +568,14 @@ class TestRoutedAcceptancePure(TestCase):
 			frappe.cache.execute_command("SET", key, "worker-token", "EX", 60)
 			self.addCleanup(frappe.cache.execute_command, "DEL", key)
 		memo = routing.memo_key(company, "Payable")
-		frappe.cache.execute_command("SET", memo, "1", "EX", 60)
+		frappe.cache.execute_command("SET", memo, "acceptance-token", "EX", 60)
 		self.addCleanup(frappe.cache.execute_command, "DEL", memo)
 		with patch.object(routing, "slot_key", side_effect=lambda n: keys[n]):
-			self.assertEqual(support.clear_routing_keys(company), 1)
-			self.assertEqual(support.clear_routing_keys(company), 0)
+			self.assertEqual(support.clear_routing_keys(company, {memo: "acceptance-token"}), 1)
+			self.assertEqual(support.clear_routing_keys(company, {memo: "acceptance-token"}), 0)
+			frappe.cache.execute_command("SET", memo, "next-worker", "EX", 60)
+			self.assertEqual(support.clear_routing_keys(company, {memo: "acceptance-token"}), 0)
+		self.assertEqual(frappe.cache.execute_command("GET", memo), b"next-worker")
 		self.assertEqual(
 			[frappe.cache.execute_command("GET", key) for key in keys], [b"worker-token"] * len(keys)
 		)
@@ -794,11 +797,14 @@ class TestRoutedAcceptanceRuns(TestCase):
 		for key in keys:
 			self.addCleanup(frappe.cache.execute_command, "DEL", key)
 		frappe.cache.execute_command("SET", keys[0], "live-worker", "EX", 60)
+		memo = routing.memo_key(self.fx.company, "Receivable")
+		self.addCleanup(frappe.cache.execute_command, "DEL", memo)
 		real = builtin_reader.read_obligations
 
 		def replaced(*args, **kwargs):
 			result = real(*args, **kwargs)
 			frappe.cache.execute_command("SET", keys[1], "next-worker", "EX", 60)
+			frappe.cache.execute_command("SET", memo, "next-worker", "EX", 60)
 			return result
 
 		with (
@@ -810,6 +816,31 @@ class TestRoutedAcceptanceRuns(TestCase):
 		reader.assert_called_once()
 		self.assertEqual(frappe.cache.execute_command("GET", keys[0]), b"live-worker")
 		self.assertEqual(frappe.cache.execute_command("GET", keys[1]), b"next-worker")
+		self.assertEqual(frappe.cache.execute_command("GET", memo), b"next-worker")
+
+	def test_routed_cleanup_keeps_foreign_memos_and_removes_its_own_fallback_memo(self):
+		from jarvis.payment_calendar import builtin_reader
+		from jarvis.payment_calendar.errors import ReaderFallback
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		foreign = routing.memo_key(self.fx.company, "Receivable")
+		own = routing.memo_key(self.fx.company, "Payable")
+		for key in (foreign, own):
+			self.addCleanup(frappe.cache.execute_command, "DEL", key)
+		for token in ("worker-token", "1"):
+			with self.subTest(token):
+				frappe.cache.execute_command("SET", foreign, token, "EX", 60)
+				with (
+					patch.object(sources, "MAX_VOUCHERS", 0),
+					patch.object(
+						builtin_reader, "read_obligations", side_effect=ReaderFallback("control_total")
+					) as reader,
+				):
+					support.routed_sides(self.fx.company, self.fx.today, "Administrator")
+				reader.assert_called_once()
+				self.assertEqual(reader.call_args.args[1], "Payable")
+				self.assertEqual(frappe.cache.execute_command("GET", foreign), token.encode())
+				self.assertFalse(frappe.cache.execute_command("EXISTS", own))
 
 	def test_a_database_write_inside_the_routed_run_fails(self):
 		from jarvis.tests import payment_calendar_routed_support as support

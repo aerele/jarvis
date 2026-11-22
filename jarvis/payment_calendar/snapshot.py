@@ -1,6 +1,7 @@
 """Worker-only coherent primary-database reads, with scoped cache bypasses."""
 
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from datetime import date as Date
 from datetime import datetime, timedelta, timezone
 from time import monotonic
@@ -20,6 +21,7 @@ from jarvis.payment_calendar.store import RESULT_SCHEMA
 # `store.RESULT_SCHEMA` is stamped on every result; `store.split_result` refuses a result without it at
 # publish, and no reader accepts another shape. `horizon` is always stored, null only without `with_horizon`.
 HORIZON_DAYS = 30
+_VIEW_BROKEN = ContextVar("payment_calendar_view_broken", default=False)
 
 
 @contextmanager
@@ -121,6 +123,11 @@ def fiscal_years_read(hits) -> bool:
 	return ("hget", "fiscal_years") in hits
 
 
+def view_is_broken() -> bool:
+	"""Whether the current source view has refused a write or transaction control."""
+	return _VIEW_BROKEN.get()
+
+
 @contextmanager
 def consistent_read():
 	"""Pin a real repeatable read, refusing helper writes or transaction controls."""
@@ -133,11 +140,10 @@ def consistent_read():
 	db.sql("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
 	connection = db._conn
 	original_sql = db.sql
-	broken = False
+	view_token = _VIEW_BROKEN.set(False)
 
 	def refuse(*args, **kwargs):
-		nonlocal broken
-		broken = True
+		_VIEW_BROKEN.set(True)
 		raise CalendarSourceUnavailable("source_changed")
 
 	def read_sql(query, *args, **kwargs):
@@ -161,9 +167,14 @@ def consistent_read():
 				stack.enter_context(_replace(db, name, replacement))
 			hits = stack.enter_context(_source_caches())
 			yield hits
-			if broken or db._conn is not connection or not original_sql("SELECT @@in_transaction")[0][0]:
+			if (
+				view_is_broken()
+				or db._conn is not connection
+				or not original_sql("SELECT @@in_transaction")[0][0]
+			):
 				refuse()
 	finally:
+		_VIEW_BROKEN.reset(view_token)
 		db.rollback()
 
 
