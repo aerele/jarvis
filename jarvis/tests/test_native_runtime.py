@@ -785,3 +785,46 @@ class TestNativeClaudeAndSignInIdRules(unittest.TestCase):
 		two = [self._claude("claude-opus-5", "C1", 0), self._claude("claude-sonnet-5", "C2", 1)]
 		errors = pool_serialize.validate_models(_settings(two, native_subscription_pool=0))
 		self.assertTrue([e for e in errors if "Only one Claude" in e])
+
+
+class TestNativeSignInHealthReachesTheSite(unittest.TestCase):
+	"""Admin marks a sign-in the native apply could not make usable as expired; the site stores it
+	through the existing health mechanism, so the pool editor shows it as needing a reconnect."""
+
+	def test_an_expired_entry_from_a_native_tenant_is_stored_whatever_its_source(self):
+		from jarvis import subscription_health as sh
+
+		live = {"X1": {"upstream": "xai", "label": "xAI Grok", "email": ""}}
+		reply = {"X1": {"state": "expired", "source": "runtime", "since": 1000, "label": "", "email": ""}}
+		with (
+			patch.object(sh, "_live_accounts", return_value=live),
+			patch.object(sh, "current_health", return_value={}),
+			patch.object(sh, "_cleared_at", return_value=0),
+			patch.object(sh, "_store", side_effect=lambda merged: bool(merged)) as store,
+		):
+			self.assertTrue(sh.apply_admin_health(reply))
+		stored = store.call_args.args[0]
+		self.assertEqual((stored["X1"]["state"], stored["X1"]["source"]), ("expired", "poll"))
+
+	def test_an_ok_entry_clears_a_stored_poll_expiry(self):
+		from jarvis import subscription_health as sh
+
+		live = {"X1": {"upstream": "xai", "label": "xAI Grok", "email": ""}}
+		prior = {
+			"X1": {
+				"upstream": "xai",
+				"label": "xAI Grok",
+				"email": "",
+				"state": "expired",
+				"source": "poll",
+				"since": 5,
+			}
+		}
+		with (
+			patch.object(sh, "_live_accounts", return_value=live),
+			patch.object(sh, "current_health", return_value=prior),
+			patch.object(sh, "_cleared_at", return_value=0),
+			patch.object(sh, "_store", side_effect=lambda merged: True) as store,
+		):
+			sh.apply_admin_health({"X1": {"state": "ok", "source": "runtime"}})
+		self.assertEqual(store.call_args.args[0], {})
