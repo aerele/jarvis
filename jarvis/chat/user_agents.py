@@ -239,6 +239,25 @@ def bound_agent(conv) -> str | None:
 	return value if isinstance(value, str) and value else None
 
 
+def agent_names(agent_ids, owner: str) -> dict[str, str]:
+	"""``{agent_id: agent_name}`` for the agents ``owner`` owns among ``agent_ids``,
+	in one query. An id that is gone, or is not ``owner``'s, is simply missing."""
+	ids = sorted({i for i in agent_ids if isinstance(i, str) and i})
+	if not ids:
+		return {}
+	try:
+		rows = frappe.get_list(
+			DOCTYPE,
+			filters={"agent_id": ["in", ids], "owner": owner},
+			fields=["agent_id", "agent_name"],
+			limit_page_length=len(ids),
+		)
+	except frappe.PermissionError:
+		# A cosmetic label: a user who can no longer read agents must still open the chat.
+		return {}
+	return {r.agent_id: r.agent_name for r in rows}
+
+
 def refuse_send(conv_doc) -> None:
 	"""``send_message`` guard: a chat bound to an agent only runs while that agent
 	is usable by the chat's owner."""

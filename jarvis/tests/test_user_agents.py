@@ -245,6 +245,73 @@ class TestStartChat(UserAgentCase):
 				sharing._set_shares(conversation, {OTHER})
 
 
+class TestChatIdentity(UserAgentCase):
+	"""The conversation payloads name the agent a chat is bound to, for its owner only."""
+
+	def _chat(self, row):
+		with _as(OWNER):
+			conversation = user_agents_api.start_user_agent_chat(row.name)["conversation"]
+		# list_conversations hides a chat with no message yet.
+		frappe.get_doc(
+			{
+				"doctype": "Jarvis Chat Message",
+				"conversation": conversation,
+				"seq": 1,
+				"role": "user",
+				"content": "hi",
+			}
+		).insert(ignore_permissions=True)
+		return conversation
+
+	def test_get_conversation_carries_the_agent_name_for_the_owner(self):
+		from jarvis.chat import api as chat_api
+
+		row = self.make_agent(agent_name="Overdue invoices")
+		conversation = self._chat(row)
+		with _as(OWNER):
+			out = chat_api.get_conversation(conversation)
+		self.assertEqual(out["conversation"]["user_agent_name"], "Overdue invoices")
+		self.assertNotIn("user_agent", out["conversation"])
+
+	def test_a_normal_chat_has_an_empty_agent_name(self):
+		from jarvis.chat import api as chat_api
+
+		with _as(OWNER), patch.object(frappe.db, "commit"):
+			conversation = chat_api.create_conversation()
+			out = chat_api.get_conversation(conversation)
+		self.assertEqual(out["conversation"]["user_agent_name"], "")
+
+	def test_a_deleted_agent_leaves_the_name_empty(self):
+		from jarvis.chat import api as chat_api
+
+		row = self.make_agent()
+		conversation = self._chat(row)
+		with _as(OWNER):
+			user_agents_api.delete_user_agent(row.name)
+			out = chat_api.get_conversation(conversation)
+		self.assertEqual(out["conversation"]["user_agent_name"], "")
+
+	def test_list_conversations_names_agent_chats_in_one_query(self):
+		from jarvis.chat import api as chat_api
+
+		first = self.make_agent(agent_name="Overdue invoices")
+		second = self.make_agent(agent_name="Stock watcher")
+		bound = [self._chat(first), self._chat(second)]
+		with _as(OWNER), patch.object(frappe, "get_list", wraps=frappe.get_list) as get_list:
+			rows = {r["name"]: r for r in chat_api.list_conversations(refresh=True)}
+		self.assertEqual(rows[bound[0]]["user_agent_name"], "Overdue invoices")
+		self.assertEqual(rows[bound[1]]["user_agent_name"], "Stock watcher")
+		self.assertTrue(all("user_agent" not in r for r in rows.values()))
+		agent_reads = [c for c in get_list.call_args_list if c.args and c.args[0] == DOCTYPE]
+		self.assertEqual(len(agent_reads), 1)
+
+	def test_agent_names_only_come_from_the_owner(self):
+		row = self.make_agent(agent_name="Mine")
+		self.assertEqual(user_agents.agent_names([row.agent_id], OWNER), {row.agent_id: "Mine"})
+		self.assertEqual(user_agents.agent_names([row.agent_id], OTHER), {})
+		self.assertEqual(user_agents.agent_names([None, ""], OWNER), {})
+
+
 class TestSync(UserAgentCase):
 	def test_payload_shape_matches_the_fleet_contract(self):
 		on = self.make_agent(tools_json='["get_list"]', allow_shell=1)

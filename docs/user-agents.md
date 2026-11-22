@@ -45,7 +45,9 @@ An agent can chat or run only once it has been synced at least once.
 key is `agent:<agent_id>:dashboard:jarvis-chat-<user>-<ms>`, and the conversation
 stores the agent id in `user_agent`, so a session minted again later (idle
 reclaim, re-pairing) still addresses the same agent. Messages go through the
-normal `send_message`.
+normal `send_message`. `get_conversation` and `list_conversations` carry the agent's
+name as `user_agent_name` (owner only, empty for a normal chat or a deleted agent), and
+the chat header shows it.
 
 Every tool call from such a session is checked in `jarvis.api.call_tool`: the
 agent must exist, be enabled, belong to the session's user, and have picked the
