@@ -163,11 +163,18 @@ def get_owned(name: str, user: str | None = None) -> frappe._dict:
 	return row
 
 
+def is_ready(row) -> bool:
+	"""Enabled, and the runtime holds its CURRENT content: every definition change
+	sets Pending, and only a push that carried this exact content sets Synced."""
+	return bool(cint(row.get("enabled")) and row.get("sync_status") == "Synced")
+
+
 def refuse_unusable(row) -> None:
-	"""Throw when ``row`` cannot chat or run now: switched off, or never synced."""
+	"""Throw when ``row`` cannot chat or run now: switched off, or its current
+	content is not on the runtime (Pending or Failed)."""
 	if not cint(row.enabled):
 		frappe.throw(_("This agent is switched off. Turn it on to use it."), UserAgentUnavailableError)
-	if not row.synced_at:
+	if not is_ready(row):
 		frappe.throw(
 			_("This agent is not ready yet. Wait for its sync to finish, or use Retry sync."),
 			UserAgentUnavailableError,

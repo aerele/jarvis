@@ -703,7 +703,8 @@ def create_or_focus_empty(origin_page: str = "") -> str:
 	# writes on file_box convs) and adopt a stray File. Exclude both, mirroring
 	# session_lifecycle._reap_empty (which now spares such rows from reaping too).
 	# An empty chat opened on a user agent is not a blank chat either: reusing it
-	# would send a New Chat to that agent (jarvis.chat.user_agents).
+	# would send a New Chat to that agent (jarvis.chat.user_agents). Keyed on the
+	# binding, not the session key, which is cleared when the session is reclaimed.
 	empty = frappe.db.sql(
 		"""
 		SELECT c.name
@@ -711,7 +712,7 @@ def create_or_focus_empty(origin_page: str = "") -> str:
 		WHERE c.owner = %s AND c.status = 'Active'
 		  AND COALESCE(c.origin_page, '') = %s
 		  AND c.file_box = 0
-		  AND COALESCE(c.session_key, '') NOT LIKE 'agent:agent-u-%%'
+		  AND COALESCE(c.user_agent, '') = ''
 		  AND NOT EXISTS (
 		    SELECT 1 FROM `tabJarvis Chat Message` m
 		    WHERE m.conversation = c.name

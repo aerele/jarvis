@@ -113,8 +113,7 @@ def run_sync() -> None:
 			_record_failure("apply_in_progress")
 			return
 		try:
-			payload, result = _send_until_settled()
-			_record_success(payload, result)
+			_record_success(*_send_until_settled())
 		except Exception as exc:
 			frappe.db.rollback()
 			code = classify(exc)
@@ -168,56 +167,74 @@ def _entry(row) -> dict:
 	}
 
 
-def _send_until_settled() -> tuple[list, dict]:
+def _send_until_settled() -> tuple[list, dict, list]:
 	"""Send, and send again while the set changed during the send. At most
-	_MAX_SENDS sends of up to 180 s each, inside the job's TIMEOUT_S. A set still
-	changing after the last one is recorded per row (``_record_success``)."""
+	_MAX_SENDS sends of up to 180 s each, inside the job's TIMEOUT_S. Returns
+	``(last sent, admin's answer, the set as it stands after that send)``; a set
+	still changing after the last send is recorded per row (``_record_success``)."""
 	from jarvis import admin_client
 
 	payload = build_payload()
 	result: dict = {}
+	current = payload
 	for sends in range(1, _MAX_SENDS + 1):
 		result = admin_client.post_push_user_agents(user_agents=payload) or {}
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- see rows saved during the send
-		fresh = build_payload()
-		if fresh == payload or sends == _MAX_SENDS:
+		current = build_payload()
+		if current == payload or sends == _MAX_SENDS:
 			break
-		payload = fresh
-	return payload, result
+		payload = current
+	return payload, result, current
 
 
-def _record_success(payload: list, result: dict) -> None:
+def _record_success(payload: list, result: dict, current: list) -> None:
 	"""Each row against what was SENT, not what it holds now: a row saved after the
-	last send is not on the runtime yet, so it stays Pending with a retryable code."""
+	last send is not on the runtime yet, so it stays Pending with a retryable code.
+	One grouped update per outcome."""
 	sent = {entry["id"]: entry for entry in payload}
-	current = {entry["id"]: entry for entry in build_payload()}
+	now_held = {entry["id"]: entry for entry in current}
 	confirmed = result.get("user_agents") if isinstance(result, dict) else None
 	confirmed = set(confirmed) if isinstance(confirmed, list) else set(sent)
-	now = now_datetime()
+	changed, removed, missing, synced = [], [], [], []
 	# System context: the outcome lands on every owner's rows.
 	for row in frappe.get_all(DOCTYPE, fields=["name", "agent_id"]):
-		if sent.get(row.agent_id) != current.get(row.agent_id):
-			_set(row.name, "Pending", "changed_during_sync")
+		if sent.get(row.agent_id) != now_held.get(row.agent_id):
+			changed.append(row.name)
 		elif row.agent_id not in sent:
-			_set(row.name, "Synced", "")
+			removed.append(row.name)
 		elif row.agent_id not in confirmed:
-			_set(row.name, "Failed", "runtime_missing")
+			missing.append(row.name)
 		else:
-			_set(row.name, "Synced", "", synced_at=now)
+			synced.append(row.name)
+	_set(changed, "Pending", "changed_during_sync")
+	_set(removed, "Synced", "")
+	_set(missing, "Failed", "runtime_missing")
+	_set(synced, "Synced", "", synced_at=now_datetime())
 
 
 def _record_failure(code: str) -> None:
-	status = "Pending" if code in RETRYABLE else "Failed"
-	# System context, as in _record_success. Synced rows are still right on the runtime.
-	for name in frappe.get_all(DOCTYPE, filters={"sync_status": ["!=", "Synced"]}, pluck="name"):
-		_set(name, status, code)
+	"""Only the rows this push carried a change for: Pending rows that are enabled
+	(to add or update) or were on the runtime before (to remove). A row Synced
+	before (the runtime still holds it as it was), Failed for a reason of its own,
+	or switched off without ever reaching the runtime keeps its state and message."""
+	# System context, as in _record_success.
+	rows = frappe.get_all(
+		DOCTYPE, filters={"sync_status": "Pending"}, fields=["name", "enabled", "synced_at"]
+	)
+	carried = [r.name for r in rows if cint(r.enabled) or r.synced_at]
+	_set(carried, "Pending" if code in RETRYABLE else "Failed", code)
 
 
-def _set(name: str, status: str, code: str, **extra) -> None:
-	values = {
-		"sync_status": status,
-		"sync_error": code,
-		"sync_error_message": sentence_for(code) if code else "",
-		**extra,
-	}
-	frappe.db.set_value(DOCTYPE, name, values, update_modified=False)
+def _set(names: list, status: str, code: str, **extra) -> None:
+	if not names:
+		return
+	table = frappe.qb.DocType(DOCTYPE)
+	query = (
+		frappe.qb.update(table)
+		.set(table.sync_status, status)
+		.set(table.sync_error, code)
+		.set(table.sync_error_message, sentence_for(code) if code else "")
+	)
+	for field, value in extra.items():
+		query = query.set(getattr(table, field), value)
+	query.where(table.name.isin(names)).run()

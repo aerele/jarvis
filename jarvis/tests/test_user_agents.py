@@ -202,6 +202,25 @@ class TestStartChat(UserAgentCase):
 				with self.assertRaises(user_agents.UserAgentUnavailableError):
 					user_agents_api.start_user_agent_chat(name)
 
+	def test_an_edited_agent_is_not_ready_until_its_new_content_is_synced(self):
+		row = self.make_agent()
+		with _as(OWNER):
+			self.assertTrue(user_agents_api.get_user_agent(row.name)["ready"])
+			edited = user_agents_api.update_user_agent(row.name, instructions="Also chase quotations.")
+		self.assertEqual(edited["sync"]["status"], "Pending")
+		self.assertTrue(edited["sync"]["synced_at"])
+		self.assertFalse(edited["ready"])
+		with _as(OWNER):
+			for call in (
+				lambda: user_agents_api.start_user_agent_chat(row.name),
+				lambda: user_agents_api.run_user_agent_now(row.name, prompt="go"),
+			):
+				with self.assertRaises(user_agents.UserAgentUnavailableError):
+					call()
+		frappe.db.set_value(DOCTYPE, row.name, "sync_status", "Failed")
+		with _as(OWNER), self.assertRaises(user_agents.UserAgentUnavailableError):
+			user_agents_api.start_user_agent_chat(row.name)
+
 	def test_a_reminted_session_still_addresses_the_agent(self):
 		row = self.make_agent()
 		with patch.object(frappe.db, "commit"):
@@ -216,6 +235,17 @@ class TestStartChat(UserAgentCase):
 		row = self.make_agent()
 		with _as(OWNER), patch.object(frappe.db, "commit"):
 			bound = user_agents_api.start_user_agent_chat(row.name)["conversation"]
+			fresh = chat_api.create_or_focus_empty()
+		self.assertNotEqual(fresh, bound)
+
+	def test_new_chat_never_reuses_an_agent_chat_whose_session_was_reclaimed(self):
+		from jarvis.chat import api as chat_api
+
+		row = self.make_agent()
+		with _as(OWNER), patch.object(frappe.db, "commit"):
+			bound = user_agents_api.start_user_agent_chat(row.name)["conversation"]
+			# The idle reclaim and the lazy remint both leave the key empty.
+			frappe.db.set_value(CONV, bound, "session_key", None)
 			fresh = chat_api.create_or_focus_empty()
 		self.assertNotEqual(fresh, bound)
 
@@ -394,6 +424,56 @@ class TestSync(UserAgentCase):
 		)
 		self.assertEqual(user_agent_sync.classify(exc), "admin_outdated")
 		self.assertEqual(user_agent_sync.classify(AdminValidationError("bad")), "InvalidUserAgents")
+
+	def test_a_failure_touches_only_the_rows_the_push_carried(self):
+		carried = self.make_agent(synced=False, agent_name="Carried")
+		failed = self.make_agent(agent_name="Failed before")
+		frappe.db.set_value(
+			DOCTYPE,
+			failed.name,
+			{"sync_status": "Failed", "sync_error": "runtime_missing", "sync_error_message": "Own reason."},
+		)
+		off = self.make_agent(agent_name="Off and synced", enabled=0)
+		never = self.make_agent(synced=False, agent_name="Off, never synced", enabled=0)
+		other = self.make_agent(OTHER, agent_name="Someone else's")
+		with (
+			patch(
+				"jarvis.admin_client.post_push_user_agents",
+				side_effect=AdminContractError("off", code="user_agents_disabled"),
+			),
+			patch.object(frappe.db, "commit"),
+			patch.object(frappe.db, "rollback"),
+		):
+			user_agent_sync.run_sync()
+		state = lambda r: frappe.db.get_value(  # noqa: E731
+			DOCTYPE, r.name, ["sync_status", "sync_error", "sync_error_message"], as_dict=True
+		)
+		self.assertEqual(state(carried).sync_error, "user_agents_disabled")
+		self.assertEqual(state(carried).sync_status, "Failed")
+		self.assertEqual(
+			(state(failed).sync_status, state(failed).sync_error, state(failed).sync_error_message),
+			("Failed", "runtime_missing", "Own reason."),
+		)
+		for row in (off, other):
+			self.assertEqual((state(row).sync_status, state(row).sync_error or ""), ("Synced", ""))
+		self.assertEqual((state(never).sync_status, state(never).sync_error or ""), ("Pending", ""))
+
+	def test_the_outcome_is_written_in_grouped_updates_from_the_sent_payload(self):
+		rows = [self.make_agent(synced=False, agent_name=f"Agent {i}") for i in range(3)]
+		with (
+			patch(
+				"jarvis.admin_client.post_push_user_agents",
+				return_value={"user_agents": [r.agent_id for r in rows]},
+			),
+			patch.object(frappe.db, "commit"),
+			patch.object(user_agent_sync, "build_payload", wraps=user_agent_sync.build_payload) as build,
+			patch.object(frappe.db, "set_value", side_effect=AssertionError("one write per row")),
+		):
+			user_agent_sync.run_sync()
+		# One build before the send and one after it, none in the bookkeeping.
+		self.assertEqual(build.call_count, 2)
+		for row in rows:
+			self.assertEqual(frappe.db.get_value(DOCTYPE, row.name, "sync_status"), "Synced")
 
 	def test_a_failure_leaves_synced_rows_synced(self):
 		synced = self.make_agent()

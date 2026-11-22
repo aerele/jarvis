@@ -37,7 +37,9 @@ control plane must also allow user agents for the workspace (tenant field
    `apply_in_progress`, rate limits and an unreachable host leave the row Pending
    (use Retry sync); any other refusal marks it Failed.
 
-An agent can chat or run only once it has been synced at least once.
+An agent can chat or run only while it is enabled and Synced: an edit, a
+re-enable or a failed push makes it wait until its current content is on the
+runtime. A failed push only touches the rows it carried a change for.
 
 ## Chats
 
