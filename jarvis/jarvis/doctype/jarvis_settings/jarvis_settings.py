@@ -1285,11 +1285,14 @@ class JarvisSettings(Document):
 			compute_pool_mode,
 			compute_proxy_active,
 			lone_direct_handover_due,
+			new_kimi_subscription_errors,
 			validate_models,
 		)
 
 		# Step 1: Validate first — clean error before any state mutation.
 		errors = validate_models(self)
+		if not errors:
+			errors = new_kimi_subscription_errors(self, self.get_doc_before_save())
 		if errors:
 			frappe.throw("<br>".join(errors), title="LLM Configuration")
 

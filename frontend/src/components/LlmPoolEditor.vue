@@ -1027,6 +1027,7 @@
 							</JvCombo>
 						</div>
 					</div>
+					<p v-if="panel.mode === 'add'" class="jv-pool-foldnote">{{ KIMI_KEY_HINT }}</p>
 
 					<!-- jarvis#934: same non-blocking backstop warning as the main list,
 					     surfaced here too so it is seen BEFORE OAuth sign-in starts, not
@@ -1936,7 +1937,7 @@
 									onUpstreamChange(m);
 								}
 							"
-							:options="upstreamOpts"
+							:options="OFFERED_UPSTREAMS"
 							:editable="editable"
 							placeholder="Provider"
 						>
@@ -1957,6 +1958,7 @@
 								></template
 							>
 						</JvCombo>
+						<p class="jv-pool-foldnote">{{ KIMI_KEY_HINT }}</p>
 					</div>
 
 					<!-- Connected accounts -->
@@ -2822,7 +2824,13 @@ const UPSTREAM_PROVIDER = Object.fromEntries(
 // JvCombo speaks display LABELS; a row stores `upstream` as the VALUE the pool spec
 // requires ("openai" / "google"). Bridge the two rather than letting "OpenAI" reach
 // the spec (the fleet validates upstream against openai|anthropic|google and 422s).
-const upstreamLabels = upstreamOpts.map((o) => o.label);
+// Kimi's sign-in is no longer offered for a NEW connection (the runtime has no Kimi sign-in;
+// Kimi is added by membership key). It stays in `upstreamOpts` so a saved Kimi row still
+// shows its own label and chip.
+const OFFERED_UPSTREAMS = upstreamOpts.filter((o) => o.value !== "kimi");
+const upstreamLabels = OFFERED_UPSTREAMS.map((o) => o.label);
+const KIMI_KEY_HINT =
+	"Kimi connects with a membership key: add an API key, choose OpenAI-Compatible, base URL https://api.kimi.com/coding/v1, model kimi-for-coding.";
 // Fall back to the raw value (never blank) so an unrecognized/legacy upstream
 // renders "Sign in with <value>" rather than "Sign in with " (review finding).
 const upstreamLabelOf = (v) =>

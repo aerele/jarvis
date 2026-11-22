@@ -578,6 +578,32 @@ def lone_direct_handover_due(settings) -> bool:
 	return (_field(account, "upstream") or "").strip().lower() == "openai"
 
 
+# Kimi sign-in (device flow through the CLIProxy sidecar) is no longer offered: the agent runtime
+# 2026.11 has no Kimi sign-in, only API keys. A saved pool that already has one keeps working.
+KIMI_SIGNIN_REMOVED_MESSAGE = (
+	"Kimi sign-in is no longer offered. Add Kimi with a membership key: choose OpenAI-Compatible, "
+	"base URL https://api.kimi.com/coding/v1, model kimi-for-coding."
+)
+
+
+def _kimi_subscription_keys(settings) -> set:
+	"""The account refs of every Kimi subscription account on ``settings``. A row with no
+	account yet has no serving effect and, with the sign-in refused, can never get one."""
+	keys = set()
+	for m in getattr(settings, "models", None) or []:
+		if _credential_type(m) != "subscription" or _subscription_upstream(m) != "kimi":
+			continue
+		keys |= {(_field(a, "account_ref") or "").strip() for a in _model_accounts(m)} - {""}
+	return keys
+
+
+def new_kimi_subscription_errors(settings, before) -> list:
+	"""Refuse a Kimi subscription account that the SAVED pool (``before``) does not
+	already have. An unchanged saved pool, and any removal, pass."""
+	added = _kimi_subscription_keys(settings) - (_kimi_subscription_keys(before) if before else set())
+	return [KIMI_SIGNIN_REMOVED_MESSAGE] if added else []
+
+
 def pool_primary_model(settings) -> str:
 	"""The model id a pool tenant's container runs by DEFAULT, or "".
 

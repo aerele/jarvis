@@ -358,6 +358,11 @@ def begin_pool_account_signin(provider: str, model: str) -> dict:
 		p = get_provider(provider)
 	except UnknownProviderError as e:
 		return _err("unknown_provider", str(e))
+	if p.get("agent_provider") == "kimi":
+		# No new Kimi sign-in (see pool_serialize.KIMI_SIGNIN_REMOVED_MESSAGE); a saved one keeps working.
+		from jarvis.jarvis.pool_serialize import KIMI_SIGNIN_REMOVED_MESSAGE
+
+		return _err("kimi_signin_removed", KIMI_SIGNIN_REMOVED_MESSAGE)
 	if p.get("grant_type") == "device_code":
 		return _begin_device_signin(provider, model)
 	return _begin_signin(provider, model, pool=True)

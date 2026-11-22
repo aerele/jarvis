@@ -1266,6 +1266,24 @@ describe("subscription source chip labels the real provider", () => {
 	});
 });
 
+describe("Kimi sign-in is not offered for a new connection", () => {
+	it("leaves Kimi out of the provider options but keeps its label for a saved row", async () => {
+		const w = await mountEditor();
+		expect(w.vm.upstreamLabels).toEqual(["OpenAI", "Anthropic", "xAI Grok"]);
+		expect(w.vm.OFFERED_UPSTREAMS.map((o) => o.value)).not.toContain("kimi");
+		// a saved Kimi row still reads as Kimi, in its label and its chip
+		expect(w.vm.upstreamLabelOf("kimi")).toBe("Kimi (Moonshot)");
+		expect(w.vm.upstreamValueOf("Kimi (Moonshot)")).toBe("kimi");
+	});
+
+	it("points the customer to a membership key through OpenAI-Compatible", async () => {
+		const w = await mountEditor();
+		expect(w.vm.KIMI_KEY_HINT).toContain("https://api.kimi.com/coding/v1");
+		expect(w.vm.KIMI_KEY_HINT).toContain("kimi-for-coding");
+		expect(w.vm.KIMI_KEY_HINT).toContain("OpenAI-Compatible");
+	});
+});
+
 describe("row logo matches the row's own provider (jarvis: AI-models row icon bug)", () => {
 	// seedRows() backfills a UI-only `upstream` field onto every row (subscription
 	// rows need it), defaulting to "openai" when a row has no accounts to read it
