@@ -25,8 +25,8 @@ export function timeHHMM(s) {
 }
 
 // Ready / Syncing / Sync failed / Off. `ready` (the server's own word) is what
-// decides whether Chat and Run now work: an edited agent shows Syncing yet can
-// still be used, because it was synced once.
+// decides whether Chat and Run now work: only a Synced agent is ready, so an edited
+// agent waits (Syncing) until its new content is on the runtime.
 export function stateBadge(agent) {
 	if (!agent.enabled) return { label: "Off", theme: "gray" };
 	const status = (agent.sync && agent.sync.status) || "Pending";
