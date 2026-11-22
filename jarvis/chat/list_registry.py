@@ -626,6 +626,15 @@ _BY_KEY: dict[str, ListView] = {v.view_key: v for v in _VIEWS}
 #: unclassified whatever it is named (the round-2 loophole: discovery keyed only on
 #: ``list_*``/``admin_list_*``, so a ``search_*`` or ``*_feed`` collection evaded it).
 NON_LIST_ENDPOINTS: dict[str, str] = {
+	# My agents: the caller's own user agents, at most 5 (user_agents.MAX_PER_OWNER),
+	# rendered whole on one tab; and the fixed tool catalogue the agent editor picks
+	# from. Neither has a filter, sort or page contract.
+	"jarvis.chat.user_agents_api.list_user_agents": (
+		"the caller's own user agents, at most 5, shown whole on the My agents tab"
+	),
+	"jarvis.chat.user_agents_api.list_pickable_tools": (
+		"the fixed tool catalogue the agent editor's picker shows, grouped by app"
+	),
 	# One chat's background-report cards: the few runs that chat started and hasn't
 	# shown yet, rendered inline in the thread. No filter, sort or page contract.
 	"jarvis.chat.report_runs.chat_report_runs": "one chat's background-report cards, shown inline in the thread",
