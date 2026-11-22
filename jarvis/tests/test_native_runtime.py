@@ -600,3 +600,107 @@ class TestProxyEraRulesAreGoneOnNative(unittest.TestCase):
 		spec, _keys, _blobs = pool_serialize.build_pool_payload(_settings(models, native_subscription_pool=1))
 		self.assertEqual([m["model"] for m in spec["models"]], [f"m{i}" for i in range(12)])
 		self.assertEqual([m["order"] for m in spec["models"]], list(range(12)))
+
+
+def _keyrow(model, provider, order, enabled=1):
+	return frappe._dict(
+		model=model,
+		tier="strong",
+		order=order,
+		enabled=enabled,
+		credential_type="api_key",
+		provider=provider,
+		api_key="sk",
+		accounts=[],
+	)
+
+
+class TestEveryNativePickNamesItsOwnProvider(unittest.TestCase):
+	def _pick(self, models, model, native=True):
+		settings = _settings(models, native_subscription_pool=1 if native else 0)
+		conv = frappe._dict(model_override=model)
+		with (
+			patch.object(turn_handler.frappe, "get_single", return_value=settings),
+			patch.object(turn_handler, "_is_native_claude_pick", return_value=False),
+		):
+			return turn_handler._resolve_model_and_provider(conv)
+
+	def test_a_pool_without_a_claude_member_pins_each_sign_in_by_its_upstream(self):
+		models = [
+			_sub("gpt-5.6-terra", "openai", order=0, accounts=[_acct("openai", "O1")]),
+			_sub("grok-4.3", "xai", order=1, accounts=[_acct("xai", "X1")]),
+		]
+		self.assertEqual(self._pick(models, "grok-4.3"), ("grok-4.3", "xai"))
+		self.assertEqual(self._pick(models, "gpt-5.6-terra"), ("gpt-5.6-terra", "openai"))
+		# The live bug: the picked ref was "openai/grok-4.3".
+		model, provider = self._pick(models, "grok-4.3")
+		self.assertEqual(
+			gateway_ids.model_ref_for_gateway(provider, model, frappe._dict(V11)), "xai/grok-4.3"
+		)
+
+	def test_the_first_row_in_pool_order_wins_when_two_rows_serve_one_model(self):
+		sub = _sub("gpt-5.5", "openai", order=1, accounts=[_acct("openai", "O1")])
+		self.assertEqual(
+			self._pick([sub, _keyrow("gpt-5.5", "openai_compat", 0)], "gpt-5.5")[1], "openai_compat-0"
+		)
+		self.assertEqual(self._pick([sub, _keyrow("gpt-5.5", "openai_compat", 2)], "gpt-5.5")[1], "openai")
+
+	def test_an_api_key_row_uses_the_id_the_fleet_renders_for_it(self):
+		# Fleet numbers the enabled API-key chat rows in pool order: sign-ins, disabled rows and
+		# image models do not take a number, so a reorder or a disable keeps the numbering.
+		models = [
+			_keyrow("deepseek-chat", "deepseek", 2),
+			_keyrow("skipped", "groq", 0, enabled=0),
+			_sub("gpt-5.5", "openai", order=1, accounts=[_acct("openai", "O1")]),
+			_keyrow("gpt-image-2", "openai_compat", 2),
+			_keyrow("llama-3.3", "groq", 3),
+		]
+		self.assertEqual(self._pick(models, "deepseek-chat")[1], "deepseek-0")
+		self.assertEqual(self._pick(models, "llama-3.3")[1], "groq-1")
+		self.assertEqual(self._pick(models, "gpt-5.5")[1], "openai")
+
+	def test_a_model_id_with_a_slash_is_pinned_as_provider_then_the_whole_id(self):
+		models = [
+			_keyrow("anthropic/claude-sonnet-5", "openrouter", 0),
+			_keyrow("deepseek/deepseek-r1", "openrouter", 1),
+		]
+		model, provider = self._pick(models, "deepseek/deepseek-r1")
+		self.assertEqual(provider, "openrouter-1")
+		ref = gateway_ids.model_ref_for_gateway(provider, model, frappe._dict(V11))
+		self.assertEqual(ref, "openrouter-1/deepseek/deepseek-r1")
+
+	def test_the_2026_11_rename_is_applied_last_and_never_to_a_numbered_id(self):
+		v11 = frappe._dict(V11)
+		self.assertEqual(
+			gateway_ids.model_ref_for_gateway("moonshot-0", "kimi-k2.6", v11), "moonshot-0/kimi-k2.6"
+		)
+		self.assertEqual(gateway_ids.model_ref_for_gateway("xai", "grok-4.3", v11), "xai/grok-4.3")
+
+	def test_a_model_no_row_serves_has_no_provider_and_a_sidecar_tenant_is_unchanged(self):
+		models = [_sub("grok-4.3", "xai", order=0, accounts=[_acct("xai", "X1")])]
+		self.assertEqual(turn_handler._native_pick_provider(_settings(models), "nothing"), None)
+		self.assertEqual(self._pick(models, "grok-4.3", native=False), ("grok-4.3", None))
+
+	def test_one_shot_and_title_pins_use_the_same_resolved_provider(self):
+		models = [
+			_sub("gpt-5.6-terra", "openai", order=0, accounts=[_acct("openai", "O1")]),
+			_sub("grok-4.3", "xai", order=1, accounts=[_acct("xai", "X1")]),
+		]
+		model, provider = self._pick(models, "grok-4.3")  # what title / polish / suggestions / prewarm get
+		session = object.__new__(AgentSession)
+		with (
+			patch.object(AgentSession, "set_session_model") as pin,
+			patch("jarvis.chat.agent_client._log_pinned_oneshot"),
+			patch.object(native_runtime.frappe, "get_cached_value", side_effect=lambda *a: V11.get(a[2])),
+		):
+			session._apply_oneshot_model("k", model, provider, "idem")
+		self.assertEqual(pin.call_args.args[:2], ("k", "xai/grok-4.3"))
+		# no pick, no pin: an Auto conversation's one-shots never name a ref the gateway lacks
+		with (
+			patch.object(
+				turn_handler.frappe, "get_single", return_value=_settings(models, native_subscription_pool=1)
+			),
+		):
+			self.assertEqual(
+				turn_handler._resolve_model_and_provider(frappe._dict(model_override="")), ("", None)
+			)
