@@ -40,12 +40,12 @@ export function syncMessage(agent) {
 	return (agent.sync && agent.sync.message) || "";
 }
 
-// Retry is for a failure, and for a sync the server left Pending with a reason
-// (a busy runtime, a rate limit): both only move when the user asks again.
+// Retry is for any enabled agent that is not synced: a failure, a sync the server left
+// Pending with a reason (a busy runtime, a rate limit), and a sync job that never ran,
+// which has no reason at all. Another send while one is queued does no harm.
 export function canRetrySync(agent) {
 	if (!agent.enabled) return false;
-	const status = (agent.sync && agent.sync.status) || "Pending";
-	return status === "Failed" || (status === "Pending" && !!syncMessage(agent));
+	return ((agent.sync && agent.sync.status) || "Pending") !== "Synced";
 }
 
 export function isSyncing(agent) {

@@ -21,6 +21,9 @@ export function useUserAgents() {
 	const error = ref("");
 	let timer = null;
 	let polls = 0;
+	// Whether a read ever answered. Until then a failure hides the tab; after it, a
+	// failed reload keeps the tab and the list that is on screen.
+	let loaded = false;
 
 	const atCap = computed(() => agents.value.length >= maxAgents.value);
 
@@ -32,9 +35,9 @@ export function useUserAgents() {
 			if (res.max_agents) maxAgents.value = res.max_agents;
 			agents.value = res.agents || [];
 			error.value = "";
+			loaded = true;
 		} catch (e) {
-			// A quiet re-read that fails keeps what is on screen.
-			if (!quiet) {
+			if (!loaded) {
 				enabled.value = false;
 				agents.value = [];
 			}

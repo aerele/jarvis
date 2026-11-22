@@ -67,6 +67,18 @@ describe("useUserAgents", () => {
 		expect(state.error.value).toBe("Jarvis is offline.");
 	});
 
+	it("keeps the tab and the list when a later reload fails", async () => {
+		api.listUserAgents
+			.mockResolvedValueOnce({ enabled: true, max_agents: 5, agents: [agent("a")] })
+			.mockRejectedValueOnce({ messages: ["Jarvis is offline."] });
+		const { state } = harness();
+		await state.load();
+		await state.load();
+		expect(state.enabled.value).toBe(true);
+		expect(state.agents.value).toHaveLength(1);
+		expect(state.error.value).toBe("Jarvis is offline.");
+	});
+
 	it("re-reads while a sync is pending and stops once it settles", async () => {
 		api.listUserAgents
 			.mockResolvedValueOnce({

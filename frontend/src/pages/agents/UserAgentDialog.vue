@@ -208,7 +208,9 @@ const dayOptions = computed(() =>
 	form.frequency === "weekly" ? WEEKDAY_OPTIONS : DAY_OF_MONTH_OPTIONS
 );
 const syncText = computed(() => (props.agent ? syncMessage(props.agent) : ""));
-const retryable = computed(() => !!props.agent && canRetrySync(props.agent));
+// Shown with a stored sentence only: a sync that just started is not worth a button here
+// (the row's menu still offers Retry sync for one that never settles).
+const retryable = computed(() => !!props.agent && !!syncText.value && canRetrySync(props.agent));
 
 // Seeded when the dialog opens, never when the host hands back the agent a Save just
 // created: that would wipe what the user is still looking at.

@@ -65,10 +65,11 @@ describe("stateBadge", () => {
 });
 
 describe("sync helpers", () => {
-	it("offers a retry for a failure and for a pending sync that has a reason", () => {
+	it("offers a retry for any enabled agent that is not synced", () => {
 		expect(canRetrySync(withSync({ status: "Failed" }))).toBe(true);
 		expect(canRetrySync(withSync({ status: "Pending", message: "Busy." }))).toBe(true);
-		expect(canRetrySync(withSync({ status: "Pending" }))).toBe(false);
+		// A job that never ran leaves Pending with no reason.
+		expect(canRetrySync(withSync({ status: "Pending" }))).toBe(true);
 		expect(canRetrySync(agent())).toBe(false);
 		expect(canRetrySync(withSync({ status: "Failed" }, { enabled: false }))).toBe(false);
 	});
