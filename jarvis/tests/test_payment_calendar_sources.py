@@ -1194,7 +1194,8 @@ class TestRepairRebuild(EngineCase):
 	def test_repair_rebuild_is_one_pass(self):
 		engine, keys = self.synthetic(repairs=3000, normal=0)
 		original = []
-		_, seen = self.run_build(engine, keys, lambda report: original.append(report.data))
+		with patch.object(sources, "source_profile", return_value=SimpleNamespace(major="16")):
+			_, seen = self.run_build(engine, keys, lambda report: original.append(report.data))
 		self.assertEqual(len(seen), 3000)
 		# No repair saw a rebuilt list; the single rebuild came after the loop.
 		self.assertTrue(all(data is original[0] for data in seen))
@@ -1239,7 +1240,8 @@ class TestRepairRebuild(EngineCase):
 
 	def test_err_journals_become_a_set(self):
 		engine, keys = self.synthetic(repairs=1, normal=1)
-		self.run_build(engine, keys)
+		with patch.object(sources, "source_profile", return_value=SimpleNamespace(major="16")):
+			self.run_build(engine, keys)
 		self.assertEqual(engine.err_journals, {"JV-1", "JV-2"})
 		engine, keys = self.synthetic(repairs=1, normal=1)
 		with patch.object(sources, "source_profile", return_value=SimpleNamespace(major="15")):
