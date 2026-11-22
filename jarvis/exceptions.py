@@ -274,11 +274,16 @@ class AdminUnreachableError(JarvisError):
 
 	``status_code`` is the HTTP status admin (or a proxy in front of it) answered
 	with, None for a transport failure. The error push reads it to tell a gateway
-	502/503/504 from admin refusing a request."""
+	502/503/504 from admin refusing a request.
 
-	def __init__(self, *args, status_code: int | None = None):
+	``admin_code`` is admin's own ``error.code`` when its envelope carried one
+	(a 5xx or an ``ok: false`` answer), else "". Deliberately not ``code``: callers
+	that read ``code`` treat it as a refusal, and this class is not one."""
+
+	def __init__(self, *args, status_code: int | None = None, admin_code: str = ""):
 		super().__init__(*args)
 		self.status_code = status_code
+		self.admin_code = admin_code
 
 
 SITE_IS_COPY_CODE = "site_is_copy"

@@ -19,6 +19,8 @@ has them as they were.
 
 from __future__ import annotations
 
+import re
+
 import frappe
 from frappe.utils import cint, now_datetime
 
@@ -45,9 +47,37 @@ Your owner's instructions:
 _NO_SHELL = "- You have no shell and cannot write files."
 _SHELL = "- Your shell and files live in your own sandbox. Keep work there."
 
+# Codes after which the same push can work a minute later: the row stays Pending and
+# Retry sync is offered. Every other code, known or not, marks the row Failed.
 RETRYABLE = frozenset(
-	{"apply_in_progress", "RateLimitExceeded", "FleetError", "admin_unreachable", "changed_during_sync"}
+	{
+		"apply_in_progress",
+		"job_running",
+		"overloaded",
+		"healthz_timeout",
+		"user_agents_not_loaded",
+		"RateLimitExceeded",
+		"FleetError",
+		"admin_unreachable",
+		"changed_during_sync",
+	}
 )
+# Failures on the workspace side that only support can fix. They, and any code this
+# bench does not know, get the support sentence with the code in it.
+NEEDS_SUPPORT = frozenset(
+	{
+		"roster_shape_ambiguous",
+		"sandbox_registry_unreadable",
+		"user_agents_unreadable",
+		"sandbox_keygen_failed",
+		"sandbox_users_failed",
+		"sandbox_workspace_refresh_failed",
+	}
+)
+_SUPPORT_SENTENCE = (
+	"Jarvis could not set up this agent on your workspace. Contact support and share this code: {code}."
+)
+_CODE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{0,63}")
 _SENTENCES = {
 	"InvalidUserAgents": "The runtime refused this agent's settings. Check its instructions and tools, then save again.",
 	"NoRunningTenant": "Your Jarvis workspace is not running right now. Use Retry sync once it is back.",
@@ -56,6 +86,10 @@ _SENTENCES = {
 	"user_agents_unsupported_image": "This workspace runs an older Jarvis runtime that cannot host custom agents. Ask support to update it, then use Retry sync.",
 	"sandbox_image_unconfigured": "Shell access is not set up on this workspace yet. Turn off Allow shell, or ask support to set it up.",
 	"apply_in_progress": "Another change is being applied to your workspace. Use Retry sync in a minute.",
+	"job_running": "Your workspace is busy with another job right now. Use Retry sync in a minute.",
+	"overloaded": "Your workspace is too busy to apply this agent right now. Use Retry sync in a minute.",
+	"healthz_timeout": "Your workspace restarted to apply this agent and did not come back in time. Use Retry sync in a minute.",
+	"user_agents_not_loaded": "Your workspace has not loaded this agent yet. Use Retry sync in a minute.",
 	"RateLimitExceeded": "Too many agent changes in the last hour. Use Retry sync in a few minutes.",
 	"FleetError": "Jarvis could not apply this agent to your workspace. Use Retry sync in a minute.",
 	"admin_unreachable": "Jarvis could not reach your workspace to apply this agent. Use Retry sync in a minute.",
@@ -135,7 +169,7 @@ def classify(exc: BaseException) -> str:
 		return "RateLimitExceeded"
 	if isinstance(exc, AdminAuthError):
 		return "admin_auth"
-	code = str(getattr(exc, "code", "") or "")
+	code = _safe_code(getattr(exc, "code", ""))
 	if isinstance(exc, AdminValidationError):
 		from jarvis.admin_client import is_method_not_found
 
@@ -145,14 +179,24 @@ def classify(exc: BaseException) -> str:
 			return "admin_outdated"
 		return code or "InvalidUserAgents"
 	if isinstance(exc, AdminUnreachableError):
-		return code or "admin_unreachable"
+		return code or _safe_code(getattr(exc, "admin_code", "")) or "admin_unreachable"
 	return "unexpected"
 
 
+def is_retryable(code: str) -> bool:
+	return code in RETRYABLE
+
+
+def _safe_code(value) -> str:
+	"""An admin code fit to store and show: a short identifier, else ""."""
+	code = str(value or "").strip()
+	return code if _CODE_RE.fullmatch(code) else ""
+
+
 def sentence_for(code: str) -> str:
-	return _SENTENCES.get(code) or (
-		"The runtime refused this change. Use Retry sync, and contact support if it keeps failing."
-	)
+	"""The sentence stored beside ``code``. A code that needs support, or one this
+	bench does not know, names the code so support can act on it."""
+	return _SENTENCES.get(code) or _SUPPORT_SENTENCE.format(code=code or "unknown")
 
 
 def _entry(row) -> dict:
@@ -222,7 +266,7 @@ def _record_failure(code: str) -> None:
 		DOCTYPE, filters={"sync_status": "Pending"}, fields=["name", "enabled", "synced_at"]
 	)
 	carried = [r.name for r in rows if cint(r.enabled) or r.synced_at]
-	_set(carried, "Pending" if code in RETRYABLE else "Failed", code)
+	_set(carried, "Pending" if is_retryable(code) else "Failed", code)
 
 
 def _set(names: list, status: str, code: str, **extra) -> None:

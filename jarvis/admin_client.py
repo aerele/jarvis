@@ -3079,6 +3079,14 @@ _PERMANENT_REJECTION_CODES = frozenset(
 )
 
 
+def _envelope_code(envelope) -> str:
+	"""admin's ``error.code`` from an ``ok: false`` envelope, or "". Only a short
+	identifier is kept, never free text."""
+	err = envelope.get("error") if isinstance(envelope, dict) else None
+	code = str((err or {}).get("code") or "") if isinstance(err, dict) else ""
+	return code if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", code) else ""
+
+
 def _permanent_rejection_code(envelope) -> str:
 	"""admin's ``error.code`` when it names a permanent rejection, else "".
 
@@ -3349,7 +3357,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 				detail=msg,
 			)
 		raise AdminUnreachableError(
-			f"admin returned a {resp.status_code} error: {msg}", status_code=resp.status_code
+			f"admin returned a {resp.status_code} error: {msg}",
+			status_code=resp.status_code,
+			admin_code=_envelope_code(envelope),
 		)
 	if isinstance(envelope, dict) and not envelope.get("ok", True):
 		err = envelope.get("error", {}) or {}
@@ -3366,7 +3376,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		# omitted - the bench knows where it's pointing.
 		if _permanent_rejection_code(envelope):
 			raise AdminRejectedError(f"{code}: {msg}", code=code, detail=msg)
-		raise AdminUnreachableError(f"{code}: {msg}", status_code=resp.status_code)
+		raise AdminUnreachableError(
+			f"{code}: {msg}", status_code=resp.status_code, admin_code=_envelope_code(envelope)
+		)
 	from jarvis.chat.runtime_profile import private_connection
 
 	return private_connection(envelope.get("data", envelope) if isinstance(envelope, dict) else envelope)
