@@ -87,11 +87,44 @@ def _version_count():
 	return frappe.db.count("Version", {"ref_doctype": SETTINGS})
 
 
+def _existing_companies(count):
+	return frappe.get_all("Company", pluck="name", order_by="name", limit=count)
+
+
 def _companies(count):
-	names = frappe.get_all("Company", pluck="name", order_by="name", limit=count)
-	if len(names) < count:
-		raise AssertionError(f"test site needs {count} Company rows")
+	"""`count` company names: the site's own, and fresh bare rows (this test's transaction) for the rest.
+
+	A CI site can have one company or none. The settings check only asks whether a name exists, so a bare row
+	made by `db_insert` (no accounts, no hooks) is enough; `tearDown` rolls it back.
+	"""
+	names = _existing_companies(count)
+	for index in range(len(names), count):
+		name = f"_PCR Company {frappe.generate_hash(length=8)} {index}"
+		doc = frappe.get_doc(
+			{
+				"doctype": "Company",
+				"company_name": name,
+				"abbr": f"PCR{frappe.generate_hash(length=4)}".upper(),
+				"default_currency": "INR",
+				"country": "India",
+			}
+		)
+		doc.name = name
+		doc.db_insert()
+		_made_companies.append(name)
+		names.append(name)
 	return names
+
+
+# Fresh company rows of this run: a settings save can commit, so `tearDown` deletes them by name.
+_made_companies: list[str] = []
+
+
+def _remove_made_companies():
+	frappe.db.rollback()
+	while _made_companies:
+		frappe.db.delete("Company", {"name": _made_companies.pop()})
+	frappe.db.commit()
 
 
 class RoutingSettingsCase(FrappeTestCase):
@@ -113,7 +146,7 @@ class RoutingSettingsCase(FrappeTestCase):
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
-		frappe.db.rollback()
+		_remove_made_companies()
 
 
 class TestReaderSettingsFields(RoutingSettingsCase):

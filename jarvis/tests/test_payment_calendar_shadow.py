@@ -54,10 +54,11 @@ _site_key = []
 
 
 def setUpModule():
-	"""The CI site has no `encryption_key`; every digest needs one. Set for the whole module.
+	"""Use a fixed test key and save the site key for module cleanup.
 
-	It is set on `frappe.conf` directly, not with a patcher: the cases call `patch.stopall`, which would stop it.
-	The explicit no-key tests patch an empty key themselves and put this one back.
+	Frappe reloads `frappe.local.conf` at class cleanup, so each setup must set the key again.
+	Use direct assignment: `patch.stopall` must not remove the key before Redis cleanup.
+	The explicit no-key tests patch an empty key and restore the test key.
 	"""
 	_site_key.append(frappe.conf.get("encryption_key"))
 	frappe.conf["encryption_key"] = MODULE_KEY
@@ -65,6 +66,7 @@ def setUpModule():
 
 def tearDownModule():
 	try:
+		frappe.conf["encryption_key"] = MODULE_KEY
 		purge_keys()
 	finally:
 		original = _site_key.pop() if _site_key else None
@@ -130,6 +132,7 @@ class ShadowCase(FrappeTestCase):
 	"""Dispatch, units and the gate with the settings, the clock, the queue and the commit patched."""
 
 	def setUp(self):
+		frappe.conf["encryption_key"] = MODULE_KEY
 		frappe.set_user("Administrator")
 		key_prefix()
 		purge_keys()
@@ -1146,6 +1149,7 @@ class RealShadowCase(TestCase):
 
 	def setUp(self):
 		require_calendar_test_site()
+		frappe.conf["encryption_key"] = MODULE_KEY
 		frappe.set_user("Administrator")
 		self.fx = CalendarFixtures()
 		self.fx.invoice((100,))
@@ -1442,6 +1446,7 @@ class TestGate(ShadowCase):
 
 class TestErrorLogOnceExtension(FrappeTestCase):
 	def setUp(self):
+		frappe.conf["encryption_key"] = MODULE_KEY
 		self.log_error = patch.object(frappe, "log_error").start()
 		self.addCleanup(patch.stopall)
 		self.addCleanup(frappe.cache.delete_keys, "jarvis:pcal:errlog:shadow-test-op")
