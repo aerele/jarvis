@@ -1708,8 +1708,8 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 			"a confirmed direct apply must stamp llm_direct_synced_at (is_ready_for_chat's gate)",
 		)
 
-	def test_lone_kimi_subscription_still_reaches_the_pool_push(self):
-		"""Kimi has no agent-native auth flow, so it must still take the pool
+	def test_lone_unrenderable_subscription_still_reaches_the_pool_push(self):
+		"""xAI has no fleet-template arm on a sidecar tenant, so it must still take the pool
 		leg - the seam-level counterpart to the compute_pool_mode unit test."""
 		from jarvis import onboarding
 
@@ -1722,12 +1722,12 @@ class TestRT6LoneSubscriptionDirectLeg(_RT3SettingsTestCase):
 			frappe_patch("jarvis.admin_client.post_subscription_connect") as mock_connect,
 		):
 			out = onboarding.save_llm_pool(
-				frappe.as_json(self._lone_sub_payload(upstream="kimi", agent_provider="kimi")),
+				frappe.as_json(self._lone_sub_payload(upstream="xai", agent_provider="xai")),
 				preset=None,
 				routing_mode="failover",
 			)
 
-		self.assertTrue(len(pool_calls) >= 1, "a lone Kimi subscription must still push /llm-pool")
+		self.assertTrue(len(pool_calls) >= 1, "a lone xAI subscription must still push /llm-pool")
 		self.assertNotEqual(
 			out.get("last_sync_status", ""), "", "the pool leg must have run and stamped a status"
 		)

@@ -856,9 +856,29 @@ class JarvisSettings(Document):
 			):
 				self.llm_api_key = api_key_val
 
+	def _refuse_new_kimi_sign_in(self):
+		"""No NEW Kimi sign-in account (see ``pool_serialize.KIMI_SIGNIN_REMOVED_MESSAGE``); a saved
+		one keeps working. Runs in ``validate``, not ``on_update``: here the saved rows still read
+		their OLD encrypted accounts, while after the save both documents read the new ones and the
+		comparison would see no difference."""
+		from jarvis.jarvis.pool_serialize import new_kimi_subscription_errors
+
+		if not self.get("models"):
+			return
+		before = self.get_doc_before_save()
+		if before is None and not self.is_new():
+			# A save path that skipped the "before" load (a background job, flags): read the saved
+			# rows, so a Kimi sign-in that is already saved is never taken for a new one.
+			# Single doctype, fresh read of the stored rows; this is validate, before the new rows land.
+			before = frappe.get_single("Jarvis Settings")
+		errors = new_kimi_subscription_errors(self, before)
+		if errors:
+			frappe.throw("<br>".join(errors), title="LLM Configuration")
+
 	def validate(self):
 		self._preserve_agent_catalog_state()
 		self._guard_admin_only_fields()
+		self._refuse_new_kimi_sign_in()
 		# #731: a genuine ON -> OFF flip of the wiki toggle enqueues a container
 		# scrub in on_update. Capture the change here, the same way
 		# llm_auth_mode_changed is captured below: has_value_changed compares the

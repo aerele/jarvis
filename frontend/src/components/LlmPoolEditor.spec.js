@@ -1266,6 +1266,24 @@ describe("subscription source chip labels the real provider", () => {
 	});
 });
 
+describe("Kimi sign-in is not offered for a new connection", () => {
+	it("leaves Kimi out of the provider options but keeps its label for a saved row", async () => {
+		const w = await mountEditor();
+		expect(w.vm.upstreamLabels).toEqual(["OpenAI", "Anthropic", "xAI Grok"]);
+		expect(w.vm.OFFERED_UPSTREAMS.map((o) => o.value)).not.toContain("kimi");
+		// a saved Kimi row still reads as Kimi, in its label and its chip
+		expect(w.vm.upstreamLabelOf("kimi")).toBe("Kimi (Moonshot)");
+		expect(w.vm.upstreamValueOf("Kimi (Moonshot)")).toBe("kimi");
+	});
+
+	it("points the customer to a membership key through OpenAI-Compatible", async () => {
+		const w = await mountEditor();
+		expect(w.vm.KIMI_KEY_HINT).toContain("https://api.kimi.com/coding/v1");
+		expect(w.vm.KIMI_KEY_HINT).toContain("kimi-for-coding");
+		expect(w.vm.KIMI_KEY_HINT).toContain("OpenAI-Compatible");
+	});
+});
+
 describe("row logo matches the row's own provider (jarvis: AI-models row icon bug)", () => {
 	// seedRows() backfills a UI-only `upstream` field onto every row (subscription
 	// rows need it), defaulting to "openai" when a row has no accounts to read it
@@ -1866,5 +1884,38 @@ describe("edit panel footer layout (#809)", () => {
 		await idle();
 
 		expect(actionRows(w)).toEqual([["Connect", "Cancel"]]);
+	});
+});
+
+describe("reordering the accounts of one subscription row (live finding 2026-11-23)", () => {
+	const accounts = () => [account("SUB_a", "a@x.com"), account("SUB_b", "b@x.com")];
+	const refs = (models) => models[0].subscription.accounts.map((a) => a.account_ref);
+
+	it("saves the swapped order and shows it again after the reload", async () => {
+		setPool([subModel("gpt-5", 0, accounts())]);
+		const w = await mountEditor();
+		w.vm.moveAccount(w.vm.rows[0], 1, -1);
+		await w.vm.applyOrder();
+		await idle();
+		expect(refs(savedModels())).toEqual(["SUB_b", "SUB_a"]);
+		expect(w.vm.rows[0].accounts.map((a) => a.account_ref)).toEqual(["SUB_b", "SUB_a"]);
+		expect(w.vm.orderDirty).toBe(false);
+	});
+
+	it("keeps the unapplied banner while the apply is still pending, then clears it", async () => {
+		setPool([subModel("gpt-5", 0, accounts())]);
+		syncStatus = {
+			...syncStatus,
+			last_sync_status: "pending: admin applying config",
+			pending: true,
+		};
+		const w = await mountEditor();
+		w.vm.moveAccount(w.vm.rows[0], 1, -1);
+		const applying = w.vm.applyOrder();
+		await idle();
+		expect(w.vm.orderDirty).toBe(true); // the apply has not settled: the banner is honest
+		syncStatus = { ...syncStatus, last_sync_status: "ok (pool via admin)", pending: false };
+		await applying;
+		expect(w.vm.orderDirty).toBe(false);
 	});
 });

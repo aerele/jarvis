@@ -358,6 +358,11 @@ def begin_pool_account_signin(provider: str, model: str) -> dict:
 		p = get_provider(provider)
 	except UnknownProviderError as e:
 		return _err("unknown_provider", str(e))
+	if p.get("agent_provider") == "kimi":
+		# No new Kimi sign-in (see pool_serialize.KIMI_SIGNIN_REMOVED_MESSAGE); a saved one keeps working.
+		from jarvis.jarvis.pool_serialize import KIMI_SIGNIN_REMOVED_MESSAGE
+
+		return _err("kimi_signin_removed", KIMI_SIGNIN_REMOVED_MESSAGE)
 	if p.get("grant_type") == "device_code":
 		return _begin_device_signin(provider, model)
 	return _begin_signin(provider, model, pool=True)
@@ -740,6 +745,13 @@ def poll_pool_account_signin(nonce: str) -> dict:
 		return _err("unknown_nonce", "nonce not recognized")
 
 	p = get_provider(entry["provider"])
+	if p.get("agent_provider") == "kimi":
+		# A Kimi device flow begun before the sign-in was withdrawn cannot finish: nothing new may
+		# be minted. A saved Kimi account is unaffected (the token is not touched here).
+		from jarvis.jarvis.pool_serialize import KIMI_SIGNIN_REMOVED_MESSAGE
+
+		frappe.cache.hdel(_CACHE_KEY, nonce)
+		return _err("kimi_signin_removed", KIMI_SIGNIN_REMOVED_MESSAGE)
 	headers = dict(p.get("device_headers") or {})
 	headers["X-Msh-Device-Id"] = entry.get("device_id", "")
 	try:

@@ -52,7 +52,7 @@ class _SaveOpBase(_RT3SettingsTestCase):
 		s.db_set("proxy_active", 0, update_modified=False)
 		# jarvis#715 gives a LONE subscription its own routing decision, keyed
 		# partly on "has this workspace ever synced through the pool leg". This
-		# class's subscriptions use upstream "kimi" precisely so that decision
+		# class's subscriptions use upstream "xai" precisely so that decision
 		# stays out of these tests' way (see _capture/_sub_models below), but
 		# clear both markers anyway for determinism against a shared, DB-polluting
 		# site.
@@ -66,18 +66,17 @@ class _SaveOpBase(_RT3SettingsTestCase):
 		frappe.db.commit()
 
 	def _capture(self, ref="SUB_op0001", subject="acct-op-1"):
-		# Kimi (Moonshot), DELIBERATELY: it has no agent-native auth flow, so a
-		# lone Kimi subscription always stays on the pool leg regardless of
-		# jarvis#715's new lone-renderable-subscription exception. These tests are
-		# about POOL-leg plumbing (capture consumption, resumability, idempotency
-		# threading, the apply-operation descriptor) - not about which leg a
-		# subscription takes, which is covered on its own in
-		# test_unified_llm_config.py and test_llm_pool_endpoints.py.
-		blob = {"type": "oauth", "provider": "kimi", "access": "AT-op", "refresh": "RT-op"}
+		# xAI, DELIBERATELY: on a sidecar tenant it has no fleet-template arm, so a lone xAI
+		# subscription always stays on the pool leg regardless of jarvis#715's lone-renderable
+		# subscription exception. (Kimi was used before its sign-in stopped being offered.)
+		# These tests are about POOL-leg plumbing (capture consumption, resumability, idempotency
+		# threading, the apply-operation descriptor) - not about which leg a subscription takes,
+		# which is covered on its own in test_unified_llm_config.py and test_llm_pool_endpoints.py.
+		blob = {"type": "oauth", "provider": "xai", "access": "AT-op", "refresh": "RT-op"}
 		return pc.create_capture(
-			provider="Kimi (Moonshot)",
-			upstream="kimi",
-			agent_provider="kimi",
+			provider="xAI Grok",
+			upstream="xai",
+			agent_provider="xai",
 			oauth_blob=json.dumps(blob),
 			account_email="op@example.com",
 			account_ref=ref,
@@ -95,7 +94,7 @@ class _SaveOpBase(_RT3SettingsTestCase):
 					"rotation": "sticky",
 					"accounts": [
 						{
-							"upstream": "kimi",
+							"upstream": "xai",
 							"account_ref": ref,
 							"label": "op@example.com",
 							"capture_id": cap_id,
@@ -433,8 +432,8 @@ class TestSaveLlmPoolSwitch(_SaveOpBase):
 	def test_a_first_activation_is_not_a_switch_and_uses_sync_pool_now(self):
 		"""setUp's baseline (llm_pool_synced_at and llm_direct_synced_at both
 		unset) is a genuinely fresh workspace - even though this pool's lone
-		Kimi subscription computes proxy_active=True (Kimi has no agent-native
-		auth flow, so it is never lone-direct-capable - see
+		xAI subscription computes proxy_active=True (xAI has no fleet-template arm
+		on a sidecar tenant, so it is never lone-direct-capable - see
 		compute_proxy_active), there is no established container to protect,
 		so this first save must NOT be treated as a switch and must keep
 		using the synchronous descriptor-obtain path, exactly like

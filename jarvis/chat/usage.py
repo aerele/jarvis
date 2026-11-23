@@ -31,6 +31,7 @@ import frappe
 from frappe.query_builder.functions import Coalesce
 
 from jarvis.chat import txn
+from jarvis.chat.gateway_ids import provider_from_gateway
 
 # The pool-mode "Auto" sentinel model id. turn_handler._session_model_for
 # patches an unpinned BIFROST-fronted pool conversation's agent SESSION to
@@ -291,7 +292,9 @@ def resolved_model_identity(row: dict | None) -> tuple[str, str]:
 	reading it costs nothing extra: finalize already polls it for usage."""
 	if not isinstance(row, dict):
 		return "", ""
-	return (row.get("model") or "").strip(), (row.get("modelProvider") or "").strip()
+	# The gateway names a few providers differently on agent runtime 2026.11 (moonshot_api);
+	# the rest of the app, and admin, know the plain id.
+	return (row.get("model") or "").strip(), provider_from_gateway((row.get("modelProvider") or "").strip())
 
 
 def _context_capacity_and_pct(row: dict | None, used_tokens: int) -> tuple[int, float]:

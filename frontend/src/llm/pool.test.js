@@ -1159,3 +1159,47 @@ test("isContainerOnlyRow: ollama and vllm keep their carve-out with no base url"
 	assert.equal(isContainerOnlyRow({ provider: "vLLM (local)", baseUrl: "" }), true);
 	assert.equal(isContainerOnlyRow(null), false);
 });
+
+test("poolBackstopWarning: a native tenant never needs an API-key backstop", () => {
+	const models = [
+		{ credentialType: "subscription", upstream: "openai" },
+		{ credentialType: "subscription", upstream: "xai" },
+	];
+	assert.match(poolBackstopWarning(models), /backstop/i);
+	assert.equal(poolBackstopWarning(models, false), poolBackstopWarning(models));
+	assert.equal(poolBackstopWarning(models, true), "");
+});
+
+test("validatePool: the proxy-era Claude combination and position rules are skipped on a native tenant", () => {
+	const claude = {
+		provider: "Anthropic",
+		model: "claude-opus-5",
+		subscription: { accounts: [{ upstream: "anthropic", account_ref: "C1" }] },
+	};
+	const chatgpt = {
+		provider: "OpenAI",
+		model: "gpt-5.6-terra",
+		subscription: { accounts: [{ upstream: "openai", account_ref: "O1" }] },
+	};
+	const grok = {
+		provider: "xAI Grok",
+		model: "grok-4.3",
+		subscription: { accounts: [{ upstream: "xai", account_ref: "X1" }] },
+	};
+	// Claude in the middle, and next to xAI: refused with the proxy, allowed natively.
+	assert.equal(validatePool([chatgpt, claude, grok], null).ok, false);
+	assert.equal(validatePool([chatgpt, claude, grok], null, true).ok, true);
+	// One Claude LOGIN: several Claude models on it are fine natively, a second login is not.
+	const second = {
+		...claude,
+		model: "claude-sonnet-5",
+		subscription: { accounts: [{ upstream: "anthropic", account_ref: "C1" }] },
+	};
+	assert.equal(validatePool([claude, second], null, true).ok, true);
+	assert.equal(validatePool([claude, second], null, false).ok, false);
+	const other = {
+		...second,
+		subscription: { accounts: [{ upstream: "anthropic", account_ref: "C2" }] },
+	};
+	assert.equal(validatePool([claude, other], null, true).ok, false);
+});

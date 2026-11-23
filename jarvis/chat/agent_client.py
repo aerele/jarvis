@@ -55,6 +55,7 @@ from jarvis.chat.device import (
 	update_device_token,
 )
 from jarvis.chat.events import parse_event
+from jarvis.chat.gateway_ids import alternate_ref, model_ref_for_gateway
 
 # #773: every socket call of a session goes through one gated, deadline-bounded IO
 # path; the names are re-exported here for callers of this module.
@@ -650,6 +651,13 @@ _MEDIA_URL_RE = re.compile(r"^/api/chat/media/outgoing/[A-Za-z0-9%._~:@-]+/[0-9a
 # Mirrors generated_media._MAX_MEDIA_PER_TURN (a separate cap: these blocks are
 # a distinct delivery mechanism from the native MEDIA:/embedded-path markers).
 _MAX_MEDIA_URLS_PER_TURN = 8
+
+
+# The path an ``artifacts.download`` answer may carry: the outgoing media route for one
+# session and attachment, optionally with the ``mediaTicket`` query.
+_TICKET_PATH_RE = re.compile(
+	r"^/api/chat/media/outgoing/([A-Za-z0-9%._~:@-]+)/([0-9a-f-]{36})/full(\?mediaTicket=[A-Za-z0-9%._~=&-]+)?$"
+)
 
 
 def _valid_media_url(url) -> bool:
@@ -1304,6 +1312,31 @@ class AgentSession:
 		)
 		return res.get("payload") or {}
 
+	def artifact_download_url(
+		self, session_key: str, artifact_id: str, *, timeout_s: float = 15
+	) -> str | None:
+		"""``artifacts.download`` for a managed outgoing media artifact: the gateway answers with a
+		short-lived path carrying a ``mediaTicket`` (and its expiry). The ticket is the authority
+		for the HTTP GET, which sends no other credential. The path is accepted only when it is a
+		plain outgoing-media path for the SAME session key and attachment that were asked for
+		(no traversal, scheme or host); otherwise None."""
+		from urllib.parse import unquote
+
+		res = self._request(
+			"artifacts.download",
+			{"sessionKey": session_key, "artifactId": artifact_id},
+			timeout_s=timeout_s,
+		)
+		payload = res.get("payload") or res
+		path = payload.get("url") if isinstance(payload, dict) else None
+		if not isinstance(path, str) or ".." in path or "\\" in path or "//" in path.split("?", 1)[0]:
+			return None
+		m = _TICKET_PATH_RE.match(path)
+		attachment = artifact_id.rsplit("_", 1)[-1]
+		if not m or unquote(m.group(1)) != session_key or m.group(2) != attachment:
+			return None
+		return path
+
 	def get_session_messages(
 		self,
 		session_key: str,
@@ -1462,11 +1495,23 @@ class AgentSession:
 		``modelOverrideSource: "auto"`` -- and that marker is not in the sessions.patch
 		schema (the gateway rejects it with INVALID_REQUEST), so not overriding is the
 		supported way to preserve failover. See ``turn_handler._session_model_for``."""
-		self._request(
-			"sessions.patch",
-			{"key": session_key, "model": model_ref},
-			timeout_s=timeout_s,
-		)
+		try:
+			self._request(
+				"sessions.patch",
+				{"key": session_key, "model": model_ref},
+				timeout_s=timeout_s,
+			)
+		except AgentUnreachableError as err:
+			# The stored runtime version can lag a roll by one heartbeat, so the provider id
+			# may be in the wrong form. A pin is idempotent: on a definitive refusal, try the
+			# other form once and, if that fails too, raise the first error.
+			other = alternate_ref(model_ref)
+			if other is None or not is_definitive_refusal(err) or is_session_changed(err):
+				raise
+			try:
+				self._request("sessions.patch", {"key": session_key, "model": other}, timeout_s=timeout_s)
+			except AgentUnreachableError:
+				raise err from None
 
 	# -- Session repair calls (#753) -----------------------------------------
 	# Used only by jarvis.chat.session_repair, before a send. A refusal raises an
@@ -1744,7 +1789,7 @@ class AgentSession:
 		if model:
 			self.set_session_model(
 				session_key,
-				f"{provider}/{model}" if provider else model,
+				model_ref_for_gateway(provider, model),
 				timeout_s=CONNECT_TIMEOUT_SECONDS,
 			)
 

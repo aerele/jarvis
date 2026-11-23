@@ -121,7 +121,11 @@ export function subModelSuggestions(apiSubscriptionModels) {
 export function defaultSubscriptionModel(upstream, catalog) {
 	return ((catalog || {})[upstream] || [])[0] || "";
 }
-export function validatePool(models, preset) {
+// `native`: a tenant on the agent runtime's own failover. The Claude combination and position
+// rules below exist only because of how the proxy sidecars collapsed several sign-ins into one
+// route, so they are skipped there. The Claude backend owns one login: on a native tenant any
+// number of Claude models may share ONE account, and each Claude row still has exactly one.
+export function validatePool(models, preset, native = false) {
 	if (!Array.isArray(models) || models.length === 0)
 		return { ok: false, error: "Add at least one model." };
 	const subscriptionUpstream = (m) => {
@@ -181,12 +185,28 @@ export function validatePool(models, preset) {
 	const claudeIndexes = models
 		.map((m, i) => (m && m.subscription && subscriptionUpstream(m) === "anthropic" ? i : -1))
 		.filter((i) => i >= 0);
-	if (claudeIndexes.length > 1)
+	if (native) {
+		// The Claude backend owns one login per container: any number of Claude MODELS, one account.
+		const refs = new Set(
+			claudeIndexes
+				.flatMap((i) =>
+					(models[i].subscription.accounts || []).map((a) =>
+						(a.account_ref || "").trim()
+					)
+				)
+				.filter(Boolean)
+		);
+		if (refs.size > 1)
+			return {
+				ok: false,
+				error: "A pool supports one Claude account; use the same sign-in for every Claude model.",
+			};
+	} else if (claudeIndexes.length > 1)
 		return { ok: false, error: "Only one Claude subscription model is supported per pool." };
 	const otherSubscriptions = models.filter(
 		(m) => m && m.subscription && subscriptionUpstream(m) !== "anthropic"
 	);
-	if (claudeIndexes.length && otherSubscriptions.length) {
+	if (!native && claudeIndexes.length && otherSubscriptions.length) {
 		if (otherSubscriptions.some((m) => subscriptionUpstream(m) !== "openai"))
 			return {
 				ok: false,
@@ -222,7 +242,11 @@ export function validatePool(models, preset) {
 // validatePool/save shape (a `subscription` object, upstream only on its
 // accounts) - so a caller can pass rows straight from the editor with no
 // normalization step.
-export function poolBackstopWarning(models) {
+//
+// A NATIVE tenant (`native` true: the agent runtime does failover and account rotation itself, no
+// proxy sidecars) needs no API-key leg, so it never warns.
+export function poolBackstopWarning(models, native = false) {
+	if (native) return "";
 	const list = Array.isArray(models) ? models : [];
 	const isSubscription = (m) =>
 		!!(
