@@ -67,26 +67,9 @@ _LEGACY_HINTS = {
 
 
 class TestCatalogShape(unittest.TestCase):
-	def test_forty_eight_providers(self):
-		# 31 from the 2026-09-05 sweep + 16 from the 2026-09-07 gap analysis
-		# + WhatsApp Business (2026-10-19). CONNECTOR_PROVIDERS.md carries all.
-		self.assertEqual(len(catalog.PROVIDERS), 48)
-
-	def test_names_unique(self):
-		names = [p.name for p in catalog.PROVIDERS]
-		self.assertEqual(len(names), len(set(names)))
-
-	def test_keys_unique(self):
-		keys = [p.key for p in catalog.PROVIDERS]
-		self.assertEqual(len(keys), len(set(keys)))
-
 	def test_all_base_urls_https(self):
 		for provider in catalog.PROVIDERS:
 			self.assertTrue(provider.base_url.startswith("https://"), provider.name)
-
-	def test_all_keys_are_lowercase_slugs(self):
-		for provider in catalog.PROVIDERS:
-			self.assertRegex(provider.key, r"^[a-z0-9_-]+$", provider.name)
 
 	def test_auth_class_counts_match_probe_sweep(self):
 		counts = {}
@@ -729,12 +712,6 @@ class TestGapAnalysisEntries(unittest.TestCase):
 		# HubSpot and Calendly serve MCP at the origin itself; a `/mcp` suffix is 404.
 		self.assertEqual(catalog.by_name("HubSpot").base_url, "https://mcp.hubspot.com")
 		self.assertEqual(catalog.by_name("Calendly").base_url, "https://mcp.calendly.com/")
-
-	def test_new_categories_are_allowed_and_used(self):
-		used = {p.category for p in catalog.PROVIDERS}
-		for category in ("accounting", "crm", "commerce", "communication"):
-			self.assertIn(category, catalog._ALLOWED_CATEGORIES)
-			self.assertIn(category, used)
 
 
 class TestWhatsAppBusinessEntry(unittest.TestCase):

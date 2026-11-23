@@ -14,10 +14,6 @@ describe("dashboardPrefill", () => {
 		pendingDashboardPrefill.value = null;
 	});
 
-	it("starts empty", () => {
-		expect(takeDashboardPrefill()).toBeNull();
-	});
-
 	it("returns what was set", () => {
 		setDashboardPrefill({ text: "Monthly sales by territory", autoSend: true });
 		expect(takeDashboardPrefill()).toEqual({

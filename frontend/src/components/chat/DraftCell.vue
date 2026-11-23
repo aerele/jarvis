@@ -76,14 +76,16 @@ function onEscape(ev) {
 	}
 }
 
+// A Link searches its options; a Dynamic Link searches the DocType its controlling field
+// (options) holds on this row, as Desk does (a Payment Entry reference's Name follows its Type).
+const isLinkLike = () => ["Link", "Dynamic Link"].includes(props.field.fieldtype);
+const linkTarget = () =>
+	props.field.fieldtype === "Dynamic Link"
+		? String(props.row[props.field.options] || "")
+		: props.field.options;
+
 function search(ev) {
-	emit(
-		"link-search",
-		props.cellKey,
-		() => props.row[props.field.fieldname],
-		props.field.options,
-		ev
-	);
+	emit("link-search", props.cellKey, () => props.row[props.field.fieldname], linkTarget(), ev);
 }
 </script>
 
@@ -99,7 +101,7 @@ function search(ev) {
 		:aria-describedby="describedby || undefined"
 		>{{ shown() }}</span
 	>
-	<template v-else-if="field.fieldtype === 'Link'">
+	<template v-else-if="isLinkLike()">
 		<input
 			class="jv-action-input"
 			v-model="row[field.fieldname]"

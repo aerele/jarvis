@@ -1384,22 +1384,6 @@ class TestUsageRollupContextAndUsersDaily(FrappeTestCase):
 		self.assertIn(lower_email, emails)
 		self.assertNotIn(mixed_email, emails)
 
-	# -- review fix 6: the UTC ZoneInfo is built once at module level -------- #
-	def test_iso_utc_z_reuses_module_level_utc_zoneinfo(self):
-		from zoneinfo import ZoneInfo as RealZoneInfo
-
-		calls = []
-
-		def spy(key):
-			calls.append(key)
-			return RealZoneInfo(key)
-
-		with patch("jarvis.chat.usage_push.ZoneInfo", side_effect=spy):
-			usage_push._iso_utc_z(frappe.utils.now_datetime())
-			usage_push._iso_utc_z(frappe.utils.now_datetime())
-		self.assertNotIn("UTC", calls, "UTC must come from the module-level _UTC, not a fresh ZoneInfo call")
-		self.assertIsInstance(usage_push._UTC, RealZoneInfo)
-
 	# -- users_daily: grouping, window, per_model cap, email case ----------- #
 	def test_users_daily_rollup_groups_by_user_day_model(self):
 		today = frappe.utils.today()

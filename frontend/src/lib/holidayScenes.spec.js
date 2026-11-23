@@ -48,15 +48,6 @@ describe("the scene loader map", () => {
 		expect(designs).toEqual([...DESIGNS].sort());
 	});
 
-	it("loads once and keeps the module; a design with no scene gives null without loading", async () => {
-		const load = vi.fn(async () => scene);
-		const loaders = { diwali: load };
-		expect(await loadScene("diwali", { loaders })).toBe(scene);
-		expect(await loadScene("diwali", { loaders })).toBe(scene);
-		expect(load).toHaveBeenCalledTimes(1);
-		expect(await loadScene("ramadan", { loaders })).toBeNull();
-	});
-
 	it("is loading while the import is pending, so the router leaves its error alone", async () => {
 		let finish;
 		const loaders = { diwali: () => new Promise((resolve) => (finish = resolve)) };

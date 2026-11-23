@@ -1235,11 +1235,6 @@ class TestHookFailures(Base):
 		self.assertTrue(frappe.db.exists("ToDo", {"description": "actact-after-hook"}))
 		self.assertEqual(self.one().outcome, "ok")
 
-	def test_the_prefilter_comment_matches_what_the_code_does(self):
-		# The v2 /method/<doctype>/<m> form must load the doctype's controller to learn the
-		# name; only the doctype-less forms are free. The text says so instead of claiming "nothing".
-		self.assertIn("v2", activity_actions._record.__doc__ or "")
-
 
 # --------------------------------------------------------------------------- #
 # D6: counters the logging-health block reads

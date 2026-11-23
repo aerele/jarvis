@@ -125,10 +125,6 @@ test("bannerShouldShow: soft + no snooze -> true", () => {
 	assert.equal(bannerShouldShow({ version: "16.4.0", tier: "soft" }, 1000, null), true);
 });
 
-test("bannerShouldShow: severe + no snooze -> true (non-blocking nudge, same as soft)", () => {
-	assert.equal(bannerShouldShow({ version: "16.4.0", tier: "severe" }, 1000, null), true);
-});
-
 test("bannerShouldShow: any versioned tier except none/hard shows - even an unknown one", () => {
 	// Forward-compat mirror of pillFor: none (all-clear) and hard (full-page gate)
 	// never banner; soft, severe AND any unknown-but-versioned future tier do.

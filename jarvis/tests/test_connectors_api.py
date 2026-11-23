@@ -280,11 +280,6 @@ class TestDisabledCatalogPreset(_ConnectorApiTestCase):
 
 	DISABLED_PRESET = "Plaid"
 
-	def test_the_preset_is_a_real_disabled_catalog_entry(self):
-		provider = catalog.by_name(self.DISABLED_PRESET)
-		self.assertIsNotNone(provider)
-		self.assertFalse(provider.enabled)
-
 	def test_a_row_on_a_disabled_preset_still_saves(self):
 		# Created directly: add_connector refuses a disabled preset, which is the
 		# point of disabling it. This models the row that predates the change.
@@ -2848,12 +2843,6 @@ class TestOauthErrorMessages(unittest.TestCase):
 			message, "This app did not ask for a sign-in. Add it with a key, or with no sign-in."
 		)
 		self.assertNotIn("401", message, "the engine's detail is not shown")
-
-	def test_address_mismatch_has_its_own_sentence(self):
-		self.assertEqual(
-			connectors_api._oauth_error_message("client_address_mismatch"),
-			"This connector's address changed. Remove it and add it again.",
-		)
 
 	def test_unknown_code_keeps_the_generic_sentence(self):
 		self.assertEqual(

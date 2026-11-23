@@ -2,8 +2,7 @@
 // dictation, extracted as a PLAIN, importable, unit-tested module (the composer imports it;
 // useDictationRecorder feeds it) exactly like the Relay-Pump eventFence precedent. It owns NO
 // browser APIs: MediaRecorder, `fetch` and IndexedDB are all injected, so its whole contract is
-// testable with `node --test` (see voiceDictationStore.test.js, run in the python suite forever
-// via jarvis/tests/test_voice_dictation_store_client.py).
+// testable with `node --test` (see voiceDictationStore.test.js, run by `npm run test:node`).
 //
 // WHY ONE UNIT PER RECORDING. The previous design cut a long take into independent ~15 s clips
 // and transcribed each one on its own. That destroyed the context a speech model needs: each

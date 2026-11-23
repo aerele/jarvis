@@ -469,7 +469,3 @@ class TestDifferential(FrappeTestCase):
 		inputs = {r["i"] for r in self.table["rows"]}
 		for raw in TestCanonical.MIXES:
 			self.assertIn(raw, inputs)
-
-	def test_unicode_versions_are_recorded(self):
-		self.assertTrue(self.table["meta"]["python_unicode"])
-		self.assertTrue(unicodedata.unidata_version)

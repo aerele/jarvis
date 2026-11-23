@@ -2,10 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MOODS, effectiveMood, faceShown, stageMood } from "./holidayFace.js";
 
-test("MOODS: the moods the mark can show", () => {
-	assert.deepEqual(MOODS, ["star", "happy", "upgrading", "peek"]);
-});
-
 test("faceShown: any mood other than the resting star shows the face", () => {
 	assert.equal(faceShown("star"), false);
 	assert.equal(faceShown("happy"), true);

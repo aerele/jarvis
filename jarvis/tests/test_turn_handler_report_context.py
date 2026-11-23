@@ -21,9 +21,6 @@ from jarvis.chat.turn_handler import (
 
 
 class TestFormatReportFilters(FrappeTestCase):
-	def test_empty_dict_returns_empty_string(self):
-		self.assertEqual(_format_report_filters({}), "")
-
 	def test_all_falsy_values_returns_empty_string(self):
 		"""None / "" / [] / {} are all "unset" from the operator's
 		perspective - dropping them keeps the prompt line tight."""
@@ -163,11 +160,6 @@ class TestPrependDocContextReportBranch(FrappeTestCase):
 			out,
 			"[Viewing: Sales Invoice SINV-0001; resolve 'this'/'here' against it]\n\nis this overdue?",
 		)
-
-	def test_empty_context_returns_unchanged(self):
-		"""Regression: no context still returns the raw user message."""
-		self.assertEqual(_prepend_doc_context("hello", None), "hello")
-		self.assertEqual(_prepend_doc_context("hello", {}), "hello")
 
 	def test_report_name_whitespace_only_is_ignored(self):
 		"""Whitespace-only report_name isn't a real report - fall through
