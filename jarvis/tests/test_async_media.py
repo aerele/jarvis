@@ -311,6 +311,115 @@ class TestJob(unittest.TestCase):
 		nxt.assert_not_called()
 
 
+URL2 = "/api/chat/media/outgoing/jarvis-chat-u-1/9b8c7d6e-1a2b-4c3d-8e4f-5a6b7c8d9e0f/full"
+NOW = "2026-11-23 20:10:00"
+
+
+class TestWhoseImageIsIt(unittest.TestCase):
+	"""The runtime posts a finished image whenever its task ends, possibly after the user's next
+	message (live 2026-11-23). Ownership is decided by order and by what is already attached."""
+
+	def _claim(self, *, me, next_seq, assistants, tools, deliveries, rows=None, age_s=20):
+		"""assistants: [(name, seq, [attached urls])]; tools: [seq]; me: (name, seq)."""
+		from jarvis.chat import generated_media
+
+		def get_all(dt, filters=None, **kw):
+			if filters.get("role") == "assistant":
+				return [
+					{
+						"name": n,
+						"seq": q,
+						"canvas": frappe.as_json([{"source": generated_media._media_url_id(u)} for u in got]),
+					}
+					for n, q, got in assistants
+				]
+			return [
+				{"seq": q, "tool_name": "image_generate", "tool_status": "completed", "creation": NOW}
+				for q in tools
+			]
+
+		am = frappe._dict(seq=me[1], creation=NOW)
+		with (
+			patch.object(turn_handler, "_turn_window", return_value=(am, next_seq, None)),
+			patch.object(turn_handler.frappe, "get_all", side_effect=get_all),
+			patch.object(turn_handler.frappe.utils, "now_datetime", return_value=NOW),
+			patch.object(turn_handler.frappe.utils, "add_to_date", return_value="cutoff"),
+			patch.object(turn_handler.frappe.utils, "time_diff_in_seconds", return_value=age_s),
+		):
+			rels, urls, owed = turn_handler._claim_async_media(
+				me[0],
+				"C",
+				rows or [{"name": "T"}],
+				[],
+				[{"url": u, "mime_type": "image/png"} for u in deliveries],
+			)
+		return [u["url"] for u in urls], owed
+
+	def test_a_follow_up_sent_before_the_image_lands_does_not_lose_it(self):
+		# seq 2 assistant (image tool at 3), user 7, assistant 8: the image lands after seq 7.
+		got, owed = self._claim(
+			me=("A1", 2), next_seq=7, assistants=[("A1", 2, []), ("A2", 8, [])], tools=[3], deliveries=[URL]
+		)
+		self.assertEqual(got, [URL])
+		self.assertEqual(owed, 0)
+
+	def test_a_follow_up_that_makes_its_own_image_does_not_take_the_first_one(self):
+		assistants = [("A1", 2, []), ("A2", 8, [])]
+		# Only the first image has landed: it belongs to turn 1, not to the later turn.
+		got, owed = self._claim(
+			me=("A2", 8), next_seq=None, assistants=assistants, tools=[3, 9], deliveries=[URL]
+		)
+		self.assertEqual((got, owed), ([], 1))
+		got, _ = self._claim(me=("A1", 2), next_seq=7, assistants=assistants, tools=[3, 9], deliveries=[URL])
+		self.assertEqual(got, [URL])
+
+	def test_two_image_turns_in_a_row_each_get_their_own(self):
+		assistants = [("A1", 2, []), ("A2", 8, [])]
+		first, _ = self._claim(
+			me=("A1", 2), next_seq=7, assistants=assistants, tools=[3, 9], deliveries=[URL, URL2]
+		)
+		second, owed = self._claim(
+			me=("A2", 8), next_seq=None, assistants=assistants, tools=[3, 9], deliveries=[URL, URL2]
+		)
+		self.assertEqual(first, [URL])
+		self.assertEqual((second, owed), ([URL2], 1))
+
+	def test_an_image_already_attached_is_never_attached_again(self):
+		# Turn 1 got its image; turn 2's job still sees it in the transcript and must skip it.
+		got, owed = self._claim(
+			me=("A2", 8),
+			next_seq=None,
+			assistants=[("A1", 2, [URL]), ("A2", 8, [])],
+			tools=[3, 9],
+			deliveries=[URL, URL2],
+		)
+		self.assertEqual((got, owed), ([URL2], 0))
+		got, _ = self._claim(
+			me=("A1", 2),
+			next_seq=7,
+			assistants=[("A1", 2, [URL]), ("A2", 8, [URL2])],
+			tools=[3, 9],
+			deliveries=[URL, URL2],
+		)
+		self.assertEqual(got, [])
+
+	def test_an_earlier_turn_that_stopped_waiting_no_longer_holds_a_place(self):
+		got, owed = self._claim(
+			me=("A2", 8),
+			next_seq=None,
+			assistants=[("A1", 2, []), ("A2", 8, [])],
+			tools=[3, 9],
+			deliveries=[URL],
+			age_s=10_000,
+		)
+		self.assertEqual((got, owed), ([URL], 0))
+
+	def test_the_job_no_longer_ends_the_window_at_the_next_message(self):
+		import inspect
+
+		self.assertNotIn("until_ms=until_ms", inspect.getsource(turn_handler.persist_async_media))
+
+
 class TestFetchAcceptsWhatTheGatewayServes(unittest.TestCase):
 	PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 32
 

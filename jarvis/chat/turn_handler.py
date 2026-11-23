@@ -615,10 +615,18 @@ def persist_async_media(
 		if not rows:
 			done = True
 			return
-		_am, _next_seq, until_ms = _turn_window(assistant_msg_name, conversation_id)
-		media_rels, media_urls = _harvest_post_yield_media(
-			conversation_id, turn_start_ms, timeout_s=ASYNC_MEDIA_SLICE_S, until_ms=until_ms
+		# No upper bound on the delivery's time: the runtime posts the finished media whenever its
+		# task ends, possibly after the next user message. Which delivery is this turn's is decided
+		# by ``_claim_async_media`` (order and what is already attached), not by the clock.
+		raw_rels, raw_urls = _harvest_post_yield_media(
+			conversation_id, turn_start_ms, timeout_s=ASYNC_MEDIA_SLICE_S
 		)
+		media_rels, media_urls, owed = _claim_async_media(
+			assistant_msg_name, conversation_id, rows, raw_rels, raw_urls
+		)
+		if (raw_rels or raw_urls) and not (media_rels or media_urls):
+			# Deliveries exist but belong to another turn (or are attached already): wait, do not spin.
+			time.sleep(_YIELD_MEDIA_POLL_INTERVAL_S)
 		if media_rels or media_urls:
 			seed_attempts += 1
 			settings = frappe.get_single("Jarvis Settings")
@@ -629,7 +637,7 @@ def persist_async_media(
 			ids = [generated_media._media_dedup_key(r) for r in media_rels] + [
 				generated_media._media_url_id(u["url"]) for u in media_urls
 			]
-			if all(i in have for i in ids):
+			if all(i in have for i in ids) and len(have) >= len(rows):
 				done = True
 		if done or seed_attempts >= ASYNC_MEDIA_SEED_ATTEMPTS or int(time.time() * 1000) >= deadline_ms:
 			done = True
@@ -643,6 +651,91 @@ def persist_async_media(
 				rows, assistant_msg_name, conversation_id, user, run_id, turn_start_ms,
 				deadline_ms, slice_no, seed_attempts,
 			)  # fmt: skip
+
+
+def _media_sources(canvas_json) -> set[str]:
+	"""The ``source`` keys of one message's canvas JSON."""
+	try:
+		items = frappe.parse_json(canvas_json) if canvas_json else []
+	except Exception:
+		return set()
+	return {i["source"] for i in items or [] if isinstance(i, dict) and i.get("source")}
+
+
+def _claim_async_media(
+	assistant_msg_name: str, conversation_id: str, rows: list[dict], media_rels: list, media_urls: list
+) -> tuple[list, list, int]:
+	"""Which of the transcript's deliveries belong to THIS turn: ``(rels, urls, owed)``.
+
+	The runtime posts a finished image whenever its task ends, which can be after the user's next
+	message, so the clock cannot say whose it is. Two rules do: (1) a delivery already attached to any
+	message of the conversation is never taken again; (2) deliveries go to the media tool calls in the
+	order those calls were made, so this turn first passes over one delivery for every earlier turn's
+	call that is still waiting for its image, then takes one per call of its own (everything left when
+	no later turn has a media call of its own). ``owed`` is how many deliveries earlier turns are still
+	waiting for. Only runs for a turn that has media tool rows."""
+	from jarvis.chat import generated_media
+	from jarvis.chat.agent_client import MEDIA_GEN_TOOL_NAMES
+
+	am, next_seq, _until = _turn_window(assistant_msg_name, conversation_id)
+	if not am or not (media_rels or media_urls):
+		return list(media_rels), list(media_urls), 0
+	now = frappe.utils.now_datetime()
+	cutoff = frappe.utils.add_to_date(now, hours=-1)
+	# System context (the media job), scoped to one conversation and the last hour.
+	assistants = frappe.get_all(
+		MSG,
+		filters={"conversation": conversation_id, "role": "assistant", "creation": [">=", cutoff]},
+		fields=["name", "seq", "canvas"],
+		order_by="seq asc",
+		limit_page_length=200,
+	)
+	tool_rows = [
+		r
+		for r in frappe.get_all(
+			MSG,
+			filters={
+				"conversation": conversation_id,
+				"role": "tool",
+				"tool_name": ["in", list(MEDIA_GEN_TOOL_NAMES)],
+				"creation": [">=", cutoff],
+			},
+			fields=["seq", "tool_name", "tool_status", "creation"],
+			order_by="seq asc",
+			limit_page_length=200,
+		)
+		if (r.get("tool_status") or "").lower() in _ASYNC_MEDIA_STARTED_STATUSES
+	]
+	sources = {a["name"]: _media_sources(a.get("canvas")) for a in assistants}
+	attached = set().union(*sources.values()) if sources else set()
+	own = sources.get(assistant_msg_name) or set()
+
+	owed = 0
+	prior = [a for a in assistants if a["seq"] < am.seq]
+	for i, a in enumerate(prior):
+		hi = prior[i + 1]["seq"] if i + 1 < len(prior) else am.seq
+		its = [r for r in tool_rows if a["seq"] < r["seq"] < hi]
+		if not its:
+			continue
+		bound = _async_media_bound_s(its)
+		if frappe.utils.time_diff_in_seconds(now, its[-1]["creation"]) > bound:
+			continue  # that turn stopped waiting; its image will never be claimed
+		owed += max(0, len(its) - len(sources.get(a["name"]) or set()))
+
+	deliveries = [("rel", r, generated_media._media_dedup_key(r)) for r in media_rels] + [
+		("url", u, generated_media._media_url_id(u["url"])) for u in media_urls
+	]
+	unseen = [d for d in deliveries if d[2] not in attached]
+	later_calls = next_seq is not None and any(r["seq"] > next_seq for r in tool_rows)
+	need = max(0, len(rows) - len(own))
+	mine = unseen[owed:]
+	if later_calls:
+		mine = mine[: max(need, 1)]
+	return (
+		[d[1] for d in mine if d[0] == "rel"],
+		[d[1] for d in mine if d[0] == "url"],
+		owed,
+	)
 
 
 def _continue_or_close(
