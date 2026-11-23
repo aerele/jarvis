@@ -277,12 +277,15 @@ def run_prepare(run_id: str, relay_target_id: str | None = None) -> dict:
 				# Jarvis Chat Session row + CONV.session_key BEFORE the first tool
 				# callback can fire (the plugin sessionKey->user moat, jarvis/api.py:55).
 				from jarvis.chat.api import _ensure_session_key
+				from jarvis.chat.user_agents import bound_agent
 
 				# profile=True: the pump pipeline's deferred creation point,
 				# reached only for a genuine first turn of interactive chat -
 				# a macro/scheduled turn always mints its session eagerly at
 				# api._enqueue_turn, before this worker path ever runs.
-				session_key = _ensure_session_key(chat_user, sess=sess, profile=True)
+				session_key = _ensure_session_key(
+					chat_user, sess=sess, profile=True, user_agent=bound_agent(conv)
+				)
 				frappe.db.set_value(CONV, conversation, "session_key", session_key)
 				frappe.db.commit()
 			# (#23) model patch (stateful — agent remembers across turns). A None ref

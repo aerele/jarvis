@@ -39,6 +39,8 @@ class TestCollaborationFoundation(SharingCase):
 					"auto_mode",
 					"file_box",
 					"last_active_at",
+					# The bound user agent's name, "" for a normal chat (never the id).
+					"user_agent_name",
 				},
 			)
 			self.assertEqual(

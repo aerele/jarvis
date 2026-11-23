@@ -20,6 +20,7 @@
   "origin_page",
   "compacting_since",
   "agent_initiated",
+  "user_agent",
   "turn_count",
   "session_feedback_asked_at",
   "filebox_active_source_file",
@@ -369,6 +370,16 @@
    "read_only": 1,
    "no_copy": 1,
    "description": "Set at insert by the server-side producers that open a conversation the user did not ask for: macro runs, macro merges, app-learning runs, scheduled agent audits, proactive messages, and the act-on-a-finding chat. Such a conversation is a run log the user may reply to, not a chat session they chose to start, so it is excluded from turn counting and from the once-per-session feedback popup (spec: \"agent-initiated conversations are excluded from both\"). Distinct from skip_confirmation, which is armed-macro-only and is cleared when the run ends. Server-set only."
+  },
+  {
+   "fieldname": "user_agent",
+   "fieldtype": "Data",
+   "label": "User agent",
+   "hidden": 1,
+   "read_only": 1,
+   "no_copy": 1,
+   "permlevel": 1,
+   "description": "The agent_id of the Jarvis User Agent this chat talks to, empty for a normal chat. Stamped by jarvis.chat.user_agents when the chat opens, so a session minted again later (idle reclaim, re-pairing) still addresses the same agent. permlevel 1, server-set only, like session_key."
   },
   {
    "fieldname": "turn_count",

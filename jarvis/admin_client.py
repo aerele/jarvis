@@ -1922,6 +1922,29 @@ def post_push_role_profiles(role_profiles: list[dict]) -> dict:
 	)
 
 
+def post_push_user_agents(user_agents: list[dict]) -> dict:
+	"""POST the FULL set of enabled user agents to admin -> fleet -> container
+	(``push_user_agents``, fleet contract 1.57). Anything not listed is removed, so
+	an empty list removes every user agent.
+
+	``user_agents`` is the list built by ``jarvis.chat.user_agent_sync.build_payload``
+	(each ``{id, body, tools_allow, sandbox, timeout_s}``). Returns admin's ``data``:
+	``{action: "hot-apply" | "restart" | "noop", user_agents: [ids], sandbox}``.
+
+	Raises:
+		AdminContractError (400/409, carries ``code``: ``InvalidUserAgents``,
+		``NoRunningTenant``, ``user_agents_disabled``, ``user_agents_unsupported_fleet``,
+		``user_agents_unsupported_image``, ``sandbox_image_unconfigured``,
+		``apply_in_progress``), AdminRateLimitedError (429), AdminUnreachableError
+		(502 ``FleetError`` and transport failures), AdminAuthError.
+	"""
+	return _post(
+		path=_m("api.tenant.push_user_agents"),
+		body={"user_agents": user_agents},
+		timeout_s=180,
+	)
+
+
 def post_agent_run(run_id: str, agent_id: str, session_key: str, message: str, timeout_s: int = 600) -> dict:
 	"""Dispatch ONE marketplace-agent delegate turn: bench → admin → fleet → the
 	customer's container (Phase 2C run relay).
@@ -3056,6 +3079,14 @@ _PERMANENT_REJECTION_CODES = frozenset(
 )
 
 
+def _envelope_code(envelope) -> str:
+	"""admin's ``error.code`` from an ``ok: false`` envelope, or "". Only a short
+	identifier is kept, never free text."""
+	err = envelope.get("error") if isinstance(envelope, dict) else None
+	code = str((err or {}).get("code") or "") if isinstance(err, dict) else ""
+	return code if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", code) else ""
+
+
 def _permanent_rejection_code(envelope) -> str:
 	"""admin's ``error.code`` when it names a permanent rejection, else "".
 
@@ -3326,7 +3357,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 				detail=msg,
 			)
 		raise AdminUnreachableError(
-			f"admin returned a {resp.status_code} error: {msg}", status_code=resp.status_code
+			f"admin returned a {resp.status_code} error: {msg}",
+			status_code=resp.status_code,
+			admin_code=_envelope_code(envelope),
 		)
 	if isinstance(envelope, dict) and not envelope.get("ok", True):
 		err = envelope.get("error", {}) or {}
@@ -3343,7 +3376,9 @@ def _do_post(url: str, body: dict, headers: dict, timeout_s: int, admin_url: str
 		# omitted - the bench knows where it's pointing.
 		if _permanent_rejection_code(envelope):
 			raise AdminRejectedError(f"{code}: {msg}", code=code, detail=msg)
-		raise AdminUnreachableError(f"{code}: {msg}", status_code=resp.status_code)
+		raise AdminUnreachableError(
+			f"{code}: {msg}", status_code=resp.status_code, admin_code=_envelope_code(envelope)
+		)
 	from jarvis.chat.runtime_profile import private_connection
 
 	return private_connection(envelope.get("data", envelope) if isinstance(envelope, dict) else envelope)

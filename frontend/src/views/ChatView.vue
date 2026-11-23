@@ -6760,6 +6760,16 @@ const modelsByProvider = computed(() => {
 // run's "Open chat" is NOT in that list - its title is only knowable from the
 // fetch. Cleared on the new-chat (no id) path so the welcome still shows there.
 const loadedConvTitle = ref("");
+// The user agent this chat is bound to, by name, from the same fetch ("" for an ordinary
+// chat). Read from the list row first, as the title is, and from the fetch for a chat
+// the list omits because it has no message yet.
+const loadedUserAgentName = ref("");
+const currentUserAgentName = computed(
+	() =>
+		store.conversations.find((c) => c.name === currentId.value)?.user_agent_name ||
+		loadedUserAgentName.value ||
+		""
+);
 const currentTitle = computed(
 	() =>
 		store.conversations.find((c) => c.name === currentId.value)?.title ||
@@ -7205,7 +7215,12 @@ const starredCount = computed(() => store.conversations.filter((c) => c.starred)
 // jarvis.chat.api.get_tool_activity / get_usage.chat_tool_calls.
 const headerSub = computed(() => {
 	const n = msgCount.value;
-	return n ? `${Math.ceil(n / 2)} message${n > 2 ? "s" : ""}` : "Your AI Teammate";
+	const count = n ? `${Math.ceil(n / 2)} message${n > 2 ? "s" : ""}` : "";
+	// A chat with one of the user's own agents names it where the line otherwise reads
+	// "Your AI Teammate".
+	const agent = currentUserAgentName.value;
+	if (agent) return count ? `${agent} · ${count}` : agent;
+	return count || "Your AI Teammate";
 });
 const canSend = computed(
 	() =>
@@ -11015,6 +11030,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 		histIdx.value = null;
 		histDraft.value = "";
 		loadedConvTitle.value = "";
+		loadedUserAgentName.value = "";
 		contextInfo.value = null;
 		return;
 	}
@@ -11129,6 +11145,7 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// Remember the fetched title so a titled-but-empty conversation (which the
 	// recent list omits) is recognised as existing, not rendered as a new chat.
 	loadedConvTitle.value = d?.conversation?.title || "";
+	loadedUserAgentName.value = d?.conversation?.user_agent_name || "";
 	// The origin and the conversation it was read for, written as a pair — the
 	// gate compares the second against currentId, so neither is ever trusted
 	// alone. Nothing above blanks them: a refresh of the conversation already on
@@ -11644,6 +11661,7 @@ async function newChat() {
 	// otherwise isExistingTitledConv keeps the previous conversation's title and
 	// suppresses the welcome screen on the fresh chat.
 	loadedConvTitle.value = "";
+	loadedUserAgentName.value = "";
 	// loadConversation is the only other writer and the route watcher no-ops here
 	// (currentId already equals this id), so without this the previous chat's
 	// origin survives onto a brand-new one — and the first html the agent draws

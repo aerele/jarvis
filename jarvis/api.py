@@ -430,6 +430,17 @@ def _call_tool(tool: str, args: dict | str | None = None, result_mode: str | Non
 			frappe.local.response.http_status_code = 403
 			return _error("PermissionError", f"session user is disabled: {plugin_user}")
 
+		# A user agent's session gets no delegate Run row, so this is its allowlist:
+		# the agent must exist, be on, belong to the session user and have picked this
+		# tool. Ahead of every dispatch fork, shared chats included. Any other key is
+		# answered by one string check.
+		from jarvis.chat.user_agents import tool_refusal
+
+		if refusal := tool_refusal(session_key, plugin_user, tool):
+			_record_denied_call(tool, "PermissionError", actor=plugin_user, channel="chat")
+			frappe.local.response.http_status_code = 403
+			return _error("PermissionError", refusal)
+
 		# NOTE: no Jarvis-access role gate on the plugin path. It is
 		# machine-authenticated (token/HMAC proves the call came from agent),
 		# and `plugin_user` is the real chat user — role-gated when they sent

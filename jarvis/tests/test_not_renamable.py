@@ -77,6 +77,7 @@ NOT_RENAMABLE = (
 	"Jarvis Trigger Activity",
 	"Jarvis Wiki Graph History",
 	"Jarvis Physical Count",
+	"Jarvis User Agent",
 )
 
 NOT_RENAMABLE_CHILD = (

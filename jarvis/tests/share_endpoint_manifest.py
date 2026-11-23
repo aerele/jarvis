@@ -336,6 +336,24 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.chat.user_agents_api",
+	"The caller's own user agents (owner-only rows); a conversation opened here is a new chat owned by the caller, never a lookup of a supplied conversation.",
+	"""
+    create_user_agent
+    delete_user_agent
+    get_user_agent
+    list_pickable_tools
+    list_user_agents
+    retry_user_agent_sync
+    run_user_agent_now
+    set_user_agent_enabled
+    set_user_agent_schedule
+    start_user_agent_chat
+    update_user_agent
+    """,
+)
+
+_unrelated(
 	"jarvis.chat.filebox",
 	"Skill capability check, not a conversation read or mutation.",
 	"""

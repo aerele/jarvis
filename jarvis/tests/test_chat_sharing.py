@@ -374,6 +374,7 @@ class TestShareReads(SharingCase):
 					"auto_mode",
 					"file_box",
 					"origin_page",
+					"user_agent_name",
 				}
 			)
 			self.assertTrue(set(body.get("paging", {})) <= PAGING_KEYS | {"limit"})

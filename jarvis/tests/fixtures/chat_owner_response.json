@@ -10,7 +10,8 @@
       "session_key": "characterization-session",
       "status": "Active",
       "thinking_override": "high",
-      "title": "Owner contract"
+      "title": "Owner contract",
+      "user_agent_name": ""
     },
     "messages": [
       {
@@ -265,7 +266,8 @@
       "session_key": "characterization-session",
       "status": "Active",
       "thinking_override": "high",
-      "title": "Owner contract"
+      "title": "Owner contract",
+      "user_agent_name": ""
     },
     "messages": [
       {
@@ -380,7 +382,8 @@
       "session_key": "characterization-session",
       "status": "Active",
       "thinking_override": "high",
-      "title": "Owner contract"
+      "title": "Owner contract",
+      "user_agent_name": ""
     },
     "messages": [
       {
@@ -556,7 +559,8 @@
       "session_key": "characterization-session",
       "status": "Active",
       "thinking_override": "high",
-      "title": "Owner contract"
+      "title": "Owner contract",
+      "user_agent_name": ""
     },
     "messages": [
       {
@@ -799,7 +803,8 @@
       "session_key": "characterization-session",
       "status": "Active",
       "thinking_override": "high",
-      "title": "Owner contract"
+      "title": "Owner contract",
+      "user_agent_name": ""
     },
     "messages": [
       {

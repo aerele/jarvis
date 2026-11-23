@@ -2422,6 +2422,8 @@ _WIPE_DOCTYPES = (
 	"Jarvis Trigger Activity",
 	"Jarvis Trigger",
 	"Jarvis Approval Request",
+	# the users' own agents (their last-run chats are wiped above)
+	"Jarvis User Agent",
 	# learning artifacts
 	"Jarvis Learned Pattern Role",
 	"Jarvis Learned Pattern",
