@@ -42,7 +42,7 @@ _NOT_READY_ERROR = {
 	"ok": False,
 	"error": {
 		"code": "connector_not_ready",
-		"message": "This connector needs to be tested in Settings before it can be used.",
+		"message": broker.NOT_READY_MESSAGE,
 	},
 }
 
@@ -75,19 +75,6 @@ def call_connector(connector: str, action: str, args: dict | None = None) -> dic
 	# falls through to broker.call unchanged, so the model sees THAT error
 	# (connector_not_found / connector_disabled) rather than a misleading
 	# "needs to be tested" for a connector an admin turned off on purpose.
-	if row is not None and row.get("enabled") and not _has_passed_test(row):
+	if row is not None and row.get("enabled") and not broker.has_passed_test(row):
 		return _NOT_READY_ERROR
 	return broker.call(connector, action, args, run_id=get_session_key())
-
-
-def _has_passed_test(row) -> bool:
-	"""An enabled connector may only be called once it has an actual PASSING
-	connection test on file: ``last_test_status`` and ``tools_cache`` both go
-	blank the moment the SPA's ``update_connector`` sees a credential/base_url
-	edit (a stale cache would otherwise validate arguments - or not - against
-	a schema that no longer describes what is actually listening at that
-	URL), so either being empty means the connector's current configuration
-	has never been proven to work."""
-	if (row.get("last_test_status") or "") != "Passed":
-		return False
-	return bool(row.get("tools_cache"))

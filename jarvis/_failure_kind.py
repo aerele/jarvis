@@ -29,6 +29,7 @@ import re
 
 import frappe
 
+from jarvis.connectors.outcome import FIXABLE_CODES, RETRY_LATER_CODES, inner_error_code
 from jarvis.exceptions import InvalidFieldValueError, ResultTooLargeError, RetryLaterError
 
 FIXABLE = "fixable"
@@ -169,7 +170,13 @@ def kind_of(exc: BaseException) -> str:
 def envelope_kind(result) -> str:
 	"""The failure kind a failed tool envelope carries, trusted only when its code is
 	one this module knows for that kind. No ``error``, no ``kind``, an unknown code or
-	a refusal: NOT_FIXABLE."""
+	a refusal: NOT_FIXABLE.
+
+	A connector call the app never saw is the one envelope that is outer ok with an
+	inner ``{ok: False}``: its code decides (``connectors.outcome``)."""
+	inner = inner_error_code(result)
+	if inner:
+		return _inner_kind(inner)
 	err = result.get("error") if isinstance(result, dict) else None
 	if not isinstance(err, dict):
 		return NOT_FIXABLE
@@ -179,4 +186,12 @@ def envelope_kind(result) -> str:
 	kind = err.get("kind")
 	if kind in _CODES_BY_KIND and err.get("code") in _CODES_BY_KIND[kind]:
 		return kind
+	return NOT_FIXABLE
+
+
+def _inner_kind(code: str) -> str:
+	if code in FIXABLE_CODES:
+		return FIXABLE
+	if code in RETRY_LATER_CODES:
+		return RETRY_LATER
 	return NOT_FIXABLE

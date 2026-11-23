@@ -15,6 +15,7 @@ row-lookup class is a ``FrappeTestCase`` that inserts a real ``Jarvis Connector`
 and drives the helper off its stored ``allowed_actions`` flags - it runs on CI.
 """
 
+import json
 import unittest
 from unittest.mock import patch
 
@@ -169,9 +170,11 @@ class TestConnectorSafeReadRowLookup(FrappeTestCase):
 				frappe.delete_doc(CONNECTOR, name, ignore_permissions=True, force=True)
 		frappe.db.commit()
 
-	def _mk(self, key: str, actions: list[dict], enabled: int = 1) -> str:
+	def _mk(self, key: str, actions: list[dict], enabled: int = 1, tested: bool = True) -> str:
 		"""Insert a Shared connector as Administrator so resolve_for_status
-		(Personal-wins-over-Shared) resolves it for any caller."""
+		(Personal-wins-over-Shared) resolves it for any caller. ``tested`` stamps a
+		passed connection test and a cache listing each action (the pre-park check
+		refuses a call on a connector without one)."""
 		prev = frappe.session.user
 		frappe.set_user("Administrator")
 		try:
@@ -185,7 +188,18 @@ class TestConnectorSafeReadRowLookup(FrappeTestCase):
 					"base_url": "https://example.invalid/mcp",
 					"allowed_actions": actions,
 				}
-			).insert(ignore_permissions=True)
+			)
+			doc.insert(ignore_permissions=True)
+			if tested:
+				tools = [
+					{"name": a["action"], "inputSchema": {"type": "object", "required": ["title"]}}
+					for a in actions
+				]
+				frappe.db.set_value(
+					CONNECTOR,
+					doc.name,
+					{"last_test_status": "Passed", "tools_cache": json.dumps({"tools": tools})},
+				)
 			self._connectors.append(doc.name)
 			frappe.db.commit()
 			return doc.name
@@ -257,10 +271,72 @@ class TestConnectorSafeReadRowLookup(FrappeTestCase):
 			patch("jarvis.chat.events.publish_to_user"),
 			patch.object(api.telemetry, "record_tool"),
 		):
-			r = api._run_tool("call_connector", {"connector": key, "action": "create_issue"})
+			r = api._run_tool(
+				"call_connector", {"connector": key, "action": "create_issue", "args": {"title": "t"}}
+			)
 		self.assertEqual((r.get("data") or {}).get("status"), "pending_confirmation")
 		mint.assert_called_once()
 		disp.assert_not_called()
+
+	def _refused(self, key, action, args=None):
+		"""Drive ``_run_tool`` for a call the broker would refuse; return the result,
+		the mint mock, the audit mock and the broker's mcp call mock."""
+		with (
+			patch("jarvis.api.dispatch") as disp,
+			patch("jarvis.chat.pending_confirm.mint", return_value="tok") as mint,
+			patch("jarvis.chat.events.publish_to_user"),
+			patch("jarvis.api.audit.record") as aud,
+			patch("jarvis.connectors.mcp_client.run_tool") as sent,
+			patch.object(api.telemetry, "record_tool"),
+		):
+			r = api._run_tool("call_connector", {"connector": key, "action": action, "args": args or {}})
+		disp.assert_not_called()
+		sent.assert_not_called()
+		mint.assert_not_called()  # no confirmation card was minted
+		return r, aud
+
+	def test_not_allowed_action_is_refused_before_a_card_and_audited(self):
+		key = "gate-refuse-denied"
+		self._mk(key, actions=[{"action": "delete_issue", "allowed": 0, "read_only": 0, "destructive": 1}])
+		r, aud = self._refused(key, "delete_issue")
+		self.assertEqual(r["ok"], True)
+		self.assertEqual(r["data"]["ok"], False)
+		self.assertEqual(r["data"]["error"]["code"], "action_denied")
+		_, kwargs = aud.call_args
+		self.assertFalse(kwargs["ok"])
+		self.assertEqual(kwargs["error_code"], "action_denied")
+
+	def test_unknown_action_and_bad_arguments_are_refused_before_a_card(self):
+		key = "gate-refuse-args"
+		self._mk(key, actions=[{"action": "create_issue", "allowed": 1, "read_only": 0, "destructive": 0}])
+		r, _ = self._refused(key, "no_such_action")
+		self.assertEqual(r["data"]["error"]["code"], "action_unknown")
+		r, _ = self._refused(key, "create_issue", {})  # "title" is required
+		self.assertEqual(r["data"]["error"]["code"], "invalid_arguments")
+
+	def test_untested_and_disabled_connectors_are_refused_before_a_card(self):
+		action = [{"action": "create_issue", "allowed": 1, "read_only": 0, "destructive": 0}]
+		self._mk("gate-refuse-untested", actions=action, tested=False)
+		self._mk("gate-refuse-off", actions=action, enabled=0)
+		r, _ = self._refused("gate-refuse-untested", "create_issue")
+		self.assertEqual(r["data"]["error"]["code"], "connector_not_ready")
+		r, _ = self._refused("gate-refuse-off", "create_issue")
+		self.assertEqual(r["data"]["error"]["code"], "connector_disabled")
+		r, _ = self._refused("gate-refuse-missing", "create_issue")
+		self.assertEqual(r["data"]["error"]["code"], "connector_not_found")
+
+	def test_refusal_writes_one_connector_log_row(self):
+		key = "gate-refuse-log"
+		name = self._mk(
+			key, actions=[{"action": "delete_issue", "allowed": 0, "read_only": 0, "destructive": 1}]
+		)
+		before = frappe.db.count("Jarvis Connector Log", {"connector": name})
+		self._refused(key, "delete_issue")
+		rows = frappe.get_all(
+			"Jarvis Connector Log", filters={"connector": name}, fields=["status", "error_code"]
+		)
+		self.assertEqual(len(rows) - before, 1)
+		self.assertEqual((rows[-1].status, rows[-1].error_code), ("Denied", "action_denied"))
 
 
 if __name__ == "__main__":

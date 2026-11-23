@@ -882,6 +882,34 @@ class TestFailureCleanup(PendingActionTestMixin, FrappeTestCase):
 			self._failed_audit_rows("call_connector"), ["failed"], "its own audit row, not a duplicate"
 		)
 
+	def test_connector_card_the_app_never_saw_settles_as_not_sent(self):
+		"""A connector call refused before it was sent (the tool's own ``{ok: False}``
+		answer, wrapped by dispatch) reads "failed / nothing changed"; codes that may
+		have reached the app stay unknown."""
+
+		def refused(code):
+			def body(tool, args):
+				return {"ok": False, "error": {"code": code, "message": "m"}}
+
+			return body
+
+		for code, reason, outcome in (
+			("invalid_arguments", "not_sent", "failed"),
+			("action_denied", "not_sent", "failed"),
+			("connector_not_ready", "not_sent", "failed"),
+			("tool_error", "failed", "unknown"),
+			("transport_error", "failed", "unknown"),
+			("ssrf_blocked", "failed", "unknown"),
+		):
+			with self.subTest(code=code):
+				name, out, _ = self._run(
+					refused(code), tool="call_connector", args={"connector": "c", "action": "a"}
+				)
+				row = self.row(name)
+				self.assertEqual((row.status, row.reason_code, out["outcome"]), ("Failed", reason, outcome))
+				if reason == "not_sent":
+					self.assertEqual(row.reason, "The app was not called; nothing was changed.")
+
 	def test_sentinel_is_disarmed_before_any_later_commit(self):
 		from jarvis.tools._preview_sandbox import preview_sandbox
 

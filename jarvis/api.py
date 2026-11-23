@@ -4211,6 +4211,28 @@ def _run_covered_write(
 	return result
 
 
+def _connector_precheck_refusal(tool: str, args) -> dict | None:
+	"""A ``call_connector`` that the broker would refuse before sending anything (an
+	action that is not allowed, bad arguments, an untested or switched-off connector)
+	is answered now, in the envelope an inline call returns, and no card is parked:
+	the person would only be asked to confirm a call that cannot run. ``None`` for
+	everything else, including a call the checks cannot judge. The gate is untouched:
+	a call that passes still parks."""
+	if tool != "call_connector" or not isinstance(args, dict):
+		return None
+	connector, action = args.get("connector"), args.get("action")
+	if not isinstance(connector, str) or not isinstance(action, str):
+		return None
+	from jarvis.connectors import broker
+	from jarvis.tools._agent_run_ctx import get_session_key
+
+	refusal = broker.precheck(connector, action, args.get("args"), run_id=get_session_key())
+	if refusal is None:
+		return None
+	_record_tool_audit(tool, args, refusal)
+	return {"ok": True, "data": refusal}
+
+
 def _connector_call_is_safe_read(args) -> bool:
 	"""Action-aware carve-out for ``call_connector``'s confirm-first gate: return
 	True ONLY for a connector action the CURRENT user has explicitly ALLOWED and
@@ -5363,6 +5385,9 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 						refused["error"]["fields"] = fields
 				return refused
 		else:
+			refused = _connector_precheck_refusal(tool, args)
+			if refused is not None:
+				return refused
 			try:
 				preview = _pending_preview(tool, args)
 			except PreviewSandboxLost as e:

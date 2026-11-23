@@ -281,6 +281,75 @@ class TestCallHonoursSwitchedOffAction(unittest.TestCase):
 		execute.assert_called_once()
 
 
+class TestPrecheck(unittest.TestCase):
+	"""``broker.precheck`` runs the checks ``call`` makes before it sends anything,
+	so a confirmation card is never parked for a call that cannot run."""
+
+	_TOOLS = {"tools": [{"name": "create", "inputSchema": {"type": "object", "required": ["title"]}}]}
+
+	def _row(self, *, allowed=1, enabled=1, status="Passed", cache=True):
+		action = {"action": "create", "allowed": allowed, "read_only": 0, "destructive": 0}
+		return _Row(
+			name="conn-1",
+			enabled=enabled,
+			allowed_actions=[action],
+			last_test_status=status,
+			tools_cache=json.dumps(self._TOOLS) if cache else None,
+		)
+
+	def _precheck(self, row, args):
+		with (
+			mock.patch.object(broker, "_resolve_row", return_value=row),
+			mock.patch.object(broker, "_log") as log,
+			mock.patch.object(broker.refresh, "after_call"),
+			mock.patch.object(broker, "_execute") as execute,
+			mock.patch.object(broker.mcp_client, "run_tool") as sent,
+		):
+			out = broker.precheck("docs", "create", args)
+		execute.assert_not_called()
+		sent.assert_not_called()  # nothing ever leaves the bench
+		return out, log
+
+	def test_a_runnable_call_passes_and_writes_no_row(self):
+		out, log = self._precheck(self._row(), {"title": "t"})
+		self.assertIsNone(out)
+		log.assert_not_called()
+
+	def test_each_refusal_returns_its_code_and_writes_one_row(self):
+		cases = (
+			(self._row(allowed=0), {"title": "t"}, "action_denied"),
+			(self._row(enabled=0), {"title": "t"}, "connector_disabled"),
+			(self._row(status=""), {"title": "t"}, "connector_not_ready"),
+			(self._row(cache=False), {"title": "t"}, "connector_not_ready"),
+			(self._row(), {}, "invalid_arguments"),
+		)
+		for row, args, code in cases:
+			with self.subTest(code=code):
+				out, log = self._precheck(row, args)
+				self.assertEqual(out["ok"], False)
+				self.assertEqual(out["error"]["code"], code)
+				log.assert_called_once()
+				self.assertEqual(log.call_args.args[2], code)
+
+	def test_unknown_connector_is_refused_without_a_row(self):
+		with (
+			mock.patch.object(
+				broker, "_resolve_row", side_effect=broker._BrokerError("connector_not_found", "none")
+			),
+			mock.patch.object(broker, "_log") as log,
+		):
+			out = broker.precheck("nope", "create", {})
+		self.assertEqual(out["error"]["code"], "connector_not_found")
+		log.assert_not_called()  # no row to log against, as in ``call``
+
+	def test_an_unexpected_error_lets_the_real_call_decide(self):
+		with (
+			mock.patch.object(broker, "_resolve_row", side_effect=RuntimeError("db down")),
+			mock.patch.object(broker, "frappe", mock.MagicMock()),
+		):
+			self.assertIsNone(broker.precheck("docs", "create", {}))
+
+
 class _DoesNotExist(Exception):
 	"""Stand-in for ``frappe.DoesNotExistError`` - a REAL class so ``_resolve_row``'s
 	``except frappe.DoesNotExistError`` can catch it under a mocked frappe."""

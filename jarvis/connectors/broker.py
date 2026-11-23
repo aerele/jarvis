@@ -81,6 +81,8 @@ CB_OPEN_S = 30
 CC_LIMIT = 4
 CC_TTL_S = int(TOTAL_TIMEOUT_S) + 20  # comfortably longer than one call
 
+NOT_READY_MESSAGE = "This connector needs to be tested in Settings before it can be used."
+
 _ARGS_SUMMARY_MAX = 500
 _MESSAGE_MAX = 1000
 
@@ -423,6 +425,48 @@ def call(connector_key: str, action: str, args: dict | None = None, *, run_id: s
 			"ok": False,
 			"error": {"code": "internal_error", "message": "The connector call failed unexpectedly."},
 		}
+
+
+def precheck(connector_key: str, action: str, args: dict | None = None, *, run_id: str | None = None):
+	"""The checks :func:`call` runs BEFORE it sends anything, run now and alone: row,
+	enabled, a passed connection test, action allowed, arguments against the cached
+	schema. ``None`` when the call may go on; else the ``{ok: False, error}`` envelope
+	:func:`call` would answer, with the same Connector Log row. Nothing is ever sent.
+
+	Used to refuse a call before a confirmation card is parked for it. A check that
+	itself fails unexpectedly returns ``None``: the real call still runs all of them."""
+	started = time.monotonic()
+	row = None
+	try:
+		row = _resolve_row(connector_key)
+		if not row.get("enabled"):
+			raise _BrokerError("connector_disabled", "This connector is turned off.")
+		if not has_passed_test(row):
+			raise _BrokerError("connector_not_ready", NOT_READY_MESSAGE)
+		_gate(row, action)
+		_validate_args(row, action, args, policy.input_schema(row, action))
+		return None
+	except _BrokerError as exc:
+		if row is not None:
+			_log(row, action, exc.code, exc.message, started, run_id, args, None)
+			refresh.after_call(row, exc.code)
+		return exc.as_dict()
+	except Exception:
+		frappe.logger("jarvis.connectors").warning("connector precheck unexpected error", exc_info=True)
+		return None
+
+
+def has_passed_test(row) -> bool:
+	"""An enabled connector may only be called once it has an actual PASSING
+	connection test on file: ``last_test_status`` and ``tools_cache`` both go
+	blank the moment the SPA's ``update_connector`` sees a credential/base_url
+	edit (a stale cache would otherwise validate arguments - or not - against
+	a schema that no longer describes what is actually listening at that
+	URL), so either being empty means the connector's current configuration
+	has never been proven to work."""
+	if (row.get("last_test_status") or "") != "Passed":
+		return False
+	return bool(row.get("tools_cache"))
 
 
 # --------------------------------------------------------------------------- #
