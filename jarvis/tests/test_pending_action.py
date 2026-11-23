@@ -234,6 +234,41 @@ class TestPark(PendingActionTestMixin, FrappeTestCase):
 		self.set_col(first, status="Executed")
 		self.park(conv)  # a terminal card no longer blocks
 
+	def test_the_refusal_to_park_a_second_card_names_the_waiting_one(self):
+		from jarvis import api
+
+		conv = self.make_conv()
+		self.park(conv, summary='Pay\n ACME  "Ltd" 1,000')
+		other = self.make_conv()
+		self.park(other, summary="Cancel order SO-9")
+		args = {"doctype": "ToDo", "values": {"description": "pa-test second"}}
+		with patch("jarvis.api._run_preview", return_value={"would": {"doctype": "ToDo"}}), as_user(OWNER):
+			res = api._run_tool("create_doc", dict(args), conversation=conv)
+		self.assertEqual(res["error"]["code"], "ConfirmationPendingError")
+		message = res["error"]["message"]
+		self.assertIn("(the waiting card: \"Pay ACME 'Ltd' 1,000\")", message)
+		self.assertNotIn("SO-9", message, "only this conversation's card is named")
+		self.assertIn("confirms or discards it", message)
+		self.assertEqual(frappe.db.count(PA, {"conversation": conv}), 1)
+
+	def test_a_waiting_card_that_cannot_be_found_is_not_named(self):
+		from jarvis import api
+
+		self.assertEqual(api._waiting_card_label(None, OWNER), "")
+		self.assertEqual(api._waiting_card_label(self.make_conv(), OWNER), "")
+		self.assertEqual(api._waiting_card_label(self.make_conv(), None), "")
+		self.assertNotIn("waiting card:", api._single_flight_error()["error"]["message"])
+
+	def test_a_card_owned_by_someone_else_in_the_chat_is_not_named(self):
+		from jarvis import api
+
+		conv = self.make_conv()
+		self.park(conv, summary="Pay ACME 1,000")
+		self.assertIn("Pay ACME 1,000", api._waiting_card_label(conv, OWNER))
+		self.assertEqual(api._waiting_card_label(conv, OTHER), "")
+		self.assertNotIn("Pay ACME", api._single_flight_error(conv, OTHER)["error"]["message"])
+		self.assertIn("Pay ACME", api._single_flight_error(conv, OWNER)["error"]["message"])
+
 	def test_legacy_pending_hook_joins_single_flight(self):
 		conv = self.make_conv()
 		with self.assertRaises(pa.ConfirmationPendingError):
@@ -865,6 +900,34 @@ class TestFailureCleanup(PendingActionTestMixin, FrappeTestCase):
 		self.assertEqual((self.row(name).reason_code, out["outcome"]), ("failed", "unknown"))
 		# Backport note: develop's inner {ok: false} connector half is omitted - it
 		# relies on envelope_ok / _ENVELOPE_TOOLS (connector feature, not on this branch).
+
+	def test_connector_card_the_app_never_saw_settles_as_not_sent(self):
+		"""A connector call refused before it was sent (the tool's own ``{ok: False}``
+		answer, wrapped by dispatch) reads "failed / nothing changed"; codes that may
+		have reached the app stay unknown."""
+
+		def refused(code):
+			def body(tool, args):
+				return {"ok": False, "error": {"code": code, "message": "m"}}
+
+			return body
+
+		for code, reason, outcome in (
+			("invalid_arguments", "not_sent", "failed"),
+			("action_denied", "not_sent", "failed"),
+			("connector_not_ready", "not_sent", "failed"),
+			("tool_error", "failed", "unknown"),
+			("transport_error", "failed", "unknown"),
+			("ssrf_blocked", "failed", "unknown"),
+		):
+			with self.subTest(code=code):
+				name, out, _ = self._run(
+					refused(code), tool="call_connector", args={"connector": "c", "action": "a"}
+				)
+				row = self.row(name)
+				self.assertEqual((row.status, row.reason_code, out["outcome"]), ("Failed", reason, outcome))
+				if reason == "not_sent":
+					self.assertEqual(row.reason, "The app was not called; nothing was changed.")
 
 	def test_sentinel_is_disarmed_before_any_later_commit(self):
 		from jarvis.tools._preview_sandbox import preview_sandbox

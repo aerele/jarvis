@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from jarvis.connectors.secret_scrub import REDACTION, is_secret_key, scrub_text, scrub_value
+from jarvis.connectors.secret_scrub import REDACTION, is_secret_key, scrub_counted, scrub_text, scrub_value
 
 AWS_ID = "AKIAIOSFODNN7EXAMPLE"
 PRESIGNED = (
@@ -102,6 +102,101 @@ class TestScrubValue(unittest.TestCase):
 		self.assertNotIn("ghp_" + "z" * 36, str(out))
 		self.assertEqual(out["n"], 3)
 		self.assertIs(out["ok"], True)
+
+
+class TestScrubStructured(unittest.TestCase):
+	"""A structured answer and its text copy are masked alike."""
+
+	def test_a_value_under_a_credential_named_field_is_masked(self):
+		out, count = scrub_counted({"client_secret": "plain-words-here", "nested": [{"apiKey": "k1"}]})
+		self.assertEqual(out["client_secret"], REDACTION)
+		self.assertEqual(out["nested"][0]["apiKey"], REDACTION)
+		self.assertEqual(count, 2)
+
+	def test_ids_cursors_and_locators_are_left_alone(self):
+		answer = {
+			"key": "user-42",
+			"issue_key": "ABC-1",
+			"idempotency_key": "req-9",
+			"next_page_token": "cursor-77",
+			"authorization_url": "https://idp.example/authorize",
+			"api_key_id": "k_123",
+			"description": "a long sentence about a ticket " * 5,
+		}
+		out, count = scrub_counted(answer)
+		self.assertEqual(out, answer)
+		self.assertEqual(count, 0)
+
+	def test_counts_replacements_and_leaves_numbers_and_bools(self):
+		out, count = scrub_counted({"n": 1, "ok": True, "u": f"id {AWS_ID}"})
+		self.assertEqual((out["n"], out["ok"], count), (1, True, 1))
+
+
+class TestScrubIsLinear(unittest.TestCase):
+	def test_many_key_headers_without_a_footer_are_not_quadratic(self):
+		import time
+
+		text = "-----BEGIN PRIVATE KEY----- abc " * 60000
+		started = time.monotonic()
+		out, count = scrub_text(text)
+		self.assertLess(time.monotonic() - started, 2.0)
+		self.assertEqual(out, REDACTION)
+		self.assertEqual(count, 1)
+
+	def test_a_run_of_jwt_prefixes_is_not_quadratic(self):
+		import time
+
+		started = time.monotonic()
+		out, _count = scrub_text("eyJ-" * 500_000)  # 2 MB
+		self.assertLess(time.monotonic() - started, 1.0)
+		self.assertEqual(out, "eyJ-" * 500_000)
+
+	def test_many_dotted_jwt_prefixes_are_linear(self):
+		import time
+
+		text = ("eyJ-" * 50 + ".") * 10_000
+		started = time.monotonic()
+		scrub_text(text)
+		self.assertLess(time.monotonic() - started, 1.0)
+
+	def test_a_long_dotted_non_jwt_chain_is_linear(self):
+		import time
+
+		text = ".".join(["abcdefghij"] * 200_000)
+		started = time.monotonic()
+		out, count = scrub_text(text)
+		self.assertLess(time.monotonic() - started, 1.0)
+		self.assertEqual((out, count), (text, 0))
+
+	def test_a_jwt_after_a_hyphen_or_underscore_is_masked_and_the_prefix_kept(self):
+		jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+		for prefix in ("x-", "token_", "a-b_c-"):
+			with self.subTest(prefix=prefix):
+				out, count = scrub_text(f"v {prefix}{jwt} end")
+				self.assertEqual((out, count), (f"v {prefix}{REDACTION} end", 1))
+
+	def test_a_jwt_behind_non_jwt_segments_is_still_found(self):
+		jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+		out, count = scrub_text(f"a.bbbbbbb.{jwt}")
+		self.assertEqual(count, 1)
+		self.assertNotIn("eyJ", out)
+
+	def test_dotted_values_that_are_not_jwts_are_unchanged(self):
+		for text in ("v1.2023-11-23.build-12345", "api.example-site.com", "see eyJ.abcdef.ghijkl", "a.b.c"):
+			with self.subTest(text=text):
+				self.assertEqual(scrub_text(text), (text, 0))
+
+	def test_a_real_jwt_is_still_masked(self):
+		jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+		out, count = scrub_text(f"token: {jwt} and ({jwt})")
+		self.assertNotIn("eyJ", out)
+		self.assertEqual(count, 2)
+
+	def test_blocks_with_footers_are_masked_one_by_one(self):
+		block = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----"
+		out, count = scrub_text(f"a {block} b {block} c")
+		self.assertEqual(out, f"a {REDACTION} b {REDACTION} c")
+		self.assertEqual(count, 2)
 
 
 class TestIsSecretKey(unittest.TestCase):
