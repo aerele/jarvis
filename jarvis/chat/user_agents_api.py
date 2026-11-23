@@ -16,6 +16,11 @@ The ``Agent`` shape every write returns (and ``list_user_agents`` lists)::
         "enabled": bool,
         "allow_shell": bool,
         "tools": [str],  # picked tool ids, see list_pickable_tools
+        "browser": {
+            "enabled": bool,  # the agent has a web browser
+            "mode": "listed" | "public",  # listed sites only, or any public site
+            "sites": [str],  # normalised host names, [] when none are stored
+        },
         "sync": {
             "status": "Pending" | "Synced" | "Failed",
             "error": str,  # machine code, "" when fine
@@ -69,14 +74,35 @@ _RUN_SENTENCES = {
 def list_user_agents() -> dict:
 	"""The caller's agents, oldest first.
 
-	Returns ``{"enabled": bool, "max_agents": int, "agents": [Agent]}``. With the
-	site flag off: ``{"enabled": False, "max_agents": 5, "agents": []}``."""
+	Returns ``{"enabled": bool, "max_agents": int, "browser_enabled": bool,
+	"max_browser_agents": int, "browser_agents_in_use": int, "agents": [Agent]}``.
+	``browser_enabled`` is the site's browser switch (hide the option while False);
+	``max_browser_agents`` (3) caps ENABLED agents with a browser across the whole
+	workspace, every owner included, and ``browser_agents_in_use`` is how many there
+	are now. With the site flag off: ``enabled`` and ``browser_enabled`` False,
+	``agents`` [] and ``browser_agents_in_use`` 0."""
+	out = {
+		"enabled": False,
+		"max_agents": user_agents.MAX_PER_OWNER,
+		"browser_enabled": False,
+		"max_browser_agents": user_agents.MAX_BROWSER_PER_SITE,
+		"browser_agents_in_use": 0,
+		"agents": [],
+	}
 	if not user_agents.is_enabled():
-		return {"enabled": False, "max_agents": user_agents.MAX_PER_OWNER, "agents": []}
+		return out
 	rows = frappe.get_list(
 		DOCTYPE, filters={"owner": frappe.session.user}, fields=["*"], order_by="creation asc"
 	)
-	return {"enabled": True, "max_agents": user_agents.MAX_PER_OWNER, "agents": [_shape(r) for r in rows]}
+	# A count across owners reveals no row; the editor needs it to cap the option.
+	in_use = frappe.db.count(DOCTYPE, {"enabled": 1, "allow_browser": 1})
+	return {
+		**out,
+		"enabled": True,
+		"browser_enabled": user_agents.browser_switch_on(),
+		"browser_agents_in_use": in_use,
+		"agents": [_shape(r) for r in rows],
+	}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -96,12 +122,23 @@ def create_user_agent(
 	description: str | None = None,
 	allow_shell: int | str | bool = 0,
 	enabled: int | str | bool = 1,
+	allow_browser: int | str | bool = 0,
+	browser_mode: str | None = None,
+	browser_sites: list | str | None = None,
 ) -> dict:
 	"""Create an agent owned by the caller and start its sync.
 
 	Args: ``agent_name`` (max 140), ``instructions`` (max 12,000), ``tools`` (list of
 	tool ids, or its JSON string), ``description`` (max 1,000), ``allow_shell`` and
-	``enabled`` (0/1). At most 5 agents per user. Returns ``Agent`` (sync Pending)."""
+	``enabled`` (0/1). At most 5 agents per user. Returns ``Agent`` (sync Pending).
+
+	Browser (only while ``list_user_agents().browser_enabled``): ``allow_browser``
+	(0/1); ``browser_mode`` ``"listed"`` (default) or ``"public"``; ``browser_sites``
+	as a list of strings (or that list as a JSON string) or one text with one site
+	per line. Sites are normalised
+	(scheme, path, query and port dropped, lower-cased, repeats dropped); "listed"
+	needs 1 to 30. Refused: the switch off, a line that is not a host (the message
+	quotes it), more than 3 enabled browser agents on the workspace."""
 	refuse_in_tool_dispatch()
 	user_agents.require_enabled()
 	doc = frappe.get_doc(
@@ -113,6 +150,9 @@ def create_user_agent(
 			"tools_json": _tools_value(tools),
 			"allow_shell": cint(allow_shell),
 			"enabled": cint(enabled),
+			"allow_browser": cint(allow_browser),
+			"browser_mode": _browser_mode(browser_mode or "listed"),
+			"browser_sites": _sites_text(browser_sites),
 		}
 	)
 	doc.insert()
@@ -128,10 +168,15 @@ def update_user_agent(
 	tools: list | str | None = None,
 	description: str | None = None,
 	allow_shell: int | str | bool | None = None,
+	allow_browser: int | str | bool | None = None,
+	browser_mode: str | None = None,
+	browser_sites: list | str | None = None,
 ) -> dict:
 	"""Change an agent's definition. Only the arguments passed change; any change
-	starts a sync. Args: ``name`` plus any of ``agent_name``, ``instructions``,
-	``tools``, ``description``, ``allow_shell``. Returns ``Agent``."""
+	starts a sync and makes the agent not ready until it lands. Args: ``name`` plus
+	any of ``agent_name``, ``instructions``, ``tools``, ``description``,
+	``allow_shell``, ``allow_browser``, ``browser_mode``, ``browser_sites`` (same
+	forms and rules as ``create_user_agent``). Returns ``Agent``."""
 	refuse_in_tool_dispatch()
 	user_agents.require_enabled()
 	doc = _owned_doc(name)
@@ -146,6 +191,12 @@ def update_user_agent(
 		doc.tools_json = _tools_value(tools)
 	if allow_shell is not None:
 		doc.allow_shell = cint(allow_shell)
+	if allow_browser is not None:
+		doc.allow_browser = cint(allow_browser)
+	if browser_mode is not None:
+		doc.browser_mode = _browser_mode(browser_mode)
+	if browser_sites is not None:
+		doc.browser_sites = _sites_text(browser_sites)
 	doc.save()
 	return _fresh(name)
 
@@ -296,6 +347,27 @@ def _fresh(name: str) -> dict:
 	return _shape(user_agents.get_owned(name))
 
 
+def _browser_mode(value: str) -> str:
+	mode = user_agents.BROWSER_MODES.get(str(value or "").strip().lower())
+	if not mode:
+		frappe.throw(_('The browser mode must be "listed" or "public".'))
+	return mode
+
+
+def _sites_text(sites) -> str:
+	"""The stored form: one site per line. A JSON list string counts as a list."""
+	if sites is None:
+		return ""
+	if isinstance(sites, str) and sites.strip().startswith("["):
+		try:
+			sites = frappe.parse_json(sites)
+		except Exception:
+			pass
+	if isinstance(sites, list | tuple):
+		return "\n".join(str(s or "") for s in sites)
+	return str(sites)
+
+
 def _tools_value(tools) -> str:
 	if tools is None:
 		return "[]"
@@ -312,6 +384,7 @@ def _shape(row) -> dict:
 		"enabled": bool(cint(row.enabled)),
 		"allow_shell": bool(cint(row.allow_shell)),
 		"tools": user_agents.picked_tools(row.tools_json),
+		"browser": user_agents.browser_view(row),
 		"sync": {
 			"status": row.sync_status or "Pending",
 			"error": row.sync_error or "",

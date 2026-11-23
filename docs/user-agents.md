@@ -55,6 +55,29 @@ Every tool call from such a session is checked in `jarvis.api.call_tool`: the
 agent must exist, be enabled, belong to the session's user, and have picked the
 tool. Other sessions are not affected.
 
+## Web browser
+
+An agent can also get its own web browser. The option exists only while both
+`Jarvis Settings.enable_user_agents` and `Jarvis Settings.enable_user_agent_browser`
+are on, and the runtime host supports it.
+
+- The owner turns on "Can use a web browser" and picks what it can open: "Listed
+  sites only" (1 to 30 sites, one per line; a site's subdomains are included) or
+  "Any public site". Pasted addresses are cleaned up: the scheme, path, query and
+  port are dropped and the rest is lower-cased. A line that is still not a site
+  is refused, and the message quotes it.
+- At most 3 enabled agents per workspace can have a browser, across all owners.
+- A browser change waits for the sync like any other edit: the agent is not ready
+  until the runtime holds the new setting. Switching the site option on or off
+  sends every browser agent again.
+- The push carries the browser only while the switch is on and the agent has it.
+
+Risk, in plain words: a web page the agent opens can trick it into sending data it
+read (ERP data included, since reads are not confirmed) to a site it is allowed to
+open. Listed sites reduce this; "Any public site" does not. Downloads and uploads
+are off in this version. The browser runs in its own container with its inner
+sandbox off, so the container is the wall.
+
 ## Schedule
 
 A five-minute sweep starts each due agent as its owner, in a new bound chat, with
@@ -66,6 +89,6 @@ Run now does the same on demand, without moving the schedule.
 
 ## Not in v1
 
-Browser use, sharing an agent, per-agent connector scope, native memory,
+Downloads and uploads in the browser, sharing an agent, per-agent connector scope, native memory,
 sub-agents, the runtime's own scheduler for ERP work, and more than two live
 marketplace agents.
