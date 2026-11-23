@@ -254,9 +254,20 @@ class TestPark(PendingActionTestMixin, FrappeTestCase):
 	def test_a_waiting_card_that_cannot_be_found_is_not_named(self):
 		from jarvis import api
 
-		self.assertEqual(api._waiting_card_label(None), "")
-		self.assertEqual(api._waiting_card_label(self.make_conv()), "")
+		self.assertEqual(api._waiting_card_label(None, OWNER), "")
+		self.assertEqual(api._waiting_card_label(self.make_conv(), OWNER), "")
+		self.assertEqual(api._waiting_card_label(self.make_conv(), None), "")
 		self.assertNotIn("waiting card:", api._single_flight_error()["error"]["message"])
+
+	def test_a_card_owned_by_someone_else_in_the_chat_is_not_named(self):
+		from jarvis import api
+
+		conv = self.make_conv()
+		self.park(conv, summary="Pay ACME 1,000")
+		self.assertIn("Pay ACME 1,000", api._waiting_card_label(conv, OWNER))
+		self.assertEqual(api._waiting_card_label(conv, OTHER), "")
+		self.assertNotIn("Pay ACME", api._single_flight_error(conv, OTHER)["error"]["message"])
+		self.assertIn("Pay ACME", api._single_flight_error(conv, OWNER)["error"]["message"])
 
 	def test_legacy_pending_hook_joins_single_flight(self):
 		conv = self.make_conv()

@@ -4224,11 +4224,14 @@ def _connector_precheck_refusal(tool: str, args) -> dict | None:
 	if not isinstance(connector, str) or not isinstance(action, str):
 		return None
 	from jarvis.connectors import broker
+	from jarvis.connectors.secret_scrub import scrub_value
 	from jarvis.tools._agent_run_ctx import get_session_key
 
 	refusal = broker.precheck(connector, action, args.get("args"), run_id=get_session_key())
 	if refusal is None:
 		return None
+	# A schema error repeats the offending argument value, which may be a credential.
+	refusal = scrub_value(refusal)
 	_record_tool_audit(tool, args, refusal)
 	return {"ok": True, "data": refusal}
 
@@ -4669,14 +4672,14 @@ def _stamp_file_box_draft(conv: str, data) -> bool:
 	return True
 
 
-def _single_flight_error(conversation: str | None = None) -> dict:
+def _single_flight_error(conversation: str | None = None, owner_user: str | None = None) -> dict:
 	"""F16: a card already waits in this conversation. Cards never expire, so the
 	model must stop until the user answers it. The waiting card is named when it can
 	be found, so the model tells the user exactly which card to answer."""
 	return _error(
 		"ConfirmationPendingError",
 		"a confirmation card for a previous action is still awaiting the user in this "
-		f"conversation{_waiting_card_label(conversation)}. Only one runs at a time - do NOT "
+		f"conversation{_waiting_card_label(conversation, owner_user)}. Only one runs at a time - do NOT "
 		"retry this call; stop and end your turn now. The card does not expire: the user "
 		"confirms or discards it, and once they confirm you'll get a follow-up turn to "
 		"continue with the next step. If the waiting card is not what the user asked for, "
@@ -4685,16 +4688,18 @@ def _single_flight_error(conversation: str | None = None) -> dict:
 	)
 
 
-def _waiting_card_label(conversation: str | None) -> str:
+def _waiting_card_label(conversation: str | None, owner_user: str | None) -> str:
 	"""`` (the waiting card: "<summary>")`` for the one Pending chat card of
-	``conversation``, or an empty string when there is none to name. The summary is
-	the plain-text title the card shows; a read error only costs the name."""
-	if not conversation:
+	``conversation`` that belongs to ``owner_user``, or an empty string when there is
+	none to name. A card another person of a shared chat owns is never named: its
+	title is theirs to see. The summary is the plain-text title the card shows; a read
+	error only costs the name."""
+	if not conversation or not owner_user:
 		return ""
 	try:
 		summary = frappe.db.get_value(
 			"Jarvis Pending Action",
-			{"conversation": conversation, "kind": "chat", "status": "Pending"},
+			{"conversation": conversation, "kind": "chat", "status": "Pending", "owner_user": owner_user},
 			"summary",
 			order_by="creation desc",
 		)
@@ -5305,7 +5310,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				"call once; if it still fails, tell the user and stop - do not loop.",
 			)
 		if conversation_pending:
-			return _single_flight_error(conv)
+			return _single_flight_error(conv, owner_user)
 		# send_email(recipients_from=...): the bench runs the query and writes one message
 		# per row NOW, so the card shows the real recipients and Confirm sends exactly
 		# them (send_email re-runs the query and refuses a changed list). The model never
@@ -5485,7 +5490,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		except pending_confirm.ConfirmationPendingError:
 			# Park re-checks single-flight under its lock: a card that could not be
 			# superseded after all (another actor holds it) is not a storage error.
-			return _single_flight_error(conv)
+			return _single_flight_error(conv, owner_user)
 		# mint returns None when it could not stage the park (a transient cache
 		# failure that it already rolled back, so nothing is persisted). Do NOT
 		# publish a card against a token whose record does not exist - that card is

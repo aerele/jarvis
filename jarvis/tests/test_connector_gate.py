@@ -170,7 +170,7 @@ class TestConnectorSafeReadRowLookup(FrappeTestCase):
 				frappe.delete_doc(CONNECTOR, name, ignore_permissions=True, force=True)
 		frappe.db.commit()
 
-	def _mk(self, key: str, actions: list[dict], enabled: int = 1, tested: bool = True) -> str:
+	def _mk(self, key: str, actions: list[dict], enabled: int = 1, tested: bool = True, schema=None) -> str:
 		"""Insert a Shared connector as Administrator so resolve_for_status
 		(Personal-wins-over-Shared) resolves it for any caller. ``tested`` stamps a
 		passed connection test and a cache listing each action (the pre-park check
@@ -192,7 +192,10 @@ class TestConnectorSafeReadRowLookup(FrappeTestCase):
 			doc.insert(ignore_permissions=True)
 			if tested:
 				tools = [
-					{"name": a["action"], "inputSchema": {"type": "object", "required": ["title"]}}
+					{
+						"name": a["action"],
+						"inputSchema": schema or {"type": "object", "required": ["title"]},
+					}
 					for a in actions
 				]
 				frappe.db.set_value(
@@ -324,6 +327,39 @@ class TestConnectorSafeReadRowLookup(FrappeTestCase):
 		self.assertEqual(r["data"]["error"]["code"], "connector_disabled")
 		r, _ = self._refused("gate-refuse-missing", "create_issue")
 		self.assertEqual(r["data"]["error"]["code"], "connector_not_found")
+
+	def test_a_refusal_never_repeats_a_credential_from_the_arguments(self):
+		token = "ghp_" + "k" * 36
+		key = "gate-refuse-token"
+		self._mk(
+			key,
+			actions=[{"action": "create_issue", "allowed": 1, "read_only": 0, "destructive": 0}],
+			schema={"type": "object", "properties": {"title": {"type": "integer"}}},
+		)
+		r, aud = self._refused(key, "create_issue", {"title": token})
+		self.assertEqual(r["data"]["error"]["code"], "invalid_arguments")
+		self.assertNotIn(token, json.dumps(r))
+		self.assertNotIn(token, aud.call_args.kwargs["error_message"])
+
+	def test_a_schema_message_that_repeats_an_argument_is_scrubbed(self):
+		# A jsonschema message ("'<value>' is not of type 'integer'") repeats the value.
+		token = "ghp_" + "k" * 36
+		refusal = {
+			"ok": False,
+			"error": {
+				"code": "invalid_arguments",
+				"message": f"argument 'title' is invalid: '{token}' is not of type 'integer'",
+			},
+		}
+		with (
+			patch("jarvis.connectors.broker.precheck", return_value=refusal),
+			patch("jarvis.api.audit.record") as aud,
+		):
+			r = api._connector_precheck_refusal("call_connector", {"connector": "c", "action": "a"})
+		self.assertEqual(r["data"]["error"]["code"], "invalid_arguments")
+		self.assertNotIn(token, json.dumps(r))
+		self.assertNotIn(token, aud.call_args.kwargs["error_message"])
+		self.assertIn("is not of type 'integer'", r["data"]["error"]["message"])
 
 	def test_refusal_writes_one_connector_log_row(self):
 		key = "gate-refuse-log"

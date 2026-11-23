@@ -42,7 +42,7 @@ _TOKEN_RES = (
 	re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b"),  # Stripe
 	re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b"),  # Slack
 	re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),  # Google API key
-	re.compile(r"\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b"),  # JWT
+	re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b"),  # JWT
 )
 
 _SECRET_WORDS = frozenset(

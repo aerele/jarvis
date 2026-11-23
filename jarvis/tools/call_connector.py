@@ -92,7 +92,18 @@ def _scrubbed(result):
 	an app's answer enters the bench, so the agent, the stored transcript, realtime
 	and the receipts all get the masked copy. A signed link is masked too: the agent
 	cannot hand over a working one, and the note says what to do instead."""
-	scrubbed, count = scrub_counted(result)
+	try:
+		scrubbed, count = scrub_counted(result)
+	except Exception:
+		# A pathological answer (nested thousands deep) must not reach the agent unmasked.
+		# ``internal_error`` is not a pre-send code, so a confirmed card stays "unknown".
+		return {
+			"ok": False,
+			"error": {
+				"code": "internal_error",
+				"message": "The connector's answer could not be read safely.",
+			},
+		}
 	if not count:
 		return result
 	if isinstance(scrubbed, dict):

@@ -143,6 +143,20 @@ class TestScrubIsLinear(unittest.TestCase):
 		self.assertEqual(out, REDACTION)
 		self.assertEqual(count, 1)
 
+	def test_a_run_of_jwt_prefixes_is_not_quadratic(self):
+		import time
+
+		started = time.monotonic()
+		out, _count = scrub_text("eyJ-" * 500_000)  # 2 MB
+		self.assertLess(time.monotonic() - started, 1.0)
+		self.assertEqual(out, "eyJ-" * 500_000)
+
+	def test_a_real_jwt_is_still_masked(self):
+		jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+		out, count = scrub_text(f"token: {jwt} and ({jwt})")
+		self.assertNotIn("eyJ", out)
+		self.assertEqual(count, 2)
+
 	def test_blocks_with_footers_are_masked_one_by_one(self):
 		block = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----"
 		out, count = scrub_text(f"a {block} b {block} c")

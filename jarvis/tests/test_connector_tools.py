@@ -95,6 +95,20 @@ class TestCallConnectorDelegation(unittest.TestCase):
 		self.assertEqual(result["result"]["structuredContent"]["key"], "user-42")
 		self.assertIn("open it from the app itself", result["redaction_note"])
 
+	def test_an_answer_nested_too_deep_to_scrub_is_never_returned_raw(self):
+		deep = leaf = {}
+		for _ in range(2000):
+			leaf["n"] = {}
+			leaf = leaf["n"]
+		leaf["secret"] = "AKIAIOSFODNN7EXAMPLE"
+		result = self._call_with({"ok": True, "result": deep})
+		self.assertEqual(result["ok"], False)
+		self.assertEqual(result["error"]["code"], "internal_error")
+		self.assertNotIn("result", result)
+		from jarvis.connectors.outcome import NOT_SENT_CODES
+
+		self.assertNotIn("internal_error", NOT_SENT_CODES)
+
 	def test_a_clean_answer_is_returned_untouched_with_no_note(self):
 		answer = {"ok": True, "result": {"content": [{"type": "text", "text": "issue_key=ABC-1"}]}}
 		result = self._call_with(answer)
