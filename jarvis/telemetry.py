@@ -84,7 +84,7 @@ def record_budget_event(
 	uncapped-but-oversized result). Unlike ``record_tool``, this is not gated
 	on a custom-doctype target - every event is signal for sizing the budget
 	itself. The guard outcome rides under ``outcome`` (truncated / bounded_document /
-	uncapped / uncapped_nonrow / measure_failed) - NOT ``event`` - so it does not collide
+	uncapped / uncapped_nonrow / bounded_connector / measure_failed) - NOT ``event`` - so it does not collide
 	with this line's own ``kind`` discriminator. Never raises."""
 	try:
 		_emit(
