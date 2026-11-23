@@ -29,6 +29,7 @@ TERMINAL = (EXECUTED, FAILED, DISCARDED, CANCELLED, SUPERSEDED)
 # Fixed bench text per reason code; the row never carries free text (§4.1).
 REASON_TEXT = {
 	"failed": "The action could not be applied; nothing was changed.",
+	"not_sent": "The app was not called; nothing was changed.",
 	"stale": "The record changed after this action was proposed.",
 	"target_missing": "The record this action targets no longer exists.",
 	"unverifiable": "This action can no longer be verified on this site.",

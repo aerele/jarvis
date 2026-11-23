@@ -59,6 +59,7 @@ MESSAGE = "Jarvis Chat Message"
 SESSION = "Jarvis Chat Session"
 PATCH_LOG = "Patch Log"
 
+CONNECTOR_KEY = "cc-github"
 AUD_SLUG = "cc-auditor"
 OP_SLUG = "cc-operator"
 STOCK_SLUG = "stock-variance-auditor"
@@ -738,6 +739,54 @@ class TestConnectorAlwaysGated(_DelegateCase):
 	specifically for call_connector, and that closing it does not touch any
 	other tool's legacy behaviour."""
 
+	def setUp(self):
+		super().setUp()
+		self._drop_connector()
+
+	def tearDown(self):
+		self._drop_connector()
+		super().tearDown()
+
+	def _drop_connector(self) -> None:
+		# Committed: the row is inserted (and committed) by the test, so its delete must be too.
+		frappe.set_user("Administrator")
+		for name in frappe.get_all("Jarvis Connector", filters={"key": CONNECTOR_KEY}, pluck="name"):
+			frappe.delete_doc("Jarvis Connector", name, ignore_permissions=True, force=True)
+		frappe.db.commit()
+
+	def _mk_connector(self, *, tested: bool) -> None:
+		"""A Shared connector with one allowed write action. The pre-park check refuses a
+		call on a connector that does not exist or has not passed its test, so a call that
+		must PARK needs a tested one."""
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc(
+			{
+				"doctype": "Jarvis Connector",
+				"key": CONNECTOR_KEY,
+				"label": "cc-connector",
+				"scope": "Shared",
+				"enabled": 1,
+				"base_url": "https://example.invalid/mcp",
+				"allowed_actions": [{"action": "x", "allowed": 1, "read_only": 0, "destructive": 0}],
+			}
+		).insert(ignore_permissions=True)
+		if tested:
+			tools = {"tools": [{"name": "x", "inputSchema": {"type": "object"}}]}
+			frappe.db.set_value(
+				"Jarvis Connector",
+				doc.name,
+				{"last_test_status": "Passed", "tools_cache": json.dumps(tools)},
+			)
+		frappe.db.commit()
+
+	def _declare_connector(self) -> None:
+		frappe.db.set_value(
+			RUN,
+			self.aud_run,
+			{"tools_allow_json": json.dumps([*AUD_TOOLS_ALLOW, "jarvis__call_connector"])},
+			update_modified=False,
+		)
+
 	def test_legacy_run_never_reaches_call_connector(self):
 		frappe.db.set_value(
 			RUN,
@@ -775,15 +824,24 @@ class TestConnectorAlwaysGated(_DelegateCase):
 		refused by the capability gate is the thing proven here - the tool's
 		OWN kill switch and the broker's gates are covered separately, see
 		test_connector_tools.py."""
-		frappe.db.set_value(
-			RUN,
-			self.aud_run,
-			{"tools_allow_json": json.dumps([*AUD_TOOLS_ALLOW, "jarvis__call_connector"])},
-			update_modified=False,
-		)
-		res = self._dispatch(self.aud_key, "call_connector", {"connector": "github", "action": "x"})
+		self._mk_connector(tested=True)
+		self._declare_connector()
+		res = self._dispatch(self.aud_key, "call_connector", {"connector": CONNECTOR_KEY, "action": "x"})
 		self.assertTrue(res["ok"], res)
 		self.assertEqual((res.get("data") or {}).get("status"), "pending_confirmation")
+
+	def test_declared_run_on_an_untested_connector_is_refused_with_no_card(self):
+		"""The other side: declaring the tool passes the capability gate, but a call the
+		broker would refuse at dispatch is refused now, before a card is parked."""
+		self._mk_connector(tested=False)
+		self._declare_connector()
+		with mock.patch("jarvis.chat.pending_confirm.mint") as mint:
+			res = self._dispatch(self.aud_key, "call_connector", {"connector": CONNECTOR_KEY, "action": "x"})
+		mint.assert_not_called()
+		self.assertTrue(res["ok"], res)
+		self.assertNotEqual((res.get("data") or {}).get("status"), "pending_confirmation")
+		self.assertEqual(res["data"]["ok"], False)
+		self.assertEqual(res["data"]["error"]["code"], "connector_not_ready")
 
 
 # --------------------------------------------------------------------------- #
