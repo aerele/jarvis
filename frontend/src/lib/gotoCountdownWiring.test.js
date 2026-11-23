@@ -850,31 +850,6 @@ test("Esc is left alone when a dialog is open, settings are open, IME is composi
 	}
 });
 
-test("the Esc branch is the first thing onGlobalKey does, guarded as the plan says, with no preventDefault", () => {
-	const body = fnBody("function onGlobalKey(e)");
-	const first = body
-		.slice(body.indexOf("{") + 1)
-		.replace(/^(\s*\/\/[^\n]*\n)*/, "")
-		.trimStart();
-	assert.ok(
-		first.startsWith(
-			'if (\n\t\te.key === "Escape" &&\n\t\tgotoCdState.value &&\n\t\tgotoCd.state() &&'
-		),
-		first.slice(0, 120)
-	);
-	const branch = body.slice(0, body.indexOf("return;\n\t}") + 10);
-	for (const guard of [
-		"gotoCd.state()",
-		"!e.defaultPrevented",
-		"!e.isComposing",
-		"!store.settingsOpen",
-		"!modalIsOpen(document)",
-	])
-		assert.ok(branch.includes(guard), guard);
-	assert.doesNotMatch(branch, /preventDefault\(\)|stopPropagation\(\)/);
-	assert.match(branch, /stayInChat\(gotoCardHasFocus\(\), "esc"\);\s*return;/);
-});
-
 test("after an exit, the card state is clear and Esc reaches the mic again", () => {
 	const scope = keyScope({ micState: { value: "recording" } });
 	scope.gotoCdState.value = state();

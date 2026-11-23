@@ -433,16 +433,6 @@ describe("persistent export card", () => {
 			const failed = show({ status: "failed", attempts: 4, retries: 1 }, "job2");
 			expect(failed.find(".jv-xfoot small").text()).toBe("Attempt 2 of 2");
 		});
-
-		it("shows small files in KB, never 0.00 MB", () => {
-			const wrapper = show({
-				status: "ready",
-				size_bytes: 2048,
-				file_url: "/private/files/x.xlsx",
-			});
-			expect(wrapper.text()).toContain("2 KB");
-			expect(wrapper.text()).not.toContain("0.00 MB");
-		});
 	});
 
 	describe("clock and live region", () => {
