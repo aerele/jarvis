@@ -234,6 +234,30 @@ class TestPark(PendingActionTestMixin, FrappeTestCase):
 		self.set_col(first, status="Executed")
 		self.park(conv)  # a terminal card no longer blocks
 
+	def test_the_refusal_to_park_a_second_card_names_the_waiting_one(self):
+		from jarvis import api
+
+		conv = self.make_conv()
+		self.park(conv, summary='Pay\n ACME  "Ltd" 1,000')
+		other = self.make_conv()
+		self.park(other, summary="Cancel order SO-9")
+		args = {"doctype": "ToDo", "values": {"description": "pa-test second"}}
+		with patch("jarvis.api._run_preview", return_value={"would": {"doctype": "ToDo"}}), as_user(OWNER):
+			res = api._run_tool("create_doc", dict(args), conversation=conv)
+		self.assertEqual(res["error"]["code"], "ConfirmationPendingError")
+		message = res["error"]["message"]
+		self.assertIn("(the waiting card: \"Pay ACME 'Ltd' 1,000\")", message)
+		self.assertNotIn("SO-9", message, "only this conversation's card is named")
+		self.assertIn("confirms or discards it", message)
+		self.assertEqual(frappe.db.count(PA, {"conversation": conv}), 1)
+
+	def test_a_waiting_card_that_cannot_be_found_is_not_named(self):
+		from jarvis import api
+
+		self.assertEqual(api._waiting_card_label(None), "")
+		self.assertEqual(api._waiting_card_label(self.make_conv()), "")
+		self.assertNotIn("waiting card:", api._single_flight_error()["error"]["message"])
+
 	def test_legacy_pending_hook_joins_single_flight(self):
 		conv = self.make_conv()
 		with self.assertRaises(pa.ConfirmationPendingError):
