@@ -773,6 +773,31 @@ class TestContinuation(FrappeTestCase):
 		self.assertIn('"number": 7', text)
 		self.assertIn("https://github.com/o/r/issues/7", text)
 
+	def test_connector_receipt_unreadable_stored_answer_is_not_no_content(self):
+		from jarvis.chat.actions_api import _confirm_receipt_text, _pa_receipt_text
+
+		record = self._connector_record()
+		expected = "call_connector connector=github action=create_issue succeeded (the app's answer is not available)."
+		self.assertEqual(_confirm_receipt_text(record, {"ok": True}), expected)
+		self.assertEqual(_confirm_receipt_text(record, {"ok": True, "data": {"ok": True}}), expected)
+		# A card that ran whose settlement could not be opened: ``_item`` gives no result.
+		item = {"tool": "call_connector", "args": record["args"], "status": "Executed", "result": None}
+		self.assertEqual(_pa_receipt_text(item), expected)
+
+	def test_connector_failure_message_is_windowed_before_scrubbing(self):
+		import time
+
+		from jarvis.chat.actions_api import _confirm_receipt_text
+
+		message = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n" * 60_000
+		result = {"ok": True, "data": {"ok": False, "error": {"code": "tool_error", "message": message}}}
+		started = time.perf_counter()
+		text = _confirm_receipt_text(self._connector_record(), result)
+		seconds = time.perf_counter() - started
+		print(f"\n  adversarial failure message: {len(message)} chars in {seconds * 1000:.0f} ms")
+		self.assertLess(seconds, 1.0)
+		self.assertNotIn("AAAA", text)
+
 	def test_connector_receipt_empty_response(self):
 		from jarvis.chat.actions_api import _confirm_receipt_text
 
@@ -1132,6 +1157,118 @@ class TestContinuation(FrappeTestCase):
 		self.assertIn("receipt_text", res)
 		self.assertIn("Returned:", res["receipt_text"])
 		self.assertIn("ACC-batch-marker", res["receipt_text"])
+
+	def _confirm_legacy_batch(self, specs):
+		"""Confirm one legacy token per ``(tool, args, envelope)`` as a batch card; the
+		results are what ``_confirm_typed_items`` folds into one continuation."""
+		from jarvis.chat import pending_confirm
+		from jarvis.chat.actions_api import _confirm_core
+
+		conv = self._conv()
+		tokens, envelopes = [], {}
+		for tool, args, envelope in specs:
+			# A legacy (Redis) token: the pending-action path settles through settle_batch.
+			token = pending_confirm.legacy.mint(
+				conversation=conv, owner="Administrator", tool=tool, args=args, run_id="testrun"
+			)
+			tokens.append(token)
+			envelopes[token] = envelope
+
+		def fake_dispatch(tool, args, **_kw):
+			return next(e for (t, a, e), tok in zip(specs, tokens, strict=True) if (t, a) == (tool, args))
+
+		with patch("jarvis.api.dispatch_confirmed", side_effect=fake_dispatch):
+			return [_confirm_core(token, conv, batch=True) for token in tokens]
+
+	def test_confirm_core_batch_connector_failure_carries_its_own_outcome(self):
+		failed = {"ok": True, "data": {"ok": False, "error": {"code": "tool_error", "message": "refused"}}}
+		args = {"connector": "notion", "action": "update_page"}
+		(res,) = self._confirm_legacy_batch([("call_connector", args, failed)])
+		self.assertEqual(res["receipt_outcome"], "unknown")
+		self.assertIn("FAILED (tool_error). <untrusted-data", res["receipt_text"])
+		ok = {"ok": True, "data": {"ok": True, "result": {"content": [{"type": "text", "text": "done"}]}}}
+		(res,) = self._confirm_legacy_batch([("call_connector", args, ok)])
+		self.assertEqual(res["receipt_outcome"], "ok")
+		self.assertIn("The app returned", res["receipt_text"])
+
+	def test_confirm_core_batch_connector_receipt_uses_the_small_per_card_limit(self):
+		from jarvis.chat.actions_api import CONNECTOR_RECEIPT_MIN
+
+		big = {
+			"ok": True,
+			"data": {"ok": True, "result": {"content": [{"type": "text", "text": "w" * 9000}]}},
+		}
+		(res,) = self._confirm_legacy_batch(
+			[("call_connector", {"connector": "github", "action": "list_all"}, big)]
+		)
+		self.assertTrue(
+			res["receipt_text"].endswith(
+				f"[cut: showed {CONNECTOR_RECEIPT_MIN} of 9000 characters]\n</untrusted-data>"
+			)
+		)
+
+	def test_legacy_batch_long_connector_success_does_not_hide_a_failure(self):
+		from jarvis.chat.api import _legacy_batch_continuation
+
+		big = {
+			"ok": True,
+			"data": {"ok": True, "result": {"content": [{"type": "text", "text": "w" * 8100}]}},
+		}
+		failed = {
+			"ok": True,
+			"data": {"ok": False, "error": {"code": "tool_error", "message": "App said no"}},
+		}
+		results = self._confirm_legacy_batch(
+			[
+				("call_connector", {"connector": "github", "action": "list_all"}, big),
+				("call_connector", {"connector": "notion", "action": "update_page"}, failed),
+			]
+		)
+		receipt, outcome = _legacy_batch_continuation([(r["receipt_text"], r) for r in results])
+		self.assertIn("App said no", receipt)
+		self.assertEqual(outcome, "unknown")
+		# The failure is listed first, whatever the order the cards were confirmed in.
+		self.assertLess(receipt.index("App said no"), receipt.index("list_all"))
+
+	def test_legacy_batch_mixed_connector_and_erp_cards(self):
+		from jarvis.chat.api import _legacy_batch_continuation
+
+		ok_erp = {"ok": True, "data": {"name": "TODO-1"}}
+		bad_erp = {"ok": False, "error": {"message": "Missing field", "code": "ValidationError"}}
+		failed = {
+			"ok": True,
+			"data": {"ok": False, "error": {"code": "tool_error", "message": "App said no"}},
+		}
+		results = self._confirm_legacy_batch(
+			[
+				("create_doc", {"doctype": "ToDo", "description": "a"}, ok_erp),
+				("update_doc", {"doctype": "ToDo", "name": "TODO-1", "description": "b"}, bad_erp),
+			]
+		)
+		# No connector card: the old behaviour, a plain failure is not fixable.
+		receipt, outcome = _legacy_batch_continuation([(r["receipt_text"], r) for r in results])
+		self.assertEqual(outcome, "failed_not_fixable")
+		self.assertIn("create_doc doctype=ToDo -> TODO-1 succeeded.", receipt)
+		self.assertIn("FAILED. Missing field", receipt)
+		self.assertNotIn("untrusted-data", receipt)
+		# Add a connector failure: unknown wins, and the ERP receipts read the same.
+		results += self._confirm_legacy_batch(
+			[("call_connector", {"connector": "notion", "action": "update_page"}, failed)]
+		)
+		receipt, outcome = _legacy_batch_continuation([(r["receipt_text"], r) for r in results])
+		self.assertEqual(outcome, "unknown")
+		self.assertIn("create_doc doctype=ToDo -> TODO-1 succeeded.", receipt)
+		self.assertIn("FAILED (tool_error). <untrusted-data", receipt)
+
+	def test_legacy_batch_unknown_beats_partial(self):
+		from jarvis.chat.api import _legacy_batch_continuation
+
+		receipts = [
+			("a PARTIAL", {"ok": False, "outcome": "partial", "error": {"message": "x"}}),
+			("b UNKNOWN", {"ok": True, "receipt_outcome": "unknown"}),
+		]
+		self.assertEqual(_legacy_batch_continuation(receipts)[1], "unknown")
+		self.assertEqual(_legacy_batch_continuation(receipts[:1])[1], "partial")
 
 	def test_confirm_tool_failed_write_still_continues_with_neutralized_error(self):
 		# A confirmed write that FAILS must still dispatch the continuation (so the

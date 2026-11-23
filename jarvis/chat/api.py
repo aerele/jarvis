@@ -2203,14 +2203,18 @@ def _legacy_batch_continuation(receipts: list[tuple[str, dict]]) -> tuple[str, s
 	outcomes = [res.get("receipt_outcome") or _legacy_outcome(res) for _text, res in receipts]
 	if all(o == OUTCOME_OK for o in outcomes):
 		return " ".join(text for text, _res in receipts), OUTCOME_OK
+	# What went wrong first: ``_join_capped`` shows the first receipt in full and may drop
+	# the rest, so a long success must not hide a failure after it.
+	order = sorted(range(len(receipts)), key=lambda i: outcomes[i] == OUTCOME_OK)
+	joined = _join_capped([receipts[i][0] for i in order])
 	# Unverified (a connector the app answered with an error) wins over partial, as in
 	# ``actions_api._settled_plan``; either wins over every plain failure.
 	for outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
 		if outcome in outcomes:
-			return _join_capped([text for text, _res in receipts]), outcome
+			return joined, outcome
 	busy_only = all(o == OUTCOME_RETRY_LATER for o in outcomes)
 	outcome = OUTCOME_RETRY_LATER if busy_only else OUTCOME_NOT_FIXABLE
-	return _join_capped([text for text, _res in receipts]), outcome
+	return joined, outcome
 
 
 def _confirm_typed_items(conversation, items):

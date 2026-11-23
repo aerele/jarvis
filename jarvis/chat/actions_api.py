@@ -1975,7 +1975,8 @@ def _confirm_core(
 		# so the caller can compose them.
 		if batch:
 			if isinstance(result, dict):
-				result["receipt_text"] = _confirm_receipt_text(record, result)
+				# A small share of the follow-up's room: this path has no total cap.
+				result["receipt_text"] = _confirm_receipt_text(record, result, CONNECTOR_RECEIPT_MIN)
 				result["receipt_outcome"] = _legacy_outcome(result, record["tool"])
 			return result
 		_cont = None
@@ -2171,12 +2172,14 @@ def _connector_receipt_text(desc: str, data, limit: int) -> str:
 
 
 def _connector_failure_line(desc: str, envelope: dict) -> str:
+	from jarvis.connectors.result_view import scrubbed_window
 	from jarvis.connectors.secret_scrub import scrub_text
 
 	err = envelope.get("error") if isinstance(envelope.get("error"), dict) else {}
-	code = f" ({scrub_text(err.get('code'))[0]})" if err.get("code") else ""
-	message = " ".join(scrub_text(err.get("message"))[0].split())
-	if len(message) > CONNECTOR_FAILURE_CAP:
+	code = f" ({scrub_text(str(err.get('code'))[:80])[0]})" if err.get("code") else ""
+	message, total = scrubbed_window(str(err.get("message") or ""), CONNECTOR_FAILURE_CAP)
+	message = " ".join(message.split())
+	if total > CONNECTOR_FAILURE_CAP or len(message) > CONNECTOR_FAILURE_CAP:
 		message = message[: CONNECTOR_FAILURE_CAP - 3].rstrip() + "..."
 	return f"{desc} FAILED{code}. {_fenced_app_text(message)}".strip()
 
@@ -2184,7 +2187,10 @@ def _connector_failure_line(desc: str, envelope: dict) -> str:
 def _connector_success_line(desc: str, envelope: dict, limit: int) -> str:
 	from jarvis.connectors.result_view import receipt_payload
 
-	payload = receipt_payload(envelope.get("result"), limit)
+	if envelope.get("result") is None:
+		# The card ran, but its stored answer could not be read back: not "no content".
+		return f"{desc} succeeded (the app's answer is not available)."
+	payload = receipt_payload(envelope["result"], limit)
 	if not payload:
 		return f"{desc} succeeded. The app returned no content."
 	return (
