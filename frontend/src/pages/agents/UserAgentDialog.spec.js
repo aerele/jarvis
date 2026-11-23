@@ -26,14 +26,19 @@ vi.mock("frappe-ui", () => ({
 		template: `<p v-if="message" class="error">{{ message }}</p>`,
 	},
 	FormControl: {
-		props: ["modelValue", "type", "label", "options"],
+		props: ["modelValue", "type", "label", "options", "placeholder"],
 		emits: ["update:modelValue"],
-		template: `<label class="field" :data-label="label"><input :value="modelValue" @input="$emit('update:modelValue', $event.target.value)" /></label>`,
+		template: `<label class="field" :data-label="label"><textarea v-if="type === 'textarea'" :value="modelValue" :placeholder="placeholder" @input="$emit('update:modelValue', $event.target.value)" /><input v-else :value="modelValue" :placeholder="placeholder" @input="$emit('update:modelValue', $event.target.value)" /></label>`,
 	},
 	Switch: {
-		props: ["modelValue", "label"],
+		props: ["modelValue", "label", "disabled"],
 		emits: ["update:modelValue"],
-		template: `<label class="switch" :data-label="label"><input type="checkbox" :checked="modelValue" @change="$emit('update:modelValue', $event.target.checked)" /></label>`,
+		template: `<label class="switch" :data-label="label"><input type="checkbox" :checked="modelValue" :disabled="disabled" @change="$emit('update:modelValue', $event.target.checked)" /></label>`,
+	},
+	TabButtons: {
+		props: ["buttons", "modelValue"],
+		emits: ["update:modelValue"],
+		template: `<div class="modes"><button v-for="b in buttons" :key="b.value" :data-mode="b.value" :aria-pressed="modelValue === b.value" @click="$emit('update:modelValue', b.value)">{{ b.label }}</button></div>`,
 	},
 	Badge: { props: ["label"], template: "<span>{{ label }}</span>" },
 	FeatherIcon: { template: "<i />" },
@@ -82,7 +87,8 @@ const agent = (extra = {}) => ({
 	...extra,
 });
 
-const field = (w, label) => w.get(`.field[data-label="${label}"] input`);
+const field = (w, label) =>
+	w.get(`.field[data-label="${label}"] input, .field[data-label="${label}"] textarea`);
 const button = (w, label) => w.findAll("button").find((b) => b.text() === label);
 
 async function open(props = {}) {
@@ -299,5 +305,132 @@ describe("UserAgentDialog: an existing agent", () => {
 		api.listPickableTools.mockRejectedValue({ messages: ["Custom agents are turned off."] });
 		const w = await open({ agent: agent() });
 		expect(w.text()).toContain("Custom agents are turned off.");
+	});
+});
+
+describe("UserAgentDialog: the web browser option", () => {
+	const BROWSER = { enabled: true, max: 3, inUse: 1 };
+	const toggle = (w) => w.get('.switch[data-label="Can use a web browser"] input');
+	const warning = "A web page can trick the agent into sending data it has read to any site.";
+	const fill = async (w) => {
+		await field(w, "Name").setValue("Researcher");
+		await field(w, "Instructions").setValue("Look things up.");
+	};
+
+	it("is hidden while the site does not offer a browser", async () => {
+		const w = await open();
+		expect(w.find('.switch[data-label="Can use a web browser"]').exists()).toBe(false);
+		await fill(w);
+		api.createUserAgent.mockResolvedValue(agent());
+		await button(w, "Create agent").trigger("click");
+		await flushPromises();
+		expect(api.createUserAgent.mock.calls[0][0]).not.toHaveProperty("allow_browser");
+	});
+
+	it("shows the toggle with its help line, and the modes only once it is on", async () => {
+		const w = await open({ browser: BROWSER });
+		expect(w.text()).toContain(
+			"The agent gets its own private browser. Logins stay saved for this agent only."
+		);
+		expect(w.find(".modes").exists()).toBe(false);
+		await toggle(w).setValue(true);
+		expect(w.findAll(".modes button").map((b) => b.text())).toEqual([
+			"Listed sites only",
+			"Any public site",
+		]);
+		expect(w.get('.modes [data-mode="listed"]').attributes("aria-pressed")).toBe("true");
+		expect(field(w, "Sites, one per line").attributes("placeholder")).toBe("example.com");
+	});
+
+	it("sends the cleaned site list in listed mode", async () => {
+		api.createUserAgent.mockResolvedValue(agent());
+		const w = await open({ browser: BROWSER });
+		await fill(w);
+		await toggle(w).setValue(true);
+		await field(w, "Sites, one per line").setValue(
+			"  example.com \n\n docs.example.org\r\n   \n"
+		);
+		await button(w, "Create agent").trigger("click");
+		await flushPromises();
+		expect(api.createUserAgent).toHaveBeenCalledWith(
+			expect.objectContaining({
+				allow_browser: true,
+				browser_mode: "listed",
+				browser_sites: ["example.com", "docs.example.org"],
+			})
+		);
+	});
+
+	it("shows the warning only in public mode, and hides the site list there", async () => {
+		const w = await open({ browser: BROWSER });
+		await toggle(w).setValue(true);
+		expect(w.text()).not.toContain(warning);
+		expect(w.find('.field[data-label="Sites, one per line"]').exists()).toBe(true);
+		await w.get('.modes [data-mode="public"]').trigger("click");
+		expect(w.text()).toContain(warning);
+		expect(w.text()).toContain("Use listed sites unless you need this.");
+		expect(w.find('.field[data-label="Sites, one per line"]').exists()).toBe(false);
+		api.createUserAgent.mockResolvedValue(agent());
+		await fill(w);
+		await button(w, "Create agent").trigger("click");
+		await flushPromises();
+		expect(api.createUserAgent).toHaveBeenCalledWith(
+			expect.objectContaining({ allow_browser: true, browser_mode: "public" })
+		);
+	});
+
+	it("counts the sites only near the limit", async () => {
+		const w = await open({ browser: BROWSER });
+		await toggle(w).setValue(true);
+		await field(w, "Sites, one per line").setValue("a.com\nb.com");
+		expect(w.text()).not.toContain("of 30 sites");
+		const many = Array.from({ length: 26 }, (_, i) => `site${i}.com`).join("\n");
+		await field(w, "Sites, one per line").setValue(many);
+		expect(w.text()).toContain("26 of 30 sites");
+	});
+
+	it("disables the toggle at the cap, with the reason, unless the agent already has a browser", async () => {
+		const full = { enabled: true, max: 3, inUse: 3 };
+		const w = await open({ browser: full });
+		expect(toggle(w).attributes("disabled")).toBeDefined();
+		expect(w.text()).toContain("Only 3 agents per workspace can have a browser.");
+		const own = agent({ browser: { enabled: true, mode: "listed", sites: ["example.com"] } });
+		const w2 = await open({ browser: full, agent: own });
+		expect(toggle(w2).attributes("disabled")).toBeUndefined();
+		expect(field(w2, "Sites, one per line").element.value).toBe("example.com");
+	});
+
+	it("updates the browser fields on an edit, and only when they changed", async () => {
+		const own = agent({ browser: { enabled: true, mode: "listed", sites: ["example.com"] } });
+		api.updateUserAgent.mockResolvedValue(own);
+		const w = await open({ browser: BROWSER, agent: own });
+		await button(w, "Save changes").trigger("click");
+		await flushPromises();
+		expect(api.updateUserAgent).not.toHaveBeenCalled();
+		await field(w, "Sites, one per line").setValue("example.com\nexample.org");
+		await button(w, "Save changes").trigger("click");
+		await flushPromises();
+		expect(api.updateUserAgent).toHaveBeenCalledWith(
+			"UA-1",
+			expect.objectContaining({
+				allow_browser: true,
+				browser_mode: "listed",
+				browser_sites: ["example.com", "example.org"],
+			})
+		);
+	});
+
+	it("shows the server's sentence about a refused site and keeps the dialog open", async () => {
+		api.createUserAgent.mockRejectedValue({
+			messages: ['"localhost" is not a public site. Remove that line.'],
+		});
+		const w = await open({ browser: BROWSER });
+		await fill(w);
+		await toggle(w).setValue(true);
+		await field(w, "Sites, one per line").setValue("localhost");
+		await button(w, "Create agent").trigger("click");
+		await flushPromises();
+		expect(w.text()).toContain('"localhost" is not a public site. Remove that line.');
+		expect(w.emitted("update:modelValue")).toBeUndefined();
 	});
 });

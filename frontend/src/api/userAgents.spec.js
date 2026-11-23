@@ -88,4 +88,34 @@ describe("userAgents API", () => {
 			].map((n) => UA + n)
 		);
 	});
+
+	it("sends the browser fields only when the caller has them", async () => {
+		await api.createUserAgent({ agent_name: "A", instructions: "x" });
+		expect(frappeUi.call.mock.calls[0][1]).not.toHaveProperty("allow_browser");
+		await api.createUserAgent({
+			agent_name: "A",
+			instructions: "x",
+			allow_browser: true,
+			browser_mode: "public",
+			browser_sites: [],
+		});
+		expect(frappeUi.call.mock.calls[1][1]).toMatchObject({
+			allow_browser: 1,
+			browser_mode: "public",
+			browser_sites: [],
+		});
+		await api.updateUserAgent("UA-1", {
+			agent_name: "A",
+			instructions: "x",
+			allow_browser: false,
+			browser_mode: "listed",
+			browser_sites: ["example.com"],
+		});
+		expect(frappeUi.call.mock.calls[2][1]).toMatchObject({
+			name: "UA-1",
+			allow_browser: 0,
+			browser_mode: "listed",
+			browser_sites: ["example.com"],
+		});
+	});
 });

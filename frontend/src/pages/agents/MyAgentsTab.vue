@@ -183,6 +183,7 @@
 		<UserAgentDialog
 			v-model="dialogOpen"
 			:agent="editingAgent"
+			:browser="browser"
 			@update:modelValue="(open) => !open && (editingName = '')"
 			@saved="onSaved"
 		/>
@@ -221,6 +222,8 @@ import { canRetrySync, lastRun, scheduleSummary, stateBadge, syncMessage } from 
 const props = defineProps({
 	agents: { type: Array, default: () => [] },
 	maxAgents: { type: Number, default: 5 },
+	// The workspace's web browser option: {enabled, max, inUse}.
+	browser: { type: Object, default: () => ({ enabled: false, max: 3, inUse: 0 }) },
 	loading: { type: Boolean, default: false },
 	error: { type: String, default: "" },
 });

@@ -17,6 +17,23 @@ export const NEAR_INSTRUCTIONS = 11000;
 export const MAX_PROMPT = 4000;
 export const MAX_NAME = 140;
 export const MAX_DESCRIPTION = 1000;
+export const MAX_BROWSER_SITES = 30;
+// The sites counter appears only once the list is this long.
+export const NEAR_BROWSER_SITES = 25;
+
+export const BROWSER_MODES = [
+	{ label: "Listed sites only", value: "listed" },
+	{ label: "Any public site", value: "public" },
+];
+
+// The textarea's lines, trimmed, with the empty ones dropped. Nothing else: the server
+// normalises hosts and refuses names that are not public.
+export function cleanSites(text) {
+	return String(text || "")
+		.split(/\r?\n/)
+		.map((l) => l.trim())
+		.filter(Boolean);
+}
 
 // "9:00:00" -> "09:00", the value of a native time input.
 export function timeHHMM(s) {
@@ -86,6 +103,9 @@ export function emptyForm() {
 		instructions: "",
 		tools: [],
 		allow_shell: false,
+		allow_browser: false,
+		browser_mode: "listed",
+		browser_sites: "",
 		schedule_enabled: false,
 		frequency: "daily",
 		time: "09:00",
@@ -97,12 +117,16 @@ export function emptyForm() {
 export function formFromAgent(agent) {
 	const s = agent.schedule || {};
 	const frequency = s.frequency || "daily";
+	const b = agent.browser || {};
 	return {
 		agent_name: agent.agent_name || "",
 		description: agent.description || "",
 		instructions: agent.instructions || "",
 		tools: [...(agent.tools || [])],
 		allow_shell: !!agent.allow_shell,
+		allow_browser: !!b.enabled,
+		browser_mode: b.mode === "public" ? "public" : "listed",
+		browser_sites: (b.sites || []).join("\n"),
 		schedule_enabled: !!s.enabled,
 		frequency,
 		time: timeHHMM(s.time) || "09:00",
@@ -147,15 +171,23 @@ export function validateForm(form, { maxTools = 64 } = {}) {
 }
 
 // The definition fields. Sending them starts a sync on the server, so the dialog
-// only calls update when one of them changed (see definitionChanged).
-export function definitionPayload(form) {
-	return {
+// only calls update when one of them changed (see definitionChanged). The browser
+// fields ride along only while the site offers a browser (`browser: true`): without
+// it they are left out, and the server keeps what it has.
+export function definitionPayload(form, { browser = false } = {}) {
+	const out = {
 		agent_name: form.agent_name.trim(),
 		description: (form.description || "").trim(),
 		instructions: form.instructions.trim(),
 		tools: [...form.tools].sort(),
 		allow_shell: !!form.allow_shell,
 	};
+	if (browser) {
+		out.allow_browser = !!form.allow_browser;
+		out.browser_mode = form.browser_mode === "public" ? "public" : "listed";
+		out.browser_sites = cleanSites(form.browser_sites);
+	}
+	return out;
 }
 
 export function schedulePayload(form) {
@@ -169,15 +201,19 @@ export function schedulePayload(form) {
 	};
 }
 
-export function definitionChanged(form, agent) {
-	const a = definitionPayload(formFromAgent(agent));
-	const b = definitionPayload(form);
+export function definitionChanged(form, agent, { browser = false } = {}) {
+	const a = definitionPayload(formFromAgent(agent), { browser });
+	const b = definitionPayload(form, { browser });
 	return (
 		a.agent_name !== b.agent_name ||
 		a.description !== b.description ||
 		a.instructions !== b.instructions ||
 		a.allow_shell !== b.allow_shell ||
-		a.tools.join("\n") !== b.tools.join("\n")
+		a.tools.join("\n") !== b.tools.join("\n") ||
+		(browser &&
+			(a.allow_browser !== b.allow_browser ||
+				a.browser_mode !== b.browser_mode ||
+				a.browser_sites.join("\n") !== b.browser_sites.join("\n")))
 	);
 }
 

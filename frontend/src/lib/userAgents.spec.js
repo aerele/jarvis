@@ -5,6 +5,7 @@ vi.mock("frappe-ui", () => ({ dayjs: () => ({ format: () => "" }) }));
 import {
 	MAX_INSTRUCTIONS,
 	canRetrySync,
+	cleanSites,
 	definitionChanged,
 	definitionPayload,
 	emptyForm,
@@ -189,5 +190,33 @@ describe("payloads and change detection", () => {
 		expect(
 			scheduleChanged({ ...formFromAgent(a), frequency: "weekly", day: "Monday" }, a)
 		).toBe(false);
+	});
+
+	it("cleans the site lines and leaves the rest to the server", () => {
+		expect(cleanSites("  example.com \n\n https://Docs.Example.org/path\r\n  ")).toEqual([
+			"example.com",
+			"https://Docs.Example.org/path",
+		]);
+		expect(cleanSites("")).toEqual([]);
+	});
+	it("adds the browser fields to the payload only when the site offers a browser", () => {
+		const a = agent({ browser: { enabled: true, mode: "public", sites: ["a.com", "b.com"] } });
+		const form = formFromAgent(a);
+		expect(form).toMatchObject({
+			allow_browser: true,
+			browser_mode: "public",
+			browser_sites: "a.com\nb.com",
+		});
+		expect(definitionPayload(form)).not.toHaveProperty("allow_browser");
+		expect(definitionPayload(form, { browser: true })).toMatchObject({
+			allow_browser: true,
+			browser_mode: "public",
+			browser_sites: ["a.com", "b.com"],
+		});
+		expect(definitionChanged(form, a, { browser: true })).toBe(false);
+		expect(definitionChanged({ ...form, browser_mode: "listed" }, a, { browser: true })).toBe(
+			true
+		);
+		expect(definitionChanged({ ...form, browser_mode: "listed" }, a)).toBe(false);
 	});
 });

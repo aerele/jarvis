@@ -70,6 +70,54 @@
 					</p>
 				</div>
 
+				<div v-if="browser.enabled" class="flex flex-col gap-3">
+					<div class="flex flex-col gap-1">
+						<Switch
+							label="Can use a web browser"
+							:disabled="browserCapped"
+							:modelValue="form.allow_browser"
+							@update:modelValue="(v) => (form.allow_browser = v)"
+						/>
+						<p class="text-p-sm text-ink-gray-5">
+							{{
+								browserCapped
+									? `Only ${browser.max} agents per workspace can have a browser.`
+									: "The agent gets its own private browser. Logins stay saved for this agent only."
+							}}
+						</p>
+					</div>
+					<template v-if="form.allow_browser">
+						<TabButtons
+							:buttons="BROWSER_MODES"
+							:modelValue="form.browser_mode"
+							@update:modelValue="(v) => (form.browser_mode = v)"
+						/>
+						<div v-if="form.browser_mode === 'listed'">
+							<FormControl
+								type="textarea"
+								label="Sites, one per line"
+								:rows="4"
+								placeholder="example.com"
+								:modelValue="form.browser_sites"
+								@update:modelValue="(v) => (form.browser_sites = v)"
+							/>
+							<p v-if="nearSites" class="mt-1 text-p-sm text-ink-gray-5">
+								{{ siteCount }} of {{ MAX_BROWSER_SITES }} sites
+							</p>
+						</div>
+						<div
+							v-else
+							class="flex items-start gap-2 rounded-lg border border-outline-amber-2 bg-surface-amber-1 px-3 py-2 text-sm text-ink-amber-3"
+						>
+							<FeatherIcon name="alert-triangle" class="size-4 shrink-0" />
+							<span>
+								A web page can trick the agent into sending data it has read to any
+								site. Use listed sites unless you need this.
+							</span>
+						</div>
+					</template>
+				</div>
+
 				<section class="flex flex-col gap-4">
 					<div class="text-base font-medium text-ink-gray-9">Schedule</div>
 					<Switch
@@ -161,16 +209,29 @@
 // `agent`, which turns the dialog into an edit, so a second Save can never create a
 // duplicate.
 import { computed, reactive, ref, watch } from "vue";
-import { Button, Dialog, ErrorMessage, FormControl, Switch, toast } from "frappe-ui";
+import {
+	Button,
+	Dialog,
+	ErrorMessage,
+	FeatherIcon,
+	FormControl,
+	Switch,
+	TabButtons,
+	toast,
+} from "frappe-ui";
 import UserAgentToolPicker from "./UserAgentToolPicker.vue";
 import * as userAgentsApi from "@/api/userAgents";
 import { errMessage as errMsg, errHtml } from "@/lib/errors";
 import { DAY_OF_MONTH_OPTIONS, WEEKDAY_OPTIONS } from "@/lib/scheduleAnchor";
 import {
+	BROWSER_MODES,
 	FREQUENCY_OPTIONS,
+	MAX_BROWSER_SITES,
 	MAX_INSTRUCTIONS,
+	NEAR_BROWSER_SITES,
 	NEAR_INSTRUCTIONS,
 	canRetrySync,
+	cleanSites,
 	definitionChanged,
 	definitionPayload,
 	emptyForm,
@@ -185,6 +246,8 @@ const props = defineProps({
 	modelValue: { type: Boolean, default: false },
 	// The live agent being edited; null for a new one.
 	agent: { type: Object, default: null },
+	// The workspace's web browser option: {enabled, max, inUse}. Hidden while not enabled.
+	browser: { type: Object, default: () => ({ enabled: false, max: 3, inUse: 0 }) },
 });
 const emit = defineEmits(["update:modelValue", "saved"]);
 
@@ -210,6 +273,14 @@ const dayOptions = computed(() =>
 const syncText = computed(() => (props.agent ? syncMessage(props.agent) : ""));
 // Shown with a stored sentence only: a sync that just started is not worth a button here
 // (the row's menu still offers Retry sync for one that never settles).
+// The browser option is capped across the workspace; an agent that already has one keeps it.
+const browserCapped = computed(
+	() =>
+		props.browser.inUse >= props.browser.max &&
+		!(props.agent && props.agent.browser && props.agent.browser.enabled)
+);
+const siteCount = computed(() => cleanSites(form.browser_sites).length);
+const nearSites = computed(() => siteCount.value >= NEAR_BROWSER_SITES);
 const retryable = computed(() => !!props.agent && !!syncText.value && canRetrySync(props.agent));
 
 // Seeded when the dialog opens, never when the host hands back the agent a Save just
@@ -258,12 +329,16 @@ async function save() {
 	if (Object.keys(errors).length) return;
 	saving.value = true;
 	try {
+		const withBrowser = { browser: !!props.browser.enabled };
 		let current = props.agent;
 		if (!current) {
-			current = await userAgentsApi.createUserAgent(definitionPayload(form));
+			current = await userAgentsApi.createUserAgent(definitionPayload(form, withBrowser));
 			emit("saved", current);
-		} else if (definitionChanged(form, current)) {
-			current = await userAgentsApi.updateUserAgent(current.name, definitionPayload(form));
+		} else if (definitionChanged(form, current, withBrowser)) {
+			current = await userAgentsApi.updateUserAgent(
+				current.name,
+				definitionPayload(form, withBrowser)
+			);
 			emit("saved", current);
 		}
 		if (scheduleChanged(form, current)) {

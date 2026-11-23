@@ -151,4 +151,36 @@ describe("useUserAgents", () => {
 		expect(state.agents.value.map((a) => a.name)).toEqual(["b"]);
 		expect(api.listUserAgents).toHaveBeenCalledTimes(1);
 	});
+
+	it("reads the browser option and keeps the workspace count exact between reads", async () => {
+		const mine = (name, browser, enabled = true) => ({
+			...agent(name),
+			enabled,
+			browser: { enabled: browser, mode: "listed", sites: [] },
+		});
+		api.listUserAgents.mockResolvedValue({
+			enabled: true,
+			max_agents: 5,
+			browser_enabled: true,
+			max_browser_agents: 3,
+			browser_agents_in_use: 2,
+			agents: [mine("a", true), mine("b", false)],
+		});
+		const { state } = harness();
+		await state.load();
+		expect(state.browserEnabled.value).toBe(true);
+		expect(state.maxBrowserAgents.value).toBe(3);
+		expect(state.browserAgentsInUse.value).toBe(2);
+		state.upsert(mine("b", true));
+		expect(state.browserAgentsInUse.value).toBe(3);
+		state.upsert(mine("a", true, false));
+		expect(state.browserAgentsInUse.value).toBe(2);
+	});
+
+	it("has no browser option when the site does not offer one", async () => {
+		api.listUserAgents.mockResolvedValue({ enabled: true, max_agents: 5, agents: [] });
+		const { state } = harness();
+		await state.load();
+		expect(state.browserEnabled.value).toBe(false);
+	});
 });

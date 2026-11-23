@@ -13,6 +13,16 @@ export const listUserAgents = () => call(UA + "list_user_agents");
 // -> {max_tools, groups: [{app, label, tools: [{id, label, kind: "read"|"write"}]}]}
 export const listPickableTools = () => call(UA + "list_pickable_tools");
 
+// The browser fields, only when the caller has them (the site offers a browser).
+function browserArgs(p) {
+	if (p.allow_browser === undefined) return {};
+	return {
+		allow_browser: p.allow_browser ? 1 : 0,
+		browser_mode: p.browser_mode || "listed",
+		browser_sites: p.browser_sites || [],
+	};
+}
+
 export const createUserAgent = (p) =>
 	call(UA + "create_user_agent", {
 		agent_name: p.agent_name,
@@ -20,6 +30,7 @@ export const createUserAgent = (p) =>
 		description: p.description || "",
 		tools: p.tools || [],
 		allow_shell: p.allow_shell ? 1 : 0,
+		...browserArgs(p),
 	});
 
 // Only the keys passed change on the server, so the caller sends the definition
@@ -32,6 +43,7 @@ export const updateUserAgent = (name, p) =>
 		description: p.description || "",
 		tools: p.tools || [],
 		allow_shell: p.allow_shell ? 1 : 0,
+		...browserArgs(p),
 	});
 
 export const deleteUserAgent = (name) => call(UA + "delete_user_agent", { name });

@@ -17,6 +17,12 @@ export function useUserAgents() {
 	const enabled = ref(false);
 	const maxAgents = ref(5);
 	const agents = ref([]);
+	// The workspace's web browser option: the site switch, the cap, and how many enabled
+	// agents hold one across every owner. The count is kept exact between reads by
+	// swapping this user's own agents for what the list holds now.
+	const browserEnabled = ref(false);
+	const maxBrowserAgents = ref(3);
+	const browserInUseOthers = ref(0);
 	const loading = ref(false);
 	const error = ref("");
 	let timer = null;
@@ -25,6 +31,11 @@ export function useUserAgents() {
 	// failed reload keeps the tab and the list that is on screen.
 	let loaded = false;
 
+	const ownBrowserAgents = (list) =>
+		list.filter((a) => a.enabled && a.browser && a.browser.enabled).length;
+	const browserAgentsInUse = computed(
+		() => browserInUseOthers.value + ownBrowserAgents(agents.value)
+	);
 	const atCap = computed(() => agents.value.length >= maxAgents.value);
 
 	async function load({ quiet = false } = {}) {
@@ -34,6 +45,12 @@ export function useUserAgents() {
 			enabled.value = !!res.enabled;
 			if (res.max_agents) maxAgents.value = res.max_agents;
 			agents.value = res.agents || [];
+			browserEnabled.value = !!res.browser_enabled;
+			if (res.max_browser_agents) maxBrowserAgents.value = res.max_browser_agents;
+			browserInUseOthers.value = Math.max(
+				0,
+				(res.browser_agents_in_use || 0) - ownBrowserAgents(agents.value)
+			);
 			error.value = "";
 			loaded = true;
 		} catch (e) {
@@ -83,5 +100,18 @@ export function useUserAgents() {
 
 	onBeforeUnmount(stopPoll);
 
-	return { enabled, maxAgents, agents, loading, error, atCap, load, upsert, remove };
+	return {
+		enabled,
+		maxAgents,
+		agents,
+		browserEnabled,
+		maxBrowserAgents,
+		browserAgentsInUse,
+		loading,
+		error,
+		atCap,
+		load,
+		upsert,
+		remove,
+	};
 }

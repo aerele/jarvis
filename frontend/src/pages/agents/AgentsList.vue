@@ -71,6 +71,11 @@
 			class="min-h-0 flex-1"
 			:agents="myAgents.agents.value"
 			:max-agents="myAgents.maxAgents.value"
+			:browser="{
+				enabled: myAgents.browserEnabled.value,
+				max: myAgents.maxBrowserAgents.value,
+				inUse: myAgents.browserAgentsInUse.value,
+			}"
 			:loading="myAgents.loading.value"
 			:error="myAgents.error.value"
 			@reload="myAgents.load()"
