@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from jarvis.connectors.secret_scrub import REDACTION, is_secret_key, scrub_text, scrub_value
+from jarvis.connectors.secret_scrub import REDACTION, is_secret_key, scrub_counted, scrub_text, scrub_value
 
 AWS_ID = "AKIAIOSFODNN7EXAMPLE"
 PRESIGNED = (
@@ -102,6 +102,52 @@ class TestScrubValue(unittest.TestCase):
 		self.assertNotIn("ghp_" + "z" * 36, str(out))
 		self.assertEqual(out["n"], 3)
 		self.assertIs(out["ok"], True)
+
+
+class TestScrubStructured(unittest.TestCase):
+	"""A structured answer and its text copy are masked alike."""
+
+	def test_a_value_under_a_credential_named_field_is_masked(self):
+		out, count = scrub_counted({"client_secret": "plain-words-here", "nested": [{"apiKey": "k1"}]})
+		self.assertEqual(out["client_secret"], REDACTION)
+		self.assertEqual(out["nested"][0]["apiKey"], REDACTION)
+		self.assertEqual(count, 2)
+
+	def test_ids_cursors_and_locators_are_left_alone(self):
+		answer = {
+			"key": "user-42",
+			"issue_key": "ABC-1",
+			"idempotency_key": "req-9",
+			"next_page_token": "cursor-77",
+			"authorization_url": "https://idp.example/authorize",
+			"api_key_id": "k_123",
+			"description": "a long sentence about a ticket " * 5,
+		}
+		out, count = scrub_counted(answer)
+		self.assertEqual(out, answer)
+		self.assertEqual(count, 0)
+
+	def test_counts_replacements_and_leaves_numbers_and_bools(self):
+		out, count = scrub_counted({"n": 1, "ok": True, "u": f"id {AWS_ID}"})
+		self.assertEqual((out["n"], out["ok"], count), (1, True, 1))
+
+
+class TestScrubIsLinear(unittest.TestCase):
+	def test_many_key_headers_without_a_footer_are_not_quadratic(self):
+		import time
+
+		text = "-----BEGIN PRIVATE KEY----- abc " * 60000
+		started = time.monotonic()
+		out, count = scrub_text(text)
+		self.assertLess(time.monotonic() - started, 2.0)
+		self.assertEqual(out, REDACTION)
+		self.assertEqual(count, 1)
+
+	def test_blocks_with_footers_are_masked_one_by_one(self):
+		block = "-----BEGIN RSA PRIVATE KEY-----\nMIIB\n-----END RSA PRIVATE KEY-----"
+		out, count = scrub_text(f"a {block} b {block} c")
+		self.assertEqual(out, f"a {REDACTION} b {REDACTION} c")
+		self.assertEqual(count, 2)
 
 
 class TestIsSecretKey(unittest.TestCase):

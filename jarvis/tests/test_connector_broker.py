@@ -64,9 +64,115 @@ class TestRecursiveRedaction(unittest.TestCase):
 		self.assertEqual(out["items"][1]["ok"], 1)
 
 	def test_long_nested_string_is_clipped(self):
-		out = broker._redact_value({"a": {"b": "x" * 200}})
+		out = broker._redact_value({"a": {"b": "x" * 500}})
 		self.assertTrue(out["a"]["b"].endswith("..."))
-		self.assertLessEqual(len(out["a"]["b"]), 84)
+		self.assertEqual(len(out["a"]["b"]), 203)
+
+	def test_a_string_between_80_and_200_characters_is_kept_whole(self):
+		text = "an ordinary sentence about a ticket " * 4
+		self.assertEqual(broker._redact_value({"note": text.strip()})["note"], text.strip())
+
+	def test_a_bare_key_is_an_id_not_a_secret(self):
+		out = broker._redact_value({"key": "user-42", "issue_key": "ABC-1", "teamKey": "ENG", "apiKey": "x"})
+		self.assertEqual(out["key"], "user-42")
+		self.assertEqual(out["issue_key"], "ABC-1")
+		self.assertEqual(out["teamKey"], "ENG")
+		self.assertEqual(out["apiKey"], "***")
+
+	def test_every_known_id_name_is_shown(self):
+		names = (
+			"key",
+			"issue_key",
+			"project_key",
+			"projectKey",
+			"teamKey",
+			"idempotency_key",
+			"page_token",
+			"next_page_token",
+			"nextPageToken",
+			"cursor",
+		)
+		for name in names:
+			with self.subTest(name=name):
+				self.assertEqual(broker._redact_value({name: "visible-1"})[name], "visible-1")
+
+	def test_concatenated_and_oddly_cased_secret_names_are_still_masked(self):
+		names = (
+			"clientsecret",
+			"client_secret",
+			"xapikeyheader",
+			"X-Api-Key-Header",
+			"authToken2",
+			"AUTHTOKEN",
+			"accesstoken",
+			"bearerValue",
+			"privatekey",
+			"private_key_pem",
+			"passwordConfirm",
+			"passwd",
+			"credentialsJson",
+			"Authorization",
+			"sessiontoken",
+			"secretkey",
+			"accesskey",
+			"signingkey",
+			"encryptionkey",
+			"stripeApiKey",
+		)
+		for name in names:
+			with self.subTest(name=name):
+				self.assertEqual(broker._redact_value({name: "hunter2-value"})[name], "***")
+
+	def test_a_secret_value_under_a_harmless_key_is_masked_by_the_value_scrub(self):
+		url = "https://b.s3.amazonaws.com/r?X-Amz-Signature=deadbeef01&X-Amz-Expires=60"
+		out = broker._redact_value({"key": url, "cursor": "ghp_" + "r" * 36})
+		self.assertNotIn("deadbeef01", out["key"])
+		self.assertNotIn("ghp_", out["cursor"])
+
+	def test_credential_shaped_values_are_masked_whatever_the_key(self):
+		url = (
+			"https://b.s3.amazonaws.com/r?X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2Fs3"
+			"&X-Amz-Signature=deadbeef01&X-Amz-Security-Token=tok123abc&X-Amz-Expires=60"
+		)
+		out = broker._redact_value({"download": url, "items": [{"note": "key AKIAIOSFODNN7EXAMPLE"}]})
+		blob = json.dumps(out)
+		for leaked in ("AKIAIOSFODNN7EXAMPLE", "deadbeef01", "tok123abc"):
+			self.assertNotIn(leaked, blob)
+		self.assertIn("X-Amz-Expires=60", blob)
+
+	def test_a_secret_is_masked_before_the_clip_not_cut_in_half(self):
+		text = "x" * 190 + " ghp_" + "z" * 36
+		out = broker._redact_value({"note": text})["note"]
+		self.assertNotIn("ghp_", out)
+
+	def test_clean_masks_secrets_in_an_apps_error_text(self):
+		text = broker._clean("rejected token ghp_" + "q" * 36 + " for AKIAIOSFODNN7EXAMPLE")
+		self.assertNotIn("ghp_", text)
+		self.assertNotIn("AKIAIOSFODNN7EXAMPLE", text)
+		self.assertIn("rejected token", text)
+
+	def test_the_connector_log_row_gets_the_scrubbed_args_and_message(self):
+		fake = mock.MagicMock()
+		fake.as_json = lambda obj: json.dumps(obj)
+		row = _Row(name="conn-1")
+		args = {"key": "user-42", "apiKey": "hunter2-hunter2", "body": "see AKIAIOSFODNN7EXAMPLE"}
+		with (
+			mock.patch.object(broker, "frappe", fake),
+			mock.patch.object(broker, "log_call") as log_call,
+		):
+			broker._log(row, "put", "tool_error", "bad token ghp_" + "q" * 36, 0.0, "run-1", args, None)
+		kwargs = log_call.call_args.kwargs
+		self.assertIn('"key": "user-42"', kwargs["args_summary"])
+		self.assertNotIn("hunter2", kwargs["args_summary"])
+		self.assertNotIn("AKIAIOSFODNN7EXAMPLE", kwargs["args_summary"])
+		self.assertNotIn("ghp_", kwargs["message"])
+
+	def test_a_list_of_args_is_redacted_too(self):
+		fake = mock.MagicMock()
+		fake.as_json = lambda obj: json.dumps(obj)
+		with mock.patch.object(broker, "frappe", fake):
+			summary = broker._redact_args([{"password": "p4ss"}])
+		self.assertNotIn("p4ss", summary)
 
 	def test_redact_args_serialized_summary_hides_nested_token(self):
 		fake = mock.MagicMock()

@@ -66,6 +66,41 @@ class TestCallConnectorDelegation(unittest.TestCase):
 		broker_call.assert_called_once_with("github", "create_issue", {"title": "x"}, run_id="sess-1")
 		self.assertIs(result, broker_result)
 
+	def _call_with(self, broker_result):
+		with (
+			mock.patch.object(call_connector, "get_session_key", return_value=None),
+			mock.patch.object(call_connector.broker, "resolve_for_status", return_value=_ready_row()),
+			mock.patch.object(call_connector.broker, "call", return_value=broker_result),
+		):
+			return call_connector.call_connector("cashfree", "get_report")
+
+	def test_an_aws_key_id_and_a_presigned_url_in_the_answer_are_masked(self):
+		url = (
+			"https://bucket.s3.amazonaws.com/r.csv?X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20261123"
+			"&X-Amz-Signature=0123456789abcdef&X-Amz-Security-Token=FwoGZXIvYXdz&X-Amz-Expires=300"
+		)
+		answer = {
+			"url": url,
+			"key_id": "AKIAIOSFODNN7EXAMPLE",
+			"client_secret": "s3cr3t-value",
+			"key": "user-42",
+		}
+		result = self._call_with(
+			{"ok": True, "result": {"structuredContent": answer, "content": [{"type": "text", "text": url}]}}
+		)
+		dumped = json.dumps(result)
+		for leaked in ("AKIAIOSFODNN7EXAMPLE", "0123456789abcdef", "FwoGZXIvYXdz", "s3cr3t-value"):
+			self.assertNotIn(leaked, dumped)
+		self.assertIn("X-Amz-Expires=300", dumped)  # only the credential parts go
+		self.assertEqual(result["result"]["structuredContent"]["key"], "user-42")
+		self.assertIn("open it from the app itself", result["redaction_note"])
+
+	def test_a_clean_answer_is_returned_untouched_with_no_note(self):
+		answer = {"ok": True, "result": {"content": [{"type": "text", "text": "issue_key=ABC-1"}]}}
+		result = self._call_with(answer)
+		self.assertIs(result, answer)
+		self.assertNotIn("redaction_note", result)
+
 	def test_broker_error_result_passed_through_unmodified(self):
 		broker_result = {"ok": False, "error": {"code": "action_denied", "message": "nope"}}
 		with (

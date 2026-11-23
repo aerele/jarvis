@@ -36,7 +36,13 @@ marketplace agent is a privilege escalation, not an ordinary tool call.
 from __future__ import annotations
 
 from jarvis.connectors import broker
+from jarvis.connectors.secret_scrub import scrub_counted
 from jarvis.tools._agent_run_ctx import get_session_key
+
+_REDACTION_NOTE = (
+	"Secrets in this answer were hidden as [REDACTED-SECRET]. "
+	"If a signed link was hidden, open it from the app itself."
+)
 
 _NOT_READY_ERROR = {
 	"ok": False,
@@ -59,7 +65,8 @@ def call_connector(connector: str, action: str, args: dict | None = None) -> dic
 	not-yet-enabled actions confirm too). ``preview`` is not supported - there is
 	nothing to dry-run against a live third-party API.
 
-	Returns the broker's structured result verbatim: ``{"ok": True, "result":
+	Returns the broker's structured result, with credential-shaped values in it
+	masked (``secret_scrub``): ``{"ok": True, "result":
 	<the MCP tools/call result>}`` on success, or ``{"ok": False, "error":
 	{"code", "message"}}`` on any failure (unknown connector, disabled
 	connector, connector not yet tested (``connector_not_ready``), action not
@@ -77,4 +84,17 @@ def call_connector(connector: str, action: str, args: dict | None = None) -> dic
 	# "needs to be tested" for a connector an admin turned off on purpose.
 	if row is not None and row.get("enabled") and not broker.has_passed_test(row):
 		return _NOT_READY_ERROR
-	return broker.call(connector, action, args, run_id=get_session_key())
+	return _scrubbed(broker.call(connector, action, args, run_id=get_session_key()))
+
+
+def _scrubbed(result):
+	"""``result`` with every credential-shaped value masked. This is the one point where
+	an app's answer enters the bench, so the agent, the stored transcript, realtime
+	and the receipts all get the masked copy. A signed link is masked too: the agent
+	cannot hand over a working one, and the note says what to do instead."""
+	scrubbed, count = scrub_counted(result)
+	if not count:
+		return result
+	if isinstance(scrubbed, dict):
+		scrubbed["redaction_note"] = _REDACTION_NOTE
+	return scrubbed

@@ -33,7 +33,6 @@ import frappe.
 
 from __future__ import annotations
 
-import re
 import time
 from collections.abc import Callable
 
@@ -41,6 +40,8 @@ import frappe
 
 from jarvis.connectors import mcp_client, mcp_wire, oauth, policy, refresh, ssrf
 from jarvis.connectors.limits import AtCapacityError, CircuitBreaker, ConcurrencyCap
+from jarvis.connectors.result_view import scrubbed_window
+from jarvis.connectors.secret_scrub import is_secret_key
 from jarvis.jarvis.doctype.jarvis_connector_log.jarvis_connector_log import log_call
 
 CONNECTOR_DOCTYPE = "Jarvis Connector"
@@ -83,12 +84,31 @@ CC_TTL_S = int(TOTAL_TIMEOUT_S) + 20  # comfortably longer than one call
 
 NOT_READY_MESSAGE = "This connector needs to be tested in Settings before it can be used."
 
-_ARGS_SUMMARY_MAX = 500
+_ARGS_SUMMARY_MAX = 2000
+_ARG_STRING_MAX = 200
 _MESSAGE_MAX = 1000
 
-# Keys whose VALUES must never reach the audit log - a connector's own args can
-# carry a per-call secret (a one-off token, a password field).
-_REDACT_KEY_RE = re.compile(r"token|secret|password|authorization|credential|key|bearer", re.IGNORECASE)
+# The Connector Log masks by key name deny-by-default: ``secret_scrub.is_secret_key``
+# (whole words) OR any of these fragments in the name with separators and case removed,
+# so ``clientsecret``, ``xapikeyheader`` and ``authToken2`` are masked too. The audit
+# showed ids being masked by a bare ``key``; only these names (separators removed) are
+# exempt, and values are scrubbed whatever the key.
+_LOG_SECRET_FRAGMENTS = (
+	"token",
+	"secret",
+	"passw",
+	"credential",
+	"authoriz",
+	"bearer",
+	"apikey",
+	"privatekey",
+	"accesskey",
+	"signingkey",
+	"encryptionkey",
+)
+_LOG_HARMLESS_KEYS = frozenset(
+	{"key", "issuekey", "projectkey", "teamkey", "idempotencykey", "pagetoken", "nextpagetoken", "cursor"}
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -622,32 +642,34 @@ def _status_for(error_code: str) -> str:
 
 
 def _redact_value(value):
-	"""Recursively redact secret-shaped keys and clip long strings anywhere in a
-	nested structure. A top-level-only scrub let a nested token (e.g.
-	``{"config": {"token": ...}}``) reach the audit table verbatim; this walks
-	dicts and lists so no secret-shaped key survives at any depth."""
+	"""Recursively redact, at any depth: a value under a credential-named key
+	(``secret_scrub.is_secret_key``: a bare ``key`` is an id, not a secret) and any
+	credential-shaped value inside a string. A long string is scrubbed first and then
+	clipped, so a secret never survives as a fragment. A top-level-only scrub let a
+	nested token (e.g. ``{"config": {"token": ...}}``) reach the audit table."""
 	if isinstance(value, dict):
-		out = {}
-		for key, val in value.items():
-			if _REDACT_KEY_RE.search(str(key)):
-				out[key] = "***"
-			else:
-				out[key] = _redact_value(val)
-		return out
+		return {k: "***" if _masks_in_log(k) else _redact_value(v) for k, v in value.items()}
 	if isinstance(value, (list, tuple)):
 		return [_redact_value(v) for v in value]
-	if isinstance(value, str) and len(value) > 80:
-		return value[:80] + "..."
+	if isinstance(value, str):
+		text, total = scrubbed_window(value, _ARG_STRING_MAX)
+		return text + "..." if total > _ARG_STRING_MAX else text
 	return value
 
 
+def _masks_in_log(key) -> bool:
+	"""True when the value under ``key`` must not be written to the Connector Log."""
+	squashed = "".join(ch for ch in str(key).lower() if ch.isalnum())
+	if squashed in _LOG_HARMLESS_KEYS:
+		return False
+	return is_secret_key(key) or any(fragment in squashed for fragment in _LOG_SECRET_FRAGMENTS)
+
+
 def _redact_args(args) -> str:
-	"""Redact secret-shaped keys (recursively), clip long string values, then
-	truncate the whole summary. Never let a per-call token land in the audit table."""
+	"""Redact (recursively), then truncate the whole summary. Never let a per-call
+	token land in the audit table."""
 	try:
-		if not isinstance(args, dict):
-			return _clip(frappe.as_json(args) if args is not None else "", _ARGS_SUMMARY_MAX)
-		return _clip(frappe.as_json(_redact_value(args)), _ARGS_SUMMARY_MAX)
+		return "" if args is None else _clip(frappe.as_json(_redact_value(args)), _ARGS_SUMMARY_MAX)
 	except Exception:
 		return ""
 
@@ -662,7 +684,9 @@ def _response_bytes(result) -> int:
 
 
 def _clean(text: str) -> str:
-	return _clip((text or "").strip(), _MESSAGE_MAX)
+	"""``text`` scrubbed of credential-shaped values, then clipped. An app's error text
+	reaches the agent and the log through here."""
+	return scrubbed_window(text or "", _MESSAGE_MAX)[0]
 
 
 def _clip(text: str, length: int) -> str:
