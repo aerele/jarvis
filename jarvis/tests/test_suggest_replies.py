@@ -137,8 +137,31 @@ class TestSkipReason(FrappeTestCase):
 		self.assertEqual(self._reason([reply], pending=[{"token": "t"}]), "pending_card")
 
 
+class TestSiteDefault(FrappeTestCase):
+	def test_seeded_on_and_an_explicit_off_survives(self):
+		# A missing row must become a real "1" on install / migrate, before any Settings save
+		# can write the unset Check as 0; an admin's explicit 0 is never overwritten.
+		from jarvis.learning.roles import _seed_personalise_settings_defaults
+
+		for stored, expected in (("missing", True), ("0", False), ("1", True)):
+			frappe.db.delete("Singles", {"doctype": "Jarvis Settings", "field": sr.SETTING})
+			if stored != "missing":
+				frappe.db.sql(
+					"INSERT INTO `tabSingles` (doctype, field, value) VALUES (%s,%s,%s)",
+					("Jarvis Settings", sr.SETTING, stored),
+				)
+			_seed_personalise_settings_defaults()
+			self.assertEqual(sr.enabled(), expected, stored)
+			self.assertTrue(
+				frappe.db.sql(
+					"select 1 from `tabSingles` where doctype=%s and field=%s",
+					("Jarvis Settings", sr.SETTING),
+				)
+			)
+
+
 class TestJob(FrappeTestCase):
-	def _run(self, answer='{"replies": ["Export it", "Chart it"]}', *, claude=False, skips=(None, None)):
+	def _run(self, answer='{"replies": ["Export it", "Chart it"]}', *, skips=(None, None)):
 		settings = frappe._dict(agent_url="http://agent:18789")
 		gen = MagicMock(return_value=answer)
 		with (
@@ -146,7 +169,6 @@ class TestJob(FrappeTestCase):
 			patch.object(sr.frappe, "get_single", return_value=settings),
 			patch.object(sr.frappe, "get_doc", return_value=frappe._dict(name="C1")),
 			patch("jarvis.chat.turn_handler._resolve_model_and_provider", return_value=("m", "p")),
-			patch("jarvis.chat.turn_handler.one_shot_runs_on_claude_plan", return_value=claude),
 			patch.object(sr, "transcript", return_value="User: hi\n\nJarvis: hello"),
 			patch.object(sr, "_generate_via_gateway", gen),
 			patch("jarvis.chat.txn.fresh_snapshot"),
@@ -170,11 +192,13 @@ class TestJob(FrappeTestCase):
 			{"kind": "message:replies", "conversation_id": "C1", "message_id": "R1", **stored},
 		)
 
-	def test_no_model_call_on_the_claude_plan(self):
-		gen, set_value, publish, _ = self._run(claude=True)
-		gen.assert_not_called()
-		set_value.assert_not_called()
-		publish.assert_not_called()
+	def test_runs_on_the_claude_plan_too(self):
+		# Unlike auto-titles: the job never asks one_shot_runs_on_claude_plan.
+		with patch("jarvis.chat.turn_handler.one_shot_runs_on_claude_plan", return_value=True) as plan:
+			gen, set_value, _, _ = self._run()
+		plan.assert_not_called()
+		gen.assert_called_once()
+		set_value.assert_called_once()
 
 	def test_a_chat_that_moved_on_meanwhile_gets_nothing(self):
 		_, set_value, publish, _ = self._run(skips=(None, "not_latest"))

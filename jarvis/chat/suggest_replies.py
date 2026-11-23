@@ -17,9 +17,10 @@ How this differs from Flow, and why:
     user's own (Jarvis User Settings.suggest_replies, in their chat settings); both on by
     default. A user who turned theirs off gets no model call, and the chat history
     leaves out the ones already stored (``api._conversation_history``).
-  - **Skipped where a one-shot is costly or redundant**: on the Claude plan a one-shot starts
-    its own claude-cli process (``one_shot_runs_on_claude_plan``, as titles skip it); a reply
-    that asks its own question (a ``jarvis-ask`` card) already offers the answers; a parked
+  - **Also on the Claude plan**, unlike auto-titles: there each one runs as its own short
+    claude-cli turn on the user's subscription. The chips are the point of the feature, and the
+    two switches are the way to turn that cost off.
+  - **Skipped where they are redundant**: a reply that asks its own question (a ``jarvis-ask`` card) already offers the answers; a parked
     confirmation card is the next step; a shared chat is not the owner's alone.
   - **Off the request path**: a finalize effect enqueues ``job`` on the short queue, so the
     turn ends at once and the chips land a few seconds later over realtime
@@ -206,15 +207,13 @@ def job(conversation: str, message: str, owner: str) -> None:
 	try:
 		if skip_reason(conversation, message, owner):
 			return
-		from jarvis.chat.turn_handler import _resolve_model_and_provider, one_shot_runs_on_claude_plan
+		from jarvis.chat.turn_handler import _resolve_model_and_provider
 
 		settings = frappe.get_single("Jarvis Settings")
 		gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 		if not gateway_url:
 			return
 		model, provider = _resolve_model_and_provider(frappe.get_doc(CONV, conversation))
-		if one_shot_runs_on_claude_plan(settings, model, provider):
-			return
 		text = transcript(conversation)
 		if not text:
 			return

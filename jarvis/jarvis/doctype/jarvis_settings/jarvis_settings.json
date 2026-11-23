@@ -1318,7 +1318,7 @@
    "fieldtype": "Check",
    "label": "Suggest follow-up replies",
    "default": "1",
-   "description": "After a reply, offer the user one to three likely next messages as chips they can tap to send. Costs one short extra model call per reply (none on the Claude plan, where it is skipped)."
+   "description": "After a reply, offer the user one to three likely next messages as chips they can tap to send. Costs one short extra model call per reply, on the Claude plan too (a short turn on the user's subscription)."
   },
   {
    "fieldname": "deployment_section",
