@@ -11,34 +11,58 @@ describe("SuggestedReplies", () => {
 		delete window.matchMedia;
 	});
 
-	test("a tap sends that suggestion as it is", async () => {
+	test("a tap ticks it and lights Send, but sends nothing", async () => {
 		const w = mount(SuggestedReplies, { props: { replies } });
 		const chips = w.findAll(".jv-followup");
 		expect(chips.map((c) => c.text())).toEqual(replies);
-		expect(w.find(".jv-followup-send").exists()).toBe(false);
+		expect(w.find(".jv-followup-send").classes()).toContain("hidden");
 		await chips[1].trigger("click");
-		expect(w.emitted("send")).toEqual([["Create the timesheets"]]);
-	});
-
-	test("several answers tick, then one Send sends them together in their order", async () => {
-		const w = mount(SuggestedReplies, { props: { replies, multiSelect: true } });
-		const send = w.find(".jv-followup-send");
-		expect(send.classes()).toContain("hidden");
-		const chips = w.findAll(".jv-followup");
-		await chips[2].trigger("click");
-		await chips[0].trigger("click");
 		expect(w.emitted("send")).toBeUndefined();
-		expect(chips[0].attributes("aria-pressed")).toBe("true");
+		expect(w.emitted("pick")).toEqual([["Create the timesheets"]]);
+		expect(chips[1].classes()).toContain("on");
+		expect(chips[1].attributes("aria-checked")).toBe("true");
+		expect(chips[1].find("path").exists()).toBe(true); // the tick
 		expect(w.find(".jv-followup-send").classes()).not.toContain("hidden");
-		await chips[2].trigger("click"); // untick
-		await chips[2].trigger("click"); // tick again
-		await w.find(".jv-followup-send").trigger("click");
-		expect(w.emitted("send")).toEqual([["Show the missing dates, Only the last 30 days"]]);
 	});
 
-	test("nothing is sent while disabled", async () => {
+	test("one at a time: a second tap moves the tick, the same tap again clears it", async () => {
+		const w = mount(SuggestedReplies, { props: { replies } });
+		const chips = w.findAll(".jv-followup");
+		await chips[0].trigger("click");
+		await chips[2].trigger("click");
+		expect(w.findAll(".jv-followup.on").map((c) => c.text())).toEqual([
+			"Only the last 30 days",
+		]);
+		await chips[2].trigger("click");
+		expect(w.findAll(".jv-followup.on")).toHaveLength(0);
+		expect(w.find(".jv-followup-send").classes()).toContain("hidden");
+		expect(w.emitted("pick")).toEqual([
+			["Show the missing dates"],
+			["Only the last 30 days"],
+			[""],
+		]);
+	});
+
+	test("Send sends exactly the chosen one and releases the composer", async () => {
+		const w = mount(SuggestedReplies, { props: { replies } });
+		await w.findAll(".jv-followup")[0].trigger("click");
+		await w.find(".jv-followup-send").trigger("click");
+		expect(w.emitted("send")).toEqual([["Show the missing dates"]]);
+		expect(w.emitted("pick").at(-1)).toEqual([""]);
+	});
+
+	test("unmounting with one chosen releases the composer", async () => {
+		const w = mount(SuggestedReplies, { props: { replies } });
+		await w.findAll(".jv-followup")[0].trigger("click");
+		w.unmount();
+		expect(w.emitted("pick").at(-1)).toEqual([""]);
+	});
+
+	test("nothing is chosen or sent while disabled", async () => {
 		const w = mount(SuggestedReplies, { props: { replies, disabled: true } });
 		await w.findAll(".jv-followup")[0].trigger("click");
+		await w.find(".jv-followup-send").trigger("click");
+		expect(w.emitted("pick")).toBeUndefined();
 		expect(w.emitted("send")).toBeUndefined();
 	});
 
@@ -47,9 +71,9 @@ describe("SuggestedReplies", () => {
 		window.matchMedia = () => ({ matches: true });
 		const w = mount(SuggestedReplies, { props: { replies } });
 		await w.findAll(".jv-followup")[0].trigger("click");
-		expect(w.emitted("send")).toBeUndefined();
+		expect(w.emitted("pick")).toBeUndefined();
 		vi.advanceTimersByTime(450);
 		await w.findAll(".jv-followup")[0].trigger("click");
-		expect(w.emitted("send")).toEqual([["Show the missing dates"]]);
+		expect(w.emitted("pick")).toEqual([["Show the missing dates"]]);
 	});
 });

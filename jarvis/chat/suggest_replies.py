@@ -3,7 +3,8 @@
 Modelled on Frappe Flow's suggested replies (frappe/frappe, flow/harness/src/flow_harness/
 session/suggest_replies.py and SuggestedReplies.vue): after a turn ends well, ONE extra model
 call asks "what might the user ask next?" and gets back one to three short follow-ups as JSON;
-the chat shows them under the latest reply until the user says something, and a tap sends one.
+the chat shows them under the latest reply until the user says something; a tap ticks one
+and its Send sends it.
 
 How this differs from Flow, and why:
 
@@ -59,13 +60,12 @@ PROMPT = (
 	"Below is the end of a chat between a user and Jarvis, an assistant inside their ERP "
 	"(ERPNext). What might the user ask Jarvis next?\n"
 	"Reply with only a JSON object and call no tools: "
-	'{{"replies": [one to three short follow-ups the user would send in this chat], '
-	'"multi_select": false}}.\n'
+	'{{"replies": [one to three short follow-ups the user would send in this chat]}}.\n'
 	"Write each in the user's words and language, as a request to Jarvis, under 15 words. "
 	"Each is a next step they would likely want or, when Jarvis's last reply asked them "
 	"something, a likely answer. Give only the ones they would really pick, even if that is "
-	'just one, and never filler like "No, that\'s it" or "Thanks". Set multi_select to true '
-	'when they may pick several together. Reply {{"replies": []}} when no next step is clear.'
+	'just one, and never filler like "No, that\'s it" or "Thanks". The user picks one. '
+	'Reply {{"replies": []}} when no next step is clear.'
 	"\n\nThe chat:\n{transcript}"
 )
 
@@ -79,7 +79,8 @@ _ASK_FENCE = "```jarvis-ask"
 # Parsing (strict: a bad answer is no chips, never a wrong chip)
 # --------------------------------------------------------------------------- #
 def parse_replies(text: str | None) -> dict | None:
-	"""``{"replies": [...], "multi_select": bool}`` from the model's answer, or None."""
+	"""``{"replies": [...]}`` from the model's answer, or None. Any other key is dropped:
+	the user picks one suggestion (SuggestedReplies), never several."""
 	match = _OBJECT_RE.search(_THINK_RE.sub("", text or ""))
 	try:
 		data = json.loads(match.group()) if match else None
@@ -95,7 +96,7 @@ def parse_replies(text: str | None) -> dict | None:
 		or any(len(reply) > MAX_REPLY_CHARS for reply in replies)
 	):
 		return None
-	return {"replies": replies, "multi_select": data.get("multi_select") is True}
+	return {"replies": replies}
 
 
 # --------------------------------------------------------------------------- #

@@ -16,12 +16,12 @@ from jarvis.chat import turn_state as ts
 class TestParse(FrappeTestCase):
 	def test_one_to_three_distinct_short_messages(self):
 		fenced = '```json\n{"replies": [" Yes ", "No"], "multi_select": true}\n```'
-		self.assertEqual(sr.parse_replies(fenced), {"replies": ["Yes", "No"], "multi_select": True})
+		self.assertEqual(sr.parse_replies(fenced), {"replies": ["Yes", "No"]})  # extra keys dropped
 		thought = '<think>Answer as {"replies": [...]} only.</think>\n{"replies": ["Yes", "No"]}'
 		self.assertEqual(sr.parse_replies(thought)["replies"], ["Yes", "No"])
 		self.assertEqual(
 			sr.parse_replies('{"replies": ["Run the tests"]}'),
-			{"replies": ["Run the tests"], "multi_select": False},
+			{"replies": ["Run the tests"]},
 		)
 		for text in (
 			'{"replies": []}',
@@ -37,10 +37,10 @@ class TestParse(FrappeTestCase):
 		):
 			self.assertIsNone(sr.parse_replies(text), text)
 
-	def test_inner_whitespace_is_folded_and_multi_select_needs_a_real_true(self):
+	def test_inner_whitespace_is_folded(self):
 		self.assertEqual(
-			sr.parse_replies('{"replies": ["Show  me\\nthe list"], "multi_select": "yes"}'),
-			{"replies": ["Show me the list"], "multi_select": False},
+			sr.parse_replies('{"replies": ["Show  me\\nthe list"]}'),
+			{"replies": ["Show me the list"]},
 		)
 
 
@@ -183,7 +183,7 @@ class TestJob(FrappeTestCase):
 	def test_stores_on_the_reply_and_publishes(self):
 		gen, set_value, publish, _ = self._run()
 		gen.assert_called_once_with("ws://agent:18789", "User: hi\n\nJarvis: hello", model="m", provider="p")
-		stored = {"replies": ["Export it", "Chart it"], "multi_select": False}
+		stored = {"replies": ["Export it", "Chart it"]}
 		set_value.assert_called_once_with(
 			sr.MSG, "R1", "suggested_replies", json.dumps(stored), update_modified=False
 		)
@@ -285,7 +285,7 @@ class TestWiring(FrappeTestCase):
 			"role": "assistant",
 			"content": "You have 6 customers.",
 			"seq": 2,
-			"suggested_replies": {"replies": ["List them"], "multi_select": False},
+			"suggested_replies": {"replies": ["List them"]},
 		}
 		self.assertNotIn("suggested_replies", project_row(row, "C1"))
 

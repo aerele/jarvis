@@ -1,32 +1,29 @@
 <!--
   The user's likely next messages under the latest reply (jarvis.chat.suggest_replies),
-  as Frappe Flow offers them (flow/harness/ui/core/src/components/SuggestedReplies.vue):
-  a tap sends that message; when the reply asked something that takes several answers
-  (multiSelect), the chips tick and one Send sends them together, joined by ", ".
-  Shared by the desktop chat and the PWA (through @shared): the colours fall back from
-  the desktop palette (theme.js) to the PWA's (pwa/src/index.css).
+  after Frappe Flow's suggested replies (flow/harness/ui/core/src/components/SuggestedReplies.vue).
+  A tap never sends: it ticks that one suggestion (one at a time; tapping it again unticks
+  it) and lights the Send button beside them, so a stray tap costs nothing. The chat
+  locks its composer while one is chosen ("pick" tells it), so what goes out is exactly
+  the chosen text. Shared by the desktop chat and the PWA (through @shared): the colours
+  fall back from the desktop palette (theme.js) to the PWA's (pwa/src/index.css).
 -->
 <template>
 	<div class="jv-followup-wrap">
-		<div
-			class="jv-followups"
-			role="group"
-			:aria-label="multiSelect ? 'Pick answers' : 'Suggested replies'"
-		>
+		<div class="jv-followups" role="radiogroup" aria-label="Suggested replies">
 			<button
 				v-for="reply in replies"
 				:key="reply"
 				type="button"
+				role="radio"
 				class="jv-followup"
-				:class="{ on: picked.includes(reply) }"
+				:class="{ on: picked === reply }"
 				:title="reply"
-				:aria-pressed="multiSelect ? picked.includes(reply) : undefined"
+				:aria-checked="picked === reply"
 				:disabled="disabled"
 				@click="tap(reply)"
 			>
 				<svg
-					v-if="multiSelect"
-					class="jv-followup-box"
+					class="jv-followup-tick"
 					width="14"
 					height="14"
 					viewBox="0 0 24 24"
@@ -37,19 +34,18 @@
 					stroke-linejoin="round"
 					aria-hidden="true"
 				>
-					<rect x="3" y="3" width="18" height="18" rx="4" />
-					<path v-if="picked.includes(reply)" d="m8 12 3 3 5-6" />
+					<circle cx="12" cy="12" r="9" />
+					<path v-if="picked === reply" d="m8 12.5 3 3 5-6" />
 				</svg>
 				<span class="jv-followup-text">{{ reply }}</span>
 			</button>
 		</div>
 		<button
-			v-if="multiSelect"
 			type="button"
 			class="jv-followup-send"
-			:class="{ hidden: !picked.length }"
-			:disabled="disabled || !picked.length"
-			@click="emit('send', replies.filter((r) => picked.includes(r)).join(', '))"
+			:class="{ hidden: !picked }"
+			:disabled="disabled || !picked"
+			@click="send"
 		>
 			Send
 			<svg
@@ -71,16 +67,21 @@
 </template>
 
 <script setup>
-import { ref } from "vue";
+import { onBeforeUnmount, ref } from "vue";
 
 const props = defineProps({
 	replies: { type: Array, required: true },
-	multiSelect: { type: Boolean, default: false },
 	disabled: { type: Boolean, default: false },
 });
-const emit = defineEmits(["send"]);
+// pick: the chosen text, or "" when none is (the chat locks its composer meanwhile).
+// send: the chosen text, on Send.
+const emit = defineEmits(["pick", "send"]);
 
-const picked = ref([]);
+const picked = ref("");
+function choose(reply) {
+	picked.value = reply;
+	emit("pick", reply);
+}
 
 // On a touch screen they come up as the run ends, under a finger that may be going
 // elsewhere: a tap in their first moment does nothing (as Flow does).
@@ -89,11 +90,18 @@ const coarse =
 	typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)")?.matches;
 function tap(reply) {
 	if (props.disabled || (coarse && Date.now() - shownAt < 400)) return;
-	if (!props.multiSelect) return emit("send", reply);
-	picked.value = picked.value.includes(reply)
-		? picked.value.filter((r) => r !== reply)
-		: [...picked.value, reply];
+	choose(picked.value === reply ? "" : reply);
 }
+function send() {
+	if (props.disabled || !picked.value) return;
+	const text = picked.value;
+	choose("");
+	emit("send", text);
+}
+// Gone (a new reply, a sent message, the switch turned off): never leave the composer locked.
+onBeforeUnmount(() => {
+	if (picked.value) emit("pick", "");
+});
 </script>
 
 <style scoped>
@@ -134,6 +142,7 @@ function tap(reply) {
 }
 .jv-followup.on {
 	border-color: var(--cta, var(--accent));
+	background: var(--surface-2, var(--card2));
 	color: var(--text, var(--ink9));
 }
 .jv-followup:disabled {
@@ -144,11 +153,11 @@ function tap(reply) {
 	min-width: 0;
 	overflow-wrap: anywhere;
 }
-.jv-followup-box {
+.jv-followup-tick {
 	flex: none;
 	color: var(--text-3, var(--ink5));
 }
-.jv-followup.on .jv-followup-box {
+.jv-followup.on .jv-followup-tick {
 	color: var(--cta, var(--accent));
 }
 .jv-followup-send {
@@ -164,8 +173,9 @@ function tap(reply) {
 	font-size: 13px;
 	font-weight: 600;
 	cursor: pointer;
+	box-shadow: 0 0 0 3px color-mix(in srgb, var(--cta, var(--accent)) 22%, transparent);
 }
-/* keeps its room while hidden, so ticking the first answer does not shift the chat */
+/* keeps its room while hidden, so choosing one does not shift the chat */
 .jv-followup-send.hidden {
 	visibility: hidden;
 }

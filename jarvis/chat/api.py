@@ -782,7 +782,7 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 		# The live steps the reply showed, saved at settlement: [{text, at}].
 		"steps",
 		# The user's likely next messages, offered as chips under the latest reply
-		# (jarvis.chat.suggest_replies): {replies, multi_select}, or empty.
+		# (jarvis.chat.suggest_replies): {replies}, or empty.
 		"suggested_replies",
 		"reply_duration_ms",
 		# jarvis#560: which model actually produced each reply. The SPA renders it

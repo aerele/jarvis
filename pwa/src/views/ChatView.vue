@@ -1133,8 +1133,10 @@ function suggestionsFor(it) {
 	const s = it.msg.suggested_replies;
 	return s && Array.isArray(s.replies) && s.replies.length ? s : null;
 }
-// A tap sends the suggestion as the next message, through the same recoverable path as
-// a typed one, leaving whatever the user has typed (and a Reply quote) in the composer.
+// A tap ticks one (never sends) and locks the composer until it is sent or unticked
+// (SuggestedReplies emits "" then, or when it goes away). Send sends it through the same
+// recoverable path as a typed message, leaving the composer's text and Reply quote alone.
+const chosenSuggestion = ref("");
 async function sendSuggestion(text) {
 	const cid = convId.value;
 	const generation = viewGeneration;
@@ -1665,8 +1667,7 @@ function onEvent(p) {
 			// Suggested replies landed for a reply in this chat (a short-queue job, seconds
 			// after run:end): set them on the row in place.
 			const m = messages.value.find((x) => x.name === p.message_id);
-			if (m && Array.isArray(p.replies))
-				m.suggested_replies = { replies: p.replies, multi_select: !!p.multi_select };
+			if (m && Array.isArray(p.replies)) m.suggested_replies = { replies: p.replies };
 			break;
 		}
 		case "run:start":
@@ -2107,13 +2108,13 @@ onUnmounted(() => {
 						</button>
 					</div>
 					<!-- the user's likely next messages, under the latest reply only
-					     (jarvis.chat.suggest_replies); a tap sends one -->
+					     (jarvis.chat.suggest_replies); a tap ticks one, Send sends it -->
 					<SuggestedReplies
 						v-if="suggestionsFor(it)"
 						:key="'sr-' + it.key"
 						:replies="suggestionsFor(it).replies"
-						:multi-select="suggestionsFor(it).multi_select"
 						:disabled="sending"
+						@pick="chosenSuggestion = $event"
 						@send="sendSuggestion"
 					/>
 					<ActionCard
@@ -2447,7 +2448,10 @@ onUnmounted(() => {
 		:sending="sending"
 		:attachments="attachments"
 		:mic-enabled="micEnabled"
-		:disabled="holdActive"
+		:disabled="holdActive || !!chosenSuggestion"
+		:placeholder="
+			chosenSuggestion ? 'Send the chosen follow-up, or untick it to type' : undefined
+		"
 		:auto-mode="!!conversation?.auto_mode"
 		@send="send"
 		@stop="stop"
