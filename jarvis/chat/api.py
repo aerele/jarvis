@@ -2199,11 +2199,15 @@ def _legacy_batch_continuation(receipts: list[tuple[str, dict]]) -> tuple[str, s
 	one that committed part-way makes the whole batch ``partial``."""
 	from jarvis.chat.actions_api import _join_capped, _legacy_outcome
 
-	outcomes = [_legacy_outcome(res) for _text, res in receipts]
+	# A connector card's outcome was judged on its own result (``receipt_outcome``).
+	outcomes = [res.get("receipt_outcome") or _legacy_outcome(res) for _text, res in receipts]
 	if all(o == OUTCOME_OK for o in outcomes):
 		return " ".join(text for text, _res in receipts), OUTCOME_OK
-	if OUTCOME_PARTIAL in outcomes:  # a card that committed part-way wins over every failure
-		return _join_capped([text for text, _res in receipts]), OUTCOME_PARTIAL
+	# Unverified (a connector the app answered with an error) wins over partial, as in
+	# ``actions_api._settled_plan``; either wins over every plain failure.
+	for outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
+		if outcome in outcomes:
+			return _join_capped([text for text, _res in receipts]), outcome
 	busy_only = all(o == OUTCOME_RETRY_LATER for o in outcomes)
 	outcome = OUTCOME_RETRY_LATER if busy_only else OUTCOME_NOT_FIXABLE
 	return _join_capped([text for text, _res in receipts]), outcome
