@@ -115,6 +115,8 @@ class TestTheCheckRunsOnTheSavedDocumentCorrectly(unittest.TestCase):
 			preset=None,
 			routing_mode="failover",
 			get_doc_before_save=lambda: before,
+			# No "before" document here means a first-ever save: the saved rows are not read.
+			is_new=lambda: before is None,
 		)
 		doc.get = lambda key, default=None: getattr(doc, key, default)
 		return doc
