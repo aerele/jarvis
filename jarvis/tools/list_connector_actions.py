@@ -42,7 +42,7 @@ import json
 
 import frappe
 
-from jarvis.connectors import action_rows, listing_budget, policy, readiness
+from jarvis.connectors import action_rows, listing_budget, policy, readiness, schema_view
 from jarvis.connectors.action_rows import ACTIONS_FIELD, CONNECTOR_DOCTYPE
 
 _ACTION_FIELDS = ["action", "allowed", "read_only", "destructive", "description"]
@@ -54,7 +54,7 @@ _DESCRIPTION_MAX = 200
 # to ``ensure_ascii=True``, so the character length equals the byte length.
 _SUMMARY_MAX_NAMES = 100
 _SUMMARY_NAME_MAX = 128
-_SCHEMA_MAX_BYTES = 16 * 1024
+_SCHEMA_MAX_BYTES = schema_view.SCHEMA_MAX_CHARS
 
 
 def list_connector_actions(connector: str | None = None, action: str | None = None) -> dict:
@@ -85,10 +85,10 @@ def list_connector_actions(connector: str | None = None, action: str | None = No
 	instead of guessing. Each action entry is
 	``{"action", "description", "input_schema"}`` where ``input_schema`` is the
 	connector's cached MCP ``inputSchema`` for that action, or ``null`` when the
-	cache holds no schema for it. If that schema serialises past 16 KiB it is
-	replaced by a compact summary of its top level,
-	``{"truncated": true, "required": [names], "properties": [names]}``, so a
-	huge schema never floods the turn.
+	cache holds no schema for it. If that schema serialises past 24,000
+	characters it is shortened in steps that keep every field's type, and
+	marked ``"truncated": true`` with a note, so a huge schema never floods the
+	turn.
 
 	Resolution and gating with ``action``:
 
@@ -220,17 +220,15 @@ def _schema_item(action: str, child: dict | None, cache) -> dict:
 
 def _capped_schema(schema_obj):
 	"""``schema_obj`` unchanged, unless it serialises past ``_SCHEMA_MAX_BYTES``,
-	in which case a compact top-level summary. The schema is untrusted server
-	data, so nothing here trusts its shape."""
+	in which case a shortened copy that keeps the field types
+	(``jarvis.connectors.schema_view``). The schema is untrusted server data, so
+	nothing here trusts its shape."""
 	if schema_obj is None:
 		return None
 	try:
-		serialised = json.dumps(schema_obj)
+		return schema_view.compact(schema_obj, _SCHEMA_MAX_BYTES)
 	except (TypeError, ValueError):
 		return _schema_summary(schema_obj)
-	if len(serialised) <= _SCHEMA_MAX_BYTES:
-		return schema_obj
-	return _schema_summary(schema_obj)
 
 
 def _schema_summary(schema_obj) -> dict:

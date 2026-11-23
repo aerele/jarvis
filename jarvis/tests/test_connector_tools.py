@@ -18,7 +18,7 @@ these run with no site. What is proven here:
     surfaces only the actions ``policy.action_decision`` currently allows;
   * with an ``action``, ``list_connector_actions`` returns that one action's
     ``input_schema`` (read from ``tools_cache`` in one bounded ``get_values``)
-    only when the gate allows it and size-capped at 16 KiB - a denied or
+    only when the gate allows it and, past 24,000 characters, shortened with its field types kept - a denied or
     unknown action reads no cache and yields empty actions, and the no-action
     output is unchanged.
 
@@ -443,14 +443,21 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 		result = self._run(fake, connector="github", action="read_issue")
 		self.assertEqual(result["connectors"][0]["actions"][0]["input_schema"], schema)
 
-	def test_oversize_schema_returns_top_level_summary(self):
-		# > 16 KiB serialised; required carries a non-string the summary must drop.
+	def test_oversize_schema_is_shortened_and_keeps_property_types(self):
+		# > 24,000 serialised; required carries a non-string the view must drop.
 		big = {
 			"type": "object",
-			"properties": {f"field_{i}": {"type": "string", "description": "x" * 300} for i in range(100)},
-			"required": ["field_0", 123, "field_1"],
+			"properties": {
+				f"field_{i}": {
+					"type": "integer" if i % 2 else "string",
+					"description": "x" * 300,
+					"examples": ["e" * 50],
+				}
+				for i in range(150)
+			},
+			"required": ["field_0", "field_1"],
 		}
-		self.assertGreater(len(json.dumps(big)), 16 * 1024)
+		self.assertGreater(len(json.dumps(big)), 24 * 1000)
 		fake = self._fake_frappe(
 			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
 			[self._action("conn-1", "read_issue", read_only=1, allowed=1)],
@@ -459,8 +466,31 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 		result = self._run(fake, connector="github", action="read_issue")
 		schema_out = result["connectors"][0]["actions"][0]["input_schema"]
 		self.assertTrue(schema_out["truncated"])
+		self.assertIn("full schema still checks", schema_out["note"])
+		self.assertLessEqual(len(json.dumps(schema_out)), 24 * 1000)
 		self.assertEqual(schema_out["required"], ["field_0", "field_1"])
-		self.assertEqual(schema_out["properties"], [f"field_{i}" for i in range(100)])
+		props = schema_out["properties"]
+		self.assertEqual(len(props), 150)
+		self.assertEqual(props["field_0"]["type"], "string")
+		self.assertEqual(props["field_1"]["type"], "integer")
+		self.assertNotIn("examples", props["field_0"])
+
+	def test_schema_too_big_for_every_step_keeps_types_by_name(self):
+		huge = {
+			"type": "object",
+			"properties": {f"f{i}_" + "n" * 100: {"type": "number"} for i in range(400)},
+			"required": ["f0_" + "n" * 100],
+		}
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
+			[self._action("conn-1", "read_issue", read_only=1, allowed=1)],
+			caches={"conn-1": self._cache({"read_issue": huge})},
+		)
+		result = self._run(fake, connector="github", action="read_issue")
+		schema_out = result["connectors"][0]["actions"][0]["input_schema"]
+		self.assertTrue(schema_out["truncated"])
+		self.assertEqual(len(schema_out["properties"]), 100)
+		self.assertEqual(set(schema_out["properties"].values()), {"number"})
 
 	def test_no_action_path_is_unchanged_and_reads_no_cache(self):
 		connectors = [
