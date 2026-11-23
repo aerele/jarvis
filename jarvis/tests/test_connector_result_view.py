@@ -4,6 +4,7 @@ shown to the agent. No bench."""
 from __future__ import annotations
 
 import json
+import time
 import unittest
 
 from jarvis.connectors.result_view import payload_text, receipt_payload
@@ -79,3 +80,41 @@ class TestReceiptPayload(unittest.TestCase):
 	def test_no_content_gives_empty_string(self):
 		self.assertEqual(receipt_payload({"content": []}, 100), "")
 		self.assertEqual(receipt_payload(None, 100), "")
+
+
+class TestBoundedScrubbing(unittest.TestCase):
+	"""An answer can be megabytes: the cost of scrubbing must not grow with it."""
+
+	def _timed(self, text, limit=1000):
+		started = time.perf_counter()
+		out = receipt_payload({"content": [_text(text)]}, limit)
+		return out, time.perf_counter() - started
+
+	def test_many_unterminated_key_blocks_return_fast(self):
+		# Each block start scans to the end of the text for its footer: quadratic unwindowed.
+		text = "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n" * 60_000
+		self.assertGreater(len(text), 2_000_000)
+		out, seconds = self._timed(text)
+		print(f"\n  adversarial key-block payload: {len(text)} chars in {seconds * 1000:.0f} ms")
+		self.assertLess(seconds, 1.0)
+		self.assertNotIn("AAAA", out)
+		self.assertIn("of %d characters]" % len(text), out)
+
+	def test_jwt_lookalike_run_returns_fast(self):
+		text = "eyJaaaaa-" * 250_000
+		self.assertGreater(len(text), 2_000_000)
+		out, seconds = self._timed(text)
+		print(f"\n  adversarial JWT-like payload: {len(text)} chars in {seconds * 1000:.0f} ms")
+		self.assertLess(seconds, 1.0)
+		self.assertTrue(out.endswith("characters]"))
+
+	def test_key_block_whose_end_lies_past_the_window_is_masked(self):
+		key = "-----BEGIN PRIVATE KEY-----\n" + "KEYBODY" * 5000 + "\n-----END PRIVATE KEY-----"
+		out, _seconds = self._timed("note: " + key, limit=200)
+		self.assertNotIn("KEYBODY", out)
+		self.assertNotIn("BEGIN PRIVATE", out)
+		self.assertIn("[REDACTED-SECRET]", out)
+
+	def test_cut_marker_reports_the_full_length(self):
+		out, _seconds = self._timed("x" * 100_000, limit=500)
+		self.assertTrue(out.endswith("[cut: showed 500 of 100000 characters]"))

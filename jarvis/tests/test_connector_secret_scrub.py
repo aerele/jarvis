@@ -3,6 +3,7 @@ the key-name test. No bench."""
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from jarvis.connectors.secret_scrub import REDACTION, is_secret_key, scrub_text, scrub_value

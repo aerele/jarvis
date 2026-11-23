@@ -26,15 +26,29 @@ def payload_text(mcp_result) -> str:
 	return " ".join(parts)
 
 
+# Scrubbing is not linear for every pattern, and an answer can be megabytes: only a window
+# just past the cut is scrubbed. The margin keeps a secret that straddles the cut whole
+# inside the window, so it is masked before the cut and never half shown.
+_WINDOW_MARGIN = 4096
+
+
 def receipt_payload(mcp_result, limit: int) -> str:
 	"""``payload_text`` scrubbed, then bounded to ``limit`` characters. A cut ends with
-	``[cut: showed N of M characters]``. Scrubbing comes first, so a secret that
-	straddles the cut is never half shown."""
-	text, _count = scrub_text(payload_text(mcp_result))
-	text = text.strip()
-	if len(text) <= limit:
+	``[cut: showed N of M characters]``, M being the full length of the answer."""
+	text, total = scrubbed_window(payload_text(mcp_result), limit)
+	if total <= limit:
 		return text
-	return f"{text[:limit]} [cut: showed {limit} of {len(text)} characters]"
+	return f"{text} [cut: showed {len(text)} of {total} characters]"
+
+
+def scrubbed_window(raw: str, limit: int) -> tuple[str, int]:
+	"""``(text, total)``: the first ``limit`` characters of ``raw`` after scrubbing, and
+	the length of the whole of ``raw``. Only ``limit`` plus a margin is scrubbed, so the
+	cost is bounded whatever the size of ``raw``. A key block whose end lies past the
+	window is masked to the window's end (``scrub_text``)."""
+	head = raw[: limit + _WINDOW_MARGIN]
+	scrubbed, _count = scrub_text(head)
+	return scrubbed.strip()[:limit], len(raw)
 
 
 def _compact(value) -> str:

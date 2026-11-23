@@ -19,12 +19,20 @@ from jarvis.learning.source_guard import REDACTION, redact_secrets
 _URL_PARAM_RE = re.compile(
 	r"(?i)((?:[?&;]|\\u0026)(?:x-amz-credential|x-amz-signature|x-amz-security-token"
 	r"|x-goog-credential|x-goog-signature|awsaccesskeyid|signature|sig"
-	r"|access_token|id_token|refresh_token)=)([^&\s\"'<>\\]+)"
+	r"|access_token|id_token|refresh_token|token|api_key|apikey|client_secret|password)=)([^&\s\"'<>\\]+)"
 )
 
-# A JSON string value under a secret-named key (``"access_token": "..."``). The
-# source_guard assignment rule misses it: the closing quote of the key sits before the colon.
-_JSON_PAIR_RE = re.compile(r'"([A-Za-z0-9_\- ]{1,40})"(\s*:\s*)"((?:[^"\\]|\\.){8,})"')
+# A JSON string value under a secret-named key (``"access_token": "..."``), also when the
+# JSON itself sits escaped inside a JSON string (``\\"access_token\\":\\"...\\"``). The
+# source_guard assignment rule misses both: the closing quote of the key sits before the colon.
+_JSON_PAIR_RES = (
+	re.compile(r'(")([A-Za-z0-9_\- ]{1,40})"(\s*:\s*)"((?:[^"\\]|\\.)+)"'),
+	re.compile(r'(\\")([A-Za-z0-9_\- ]{1,40})\\"(\s*:\s*)\\"((?:[^"\\]|\\(?!"))+)\\"'),
+)
+
+# An unterminated private key block (its end lies past the text we were given): the rest
+# of the text is key material.
+_PEM_TAIL_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*\Z", re.DOTALL)
 
 # Well-known token shapes, each with a fixed prefix.
 _TOKEN_RES = (
@@ -53,8 +61,10 @@ _SECRET_WORDS = frozenset(
 )
 # A ``token`` the agent needs to carry on (a cursor), not a credential.
 _CURSOR_WORDS = frozenset(
-	{"page", "next", "prev", "previous", "continuation", "cursor", "sync", "pagination"}
+	{"page", "next", "prev", "previous", "continuation", "cursor", "sync", "pagination", "resume"}
 )
+# ``authorization_url``, ``api_key_id``: a name ending in one of these is a locator, not the secret.
+_LOCATOR_WORDS = frozenset({"url", "uri", "link", "id"})
 _SECRET_PAIRS = frozenset(
 	{
 		("api", "key"),
@@ -88,8 +98,10 @@ def scrub_text(text) -> tuple[str, int]:
 		masked += replaced != match.group(0)
 		return replaced
 
-	out = _JSON_PAIR_RE.sub(mask, out)
-	return out, count + masked
+	for pattern in _JSON_PAIR_RES:
+		out = pattern.sub(mask, out)
+	out, n = _PEM_TAIL_RE.subn(REDACTION, out)
+	return out, count + masked + n
 
 
 def scrub_value(obj):
@@ -116,10 +128,13 @@ def is_secret_key(name) -> bool:
 
 
 def _mask_secret_pair(match) -> str:
-	key, colon, value = match.groups()
-	if not is_secret_key(key) or value == REDACTION or _CURSOR_WORDS & set(_words(key)):
+	quote, key, colon, value = match.groups()
+	words = _words(key)
+	if not is_secret_key(key) or value == REDACTION or words[-1] in _LOCATOR_WORDS:
 		return match.group(0)
-	return f'"{key}"{colon}"{REDACTION}"'
+	if _CURSOR_WORDS & set(words):
+		return match.group(0)
+	return f"{quote}{key}{quote}{colon}{quote}{REDACTION}{quote}"
 
 
 def _words(name) -> list[str]:
