@@ -18,6 +18,7 @@ RETRY = (
 	"overloaded",
 	"healthz_timeout",
 	"user_agents_not_loaded",
+	"browser_start_failed",
 	"RateLimitExceeded",
 	"FleetError",
 	"admin_unreachable",
@@ -30,6 +31,7 @@ SUPPORT = (
 	"sandbox_keygen_failed",
 	"sandbox_users_failed",
 	"sandbox_workspace_refresh_failed",
+	"browser_guard_missing",
 )
 HANDLED = (
 	"InvalidUserAgents",
@@ -38,6 +40,8 @@ HANDLED = (
 	"user_agents_unsupported_image",
 	"sandbox_image_unconfigured",
 	"NoRunningTenant",
+	"browser_limit",
+	"browser_image_unconfigured",
 )
 SUPPORT_SENTENCE = (
 	"Jarvis could not set up this agent on your workspace. Contact support and share this code: {}."
