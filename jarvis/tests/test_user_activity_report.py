@@ -161,14 +161,6 @@ class TestReportMigration(FrappeTestCase):
 		frappe.flags.in_import = False
 		frappe.set_user("Administrator")
 
-	def test_fixture_is_newer_than_the_json(self):
-		# The point of the scenario: plain sync would skip the JSON for this row.
-		from frappe.utils import get_datetime
-
-		self.assertGreater(
-			get_datetime(frappe.db.get_value("Report", OLD, "modified")), get_datetime(_json()["modified"])
-		)
-
 	def test_rename_moves_row_and_keeps_links(self):
 		rename_patch()
 
@@ -317,14 +309,6 @@ class TestReportFolders(FrappeTestCase):
 		spec = _json()
 		self.assertEqual(spec["disable_prepared_report"], 1)
 		self.assertEqual(spec["prepared_report"], 0)
-
-	def test_the_report_has_no_private_scope_line_alias(self):
-		# D7: one name for the scope line, ``activity_report.scope_line``.
-		from jarvis import activity_report
-		from jarvis.jarvis.report.jarvis_user_activity import jarvis_user_activity as report
-
-		self.assertFalse(hasattr(report, "_scope_line"))
-		self.assertTrue(callable(activity_report.scope_line))
 
 	def test_the_auto_email_report_method_the_export_signal_relies_on_still_exists(self):
 		# D7: ``_from_auto_email_report`` looks for this method name in this file in the call

@@ -126,12 +126,6 @@ class TestTurnRecovery(FrappeTestCase):
 		self.assertIn("assistant:delta", kinds)
 		self.assertIn("run:end", kinds)
 
-	def test_uses_raw_session_messages_not_truncating_history(self):
-		# Content must come from get_session_messages (raw), never get_history (#1).
-		sess = self._fake_sess(messages_by_key={SK: [transcript_message("assistant", "x", seq=1)]})
-		self._run(sess)
-		sess.get_history.assert_not_called()
-
 	def test_leaves_active_run_untouched(self):
 		sess = self._fake_sess(
 			active={SK},

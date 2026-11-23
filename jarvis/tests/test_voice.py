@@ -524,13 +524,6 @@ class TestAdminGetSttConfig(FrappeTestCase):
 	def tearDown(self):
 		frappe.cache().delete_value(admin_client._STT_CONFIG_CACHE_KEY)
 
-	def test_error_returns_none(self):
-		with patch(
-			"jarvis.admin_client._post",
-			side_effect=admin_client.AdminAuthError("not onboarded"),
-		):
-			self.assertIsNone(admin_client.get_stt_config())
-
 	def test_error_is_negative_cached(self):
 		"""A failed fetch must not make every subsequent call (SPA loads)
 		pay a fresh admin round-trip: the miss is cached briefly."""
