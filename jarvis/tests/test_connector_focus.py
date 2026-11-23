@@ -4,19 +4,25 @@ Focus: the prompt line, the per-turn Redis binding (set, cleared by a turn
 without focus, scoped to one conversation), and the
 agent tool gate in ``jarvis.api._dispatch_from_session``.
 
-Connected apps: the per-turn line lists the caller's usable connectors only,
-capped, and is left out under focus or when there is none.
+Connected apps: the per-turn line names every usable connector of the caller
+(a connector with no allowed action, or an untested one, is left out), ends with
+a pointer to the full listing when the names do not fit, and is left out under
+focus or when there is none.
 """
 
+import re
 from unittest.mock import patch
 
 import frappe
 from frappe.tests.utils import FrappeTestCase
 
+from jarvis._session import impersonate
 from jarvis.api import _dispatch_from_session
 from jarvis.chat import connected_apps, connector_focus
 from jarvis.chat.turn_handler import _prepend_connected_apps, _prepend_connector_focus
+from jarvis.connectors import catalog
 from jarvis.permissions import JARVIS_USER_ROLE, ensure_jarvis_user_role
+from jarvis.tools.list_connector_actions import list_connector_actions
 
 CONNECTOR = "Jarvis Connector"
 CONV = "Jarvis Conversation"
@@ -172,7 +178,9 @@ class TestConnectedAppsLine(FrappeTestCase):
 	def tearDown(self):
 		frappe.set_user(self._orig_user)
 
-	def _mk(self, key, label, *, scope="Shared", preset="Custom URL", owner=None, passed=True):
+	def _mk(self, key, label, *, scope="Shared", preset="Custom URL", owner=None, passed=True, allowed=1):
+		# allowed=None: no child rows at all (a server that sent no tools).
+		actions = [] if allowed is None else [{"action": "read_thing", "allowed": allowed}]
 		name = (
 			frappe.get_doc(
 				{
@@ -181,6 +189,7 @@ class TestConnectedAppsLine(FrappeTestCase):
 					"label": label,
 					"scope": scope,
 					"base_url": "https://example.invalid/mcp",
+					"allowed_actions": actions,
 				}
 			)
 			.insert()
@@ -216,16 +225,62 @@ class TestConnectedAppsLine(FrappeTestCase):
 		self.assertIn("A Private App", connected_apps.prompt_line(USER_A))
 		self.assertEqual(connected_apps.prompt_line(USER_B), "")
 
-	def test_capped_by_count_and_length(self):
-		for i in range(15):
+	def test_a_passed_row_with_no_allowed_action_is_not_named(self):
+		self._mk("zoom", "Zoom", allowed=0)
+		self._mk("bare", "Bare App", allowed=None)
+		self._mk("docs", "Docs")
+		line = connected_apps.prompt_line(USER_A)
+		self.assertIn("Docs", line)
+		self.assertNotIn("Zoom", line)
+		self.assertNotIn("Bare App", line)
+
+	def test_oauth_row_without_a_token_for_the_caller_is_not_named(self):
+		name = self._mk("oauthapp", "Sign In App")
+		frappe.db.set_value(CONNECTOR, name, "auth_method", "OAuth", update_modified=False)
+		self.assertEqual(connected_apps.prompt_line(USER_A), "")
+
+	def test_every_usable_app_is_named_past_the_old_cap(self):
+		for i in range(25):
 			self._mk(f"app{i:02d}", f"App {i:02d}")
 		line = connected_apps.prompt_line(USER_A)
-		self.assertEqual(line.count("App "), connected_apps.MAX_APPS)
-		for i in range(15):
+		for i in range(25):
+			self.assertIn(f"App {i:02d}", line)
+		self.assertNotIn("more:", line)
+
+	def test_25_connected_catalog_presets_are_all_discoverable(self):
+		"""The audit's failure: 25 connected apps, the agent saw 8. Every name
+		must be in the line, or counted by its "and N more" pointer AND present
+		in the listing the pointer sends the agent to."""
+		providers = [catalog.by_name(name) for name in catalog.preset_names()[:25]]
+		self.assertEqual(len(providers), 25)
+		for provider in providers:
+			self._mk(provider.key, provider.name, preset=provider.name)
+		line = connected_apps.prompt_line(USER_A)
+		named = [p.name for p in providers if p.name in line]
+		more = re.search(r"and (\d+) more: call list_connector_actions", line)
+		self.assertEqual(len(named) + (int(more.group(1)) if more else 0), 25)
+		with impersonate(USER_A):
+			listed = {c["label"] for c in list_connector_actions()["connectors"]}
+		self.assertEqual(listed, {p.name for p in providers})
+		self.assertEqual(len(named), 25, "25 short names fit the name budget")
+
+	def test_over_the_name_budget_ends_with_a_pointer_to_the_listing(self):
+		for i in range(40):
 			self._mk(f"long{i:02d}", f"Long App {i:02d} " + "x" * 40)
 		line = connected_apps.prompt_line(USER_A)
-		self.assertLessEqual(len(line), connected_apps.MAX_CHARS)
-		self.assertTrue(line.endswith("]"))
+		self.assertLessEqual(len(line), connected_apps.NAMES_MAX_CHARS)
+		self.assertTrue(line.endswith(" more: call list_connector_actions for the full list]"))
+		shown = line.count("Long App ")
+		more = int(re.search(r"and (\d+) more", line).group(1))
+		self.assertEqual(shown + more, 40)
+
+	def test_descriptions_only_while_the_whole_line_is_short(self):
+		for i in range(12):
+			self._mk(f"gh{i:02d}", f"GitHub {i:02d}", preset="GitHub")
+		self.assertNotIn("(", connected_apps.prompt_line(USER_A))
+		frappe.db.delete(CONNECTOR)
+		self._mk("gh", "GitHub", preset="GitHub")
+		self.assertIn("GitHub (", connected_apps.prompt_line(USER_A))
 
 	def test_prepended_without_focus_and_omitted_under_focus(self):
 		self._mk("mine", "My Gateway")

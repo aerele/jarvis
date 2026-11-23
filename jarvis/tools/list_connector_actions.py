@@ -42,20 +42,19 @@ import json
 
 import frappe
 
-from jarvis.connectors import action_rows, policy
+from jarvis.connectors import action_rows, listing_budget, policy, readiness, schema_view
 from jarvis.connectors.action_rows import ACTIONS_FIELD, CONNECTOR_DOCTYPE
 
 _ACTION_FIELDS = ["action", "allowed", "read_only", "destructive", "description"]
 
-_MAX_CONNECTORS = 30
-_MAX_ACTIONS_PER_CONNECTOR = 50
+_MAX_CONNECTORS = 200
 _DESCRIPTION_MAX = 200
 # Cap on the serialised inputSchema returned to the model, protecting the chat
 # turn's token budget from a pathological server schema. ``json.dumps`` defaults
 # to ``ensure_ascii=True``, so the character length equals the byte length.
 _SUMMARY_MAX_NAMES = 100
 _SUMMARY_NAME_MAX = 128
-_SCHEMA_MAX_BYTES = 16 * 1024
+_SCHEMA_MAX_BYTES = schema_view.SCHEMA_MAX_CHARS
 
 
 def list_connector_actions(connector: str | None = None, action: str | None = None) -> dict:
@@ -70,9 +69,15 @@ def list_connector_actions(connector: str | None = None, action: str | None = No
 
 	Without ``action`` (or an empty ``action``) this is the plain listing.
 	Returns ``{"connectors": [{"connector", "label", "scope", "actions":
-	[{"action", "description"}]}]}`` - one entry per visible connector, each
-	action trimmed to name and description. When the caller can see no
-	connectors, returns ``{"connectors": []}`` - never an error.
+	[{"action", "description"}], "ready", "reason"?}]}`` - one entry per visible
+	connector, each action trimmed to name and description. ``ready`` is true
+	when ``call_connector`` can use the connector now; when false, ``reason`` is
+	``not_tested``, ``no_allowed_actions`` or ``not_signed_in``. Up to 200
+	connectors are listed (``"truncated": true`` when more exist). A listing
+	over 24,000 characters is shortened in steps (descriptions, then action
+	names, then the first 10 actions plus ``more_actions``); a connector is never
+	dropped. When the caller can see no connectors, returns
+	``{"connectors": []}`` - never an error.
 
 	With ``action`` this is the argument-schema view for that one action. Call it
 	with ``connector`` and ``action=<name>`` before ``call_connector`` whenever
@@ -80,10 +85,10 @@ def list_connector_actions(connector: str | None = None, action: str | None = No
 	instead of guessing. Each action entry is
 	``{"action", "description", "input_schema"}`` where ``input_schema`` is the
 	connector's cached MCP ``inputSchema`` for that action, or ``null`` when the
-	cache holds no schema for it. If that schema serialises past 16 KiB it is
-	replaced by a compact summary of its top level,
-	``{"truncated": true, "required": [names], "properties": [names]}``, so a
-	huge schema never floods the turn.
+	cache holds no schema for it. If that schema serialises past 24,000
+	characters it is shortened in steps that keep every field's type, and
+	marked ``"truncated": true`` with a note, so a huge schema never floods the
+	turn.
 
 	Resolution and gating with ``action``:
 
@@ -98,10 +103,10 @@ def list_connector_actions(connector: str | None = None, action: str | None = No
 	The ``inputSchema`` is untrusted server data and never influences the allow
 	decision, which reads only the stored child-row flags.
 	"""
-	by_key = _resolve_connectors(connector)
 	if action:
-		return _schema_view(by_key, action, single=bool(connector))
-	return _listing_view(by_key)
+		return _schema_view(_resolve_connectors(connector), action, single=bool(connector))
+	by_key, truncated = _fetch_connectors(connector, readiness.ROW_FIELDS)
+	return _listing_view(by_key, truncated)
 
 
 def _resolve_connectors(connector: str | None, extra_fields: tuple[str, ...] = ()) -> dict[str, dict]:
@@ -109,6 +114,12 @@ def _resolve_connectors(connector: str | None, extra_fields: tuple[str, ...] = (
 	Shared for a shared key. The single permission-checked query both views use
 	(and the per-turn connected-apps prompt line, which adds ``extra_fields``);
 	nothing downstream re-filters by owner."""
+	return _fetch_connectors(connector, extra_fields)[0]
+
+
+def _fetch_connectors(connector: str | None, extra_fields: tuple[str, ...]) -> tuple[dict[str, dict], bool]:
+	"""``(rows by key, cut)``; ``cut`` is true when more than ``_MAX_CONNECTORS``
+	rows matched. One extra row is read to tell a cut from an exact fit."""
 	filters: dict = {"enabled": 1}
 	if connector:
 		filters["key"] = connector
@@ -119,24 +130,37 @@ def _resolve_connectors(connector: str | None, extra_fields: tuple[str, ...] = (
 		# "Personal" sorts before "Shared" - the de-dupe below keeps the
 		# FIRST row seen per key, so this ordering is what makes Personal win.
 		order_by="scope asc, label asc",
-		limit_page_length=_MAX_CONNECTORS,
+		limit_page_length=_MAX_CONNECTORS + 1,
 	)
+	cut = len(rows) > _MAX_CONNECTORS
 	by_key: dict[str, dict] = {}
-	for row in rows:
+	for row in rows[:_MAX_CONNECTORS]:
 		by_key.setdefault(row["key"], row)
-	return by_key
+	return by_key, cut
 
 
-def _listing_view(by_key: dict[str, dict]) -> dict:
+def _listing_view(by_key: dict[str, dict], truncated: bool = False) -> dict:
 	"""The plain listing: every visible connector with its policy-allowed
-	actions trimmed to ``{action, description}``."""
-	actions_by_parent = action_rows.by_parent([row["name"] for row in by_key.values()], _ACTION_FIELDS)
-	return {
+	actions trimmed to ``{action, description}``, and whether it is ``ready``."""
+	rows = list(by_key.values())
+	actions_by_parent = action_rows.by_parent([row["name"] for row in rows], _ACTION_FIELDS)
+	why_not = readiness.reasons(rows, actions_by_parent)
+	listing: dict = {
 		"connectors": [
-			_connector_entry(row, _allowed_actions(actions_by_parent.get(row["name"], [])))
-			for row in by_key.values()
+			{
+				**_connector_entry(row, _allowed_actions(actions_by_parent.get(row["name"], []))),
+				**_ready_keys(why_not[row["name"]]),
+			}
+			for row in rows
 		]
 	}
+	if truncated:
+		listing["truncated"] = True
+	return listing_budget.bound(listing)
+
+
+def _ready_keys(reason: str | None) -> dict:
+	return {"ready": True} if reason is None else {"ready": False, "reason": reason}
 
 
 def _schema_view(by_key: dict[str, dict], action: str, single: bool) -> dict:
@@ -196,17 +220,15 @@ def _schema_item(action: str, child: dict | None, cache) -> dict:
 
 def _capped_schema(schema_obj):
 	"""``schema_obj`` unchanged, unless it serialises past ``_SCHEMA_MAX_BYTES``,
-	in which case a compact top-level summary. The schema is untrusted server
-	data, so nothing here trusts its shape."""
+	in which case a shortened copy that keeps the field types
+	(``jarvis.connectors.schema_view``). The schema is untrusted server data, so
+	nothing here trusts its shape."""
 	if schema_obj is None:
 		return None
 	try:
-		serialised = json.dumps(schema_obj)
+		return schema_view.compact(schema_obj, _SCHEMA_MAX_BYTES)
 	except (TypeError, ValueError):
 		return _schema_summary(schema_obj)
-	if len(serialised) <= _SCHEMA_MAX_BYTES:
-		return schema_obj
-	return _schema_summary(schema_obj)
 
 
 def _schema_summary(schema_obj) -> dict:
@@ -253,7 +275,8 @@ def _connector_entry(row: dict, actions: list[dict]) -> dict:
 
 def _allowed_actions(children: list[dict]) -> list[dict]:
 	"""The subset of ``children`` ``policy.action_decision`` currently permits,
-	each trimmed to a compact ``{action, description}``."""
+	each trimmed to a compact ``{action, description}``. Not capped here:
+	``listing_budget`` bounds the whole listing by size instead."""
 	row = {ACTIONS_FIELD: children}
 	actions = []
 	for child in children:
@@ -265,6 +288,4 @@ def _allowed_actions(children: list[dict]) -> list[dict]:
 				"description": (child.get("description") or "")[:_DESCRIPTION_MAX],
 			}
 		)
-		if len(actions) >= _MAX_ACTIONS_PER_CONNECTOR:
-			break
 	return actions
