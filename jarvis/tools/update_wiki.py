@@ -27,6 +27,7 @@ import frappe
 from jarvis.chat import wiki_permissions
 from jarvis.chat.wiki import PAGE_TYPES, WIKI_DISABLED_MESSAGE, append_source, wiki_enabled
 from jarvis.exceptions import FeatureDisabledError, InvalidArgumentError, PermissionDeniedError
+from jarvis.learning.sanitizer import _CONTROL_RE, scan_instruction_injection
 from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE
 
 WIKI = "Jarvis Wiki Page"
@@ -53,6 +54,21 @@ def _require_system_user() -> None:
 		return
 	if frappe.db.get_value("User", user, "user_type") != "System User":
 		raise PermissionDeniedError("wiki tools require a desk (System User) session")
+
+
+def _clean_summary(summary) -> str | None:
+	"""One-line summary, or None when blank. Refuses text the injection scan
+	would otherwise swap for a placeholder in the controller, so the agent
+	hears why instead of storing a hidden summary."""
+	# Strip control chars first, as the controller does, so "jar\x00vis__" is refused here.
+	text = " ".join(_CONTROL_RE.sub("", str(summary)).split()) or None
+	if text and scan_instruction_injection(text):
+		raise InvalidArgumentError(
+			"summary refused: it contains text that looks like an instruction (a heading or --- "
+			"at the start, a code fence, a role prefix such as system:, 'ignore previous' wording, "
+			"a jarvis__ tool name, or an <available_skills> tag). Rewrite it as plain prose."
+		)
+	return text
 
 
 def _find_existing(slug: str, scope: str, user: str) -> str | None:
@@ -144,7 +160,7 @@ def update_wiki(
 		if ref_name is not None and str(ref_name).strip():
 			doc.ref_name = str(ref_name).strip()
 		if summary is not None:
-			doc.summary = " ".join(str(summary).split()) or None
+			doc.summary = _clean_summary(summary)
 		if append_md and str(append_md).strip():
 			existing = (doc.body_md or "").strip()
 			doc.body_md = f"{existing}\n\n{str(append_md).strip()}".strip()
@@ -165,7 +181,7 @@ def update_wiki(
 				"page_type": page_type,
 				"ref_doctype": (str(ref_doctype).strip() if ref_doctype else None),
 				"ref_name": (str(ref_name).strip() if ref_name else None),
-				"summary": (" ".join(str(summary).split()) or None) if summary is not None else None,
+				"summary": _clean_summary(summary) if summary is not None else None,
 				"body_md": str(replace_body_md or append_md or "").strip(),
 				"status": "Active",
 				"scope": scope,
@@ -185,4 +201,5 @@ def update_wiki(
 		"scope": doc.get("scope") or "Org",
 		"status": doc.status,
 		"body_chars": len(doc.body_md or ""),
+		"summary_chars": len(doc.summary or ""),
 	}
