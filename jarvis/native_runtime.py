@@ -52,14 +52,14 @@ def gateway_is_v11(settings=None) -> bool:
 	return version is not None and version >= GATEWAY_V11
 
 
-def persist(reply) -> None:
+def persist(reply) -> bool:
 	"""Store admin's two facts from a heartbeat reply or a connection payload.
 
 	A missing key keeps what is stored, and so does a value of the wrong type. Writes only on
-	change. When the native flag changed, ``proxy_active`` is recomputed, since a native tenant
+	change and returns True when it wrote. When the native flag changed, ``proxy_active`` is recomputed, since a native tenant
 	has no proxy. No commit: the caller's job commits."""
 	if not isinstance(reply, dict):
-		return
+		return False
 	changes: dict = {}
 	if NATIVE_FIELD in reply and isinstance(reply[NATIVE_FIELD], bool):
 		changes[NATIVE_FIELD] = 1 if reply[NATIVE_FIELD] else 0
@@ -70,7 +70,7 @@ def persist(reply) -> None:
 		elif isinstance(raw, str) and _VERSION.match(raw.strip()):
 			changes[VERSION_FIELD] = raw.strip()
 	if not changes:
-		return
+		return False
 	# Two cached field reads, not the whole Single; set_single_value below clears the cache.
 	stored = frappe.get_cached_value(SETTINGS, SETTINGS, [NATIVE_FIELD, VERSION_FIELD], as_dict=True) or {}
 	changes = {
@@ -79,10 +79,11 @@ def persist(reply) -> None:
 		if (cint(stored.get(k)) if k == NATIVE_FIELD else (stored.get(k) or "")) != v
 	}
 	if not changes:
-		return
+		return False
 	frappe.db.set_single_value(SETTINGS, changes, update_modified=False)
 	if NATIVE_FIELD in changes:
 		_refresh_proxy_active()
+	return True
 
 
 def _refresh_proxy_active() -> None:
@@ -101,20 +102,24 @@ _REFRESH_CACHE_KEY = "jarvis:runtime_facts_refreshed"
 def refresh_from_admin() -> bool:
 	"""Read the two facts from admin now, through the same connection read the daily sync
 	uses, and store them. For the moment a pin is refused and the stored facts may lag a
-	flip by up to one heartbeat. At most once a minute per site, so a pin that stays refused
-	does not cost an admin round trip every turn. True when the read and the store worked.
-	Never raises."""
+	flip by up to one heartbeat. A refresh that found NOTHING new is not repeated for a minute
+	(a pin that stays refused must not cost an admin round trip every turn); one that found a
+	change is never throttled, so a refusal soon after a real change still refreshes. True when
+	the read and the store worked. Never raises."""
 	try:
-		cache = frappe.cache()
-		if cache.get_value(_REFRESH_CACHE_KEY):
+		if frappe.cache().get_value(_REFRESH_CACHE_KEY):
 			return False
-		cache.set_value(_REFRESH_CACHE_KEY, 1, expires_in_sec=REFRESH_MIN_INTERVAL_S)
 	except Exception:
 		pass  # no cache, no throttle
 	try:
 		from jarvis import admin_client
 
-		persist(admin_client.get_connection(timeout_s=8) or {})
-		return True
+		changed = persist(admin_client.get_connection(timeout_s=8) or {})
 	except Exception:
 		return False
+	if not changed:
+		try:
+			frappe.cache().set_value(_REFRESH_CACHE_KEY, 1, expires_in_sec=REFRESH_MIN_INTERVAL_S)
+		except Exception:
+			pass
+	return True

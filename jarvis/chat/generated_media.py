@@ -488,6 +488,7 @@ def _get_media_bytes(
 	*,
 	quiet: bool = False,
 	timeout_s: float = 15,
+	refuse_svg: bool = False,
 ):
 	"""One GET of a media path. Returns ``(status, bytes | None)``; the bytes are None for any
 	response that is not an acceptable image/declared-type body (the reason is logged unless
@@ -506,7 +507,7 @@ def _get_media_bytes(
 				fail(f"status {r.status_code}")
 				return r.status_code, None
 			ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
-			if "svg" in ctype or "svg" in (mime_type or "").lower():
+			if refuse_svg and ("svg" in ctype or "svg" in (mime_type or "").lower()):
 				fail("svg is not accepted")
 				return 200, None
 			generic = ctype in ("application/octet-stream", "binary/octet-stream", "")
@@ -611,8 +612,13 @@ def fetch_media_url(
 	if not base or not token:
 		_media_fetch_failed(url, "no gateway address or token")
 		return None
+	# SVG can carry script. A native tenant (and a gateway known to be 2026.11+) refuses it, and so
+	# does the ticket fetch; a tenant on an older runtime keeps the behaviour it always had.
+	from jarvis import native_runtime
+
+	refuse_svg = native_runtime.is_native_pool() or native_runtime.gateway_is_v11()
 	status, body = _get_media_bytes(
-		base, url, {"Authorization": f"Bearer {token}"}, url, mime_type, quiet=True
+		base, url, {"Authorization": f"Bearer {token}"}, url, mime_type, quiet=True, refuse_svg=refuse_svg
 	)
 	if body is not None:
 		return body
@@ -623,7 +629,9 @@ def fetch_media_url(
 	if not ticketed:
 		_media_fetch_failed(url, f"status {status}, no ticketed url from the gateway")
 		return None
-	return _get_media_bytes(base, ticketed, {}, url, mime_type, timeout_s=_TICKET_GET_TIMEOUT_S)[1]
+	return _get_media_bytes(
+		base, ticketed, {}, url, mime_type, timeout_s=_TICKET_GET_TIMEOUT_S, refuse_svg=True
+	)[1]
 
 
 def _media_url_filename(url: str, mime_type: str | None) -> str:

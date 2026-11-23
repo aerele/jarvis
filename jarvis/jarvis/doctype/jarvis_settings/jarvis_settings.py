@@ -865,7 +865,13 @@ class JarvisSettings(Document):
 
 		if not self.get("models"):
 			return
-		errors = new_kimi_subscription_errors(self, self.get_doc_before_save())
+		before = self.get_doc_before_save()
+		if before is None and not self.is_new():
+			# A save path that skipped the "before" load (a background job, flags): read the saved
+			# rows, so a Kimi sign-in that is already saved is never taken for a new one.
+			# Single doctype, fresh read of the stored rows; this is validate, before the new rows land.
+			before = frappe.get_single("Jarvis Settings")
+		errors = new_kimi_subscription_errors(self, before)
 		if errors:
 			frappe.throw("<br>".join(errors), title="LLM Configuration")
 

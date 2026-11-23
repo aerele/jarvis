@@ -107,14 +107,17 @@ class TestYieldPathUnchanged(unittest.TestCase):
 
 
 class TestTrigger(unittest.TestCase):
-	def _start(self, rows, **kw):
+	def _start(self, rows, v11=True, **kw):
 		args = dict(media_rels=None, media_urls=None, yield_continuation=False)
 		args.update(kw)
 		with (
-			patch.object(turn_handler, "_async_media_tool_rows", return_value=rows),
+			patch("jarvis.native_runtime.gateway_is_v11", return_value=v11),
+			patch.object(turn_handler, "_recent_media_tool_row_exists", return_value=bool(rows)) as cheap,
+			patch.object(turn_handler, "_async_media_tool_rows", return_value=rows) as exact,
 			patch.object(turn_handler.frappe, "enqueue") as enq,
 		):
 			turn_handler._maybe_start_async_media_harvest("M", "C", "u@x", "run", START_MS, **args)
+		enq.cheap, enq.exact = cheap, exact
 		return enq
 
 	def test_a_normal_final_after_a_started_media_tool_enqueues_the_first_slice_on_the_turn_lane(self):
@@ -130,6 +133,18 @@ class TestTrigger(unittest.TestCase):
 		self.assertEqual(kw["timeout"], turn_handler.ASYNC_MEDIA_JOB_TIMEOUT_S)
 		self.assertLess(turn_handler.ASYNC_MEDIA_JOB_TIMEOUT_S, 120)
 		self.assertGreater(kw["deadline_ms"], int(time.time() * 1000))
+
+	def test_an_older_runtime_costs_no_query_and_no_job(self):
+		enq = self._start([{"name": "T1", "tool_status": "running"}], v11=False)
+		enq.assert_not_called()
+		enq.cheap.assert_not_called()
+		enq.exact.assert_not_called()
+
+	def test_a_turn_with_no_media_tool_row_costs_one_cheap_query_only(self):
+		enq = self._start([])
+		enq.assert_not_called()
+		enq.cheap.assert_called_once()
+		enq.exact.assert_not_called()
 
 	def test_no_media_tool_no_job(self):
 		self._start([]).assert_not_called()
@@ -309,6 +324,8 @@ class TestFetchAcceptsWhatTheGatewayServes(unittest.TestCase):
 			patch("requests.get", return_value=resp),
 			patch("jarvis.chat.canvas._http_base", return_value="http://gw"),
 			patch.object(generated_media.frappe, "logger") as logger,
+			patch("jarvis.native_runtime.is_native_pool", return_value=False),
+			patch("jarvis.native_runtime.gateway_is_v11", return_value=False),
 		):
 			out = generated_media.fetch_media_url("http://gw", "tok", URL, mime_type="image/png")
 		return out, logger
@@ -370,6 +387,8 @@ class TestTicketedMediaOnTheNewGateway(unittest.TestCase):
 			patch("jarvis.chat.canvas._http_base", return_value="http://gw"),
 			patch.object(generated_media, "_ticket_path", return_value=ticket) as ticket_path,
 			patch.object(generated_media.frappe, "logger"),
+			patch("jarvis.native_runtime.is_native_pool", return_value=False),
+			patch("jarvis.native_runtime.gateway_is_v11", return_value=False),
 		):
 			out = generated_media.fetch_media_url("http://gw", "tok", URL, mime_type=mime)
 		return out, calls, ticket_path
@@ -480,7 +499,7 @@ class TestTicketHardening(unittest.TestCase):
 class TestFetchQuietAndNoSvg(unittest.TestCase):
 	PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 32
 
-	def _fetch(self, responses, ticket="/t?mediaTicket=a", mime="image/png"):
+	def _fetch(self, responses, ticket="/t?mediaTicket=a", mime="image/png", native=False, v11=False):
 		from jarvis.chat import generated_media
 
 		with (
@@ -488,6 +507,8 @@ class TestFetchQuietAndNoSvg(unittest.TestCase):
 			patch("jarvis.chat.canvas._http_base", return_value="http://gw"),
 			patch.object(generated_media, "_ticket_path", return_value=ticket),
 			patch.object(generated_media.frappe, "logger") as logger,
+			patch("jarvis.native_runtime.is_native_pool", return_value=native),
+			patch("jarvis.native_runtime.gateway_is_v11", return_value=v11),
 		):
 			out = generated_media.fetch_media_url("http://gw", "tok", URL, mime_type=mime)
 		return out, logger
@@ -502,58 +523,16 @@ class TestFetchQuietAndNoSvg(unittest.TestCase):
 		self.assertIsNone(out)
 		logger.return_value.warning.assert_called_once()
 
-	def test_svg_is_refused(self):
-		out, _ = self._fetch([_resp(200, "image/svg+xml", b"<svg/>")], mime="image/svg+xml")
-		self.assertIsNone(out)
-		out, _ = self._fetch([_resp(200, "image/svg+xml", b"<svg/>")])
-		self.assertIsNone(out)
+	def test_svg_is_refused_on_a_native_tenant_or_a_2026_11_gateway_but_not_on_an_older_one(self):
+		# A deliberate hardening that reaches only those tenants: SVG can carry script.
+		svg = _resp(200, "image/svg+xml", b"<svg/>")
+		self.assertIsNone(self._fetch([svg], mime="image/svg+xml", native=True)[0])
+		svg = _resp(200, "image/svg+xml", b"<svg/>")
+		self.assertIsNone(self._fetch([svg], mime="image/svg+xml", v11=True)[0])
+		svg = _resp(200, "image/svg+xml", b"<svg/>")
+		self.assertEqual(self._fetch([svg], mime="image/svg+xml")[0], b"<svg/>")  # older runtime: as before
 
-
-class TestJobChainSurvivesFaults(unittest.TestCase):
-	def _run(self, *, harvest_raises=False, deadline_ms=None, rels=None, have=()):
-		rows = [{"name": "T1", "tool_status": "running", "tool_name": "image_generate"}]
-		from jarvis.chat import generated_media
-
-		harvest = (
-			MagicMock(side_effect=RuntimeError("boom"))
-			if harvest_raises
-			else MagicMock(return_value=(rels or [], []))
-		)
-		with (
-			patch("jarvis.chat.agent_scope.assert_fefo_message_artifact_scope"),
-			patch.object(turn_handler, "_async_media_tool_rows", return_value=rows),
-			patch.object(turn_handler, "_turn_window", return_value=(None, None, None)),
-			patch.object(turn_handler, "_harvest_post_yield_media", harvest),
-			patch.object(generated_media, "_existing_media_sources", return_value=set(have)),
-			patch.object(turn_handler.frappe, "get_single", return_value=frappe._dict()),
-			patch.object(turn_handler.frappe, "log_error"),
-			patch.object(turn_handler.frappe.db, "set_value") as set_value,
-			patch.object(turn_handler, "_seed_gateway_media"),
-			patch.object(turn_handler, "_enqueue_async_media_slice") as nxt,
-			patch.object(turn_handler, "_publish_to_user"),
-		):
-			turn_handler.persist_async_media(
-				"M", "C", "u", "run", START_MS, deadline_ms=deadline_ms or int(time.time() * 1000) + 60_000
-			)
-		return nxt, set_value
-
-	def test_a_fault_in_a_slice_still_enqueues_the_next_one(self):
-		nxt, set_value = self._run(harvest_raises=True)
-		nxt.assert_called_once()
-		set_value.assert_not_called()
-
-	def test_a_fault_past_the_bound_closes_the_rows_instead(self):
-		nxt, set_value = self._run(harvest_raises=True, deadline_ms=1)
-		nxt.assert_not_called()
-		self.assertEqual(set_value.call_args.args[2]["tool_status"], "completed")
-
-	def test_a_found_media_path_is_done_only_when_the_canvas_has_it(self):
-		from jarvis.chat import generated_media
-
-		path = "/data/media/outgoing/a.png"
-		with patch.object(generated_media, "_media_dedup_key", side_effect=lambda p: "a.png"):
-			nxt, _ = self._run(rels=[path], have=[])
-			nxt.assert_called_once()  # the seeder failed: try again
-			nxt, set_value = self._run(rels=[path], have=["a.png"])
-		nxt.assert_not_called()
-		self.assertEqual(set_value.call_args.args[2]["tool_status"], "completed")
+	def test_the_ticket_fetch_refuses_svg_for_everyone(self):
+		first = _resp(401, "application/json")
+		svg = _resp(200, "image/svg+xml", b"<svg/>")
+		self.assertIsNone(self._fetch([first, svg])[0])

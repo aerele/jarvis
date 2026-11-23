@@ -490,6 +490,25 @@ def _async_media_bound_s(rows: list[dict]) -> float:
 	return ASYNC_MEDIA_LONG_POLL_TIMEOUT_S if long_tool else ASYNC_MEDIA_POLL_TIMEOUT_S
 
 
+def _recent_media_tool_row_exists(conversation_id: str) -> bool:
+	"""Is there ANY media-tool row in this conversation from the last hour? A coarse, indexed
+	pre-check (the exact turn window is worked out only when it says yes)."""
+	from jarvis.chat.agent_client import MEDIA_GEN_TOOL_NAMES
+
+	cutoff = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-1)
+	return bool(
+		frappe.db.exists(
+			MSG,
+			{
+				"conversation": conversation_id,
+				"role": "tool",
+				"tool_name": ["in", list(MEDIA_GEN_TOOL_NAMES)],
+				"creation": [">=", cutoff],
+			},
+		)
+	)
+
+
 def _maybe_start_async_media_harvest(
 	assistant_msg_name,
 	conversation_id,
@@ -505,7 +524,17 @@ def _maybe_start_async_media_harvest(
 	it parks the turn and harvests inline. One job per assistant message. Never raises."""
 	if yield_continuation or media_rels or media_urls:
 		return
+	# Only a runtime known to be 2026.11+ ends a detached tool's turn normally (older ones yield
+	# the run, which the yield path handles). No extra query for any other tenant.
+	from jarvis.native_runtime import gateway_is_v11
+
+	if not gateway_is_v11():
+		return
 	try:
+		# One cheap query before anything else: a turn with no media tool row at all (almost every
+		# turn) costs exactly this and nothing more.
+		if not _recent_media_tool_row_exists(conversation_id):
+			return
 		rows = _async_media_tool_rows(assistant_msg_name, conversation_id)
 		if not rows:
 			return

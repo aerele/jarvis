@@ -508,20 +508,31 @@ class TestPinSelfHealWhenFactsAreStale(unittest.TestCase):
 				turn_handler.set_session_model_refreshing(sess, "k", frappe._dict(), "openai_compat/gpt-5.5")
 		self.assertEqual(sess.set_session_model.call_count, 1)  # no null (reset) patch sent
 
-	def test_the_refresh_is_throttled_to_once_a_minute(self):
-		cache = MagicMock()
-		cache.get_value.return_value = None
+	def _refresh(self, cache, changed):
 		with (
 			patch.object(native_runtime.frappe, "cache", return_value=cache),
 			patch("jarvis.admin_client.get_connection", return_value={}) as read,
-			patch.object(native_runtime, "persist"),
+			patch.object(native_runtime, "persist", return_value=changed),
 		):
-			self.assertTrue(native_runtime.refresh_from_admin())
-			cache.set_value.assert_called_once()
-			self.assertEqual(cache.set_value.call_args.kwargs["expires_in_sec"], 60)
-			cache.get_value.return_value = 1
-			self.assertFalse(native_runtime.refresh_from_admin())
-		read.assert_called_once()
+			return native_runtime.refresh_from_admin(), read
+
+	def test_a_refresh_that_found_nothing_is_not_repeated_for_a_minute(self):
+		cache = MagicMock()
+		cache.get_value.return_value = None
+		ok, read = self._refresh(cache, changed=False)
+		self.assertTrue(ok)
+		self.assertEqual(cache.set_value.call_args.kwargs["expires_in_sec"], 60)
+		cache.get_value.return_value = 1
+		ok, read = self._refresh(cache, changed=False)
+		self.assertFalse(ok)
+		read.assert_not_called()
+
+	def test_a_refresh_that_found_a_change_is_never_throttled(self):
+		cache = MagicMock()
+		cache.get_value.return_value = None
+		ok, _ = self._refresh(cache, changed=True)
+		self.assertTrue(ok)
+		cache.set_value.assert_not_called()  # the next refused pin refreshes again at once
 
 	def test_refresh_from_admin_stores_the_connection_facts_and_never_raises(self):
 		reply = {"native_subscription_pool": True, "agent_runtime_version": "2026.11.5"}
@@ -835,3 +846,51 @@ class TestNativeSignInHealthReachesTheSite(unittest.TestCase):
 		):
 			sh.apply_admin_health({"X1": {"state": "ok", "source": "runtime"}})
 		self.assertEqual(store.call_args.args[0], {})
+
+
+class TestKimiCheckWithoutABeforeDocument(unittest.TestCase):
+	@staticmethod
+	def _doc(models, before, is_new):
+		from types import SimpleNamespace
+
+		doc = SimpleNamespace(
+			models=models, preset=None, get_doc_before_save=lambda: before, is_new=lambda: is_new
+		)
+		doc.get = lambda key, default=None: getattr(doc, key, default)
+		return doc
+
+	def _run(self, doc, saved):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		with (
+			patch.object(frappe, "throw", side_effect=frappe.ValidationError("refused")),
+			patch.object(frappe, "get_single", return_value=saved) as read,
+		):
+			try:
+				JarvisSettings._refuse_new_kimi_sign_in(doc)
+				refused = False
+			except frappe.ValidationError:
+				refused = True
+		return refused, read
+
+	def test_a_save_that_skipped_the_before_load_reads_the_saved_rows(self):
+		saved = _settings([_sub("kimi-k2", "kimi", accounts=[_acct("kimi", "K1")])])
+		refused, read = self._run(
+			self._doc([_sub("kimi-k2", "kimi", accounts=[_acct("kimi", "K1")])], None, False), saved
+		)
+		self.assertFalse(refused)  # the saved sign-in is not taken for a new one
+		read.assert_called_once()
+		refused, _ = self._run(
+			self._doc(
+				[_sub("kimi-k2", "kimi", accounts=[_acct("kimi", "K1"), _acct("kimi", "K2")])], None, False
+			),
+			saved,
+		)
+		self.assertTrue(refused)  # a genuinely new account still is
+
+	def test_a_new_document_and_a_normal_save_do_not_read_again(self):
+		refused, read = self._run(
+			self._doc([_sub("kimi-k2", "kimi", accounts=[_acct("kimi", "K1")])], None, True), None
+		)
+		self.assertTrue(refused)
+		read.assert_not_called()
