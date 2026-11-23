@@ -180,6 +180,10 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 	                            part and the get_doc call that reads it.
 	                            ``shown``/``total`` count child rows (documents
 	                            for a batch).
+	  * ``"bounded_connector"`` - a call_connector answer over budget was cut (whole
+	                            list items, else characters) with a visible marker.
+	                            ``shown``/``total`` are the first cut's counts, None
+	                            when only a repeated ``structuredContent`` was dropped.
 	  * ``"uncapped"``        - no truncatable top-level row list; passed through
 	                            unchanged.
 	  * ``"uncapped_nonrow"`` - a row list exists but the surrounding non-row
@@ -212,6 +216,9 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 		# shown/total count child rows (documents, for a batch), not chars.
 		return out, {"kind": "bounded_document", "original_chars": total, "shown": shown, "total": parts}
 
+	if tool == "call_connector":
+		return _bound_connector(data, total)
+
 	kind, key, rows = _find_list(data)
 	if rows is None:
 		return data, {"kind": "uncapped", "original_chars": total, "shown": None, "total": None}
@@ -233,3 +240,20 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 	note = _NOTE.format(shown=len(kept), total=n) if kept else _NOTE_NONE
 	out = _envelope(data, kind, key, kept, n, note)
 	return out, {"kind": "truncated", "original_chars": total, "shown": len(kept), "total": n}
+
+
+def _bound_connector(data, total: int) -> tuple[Any, dict]:
+	"""A connector answer is ``{ok, result: {content: [...]}}``: ``result`` is a dict, so the
+	row-list path below never sees it. ``bound_tool_result`` cuts it and marks the cut."""
+	from jarvis.connectors.result_view import bound_tool_result
+
+	out, cuts = bound_tool_result(data, MAX_RESULT_CHARS - _SAFETY)
+	if cuts is None:
+		return data, {"kind": "uncapped", "original_chars": total, "shown": None, "total": None}
+	first = cuts[0] if cuts else {}
+	return out, {
+		"kind": "bounded_connector",
+		"original_chars": total,
+		"shown": first.get("shown"),
+		"total": first.get("total"),
+	}
