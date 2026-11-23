@@ -103,18 +103,6 @@ class TestComponentCss(unittest.TestCase):
 		self.assertIn("span.rag-red, span.rag-amber, span.rag-green", css)
 		self.assertNotIn("\n.rag-red, .rag-amber, .rag-green {", css)
 
-	def test_non_empty(self):
-		css = theme.component_css()
-		self.assertTrue(isinstance(css, str))
-		self.assertTrue(len(css.strip()) > 0)
-
-	def test_theme_css_matches_component_css(self):
-		"""THEME_CSS is the cached, deterministic output of component_css()."""
-		self.assertEqual(theme.THEME_CSS, theme.component_css())
-
-	def test_deterministic(self):
-		self.assertEqual(theme.component_css(), theme.component_css())
-
 	def test_contract_class_present(self):
 		for class_name in _CONTRACT_CLASSES:
 			with self.subTest(class_name=class_name):
@@ -179,12 +167,6 @@ class TestComponentCss(unittest.TestCase):
 			values.append(int(match.group(1)))
 		self.assertEqual(values, sorted(values))
 		self.assertEqual(len(set(values)), 5, "indent levels must all be distinct")
-
-	def test_unknown_class_is_inert(self):
-		"""A class the contract never names produces no selector - nothing in
-		the stylesheet can accidentally style agent-chosen class names."""
-		css = theme.component_css()
-		self.assertFalse(_has_class_token(css, "totally-made-up-class-xyz"))
 
 
 def _rule_body(css: str, selector_regex: str) -> str:

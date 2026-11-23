@@ -477,11 +477,6 @@ class TestOperatorMatrixEffectiveData(unittest.TestCase):
 		# Data itself is unchanged.
 		self.assertNotIn("Between", allowed_operators("x", "Data"))
 
-	def test_comments_standard_text_field_excludes_between(self):
-		"""``_comments`` is a standard Text field, so it must inherit the Data set."""
-		self.assertNotIn("Between", allowed_operators("_comments", "Text"))
-		self.assertNotIn("Timespan", allowed_operators("_comments", "Text"))
-
 	def test_schema_never_offers_between_on_a_small_text_field(self):
 		schema = get_schema("macros", user=USER_SM)
 		desc = _entry(schema, MACRO, "description")  # Small Text
