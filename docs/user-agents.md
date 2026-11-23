@@ -66,7 +66,7 @@ are on, and the runtime host supports it.
   "Any public site". Pasted addresses are cleaned up: the scheme, path, query and
   port are dropped and the rest is lower-cased. A line that is still not a site
   is refused, and the message quotes it. A site must be a public host name that
-  ends in an alphabetic top-level label: IP addresses and local names (`localhost`,
+  ends in an alphabetic or punycode top-level label: IP addresses and local names (`localhost`,
   `.local`, `.localhost`, `.internal`, `.lan`, `.home`, `.corp`, `.svc`) are
   refused. This is for clarity only; the exit proxy already refuses every
   non-public address when it connects.

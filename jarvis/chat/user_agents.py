@@ -53,10 +53,10 @@ BROWSER_PUBLIC = "Any public site"
 BROWSER_MODES = {"listed": BROWSER_LISTED, "public": BROWSER_PUBLIC}
 _FLEET_BROWSER_MODE = {BROWSER_LISTED: "allowlist", BROWSER_PUBLIC: "public"}
 # The shared site pattern (fleet and control plane use the same one): a host name of
-# at most 253 characters whose last label is an alphabetic top-level label, so no IP
-# address. Punycode labels (xn--...) pass.
+# at most 253 characters whose last label is an alphabetic or punycode (xn--...)
+# top-level label, so no IP address. Punycode labels pass anywhere.
 SITE_RE = re.compile(
-	r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]{2,63}$"
+	r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.([a-z]{2,63}|xn--[a-z0-9]{1,59})$"
 )
 # Names that never reach a public website. Defence in depth and a clearer message:
 # the exit proxy already refuses every non-public address when it connects.

@@ -57,13 +57,19 @@ class TestBrowserSites(BrowserCase):
 				self.assertEqual(user_agents.site_problem(line), user_agents.SITE_NOT_PUBLIC)
 
 	def test_an_all_numeric_dotted_name_is_refused(self):
-		for line in ("1.2.3.4.5", "123.456"):
+		for line in ("1.2.3.4.5", "123.456", "example.123"):
 			with self.subTest(line=line):
 				self.assertEqual(user_agents.normalise_sites(line), ([], line))
 				self.assertIsNotNone(user_agents.site_problem(line))
 
 	def test_punycode_and_multi_label_hosts_pass(self):
-		for line in ("xn--80ak6aa92e.com", "xn--bcher-kva.example", "portal.gst.gov.in", "a.b.example.co.uk"):
+		for line in (
+			"xn--80ak6aa92e.com",
+			"xn--bcher-kva.example",
+			"example.xn--h2brj9c",
+			"portal.gst.gov.in",
+			"a.b.example.co.uk",
+		):
 			with self.subTest(line=line):
 				self.assertEqual(user_agents.normalise_sites(line), ([line], None))
 				self.assertIsNone(user_agents.site_problem(line))
