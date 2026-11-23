@@ -10,7 +10,7 @@ How this differs from Flow, and why:
 
   - **A throwaway session, not the chat's own.** Flow re-runs the chat's transcript with one
     more user message, reusing its prompt cache. Jarvis's agent keeps the chat's session in
-    the OpenClaw container, and a turn on it would land in the agent's history, so this runs
+    the agent container, and a turn on it would land in the agent's history, so this runs
     the same kind of silent one-shot turn auto-titling and the new-chat suggestions use
     (``jarvis.chat.title._generate_via_gateway``), on its own session, with the end of the
     conversation (a bounded excerpt of the visible user / assistant text) in the prompt.

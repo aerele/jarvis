@@ -781,9 +781,6 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 		"canvas",
 		# The live steps the reply showed, saved at settlement: [{text, at}].
 		"steps",
-		# The user's likely next messages, offered as chips under the latest reply
-		# (jarvis.chat.suggest_replies): {replies}, or empty.
-		"suggested_replies",
 		"reply_duration_ms",
 		# jarvis#560: which model actually produced each reply. The SPA renders it
 		# on the bubble only when it differs from what the header pill implies, so
@@ -791,6 +788,9 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 		# to a steady thread.
 		"model",
 		"provider",
+		# The user's likely next messages, offered as chips under the latest reply
+		# (jarvis.chat.suggest_replies): {replies}, or empty.
+		"suggested_replies",
 		# What the row is about. The SPA reads it for one thing: an assistant row
 		# whose ref_doctype is "Jarvis Macro Run" is the engine's closing message
 		# (macros._post_closing_message), not a reply, so it must not take the
