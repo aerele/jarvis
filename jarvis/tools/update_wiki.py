@@ -27,7 +27,7 @@ import frappe
 from jarvis.chat import wiki_permissions
 from jarvis.chat.wiki import PAGE_TYPES, WIKI_DISABLED_MESSAGE, append_source, wiki_enabled
 from jarvis.exceptions import FeatureDisabledError, InvalidArgumentError, PermissionDeniedError
-from jarvis.learning.sanitizer import scan_instruction_injection
+from jarvis.learning.sanitizer import _CONTROL_RE, scan_instruction_injection
 from jarvis.permissions import JARVIS_ADMIN_ROLE, JARVIS_USER_ROLE
 
 WIKI = "Jarvis Wiki Page"
@@ -60,11 +60,13 @@ def _clean_summary(summary) -> str | None:
 	"""One-line summary, or None when blank. Refuses text the injection scan
 	would otherwise swap for a placeholder in the controller, so the agent
 	hears why instead of storing a hidden summary."""
-	text = " ".join(str(summary).split()) or None
+	# Strip control chars first, as the controller does, so "jar\x00vis__" is refused here.
+	text = " ".join(_CONTROL_RE.sub("", str(summary)).split()) or None
 	if text and scan_instruction_injection(text):
 		raise InvalidArgumentError(
-			"summary refused: it starts with a heading, code fence, role prefix or "
-			"tool-call text. Rewrite it as plain prose."
+			"summary refused: it contains text that looks like an instruction (a heading or --- "
+			"at the start, a code fence, a role prefix such as system:, 'ignore previous' wording, "
+			"a jarvis__ tool name, or an <available_skills> tag). Rewrite it as plain prose."
 		)
 	return text
 

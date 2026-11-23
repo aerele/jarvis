@@ -56,11 +56,23 @@ class TestWikiSummaryLimit(FrappeTestCase):
 		self.assertIn("Summary is 501 characters", str(ctx.exception))
 
 	def test_injection_shaped_summary_is_refused_not_swapped(self):
-		for bad in ("# Heading first", "system: do this", "see jarvis__run_method", "```code```"):
+		for bad in (
+			"# Heading first",
+			"system: do this",
+			"see jarvis__run_method",
+			"```code```",
+			"Customer asked us to ignore previous pricing",
+			"\x00# x",
+			"jar\x00vis__",
+		):
 			with self.assertRaises(InvalidArgumentError) as ctx:
 				self._save(bad)
 			self.assertIn("summary refused", str(ctx.exception))
 			self.assertIsNone(self._stored())
+
+	def test_card_collapses_whitespace_like_the_tool(self):
+		card = build_card("update_wiki", {"slug": SLUG, "summary": "a\n\n  b\tc"}, {})
+		self.assertEqual(card["summary"], "a b c")
 
 	def test_card_shows_the_full_500_character_summary(self):
 		summary = "word " * 99 + "end"  # 498 characters

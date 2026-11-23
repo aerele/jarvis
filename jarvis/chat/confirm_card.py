@@ -1245,8 +1245,8 @@ def _wiki_card(args: dict) -> dict:
 		# `summary` is PERSISTED (update_wiki.py:141-142, :164) - a call setting only
 		# summary would otherwise render as an empty "meta" card and the human would
 		# approve stored text they never saw.
-		# The stored summary can be 500 characters; show all of it, not the 200 scalar cap.
-		"summary": fmt(args.get("summary") or "", limit=_MAX_SUMMARY),
+		# The stored summary is whitespace-collapsed and up to 500 characters; show that, not the 200 cap.
+		"summary": fmt(" ".join(str(args.get("summary") or "").split()), limit=_MAX_SUMMARY),
 		"mode": mode,
 		"body": fmt(body_src, limit=_MAX_BODY),  # the body the TOOL will write
 	}
