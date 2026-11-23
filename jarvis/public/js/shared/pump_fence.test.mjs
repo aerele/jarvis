@@ -1,7 +1,6 @@
 // Executable contract test for the SHARED pump fence (JF-018). Plain node built-ins
 // (node:test + node:assert) — no framework. Run directly
-// (`node --test pump_fence.test.mjs`) or via the python suite:
-// jarvis/tests/test_pump_fence_shared_client.py subprocess-runs this, so the fence the
+// (`node --test pump_fence.test.mjs`); CI runs it, so the fence the
 // PWA and the Desk widget depend on is enforced by every CI run.
 //
 // The last test is the anti-drift guard: it replays an EXHAUSTIVE walk matrix through
