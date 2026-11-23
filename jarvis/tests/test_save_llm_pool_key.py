@@ -1,6 +1,7 @@
 """A save carries one idempotency key, so the worker hand-off cannot allocate a second operation."""
 
 import inspect
+
 from frappe.tests.utils import FrappeTestCase
 
 
