@@ -16,6 +16,7 @@ The runtime sync is ``user_agent_sync``; the schedule is ``user_agent_scheduler`
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import secrets
 import time
@@ -46,13 +47,22 @@ MAX_TOOLS = 64
 # site, and 1 to 30 listed sites each.
 MAX_BROWSER_PER_SITE = 3
 MAX_BROWSER_SITES = 30
-MAX_SITE_LENGTH = 253
 BROWSER_LISTED = "Listed sites only"
 BROWSER_PUBLIC = "Any public site"
 # API word <-> stored Select value <-> fleet contract word.
 BROWSER_MODES = {"listed": BROWSER_LISTED, "public": BROWSER_PUBLIC}
 _FLEET_BROWSER_MODE = {BROWSER_LISTED: "allowlist", BROWSER_PUBLIC: "public"}
-SITE_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+# The shared site pattern (fleet and control plane use the same one): a host name of
+# at most 253 characters whose last label is an alphabetic top-level label, so no IP
+# address. Punycode labels (xn--...) pass.
+SITE_RE = re.compile(
+	r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]{2,63}$"
+)
+# Names that never reach a public website. Defence in depth and a clearer message:
+# the exit proxy already refuses every non-public address when it connects.
+_PRIVATE_SUFFIXES = ("local", "localhost", "internal", "lan", "home", "corp", "svc", "cluster.local")
+SITE_FORMAT = "format"
+SITE_NOT_PUBLIC = "not_public"
 _SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://")
 BROWSER_LIMIT_SENTENCE = f"Only {MAX_BROWSER_PER_SITE} agents per workspace can have a browser. Turn it off on another agent first."
 TOOL_PREFIX = "jarvis__"
@@ -114,22 +124,53 @@ def normalise_sites(raw) -> tuple[list[str], str | None]:
 	"""``(sites, bad_line)`` from what a user typed or pasted: a list, or text with
 	one site per line. Each line loses its scheme, path, query, port and spaces and
 	is lower-cased; a leading "www." stays as typed. Blank lines and repeats are
-	dropped. ``bad_line`` is the first line (as typed) that is still not a host."""
+	dropped. ``bad_line`` is the first line (as typed) that is not a public host
+	name; ``site_problem`` says why."""
 	lines = raw if isinstance(raw, list | tuple) else str(raw or "").splitlines()
 	sites: list[str] = []
 	for line in lines:
 		typed = str(line or "").strip()
 		if not typed:
 			continue
-		host = _SCHEME_RE.sub("", typed.lower())
-		host = re.split(r"[/?#]", host, maxsplit=1)[0]
-		host = host.rsplit("@", 1)[-1]
-		host = re.sub(r":\d*$", "", host).rstrip(".")
-		if len(host) > MAX_SITE_LENGTH or not SITE_RE.match(host):
+		host, problem = _host_of(typed)
+		if problem:
 			return sites, typed
 		if host not in sites:
 			sites.append(host)
 	return sites, None
+
+
+def site_problem(line: str) -> str | None:
+	"""``SITE_NOT_PUBLIC`` (an IP address or a local name), ``SITE_FORMAT`` (not a
+	host name at all), or None for a public site."""
+	return _host_of(str(line or "").strip())[1]
+
+
+def _host_of(typed: str) -> tuple[str, str | None]:
+	host = _SCHEME_RE.sub("", typed.lower())
+	host = re.split(r"[/?#]", host, maxsplit=1)[0]
+	host = host.rsplit("@", 1)[-1]
+	if host.startswith("["):
+		# A bracketed IPv6 literal, with or without a port after it.
+		host = host[1 : host.find("]")] if "]" in host else host[1:]
+	if _is_ip(host):
+		return host, SITE_NOT_PUBLIC
+	host = re.sub(r":\d*$", "", host).rstrip(".")
+	if _is_ip(host):
+		return host, SITE_NOT_PUBLIC
+	if host == "localhost" or any(host == s or host.endswith("." + s) for s in _PRIVATE_SUFFIXES):
+		return host, SITE_NOT_PUBLIC
+	if not SITE_RE.match(host):
+		return host, SITE_FORMAT
+	return host, None
+
+
+def _is_ip(host: str) -> bool:
+	try:
+		ipaddress.ip_address(host)
+	except ValueError:
+		return False
+	return True
 
 
 def browser_payload(row) -> dict | None:

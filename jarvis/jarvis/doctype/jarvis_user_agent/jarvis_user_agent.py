@@ -185,9 +185,16 @@ class JarvisUserAgent(NotRenamable, Document):
 	def _validate_sites(self):
 		sites, bad = user_agents.normalise_sites(self.browser_sites)
 		if bad is not None:
+			line = frappe.bold(escape_html(bad[:80]))
+			if user_agents.site_problem(bad) == user_agents.SITE_NOT_PUBLIC:
+				frappe.throw(
+					_("{0} is not a public website. List public sites only, for example example.com.").format(
+						line
+					)
+				)
 			frappe.throw(
 				_("{0} is not a website address. Write one site per line, like portal.gst.gov.in.").format(
-					frappe.bold(escape_html(bad[:80]))
+					line
 				)
 			)
 		if cint(self.allow_browser) and self.browser_mode == user_agents.BROWSER_LISTED:

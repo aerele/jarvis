@@ -35,6 +35,47 @@ class TestBrowserSites(BrowserCase):
 			with self.subTest(line=line[:20]):
 				self.assertEqual(user_agents.normalise_sites(f"ok.com\n{line}")[1], line)
 
+	def test_ip_addresses_and_local_names_are_not_public_sites(self):
+		for line in (
+			"192.168.1.10",
+			"http://10.0.0.1:8080/admin",
+			"[::1]",
+			"http://[2001:db8::1]:443/",
+			"2001:db8::1",
+			"foo.local",
+			"a.b.cluster.local",
+			"localhost",
+			"LOCALHOST:3000",
+			"files.internal",
+			"nas.lan",
+			"box.home",
+			"ad.corp",
+			"api.svc",
+		):
+			with self.subTest(line=line):
+				self.assertEqual(user_agents.normalise_sites(line), ([], line))
+				self.assertEqual(user_agents.site_problem(line), user_agents.SITE_NOT_PUBLIC)
+
+	def test_an_all_numeric_dotted_name_is_refused(self):
+		for line in ("1.2.3.4.5", "123.456"):
+			with self.subTest(line=line):
+				self.assertEqual(user_agents.normalise_sites(line), ([], line))
+				self.assertIsNotNone(user_agents.site_problem(line))
+
+	def test_punycode_and_multi_label_hosts_pass(self):
+		for line in ("xn--80ak6aa92e.com", "xn--bcher-kva.example", "portal.gst.gov.in", "a.b.example.co.uk"):
+			with self.subTest(line=line):
+				self.assertEqual(user_agents.normalise_sites(line), ([line], None))
+				self.assertIsNone(user_agents.site_problem(line))
+
+	def test_a_non_public_line_gets_its_own_message(self):
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self.browser_agent(browser_sites="example.com\n10.0.0.5")
+		self.assertIn("10.0.0.5", str(ctx.exception))
+		self.assertIn(
+			"is not a public website. List public sites only, for example example.com.", str(ctx.exception)
+		)
+
 	def test_the_saved_row_holds_the_normalised_list(self):
 		row = self.browser_agent(browser_sites="HTTPS://A.example.com/x\na.example.com\nb.example.org:443")
 		self.assertEqual(row.browser_sites, "a.example.com\nb.example.org")
