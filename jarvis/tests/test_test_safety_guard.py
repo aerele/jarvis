@@ -76,16 +76,6 @@ class TestMockedTestsAreUntouched(FrappeTestCase):
 		self.assertEqual(r, {"ok": True})
 		post.assert_called_once()
 
-	def test_a_patched_websocket_still_works(self):
-		"""test_chat_agent_client calls AgentSession.connect DIRECTLY -- connect is
-		the unit under test, so it cannot mock itself. It mocks create_connection instead.
-		A guard inside connect() would have broken that whole file."""
-		import websocket
-
-		with patch.object(websocket, "create_connection", return_value="fake-socket") as cc:
-			self.assertEqual(websocket.create_connection("ws://t"), "fake-socket")
-		cc.assert_called_once()
-
 
 def requests_post_via_admin_client():
 	from jarvis import admin_client

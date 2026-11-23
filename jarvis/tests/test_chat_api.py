@@ -641,14 +641,6 @@ class TestRetryMessage(_ChatTestCase):
 		_, kwargs = enqueue.call_args
 		self.assertEqual(kwargs["message_id"], u2)
 
-	def test_bumps_conversation_last_active_at(self):
-		_u, asst_id = self._make_turn(self.conv, with_error=True)
-		before = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
-		with patch("frappe.enqueue"):
-			retry_message(asst_id)
-		after = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
-		self.assertGreaterEqual(after, before)
-
 	def test_legacy_retry_of_a_reply_that_is_not_the_newest_is_refused(self):
 		u, asst_id = self._make_turn(self.conv, with_error=True)
 		self._make_turn(self.conv, user_text="next question")

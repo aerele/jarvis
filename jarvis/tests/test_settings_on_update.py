@@ -266,6 +266,8 @@ class TestOnUpdateStatus(_SettingsSingletonTestCase):
 		settings = frappe.get_single("Jarvis Settings")
 		self.assertIn("failed", settings.last_sync_status or "")
 		self.assertIn("admin unreachable", settings.last_sync_status or "")
+		self.assertTrue((settings.last_sync_status or "").startswith("failed: admin unreachable:"))
+		self.assertIn("network is down", settings.last_sync_status or "")
 
 	# jarvis #542: on a "restart" the two failures below arrive as the SAME
 	# exception class off the wire (admin answers a gateway fault and a config
