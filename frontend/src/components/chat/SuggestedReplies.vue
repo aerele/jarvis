@@ -34,8 +34,8 @@
 					stroke-linejoin="round"
 					aria-hidden="true"
 				>
-					<circle cx="12" cy="12" r="9" />
-					<path v-if="picked === reply" d="m8 12.5 3 3 5-6" />
+					<rect x="3" y="3" width="18" height="18" rx="4" />
+					<path v-if="picked === reply" d="m8 12 3 3 5-6" />
 				</svg>
 				<span class="jv-followup-text">{{ reply }}</span>
 			</button>
@@ -159,6 +159,13 @@ onBeforeUnmount(() => {
 }
 .jv-followup.on .jv-followup-tick {
 	color: var(--cta, var(--accent));
+}
+/* the ticked box is filled, the tick drawn in the button's own text colour on it */
+.jv-followup.on .jv-followup-tick rect {
+	fill: var(--cta, var(--accent));
+}
+.jv-followup.on .jv-followup-tick path {
+	stroke: var(--cta-fg, #fff);
 }
 .jv-followup-send {
 	display: inline-flex;
