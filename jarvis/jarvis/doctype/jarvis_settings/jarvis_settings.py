@@ -1163,6 +1163,11 @@ class JarvisSettings(Document):
 		before = self.get_doc_before_save()
 		if before and self.has_value_changed("chat_sharing_enabled"):
 			on_sharing_setting_changed(before.get("chat_sharing_enabled"), self.get("chat_sharing_enabled"))
+		if before and self.has_value_changed("enable_user_agent_browser"):
+			# Pushes carry an agent's browser only while this switch is on.
+			from jarvis.chat.user_agent_sync import on_browser_switch_changed
+
+			on_browser_switch_changed()
 		# #731: runs BEFORE the unified-LLM early returns below so a settings save
 		# that both reconfigures the LLM and disables the wiki still scrubs.
 		self._maybe_scrub_wiki_on_disable()

@@ -10,7 +10,7 @@ import json
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import cint
+from frappe.utils import cint, escape_html
 
 from jarvis.chat import user_agents
 from jarvis.permissions import NotRenamable
@@ -21,7 +21,17 @@ MAX_INSTRUCTIONS = 12000
 MAX_PROMPT = 4000
 
 # A change to one of these changes what the runtime holds, so it is pushed again.
-SYNC_FIELDS = ("agent_name", "description", "instructions", "tools_json", "allow_shell", "enabled")
+SYNC_FIELDS = (
+	"agent_name",
+	"description",
+	"instructions",
+	"tools_json",
+	"allow_shell",
+	"enabled",
+	"allow_browser",
+	"browser_mode",
+	"browser_sites",
+)
 _SCHEDULE_FIELDS = (
 	"enabled",
 	"schedule_enabled",
@@ -44,6 +54,7 @@ class JarvisUserAgent(NotRenamable, Document):
 		self._validate_caps()
 		self._validate_text()
 		self._validate_tools()
+		self._validate_browser()
 		self._validate_schedule()
 		self._keep_server_fields()
 		self._mark_pending()
@@ -155,6 +166,51 @@ class JarvisUserAgent(NotRenamable, Document):
 		if len(picked) > user_agents.MAX_TOOLS:
 			frappe.throw(_("An agent can have at most {0} tools.").format(user_agents.MAX_TOOLS))
 		self.tools_json = json.dumps(sorted(picked))
+
+	def _validate_browser(self):
+		"""Sites are stored normalised, one per line. A listed-sites browser needs 1 to
+		30; turning a browser on needs the site switch and a free slot."""
+		if self.browser_mode not in (user_agents.BROWSER_LISTED, user_agents.BROWSER_PUBLIC):
+			self.browser_mode = user_agents.BROWSER_LISTED
+		turning_on = cint(self.allow_browser) and self._changed("allow_browser")
+		if turning_on and not user_agents.browser_switch_on():
+			frappe.throw(
+				_("Web browsing for agents is turned off on this site. Ask your Jarvis admin to turn it on."),
+				frappe.PermissionError,
+			)
+		if any(self._changed(f) for f in ("allow_browser", "browser_mode", "browser_sites")):
+			self._validate_sites()
+		self._validate_browser_cap()
+
+	def _validate_sites(self):
+		sites, bad = user_agents.normalise_sites(self.browser_sites)
+		if bad is not None:
+			frappe.throw(
+				_("{0} is not a website address. Write one site per line, like portal.gst.gov.in.").format(
+					frappe.bold(escape_html(bad[:80]))
+				)
+			)
+		if cint(self.allow_browser) and self.browser_mode == user_agents.BROWSER_LISTED:
+			if not sites:
+				frappe.throw(_("List at least one site the browser may open, one per line."))
+			if len(sites) > user_agents.MAX_BROWSER_SITES:
+				frappe.throw(
+					_("A browser can have at most {0} sites. Remove some and save again.").format(
+						user_agents.MAX_BROWSER_SITES
+					)
+				)
+		self.browser_sites = "\n".join(sites)
+
+	def _validate_browser_cap(self):
+		if not (cint(self.enabled) and cint(self.allow_browser)):
+			return
+		if not (self._changed("allow_browser") or self._changed("enabled")):
+			return
+		others = frappe.db.count(
+			self.doctype, {"enabled": 1, "allow_browser": 1, "name": ["!=", self.name or ""]}
+		)
+		if others >= user_agents.MAX_BROWSER_PER_SITE:
+			frappe.throw(user_agents.BROWSER_LIMIT_SENTENCE)
 
 	def _validate_schedule(self):
 		from jarvis.chat.macro_scheduler import (

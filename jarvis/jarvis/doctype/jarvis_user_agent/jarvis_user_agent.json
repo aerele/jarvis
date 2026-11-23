@@ -13,6 +13,10 @@
   "description",
   "instructions",
   "tools_json",
+  "browser_section",
+  "allow_browser",
+  "browser_mode",
+  "browser_sites",
   "sync_section",
   "sync_status",
   "sync_error",
@@ -86,6 +90,34 @@
    "fieldtype": "JSON",
    "label": "Tools",
    "description": "JSON list of the tool ids the owner picked (bare names such as get_list). Only these tools can run in this agent's chats."
+  },
+  {
+   "fieldname": "browser_section",
+   "fieldtype": "Section Break",
+   "label": "Web browser"
+  },
+  {
+   "default": "0",
+   "fieldname": "allow_browser",
+   "fieldtype": "Check",
+   "label": "Can use a web browser",
+   "description": "On: the agent gets its own web browser. Needs Jarvis Settings > Enable a web browser for user agents. At most 3 agents per workspace."
+  },
+  {
+   "default": "Listed sites only",
+   "depends_on": "eval:doc.allow_browser",
+   "fieldname": "browser_mode",
+   "fieldtype": "Select",
+   "label": "Browser can open",
+   "options": "Listed sites only\nAny public site",
+   "description": "Any public site: a web page can trick the agent into sending data it read to that site. Listed sites only reduces this."
+  },
+  {
+   "depends_on": "eval:doc.allow_browser && doc.browser_mode=='Listed sites only'",
+   "fieldname": "browser_sites",
+   "fieldtype": "Small Text",
+   "label": "Sites",
+   "description": "One site per line, for example portal.gst.gov.in. Its subdomains are included. 1 to 30 sites."
   },
   {
    "fieldname": "sync_section",
@@ -229,7 +261,7 @@
  ],
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-11-22 10:00:00.000000",
+ "modified": "2026-11-23 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis User Agent",

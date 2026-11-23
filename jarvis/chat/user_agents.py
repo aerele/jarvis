@@ -29,6 +29,7 @@ CONV = "Jarvis Conversation"
 CHAT_SESSION = "Jarvis Chat Session"
 SETTINGS = "Jarvis Settings"
 FLAG = "enable_user_agents"
+BROWSER_FLAG = "enable_user_agent_browser"
 
 ID_PREFIX = "agent-u-"
 ID_RE = re.compile(r"^agent-u-[0-9a-f]{10}$")
@@ -41,6 +42,19 @@ MAX_PER_OWNER = 5
 # The runtime takes at most 20 agents per workspace (fleet contract 1.57).
 MAX_PER_SITE = 20
 MAX_TOOLS = 64
+# Browser option (fleet contract 1.58): at most 3 enabled agents with a browser per
+# site, and 1 to 30 listed sites each.
+MAX_BROWSER_PER_SITE = 3
+MAX_BROWSER_SITES = 30
+MAX_SITE_LENGTH = 253
+BROWSER_LISTED = "Listed sites only"
+BROWSER_PUBLIC = "Any public site"
+# API word <-> stored Select value <-> fleet contract word.
+BROWSER_MODES = {"listed": BROWSER_LISTED, "public": BROWSER_PUBLIC}
+_FLEET_BROWSER_MODE = {BROWSER_LISTED: "allowlist", BROWSER_PUBLIC: "public"}
+SITE_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+_SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://")
+BROWSER_LIMIT_SENTENCE = f"Only {MAX_BROWSER_PER_SITE} agents per workspace can have a browser. Turn it off on another agent first."
 TOOL_PREFIX = "jarvis__"
 
 # Tools a user agent may be given, by the app that must be installed for them to
@@ -84,6 +98,58 @@ def is_enabled() -> bool:
 		return bool(cint(frappe.db.get_single_value(SETTINGS, FLAG, cache=False)))
 	except Exception:
 		return False
+
+
+def browser_switch_on() -> bool:
+	"""Both switches: the browser option exists only while user agents are on too."""
+	if not is_enabled():
+		return False
+	try:
+		return bool(cint(frappe.db.get_single_value(SETTINGS, BROWSER_FLAG, cache=False)))
+	except Exception:
+		return False
+
+
+def normalise_sites(raw) -> tuple[list[str], str | None]:
+	"""``(sites, bad_line)`` from what a user typed or pasted: a list, or text with
+	one site per line. Each line loses its scheme, path, query, port and spaces and
+	is lower-cased; a leading "www." stays as typed. Blank lines and repeats are
+	dropped. ``bad_line`` is the first line (as typed) that is still not a host."""
+	lines = raw if isinstance(raw, list | tuple) else str(raw or "").splitlines()
+	sites: list[str] = []
+	for line in lines:
+		typed = str(line or "").strip()
+		if not typed:
+			continue
+		host = _SCHEME_RE.sub("", typed.lower())
+		host = re.split(r"[/?#]", host, maxsplit=1)[0]
+		host = host.rsplit("@", 1)[-1]
+		host = re.sub(r":\d*$", "", host).rstrip(".")
+		if len(host) > MAX_SITE_LENGTH or not SITE_RE.match(host):
+			return sites, typed
+		if host not in sites:
+			sites.append(host)
+	return sites, None
+
+
+def browser_payload(row) -> dict | None:
+	"""The contract's ``browser`` object for an agent row, or None when the agent
+	has no browser (the key is then left out of the push)."""
+	if not cint(row.get("enabled")) or not cint(row.get("allow_browser")):
+		return None
+	mode = row.get("browser_mode") or BROWSER_LISTED
+	sites = normalise_sites(row.get("browser_sites"))[0] if mode == BROWSER_LISTED else []
+	return {"mode": _FLEET_BROWSER_MODE.get(mode, "allowlist"), "sites": sites}
+
+
+def browser_view(row) -> dict:
+	"""The Agent payload's ``browser``: ``{enabled, mode: "listed" | "public", sites}``."""
+	mode = "public" if row.get("browser_mode") == BROWSER_PUBLIC else "listed"
+	return {
+		"enabled": bool(cint(row.get("allow_browser"))),
+		"mode": mode,
+		"sites": normalise_sites(row.get("browser_sites"))[0],
+	}
 
 
 def require_enabled() -> None:
