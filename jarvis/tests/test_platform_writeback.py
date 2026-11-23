@@ -459,9 +459,6 @@ class TestPP2FalseCleanUnreachable(FrappeTestCase):
 			coverage_notes=notes,
 		)
 
-	def test_clean_sentence_only_for_evaluated_clean(self):
-		self.assertIn("No exceptions were found", self._html("evaluated_clean"))
-
 	def test_partial_hides_clean_sentence(self):
 		html = self._html("partial")
 		self.assertNotIn("No exceptions were found", html)

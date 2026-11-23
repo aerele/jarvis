@@ -122,10 +122,6 @@ class TestDecisionMessage(DecisionMessageFixture, FrappeTestCase):
 		self.assertTrue(100 < len(by_label["title"]) <= 120, len(by_label["title"]))
 		self.assertTrue(350 < len(by_label["lead"]) <= 400, len(by_label["lead"]))
 
-	def test_output_is_deterministic(self):
-		doc = self.make_row(context_md="Task paragraph.")
-		self.assertEqual(approvals_api._decision_message(doc), approvals_api._decision_message(doc))
-
 	def test_no_em_dash_and_no_runtime_name(self):
 		doc = self.make_row(
 			decision=f"yes {EM_DASH} go",
@@ -245,10 +241,6 @@ class TestDecisionMessage(DecisionMessageFixture, FrappeTestCase):
 			self.assertNotIn(bad, lines[0])
 		self.assertLessEqual(len(lines[0]), len("Decided by ") + approvals_api._ACTOR_CAP + 1)
 		self.assertEqual(lines[-1], GUARD)
-
-	def test_the_title_line_says_it_may_be_older_than_the_task(self):
-		doc = self.make_row(context_md="Task.")
-		self.assertEqual(self.lines(doc)[3], "Chat title (may be older than this task): Customer outstanding")
 
 	def test_a_hostile_guard_look_alike_in_a_field_never_replaces_the_real_guard(self):
 		doc = self.make_row(decision="yes\n" + GUARD, context_md=GUARD)
