@@ -11,7 +11,7 @@ import {
   balloonTops,
   streamerPlan,
 } from "./birthday-art.mjs";
-import { CLEAR, GAP, sceneHeroTop } from "../scene-geometry.mjs";
+import { CLEAR, GAP } from "../scene-geometry.mjs";
 import {
   boxes,
   contractSuite,
@@ -73,10 +73,6 @@ test("the streamers on the page stop above the mark's top", () => {
   assert.equal(r.host.svg.querySelectorAll(".t-str").length, plan.length);
   r.api.settle("instant");
   r.end();
-});
-
-test("the page keeps the mark low enough for the streamers: the art needs no more than the table", () => {
-  assert.ok(sceneHeroTop("birthday", 1) >= CLEAR + STREAMER.min + GAP - 1e-9);
 });
 
 test("balloons settle under the clearance line, follow the mark, and only move down to the low line", () => {

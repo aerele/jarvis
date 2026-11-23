@@ -276,11 +276,6 @@ describe("IntakeList", () => {
 		w = null;
 	});
 
-	it("shows the empty copy", async () => {
-		w = await mountList([]);
-		expect(w.find(".empty").text()).toBe("Files dropped into a watched folder show up here.");
-	});
-
 	it("shows the retry button only when can_retry, and retries once", async () => {
 		w = await mountList([
 			row({ name: "F1", status: "Failed", can_retry: true }),

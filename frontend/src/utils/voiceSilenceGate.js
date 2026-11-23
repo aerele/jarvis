@@ -46,7 +46,6 @@ const noop = () => {};
 const DEAD_METER = Object.freeze({
 	available: false,
 	peak: () => undefined,
-	reset: noop,
 	stop: noop,
 });
 
@@ -58,10 +57,10 @@ const DEAD_METER = Object.freeze({
 //   setInterval / clearInterval   timer overrides
 //   sampleMs       sampling period, default 100 ms
 //
-// Returns { available, peak(), reset(), stop() }. `peak()` is the highest RMS seen since the
-// last reset(), or `undefined` when the measurement can't be trusted. The dictation recorder
-// NEVER calls reset() — the peak is per TAKE, which is why one audible word anywhere in a long,
-// pause-heavy recording clears the gate; `stop()` tears the graph down with the stream.
+// Returns { available, peak(), stop() }. `peak()` is the highest RMS seen over the take, or
+// `undefined` when the measurement can't be trusted. The peak is per TAKE, which is why one
+// audible word anywhere in a long, pause-heavy recording clears the gate; `stop()` tears the
+// graph down with the stream.
 export function createRmsMeter(stream, deps = {}) {
 	const Ctx =
 		deps.AudioContext ||
@@ -142,10 +141,6 @@ export function createRmsMeter(stream, deps = {}) {
 			// silence would drop real speech, so an un-running context is UNMEASURED too.
 			if (ctx.state && ctx.state !== "running") return undefined;
 			return peak;
-		},
-		reset() {
-			peak = 0;
-			samples = 0;
 		},
 		stop() {
 			if (timer != null) {

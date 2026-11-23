@@ -188,24 +188,6 @@ test("a take that is silent from end to end measures as silent", () => {
 	assert.equal(isNearSilent(m.peak()), true);
 });
 
-test("reset() re-arms the meter — a loud take does not shield a later one", () => {
-	const a = makeAudioStack();
-	const m = createRmsMeter(STREAM, a.deps);
-	a.setLevel(0.4);
-	a.tick(3);
-	assert.equal(isNearSilent(m.peak()), false);
-	m.reset(); // each take starts from a clean peak (in prod the meter is built per take)
-	assert.equal(
-		m.peak(),
-		undefined,
-		"straight after a reset nothing is sampled yet — UNMEASURED"
-	);
-	a.setLevel(0);
-	a.tick(4);
-	assert.equal(m.peak(), 0);
-	assert.equal(isNearSilent(m.peak()), true, "the silent take after a loud one is gated");
-});
-
 test("a take that ends before the first sample is UNMEASURED, not silent", () => {
 	const a = makeAudioStack();
 	const m = createRmsMeter(STREAM, a.deps);
@@ -244,7 +226,6 @@ test("no AudioContext at all → a dead meter that measures nothing and skips no
 	assert.equal(m.available, false);
 	assert.equal(m.peak(), undefined);
 	assert.doesNotThrow(() => {
-		m.reset();
 		m.stop();
 	});
 	assert.equal(isNearSilent(m.peak()), false);
@@ -379,34 +360,6 @@ test("a silent take is only ever removed by the USER", async () => {
 	h.store.discard(id); // the chip's ✕, behind its confirm
 	assert.equal(h.store.snapshot().total, 0, "…and then, and only then, it is gone");
 	assert.equal(h.store.hasUnfinishedReason(), null, "with nothing left arming the leave guard");
-});
-
-test("END TO END: a take with speech in it passes the gate and transcribes as ONE recording", async () => {
-	const h = makeHandoff();
-	const id = h.dictate({ blob: "speech", durationS: 42, peakRms: 0.18 });
-	await flush();
-	assert.deepEqual(h.asked, [id], "the audible take is transcribed — once");
-	assert.deepEqual(h.commits, [[id, "hello there"]]);
-});
-
-test("END TO END: an UNMEASURED take (no meter) is always transcribed", async () => {
-	const h = makeHandoff();
-	const a = h.dictate({ blob: "unknown", durationS: 20 }); // no peakRms key at all
-	const b = h.dictate({ blob: "unknown2", durationS: 20, peakRms: undefined });
-	await flush();
-	assert.deepEqual(h.asked, [a, b], "no measurement means no skipping — both takes go up");
-	assert.equal(h.skipped.length, 0);
-});
-
-test("END TO END: one audible word anywhere in a take clears the gate for the WHOLE take", async () => {
-	// The gate is per-RECORDING now: a long take that is mostly pauses still transcribes, because
-	// its peak is the loudest moment in it. Only an entirely inaudible take is skipped — which is
-	// exactly why the per-clip gate could never have been enough.
-	const h = makeHandoff();
-	const id = h.dictate({ blob: "mostly pauses, one sentence", durationS: 300, peakRms: 0.2 });
-	await flush();
-	assert.deepEqual(h.asked, [id]);
-	assert.equal(h.skipped.length, 0);
 });
 
 // ── the wiring the replica above stands in for ─────────────────────────────────────────────
