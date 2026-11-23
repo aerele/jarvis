@@ -91,6 +91,7 @@ _HINT = (
 	"Never rebuild the full set in chunks."
 )
 _BOUND_META = ("_truncated", "note")
+_MAX_CUTS_NAMED = 3
 
 
 def bound_tool_result(data, budget: int) -> tuple:
@@ -128,6 +129,8 @@ class _ResultBounder:
 
 	def run(self) -> tuple:
 		self._drop_repeated_structured()
+		if not self._fits() and self._content_is_the_bulk():
+			self._cut_content_prefix()
 		if not self._fits():
 			for part in self._parts_largest_first():
 				if self._fits():
@@ -157,7 +160,11 @@ class _ResultBounder:
 		return len(_compact(self._build())) <= self.budget
 
 	def _where_cut(self) -> str:
-		return "; ".join(f"{c['where']}: first {c['shown']} of {c['total']} {c['unit']}" for c in self.cuts)
+		# Capped, so the marker stays short whatever the number of cut parts.
+		shown = self.cuts[:_MAX_CUTS_NAMED]
+		text = "; ".join(f"{c['where']}: first {c['shown']} of {c['total']} {c['unit']}" for c in shown)
+		more = len(self.cuts) - len(shown)
+		return f"{text}; and {more} more parts cut" if more > 0 else text
 
 	def _note(self) -> str:
 		return f"Result cut to fit the context window ({self._where_cut()}). PARTIAL: do not present it as complete, and tell the person it was cut. {_HINT}"
@@ -176,6 +183,27 @@ class _ResultBounder:
 			return
 		if any(_item_repeats(i, structured) for i in self.content):
 			del self.mcp["structuredContent"]
+
+	def _content_is_the_bulk(self) -> bool:
+		"""Many content items (one per record is a valid MCP shape) are cut as a list."""
+		if not self.content or len(self.content) < 2:
+			return False
+		structured = self.mcp.get("structuredContent")
+		return structured is None or len(_compact(self.content)) >= len(_compact(structured))
+
+	def _cut_content_prefix(self) -> None:
+		"""Keep the largest prefix of whole content items that fits: log2(N) dumps in all.
+		When not even the first item fits, only that item is kept and the per-item cut
+		takes it from there."""
+		full = self.content
+		cut = self._start_cut("content", "items", len(full))
+
+		def apply(k: int) -> None:
+			self.content = full[:k]
+
+		if self._largest_fit(len(full), cut, apply) == 0:
+			cut["shown"] = 1
+			self.content = full[:1]
 
 	def _parts_largest_first(self) -> list:
 		parts = [

@@ -234,11 +234,18 @@ class TestBoundToolResult(unittest.TestCase):
 		self.assertEqual((cuts[0]["shown"], cuts[0]["where"]), (0, "structured data"))
 		self.assertLessEqual(_size(out), BUDGET)
 
-	def test_a_big_image_item_becomes_a_text_line(self):
+	def test_a_big_image_item_after_the_text_is_dropped_and_said(self):
 		data = _answer(_text("chart"), {"type": "image", "data": "A" * 90_000, "mimeType": "image/png"})
-		out, _cuts = bound_tool_result(data, BUDGET)
+		out, cuts = bound_tool_result(data, BUDGET)
 		self.assertEqual(out["result"]["content"][0]["text"], "chart")
-		self.assertEqual(out["result"]["content"][1]["text"], "[image omitted: too large]")
+		self.assertEqual((cuts[0]["where"], cuts[0]["shown"], cuts[0]["total"]), ("content", 1, 2))
+		self.assertIn("first 1 of 2 items", out["result"]["content"][-1]["text"])
+		self.assertLessEqual(_size(out), BUDGET)
+
+	def test_a_big_image_item_alone_becomes_a_text_line(self):
+		data = _answer({"type": "image", "data": "A" * 90_000, "mimeType": "image/png"})
+		out, _cuts = bound_tool_result(data, BUDGET)
+		self.assertEqual(out["result"]["content"][0]["text"], "[image omitted: too large]")
 		self.assertLessEqual(_size(out), BUDGET)
 
 	def test_two_big_text_items_are_both_bounded(self):
@@ -260,3 +267,54 @@ class TestBoundToolResult(unittest.TestCase):
 			out, cuts = bound_tool_result(data, BUDGET)
 			self.assertIs(out, data)
 			self.assertIsNone(cuts)
+
+
+class TestManyContentItems(unittest.TestCase):
+	"""One text item per record is a valid MCP shape: the items are cut as a list."""
+
+	def _timed(self, data):
+		started = time.perf_counter()
+		out, cuts = bound_tool_result(data, BUDGET)
+		return out, cuts, time.perf_counter() - started
+
+	def test_300_items_keep_a_prefix_of_whole_items(self):
+		items = [_text(f"record {i:04d} " + "r" * 490) for i in range(300)]
+		out, cuts, seconds = self._timed(_answer(*items))
+		kept = out["result"]["content"][:-1]
+		self.assertGreater(len(kept), 50)
+		self.assertEqual(kept, items[: len(kept)])
+		self.assertLessEqual(_size(out), BUDGET)
+		self.assertLess(seconds, 1.0)
+		self.assertEqual((cuts[0]["where"], cuts[0]["unit"], cuts[0]["total"]), ("content", "items", 300))
+		self.assertEqual(out["shown_items"], len(kept))
+		self.assertIn(f"first {len(kept)} of 300 items", out["result"]["content"][-1]["text"])
+
+	def test_10000_small_items_in_5mib_are_bounded_with_a_marker(self):
+		items = [_text("s" * 500) for _ in range(10_000)]
+		data = _answer(*items)
+		self.assertGreater(_size(data), 5_000_000)
+		out, cuts, seconds = self._timed(data)
+		print(f"\n  10,000 content items ({_size(data)} chars): {seconds * 1000:.0f} ms")
+		self.assertLess(seconds, 2.0)
+		self.assertLessEqual(_size(out), BUDGET)
+		self.assertTrue(out["_truncated"])
+		self.assertGreater(out["shown_items"], 50)
+		self.assertEqual(out["total_items"], 10_000)
+		self.assertLess(len(out["note"]), 600)
+
+	def test_a_first_item_larger_than_the_budget_is_cut_by_characters(self):
+		items = [_text("a" * 90_000)] + [_text("small")] * 50
+		out, cuts, _seconds = self._timed(_answer(*items))
+		self.assertLessEqual(_size(out), BUDGET)
+		self.assertEqual(cuts[0]["where"], "content")
+		self.assertEqual(cuts[1]["unit"], "characters")
+		self.assertTrue(out["result"]["content"][0]["text"].startswith("aaa"))
+
+	def test_the_marker_stays_short_with_many_cut_parts(self):
+		bounder_cuts = [{"where": f"p{i}", "unit": "items", "shown": 1, "total": 2} for i in range(500)]
+		from jarvis.connectors.result_view import _ResultBounder
+
+		bounder = _ResultBounder(_answer(_text("x")), BUDGET)
+		bounder.cuts = bounder_cuts
+		self.assertLess(len(bounder._where_cut()), 300)
+		self.assertIn("and 497 more parts cut", bounder._where_cut())
