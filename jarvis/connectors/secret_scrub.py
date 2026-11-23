@@ -42,8 +42,12 @@ _TOKEN_RES = (
 	re.compile(r"\b[sr]k_(?:live|test)_[A-Za-z0-9]{16,}\b"),  # Stripe
 	re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}\b"),  # Slack
 	re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b"),  # Google API key
-	re.compile(r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\b"),  # JWT
 )
+
+# A dotted token of three segments, matched ONCE from the start of a maximal run of token
+# characters (the lookbehind). A JWT is decided in ``_mask_jwts``: a pattern that starts at
+# every ``eyJ`` would rescan the rest of an ``eyJ-eyJ-...`` run each time (quadratic).
+_DOTTED_RE = re.compile(r"(?<![A-Za-z0-9_-])([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{5,})\.([A-Za-z0-9_-]{5,})")
 
 _SECRET_WORDS = frozenset(
 	{
@@ -93,6 +97,8 @@ def scrub_text(text) -> tuple[str, int]:
 	for pattern in _TOKEN_RES:
 		out, n = pattern.subn(REDACTION, out)
 		count += n
+	out, n = _mask_jwts(out)
+	count += n
 	masked = 0
 
 	def mask(match) -> str:
@@ -161,6 +167,40 @@ def _is_secret_field(name) -> bool:
 	if not is_secret_key(name) or words[-1] in _LOCATOR_WORDS:
 		return False
 	return not _CURSOR_WORDS & set(words)
+
+
+def _mask_jwts(text: str) -> tuple[str, int]:
+	"""Every JWT masked: ``eyJ...`` at the start of a dotted token or right after a ``-``
+	or ``_`` in its first segment (``x-eyJ...``, ``token_eyJ...``), through the end of
+	the third segment. The prefix stays. Linear: each search resumes where the last
+	match ended, or at the second segment of a dotted token that was not a JWT."""
+	if "eyJ" not in text:
+		return text, 0
+	parts, pos, count = [], 0, 0
+	search_from = 0
+	while match := _DOTTED_RE.search(text, search_from):
+		start = _jwt_start(match.group(1))
+		if start is None:
+			# Not a JWT: its second segment may still begin one (``a.bbbbb.eyJ...``).
+			search_from = match.start(2)
+			continue
+		begin = match.start(1) + start
+		parts += [text[pos:begin], REDACTION]
+		pos = search_from = match.end()
+		count += 1
+	parts.append(text[pos:])
+	return "".join(parts), count
+
+
+def _jwt_start(segment: str) -> int | None:
+	"""Index of the first ``eyJ`` in ``segment`` that sits at its start or after ``-`` / ``_``
+	and has at least five token characters after it; else None."""
+	at = segment.find("eyJ")
+	while at != -1:
+		if at == 0 or segment[at - 1] in "-_":
+			return at if len(segment) - at - 3 >= 5 else None
+		at = segment.find("eyJ", at + 1)
+	return None
 
 
 def _mask_pem_blocks(text: str) -> tuple[str, int]:

@@ -151,6 +151,41 @@ class TestScrubIsLinear(unittest.TestCase):
 		self.assertLess(time.monotonic() - started, 1.0)
 		self.assertEqual(out, "eyJ-" * 500_000)
 
+	def test_many_dotted_jwt_prefixes_are_linear(self):
+		import time
+
+		text = ("eyJ-" * 50 + ".") * 10_000
+		started = time.monotonic()
+		scrub_text(text)
+		self.assertLess(time.monotonic() - started, 1.0)
+
+	def test_a_long_dotted_non_jwt_chain_is_linear(self):
+		import time
+
+		text = ".".join(["abcdefghij"] * 200_000)
+		started = time.monotonic()
+		out, count = scrub_text(text)
+		self.assertLess(time.monotonic() - started, 1.0)
+		self.assertEqual((out, count), (text, 0))
+
+	def test_a_jwt_after_a_hyphen_or_underscore_is_masked_and_the_prefix_kept(self):
+		jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+		for prefix in ("x-", "token_", "a-b_c-"):
+			with self.subTest(prefix=prefix):
+				out, count = scrub_text(f"v {prefix}{jwt} end")
+				self.assertEqual((out, count), (f"v {prefix}{REDACTION} end", 1))
+
+	def test_a_jwt_behind_non_jwt_segments_is_still_found(self):
+		jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
+		out, count = scrub_text(f"a.bbbbbbb.{jwt}")
+		self.assertEqual(count, 1)
+		self.assertNotIn("eyJ", out)
+
+	def test_dotted_values_that_are_not_jwts_are_unchanged(self):
+		for text in ("v1.2023-11-23.build-12345", "api.example-site.com", "see eyJ.abcdef.ghijkl", "a.b.c"):
+			with self.subTest(text=text):
+				self.assertEqual(scrub_text(text), (text, 0))
+
 	def test_a_real_jwt_is_still_masked(self):
 		jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.dBjftJeZ4CVPmB92K27uhbUJU1p1r"
 		out, count = scrub_text(f"token: {jwt} and ({jwt})")
