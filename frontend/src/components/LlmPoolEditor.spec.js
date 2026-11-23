@@ -1886,3 +1886,36 @@ describe("edit panel footer layout (#809)", () => {
 		expect(actionRows(w)).toEqual([["Connect", "Cancel"]]);
 	});
 });
+
+describe("reordering the accounts of one subscription row (live finding 2026-11-23)", () => {
+	const accounts = () => [account("SUB_a", "a@x.com"), account("SUB_b", "b@x.com")];
+	const refs = (models) => models[0].subscription.accounts.map((a) => a.account_ref);
+
+	it("saves the swapped order and shows it again after the reload", async () => {
+		setPool([subModel("gpt-5", 0, accounts())]);
+		const w = await mountEditor();
+		w.vm.moveAccount(w.vm.rows[0], 1, -1);
+		await w.vm.applyOrder();
+		await idle();
+		expect(refs(savedModels())).toEqual(["SUB_b", "SUB_a"]);
+		expect(w.vm.rows[0].accounts.map((a) => a.account_ref)).toEqual(["SUB_b", "SUB_a"]);
+		expect(w.vm.orderDirty).toBe(false);
+	});
+
+	it("keeps the unapplied banner while the apply is still pending, then clears it", async () => {
+		setPool([subModel("gpt-5", 0, accounts())]);
+		syncStatus = {
+			...syncStatus,
+			last_sync_status: "pending: admin applying config",
+			pending: true,
+		};
+		const w = await mountEditor();
+		w.vm.moveAccount(w.vm.rows[0], 1, -1);
+		const applying = w.vm.applyOrder();
+		await idle();
+		expect(w.vm.orderDirty).toBe(true); // the apply has not settled: the banner is honest
+		syncStatus = { ...syncStatus, last_sync_status: "ok (pool via admin)", pending: false };
+		await applying;
+		expect(w.vm.orderDirty).toBe(false);
+	});
+});

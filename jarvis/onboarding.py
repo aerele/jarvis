@@ -804,6 +804,18 @@ def _adopt_orphan_capture(account_ref: str, consumed_capture_ids: list) -> str:
 	return blob
 
 
+def _ensure_idempotency_key(key: str | None) -> str:
+	"""The key this save carries to admin. A caller that sends none (the Settings page's Apply
+	order / Remove / Resync) still gets one: ``sync_pool_now`` posts once for the descriptor and then
+	hands the same push to the async worker, and with no key admin took the worker's post for a
+	second request and allocated a second desired version and operation (live 2026-11-23: two ops
+	1 to 7 s apart, the second one gating chat on "applying" for minutes). One key per save makes the
+	worker's post resolve to the operation the first post created."""
+	import secrets
+
+	return (key or "").strip() or f"app_{secrets.token_hex(16)}"
+
+
 @frappe.whitelist(methods=["POST"])
 def save_llm_pool(
 	models: str | list,
@@ -1014,7 +1026,7 @@ def save_llm_pool(
 	# SUPPRESS the async enqueue and push synchronously below so we can return the
 	# durable apply-operation descriptor (plan-05 D2, Fable ruling / review P0-02);
 	# a single-model config keeps the existing async creds enqueue.
-	idempotency_key = (idempotency_key or "").strip()
+	idempotency_key = _ensure_idempotency_key(idempotency_key)
 	s.flags.suppress_pool_enqueue = True
 	s.save(ignore_permissions=True)
 	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist before cache bust
