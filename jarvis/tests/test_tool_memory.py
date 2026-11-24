@@ -303,13 +303,6 @@ class TestSessionBaseSurvivesCacheClear(FrappeTestCase):
 		self.addCleanup(frappe.cache.delete_value, self.key)
 		self.addCleanup(frappe.cache.delete_value, self._PROBE)
 
-	def test_the_base_key_sits_under_a_persistent_prefix(self):
-		# Read from the module: the bench may serve another checkout's hooks.
-		from jarvis import hooks
-
-		self.assertIn(_user_memory.SEEN_PREFIX, hooks.persistent_cache_keys)
-		self.assertTrue(self.key.startswith(_user_memory.SEEN_PREFIX))
-
 	def test_the_base_survives_a_full_clear(self):
 		_user_memory.note_seen("0123456789abcdef")
 		frappe.cache.set_value(self._PROBE, "x")

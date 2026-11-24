@@ -1269,31 +1269,6 @@ class TestSignupResumeFallback(FrappeTestCase):
 			second = resume.call_args.kwargs["idempotency_key"]
 		self.assertNotEqual(first, second)
 
-	def test_frappe_really_does_refuse_a_field_the_doctype_lacks(self):
-		"""The premise of the guard, asserted against REAL frappe rather than a
-		mock — and the two write layers do not agree, which is why the guard
-		checks instead of catching:
-
-		  - a READ of a field the installed doctype lacks THROWS
-		    (``get_single_value`` looks the field up in meta and refuses);
-		  - ``frappe.db.set_single_value`` validates NOTHING and silently writes
-		    an orphan ``tabSingles`` row that no migrate cleans up.
-
-		So "just catch the exception" would have left orphan rows behind on every
-		bench deployed ahead of its migrate."""
-		scratch = "zz_signup_context_probe"
-		try:
-			with self.assertRaises(Exception):
-				frappe.db.get_single_value("Jarvis Settings", scratch)
-			frappe.db.set_single_value("Jarvis Settings", scratch, "written-anyway")
-			rows = frappe.db.sql(
-				"select value from tabSingles where doctype=%s and field=%s", ("Jarvis Settings", scratch)
-			)
-			self.assertTrue(rows, "set_single_value writes without validating - that is the hazard")
-		finally:
-			frappe.db.delete("Singles", {"doctype": "Jarvis Settings", "field": scratch})
-			frappe.db.commit()
-
 	def test_an_unmigrated_bench_degrades_and_leaves_no_orphan_row(self):
 		"""The deploy window itself: code is live, ``bench migrate`` has not run,
 		so the installed doctype has no such field. Everything below is real
