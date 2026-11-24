@@ -41,6 +41,7 @@ from jarvis.chat.pending_actions._store import (
 	get_row,
 	stash_undo,
 )
+from jarvis.connectors.outcome import connector_reason
 from jarvis.permissions import is_valid_unattended_owner, refuse_in_tool_dispatch
 
 _PROVENANCE = {"chat": "chat", "file_box_held": "approval", SHEET: "approval"}
@@ -699,7 +700,7 @@ def _claim_and_run(
 		result = _held_to_the_card(name, args, structure, result)
 	if crash_tb or not (isinstance(result, dict) and result.get("ok")):
 		_discard_failed_dispatch(row, args, crash_tb, result=result, record=structure is None)
-	ok = not crash_tb and bool(isinstance(result, dict) and result.get("ok"))
+	ok = not crash_tb and api.envelope_ok(row.tool, result)
 	if not ok and row.kind == "chat" and not row.get("collaboration_binding"):
 		# ...and a card that fails ends the run, as a failed write does.
 		from jarvis.chat import turn_message_binding
@@ -717,6 +718,9 @@ def _claim_and_run(
 	# is on the form could not be verified.
 	nothing_left = note is not None and note.clean and not lock_lost
 	code = None if ok else ("partial" if lock_lost or (interfered and not nothing_left) else "failed")
+	if code == "failed" and row.tool == "call_connector" and not crash_tb:
+		# A refusal raised before the app was called reads "nothing changed", not "unknown".
+		code = connector_reason(result)
 	outcome = outcome_for(status, code, row.tool)
 	if crash_tb:
 		result = api._error(

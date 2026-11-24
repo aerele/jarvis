@@ -578,6 +578,11 @@ scheduler_events = {
 		# drift; short-circuits to a no-op push when the computed profile
 		# set already matches what admin last received.
 		"jarvis.chat.role_profiles.sync_role_profiles",
+		# MCP connectors caching (spec 2026-07-28): re-list tools daily for every
+		# enabled, previously-passed connector so a cache goes stale in the background
+		# rather than mid-chat. Each row runs under its own credential context; see
+		# jarvis.connectors.refresh.reprobe_all.
+		"jarvis.connectors.refresh.reprobe_all",
 	],
 	"weekly": [
 		# Wiki v2 health check: deterministic lint over Active pages
@@ -885,6 +890,9 @@ default_log_clearing_doctypes = {
 	"Jarvis Activity Event": 90,
 	# Its pre-aggregated per-person daily totals. clear_old_logs prunes on `day`.
 	"Jarvis Activity Daily": 90,
+	# MCP connector call audit log — high-churn, every call, never deduped. 90
+	# days matches Jarvis Trigger Activity's retention.
+	"Jarvis Connector Log": 90,
 }
 
 # Slice B fast-path: runs in the `finally` of EVERY background job on the bench (Frappe
@@ -1167,6 +1175,11 @@ has_permission.update(
 # hash has no key TTL; each entry carries its own 10-minute expiry, and the sweep on every
 # begin (``oauth.api._gc_expired_nonces``) drops expired ones, so the hash stays bounded.
 #
+# jarvis:mcp_oauth_state: and jarvis:mcp_oauth_signin_error: (2026-10-08): a connector
+# sign-in's in-flight state and its parked callback error (``connectors.mcp_oauth_store``).
+# Without them the same tick sent a sign-in back to an unknown state. Both keys keep their
+# 10-minute TTL.
+#
 # jarvis:memory_seen: (#715 F09): the memory version each chat session was last shown
 # (``tools._user_memory.SEEN_PREFIX``), the base a memory save without ``base_version`` is
 # checked against. Without it every tick wiped every chat's base, and each chat's next
@@ -1207,6 +1220,8 @@ persistent_cache_keys = [
 	"jarvis:heartbeat_macro_health_log_hour",
 	"jarvis:subscription_",
 	"jarvis.oauth.codex_signin",
+	"jarvis:mcp_oauth_state:",
+	"jarvis:mcp_oauth_signin_error:",
 	"jarvis:memory_seen:",
 	"jarvis:holiday:",
 	"jarvis:session_claim:",  # Claims must outlive the 5-minute watchdog cache clear.
@@ -1224,4 +1239,25 @@ permission_query_conditions["Jarvis Export Job"] = (
 )
 has_permission["Jarvis Export Job"] = (
 	"jarvis.jarvis.doctype.jarvis_export_job.jarvis_export_job.has_permission"
+)
+
+# ---------------------------------------------------------------------------
+# Jarvis Connector scoping (MCP connectors, P0 data model)
+# ---------------------------------------------------------------------------
+# The doctype rows grant Jarvis User / Jarvis Admin / System Manager r/w/c/d
+# broadly (no if_owner — Shared rows must be readable by non-owners); these
+# hooks scope reads to Shared-for-everyone + Personal-for-its-owner, and deny
+# writes to everyone but the admin tier (Shared) or the owner (Personal —
+# deliberately NOT widened to the admin tier, matching Jarvis Conversation).
+# The Shared-scope create/widen gate lives in the DocType controller —
+# "create" reaches has_permission without a doc.
+permission_query_conditions.update(
+	{
+		"Jarvis Connector": "jarvis.chat.connector_permissions.connector_query_conditions",
+	}
+)
+has_permission.update(
+	{
+		"Jarvis Connector": "jarvis.chat.connector_permissions.has_connector_permission",
+	}
 )

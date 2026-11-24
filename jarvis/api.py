@@ -802,7 +802,7 @@ def _dispatch_from_session(
 	"""
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
-	from jarvis.chat import agent_run_steps, macro_report_wait
+	from jarvis.chat import agent_run_steps, connector_focus, macro_report_wait
 	from jarvis.chat.collaboration import require_legacy_session
 	from jarvis.tools import _agent_run_ctx, _delegate_capability, _private_output
 
@@ -1034,6 +1034,19 @@ def _dispatch_from_session(
 			# Resolve the conversation for this session up front so the
 			# confirmation gate can bind a parked write to it.
 			conv = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
+			# Connector focus (the composer pill): while the running turn is focused,
+			# only that connector's two tools run. Here, not in _run_tool, because
+			# _run_tool also executes a person's card confirm, which focus must not block.
+			focus_refusal = connector_focus.refusal(conv, tool, parsed_args)
+			if focus_refusal:
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=parsed_args,
+					result=focus_refusal,
+					tool_call_id=tool_call_id,
+				)
+				return focus_refusal
 			# A macro step that was told to wait for a background report (or whose report
 			# failed) changes nothing until Jarvis continues it. Here too, and not in
 			# _run_tool, for the same reason as focus: a card confirm must still run.
@@ -1691,7 +1704,10 @@ def persist_tool_receipt(
 	if no_write:
 		status = ""
 	else:
-		status = "completed" if result.get("ok") else "error"
+		# envelope_ok unwraps a connector tool's inner {ok:false} (a blocked/denied/
+		# failed connector call), so its chip reads "error" not a false "completed";
+		# every other tool keeps the outer envelope's ok verbatim.
+		status = "completed" if envelope_ok(tool, result) else "error"
 
 	# Entity stamping (org wiki): which doc this call touched, so wiki nudges
 	# can read a turn's entities off the receipt rows. Lazy + guarded: a
@@ -2336,6 +2352,15 @@ _WRITE_TOOLS = frozenset(
 		"record_app_wiki",
 		"finish_app_learning_run",
 		"save_agent_dashboard",
+		# call_connector fires a real outbound call to an external service under
+		# the caller's connector credential - AUDITED like every other write here
+		# (this set is what drives is_write -> the audit + savepoint), and never
+		# previewable, so a parked call falls through to _pending_preview's
+		# described-intent default. It stays in _GATED_WRITES too, but its confirm
+		# gate is ACTION-AWARE (see _connector_call_is_safe_read): a user-allowed
+		# read-only, non-destructive action skips the card and runs as an ordinary
+		# read - still audited through THIS set. Writes/destructive/unknown park.
+		"call_connector",
 	}
 )
 # Writes whose park preview is a sandboxed trial run (``_run_preview``). Only the
@@ -3053,6 +3078,7 @@ def _describe_call(tool: str, args: dict) -> str:
 		"target_doctype",
 		"target_name",
 		"method",
+		"connector",
 		"action",
 		"recipients",
 		"to",
@@ -3407,9 +3433,47 @@ def _translate_write_error(
 	return envelope
 
 
+# Tools that never raise and return their OWN {ok: false} envelope as the tool's
+# data - so the outer {ok: true, data} envelope (the tool DISPATCHED) hides the
+# real outcome. The audit trail and the receipt chip must reflect the INNER
+# outcome for these, or an ssrf_blocked / action_denied / transport_error attempt
+# is filed as a success. Kept deliberately narrow so every other tool is untouched.
+_ENVELOPE_TOOLS = frozenset({"call_connector"})
+
+
+def envelope_ok(tool: str, result) -> bool:
+	"""Effective success of a completed tool call, for the audit line and the
+	receipt chip. Normally the OUTER envelope's ``ok`` (did the tool dispatch); for
+	an :data:`_ENVELOPE_TOOLS` tool it is the INNER ``data.ok`` (did the connector
+	call itself succeed), so a blocked/denied/failed attempt is not shown as a
+	success. Non-envelope tools are unchanged. ``result`` is the outer
+	``{ok, data}`` envelope."""
+	outer = bool(isinstance(result, dict) and result.get("ok"))
+	if not outer or tool not in _ENVELOPE_TOOLS:
+		return outer
+	data = result.get("data")
+	if isinstance(data, dict) and "ok" in data:
+		return bool(data.get("ok"))
+	return outer
+
+
 def _record_tool_audit(tool: str, args: dict, data) -> None:
-	"""Keep private app-learning material out of the existing audit sink."""
+	"""Audit a completed (non-raising) tool. ``data`` is the tool's OWN return. For
+	an :data:`_ENVELOPE_TOOLS` tool whose data is itself an ``{ok: false}`` envelope,
+	record the connector's own failure (code + message) instead of a false success;
+	every other tool records ok=True with its result exactly as before. Private
+	app-learning material stays out of the audit sink either way."""
 	safe_args, safe_data = _app_learning_audit_payload(tool, args, data)
+	if tool in _ENVELOPE_TOOLS and isinstance(data, dict) and data.get("ok") is False:
+		err = data.get("error") if isinstance(data.get("error"), dict) else {}
+		audit.record(
+			tool=tool,
+			args=safe_args,
+			ok=False,
+			error_code=err.get("code") or "connector_error",
+			error_message=err.get("message") or "",
+		)
+		return
 	audit.record(tool=tool, args=safe_args, ok=True, result=safe_data)
 
 
@@ -3494,10 +3558,9 @@ def _activity_target(tool: str, args) -> tuple[str, str]:
 def _record_tool_activity(tool: str, args, data, *, is_write: bool) -> None:
 	"""One ``read`` event per completed non-write tool call, and one ``export`` event
 	per delivered export (an export tool is a write, so it also keeps its Agent Write
-	row). Introspection tools are not logged (plan E4). This branch has no
-	envelope_ok / _ENVELOPE_TOOLS machinery (the connector-envelope feature is not on
-	the hotfix branches), so a dispatched call is ``ok``, consistent with the
-	Agent Write row recorded "applied" above. Never raises, never commits."""
+	row). Introspection tools are not logged (plan E4). A tool that dispatched but
+	answered ``{ok: false}`` in its OWN envelope (``_ENVELOPE_TOOLS``) is a `failed`
+	read, not an `ok` one. Never raises, never commits."""
 	from jarvis import activity_log
 
 	if is_write:
@@ -3515,7 +3578,7 @@ def _record_tool_activity(tool: str, args, data, *, is_write: bool) -> None:
 		method=method,
 		ref_doctype=ref_doctype,
 		row_count=activity_log.row_count_of(tool, data),
-		outcome="ok",
+		outcome="ok" if envelope_ok(tool, {"ok": True, "data": data}) else "failed",
 	)
 
 
@@ -3718,28 +3781,39 @@ def _dispatch_and_wrap(
 	if is_write:
 		# Both audit sinks get the projected pair: a private App Learning write
 		# must never reach either one with its raw args or result.
-		audit_args, audit_data = _app_learning_audit_payload(tool, args, data)
-		audit.record(tool=tool, args=audit_args, ok=True, result=audit_data)
+		_record_tool_audit(tool, args, data)
 		# Manager audit: a dispatched write (one metadata-only row; bulk collapses
-		# to one row + bulk_count). Own savepoint, never commits. This branch
-		# (version-15-hotfix) has no envelope_ok / _ENVELOPE_TOOLS machinery, so a
-		# dispatched write is recorded "applied" — consistent with the audit.record
-		# ok=True above; the call_connector inner-failure nuance is part of the
-		# connector-envelope feature that is not on this branch.
+		# to one row + bulk_count). Own savepoint, never commits. Use envelope_ok
+		# so an _ENVELOPE_TOOLS call (call_connector) that dispatched but returned
+		# its OWN {ok:false} is filed as failed, not a false success - mirroring
+		# _record_tool_audit and the receipt chip.
 		from jarvis import agent_audit
 
+		outcome = "applied" if envelope_ok(tool, {"ok": True, "data": data}) else "failed"
+		audit_args, audit_data = _app_learning_audit_payload(tool, args, data)
 		agent_audit.record_write(
 			actor=frappe.session.user,
 			tool=tool,
 			args=audit_args,
 			result=audit_data,
-			outcome="applied",
+			outcome=outcome,
 			provenance=provenance,
 			provenance_name=provenance_name,
 		)
 	# Activity events (plan 4.3(1)): after the savepoint release, so they ride the
 	# envelope's commit like the Agent Write row above.
 	_record_tool_activity(tool, args, data, is_write=is_write)
+	if not envelope_ok(tool, {"ok": True, "data": data}):
+		# A connector call that dispatched but answered {ok: false} inside its own
+		# envelope: the agent got a failure under an outer ok:true, so no failure
+		# branch above saw it.
+		from jarvis import api_errors
+
+		api_errors.record_tool_failure(
+			tool,
+			_app_learning_safe_error(tool, data.get("error") if isinstance(data, dict) else None),
+		)
+		frappe.local.jarvis_tool_failure_recorded = True
 	return {"ok": True, "data": data}
 
 
@@ -4237,6 +4311,107 @@ def _file_box_wiki_write(
 	return result
 
 
+def _connector_precheck_refusal(tool: str, args) -> dict | None:
+	"""A ``call_connector`` that the broker would refuse before sending anything (an
+	action that is not allowed, bad arguments, an untested or switched-off connector)
+	is answered now, in the envelope an inline call returns, and no card is parked:
+	the person would only be asked to confirm a call that cannot run. ``None`` for
+	everything else, including a call the checks cannot judge. The gate is untouched:
+	a call that passes still parks."""
+	if tool != "call_connector" or not isinstance(args, dict):
+		return None
+	connector, action = args.get("connector"), args.get("action")
+	if not isinstance(connector, str) or not isinstance(action, str):
+		return None
+	from jarvis.connectors import broker
+	from jarvis.connectors.secret_scrub import scrub_value
+	from jarvis.tools._agent_run_ctx import get_session_key
+
+	refusal = broker.precheck(connector, action, args.get("args"), run_id=get_session_key())
+	if refusal is None:
+		return None
+	# A schema error repeats the offending argument value, which may be a credential.
+	refusal = scrub_value(refusal)
+	_record_tool_audit(tool, args, refusal)
+	return {"ok": True, "data": refusal}
+
+
+def _connector_call_is_safe_read(args) -> bool:
+	"""Action-aware carve-out for ``call_connector``'s confirm-first gate: return
+	True ONLY for a connector action the CURRENT user has explicitly ALLOWED and
+	that is marked read-only and non-destructive - such a call skips the
+	confirmation card and runs like an ordinary read. Everything else returns
+	False and PARKS exactly as before. FAIL SAFE: any uncertainty -> False.
+
+	SAFE_READ (all four required, read off the resolved ``Jarvis Connector Action``
+	child row): the child row for ``action`` EXISTS, ``allowed`` == 1,
+	``read_only`` == 1, and ``destructive`` == 0. This is intentionally STRICTER
+	than ``policy.action_decision``'s allow rule (``allowed`` alone): skipping the
+	human card also requires the action to be a non-destructive read.
+
+	SECURITY (owner-approved tradeoff). SAFE_READ trusts the STORED
+	``read_only``/``destructive`` flags. Those are NOT client-settable: the SPA's
+	test path (``jarvis.chat.connectors_api``) stamps them server-side from the
+	remote server's ``readOnlyHint``/``destructiveHint`` MCP annotations captured
+	at Test time, PRESERVES the stored values on every re-test (a relabel by a
+	compromised server cannot flip a known write to read-only), and lets the
+	client set only the ``allowed`` bit - which the user reviews in the
+	allowed-actions picker (a newly-seen read-only action is pre-checked there and
+	the user can uncheck it; writes default off). Hard invariants preserved:
+	  * a ``destructive`` action ALWAYS confirms (destructive != 0 -> False);
+	  * an action the user did NOT allow ALWAYS confirms (allowed != 1 -> False)
+	    AND is still denied at execution by ``broker``/``policy.action_decision``
+	    - skipping the card is defense-in-depth, never a bypass of the broker's own
+	    allow gate;
+	  * the not-ready guard in ``call_connector.py`` is unchanged and still runs
+	    at execution.
+
+	Runs at the gate point inside ``_run_tool``, which is itself inside
+	``impersonate(end_user)`` (see ``_dispatch_from_session``), so
+	``frappe.session.user`` IS that user and ``broker.resolve_for_status`` below
+	resolves the SAME row the call will use (Personal wins over Shared)."""
+	try:
+		if not isinstance(args, dict):
+			return False
+		# preview=True on a gated write is a category error the park block below
+		# answers with a legible "preview is not needed" error; keep that behaviour
+		# by declining the carve-out so the call falls into the block, not silently
+		# running with the flag stripped.
+		if _as_bool(args.get("preview")):
+			return False
+		connector = args.get("connector")
+		action = args.get("action")
+		if not connector or not action or not isinstance(connector, str) or not isinstance(action, str):
+			return False
+		from jarvis.connectors import broker
+
+		# resolve_for_status never raises: it returns the resolved row (Personal
+		# wins over Shared) or None for an unknown/invisible key. It does NOT check
+		# ``enabled``, so we do (a disabled connector must still confirm/deny).
+		row = broker.resolve_for_status(connector)
+		if row is None or not row.get("enabled"):
+			return False
+		for child in row.get("allowed_actions") or []:
+			if child.get("action") != action:
+				continue
+			return (
+				bool(child.get("allowed")) and bool(child.get("read_only")) and not child.get("destructive")
+			)
+		# No child row for this action -> unknown -> confirm (and the broker denies it).
+		return False
+	except Exception:
+		# Any error resolving the row / reading the flags fails SAFE: park the call.
+		# The log itself is best-effort - a logging failure must never turn the
+		# fail-safe into a raise (that would escape the gate entirely).
+		try:
+			frappe.logger("jarvis.connectors").warning(
+				"call_connector safe-read gate lookup failed", exc_info=True
+			)
+		except Exception:
+			pass
+		return False
+
+
 def _same_file_wiki_proposal(conv: str, slug: str, owner: str) -> str | None:
 	"""A Pending or Approved File Box wiki note for ``slug`` that another upload of the
 	same file bytes, by the same dropper, already proposed (#663), or None."""
@@ -4494,19 +4669,41 @@ def _stamp_file_box_draft(conv: str, data) -> bool:
 	return True
 
 
-def _single_flight_error() -> dict:
+def _single_flight_error(conversation: str | None = None, owner_user: str | None = None) -> dict:
 	"""F16: a card already waits in this conversation. Cards never expire, so the
-	model must stop until the user answers it."""
+	model must stop until the user answers it. The waiting card is named when it can
+	be found, so the model tells the user exactly which card to answer."""
 	return _error(
 		"ConfirmationPendingError",
 		"a confirmation card for a previous action is still awaiting the user in this "
-		"conversation. Only one runs at a time - do NOT retry this call; stop and end "
-		"your turn now. The card does not expire: the user confirms or discards it, and "
-		"once they confirm you'll get a follow-up turn to continue with the next step. "
-		"If the waiting card is not what the user asked for, tell them it is wrong and ask "
-		"them to discard it (Discard in the full chat, Deny on the phone); do not ask a "
-		"yes/no question in that reply.",
+		f"conversation{_waiting_card_label(conversation, owner_user)}. Only one runs at a time - do NOT "
+		"retry this call; stop and end your turn now. The card does not expire: the user "
+		"confirms or discards it, and once they confirm you'll get a follow-up turn to "
+		"continue with the next step. If the waiting card is not what the user asked for, "
+		"tell them it is wrong and ask them to discard it (Discard in the full chat, Deny "
+		"on the phone); do not ask a yes/no question in that reply.",
 	)
+
+
+def _waiting_card_label(conversation: str | None, owner_user: str | None) -> str:
+	"""`` (the waiting card: "<summary>")`` for the one Pending chat card of
+	``conversation`` that belongs to ``owner_user``, or an empty string when there is
+	none to name. A card another person of a shared chat owns is never named: its
+	title is theirs to see. The summary is the plain-text title the card shows; a read
+	error only costs the name."""
+	if not conversation or not owner_user:
+		return ""
+	try:
+		summary = frappe.db.get_value(
+			"Jarvis Pending Action",
+			{"conversation": conversation, "kind": "chat", "status": "Pending", "owner_user": owner_user},
+			"summary",
+			order_by="creation desc",
+		)
+	except Exception:
+		return ""
+	summary = " ".join(str(summary or "").split()).replace('"', "'")
+	return f' (the waiting card: "{summary}")' if summary else ""
 
 
 def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
@@ -4702,11 +4899,28 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# batch the human should confirm, and the plugin/persona promise exactly one
 	# card for it. Non-_PREVIEWABLE bulk writes get a described-intent card via
 	# _pending_preview (no sandbox); single calls to these tools are unchanged.
+	#
+	# ACTION-AWARE call_connector carve-out (owner-approved UX): a connector action
+	# the user has explicitly allowed AND that is marked read-only + non-destructive
+	# does NOT park - it falls through to the normal dispatch at the bottom of
+	# _run_tool and runs like any ordinary read (still AUDITED: call_connector is a
+	# _WRITE_TOOL, so _dispatch_and_wrap audits it via _record_tool_audit with the
+	# _ENVELOPE_TOOLS unwrap, and telemetry records it). This sits ABOVE the whole
+	# gate block, so a safe read ALSO bypasses the armed-macro (_ARMED_SKIP_NEVER)
+	# force-stop and the skill-autorun (_SKILL_AUTORUN_NEVER) pause - a read should
+	# never halt an automation. A write/destructive/not-allowed/unknown/unresolved
+	# connector action is NOT a safe read, so it stays in call_connector's static
+	# never-skip/never-autorun classification and parks exactly as before. The
+	# ``tool == "call_connector"`` guard short-circuits so no other tool pays the
+	# row lookup. call_connector stays in _GATED_WRITES / _ARMED_SKIP_NEVER /
+	# _SKILL_AUTORUN_NEVER unchanged (writes still park; the partition invariants
+	# hold); only a proven safe read is exempted here.
+	_connector_safe_read = tool == "call_connector" and _connector_call_is_safe_read(args)
 	if (
 		tool in _GATED_WRITES
 		or (is_write and _is_bulk_call(args))
 		or (shared_permit and tool_kind(tool) == "write")
-	):
+	) and not _connector_safe_read:
 		from jarvis.chat import events, pending_confirm
 		from jarvis.tools._bulk import _MAX_BATCH
 
@@ -5093,7 +5307,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				"call once; if it still fails, tell the user and stop - do not loop.",
 			)
 		if conversation_pending:
-			return _single_flight_error()
+			return _single_flight_error(conv, owner_user)
 		# send_email(recipients_from=...): the bench runs the query and writes one message
 		# per row NOW, so the card shows the real recipients and Confirm sends exactly
 		# them (send_email re-runs the query and refuses a changed list). The model never
@@ -5193,6 +5407,9 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 						refused["error"]["fields"] = fields
 				return refused
 		else:
+			refused = _connector_precheck_refusal(tool, args)
+			if refused is not None:
+				return refused
 			try:
 				preview = _pending_preview(tool, args)
 			except PreviewSandboxLost as e:
@@ -5270,7 +5487,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		except pending_confirm.ConfirmationPendingError:
 			# Park re-checks single-flight under its lock: a card that could not be
 			# superseded after all (another actor holds it) is not a storage error.
-			return _single_flight_error()
+			return _single_flight_error(conv, owner_user)
 		# mint returns None when it could not stage the park (a transient cache
 		# failure that it already rolled back, so nothing is persisted). Do NOT
 		# publish a card against a token whose record does not exist - that card is

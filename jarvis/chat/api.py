@@ -2214,14 +2214,22 @@ def _legacy_batch_continuation(receipts: list[tuple[str, dict]]) -> tuple[str, s
 	one that committed part-way makes the whole batch ``partial``."""
 	from jarvis.chat.actions_api import _join_capped, _legacy_outcome
 
-	outcomes = [_legacy_outcome(res) for _text, res in receipts]
+	# A connector card's outcome was judged on its own result (``receipt_outcome``).
+	outcomes = [res.get("receipt_outcome") or _legacy_outcome(res) for _text, res in receipts]
 	if all(o == OUTCOME_OK for o in outcomes):
 		return " ".join(text for text, _res in receipts), OUTCOME_OK
-	if OUTCOME_PARTIAL in outcomes:  # a card that committed part-way wins over every failure
-		return _join_capped([text for text, _res in receipts]), OUTCOME_PARTIAL
+	# What went wrong first: ``_join_capped`` shows the first receipt in full and may drop
+	# the rest, so a long success must not hide a failure after it.
+	order = sorted(range(len(receipts)), key=lambda i: outcomes[i] == OUTCOME_OK)
+	joined = _join_capped([receipts[i][0] for i in order])
+	# Unverified (a connector the app answered with an error) wins over partial, as in
+	# ``actions_api._settled_plan``; either wins over every plain failure.
+	for outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
+		if outcome in outcomes:
+			return joined, outcome
 	busy_only = all(o == OUTCOME_RETRY_LATER for o in outcomes)
 	outcome = OUTCOME_RETRY_LATER if busy_only else OUTCOME_NOT_FIXABLE
-	return _join_capped([text for text, _res in receipts]), outcome
+	return joined, outcome
 
 
 def _confirm_typed_items(conversation, items):
@@ -2980,7 +2988,10 @@ def send_message(
 	# Floating-widget auto-context: {doctype, name, label} of the doc the user
 	# is viewing, OR {report_name, filters} when the user is on a
 	# query-report route, OR {page: "triggers"|"dashboards"} when the user is
-	# on the Triggers / Dashboards page, OR {handoff_pages: ["payment-calendar"]}
+	# on the Triggers / Dashboards page, OR {focus_connector: {key, label}}
+	# when the composer's connector-focus pill is armed (binding for the turn:
+	# jarvis.chat.connector_focus gates the tools too), OR {handoff_pages:
+	# ["payment-calendar"]}
 	# when the web chat can open the Payment Calendar page (a capability, not a
 	# viewing context; see the allow-list below and
 	# turn_handler._payment_calendar_clause). Only forwarded when present, for the
@@ -2996,6 +3007,20 @@ def send_message(
 			# context payload when EITHER a doc/report ref OR ground_wiki OR a
 			# page marker is set.
 			ground_wiki = 1 if (isinstance(ctx, dict) and frappe.utils.cint(ctx.get("ground_wiki"))) else 0
+			# Connector-focus pill: {key, label} of the one connector the user
+			# scoped this turn to. Both are client-supplied text (the label is a
+			# display string, the key names a connector the caller may or may not
+			# still have) — length-capped here; the prompt-side sanitizes before
+			# interpolating it into the trusted bracket line.
+			_focus_raw = ctx.get("focus_connector") if isinstance(ctx, dict) else None
+			focus_connector = (
+				{
+					"key": str(_focus_raw.get("key") or "")[:80],
+					"label": str(_focus_raw.get("label") or "")[:80],
+				}
+				if isinstance(_focus_raw, dict) and _focus_raw.get("key") and _focus_raw.get("label")
+				else None
+			)
 			# Payment Calendar hand-off capability: the web chat names the pages it
 			# can open. A literal allow-list of ONE value (never a passthrough): the
 			# server hint (turn_handler._payment_calendar_clause) only checks that
@@ -3012,6 +3037,7 @@ def send_message(
 				or ctx.get("report_name")
 				or ground_wiki
 				or ctx.get("page") in ("triggers", "dashboards")
+				or focus_connector
 				or handoff_pages
 			):
 				enqueue_kwargs["context"] = {
@@ -3026,6 +3052,11 @@ def send_message(
 					# One-shot wiki grounding (allow-listed, boolean only).
 					"ground_wiki": ground_wiki,
 				}
+				# Only set when present — an absent key, not a null/empty one,
+				# so a plain send's context dict looks exactly as it did before
+				# this pill existed (mirrors how `page` below is handled).
+				if focus_connector:
+					enqueue_kwargs["context"]["focus_connector"] = focus_connector
 				# Only set when present — an absent key, not a null/empty one,
 				# so a plain send's context dict looks exactly as it did before
 				# (mirrors how `page` below is handled).

@@ -2767,6 +2767,7 @@ def _edit_failed(
 
 
 def _edit_create_locked(row, approver: str, patches: list[dict]) -> dict:
+	from jarvis import api
 	from jarvis.chat import held_edit, held_parties
 	from jarvis.chat.pending_actions import _seal
 	from jarvis.chat.pending_actions._execute import _discard_failed_dispatch, _dispatch
@@ -2811,7 +2812,7 @@ def _edit_create_locked(row, approver: str, patches: list[dict]) -> dict:
 		return _held_refusal("busy", _HELD_BUSY)
 	stamp = get_row(locked.name).executing_at  # tells our claim apart after an interference
 	result, interfered, crash_tb = _dispatch(locked, edited, user=approver)
-	ok = not crash_tb and bool(isinstance(result, dict) and result.get("ok"))
+	ok = not crash_tb and api.envelope_ok(locked.tool, result)
 	refs = held_edit.created_refs(locked.tool, edited, result) if ok else []
 	hidden = [dt for dt, n in refs if not frappe.has_permission(dt, "read", doc=n, user=locked.exec_user)]
 	if ok and not hidden:

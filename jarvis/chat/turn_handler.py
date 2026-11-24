@@ -1420,6 +1420,7 @@ def _assemble_prompt(
 		binding,
 		msg_row.get("origin"),
 		live_draft_clause,
+		context=context,
 	)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
@@ -1560,6 +1561,14 @@ def _assemble_prompt(
 	# already date/user-augmented user_message built above. Prompt-only;
 	# the persisted/visible user message is unchanged.
 	user_message = _prepend_doc_context(user_message, context, conversation_id)
+	# The caller's usable connectors, so the agent reaches for one unprompted.
+	# Skipped under connector focus: the focus line below already names the app.
+	user_message = _prepend_connected_apps(user_message, context, chat_user)
+	# Composer connector-focus pill: a SEPARATE, additive prepend (not folded
+	# into _prepend_doc_context's branches above) so it can co-exist with a
+	# doc/report/page context and never has to touch that function's existing,
+	# individually-pinned branches.
+	user_message = _prepend_connector_focus(user_message, context)
 	# Vision is gated by the operator toggle and the model's provider being
 	# multimodal. When off, image/PDF attachments degrade to a short note (no
 	# OCR fallback any more).
@@ -1695,6 +1704,14 @@ def handle_chat_send(payload: dict) -> None:
 			title="turn_message_binding: bind_turn_message failed",
 			message=frappe.get_traceback(),
 		)
+	# Connector focus binds (or clears) for THIS turn, before dispatch, so the
+	# tool gate enforces what the prompt line says. Best-effort like the bind above.
+	try:
+		from jarvis.chat import connector_focus
+
+		connector_focus.bind_turn(conversation_id, connector_focus.focus_of(context))
+	except Exception:
+		frappe.log_error(title="connector_focus: bind_turn failed", message=frappe.get_traceback())
 	# User-message intake: the user replied, so any Pending chat-sourced
 	# approval materialized from a previous ```jarvis-ask fence is answered
 	# in chat now — flip it to Answered so the board never offers a stale
@@ -2559,6 +2576,47 @@ def _dashboard_has_asked(conversation_id: str) -> bool:
 		return True
 
 
+def _prepend_connector_focus(user_message: str, context) -> str:
+	"""Prepend the composer's connector-focus pill directive, when armed.
+
+	``context.focus_connector`` is ``{key, label}`` (jarvis/chat/api.py's
+	allow-list, both required, length-capped). The line matches what the tool
+	gate enforces for this turn (``jarvis.chat.connector_focus``, bound at turn
+	start): only the two connector tools for that key run, anything else is
+	refused. A malformed/absent context is a no-op, matching
+	``_prepend_doc_context``'s contract.
+	"""
+	from jarvis.chat import connector_focus
+
+	focus = connector_focus.focus_of(context)
+	if not focus:
+		return user_message
+	label, key = focus["label"], focus["key"]
+	return (
+		f"[Context: The user turned on connector focus for this turn, the '{label}' "
+		f"connector (key: {key}). The only tools you may call this turn are "
+		f"list_connector_actions and call_connector for the '{label}' connector. Other "
+		"tools will be refused; tell the user to clear the focus if they need them.]"
+		f"\n\n{user_message}"
+	)
+
+
+def _prepend_connected_apps(user_message: str, context, chat_user: str) -> str:
+	"""Prepend the caller's usable connectors (``jarvis.chat.connected_apps``).
+	Omitted when they have none, and under connector focus. Best-effort: a
+	failed lookup must never break the turn."""
+	from jarvis.chat import connected_apps, connector_focus
+
+	if connector_focus.focus_of(context):
+		return user_message
+	try:
+		line = connected_apps.prompt_line(chat_user)
+	except Exception:
+		frappe.log_error(title="connected apps prompt line failed", message=frappe.get_traceback())
+		return user_message
+	return f"{line}\n\n{user_message}" if line else user_message
+
+
 def _prepend_doc_context(user_message: str, context, conversation_id: str = "") -> str:
 	"""Prepend the ERP doc / report the user was viewing (floating-widget
 	auto-context) as a leading ``[Viewing: ...]`` line, so questions like
@@ -2803,7 +2861,7 @@ def _runs_without_cards(conv, binding) -> bool:
 	)
 
 
-def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
+def _drafting_clause(conv, binding, origin, live_draft_clause: str = "", *, context=None) -> str:
 	"""``DRAFTING_CLAUSE`` when the site flag ``jarvis_draft_cards`` is on and an agent call to
 	``create_doc`` / ``update_doc`` in this turn would park a draft card, else "".
 
@@ -2820,6 +2878,9 @@ def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
 	change) gets nothing: the note forbids the block, the reminder asks for it, and the site
 	shows that one card either way. A waiting parked draft gets both: its reminder says to
 	call the tool again only for a change, which agrees with "one draft at a time".
+
+	Also nothing on a turn with a connector focus (``context.focus_connector``: the gate refuses
+	``create_doc`` / ``update_doc`` then).
 
 	Also nothing on a turn whose message invokes exactly one armed skill: the gate offers "Approve
 	& run" on that write's card, and only the ordinary card has that control, so the write is not a
@@ -2838,9 +2899,12 @@ def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
 		# A builder chat (the app's own ``_BUILDER_ORIGINS``: Dashboard Builder, Triggers) shows a
 		# draft card only as a title and a link to the full chat, so it keeps today's text. Imported
 		# here: the api module is where the set lives, and the import is lazy like this module's others.
+		from jarvis.chat import connector_focus
 		from jarvis.chat.api import _BUILDER_ORIGINS
 
 		if conv.get("origin_page") in _BUILDER_ORIGINS:
+			return ""
+		if connector_focus.focus_of(context):
 			return ""
 		if _TYPED_CHANGE in live_draft_clause:
 			return ""

@@ -242,6 +242,10 @@ class JarvisWikiPage(NotRenamable, Document):
 	def _validate_lengths(self):
 		self.title = (self.title or "").strip()
 		if self.summary and len(self.summary) > MAX_SUMMARY_LEN:
-			frappe.throw(_("Summary must be at most {0} characters.").format(MAX_SUMMARY_LEN))
+			frappe.throw(
+				_("Summary is {0} characters; the limit is {1}.").format(len(self.summary), MAX_SUMMARY_LEN)
+			)
 		if self.body_md and len(self.body_md) > MAX_BODY_LEN:
-			frappe.throw(_("Body must be at most {0} characters.").format(MAX_BODY_LEN))
+			frappe.throw(
+				_("Body is {0} characters; the limit is {1}.").format(len(self.body_md), MAX_BODY_LEN)
+			)
