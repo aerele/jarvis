@@ -373,11 +373,13 @@ def _may_have_rolled_back(exc) -> bool:
 def _poison_view() -> None:
 	"""Break the open snapshot view, so the job fails at its exit check instead of mixing two views.
 
-	Inside `snapshot.consistent_read` `frappe.db.rollback` is replaced by a function that marks the view broken
-	and raises `source_changed`; calling it is the view's own mechanism. Outside a view nothing is replaced,
-	nothing is called, and nothing is rolled back.
+	Inside `snapshot.consistent_read` (`snapshot.view_is_open`) `frappe.db.rollback` is replaced by a function
+	that marks the view broken and raises `source_changed`; calling it is the view's own mechanism. Outside a
+	view nothing is called and nothing is rolled back, whatever other code left on `frappe.db`.
 	"""
-	if "rollback" not in vars(frappe.db):
+	from jarvis.payment_calendar.snapshot import view_is_open
+
+	if not view_is_open():
 		return
 	try:
 		frappe.db.rollback()

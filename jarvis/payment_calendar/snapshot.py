@@ -22,6 +22,10 @@ from jarvis.payment_calendar.store import RESULT_SCHEMA
 # publish, and no reader accepts another shape. `horizon` is always stored, null only without `with_horizon`.
 HORIZON_DAYS = 30
 _VIEW_BROKEN = ContextVar("payment_calendar_view_broken", default=False)
+# Set for the whole body of `consistent_read`. Code that must tell whether a snapshot view is open asks
+# `view_is_open`; it never reads the attributes of `frappe.db`, which other code leaves behind (a preview
+# sandbox puts `commit` and `rollback` on it for good).
+_VIEW_OPEN = ContextVar("payment_calendar_view_open", default=False)
 
 
 @contextmanager
@@ -123,6 +127,11 @@ def fiscal_years_read(hits) -> bool:
 	return ("hget", "fiscal_years") in hits
 
 
+def view_is_open() -> bool:
+	"""Whether the current code runs inside `consistent_read` (set on entry, reset in `finally`)."""
+	return _VIEW_OPEN.get()
+
+
 def view_is_broken() -> bool:
 	"""Whether the current source view has refused a write or transaction control."""
 	return _VIEW_BROKEN.get()
@@ -141,6 +150,7 @@ def consistent_read():
 	connection = db._conn
 	original_sql = db.sql
 	view_token = _VIEW_BROKEN.set(False)
+	open_token = _VIEW_OPEN.set(True)
 
 	def refuse(*args, **kwargs):
 		_VIEW_BROKEN.set(True)
@@ -175,6 +185,7 @@ def consistent_read():
 				refuse()
 	finally:
 		_VIEW_BROKEN.reset(view_token)
+		_VIEW_OPEN.reset(open_token)
 		db.rollback()
 
 

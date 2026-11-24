@@ -19,7 +19,8 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis.jarvis.doctype.jarvis_settings import jarvis_settings
 from jarvis.payment_calendar import routing
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
-from jarvis.payment_calendar.snapshot import consistent_read
+from jarvis.payment_calendar.snapshot import consistent_read, view_is_open
+from jarvis.tools._preview_sandbox import preview_sandbox
 
 SETTINGS = "Jarvis Settings"
 MODE = "payment_calendar_reader"
@@ -514,6 +515,63 @@ class TestReaderBuild(FrappeTestCase):
 			base = self._identity(directory)
 			self.assertNotEqual(base, self._identity(directory, frappe_version="2"))
 			self.assertNotEqual(base, self._identity(directory, erpnext_version="2"))
+
+
+class TestViewMarker(FrappeTestCase):
+	"""`snapshot.view_is_open` is the only test of an open view; what other code leaves on `frappe.db` is not."""
+
+	def setUp(self):
+		super().setUp()
+		# A preview sandbox leaves `commit` and `rollback` on the connection object after a clean exit. The
+		# test removes what it made, so it leaves nothing behind for the next test of the process.
+		left = set(vars(frappe.db))
+		self.addCleanup(lambda: [vars(frappe.db).pop(name, None) for name in set(vars(frappe.db)) - left])
+
+	def sent_statements(self):
+		return [call.args[0].strip().lower() for call in self.sql.call_args_list if call.args]
+
+	def spy_on_sql(self):
+		patcher = patch.object(frappe.db, "sql", wraps=frappe.db.sql)
+		self.sql = patcher.start()
+		self.addCleanup(patcher.stop)
+
+	def test_the_marker_is_set_inside_a_view_and_not_before_or_after_it(self):
+		self.assertFalse(view_is_open())
+		with consistent_read():
+			self.assertTrue(view_is_open())
+		self.assertFalse(view_is_open())
+
+	def test_the_marker_is_reset_when_the_body_raises(self):
+		with self.assertRaises(ValueError), consistent_read():
+			self.assertTrue(view_is_open())
+			raise ValueError("test")
+		self.assertFalse(view_is_open())
+
+	def test_the_marker_is_reset_when_the_view_is_refused(self):
+		with self.assertRaises(CalendarSourceUnavailable), consistent_read():
+			frappe.db.rollback()
+		self.assertFalse(view_is_open())
+
+	def test_a_preview_sandbox_does_not_make_a_view(self):
+		with preview_sandbox():
+			pass
+		self.assertIn(
+			"rollback", vars(frappe.db), "the sandbox leaves its attributes: the cause of the defect"
+		)
+		self.assertFalse(view_is_open())
+
+	def test_poison_outside_a_view_sends_no_rollback_after_a_preview_sandbox(self):
+		with preview_sandbox():
+			pass
+		self.spy_on_sql()
+		routing._poison_view()
+		self.assertEqual([s for s in self.sent_statements() if s.startswith(("rollback", "start"))], [])
+
+	def test_poison_inside_a_view_still_breaks_it(self):
+		with preview_sandbox():
+			pass
+		with self.assertRaises(CalendarSourceUnavailable), consistent_read():
+			routing._poison_view()
 
 
 class TestZZNoModeLeftBehind(FrappeTestCase):
