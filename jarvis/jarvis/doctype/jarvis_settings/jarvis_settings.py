@@ -626,9 +626,12 @@ def _switch_or_enqueue(settings, job: str, *, is_switch: bool, **kwargs) -> None
 		llm_switch.begin(job, **kwargs)
 		return
 	run_inline = bool(frappe.flags.in_test or frappe.flags.run_admin_sync_inline)
+	# `short`, not `long`: a worker serves short, then default, then long, so on a bench with few
+	# workers a connect waited behind every scheduled job of every site (live: 232 s). The explicit
+	# timeout keeps the job's own bound; the job id and dedup are unchanged.
 	frappe.enqueue(
 		job,
-		queue="long",
+		queue="short",
 		timeout=ADMIN_SYNC_RQ_TIMEOUT_S,
 		enqueue_after_commit=not run_inline,
 		now=run_inline,

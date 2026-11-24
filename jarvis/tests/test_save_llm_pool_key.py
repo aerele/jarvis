@@ -24,3 +24,18 @@ class TestEnsureIdempotencyKey(FrappeTestCase):
 		src = inspect.getsource(onboarding.save_llm_pool)
 		self.assertIn("idempotency_key = _ensure_idempotency_key(idempotency_key)", src)
 		self.assertIn("sync_pool_now(idempotency_key=idempotency_key or None", src)
+
+
+class TestSyncJobsRideTheShortQueue(FrappeTestCase):
+	def test_the_non_switch_enqueue_uses_short_with_the_sync_timeout(self):
+		from unittest.mock import patch
+
+		from jarvis.jarvis.doctype.jarvis_settings import jarvis_settings as js
+
+		with (
+			patch("jarvis.chat.llm_switch.is_active", return_value=False),
+			patch.object(js.frappe, "enqueue") as enq,
+		):
+			js._switch_or_enqueue(object(), "some.job", is_switch=False, job_id="x")
+		self.assertEqual(enq.call_args.kwargs["queue"], "short")
+		self.assertEqual(enq.call_args.kwargs["timeout"], js.ADMIN_SYNC_RQ_TIMEOUT_S)
