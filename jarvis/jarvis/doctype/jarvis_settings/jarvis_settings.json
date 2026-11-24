@@ -201,6 +201,7 @@
   "catalogue_visibility_synced_at",
   "connector_catalogue_section",
   "connector_catalogue_disabled",
+  "connector_catalogue_coming_soon",
   "connector_catalogue_synced_at",
   "connector_key_overrides",
   "connector_key_overrides_synced_at",
@@ -1482,6 +1483,14 @@
    "hidden": 1,
    "read_only": 1,
    "description": "Canonical JSON list of the preset names the operator switched off, as last applied. Names this release does not ship are kept but ignored. Empty [] = nothing disabled; empty string = never pulled (or every pull kept last-known)."
+  },
+  {
+   "fieldname": "connector_catalogue_coming_soon",
+   "fieldtype": "Small Text",
+   "label": "Coming Soon Connector Presets",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Canonical JSON list of the preset names the operator marked Coming soon, as last applied: a subset of the disabled list that stays visible in Browse but cannot be added yet. Empty [] = none; empty string = never pulled (or every pull kept last-known)."
   },
   {
    "fieldname": "connector_catalogue_synced_at",

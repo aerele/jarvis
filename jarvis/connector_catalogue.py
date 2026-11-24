@@ -37,6 +37,15 @@ or malformed -> KEEP; a well-formed map, ``{}`` included, is authoritative). Con
 ``accepts_key()`` (the ``add_connector`` and controller guards) and ``public_catalog()``
 (the picker). A key row saved before the override keeps saving, as for a disabled preset.
 
+A third policy rides the same pull: "Coming soon" (marker ``connector_catalogue_states_supported``,
+key ``connector_catalogue_coming_soon``, a list that is a subset of the disabled list). A
+coming-soon preset stays in the Browse grid as a greyed card the viewer cannot add yet, while
+a plain disabled preset is hidden. Same KEEP-on-doubt table (marker absent, key absent or
+malformed -> KEEP; a well-formed list, ``[]`` included, is authoritative). A name counts only
+when it is ALSO disabled and is a shipped, code-enabled preset, so an older control plane (no
+marker) leaves nothing coming soon. ``coming_soon_names()`` returns that effective set; the
+create guards read it for their message. Rows already saved keep working, as for a disabled preset.
+
 Never raises: it runs from the daily scheduler and the "Sync now" button; every failure
 degrades and is logged.
 """
@@ -44,6 +53,7 @@ degrades and is logged.
 from functools import lru_cache
 
 import frappe
+from frappe import _
 
 from jarvis.connectors import catalog
 
@@ -52,6 +62,8 @@ _MARKER = "connector_catalogue_supported"
 _KEY = "connector_catalogue_disabled"
 _FIELD = "connector_catalogue_disabled"
 _SYNCED_AT = "connector_catalogue_synced_at"
+_SOON_MARKER = "connector_catalogue_states_supported"
+_SOON_KEY = "connector_catalogue_coming_soon"
 _KEY_MARKER = "connector_key_policy_supported"
 _KEY_OVERRIDES = "connector_key_overrides"
 _KEY_SYNCED_AT = "connector_key_overrides_synced_at"
@@ -84,6 +96,37 @@ def is_disabled(name: str) -> bool:
 	Limited to shipped names so a stray ``Custom URL`` (or any unknown name) in the
 	policy can never block a create the catalog does not govern."""
 	return bool(name) and name in _shipped_names() and name in disabled_names()
+
+
+def coming_soon_names() -> set[str]:
+	"""The presets shown as "Coming soon": stored by the operator, still in the disabled
+	list, and shipped enabled in code. Unknown names and code-disabled presets are ignored.
+
+	Cached read. Empty set on any read or parse error (nothing is greyed out, the hidden
+	policy still applies), so the failure is logged and self-heals on the next good pull."""
+	try:
+		raw = frappe.get_cached_value(SETTINGS, SETTINGS, _SOON_KEY)
+		data = frappe.parse_json(raw) if raw else []
+		if not isinstance(data, list):
+			return set()
+		stored = {name for name in data if isinstance(name, str)}
+		return stored & disabled_names() & set(catalog.preset_names())
+	except Exception:
+		frappe.log_error(
+			title="connector_catalogue.coming_soon_names read failed", message=frappe.get_traceback()
+		)
+		return set()
+
+
+def is_coming_soon(name: str) -> bool:
+	return bool(name) and name in coming_soon_names()
+
+
+def refusal_message(name: str) -> str:
+	"""Why a NEW connector on ``name`` is refused, for the API and controller guards."""
+	if is_coming_soon(name):
+		return _("This app is coming soon.")
+	return _("This app is turned off for your workspace.")
 
 
 def providers() -> tuple[catalog.Provider, ...]:
@@ -126,12 +169,17 @@ def accepts_key(name: str) -> bool:
 
 
 def public_catalog() -> list[dict]:
-	"""``catalog.to_public`` for the picker: operator-disabled presets dropped and each
-	``accepts_key`` set to its effective value (the overlay seam never changes it)."""
+	"""``catalog.to_public`` for the picker: operator-disabled presets dropped except the
+	"Coming soon" ones, which stay with ``coming_soon: true`` (every other row carries
+	``false``), and each ``accepts_key`` set to its effective value (the overlay seam
+	never changes it)."""
 	overrides = key_overrides()
+	soon = coming_soon_names()
+	shown = {row["name"] for row in catalog.to_public(providers=providers())} | soon
 	return [
-		{**row, "accepts_key": _accepts_key(row["name"], overrides)}
-		for row in catalog.to_public(providers=providers())
+		{**row, "accepts_key": _accepts_key(row["name"], overrides), "coming_soon": row["name"] in soon}
+		for row in catalog.to_public()
+		if row["name"] in shown
 	]
 
 
@@ -178,6 +226,41 @@ def persist_key_overrides_from_connection(conn: dict) -> None:
 			title="connector_catalogue.persist_key_overrides_from_connection failed",
 			message=frappe.get_traceback(),
 		)
+
+
+def persist_coming_soon_from_connection(conn: dict) -> None:
+	"""Store the "Coming soon" list from a full ``get_connection`` payload.
+
+	Same KEEP-on-doubt table as ``persist_from_connection``. Never raises."""
+	try:
+		if not conn.get(_SOON_MARKER):
+			if coming_soon_names():
+				frappe.logger("jarvis").info(
+					"connector_catalogue: KEEP coming soon, connection lacks "
+					"connector_catalogue_states_supported (old or rolled-back control plane)"
+				)
+			return
+		if _SOON_KEY not in conn:
+			return  # partial payload (the CP omits the key on a read error): KEEP
+		_apply_coming_soon(conn.get(_SOON_KEY))
+	except Exception:
+		frappe.log_error(
+			title="connector_catalogue.persist_coming_soon_from_connection failed",
+			message=frappe.get_traceback(),
+		)
+
+
+def _apply_coming_soon(names) -> None:
+	normalized = _normalize(names)
+	if normalized is None:
+		frappe.log_error(
+			title="connector_catalogue apply skipped: malformed coming soon list",
+			message=f"phase=validate payload={repr(names)[:2000]}",
+		)
+		return  # KEEP last-applied
+	stored = frappe.as_json(normalized)
+	if frappe.get_cached_value(SETTINGS, SETTINGS, _SOON_KEY) != stored:
+		frappe.db.set_single_value(SETTINGS, _SOON_KEY, stored, update_modified=False)
 
 
 def _apply_key_overrides(policy) -> None:
