@@ -224,6 +224,12 @@ class TestEgressAddressHook(unittest.TestCase):
 		self.assertFalse(self._allowed("!2606:4700:4700::*", "2606:4700:4700::1111"))
 		self.assertTrue(self._allowed("!2606:4700:4700::*", "2606:4700:4701::1"))
 
+	def test_cidr_and_full_form_glob_rules_block_address(self):
+		self.assertFalse(self._allowed("!34.1.2.0/24", "34.1.2.5"))
+		self.assertTrue(self._allowed("!34.1.2.0/24", "34.1.3.5"))
+		self.assertFalse(self._allowed("!2606:4700:4700::/48", "2606:4700:4700::1111"))
+		self.assertFalse(self._allowed("!2606:4700:4700:0:*", "2606:4700:4700::1111"))
+
 	def test_hostname_rules_and_empty_policy_allow_address(self):
 		self.assertTrue(self._allowed("!evil.com\napi.github.com"))
 		self.assertTrue(self._allowed(None))
