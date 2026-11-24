@@ -63,6 +63,8 @@ class TestCollaborationFoundation(SharingCase):
 					"expires_at",
 					"canvas",
 					"steps",
+					# the user's likely next messages (jarvis.chat.suggest_replies)
+					"suggested_replies",
 					"reply_duration_ms",
 					"model",
 					"provider",
