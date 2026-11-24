@@ -10,13 +10,15 @@ import { sendRejectionCopy } from "../../../frontend/src/lib/sendRejectionCopy.j
 // `state` reactive; this module stays testable without a Vue runtime.
 export function createSendRecovery(state, id = newSendRequestId, onAccepted = () => {}) {
 	return {
-		stage(conversation, text, attachments, approvalTokens = []) {
+		// context: the send's allow-listed context (wiki grounding, a connector focus), or null.
+		stage(conversation, text, attachments, approvalTokens = [], context = null) {
 			const request = {
 				id: id(),
 				conversation,
 				text,
 				attachments: attachments.map((a) => ({ file_url: a.file_url, name: a.name })),
 				approvalTokens: [...approvalTokens],
+				...(context ? { context: { ...context } } : {}),
 				state: "sending",
 				checking: false,
 				result: null,
