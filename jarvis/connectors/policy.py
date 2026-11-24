@@ -14,12 +14,20 @@ import fnmatch
 import ipaddress
 import json
 import re
+import unicodedata
 
 from jarvis.connectors import schema
 
-_HEX_PART = re.compile(r"0x[0-9a-f]+", re.ASCII)
-_OCTAL_PART = re.compile(r"0[0-7]*", re.ASCII)
-_DECIMAL_PART = re.compile(r"[1-9][0-9]*", re.ASCII)
+# Part lengths are capped to what a 32-bit value can need, so a hostile rule or host
+# cannot reach ``int()`` with thousands of digits (it raises past ~4,300).
+_HEX_PART = re.compile(r"0x[0-9a-f]{1,8}", re.ASCII)
+_OCTAL_PART = re.compile(r"0[0-7]{0,11}", re.ASCII)
+_DECIMAL_PART = re.compile(r"[1-9][0-9]{0,9}", re.ASCII)
+_GLOB_CHARS = "*?[]"
+_DOT_LIKE = re.compile("[\u3002\uff0e\uff61]")
+# DNS name limit. Longer input is refused BEFORE the idna codec, which is quadratic
+# on one long non-ASCII label.
+MAX_HOST_LENGTH = 253
 
 
 def action_decision(row, action: str) -> tuple[str, str] | None:
@@ -99,17 +107,20 @@ def egress_match(host: str, raw: str | None) -> bool:
 
 
 def egress_address_match(address: str, raw: str | None) -> bool:
-	"""Check a RESOLVED address against the DENY rules that name an IP, so a
-	hostname whose DNS record points at a denied IP cannot slip past an IP rule.
-	Only IP-literal deny rules apply here: allow rules and hostname rules are
+	"""Check a RESOLVED address against the DENY rules, so a hostname whose DNS
+	record points at a denied IP cannot slip past an IP rule (``!34.1.2.3``,
+	``!34.1.2.*``, ``!2606:4700:4700::*``). Only deny rules apply: allow rules are
 	about names, and applying them to an address would deny every call in
-	allow-list mode."""
+	allow-list mode. Matching is exact or glob, with no subdomain suffix rule."""
 	if not raw:
 		return True
-	denied = {ip for ip in map(canonical_ip, _parse_rules(raw)[1]) if ip}
-	if not denied:
+	denies = _parse_rules(raw)[1]
+	if not denies:
 		return True
-	return canonical_ip(address) not in denied
+	addr = canonical_ip(address)
+	if addr is None:
+		return False
+	return not any(fnmatch.fnmatchcase(addr, rule) for rule in denies)
 
 
 def normalise_host(host: str | None) -> str | None:
@@ -119,19 +130,20 @@ def normalise_host(host: str | None) -> str | None:
 	THEN drops ONE trailing dot, so a dot-like ending cannot hide behind the strip.
 	Every IP literal the resolver accepts (``127.1``, ``0x7f.1``, a bare decimal,
 	long IPv6, IPv4-mapped IPv6) becomes its canonical text. An empty result, an
-	empty label (``a..b``, ``.a``) or a second trailing dot is refused."""
+	empty label (``a..b``, ``.a``), a second trailing dot or anything over
+	``MAX_HOST_LENGTH`` is refused. Never raises."""
 	text = (host or "").strip()
-	if not text:
+	if not text or len(text) > MAX_HOST_LENGTH:
 		return None
 	try:
 		text = text.encode("idna").decode("ascii").lower()
-	except UnicodeError:
+		if text.endswith("."):
+			text = text[:-1]
+		if not text or text.startswith(".") or text.endswith(".") or ".." in text:
+			return None
+		return canonical_ip(text) or text
+	except (UnicodeError, ValueError, OverflowError):
 		return None
-	if text.endswith("."):
-		text = text[:-1]
-	if not text or text.startswith(".") or text.endswith(".") or ".." in text:
-		return None
-	return canonical_ip(text) or text
 
 
 def canonical_ip(text: str | None) -> str | None:
@@ -141,7 +153,7 @@ def canonical_ip(text: str | None) -> str | None:
 	text = (text or "").strip().lower()
 	if text.startswith("[") and text.endswith("]"):
 		text = text[1:-1]
-	if not text or any(ch in text for ch in "*?[]"):
+	if not text or any(ch in text for ch in _GLOB_CHARS):
 		return None
 	if ":" in text:
 		return _canonical_ipv6(text)
@@ -199,14 +211,44 @@ def _parse_rules(raw: str) -> tuple[list[str], list[str]]:
 		rule = rule[1:].strip() if is_deny else rule
 		if not rule:
 			continue
-		(denies if is_deny else allows).append(normalise_host(rule) or rule)
+		(denies if is_deny else allows).append(_normalise_rule(rule))
 	return allows, denies
+
+
+def _normalise_rule(rule: str) -> str:
+	if _has_unicode_glob_label(rule):
+		# Punycoding would mangle the glob (``[üu]ber`` -> ``xn--[u]ber-3ya``), so this
+		# rule stays in unicode form and is matched against the unicode form of the host.
+		return _unicode_rule(rule)
+	return normalise_host(rule) or rule
+
+
+def _has_unicode_glob_label(rule: str) -> bool:
+	for label in _DOT_LIKE.sub(".", rule).split("."):
+		if not label.isascii() and any(ch in label for ch in _GLOB_CHARS):
+			return True
+	return False
+
+
+def _unicode_rule(rule: str) -> str:
+	text = unicodedata.normalize("NFKC", _DOT_LIKE.sub(".", rule)).lower()
+	return text[:-1] if text.endswith(".") else text
 
 
 def _host_matches(host: str, rule: str) -> bool:
 	if not rule:
 		return False
+	if not rule.isascii():
+		host = _unicode_form(host)
 	return fnmatch.fnmatch(host, rule) or host == rule or host.endswith("." + rule)
+
+
+def _unicode_form(host: str) -> str:
+	"""``host`` with its ``xn--`` labels decoded, for rules kept in unicode form."""
+	try:
+		return host.encode("ascii").decode("idna")
+	except UnicodeError:
+		return host
 
 
 def input_schema(row, action: str):

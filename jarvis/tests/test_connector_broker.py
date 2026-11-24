@@ -218,6 +218,12 @@ class TestEgressAddressHook(unittest.TestCase):
 	def test_ip_deny_rule_blocks_address(self):
 		self.assertFalse(self._allowed("!0x22.1.2.3"))
 
+	def test_glob_ip_deny_rules_block_address(self):
+		self.assertFalse(self._allowed("!34.1.2.*", "34.1.2.5"))
+		self.assertTrue(self._allowed("!34.1.2.*", "34.1.3.5"))
+		self.assertFalse(self._allowed("!2606:4700:4700::*", "2606:4700:4700::1111"))
+		self.assertTrue(self._allowed("!2606:4700:4700::*", "2606:4700:4701::1"))
+
 	def test_hostname_rules_and_empty_policy_allow_address(self):
 		self.assertTrue(self._allowed("!evil.com\napi.github.com"))
 		self.assertTrue(self._allowed(None))
