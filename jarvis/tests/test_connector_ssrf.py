@@ -110,6 +110,20 @@ class TestValidateUrl(unittest.TestCase):
 		self.assertEqual(cm.exception.kind, ssrf.ERR_EGRESS_DENIED)
 		self.assertFalse(called["resolved"], "egress deny should short-circuit before DNS")
 
+	def test_oversized_host_refused_fast_with_and_without_rules(self):
+		from jarvis.connectors import policy
+
+		url = "https://" + "\u00fc" * 16384 + ".example/mcp"
+		hooks = (None, lambda host: policy.egress_match(host, "!evil.com"))
+		for hook in hooks:
+			started = time.monotonic()
+			with mock.patch.object(ssrf.socket, "getaddrinfo") as resolve:
+				with self.assertRaises(ssrf.SsrfError) as cm:
+					ssrf._validate_url(url, hook)
+			self.assertEqual(cm.exception.kind, ssrf.ERR_INVALID_URL)
+			self.assertFalse(resolve.called)
+			self.assertLess(time.monotonic() - started, 0.5)
+
 	def test_egress_address_hook_denies_resolved_ip(self):
 		# A name whose DNS record points at a denied IP is refused after resolution.
 		hook = lambda host: True  # noqa: E731

@@ -52,6 +52,9 @@ import urllib3
 # --------------------------------------------------------------------------- #
 _ALLOWED_SCHEMES = ("http", "https")
 
+# DNS name limit; a longer host is refused before any normalisation or lookup.
+MAX_HOST_LENGTH = 253
+
 # Only same-body re-POST redirects are followed; 301/302/303 change method
 # semantics and are refused on a JSON-RPC POST (see the module docstring).
 _REPOST_REDIRECT_STATUSES = (307, 308)
@@ -193,6 +196,10 @@ def _validate_url(
 		raise SsrfError("URL must not contain embedded credentials.", kind=ERR_INVALID_URL)
 	if not parsed.hostname:
 		raise SsrfError("URL has no host.", kind=ERR_INVALID_URL)
+	if len(parsed.hostname) > MAX_HOST_LENGTH:
+		# Before the egress hook and DNS: the idna codec is quadratic on a long
+		# non-ASCII label, so an oversized host from a hostile server is a CPU sink.
+		raise SsrfError("URL host is too long.", kind=ERR_INVALID_URL)
 	if egress_allowed is not None and not egress_allowed(parsed.hostname):
 		raise SsrfError(
 			f"Egress to host {parsed.hostname} is not permitted by policy.",
