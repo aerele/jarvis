@@ -369,11 +369,16 @@ class TestRejectsWhatFrappeWouldCorrupt(_Defaults, FrappeTestCase):
 
 		from jarvis.tools._field_values import _decimal_separator
 
+		# Write the default outside the guard: frappe.db.set_default runs every doc-event hook,
+		# and Frappe's own deprecations (e.g. frappe.cache() since 2026-11-20) must not fail
+		# a test about the read.
+		self.set_default("number_format", "#.###,##")
 		with warnings.catch_warnings():
 			warnings.simplefilter("error")
-			self.set_default("number_format", "#.###,##")
 			self.assertEqual(_decimal_separator(), ",")
-			self.set_default("number_format", "#,###.##")
+		self.set_default("number_format", "#,###.##")
+		with warnings.catch_warnings():
+			warnings.simplefilter("error")
 			self.assertEqual(_decimal_separator(), ".")
 
 	def test_the_check_leaves_no_message_behind(self):
