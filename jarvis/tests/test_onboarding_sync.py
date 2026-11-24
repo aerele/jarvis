@@ -51,6 +51,8 @@ _SNAPSHOTTED_FIELDS = (
 	"latest_jarvis_version",
 	"release_notice_message",
 	"connector_key_overrides",
+	"connector_catalogue_disabled",
+	"connector_catalogue_coming_soon",
 )
 
 
@@ -154,6 +156,31 @@ class TestSyncConnection(FrappeTestCase):
 			),
 			{"Sentry": True},
 		)
+
+	def test_sync_mirrors_the_connector_coming_soon_list(self):
+		"""The operator's "Coming soon" list rides the same pull; a payload without the
+		states marker keeps what is held."""
+		_set_token("tok")
+		base = {"agent_url": "ws://localhost:19000", "agent_token": "k", "tenant_status": "running"}
+		payload = {
+			**base,
+			"connector_catalogue_supported": True,
+			"connector_catalogue_disabled": ["Linear"],
+			"connector_catalogue_states_supported": True,
+			"connector_catalogue_coming_soon": ["Linear"],
+		}
+
+		def stored():
+			return frappe.parse_json(
+				frappe.db.get_single_value("Jarvis Settings", "connector_catalogue_coming_soon", cache=False)
+			)
+
+		with patch("jarvis.onboarding.admin_client.get_connection", return_value=payload):
+			onboarding.sync_connection()
+		self.assertEqual(stored(), ["Linear"])
+		with patch("jarvis.onboarding.admin_client.get_connection", return_value=base):
+			onboarding.sync_connection()
+		self.assertEqual(stored(), ["Linear"])
 
 	def test_sync_clears_release_notice(self):
 		"""A payload without a notice clears a previously-mirrored one - the
