@@ -841,7 +841,7 @@ def add_connector(
 	doc.insert()
 	if engine_oauth:
 		_setup_mcp_oauth_client(doc)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return _connector_summary(doc)
 
 
@@ -956,7 +956,7 @@ def _discard_connector(doc) -> None:
 	never leaves a half-created, unusable row behind. Only ever called from the
 	CREATE path (:func:`add_connector`), never from a self-heal on an existing row."""
 	frappe.delete_doc(CONNECTOR, doc.name, ignore_permissions=True, force=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist discard before raise
 
 
 def _ensure_mcp_oauth_client(doc) -> None:
@@ -1144,7 +1144,7 @@ def test_connector(name: str) -> dict:
 	result = broker.test_connector(doc)
 	envelope, wrote = persist_probe_result(doc, result, now_datetime(), can_write=can_write)
 	if wrote:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return envelope
 
 
@@ -1209,7 +1209,7 @@ def set_allowed_actions(name: str, actions: str | list) -> dict:
 		)
 
 	_replace_allowed_actions(doc.name, merged)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {
 		"ok": True,
 		"actions": [
@@ -1305,7 +1305,7 @@ def update_connector(
 			doc.set("allowed_actions", [])
 
 	doc.save()
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return _connector_summary(doc)
 
 
@@ -1322,7 +1322,7 @@ def delete_connector(name: str) -> dict:
 	if not frappe.db.exists(CONNECTOR, name):
 		frappe.throw(_("Connector not found."), frappe.DoesNotExistError)
 	frappe.delete_doc(CONNECTOR, name)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True}
 
 
@@ -1449,7 +1449,7 @@ def disconnect_oauth(name: str) -> dict:
 		frappe.throw(_("Not permitted."), frappe.PermissionError)
 
 	if doc.get("mcp_oauth_client") and mcp_oauth_store.delete_token(doc.name, frappe.session.user):
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return {"ok": True}
 
 
@@ -1600,7 +1600,7 @@ def set_oauth_client_credentials(name: str, client_id: str, client_secret: str =
 	if client_secret:
 		client.client_secret = client_secret
 	client.save(ignore_permissions=True)
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 	return _connector_summary(doc)
 
 
@@ -1737,7 +1737,7 @@ def _exchange_and_store(record: dict, code: str) -> None:
 		egress_allowed=broker._egress_allowed,
 	)
 	mcp_oauth_store.save_token(connector, record["user"], token_set, resource, record.get("scope") or "")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- GET request writes
 
 
 #: Generic, protocol-free copy for the failure pages that name no provider reason
