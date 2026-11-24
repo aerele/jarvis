@@ -1,8 +1,7 @@
 // Real executable test for the client-side near-silence gate (voiceSilenceGate.js) and for the
 // recorder→composer wiring that carries it. Plain node built-ins (node:test + node:assert), like
 // voiceDictationStore.test.js / voiceSendGlue.test.js. Run directly
-// (`node --test voiceSilenceGate.test.js`) or via the python suite
-// (jarvis/tests/test_voice_silence_gate_client.py subprocess-runs it every CI run).
+// (`node --test voiceSilenceGate.test.js`) or via `npm run test:node`.
 //
 // What is being defended: audio-capable language models can hallucinate a confident phrase onto
 // silent audio, and a phrase blocklist could hide genuine speech. A take nobody spoke into must

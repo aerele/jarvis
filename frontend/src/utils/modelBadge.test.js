@@ -1,8 +1,7 @@
 // Real executable tests for the per-reply model-attribution rule (jarvis#560),
 // plus source assertions fencing the ONE surface that renders it. Plain node
 // built-ins (node:test + node:assert), like eventFence.test.js. Run directly
-// (`node --test modelBadge.test.js`) or via the python suite
-// (jarvis/tests/test_model_badge_client.py subprocess-runs it every CI run).
+// (`node --test modelBadge.test.js`) or via `npm run test:node`.
 //
 // What is being defended: the server can stamp the model that actually answered
 // on every assistant row and the feature still fails if the transcript never
