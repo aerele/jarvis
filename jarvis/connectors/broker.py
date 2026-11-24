@@ -149,9 +149,9 @@ def _egress_allowed(host: str) -> bool:
 	anyway - denying egress is the safe outcome, not a regression.
 
 	POLICY GRAMMAR (``Jarvis Settings.connector_egress_rules``, one rule per line;
-	blank lines and ``#`` comments ignored). A rule is a host glob (``fnmatch``);
-	a bare domain also matches its subdomains. Hosts and rules are normalised first
-	(trailing dot, IP spelling, IDNA; see ``policy.normalise_host``). A line
+	blank lines and ``#`` comments ignored). A rule is a name (also matching its
+	subdomains), an ASCII glob, an IP or a CIDR range; hosts and rules share one
+	normal form (the full grammar is in ``jarvis.connectors.egress``). A line
 	beginning with ``!`` is a DENY rule, otherwise it is an ALLOW rule:
 
 	  * any DENY rule matching the host        -> deny
