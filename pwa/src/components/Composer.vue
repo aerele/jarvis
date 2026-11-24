@@ -21,6 +21,8 @@ const props = defineProps({
 	// Something besides text/files makes the message sendable: a skill picked in the
 	// "+" menu (ChatView folds its "/skill_name" token into the message).
 	extraSendable: { type: Boolean, default: false },
+	// The paperclip; the chat turns it off, its "+" menu has "Add files or photos".
+	showAttach: { type: Boolean, default: true },
 });
 const emit = defineEmits([
 	"update:modelValue",
@@ -162,6 +164,7 @@ defineExpose({ reset, focusEnd });
 			     composer's own file picker so its "Add files or photos" opens it. -->
 			<slot name="leading" :pick-files="() => fileEl.click()" />
 			<button
+				v-if="props.showAttach"
 				class="jv-icon-btn"
 				aria-label="Attach a file"
 				:disabled="props.sending || props.disabled"

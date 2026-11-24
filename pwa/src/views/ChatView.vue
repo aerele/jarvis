@@ -2525,6 +2525,7 @@ onUnmounted(() => {
 			chosenSuggestion ? 'Send the chosen follow-up, or untick it to type' : undefined
 		"
 		:extra-sendable="!!armedSkill"
+		:show-attach="false"
 		:auto-mode="!!conversation?.auto_mode"
 		@send="send"
 		@stop="stop"
@@ -2539,8 +2540,9 @@ onUnmounted(() => {
 				:skills="plusSkills"
 				:selected-skill="armedSkill"
 				:connectors="plusConnectors"
-				:connector-key="connectorFocus?.key || ''"
+				:focus="connectorFocus"
 				:wiki-available="!!settings?.wiki_enabled"
+				:wiki-empty="settings?.wiki_state === 'empty'"
 				:wiki-on="groundWiki"
 				:show-pill="false"
 				@open="onPlusMenuOpen"
