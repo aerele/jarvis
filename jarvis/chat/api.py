@@ -3490,8 +3490,7 @@ def get_chat_ui_settings() -> dict:
 		# See _catalog_models_for_pool.
 		"catalog_models": _catalog_models_for_pool(settings, routable_only=True),
 		# Effort levels, minus the empty "auto" entry the UI renders separately.
-		# Empty when no route this tenant has can think: the clients then hide the
-		# effort control (see turn_handler.offered_thinking_levels).
+		# Always all three: every model and route takes an effort level.
 		"thinking_levels": offered_thinking_levels(settings),
 		# Site timezone: server datetimes are naive strings in THIS zone; the
 		# SPA feeds it to frappe-ui's setConfig("systemTimezone") so dayjsLocal
