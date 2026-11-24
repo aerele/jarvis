@@ -222,6 +222,38 @@ class TestEgressMatch(unittest.TestCase):
 				self.assertIsNone(policy.canonical_ip(text))
 
 
+class TestEgressHardening(unittest.TestCase):
+	def test_glob_with_unicode_label_still_denies(self):
+		self.assertFalse(policy.egress_match("abc\u00fccd.com", "!*\u00fc*.com"))
+		self.assertFalse(policy.egress_match("\u00fcber.com", "!*\u00fc*.com"))
+		self.assertFalse(policy.egress_match("\u00fcber.com", "![\u00fcu]ber.com"))
+		self.assertFalse(policy.egress_match("xn--ber-goa.com", "![\u00fcu]ber.com"))
+		self.assertTrue(policy.egress_match("uber.org", "![\u00fc]ber.com"))
+		self.assertTrue(policy.egress_match("plain.com", "!*\u00fc*.com"))
+
+	def test_glob_with_unicode_label_in_allow_rule(self):
+		self.assertTrue(policy.egress_match("\u00fcber.com", "*\u00fc*.com"))
+		self.assertFalse(policy.egress_match("plain.com", "*\u00fc*.com"))
+
+	def test_whole_label_wildcard_with_unicode_domain_still_works(self):
+		self.assertFalse(policy.egress_match("sub.b\u00fccher.example", "!*.b\u00fccher.example"))
+		self.assertFalse(policy.egress_match("sub.xn--bcher-kva.example", "!*.b\u00fccher.example"))
+		self.assertTrue(policy.egress_match("sub.other.example", "!*.b\u00fccher.example"))
+
+	def test_oversized_host_is_refused(self):
+		self.assertIsNone(policy.normalise_host("\u00fc" * 4096))
+		self.assertFalse(policy.egress_match("\u00fc" * 4096, "!other.com"))
+
+	def test_huge_numeric_parts_never_raise(self):
+		rule = "!" + "9" * 5000 + ".1.2.3"
+		self.assertTrue(policy.egress_match("good.example.com", rule))
+		self.assertTrue(policy.egress_address_match("34.1.2.3", rule))
+		self.assertIsNone(policy.canonical_ip("9" * 5000))
+		self.assertIsNone(policy.canonical_ip("0x" + "f" * 5000))
+		self.assertIsNone(policy.canonical_ip("0" + "7" * 5000))
+		self.assertFalse(policy.egress_match("9" * 5000 + ".example", "!other.com"))
+
+
 class TestInetAtonParity(unittest.TestCase):
 	"""The loose-IPv4 parser must agree with the C resolver on every clean form."""
 
@@ -262,6 +294,13 @@ class TestEgressAddressMatch(unittest.TestCase):
 		self.assertFalse(policy.egress_address_match("34.1.2.3", "!34.1.2.3"))
 		self.assertFalse(policy.egress_address_match("::ffff:34.1.2.3", "!0x22.1.2.3"))
 		self.assertTrue(policy.egress_address_match("34.1.2.4", "!34.1.2.3"))
+
+	def test_glob_ip_deny_rules_block_resolved_address(self):
+		self.assertFalse(policy.egress_address_match("34.1.2.5", "!34.1.2.*"))
+		self.assertFalse(policy.egress_address_match("::ffff:34.1.2.5", "!34.1.2.*"))
+		self.assertTrue(policy.egress_address_match("34.1.3.5", "!34.1.2.*"))
+		self.assertFalse(policy.egress_address_match("2606:4700:4700::1111", "!2606:4700:4700::*"))
+		self.assertTrue(policy.egress_address_match("2606:4700:4701::1111", "!2606:4700:4700::*"))
 
 	def test_hostname_and_allow_rules_do_not_apply_to_addresses(self):
 		self.assertTrue(policy.egress_address_match("34.1.2.3", "!evil.com\napi.github.com"))
