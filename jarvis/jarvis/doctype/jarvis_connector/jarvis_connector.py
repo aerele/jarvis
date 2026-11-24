@@ -33,7 +33,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from jarvis.permissions import has_jarvis_admin_access
+from jarvis.permissions import NotRenamable, has_jarvis_admin_access
 
 MAX_KEY = 64
 MAX_LABEL = 140
@@ -43,7 +43,7 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 _ALLOWED_URL_SCHEMES = ("http", "https")
 
 
-class JarvisConnector(Document):
+class JarvisConnector(NotRenamable, Document):
 	def validate(self) -> None:
 		self._normalize_key()
 		self._normalize_label()
