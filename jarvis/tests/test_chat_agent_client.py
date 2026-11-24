@@ -276,7 +276,7 @@ class TestCreateSession(FrappeTestCase):
 		self.assertEqual(key, "session-abc")
 
 	def test_uses_the_session_create_budget_not_the_connect_one(self):
-		# openclaw 2026.10.x took 18 s for a cold sessions.create after a restart (1 CPU tenant);
+		# The 2026.10.x agent runtime took 18 s for a cold sessions.create after a restart (1 CPU tenant);
 		# the shared 10 s connect budget failed the first new conversation. Both attempts (the
 		# plain one and the no-explicit-owner retry) must use the longer budget.
 		from jarvis.chat import agent_client
@@ -1775,7 +1775,7 @@ def _prepare_deadline():
 
 
 class TestSessionRpcsWaitOutGatewayStartup(FrappeTestCase):
-	"""sessions.create / sessions.patch retry while openclaw answers UNAVAILABLE (2026.10.x, ~40 s after a
+	"""sessions.create / sessions.patch retry while the agent runtime answers UNAVAILABLE (2026.10.x, ~40 s after a
 	restart); every other error is raised at once."""
 
 	def _unavailable(self):

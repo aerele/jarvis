@@ -137,7 +137,7 @@ def persist_rich_outputs(
 	media_urls landed on the terminal itself, poll the transcript for the
 	image that arrives moments later (see ``_harvest_post_yield_media``).
 	``harvest_history`` (from both transports) marks a final that arrived before the run's
-	lifecycle ``end`` frame, the only frame still carrying a ``MEDIA:`` line openclaw stripped from
+	lifecycle ``end`` frame, the only frame still carrying a ``MEDIA:`` line the agent runtime stripped from
 	the final: read the transcript ONCE (no polling) for that image.
 	Never raises."""
 	# All four blocks below persist private Files/canvas metadata.  Do one server

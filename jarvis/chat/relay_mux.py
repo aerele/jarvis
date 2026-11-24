@@ -1096,7 +1096,7 @@ class RelayMux:
 		rels = detect_media_paths(raw["text"])
 		marked = has_media_marker(raw["text"]) or has_embedded_media_path(raw["text"])
 		if not rels and raw.get("terminal_reply_raw"):
-			# openclaw strips a MEDIA: line from the final text itself, so the paths only survive on
+			# The agent runtime strips a MEDIA: line from the final text itself, so the paths only survive on
 			# the lifecycle end frame. Seed from there; ``marked`` stays off (the final text has no
 			# marker left to strip, so no content overwrite is needed).
 			rels = detect_media_paths(raw["terminal_reply_raw"])

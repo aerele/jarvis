@@ -105,15 +105,15 @@ from jarvis.exceptions import AgentUnreachableError
 
 CONNECT_TIMEOUT_SECONDS = 10
 
-# sessions.create gets its own, longer budget. openclaw 2026.10.x does real work in it (preflight,
+# sessions.create gets its own, longer budget. The 2026.10.x agent runtime does real work in it (preflight,
 # state snapshot, writer admission): measured 150-230 ms warm, but 18 s on a 1 CPU tenant in the
 # minutes after a restart or image roll, so the shared 10 s budget failed a customer's first new
-# conversation with "sessions.create timed out" (2026-10-22, openclaw compat run). 45 s covers that
+# conversation with "sessions.create timed out" (2026-10-22, runtime compat run). 45 s covers that
 # with headroom and sits well inside the turn's prepare deadline (turn_state.PREPARE_DEADLINE_S = 300;
 # the session is created after the prepare claim). Every other request keeps CONNECT_TIMEOUT_SECONDS.
 SESSION_CREATE_TIMEOUT_SECONDS = 45
 
-# openclaw 2026.10.x answers ``UNAVAILABLE`` ("Agent main has not completed startup inspection and
+# The 2026.10.x agent runtime answers ``UNAVAILABLE`` ("Agent main has not completed startup inspection and
 # preparation", "The model catalog is still loading") for ~40 s after a restart, even after
 # /healthz is 200 (the fleet agent now also waits on /startupz; this is the bench-side safety net).
 # Session setup RPCs that hit it wait and retry for up to this long instead of failing the turn.

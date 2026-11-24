@@ -432,8 +432,10 @@ if __name__ == "__main__":
 
 
 class TestLLMTaskWaitsOutGatewayStartup(unittest.TestCase):
-	"""openclaw 2026.10.x refuses work for ~40 s after a restart (agent startup inspection); a trigger
+	"""The agent runtime refuses work for ~40 s after a restart (agent startup inspection); a trigger
 	waits it out instead of failing."""
+
+	setUp = TestLLMTaskComplete.setUp
 
 	_OK = json.dumps({"ok": True, "result": {"details": {"json": "done"}}}).encode()
 	_UNAVAILABLE = json.dumps(
@@ -446,7 +448,7 @@ class TestLLMTaskWaitsOutGatewayStartup(unittest.TestCase):
 	def _run(self, responses):
 		with (
 			patch("frappe.get_cached_doc", return_value=_settings()),
-			patch("requests.post", side_effect=responses) as post,
+			patch("requests.request", side_effect=responses) as post,
 			patch("jarvis.triggers.llm_task_client.time.sleep") as sleep,
 		):
 			out = lt.llm_task_complete("p", "i")

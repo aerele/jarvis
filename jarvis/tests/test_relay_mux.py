@@ -2256,7 +2256,7 @@ class TestReaderThreadIsFrappeFree(FrappeTestCase):
 
 
 class TestRelayMuxStrippedMediaMarker(FrappeTestCase):
-	"""openclaw strips a ``MEDIA:`` line from the streamed text AND from the chat final (2026.9.3 and
+	"""The agent runtime strips a ``MEDIA:`` line from the streamed text AND from the chat final (2026.9.3 and
 	2026.10.6). The raw reply survives only on the lifecycle ``end`` frame (``terminalReply.text``),
 	which arrived before the final in 20/20 measured runs; when it does not, the final asks for one
 	transcript read instead."""

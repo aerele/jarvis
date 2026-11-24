@@ -731,7 +731,8 @@ class TestSeedBlockWiring(unittest.TestCase):
 		with patch.object(turn_handler, "_harvest_post_yield_media", return_value=([], [])) as harvest:
 			with (
 				patch("frappe.get_single", return_value=Mock(agent_url="ws://h:1")),
-				patch("frappe.db.get_value", return_value=""),
+				patch("frappe.db.get_value", side_effect=self._ordinary_message_value()),
+				patch("frappe.get_all", return_value=[]),
 				patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
 				patch("jarvis.chat.turn_handler._publish_to_user"),
 			):

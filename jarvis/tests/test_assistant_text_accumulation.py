@@ -1,5 +1,5 @@
 """One-shot readers (auto-title, suggestions, learning polish) fold assistant frames with
-events.accumulate_assistant_text. openclaw 2026.10.x sends ``text`` only on the first frame and the
+events.accumulate_assistant_text. The 2026.10.x agent runtime sends ``text`` only on the first frame and the
 rest as ``delta`` with ``text=""``; 2026.9.x sends a cumulative ``text`` on every frame."""
 
 import unittest
@@ -48,7 +48,7 @@ class TestLifecycleEndCarriesTheRawReply(unittest.TestCase):
 	def test_end_frame_keeps_terminal_reply_raw(self):
 		from jarvis.chat.events import parse_event
 
-		raw = "Here.\nMEDIA:/home/node/.openclaw/media/x.png"
+		raw = "Here.\nMEDIA:/srv/test-gateway/media/x.png"
 		ev = parse_event(
 			{"stream": "lifecycle", "data": {"phase": "end", "terminalReply": {"text": raw}}}, redact=False
 		)

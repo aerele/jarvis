@@ -743,7 +743,7 @@ class TestSetSessionModel(FrappeTestCase):
 
 
 class TestRelayStrippedMediaMarker(FrappeTestCase):
-	"""Direct relay path: a MEDIA: line openclaw stripped from the final is taken from the lifecycle end
+	"""Direct relay path: a MEDIA: line the agent runtime stripped from the final is taken from the lifecycle end
 	frame's terminalReply; a final that beats the end frame asks for one transcript read."""
 
 	_PATH = "/srv/test-gateway/media/probe/red.png"  # under the synthetic profile's media_root
