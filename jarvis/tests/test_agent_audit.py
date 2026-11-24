@@ -164,10 +164,18 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 		self.assertEqual(new[0]["ref_doctype"], "ToDo")
 
 	# NOTE (version-16-hotfix backport): the develop test
-	# test_connector_inner_failure_is_filed_as_failed is intentionally omitted here.
-	# It asserts envelope_ok files a dispatched-but-{ok:false} call_connector as
-	# "failed"; envelope_ok / _ENVELOPE_TOOLS are part of the connector-envelope
-	# feature that is not on this branch, so a dispatched write records "applied".
+	def test_connector_inner_failure_is_filed_as_failed(self):
+		# call_connector is a write that dispatches but returns its OWN {ok:false}
+		# envelope. envelope_ok must file it as failed, not a false ERP-write success.
+		before = _all_names()
+		inner_fail = {"ok": False, "error": {"code": "transport_error", "message": "x"}}
+		with m.patch("jarvis.api.dispatch", return_value=inner_fail):
+			api._dispatch_and_wrap(
+				"call_connector", {"connector": "c", "action": "a"}, is_write=True, provenance="chat"
+			)
+		new = _new_rows(before, tool="call_connector")
+		self.assertEqual(len(new), 1)
+		self.assertEqual(new[0]["outcome"], "failed")
 
 	def test_unknown_outcome_coerced_to_applied(self):
 		name = agent_audit.record_write(

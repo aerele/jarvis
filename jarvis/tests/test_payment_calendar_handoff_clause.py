@@ -17,7 +17,7 @@ from frappe.tests.utils import FrappeTestCase
 
 from jarvis import telemetry
 from jarvis._session import impersonate
-from jarvis.chat import admission, turn_handler, wiki
+from jarvis.chat import admission, connector_focus, turn_handler, wiki
 from jarvis.chat import api as chat_api
 from jarvis.payment_calendar import visibility
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
@@ -687,10 +687,13 @@ class TestSendPath(_AdmissionTestCase):
 		plain = {}
 		for fn in (
 			lambda ctx: turn_handler._prepend_doc_context("hi", ctx, "conv"),
+			lambda ctx: turn_handler._prepend_connector_focus("hi", ctx),
 			lambda ctx: wiki.wiki_clause("conv", ctx),
+			lambda ctx: connector_focus.focus_of(ctx),
 		):
 			self.assertEqual(fn(CAP_ONLY_CONTEXT), fn(plain))
 		self.assertEqual(turn_handler._prepend_doc_context("hi", CAP_ONLY_CONTEXT, "conv"), "hi")
+		self.assertIsNone(connector_focus.focus_of(CAP_ONLY_CONTEXT))
 
 	def test_a_retry_keeps_the_capability(self):
 		conv = self._mk_conv()

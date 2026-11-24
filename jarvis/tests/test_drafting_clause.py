@@ -14,13 +14,21 @@ from jarvis.chat.turn_handler import DRAFTING_CLAUSE, _drafting_clause
 
 ENABLED = "jarvis.chat.draft_card.enabled"
 OFFER = "jarvis.api._resolve_approve_run_offer"
+FOCUS = {"focus_connector": {"key": "gmail", "label": "Gmail"}}
 
 
 class TestDraftingClauseRule(unittest.TestCase):
-	def clause(self, conv=None, binding=None, origin="human", live="", flag=True, armed=None):
+	def clause(self, conv=None, binding=None, origin="human", live="", flag=True, armed=None, context=None):
 		"""``armed`` is the docname the gate's Approve & run offer resolves to (None: no offer)."""
 		with patch(ENABLED, return_value=flag), patch(OFFER, return_value=(armed, None)):
-			return _drafting_clause(conv or {}, binding, origin, live)
+			return _drafting_clause(conv or {}, binding, origin, live, context=context)
+
+	def test_a_connector_focused_turn_gets_nothing(self):
+		"""With a connector focus the prompt says only the connector tools may be called and the
+		gate refuses create_doc / update_doc: the note would tell the agent to do what is refused.
+		A focus the prompt itself ignores (no label) is no focus."""
+		self.assertEqual(self.clause(context=FOCUS), "")
+		self.assertEqual(self.clause(context={"focus_connector": {"key": "gmail"}}), DRAFTING_CLAUSE)
 
 	def test_an_ordinary_turn_gets_the_note_and_the_flag_off_gets_nothing(self):
 		"""The site flag is the only switch for everyone else: if the helper ignored it, every
