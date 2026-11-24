@@ -668,8 +668,50 @@ class TestAcceptsKey(unittest.TestCase):
 
 	GOOGLE = {"Gmail", "Google Calendar", "Google Drive", "Google Sheets", "Google Docs"}
 
-	def test_only_google_refuses_a_key(self):
-		self.assertEqual({p.name for p in catalog.PROVIDERS if not p.accepts_key}, self.GOOGLE)
+	NO_KEY = {
+		"Razorpay",
+		"PayPal",
+		"Cashfree",
+		"ClickUp",
+		"Calendly",
+		"Canva",
+		"Sentry",
+		"Cloudflare",
+		"Netlify",
+		"Webflow",
+		"Wix",
+		"GitLab",
+		"Xero",
+		"HubSpot",
+		"Monday.com",
+		"Slack",
+		"Docusign",
+		"Zoom",
+		"Box",
+	}
+	KEEP_KEY = {
+		"GitHub",
+		"Atlassian",
+		"Linear",
+		"Notion",
+		"Supabase",
+		"Neon",
+		"Airtable",
+		"Stripe",
+		"Mailchimp Transactional",
+		"Intercom",
+		"Zapier",
+		"Zendesk",
+		"Hugging Face",
+	}
+
+	def test_exact_set_of_presets_that_refuse_a_key(self):
+		refused = {p.name for p in catalog.PROVIDERS if not p.accepts_key}
+		self.assertEqual(refused, self.GOOGLE | self.NO_KEY)
+
+	def test_presets_with_a_documented_key_keep_the_option(self):
+		for name in self.KEEP_KEY:
+			self.assertTrue(catalog.accepts_key_of(name), name)
 
 	def test_accepts_key_of(self):
 		self.assertFalse(catalog.accepts_key_of("Google Drive"))

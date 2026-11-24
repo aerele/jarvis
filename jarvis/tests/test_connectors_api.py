@@ -240,16 +240,16 @@ class TestAddConnector(_ConnectorApiTestCase):
 			connectors_api.add_connector(preset="Google Drive", scope="Personal", credential="ya29.x")
 		self.assertEqual(frappe.db.count(CONNECTOR, {"preset": "Google Drive"}), before)
 
-	def _google_key_doc(self):
+	def _key_doc(self, preset="Google Drive", key="google_drive"):
 		return frappe.get_doc(
 			{
 				"doctype": CONNECTOR,
-				"key": "google_drive",
-				"label": "Google Drive",
-				"preset": "Google Drive",
+				"key": key,
+				"label": preset,
+				"preset": preset,
 				"scope": "Personal",
 				"auth_method": "API Key",
-				"base_url": catalog.base_urls()["Google Drive"],
+				"base_url": catalog.base_urls()[preset],
 				"credential": "ya29.x",
 			}
 		)
@@ -257,18 +257,31 @@ class TestAddConnector(_ConnectorApiTestCase):
 	def test_raw_insert_of_a_key_row_for_a_sign_in_only_preset_is_refused(self):
 		frappe.set_user(PLAIN_A)
 		with self.assertRaises(frappe.PermissionError):
-			self._google_key_doc().insert()
+			self._key_doc().insert()
 
 	def test_an_existing_key_row_for_a_sign_in_only_preset_still_saves(self):
 		# A row saved before accepts_key existed must still relabel or disable.
 		frappe.set_user(PLAIN_A)
-		doc = self._google_key_doc()
+		doc = self._key_doc()
 		doc.insert(ignore_permissions=True)
 		self._connectors.append(doc.name)
 		doc.reload()
 		doc.label = "Drive (old key)"
 		doc.save()
 		self.assertEqual(frappe.db.get_value(CONNECTOR, doc.name, "label"), "Drive (old key)")
+
+	def test_an_existing_sentry_key_row_still_saves(self):
+		# Sentry lost the key option in 2026-11; a row saved earlier must keep working.
+		frappe.set_user(PLAIN_A)
+		doc = self._key_doc("Sentry", "sentry")
+		doc.insert(ignore_permissions=True)
+		self._connectors.append(doc.name)
+		doc.reload()
+		doc.label = "Sentry (old key)"
+		doc.save()
+		self.assertEqual(frappe.db.get_value(CONNECTOR, doc.name, "label"), "Sentry (old key)")
+		with self.assertRaises(frappe.ValidationError):
+			connectors_api.add_connector(preset="Sentry", scope="Personal", credential="tok")
 
 
 class TestDisabledCatalogPreset(_ConnectorApiTestCase):
@@ -318,7 +331,7 @@ class TestOperatorDisabledPreset(_ConnectorApiTestCase):
 	It leaves the picker and refuses new rows on every path; a row saved before
 	the switch keeps resolving, saving and testing, as catalog.by_name promises."""
 
-	PRESET = "PayPal"
+	PRESET = "Linear"
 
 	def _disable(self, *names: str) -> None:
 		self._set_single("connector_catalogue_disabled", json.dumps(list(names)))
@@ -397,8 +410,8 @@ class TestOperatorDisabledPreset(_ConnectorApiTestCase):
 		self.assertIsNotNone(catalog.by_name(self.PRESET))
 		frappe.set_user(PLAIN_A)
 
-		renamed = connectors_api.update_connector(name, label="PayPal (old)")
-		self.assertEqual(renamed["label"], "PayPal (old)")
+		renamed = connectors_api.update_connector(name, label="Linear (old)")
+		self.assertEqual(renamed["label"], "Linear (old)")
 
 		with patch.object(broker, "test_connector", return_value={"ok": True, "tools": _TOOLS}) as probe:
 			out = connectors_api.test_connector(name)
@@ -482,14 +495,14 @@ class TestListConnectorsCatalog(_ConnectorApiTestCase):
 	def test_rows_carry_the_flow_the_spa_should_render(self):
 		github = self._mk("Personal", "gh-class", owner=PLAIN_A, preset="GitHub")
 		custom = self._mk("Personal", "custom-class", owner=PLAIN_A, preset="Custom URL")
-		razorpay = self._mk("Personal", "rzp-class", owner=PLAIN_A, preset="Razorpay")
+		linear = self._mk("Personal", "rzp-class", owner=PLAIN_A, preset="Linear")
 		open_row = self._mk("Personal", "ms-class", owner=PLAIN_A, preset="Microsoft Learn")
 
 		frappe.set_user(PLAIN_A)
 		rows = {r["name"]: r for r in connectors_api.list_connectors()["mine"]}
 		self.assertEqual(rows[github]["auth_class"], "static")
 		self.assertEqual(rows[custom]["auth_class"], "custom")
-		self.assertEqual(rows[razorpay]["auth_class"], "dcr")
+		self.assertEqual(rows[linear]["auth_class"], "dcr")
 		self.assertEqual(rows[open_row]["auth_class"], "open")
 
 
@@ -764,13 +777,13 @@ class TestConnectorOauthFieldGuard(_ConnectorApiTestCase):
 		doc = self._insert_as(
 			PLAIN_A,
 			key="rzp-evil",
-			preset="Razorpay",
+			preset="Linear",
 			auth_method="API Key",
 			credential="tok",
 			base_url="https://attacker.invalid/steal",
 		)
-		self.assertEqual(doc.base_url, catalog.base_urls()["Razorpay"])
-		self.assertEqual(frappe.get_doc(CONNECTOR, doc.name).base_url, catalog.base_urls()["Razorpay"])
+		self.assertEqual(doc.base_url, catalog.base_urls()["Linear"])
+		self.assertEqual(frappe.get_doc(CONNECTOR, doc.name).base_url, catalog.base_urls()["Linear"])
 
 
 class TestListConnectorsOauth(_ConnectorApiTestCase):
