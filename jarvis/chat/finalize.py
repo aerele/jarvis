@@ -423,6 +423,18 @@ def _effect_wiki_nudge(ctx: _Ctx) -> None:
 	)
 
 
+def _effect_suggest_replies(ctx: _Ctx) -> None:
+	# The user's likely next messages under the reply (jarvis.chat.suggest_replies): this
+	# only enqueues the short-queue job; it re-checks every gate itself. An errored /
+	# cancelled turn owes no such effect (settlement's TERMINAL_EFFECTS), nor does a shared
+	# chat (SHARED_FINAL_EFFECTS); the errored check is a belt for a replayed ledger.
+	if ctx.errored:
+		return
+	from jarvis.chat import suggest_replies
+
+	suggest_replies.enqueue(ctx.conversation, ctx.turn.get("assistant_message"), ctx.owner)
+
+
 def _effect_usage(ctx: _Ctx) -> None:
 	# R-4 / §10.7: the ≤4.5s gateway poll runs HERE (off the critical path), and the
 	# accrual is (turn_id)-idempotent. The guard CAS lives in THIS uncommitted txn:
@@ -774,6 +786,7 @@ _RUNNERS = {
 	"macro_advance": _effect_macro_advance,
 	"auto_title": _effect_auto_title,
 	"wiki_nudge": _effect_wiki_nudge,
+	"suggest_replies": _effect_suggest_replies,
 	"usage": _effect_usage,
 	"telemetry_flush": _effect_telemetry,
 }

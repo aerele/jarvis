@@ -9,6 +9,7 @@ import { applyTheme, theme } from "../lib/theme";
 import { agentName } from "@/branding";
 import { holidayTouch } from "../holidayTouch";
 import { createHolidaySwitch } from "../lib/holidaySwitch";
+import { suggestRepliesOn } from "@shared/lib/suggestRepliesPref";
 import { PRIVACY_NOTICE } from "@shared/lib/privacyNotice.js";
 
 // Settings, as the native app has them: Chat (default model + effort),
@@ -88,6 +89,42 @@ function toggleHoliday() {
 	holidayError.value = "";
 	holidaySwitch.toggle(!holiday.value);
 }
+// Personal "Suggest follow-up replies" switch (Jarvis User Settings.suggest_replies,
+// default on). Same rules as the holiday one: disabled until the server answered, the
+// chat follows only after a successful save, a failed save puts it back.
+const suggest = reactive({ value: true, loaded: false, saving: false });
+const suggestError = ref("");
+async function loadSuggest() {
+	try {
+		const res = await api.getMySettings();
+		if (res && res.ok !== false && res.data && res.data.suggest_replies !== undefined) {
+			suggest.value = !!res.data.suggest_replies;
+			suggestRepliesOn.value = suggest.value;
+		}
+	} catch {
+		/* stays on its default; the switch still works */
+	} finally {
+		suggest.loaded = true;
+	}
+}
+async function toggleSuggest() {
+	if (suggest.saving || !suggest.loaded) return;
+	const previous = suggest.value;
+	suggest.value = !previous;
+	suggest.saving = true;
+	suggestError.value = "";
+	try {
+		const res = await api.updateMySettings({ suggest_replies: suggest.value ? 1 : 0 });
+		if (!res || res.ok === false) throw new Error("save failed");
+		suggestRepliesOn.value = suggest.value;
+	} catch {
+		suggest.value = previous;
+		suggestError.value = "Could not save that. Try again.";
+	} finally {
+		suggest.saving = false;
+	}
+}
+
 // A failed read is retried when the page comes back to the front.
 function retryHoliday() {
 	if (document.visibilityState !== "hidden") holidaySwitch.retry();
@@ -100,6 +137,7 @@ onBeforeUnmount(() => {
 
 onMounted(async () => {
 	holidaySwitch.load();
+	loadSuggest();
 	window.addEventListener("focus", retryHoliday);
 	document.addEventListener("visibilitychange", retryHoliday);
 	try {
@@ -194,6 +232,33 @@ onMounted(async () => {
 			</div>
 		</div>
 		<div v-if="holidayError" class="jv-err" role="alert">{{ holidayError }}</div>
+
+		<div class="jv-label">Chat</div>
+		<div class="jv-card">
+			<div class="jv-row is-last">
+				<span class="jv-row-text">
+					Suggest follow-up replies
+					<small id="suggest-help"
+						>A few likely next messages under the latest reply. Tap one to send
+						it.</small
+					>
+				</span>
+				<button
+					class="jv-toggle"
+					:class="{ 'is-on': suggest.value }"
+					role="switch"
+					aria-label="Suggest follow-up replies"
+					:aria-checked="suggest.value"
+					aria-describedby="suggest-help"
+					:disabled="!suggest.loaded"
+					:aria-disabled="suggest.saving"
+					@click="toggleSuggest"
+				>
+					<span />
+				</button>
+			</div>
+		</div>
+		<div v-if="suggestError" class="jv-err" role="alert">{{ suggestError }}</div>
 
 		<template v-if="notifySupported">
 			<div class="jv-label">Notifications</div>

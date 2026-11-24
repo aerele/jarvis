@@ -91,6 +91,7 @@ vi.mock("@/holidayTouch", () => ({ holidayTouch: { setShown: vi.fn() } }));
 
 import * as api from "@/api";
 import { holidayTouch } from "@/holidayTouch";
+import { suggestRepliesOn } from "@/lib/suggestRepliesPref";
 import { toast } from "frappe-ui";
 import GeneralPane from "./GeneralPane.vue";
 
@@ -508,6 +509,48 @@ describe("GeneralPane, first load (jarvis-admin-v2#641)", () => {
 		await mountAs({ admin: true });
 		expect(api.getLlmConnectionStatus).toHaveBeenCalledTimes(1);
 		expect(api.getMySettings).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("GeneralPane personal suggested-replies switch", () => {
+	const row = (w) =>
+		w
+			.findAllComponents({ name: "ToggleRow" })
+			.find((r) => r.props("title") === "Suggest follow-up replies");
+
+	it("is on by default and follows the server row when it says off", async () => {
+		const w = await mountAs({ admin: false });
+		expect(row(w).props("modelValue")).toBe(true);
+		api.getMySettings.mockImplementation(() =>
+			Promise.resolve({ ok: true, data: { suggest_replies: 0 } })
+		);
+		const off = await mountAs({ admin: false });
+		expect(row(off).props("modelValue")).toBe(false);
+		expect(suggestRepliesOn.value).toBe(false);
+	});
+
+	it("saves suggest_replies, then hides the chips in the open chat", async () => {
+		suggestRepliesOn.value = true;
+		const w = await mountAs({ admin: false });
+		row(w).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(api.updateMySettings).toHaveBeenCalledWith({ suggest_replies: 0 });
+		expect(suggestRepliesOn.value).toBe(false);
+		row(w).vm.$emit("update:modelValue", true);
+		await flushPromises();
+		expect(api.updateMySettings).toHaveBeenLastCalledWith({ suggest_replies: 1 });
+		expect(suggestRepliesOn.value).toBe(true);
+	});
+
+	it("puts the switch back when the save fails", async () => {
+		suggestRepliesOn.value = true;
+		api.updateMySettings.mockImplementationOnce(() => Promise.reject(new Error("nope")));
+		const w = await mountAs({ admin: false });
+		row(w).vm.$emit("update:modelValue", false);
+		await flushPromises();
+		expect(row(w).props("modelValue")).toBe(true);
+		expect(suggestRepliesOn.value).toBe(true);
+		expect(toast.error).toHaveBeenCalled();
 	});
 });
 
