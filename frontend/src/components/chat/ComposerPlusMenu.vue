@@ -70,12 +70,14 @@
 			:aria-label="panelLabel"
 			:style="panelStyle"
 		>
-			<!-- main list -->
-			<template v-if="view === 'main'">
+			<!-- main list: always shown on desktop, where a sub-list opens BESIDE it on hover
+			     (flyMode, like Claude's); on a touch screen a sub-list replaces it -->
+			<template v-if="flyMode || view === 'main'">
 				<button
 					type="button"
 					role="menuitem"
 					class="jv-plus-item"
+					@mouseenter="hoverMain"
 					@click="choose('attach')"
 				>
 					<svg v-bind="iconAttrs" aria-hidden="true">
@@ -85,7 +87,17 @@
 					</svg>
 					<span class="jv-plus-label">Add files or photos</span>
 				</button>
-				<button type="button" role="menuitem" class="jv-plus-item" @click="go('skills')">
+				<button
+					type="button"
+					role="menuitem"
+					class="jv-plus-item"
+					data-sub="skills"
+					aria-haspopup="menu"
+					:aria-expanded="String(view === 'skills')"
+					:class="{ on: flyMode && view === 'skills' }"
+					@mouseenter="hoverSub('skills', $event)"
+					@click="openSub('skills', $event)"
+				>
 					<svg v-bind="iconAttrs" aria-hidden="true">
 						<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8Z" />
 					</svg>
@@ -100,7 +112,12 @@
 					type="button"
 					role="menuitem"
 					class="jv-plus-item"
-					@click="go('connectors')"
+					data-sub="connectors"
+					aria-haspopup="menu"
+					:aria-expanded="String(view === 'connectors')"
+					:class="{ on: flyMode && view === 'connectors' }"
+					@mouseenter="hoverSub('connectors', $event)"
+					@click="openSub('connectors', $event)"
 				>
 					<svg v-bind="iconAttrs" aria-hidden="true">
 						<path
@@ -124,6 +141,7 @@
 						:class="{ 'jv-plus-item--off': !wikiAvailable }"
 						:aria-checked="String(wikiAvailable && wikiOn)"
 						:aria-disabled="String(!wikiAvailable)"
+						@mouseenter="hoverMain"
 						@click="wikiAvailable && choose('wiki')"
 					>
 						<svg v-bind="iconAttrs" aria-hidden="true">
@@ -152,152 +170,175 @@
 				</template>
 			</template>
 
-			<!-- skills -->
-			<template v-else-if="view === 'skills'">
-				<div class="jv-plus-head">
-					<button
-						type="button"
-						class="jv-plus-back"
-						title="Back"
-						aria-label="Back"
-						@click="go('main')"
-					>
-						<svg v-bind="iconAttrs" aria-hidden="true">
-							<path d="m15 18-6-6 6-6" />
-						</svg>
-					</button>
-					<span>Skills</span>
-				</div>
-				<input
-					ref="search"
-					v-model="query"
-					class="jv-plus-search"
-					type="search"
-					placeholder="Search skills"
-					aria-label="Search skills"
-				/>
-				<div class="jv-plus-list">
-					<button
-						v-for="s in shownSkills"
-						:key="s.name || s.skill_name"
-						type="button"
-						role="menuitemradio"
-						class="jv-plus-item jv-plus-item--two"
-						:aria-checked="String(s.skill_name === selectedSkill)"
-						@click="pickSkill(s)"
-					>
-						<span class="jv-plus-two">
-							<span class="jv-plus-label">/{{ s.skill_name }}</span>
-							<span v-if="s.description" class="jv-plus-desc">{{
-								s.description
-							}}</span>
-							<span v-if="s.shared_by" class="jv-plus-desc"
-								>Shared by {{ s.shared_by }}</span
+			<!-- a sub-list: beside the menu on desktop (jv-plus-fly), in its place on touch -->
+			<div
+				v-if="view !== 'main'"
+				ref="sub"
+				class="jv-plus-sub"
+				:class="{ 'jv-plus-fly': flyMode }"
+				:style="flyMode ? flyStyle : null"
+				role="menu"
+				:aria-label="panelLabel"
+			>
+				<!-- skills -->
+				<template v-if="view === 'skills'">
+					<div class="jv-plus-head">
+						<button
+							v-if="!flyMode"
+							type="button"
+							class="jv-plus-back"
+							title="Back"
+							aria-label="Back"
+							@click="go('main')"
+						>
+							<svg v-bind="iconAttrs" aria-hidden="true">
+								<path d="m15 18-6-6 6-6" />
+							</svg>
+						</button>
+						<span>Skills</span>
+					</div>
+					<input
+						ref="search"
+						v-model="query"
+						class="jv-plus-search"
+						type="search"
+						placeholder="Search skills"
+						aria-label="Search skills"
+					/>
+					<div class="jv-plus-list">
+						<button
+							v-for="s in shownSkills"
+							:key="s.name || s.skill_name"
+							type="button"
+							role="menuitemradio"
+							class="jv-plus-item jv-plus-item--two"
+							:aria-checked="String(s.skill_name === selectedSkill)"
+							@click="pickSkill(s)"
+						>
+							<span class="jv-plus-two">
+								<span class="jv-plus-label">/{{ s.skill_name }}</span>
+								<span v-if="s.description" class="jv-plus-desc">{{
+									s.description
+								}}</span>
+								<span v-if="s.shared_by" class="jv-plus-desc"
+									>Shared by {{ s.shared_by }}</span
+								>
+							</span>
+							<svg
+								v-if="s.skill_name === selectedSkill"
+								v-bind="iconAttrs"
+								class="jv-plus-check"
+								aria-hidden="true"
 							>
-						</span>
-						<svg
-							v-if="s.skill_name === selectedSkill"
-							v-bind="iconAttrs"
-							class="jv-plus-check"
-							aria-hidden="true"
-						>
-							<path d="M20 6 9 17l-5-5" />
+								<path d="M20 6 9 17l-5-5" />
+							</svg>
+						</button>
+						<p v-if="!shownSkills.length" class="jv-plus-empty">
+							{{
+								usableSkills.length
+									? "No skill matches that."
+									: "No skills yet. Save a way of working as a skill and pick it here."
+							}}
+						</p>
+					</div>
+					<button
+						v-if="canManageSkills"
+						type="button"
+						class="jv-plus-foot"
+						title="Opens the Skills page"
+						@click="choose('manage-skills')"
+					>
+						<span>Manage skills</span>
+						<svg v-bind="iconAttrs" class="jv-plus-ext" aria-hidden="true">
+							<path d="M7 17 17 7M8 7h9v9" />
 						</svg>
 					</button>
-					<p v-if="!shownSkills.length" class="jv-plus-empty">
-						{{
-							usableSkills.length
-								? "No skill matches that."
-								: "No skills yet. Save a way of working as a skill and pick it here."
-						}}
-					</p>
-				</div>
-				<button
-					v-if="canManageSkills"
-					type="button"
-					class="jv-plus-foot"
-					@click="choose('manage-skills')"
-				>
-					Manage skills
-				</button>
-			</template>
+				</template>
 
-			<!-- connectors -->
-			<template v-else>
-				<div class="jv-plus-head">
-					<button
-						type="button"
-						class="jv-plus-back"
-						title="Back"
-						aria-label="Back"
-						@click="go('main')"
-					>
-						<svg v-bind="iconAttrs" aria-hidden="true">
-							<path d="m15 18-6-6 6-6" />
-						</svg>
-					</button>
-					<span>Focus on one app</span>
-				</div>
-				<div class="jv-plus-list">
-					<button
-						v-if="focus"
-						type="button"
-						role="menuitem"
-						class="jv-plus-item"
-						@click="pickConnector(null)"
-					>
-						<svg v-bind="iconAttrs" aria-hidden="true">
-							<path d="M18 6 6 18M6 6l12 12" />
-						</svg>
-						<span class="jv-plus-label">Clear focus</span>
-					</button>
-					<button
-						v-for="c in connectors"
-						:key="c.key"
-						type="button"
-						role="menuitemradio"
-						class="jv-plus-item"
-						:aria-checked="String(c.key === focus?.key)"
-						@click="pickConnector(c)"
-					>
-						<!-- the app's own mark (connectorLogos.js, as ConnectorLogo draws it), else the plug -->
-						<svg
-							v-if="logoOf(c)"
-							class="jv-plus-logo"
-							:viewBox="logoOf(c).viewBox"
-							width="16"
-							height="16"
-							:fill="logoOf(c).fill || 'currentColor'"
-							aria-hidden="true"
+				<!-- connectors -->
+				<template v-else>
+					<div class="jv-plus-head">
+						<button
+							v-if="!flyMode"
+							type="button"
+							class="jv-plus-back"
+							title="Back"
+							aria-label="Back"
+							@click="go('main')"
 						>
-							<path :d="logoOf(c).path" />
-						</svg>
-						<svg v-else v-bind="iconAttrs" aria-hidden="true">
-							<path
-								d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"
-							/>
-						</svg>
-						<span class="jv-plus-label">{{ c.label }}</span>
-						<svg
-							v-if="c.key === focus?.key"
-							v-bind="iconAttrs"
-							class="jv-plus-check"
-							aria-hidden="true"
+							<svg v-bind="iconAttrs" aria-hidden="true">
+								<path d="m15 18-6-6 6-6" />
+							</svg>
+						</button>
+						<span>Focus on one app</span>
+					</div>
+					<div class="jv-plus-list">
+						<button
+							v-if="focus"
+							type="button"
+							role="menuitem"
+							class="jv-plus-item"
+							@click="pickConnector(null)"
 						>
-							<path d="M20 6 9 17l-5-5" />
+							<svg v-bind="iconAttrs" aria-hidden="true">
+								<path d="M18 6 6 18M6 6l12 12" />
+							</svg>
+							<span class="jv-plus-label">Clear focus</span>
+						</button>
+						<button
+							v-for="c in connectors"
+							:key="c.key"
+							type="button"
+							role="menuitemradio"
+							class="jv-plus-item"
+							:aria-checked="String(c.key === focus?.key)"
+							@click="pickConnector(c)"
+						>
+							<!-- the app's own mark (connectorLogos.js, as ConnectorLogo draws it), else the plug -->
+							<svg
+								v-if="logoOf(c)"
+								class="jv-plus-logo"
+								:viewBox="logoOf(c).viewBox"
+								width="16"
+								height="16"
+								:fill="logoOf(c).fill || 'currentColor'"
+								aria-hidden="true"
+							>
+								<path :d="logoOf(c).path" />
+							</svg>
+							<svg v-else v-bind="iconAttrs" aria-hidden="true">
+								<path
+									d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"
+								/>
+							</svg>
+							<span class="jv-plus-label">{{ c.label }}</span>
+							<svg
+								v-if="c.key === focus?.key"
+								v-bind="iconAttrs"
+								class="jv-plus-check"
+								aria-hidden="true"
+							>
+								<path d="M20 6 9 17l-5-5" />
+							</svg>
+						</button>
+						<p v-if="!connectors.length" class="jv-plus-empty">
+							No connected apps yet.
+						</p>
+					</div>
+					<button
+						v-if="canBrowseConnectors"
+						type="button"
+						class="jv-plus-foot"
+						title="Opens Connectors in Settings"
+						@click="choose('browse-connectors')"
+					>
+						<span>Browse connectors</span>
+						<svg v-bind="iconAttrs" class="jv-plus-ext" aria-hidden="true">
+							<path d="M7 17 17 7M8 7h9v9" />
 						</svg>
 					</button>
-					<p v-if="!connectors.length" class="jv-plus-empty">No connected apps yet.</p>
-				</div>
-				<button
-					v-if="canBrowseConnectors"
-					type="button"
-					class="jv-plus-foot"
-					@click="choose('browse-connectors')"
-				>
-					Browse connectors
-				</button>
-			</template>
+				</template>
+			</div>
 		</div>
 	</div>
 </template>
@@ -355,6 +396,21 @@ const iconAttrs = {
 const root = ref(null);
 const trigger = ref(null);
 const search = ref(null);
+const sub = ref(null);
+// Desktop (a real pointer that hovers, and room to the side): a sub-list opens BESIDE the
+// menu on hover, the menu staying put. Touch: tapping one slides it in, with a Back.
+const flyMode = ref(false);
+const flyStyle = ref({});
+function canFly() {
+	try {
+		return (
+			window.innerWidth >= 720 &&
+			!!window.matchMedia?.("(hover: hover) and (pointer: fine)")?.matches
+		);
+	} catch {
+		return false;
+	}
+}
 const open = ref(false);
 const view = ref("main");
 const query = ref("");
@@ -401,6 +457,7 @@ function toggle() {
 function show() {
 	open.value = true;
 	view.value = "main";
+	flyMode.value = canFly();
 	placePanel();
 	query.value = "";
 	emit("open");
@@ -416,11 +473,21 @@ function close(refocus = false) {
 	document.removeEventListener("keydown", onKey, true);
 	if (refocus) nextTick(() => trigger.value?.focus());
 }
+// The rows of the main list (the panel's own) or of the open sub-list.
+function rowsOf(where) {
+	const el = where === "sub" ? sub.value : root.value?.querySelector(".jv-plus-panel");
+	if (!el) return [];
+	return [
+		...el.querySelectorAll(
+			where === "sub" ? "[role^='menuitem']" : ":scope > [role^='menuitem']"
+		),
+	];
+}
 // Keyboard users land in the list (the skill search when that list is up).
 function focusFirst() {
 	nextTick(() => {
 		if (view.value === "skills" && search.value) return search.value.focus();
-		root.value?.querySelector(".jv-plus-panel [role^='menuitem']")?.focus();
+		rowsOf(view.value === "main" ? "main" : "sub")[0]?.focus();
 	});
 }
 function onOutside(e) {
@@ -430,6 +497,34 @@ function go(next) {
 	view.value = next;
 	query.value = "";
 	focusFirst();
+}
+// A sub-list row was clicked (or entered from the keyboard): beside the menu on desktop,
+// in its place on touch. Hovering opens it too, without taking focus from the menu.
+function openSub(name, e, takeFocus = true) {
+	if (!flyMode.value) return go(name);
+	if (view.value !== name) {
+		view.value = name;
+		query.value = "";
+		placeFly(e?.currentTarget);
+	}
+	if (takeFocus) focusFirst();
+}
+function hoverSub(name, e) {
+	if (flyMode.value) openSub(name, e, false);
+}
+// Hovering a plain row closes the sub-list, as a desktop menu does.
+function hoverMain() {
+	if (flyMode.value) view.value = "main";
+}
+// Level with the row it belongs to, nudged up when it would run off the bottom.
+function placeFly(row) {
+	const top = row ? row.offsetTop - 6 : 0;
+	flyStyle.value = { top: `${top}px` };
+	nextTick(() => {
+		const r = sub.value?.getBoundingClientRect();
+		const over = r ? r.bottom - (window.innerHeight - 8) : 0;
+		if (over > 0) flyStyle.value = { top: `${Math.round(top - over)}px` };
+	});
 }
 function choose(action) {
 	close();
@@ -447,15 +542,25 @@ function pickConnector(c) {
 // Escape steps back out of a sub-list, then closes; arrow keys move between rows.
 function onKey(e) {
 	if (!open.value) return;
-	if (e.key === "Escape") {
+	const inSub = !!sub.value?.contains(document.activeElement);
+	if (e.key === "Escape" || (e.key === "ArrowLeft" && flyMode.value && inSub)) {
 		e.preventDefault();
 		e.stopPropagation();
-		if (view.value !== "main") go("main");
-		else close(true);
+		if (view.value === "main") return e.key === "Escape" && close(true);
+		const from = view.value;
+		if (!flyMode.value) return go("main");
+		// back to the row the sub-list belongs to
+		view.value = "main";
+		nextTick(() => root.value?.querySelector(`[data-sub="${from}"]`)?.focus());
 		return;
 	}
+	const subRow = document.activeElement?.dataset?.sub;
+	if (e.key === "ArrowRight" && subRow && !inSub) {
+		e.preventDefault();
+		return openSub(subRow, { currentTarget: document.activeElement });
+	}
 	if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-	const rows = [...(root.value?.querySelectorAll(".jv-plus-panel [role^='menuitem']") || [])];
+	const rows = rowsOf(inSub || (!flyMode.value && view.value !== "main") ? "sub" : "main");
 	if (!rows.length) return;
 	e.preventDefault();
 	const at = rows.indexOf(document.activeElement);
@@ -596,6 +701,35 @@ onBeforeUnmount(() => {
 .jv-plus-item--off:hover {
 	background: transparent;
 }
+/* a row whose sub-list is open beside the menu */
+.jv-plus-item.on {
+	background: var(--surface-2, var(--card2));
+}
+/* "takes you elsewhere" (a page or Settings), as Claude marks it */
+.jv-plus-ext {
+	flex: none;
+	color: var(--text-3, var(--ink5));
+}
+.jv-plus-sub {
+	display: flex;
+	flex-direction: column;
+	min-height: 0;
+}
+.jv-plus-fly {
+	position: absolute;
+	left: calc(100% + 6px);
+	z-index: 41;
+	width: 300px;
+	max-height: min(380px, 70vh);
+	padding: 6px;
+	background: var(--surface, var(--card));
+	border: 1px solid var(--border);
+	border-radius: 12px;
+	box-shadow: 0 10px 30px rgba(0, 0, 0, 0.14);
+}
+.jv-plus-fly .jv-plus-head {
+	padding-left: 9px;
+}
 .jv-plus-head {
 	display: flex;
 	align-items: center;
@@ -645,6 +779,10 @@ onBeforeUnmount(() => {
 	color: var(--text-3, var(--ink5));
 }
 .jv-plus-foot {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
 	margin-top: 4px;
 	padding: 8px 9px;
 	border: none;
