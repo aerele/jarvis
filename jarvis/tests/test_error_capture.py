@@ -1523,13 +1523,26 @@ class TestAttributionAndEnvelopes(CaptureBase):
 			("call_tool", "403", self.DISABLED, "get_list"),
 		)
 
-	def test_a_successful_dispatch_does_not_need_connector_envelopes(self):
+	def test_a_connector_that_failed_inside_its_envelope_is_recorded(self):
 		from jarvis import api
 
-		data = [{"name": "result"}]
-		with patch.object(api, "dispatch", return_value=data):
-			envelope = api._dispatch_and_wrap("get_list", {}, False)
-		self.assertEqual(envelope, {"ok": True, "data": data})
+		inner = {"ok": False, "error": {"code": "transport_error", "message": "connector timed out"}}
+		frappe.set_user(USER)
+		with patch.object(api, "dispatch", return_value=inner):
+			envelope = api._dispatch_and_wrap("call_connector", {}, False)
+		frappe.set_user("Administrator")
+		self.assertTrue(envelope["ok"])
+		(row,) = self.buffered()
+		self.assertEqual(
+			(row.surface, row.route, row.error_code), ("tool", "call_connector", "transport_error")
+		)
+		self.assertTrue(frappe.local.jarvis_tool_failure_recorded)
+
+	def test_a_connector_that_worked_records_nothing(self):
+		from jarvis import api
+
+		with patch.object(api, "dispatch", return_value={"ok": True, "data": []}):
+			api._dispatch_and_wrap("call_connector", {}, False)
 		self.assertEqual(self.buffered(), [])
 
 

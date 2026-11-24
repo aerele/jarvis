@@ -247,19 +247,14 @@ def _triggers_connectors(user: str, since, until=None) -> str | None:
 			order_by="creation desc",
 		)
 	)
-	# Backport adaptation: the connectors DocType does not exist on this
-	# release line (connectors are develop-only), and one failing lookup
-	# would drop the whole chip, triggers included. Probe it only if present.
-	connector = None
-	if frappe.db.exists("DocType", CONNECTOR_LOG):
-		connector = _iso(
-			frappe.db.get_value(
-				CONNECTOR_LOG,
-				[["user", "=", user], *_window(since, until)],
-				"creation",
-				order_by="creation desc",
-			)
+	connector = _iso(
+		frappe.db.get_value(
+			CONNECTOR_LOG,
+			[["user", "=", user], *_window(since, until)],
+			"creation",
+			order_by="creation desc",
 		)
+	)
 	return _latest(trigger, connector)
 
 

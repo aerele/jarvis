@@ -48,8 +48,7 @@ INTROSPECTION_TOOLS = frozenset(
 		"get_schema",  # DocType field map
 		"describe_customizations",  # site customisation index
 		"get_report_filters",  # a report's filter definitions, no report data
-		# (develop also lists "list_connector_actions" here; the connector tools are not on
-		# the hotfix branches, and test_tool_sets_name_real_tools pins every name here.)
+		"list_connector_actions",  # connector action catalogue
 		"list_app_modules",  # app-learning module catalogue
 	}
 )

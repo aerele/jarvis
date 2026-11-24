@@ -59,6 +59,8 @@ def outcome_for(status: str, reason_code: str | None, tool: str | None) -> str:
 			return "unknown"
 		if reason_code == "partial":
 			return "partial"
+		if reason_code == "not_sent":
+			return "failed"
 		if reason_code == "failed" and tool in MAY_HAVE_EXTERNAL_EFFECT:
 			return "unknown"
 		return "failed"

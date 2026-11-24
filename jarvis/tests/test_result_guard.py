@@ -590,3 +590,80 @@ class TestSnapshotEnvelope(unittest.TestCase):
 		data["run"] = "PREP-0001"
 		out, _event = enforce_result_budget(data, tool="run_report")
 		self.assertTrue(out["note"].startswith("Result truncated to fit the context window"))
+
+
+class TestConnectorResultBudget(unittest.TestCase):
+	"""A call_connector answer is {ok, result: {content: [...]}}: ``result`` is a dict,
+	so the row-list path never cut it (audit defect 8: 67 KB and 159 KB answers)."""
+
+	@staticmethod
+	def _answer(payload, **mcp):
+		return {"ok": True, "result": {"content": [{"type": "text", "text": json.dumps(payload)}], **mcp}}
+
+	def test_a_159kb_dict_answer_is_cut_within_the_budget(self):
+		data = self._answer({"records": _rows(400, 380), "totalCount": 400})
+		self.assertGreater(_size(data), 159_000)
+		out, ev = enforce_result_budget(data, tool="call_connector")
+		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
+		self.assertTrue(out["_truncated"])
+		self.assertEqual(out["total_items"], 400)
+		self.assertIn("PARTIAL", out["note"])
+		self.assertEqual(ev["kind"], "bounded_connector")
+		self.assertEqual(ev["original_chars"], _size(data))
+		self.assertEqual((ev["shown"], ev["total"]), (out["shown_items"], 400))
+
+	def test_a_list_of_500_keeps_whole_items(self):
+		out, ev = enforce_result_budget(self._answer(_rows(500, 300)), tool="call_connector")
+		kept = json.loads(out["result"]["content"][0]["text"])
+		self.assertEqual(kept, _rows(500, 300)[: len(kept)])
+		self.assertEqual(ev["shown"], len(kept))
+		self.assertEqual(ev["total"], 500)
+
+	def test_a_small_answer_is_returned_unchanged_byte_for_byte(self):
+		data = self._answer({"id": 7, "url": "https://x.test/7"}, isError=False)
+		before = json.dumps(data)
+		out, ev = enforce_result_budget(data, tool="call_connector")
+		self.assertIs(out, data)
+		self.assertIsNone(ev)
+		self.assertEqual(json.dumps(out), before)
+
+	def test_ok_and_iserror_are_preserved(self):
+		out, _ev = enforce_result_budget(self._answer(_rows(500, 300), isError=True), tool="call_connector")
+		self.assertIs(out["ok"], True)
+		self.assertIs(out["result"]["isError"], True)
+
+	def test_an_error_envelope_is_not_touched(self):
+		data = {"ok": False, "error": {"code": "tool_error", "message": "m" * 40_000}}
+		out, ev = enforce_result_budget(data, tool="call_connector")
+		self.assertIs(out, data)
+		self.assertEqual(ev["kind"], "uncapped")
+
+	def test_structured_content_that_repeats_the_text_is_dropped_first(self):
+		payload = {"issues": _rows(70, 300)}
+		data = self._answer(payload, structuredContent=payload)
+		out, ev = enforce_result_budget(data, tool="call_connector")
+		self.assertNotIn("structuredContent", out["result"])
+		self.assertNotIn("_truncated", out)
+		self.assertEqual(ev["kind"], "bounded_connector")
+		self.assertIsNone(ev["shown"])
+
+	def test_nested_mcp_shapes_stay_valid(self):
+		data = {
+			"ok": True,
+			"result": {
+				"content": [{"type": "text", "text": "summary"}],
+				"structuredContent": {"items": _rows(500, 300)},
+			},
+		}
+		out, _ev = enforce_result_budget(data, tool="call_connector")
+		self.assertLessEqual(_size(out), MAX_RESULT_CHARS)
+		self.assertEqual(out["result"]["content"][0], {"type": "text", "text": "summary"})
+		self.assertEqual(out["result"]["content"][-1]["type"], "text")
+		self.assertLess(len(out["result"]["structuredContent"]["items"]), 500)
+
+	def test_other_tools_keep_todays_behaviour(self):
+		data = self._answer(_rows(500, 300))
+		for tool in ("list_connector_actions", "get_list", "query"):
+			out, ev = enforce_result_budget(data, tool=tool)
+			self.assertIs(out, data)
+			self.assertEqual(ev["kind"], "uncapped")
