@@ -10,10 +10,19 @@ allowed. No frappe import here.
 
 from __future__ import annotations
 
-import fnmatch
 import json
 
 from jarvis.connectors import schema
+
+# The egress host match lives in its own module; these names stay importable here
+# because the broker and older callers read them from ``policy``.
+from jarvis.connectors.egress import (
+	canonical_ip,
+	egress_address_match,
+	egress_match,
+	normalise_host,
+	rule_problems,
+)
 
 
 def action_decision(row, action: str) -> tuple[str, str] | None:
@@ -57,46 +66,6 @@ def argument_error(row, action: str, args, schema_obj=None) -> tuple[str, str] |
 	if err:
 		return ("invalid_arguments", err)
 	return None
-
-
-def egress_match(host: str, raw: str | None) -> bool:
-	"""Decide whether ``host`` is permitted by the operator's egress rules ``raw``
-	(the free-text ``Jarvis Settings.connector_egress_rules``, one rule per line).
-	Fail-OPEN: empty/unset rules allow everything (the SSRF guard still blocks
-	private/metadata addresses regardless of this).
-
-	Grammar (blank lines and ``#`` comments ignored). Each rule is a host glob
-	(``fnmatch``); a bare domain also matches its subdomains. A line beginning
-	``!`` is a DENY rule, otherwise an ALLOW rule:
-
-	  * any DENY rule matches           -> deny
-	  * ALLOW rules exist but none match -> deny (allow-list mode)
-	  * no ALLOW rules (deny-list/empty) -> allow
-	"""
-	if not raw:
-		return True
-	host = (host or "").lower()
-	allows: list[str] = []
-	denies: list[str] = []
-	for line in raw.splitlines():
-		rule = line.strip().lower()
-		if not rule or rule.startswith("#"):
-			continue
-		if rule.startswith("!"):
-			denies.append(rule[1:].strip())
-		else:
-			allows.append(rule)
-	if any(_host_matches(host, r) for r in denies):
-		return False
-	if allows and not any(_host_matches(host, r) for r in allows):
-		return False
-	return True
-
-
-def _host_matches(host: str, rule: str) -> bool:
-	if not rule:
-		return False
-	return fnmatch.fnmatch(host, rule) or host == rule or host.endswith("." + rule)
 
 
 def input_schema(row, action: str):
