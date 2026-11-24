@@ -669,7 +669,7 @@ def persist_probe_result(doc, result, now, *, can_write: bool, background: bool 
 # --------------------------------------------------------------------------- #
 # 1. list
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def list_connectors() -> dict:
 	"""``{oauth_redirect_uri, catalog, shared, mine}``.
@@ -737,7 +737,7 @@ def list_connectors() -> dict:
 # --------------------------------------------------------------------------- #
 # 2. add
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def add_connector(
 	preset: str,
@@ -1115,7 +1115,7 @@ def _seed_static_client_from_catalog(doc, provider) -> None:
 # --------------------------------------------------------------------------- #
 # 3. test
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def test_connector(name: str) -> dict:
 	"""Run initialize + tools/list through ``broker.test_connector`` and, when the
@@ -1180,7 +1180,7 @@ def test_connector(name: str) -> dict:
 # --------------------------------------------------------------------------- #
 # 4. set allowed actions
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def set_allowed_actions(name: str, actions: str | list) -> dict:
 	"""Replace the ``allowed_actions`` table from the user's picker choices.
@@ -1257,7 +1257,7 @@ def set_allowed_actions(name: str, actions: str | list) -> dict:
 # --------------------------------------------------------------------------- #
 # 5. update
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def update_connector(
 	name: str,
@@ -1341,7 +1341,7 @@ def update_connector(
 # --------------------------------------------------------------------------- #
 # 6. delete
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def delete_connector(name: str) -> dict:
 	"""Hard delete. ``frappe.delete_doc`` checks the delete permission itself
@@ -1358,7 +1358,7 @@ def delete_connector(name: str) -> dict:
 # --------------------------------------------------------------------------- #
 # 7. OAuth connect / disconnect (OAUTH_CONNECTORS_DESIGN.md §4, §6a, §7)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def connect_oauth(name: str) -> dict:
 	"""Start the sign-in flow for an OAuth connector: return the provider's own
@@ -1467,7 +1467,7 @@ def _connect_mcp_oauth(doc) -> dict:
 	return {"ok": True, "url": url, "started_at": _utc_iso(now_datetime())}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def disconnect_oauth(name: str) -> dict:
 	"""End the CURRENT user's sign-in for an OAuth connector by deleting their
@@ -1482,7 +1482,7 @@ def disconnect_oauth(name: str) -> dict:
 	return {"ok": True}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def oauth_signin_status(name: str) -> dict:
 	"""Poll the CURRENT user's sign-in state for an OAuth connector. The SPA opens the
@@ -1525,7 +1525,7 @@ def oauth_signin_status(name: str) -> dict:
 # 8. discovery engine: probe, static credentials, callback
 #    (MCP_OAUTH_CLIENT_DESIGN.md §2, §5, §6)
 # --------------------------------------------------------------------------- #
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def probe_connector_auth(base_url: str) -> dict:
 	"""Ask an address whether it needs a sign-in, and where. Creates NOTHING -
@@ -1573,7 +1573,7 @@ def probe_connector_auth(base_url: str) -> dict:
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 @require_jarvis_user
 def set_oauth_client_credentials(name: str, client_id: str, client_secret: str = "") -> dict:
 	"""ADMIN ONLY. Supply the credentials an administrator got by registering this
