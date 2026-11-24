@@ -177,6 +177,7 @@
   "announcement_link_label",
   "system_tab",
   "chat_sharing_enabled",
+  "suggest_replies_enabled",
   "deployment_section",
   "deployment_mode",
   "admin_connection_section",
@@ -1315,6 +1316,13 @@
    "default": "1"
   },
   {
+   "fieldname": "suggest_replies_enabled",
+   "fieldtype": "Check",
+   "label": "Suggest follow-up replies",
+   "default": "1",
+   "description": "After a reply, offer the user one to three likely next messages as chips they can tap to send. Costs one short extra model call per reply, on the Claude plan too (a short turn on the user's subscription)."
+  },
+  {
    "fieldname": "deployment_section",
    "fieldtype": "Section Break",
    "label": "Deployment Mode",
@@ -1572,5 +1580,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-24 10:04:00.000000"
+ "modified": "2026-11-24 14:00:00.000000"
 }

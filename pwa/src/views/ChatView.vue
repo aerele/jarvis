@@ -87,6 +87,8 @@ import Composer from "../components/Composer.vue";
 import { cleanQuote, quoteMarkdown, splitQuote } from "@jsshared/reply_quote.mjs";
 import SelectionActions from "@shared/components/chat/SelectionActions.vue";
 import ReplyQuote from "@shared/components/chat/ReplyQuote.vue";
+import SuggestedReplies from "@shared/components/chat/SuggestedReplies.vue";
+import { suggestRepliesOn } from "@shared/lib/suggestRepliesPref";
 import { createReader } from "@jsshared/read_aloud.mjs";
 import {
 	boundedDelivery,
@@ -1117,6 +1119,47 @@ function onVisible() {
 }
 
 // ── sending ─────────────────────────────────────────────────────────────────
+// Suggested replies (jarvis.chat.suggest_replies, after Frappe Flow): the user's likely
+// next messages, stored on the reply and pushed over realtime (message:replies). Shown
+// under the LAST reply only, and not while a reply streams, a message is on its way, a
+// confirmation waits or a draft card is up (each is already the next step).
+function suggestionsFor(it) {
+	if (!suggestRepliesOn.value || !it?.msg || live.value || sending.value || pending.value.length)
+		return null;
+	const a = anchor.value;
+	if (a && (a.action || a.bad)) return null;
+	const last = items.value[items.value.length - 1];
+	if (!last || last.key !== it.key || last.type !== "assistant") return null;
+	const s = it.msg.suggested_replies;
+	return s && Array.isArray(s.replies) && s.replies.length ? s : null;
+}
+// A tap ticks one (never sends) and locks the composer until it is sent or unticked
+// (SuggestedReplies emits "" then, or when it goes away). Send sends it through the same
+// recoverable path as a typed message, leaving the composer's text and Reply quote alone.
+const chosenSuggestion = ref("");
+async function sendSuggestion(text) {
+	const cid = convId.value;
+	const generation = viewGeneration;
+	if (!cid || !text || holdActive.value || sending.value) return;
+	errorBanner.value = "";
+	let request;
+	try {
+		request = sendRecovery.stage(
+			cid,
+			text,
+			[],
+			orderedPending.value.map((p) => p.token)
+		);
+	} catch {
+		errorBanner.value = "Could not send that message. Try again.";
+		return;
+	}
+	const completion = dispatchRequest(request);
+	await scrollToBottom(true, () => isCurrent(cid, generation));
+	if (isCurrent(cid, generation)) follow.value = false;
+	await completion;
+}
+
 async function send() {
 	const cid = convId.value;
 	const generation = viewGeneration;
@@ -1620,6 +1663,13 @@ function onEvent(p) {
 	}
 
 	switch (p.kind) {
+		case "message:replies": {
+			// Suggested replies landed for a reply in this chat (a short-queue job, seconds
+			// after run:end): set them on the row in place.
+			const m = messages.value.find((x) => x.name === p.message_id);
+			if (m && Array.isArray(p.replies)) m.suggested_replies = { replies: p.replies };
+			break;
+		}
 		case "run:start":
 			if (ignored) return;
 			sendBusy.value = false;
@@ -2057,6 +2107,16 @@ onUnmounted(() => {
 							{{ speakingId === it.key ? "Stop" : "Listen" }}
 						</button>
 					</div>
+					<!-- the user's likely next messages, under the latest reply only
+					     (jarvis.chat.suggest_replies); a tap ticks one, Send sends it -->
+					<SuggestedReplies
+						v-if="suggestionsFor(it)"
+						:key="'sr-' + it.key"
+						:replies="suggestionsFor(it).replies"
+						:disabled="sending"
+						@pick="chosenSuggestion = $event"
+						@send="sendSuggestion"
+					/>
 					<ActionCard
 						v-if="showsDraftCard(it)"
 						:action="anchor.action"
@@ -2388,7 +2448,10 @@ onUnmounted(() => {
 		:sending="sending"
 		:attachments="attachments"
 		:mic-enabled="micEnabled"
-		:disabled="holdActive"
+		:disabled="holdActive || !!chosenSuggestion"
+		:placeholder="
+			chosenSuggestion ? 'Send the chosen follow-up, or untick it to type' : undefined
+		"
 		:auto-mode="!!conversation?.auto_mode"
 		@send="send"
 		@stop="stop"

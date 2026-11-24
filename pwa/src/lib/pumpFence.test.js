@@ -38,6 +38,7 @@ const UNFENCED_IN_CHATVIEW = new Set([
 	"export:changed", // a durable background-job notification with no run_id/seq; it can arrive after the turn ends
 	"import:finished", // Slice B: a background-poll completion signal, not a pump-sequenced turn frame
 	"macro:closed", // the macro engine's closing message landed: a reload signal with no run_id/seq, not a turn frame
+	"message:replies", // suggested replies from a short-queue job after the turn ended: no run_id/seq, set on the row in place
 ]);
 
 function onEventBody() {

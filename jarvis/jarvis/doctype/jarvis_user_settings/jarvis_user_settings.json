@@ -17,6 +17,7 @@
     "preferred_persona",
     "support_context_copy_pref",
     "show_holiday_touches",
+    "suggest_replies",
     "payment_calendar_preferences",
     "app_state_section",
     "business_greeting_state",
@@ -113,6 +114,13 @@
       "label": "Show holiday touches",
       "default": "1",
       "description": "Holiday and birthday greetings on this person's Jarvis welcome screen. Off hides everything for them."
+    },
+    {
+      "fieldname": "suggest_replies",
+      "fieldtype": "Check",
+      "label": "Suggest follow-up replies",
+      "default": "1",
+      "description": "Show this user one to three likely next messages under a finished reply (jarvis.chat.suggest_replies). Their own switch; the site-wide one is Jarvis Settings > Suggest follow-up replies."
     },
     {
       "fieldname": "app_state_section",
@@ -372,5 +380,6 @@
   ],
   "sort_field": "modified",
   "sort_order": "DESC",
-  "track_changes": 0
+  "track_changes": 0,
+  "modified": "2026-11-21 13:35:12.976361"
 }
