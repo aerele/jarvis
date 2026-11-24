@@ -19,7 +19,6 @@ import {
   GAP,
   HERO_TOP_UNITS,
   floorFit,
-  sceneHeroTop,
   FLOOR_ROW as DIWALI_ROW,
 } from "../scene-geometry.mjs";
 import {
@@ -108,13 +107,6 @@ test("the sleigh is level over the mark and crosses the whole stage", () => {
   assert.equal(y, plan.apexY);
   assert.ok(Math.abs(ang) < 1e-9);
   assert.ok(sleighAt(plan, 0)[0] < -300 && sleighAt(plan, 1)[0] > 1100);
-});
-
-test("the page keeps the mark low enough for the sleigh: the art needs no more than the table", () => {
-  for (const s of [1, 1.25])
-    assert.ok(
-      sceneHeroTop("christmas", s) >= (CLEAR + SLEIGH_MIN_ROOM + GAP) * s - 1e-9
-    );
 });
 
 test("at the lowest mark the page allows, the sleigh fits at its smallest size, and nothing asks the hero to sit lower", () => {

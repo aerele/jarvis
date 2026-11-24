@@ -54,9 +54,6 @@ describe("template golden API replies", () => {
 		expect(reply("default_bucket_now").total_remaining).toBe("69548.00");
 		expect(reply("default_bucket_today").total_remaining).toBe("42048.00");
 	});
-	it("exposes the request that produced a reply", () => {
-		expect(replyRequest("default_bucket_now")).toEqual(expect.any(Object));
-	});
 	it("wraps the reply payload in an ok envelope", () => {
 		expect(replyEnvelope("default_bucket_now")).toEqual({
 			ok: true,

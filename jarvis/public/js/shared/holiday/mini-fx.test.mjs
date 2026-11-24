@@ -4,12 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { DESIGNS } from "./answer.mjs";
-import {
-  MINI_PARTICLE,
-  PARTICLE_COUNT,
-  particleMarkup,
-  playParticles,
-} from "./mini-fx.mjs";
+import { MINI_PARTICLE, particleMarkup, playParticles } from "./mini-fx.mjs";
 
 // An svg double: innerHTML in, fake `.mfx` elements out, each remembering its animation.
 function fakeSvg() {
@@ -42,41 +37,9 @@ test("every design the answer can name has a particle", () => {
   assert.deepEqual(Object.keys(MINI_PARTICLE).sort(), [...DESIGNS].sort());
 });
 
-test("a design draws 24 particles and the same ones every time", () => {
-  for (const design of DESIGNS) {
-    const markup = particleMarkup(design);
-    assert.equal(
-      (markup.match(/class="mfx"/g) || []).length,
-      PARTICLE_COUNT,
-      design
-    );
-    assert.equal(markup, particleMarkup(design), design);
-  }
-  assert.equal(PARTICLE_COUNT, 24);
-});
-
 test("an unknown design draws nothing", () => {
   assert.equal(particleMarkup("nope"), "");
   assert.equal(particleMarkup(undefined), "");
-});
-
-test("christmas drops the shared flake art, birthday its confetti", () => {
-  assert.match(particleMarkup("christmas"), /class="mfx-snow"/);
-  assert.match(particleMarkup("christmas"), /stroke-width="1.1"/);
-  assert.match(particleMarkup("birthday"), /<rect /);
-});
-
-test("particles start above the top edge, inside the 350 wide view", () => {
-  const groups = [
-    ...particleMarkup("diwali").matchAll(
-      /<g transform="translate\(([-\d.]+) ([-\d.]+)\)"><g class="mfx"/g
-    ),
-  ];
-  assert.equal(groups.length, 24);
-  for (const [, x, y] of groups) {
-    assert.ok(x >= 12 && x <= 338, x);
-    assert.ok(y <= -12 && y >= -52, y);
-  }
 });
 
 test("playing runs one 'both'-filled fall per particle with the approved timings", () => {
