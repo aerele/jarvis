@@ -120,6 +120,15 @@ _GOOGLE_HELP_URL = "https://console.cloud.google.com/apis/credentials"
 _GOOGLE_GUIDE_URL = "https://developers.google.com/workspace/guides/configure-mcp-servers"
 _GOOGLE_HINT = "Enable the API and its MCP API, then join Google's Developer Preview."
 
+# Why the other `accepts_key=False` presets refuse a pasted key (research 2026-11-23):
+# - Vendor accepts only its own sign-in tokens: Sentry (https://mcp.sentry.dev/),
+#   Calendly (https://developer.calendly.com/calendly-mcp-server), ClickUp, Canva,
+#   Cashfree, Webflow, Xero, HubSpot, Slack, Docusign, Zoom.
+# - Documented key needs a Basic or raw header the Bearer-only key field cannot
+#   send: Razorpay (https://razorpay.com/docs/mcp-server/remote/), Wix.
+# - Unverified, hidden until proven with a live key: PayPal, Netlify, GitLab,
+#   Monday.com, Box, Cloudflare (its bindings server is deprecated).
+
 # The free-form path: a caller's own base_url (any remote MCP server that passes
 # the SSRF guard and its connection test). Not a Provider, so it can never end up
 # in PROVIDERS or leak through `by_name`.
@@ -361,6 +370,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="razorpay",
 		help_url=None,
 		hint=None,
+		accepts_key=False,
 	),
 	Provider(
 		name="PayPal",
@@ -372,6 +382,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="paypal",
 		help_url=None,
 		hint=None,
+		accepts_key=False,
 	),
 	Provider(
 		name="Square",
@@ -401,6 +412,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		hint=None,
 		# Answers 401 with an EMPTY WWW-Authenticate header; discovery falls back to
 		# the path-derived well-known document, which exists (probed 2026-09-07).
+		accepts_key=False,
 	),
 	# --- accounting ------------------------------------------------------------
 	Provider(
@@ -417,6 +429,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		# identity.xero.com publishes metadata but no registration endpoint (probed
 		# 2026-09-07); the resource document names the accounting scopes, so
 		# discovery runs as normal and asks for exactly those.
+		accepts_key=False,
 	),
 	# --- crm ------------------------------------------------------------
 	Provider(
@@ -433,6 +446,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		# The server lives at the ORIGIN (``/mcp`` is 404). Its sign-in service
 		# publishes metadata with no registration endpoint; HubSpot's own guide has
 		# each customer create an app and requires PKCE (probed 2026-09-07).
+		accepts_key=False,
 	),
 	Provider(
 		name="Pipedrive",
@@ -510,6 +524,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		help_url="https://developer.monday.com/apps/docs/oauth",
 		hint="Register your own Monday.com app, then paste its details here.",
 		guide_url="https://developer.monday.com/api-reference/docs/control-mcp-access-with-oauth-app",
+		accepts_key=False,
 	),
 	Provider(
 		name="Slack",
@@ -522,6 +537,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		help_url="https://api.slack.com/apps",
 		hint="Register your own Slack app, then paste its details here.",
 		guide_url="https://docs.slack.dev/authentication/installing-with-oauth",
+		accepts_key=False,
 	),
 	Provider(
 		name="ClickUp",
@@ -533,6 +549,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="clickup",
 		help_url=None,
 		hint=None,
+		accepts_key=False,
 	),
 	Provider(
 		name="Docusign",
@@ -554,6 +571,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		authorization_endpoint="https://account.docusign.com/oauth/auth",
 		token_endpoint="https://account.docusign.com/oauth/token",
 		scopes="signature",
+		accepts_key=False,
 	),
 	# --- communication ------------------------------------------------------------
 	Provider(
@@ -603,6 +621,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		help_url=None,
 		hint=None,
 		# The server is the ORIGIN itself (``/mcp`` is 404), probed 2026-09-07.
+		accepts_key=False,
 	),
 	Provider(
 		name="Zoom",
@@ -617,6 +636,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		guide_url="https://developers.zoom.us/docs/integrations/create/",
 		# zoom.us publishes metadata and Zoom's docs say the MCP servers accept
 		# manual app registration only, no self-registration (probed 2026-09-07).
+		accepts_key=False,
 	),
 	Provider(
 		name="Mailchimp Transactional",
@@ -678,6 +698,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		help_url="https://app.box.com/developers/console",
 		hint="Register your own Box app, then paste its details here.",
 		guide_url="https://developer.box.com/guides/authentication/oauth2/oauth2-setup/",
+		accepts_key=False,
 	),
 	Provider(
 		name="Google Drive",
@@ -744,6 +765,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="canva",
 		help_url=None,
 		hint=None,
+		accepts_key=False,
 	),
 	Provider(
 		name="Figma",
@@ -833,6 +855,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="sentry",
 		help_url=None,
 		hint=None,
+		accepts_key=False,
 	),
 	Provider(
 		name="Cloudflare",
@@ -844,6 +867,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="cloudflare",
 		help_url=None,
 		hint=None,
+		accepts_key=False,
 	),
 	Provider(
 		name="Vercel",
@@ -870,6 +894,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="netlify",
 		help_url=None,
 		hint=None,
+		accepts_key=False,
 	),
 	Provider(
 		name="Plaid",
@@ -899,6 +924,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="webflow",
 		help_url=None,
 		hint=None,
+		accepts_key=False,
 	),
 	Provider(
 		name="Wix",
@@ -910,6 +936,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		logo="wix",
 		help_url=None,
 		hint=None,
+		accepts_key=False,
 	),
 	# --- automation ------------------------------------------------------------
 	Provider(
@@ -970,6 +997,7 @@ PROVIDERS: tuple[Provider, ...] = (
 		hint=None,
 		# gitlab.com only; a self-hosted instance is the same path on its own host
 		# and connects as a Custom URL.
+		accepts_key=False,
 	),
 )
 
