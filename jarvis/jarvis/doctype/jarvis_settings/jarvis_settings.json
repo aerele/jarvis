@@ -201,6 +201,8 @@
   "connector_catalogue_section",
   "connector_catalogue_disabled",
   "connector_catalogue_synced_at",
+  "connector_key_overrides",
+  "connector_key_overrides_synced_at",
   "holiday_policy_section",
   "holiday_policy_disabled",
   "holiday_policy_disabled_designs",
@@ -1481,6 +1483,21 @@
    "read_only": 1
   },
   {
+   "fieldname": "connector_key_overrides",
+   "fieldtype": "Small Text",
+   "label": "Connector Key Overrides",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Canonical JSON object {preset name: true|false}: whether the operator offers \"Use a key instead\" for that preset, as last applied. Absent = the code default. Empty {} = no overrides; empty string = never pulled (or every pull kept last-known)."
+  },
+  {
+   "fieldname": "connector_key_overrides_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Connector Key Overrides Synced At",
+   "hidden": 1,
+   "read_only": 1
+  },
+  {
    "fieldname": "holiday_policy_section",
    "fieldtype": "Section Break",
    "label": "Holiday policy (from Jarvis Cloud)",
@@ -1555,5 +1572,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-13 19:00:00.000000"
+ "modified": "2026-11-23 20:00:00.000000"
 }

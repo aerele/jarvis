@@ -540,6 +540,8 @@ def _sync_connection(timeout_s: int | None = None, prove: bool = False) -> dict:
 	# Marker-aware + KEEP-on-doubt (jarvis.connector_catalogue) so an old/rolled-back CP
 	# never re-enables a switched-off preset fleet-wide.
 	connector_catalogue.persist_from_connection(data)
+	# Same cadence, same rules: the operator's per-preset "Use a key instead" overrides.
+	connector_catalogue.persist_key_overrides_from_connection(data)
 	# Same cadence: mirror the operator's holiday-touch policy. This is the daily path, the
 	# only one that stamps holiday_policy_synced_at (jarvis.holiday_touch.policy). Never raises.
 	holiday_policy.persist(data, daily=True)

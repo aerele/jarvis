@@ -191,18 +191,19 @@ class JarvisConnector(NotRenamable, Document):
 
 	def _guard_key_accepted(self) -> None:
 		"""A preset whose server takes only its own sign-in tokens (catalog
-		``accepts_key=False``, the Google presets) may not be saved as a key row: the
+		``accepts_key=False``, the Google presets, or an operator override via
+		``jarvis.connector_catalogue.accepts_key``) may not be saved as a key row: the
 		defense-in-depth copy of ``add_connector``'s refusal, for a raw DocType write.
 		Checked only when the row is new or its auth method or preset changes, so an
 		older key row still saves on a disable or relabel. Server writes under
 		``ignore_permissions`` skip it, as in ``_guard_oauth_fields``."""
-		from jarvis.connectors import catalog
+		from jarvis import connector_catalogue
 
 		if self.flags.ignore_permissions or (self.auth_method or "") == "OAuth":
 			return
 		if not (self.is_new() or self.has_value_changed("auth_method") or self.has_value_changed("preset")):
 			return
-		if not catalog.accepts_key_of(self.preset or ""):
+		if not connector_catalogue.accepts_key(self.preset or ""):
 			frappe.throw(_("This app connects with a sign-in, not a key."), frappe.PermissionError)
 
 	def _guard_discovery_oauth(self) -> None:
