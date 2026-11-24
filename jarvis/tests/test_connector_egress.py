@@ -126,8 +126,14 @@ ALLOWED = [
 	("*.atlassian.net", "mcp.atlassian.net"),
 	("*.example.com\n!secret.example.com", "ok.example.com"),
 	("34.1.2.3", "34.1.2.3"),
-	("b\u00fccher.example", "xn--bcher-kva.example"),
+	("b\u00fccher.example", "b\u00fccher.example"),
+	("xn--bcher-kva.example", "xn--bcher-kva.example"),
+	("34.1.2.0/24", "34.1.2.9"),
 ]
+
+
+def _deny_only(rules: str) -> bool:
+	return all(line.startswith("!") for line in rules.splitlines())
 
 
 class TestEquivalentSpellings(unittest.TestCase):
@@ -137,11 +143,17 @@ class TestEquivalentSpellings(unittest.TestCase):
 				with self.subTest(rules=rules, host=spelling):
 					self.assertFalse(egress.egress_match(spelling, rules))
 
-	def test_allow_holds_for_every_spelling(self):
+	def test_allow_holds_for_every_spelling_in_deny_list_mode(self):
 		for rules, host in ALLOWED:
-			for spelling in _spellings(host):
+			spellings = _spellings(host) if _deny_only(rules) else {host, host + ".", host.upper()}
+			for spelling in spellings:
 				with self.subTest(rules=rules, host=spelling):
 					self.assertTrue(egress.egress_match(spelling, rules))
+
+	def test_allow_list_refuses_disguised_spellings(self):
+		for spelling in ("api\u3002github.com", "\uff41pi.github.com", "api\u00ad.github.com"):
+			with self.subTest(host=spelling):
+				self.assertFalse(egress.egress_match(spelling, "api.github.com"))
 
 	def test_plain_rule_spellings_deny_the_host(self):
 		for rule, host in (
@@ -276,7 +288,8 @@ class TestForeignGlobRules(unittest.TestCase):
 		self.assertFalse(egress.egress_match("plain.com", "*\u00fc*.com"))
 
 	def test_ascii_glob_on_punycode_is_a_normal_glob(self):
-		self.assertTrue(egress.egress_match("\u00fcber.com", "xn--*.com"))
+		self.assertTrue(egress.egress_match("xn--ber-goa.com", "xn--*.com"))
+		self.assertFalse(egress.egress_match("\u00fcber.com", "xn--*.com"))  # never allowed as typed
 		self.assertFalse(egress.egress_match("\u00fcber.com", "!xn--*.com"))
 		self.assertTrue(egress.egress_match("plain.com", "!xn--*.com"))
 
@@ -285,15 +298,17 @@ class TestForeignGlobRules(unittest.TestCase):
 
 
 def _develop_allows(host: str, raw: str) -> bool:
-	"""The deny-list verdict on ``develop`` before host normalisation (an oracle)."""
-	host = host.lower()
-	for line in raw.splitlines():
-		rule = line.strip().lower()
-		if rule.startswith("!"):
-			rule = rule[1:].strip()
-			if rule and (fnmatch.fnmatch(host, rule) or host == rule or host.endswith("." + rule)):
-				return False
-	return True
+	"""``egress_match`` on ``develop``, before host normalisation (an oracle)."""
+	host = (host or "").lower()
+
+	def hit(rule):
+		return bool(rule) and (fnmatch.fnmatch(host, rule) or host == rule or host.endswith("." + rule))
+
+	lines = [line.strip().lower() for line in raw.splitlines()]
+	rules = [line for line in lines if line and not line.startswith("#")]
+	denies = [rule[1:].strip() for rule in rules if rule.startswith("!")]
+	allows = [rule for rule in rules if not rule.startswith("!")]
+	return not any(hit(rule) for rule in denies) and (not allows or any(hit(rule) for rule in allows))
 
 
 class TestOnlyAddsBlocks(unittest.TestCase):
@@ -350,6 +365,61 @@ class TestOnlyAddsBlocks(unittest.TestCase):
 				if not _develop_allows(host, rule):
 					with self.subTest(rule=rule, host=host):
 						self.assertFalse(egress.egress_match(host, rule))
+
+	ALLOW_RULES = (
+		"api.github.com",
+		"githubcopilot.com",
+		"*.atlassian.net",
+		"a?b.com",
+		"b\u00fccher.example",
+		"xn--bcher-kva.example",
+		"[\u00fcu]ber.com",
+		"1.2.3.4",
+		"0x22.1.2.3",
+		"34.1.2.*",
+		"2606:4700:4700::1111",
+		"*.example.com\n!secret.example.com",
+	)
+	ALLOW_HOSTS = (
+		"api.github.com",
+		"mcp.githubcopilot.com",
+		"mcp.atlassian.net",
+		"a\u00dfb.com",
+		"a.b.com",
+		"b\u00fccher.example",
+		"sub.b\u00fccher.example",
+		"uber.com",
+		"\u00fcber.com",
+		"1.2.3.4",
+		"evil.1.2.3.4",
+		"34.1.2.3",
+		"34.1.2.9",
+		"2606:4700:4700::1111",
+		"ok.example.com",
+	)
+
+	def test_new_allowed_is_a_subset_of_develop_allowed(self):
+		# The one agreed widening: a single real trailing dot reaches the same name.
+		for rule in self.ALLOW_RULES:
+			for host in self.ALLOW_HOSTS:
+				for spelling in _spellings(host):
+					if egress.egress_match(spelling, rule):
+						bare = spelling[:-1] if spelling.endswith(".") else spelling
+						with self.subTest(rule=rule, host=spelling):
+							self.assertTrue(_develop_allows(bare, rule))
+
+	def test_ip_allow_rule_allows_only_that_ip_as_typed(self):
+		for host in ("evil.1.2.3.4", "x1.2.3.4", "0x1.2.3.4", "::ffff:1.2.3.4", "1.2.3.4.evil"):
+			with self.subTest(host=host):
+				self.assertFalse(egress.egress_match(host, "1.2.3.4"))
+		self.assertTrue(egress.egress_match("1.2.3.4", "1.2.3.4"))
+		self.assertTrue(egress.egress_match("1.2.3.4.", "1.2.3.4"))
+
+	def test_cidr_allow_needs_the_canonical_ip(self):
+		self.assertTrue(egress.egress_match("34.1.2.9", "34.1.2.0/24"))
+		for host in ("0x22.1.2.9", "::ffff:34.1.2.9", "34.1.521", "x.34.1.2.9", "34.1.3.9"):
+			with self.subTest(host=host):
+				self.assertFalse(egress.egress_match(host, "34.1.2.0/24"))
 
 
 class TestRuleProblems(unittest.TestCase):

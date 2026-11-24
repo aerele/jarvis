@@ -19,10 +19,16 @@ Grammar, one rule per line (blank lines and ``#`` comments ignored; ``!`` = deny
     nothing.
   * anything else is kept as lower-cased text, never dropped.
 
-Deny wins, and a deny rule also matches the host as typed, exactly as before
-normalisation, so the module can only add blocks. Any allow rule turns on
-allow-list mode. Only deny rules apply to a resolved address.
-:func:`rule_problems` names rules an admin should rewrite.
+Deny wins. Any allow rule turns on allow-list mode. Only deny rules apply to a
+resolved address. :func:`rule_problems` names rules an admin should rewrite.
+
+Asymmetry, on purpose: every loose or legacy path (the old as-typed match, the
+``x.34.1.2.3`` suffix of an IP rule, every text spelling of an IP, the foreign-label
+over-block) serves DENY only, so this module can only add blocks. An ALLOW matches
+only by the strict normalised comparison (name or subdomain, ASCII glob, literal
+IP, CIDR containment) AND, except for a CIDR range, only if the old as-typed match
+also holds; a CIDR range needs the host typed as its canonical IP. Allow-list mode
+therefore never allows more than before, beyond one real trailing dot and CIDR.
 """
 
 from __future__ import annotations
@@ -55,9 +61,11 @@ def egress_match(host, raw) -> bool:
 	target = _target(host)
 	if target is None:
 		return False
-	if any(rule.matches(target) for rule in denies) or any(rule.matches(host.lower()) for rule in floor):
+	typed = host.lower()
+	if any(rule.denies(target) for rule in denies) or any(rule.denies(typed) for rule in floor):
 		return False
-	return not allows or any(rule.matches(target) for rule in allows)
+	typed = typed[:-1] if typed.endswith(".") else typed
+	return not allows or any(rule.allows(target, typed) for rule in allows)
 
 
 def egress_address_match(address, raw) -> bool:
@@ -72,7 +80,7 @@ def egress_address_match(address, raw) -> bool:
 	ip = to_ip(address)
 	if ip is None:
 		return False
-	return not any(rule.matches(ip) for rule in denies)
+	return not any(rule.denies(ip) for rule in denies)
 
 
 def normalise_host(host) -> str | None:
@@ -111,9 +119,12 @@ class _PatternRule:
 		self.raw = raw
 		self.glob = _has_glob(pattern)
 
-	def matches(self, target) -> bool:
+	def denies(self, target) -> bool:
 		texts = (target,) if isinstance(target, str) else ip_texts(target)
 		return any(self._matches_text(text) for text in texts)
+
+	def strict(self, target) -> bool:
+		return self._matches_text(target if isinstance(target, str) else str(target))
 
 	def _matches_text(self, text: str) -> bool:
 		return _glob_match(text, self.pattern) or text == self.pattern or text.endswith("." + self.pattern)
@@ -128,9 +139,14 @@ class _NetworkRule:
 		# Kept from the old grammar: ``!34.1.2.3`` also matched ``x.34.1.2.3``.
 		self.suffix = "." + str(to_ip(str(network.network_address))) if single else None
 
-	def matches(self, target) -> bool:
+	def denies(self, target) -> bool:
 		if isinstance(target, str):
 			return bool(self.suffix) and target.endswith(self.suffix)
+		return self.strict(target)
+
+	def strict(self, target) -> bool:
+		if isinstance(target, str):
+			return False
 		return any(ip.version == self.network.version and ip in self.network for ip in ip_forms(target))
 
 
@@ -138,18 +154,37 @@ class _ForeignRule:
 	"""A rule with a label that mixes a wildcard and non-ASCII letters. A deny blocks
 	every name with an ``xn--`` label under ``suffix``; an allow matches nothing."""
 
-	def __init__(self, suffix: str, deny: bool):
+	def __init__(self, suffix: str):
 		self.suffix = suffix
-		self.deny = deny
 
-	def matches(self, target) -> bool:
-		if not self.deny or not isinstance(target, str):
+	def strict(self, target) -> bool:
+		return False
+
+	def denies(self, target) -> bool:
+		if not isinstance(target, str):
 			return False
 		if self.suffix:
 			if not target.endswith("." + self.suffix):
 				return False
 			target = target[: -len(self.suffix) - 1]
 		return any(label.startswith("xn--") for label in target.split("."))
+
+
+class _AllowRule:
+	"""One allow line: the strict normalised match AND the old as-typed match of the
+	line against the host (a CIDR range instead needs the canonical IP typed)."""
+
+	def __init__(self, rules: list, typed: str):
+		self.rules = rules
+		self.legacy = _PatternRule(typed)
+		self.cidr = "/" in typed
+
+	def allows(self, target, typed_host: str) -> bool:
+		if not any(rule.strict(target) for rule in self.rules):
+			return False
+		if self.cidr:
+			return not isinstance(target, str) and typed_host == str(target)
+		return self.legacy.strict(typed_host)
 
 
 @functools.lru_cache(maxsize=32)
@@ -161,9 +196,11 @@ def _rules(raw: str) -> tuple[tuple, tuple, tuple]:
 	denies: list = []
 	floor: list = []
 	for deny, text in _rule_lines(raw):
-		(denies if deny else allows).extend(_parse_rule(text, deny))
 		if deny:
+			denies.extend(_parse_rule(text, deny))
 			floor.append(_PatternRule(text))
+		else:
+			allows.append(_AllowRule(_parse_rule(text, deny), text))
 	return tuple(allows), tuple(denies), tuple(floor)
 
 
@@ -218,7 +255,7 @@ def _foreign_rules(text: str, labels: list, encoded: list, trailing: bool, deny:
 	glob on the ASCII host (``[üu]ber.com`` still blocks ``uber.com``): as typed, and
 	label by label with the wildcard labels as typed or NFKC-folded and the rest in
 	punycode. An allow matches nothing, so it can never allow more than before."""
-	rules: list = [_ForeignRule(_plain_suffix(encoded, trailing), deny)]
+	rules: list = [_ForeignRule(_plain_suffix(encoded, trailing))]
 	if not deny:
 		return rules
 	typed = [
