@@ -1,15 +1,17 @@
 <!--
-  The composer's "+" menu, after the Claude / ChatGPT one: everything you can add to the
-  next message in one place. Add files or photos (the host's own file picker), Use a skill
-  (your own and shared skills, searchable), Connectors (focus the chat on one connected
-  app) and Ground in wiki (the one-shot wiki toggle). It sits beside the existing paperclip,
-  wiki and plug buttons and drives the SAME state they do, so the two never disagree.
+  The composer's "+" menu, after the Claude / ChatGPT one: the one place to add to the next
+  message. Add files or photos (the host's own file picker), Use a skill (your own and
+  shared skills, searchable), Connectors (focus the chat on one connected app) and Ground
+  in wiki, a check item like Claude's memory toggle (one-shot: the next answer only).
+  Whatever is on shows as a pill beside the button (SkillPill; × clears it) - the PWA,
+  whose composer row is too narrow, turns these off and shows them above its input.
 
   Purely presentational: the host passes the lists and current picks, and acts on the
-  events. A chosen skill shows as a pill (SkillPill) beside the button (× clears it); the host puts its
-  "/skill_name" token on the next message, the token the server already resolves and checks
-  (jarvis.chat.custom_skills.invoked_skill_slugs). Shared by the desktop chat and the PWA
-  (through @shared); colours fall back from the desktop palette to the PWA's.
+  events. A chosen skill rides on the next message as its "/skill_name" token, the token
+  the server already resolves and checks (jarvis.chat.custom_skills.invoked_skill_slugs).
+  The panel lines up with the left edge of the composer it sits in (.jv-composer) and
+  opens above it. Shared by the desktop chat and the PWA (through @shared); colours fall
+  back from the desktop palette to the PWA's.
 -->
 <template>
 	<div ref="root" class="jv-plus">
@@ -38,14 +40,36 @@
 				<path d="M12 5v14M5 12h14" />
 			</svg>
 		</button>
-		<SkillPill
-			v-if="selectedSkill && showPill"
-			:name="selectedSkill"
-			:disabled="disabled"
-			@clear="emit('skill', null)"
-		/>
+		<template v-if="showPill">
+			<SkillPill
+				v-if="selectedSkill"
+				:name="selectedSkill"
+				:disabled="disabled"
+				@clear="emit('skill', null)"
+			/>
+			<SkillPill
+				v-if="wikiOn"
+				kind="wiki"
+				name="Wiki"
+				:disabled="disabled"
+				@clear="emit('wiki', false)"
+			/>
+			<SkillPill
+				v-if="focus"
+				kind="connector"
+				:name="focus.label"
+				:disabled="disabled"
+				@clear="emit('connector', null)"
+			/>
+		</template>
 
-		<div v-if="open" class="jv-plus-panel" role="menu" :aria-label="panelLabel">
+		<div
+			v-if="open"
+			class="jv-plus-panel"
+			role="menu"
+			:aria-label="panelLabel"
+			:style="panelStyle"
+		>
 			<!-- main list -->
 			<template v-if="view === 'main'">
 				<button
@@ -84,30 +108,48 @@
 						/>
 					</svg>
 					<span class="jv-plus-label">Connectors</span>
-					<span v-if="focusedConnector" class="jv-plus-hint">{{
-						focusedConnector.label
-					}}</span>
+					<span v-if="focus" class="jv-plus-hint">{{ focus.label }}</span>
 					<svg v-bind="iconAttrs" class="jv-plus-chev" aria-hidden="true">
 						<path d="m9 18 6-6-6-6" />
 					</svg>
 				</button>
-				<button
-					v-if="wikiAvailable"
-					type="button"
-					role="menuitemcheckbox"
-					class="jv-plus-item"
-					:aria-checked="String(wikiOn)"
-					@click="choose('wiki')"
-				>
-					<svg v-bind="iconAttrs" aria-hidden="true">
-						<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-						<path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z" />
-					</svg>
-					<span class="jv-plus-label">Ground in wiki</span>
-					<span class="jv-plus-switch" :class="{ on: wikiOn }" aria-hidden="true"
-						><span
-					/></span>
-				</button>
+				<template v-if="wikiAvailable || wikiEmpty">
+					<div class="jv-plus-sep" role="separator" />
+					<!-- a check item (Claude's memory toggle): ticked = the next answer is
+					     grounded in the company wiki; an empty wiki shows why it can't be -->
+					<button
+						type="button"
+						role="menuitemcheckbox"
+						class="jv-plus-item jv-plus-item--two"
+						:class="{ 'jv-plus-item--off': !wikiAvailable }"
+						:aria-checked="String(wikiAvailable && wikiOn)"
+						:aria-disabled="String(!wikiAvailable)"
+						@click="wikiAvailable && choose('wiki')"
+					>
+						<svg v-bind="iconAttrs" aria-hidden="true">
+							<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+							<path
+								d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"
+							/>
+						</svg>
+						<span class="jv-plus-two">
+							<span class="jv-plus-label">Ground in wiki</span>
+							<span class="jv-plus-desc">{{
+								wikiAvailable
+									? "Answer the next message from your wiki"
+									: "No wiki pages yet"
+							}}</span>
+						</span>
+						<svg
+							v-if="wikiAvailable && wikiOn"
+							v-bind="iconAttrs"
+							class="jv-plus-check"
+							aria-hidden="true"
+						>
+							<path d="M20 6 9 17l-5-5" />
+						</svg>
+					</button>
+				</template>
 			</template>
 
 			<!-- skills -->
@@ -198,7 +240,7 @@
 				</div>
 				<div class="jv-plus-list">
 					<button
-						v-if="focusedConnector"
+						v-if="focus"
 						type="button"
 						role="menuitem"
 						class="jv-plus-item"
@@ -215,7 +257,7 @@
 						type="button"
 						role="menuitemradio"
 						class="jv-plus-item"
-						:aria-checked="String(c.key === connectorKey)"
+						:aria-checked="String(c.key === focus?.key)"
 						@click="pickConnector(c)"
 					>
 						<!-- the app's own mark (connectorLogos.js, as ConnectorLogo draws it), else the plug -->
@@ -237,7 +279,7 @@
 						</svg>
 						<span class="jv-plus-label">{{ c.label }}</span>
 						<svg
-							v-if="c.key === connectorKey"
+							v-if="c.key === focus?.key"
 							v-bind="iconAttrs"
 							class="jv-plus-check"
 							aria-hidden="true"
@@ -273,14 +315,17 @@ const props = defineProps({
 	selectedSkill: { type: String, default: "" },
 	// {key, label, preset}: connected apps this user can focus on.
 	connectors: { type: Array, default: () => [] },
-	connectorKey: { type: String, default: "" },
+	// The chat's connector focus, {key, label}, or null.
+	focus: { type: Object, default: null },
 	showConnectors: { type: Boolean, default: true },
+	// The wiki can ground answers (ui.wiki_state "ok"); empty: on, but no pages yet.
 	wikiAvailable: { type: Boolean, default: false },
+	wikiEmpty: { type: Boolean, default: false },
 	wikiOn: { type: Boolean, default: false },
 	canManageSkills: { type: Boolean, default: false },
 	canBrowseConnectors: { type: Boolean, default: false },
-	// The chosen skill's pill beside the button; a host with no room there (the PWA's
-	// composer row) renders SkillPill itself and turns this off.
+	// The pills for what is on (skill, wiki, app) beside the button; a host with no room
+	// there (the PWA's composer row) renders SkillPill itself and turns this off.
 	showPill: { type: Boolean, default: true },
 });
 // open: the menu opened (the host refreshes its lists). attach | manage-skills |
@@ -333,9 +378,21 @@ const shownSkills = computed(() => {
 });
 // Plain data, no frappe-ui (unlike ConnectorLogo's fallback), so the PWA can share this.
 const logoOf = (c) => CONNECTOR_LOGOS[c.preset] || null;
-const focusedConnector = computed(
-	() => props.connectors.find((c) => c.key === props.connectorKey) || null
-);
+// Line the panel up with the composer box it sits in (left edges flush) and open it just
+// above that box, not over the text being typed. Measured on open; without a composer
+// around it the panel simply opens above the button.
+const panelStyle = ref({});
+function placePanel() {
+	const box = root.value?.closest(".jv-composer");
+	if (!box) return (panelStyle.value = {});
+	const me = root.value.getBoundingClientRect();
+	const card = box.getBoundingClientRect();
+	// never closer than 12px to the screen's edge (the PWA's composer is full-width)
+	panelStyle.value = {
+		left: `${Math.round(Math.max(card.left, 12) - me.left)}px`,
+		bottom: `${Math.round(me.bottom - card.top) + 8}px`,
+	};
+}
 
 function toggle() {
 	if (props.disabled) return;
@@ -344,6 +401,7 @@ function toggle() {
 function show() {
 	open.value = true;
 	view.value = "main";
+	placePanel();
 	query.value = "";
 	emit("open");
 	document.addEventListener("pointerdown", onOutside, true);
@@ -525,30 +583,18 @@ onBeforeUnmount(() => {
 	flex: none;
 	color: var(--cta, var(--accent));
 }
-.jv-plus-switch {
-	flex: none;
-	width: 30px;
-	height: 18px;
-	border-radius: 9px;
-	background: var(--border-2, var(--border2));
-	position: relative;
-	transition: background 0.12s;
+.jv-plus-sep {
+	height: 1px;
+	margin: 4px 6px;
+	background: var(--border);
 }
-.jv-plus-switch > span {
-	position: absolute;
-	top: 2px;
-	left: 2px;
-	width: 14px;
-	height: 14px;
-	border-radius: 50%;
-	background: #fff;
-	transition: transform 0.12s;
+/* the wiki row while the wiki has no pages: shown, so the option is known, but inert */
+.jv-plus-item--off {
+	cursor: default;
+	opacity: 0.6;
 }
-.jv-plus-switch.on {
-	background: var(--cta, var(--accent));
-}
-.jv-plus-switch.on > span {
-	transform: translateX(12px);
+.jv-plus-item--off:hover {
+	background: transparent;
 }
 .jv-plus-head {
 	display: flex;

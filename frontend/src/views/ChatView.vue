@@ -3393,18 +3393,20 @@
 							</div>
 						</template>
 						<template #left-toolbar="{ pickFiles }">
-							<!-- The "+" menu (Claude / ChatGPT style): files, a skill, a connector
-							     focus and wiki grounding in one place. It drives the same state as
-							     the paperclip, wiki and plug buttons beside it, so they agree. A
-							     chosen skill rides on the next message as its "/skill_name" token
-							     (see send(): withSkillToken). -->
+							<!-- The "+" menu (Claude / ChatGPT style), the one place to add to a
+							     message: files, a skill, a connector focus, and wiki grounding as a
+							     check item. What is on shows as pills beside it (× clears). A chosen
+							     skill rides on the next message as its "/skill_name" token (see
+							     send(): withSkillToken); wiki is one-shot (groundNextTurn); the
+							     connector focus holds for the chat (setConnectorFocus). -->
 							<ComposerPlusMenu
 								:disabled="holdActive"
 								:skills="customSkills"
 								:selected-skill="armedSkill"
 								:connectors="connectorFocusOptions"
-								:connector-key="connectorFocus?.key || ''"
+								:focus="connectorFocus"
 								:wiki-available="!!ui.wiki_enabled"
+								:wiki-empty="wikiEmpty"
 								:wiki-on="groundNextTurn"
 								can-manage-skills
 								can-browse-connectors
@@ -3416,257 +3418,6 @@
 								@manage-skills="router.push('/skills')"
 								@browse-connectors="browseConnectors"
 							/>
-							<button
-								class="jv-iconbtn"
-								title="Attach file"
-								:disabled="holdActive"
-								@click="pickFiles"
-								style="
-									width: 30px;
-									height: 30px;
-									display: flex;
-									align-items: center;
-									justify-content: center;
-									background: transparent;
-									border: none;
-									border-radius: 7px;
-									cursor: pointer;
-									color: var(--text-3);
-								"
-							>
-								<svg
-									width="17"
-									height="17"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.7"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path
-										d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"
-									/>
-								</svg>
-							</button>
-							<!-- Empty wiki is the one unavailable state the USER can fix (write a
-							     page, or answer the "worth remembering?" nudge), so it fades with
-							     a self-serve hint instead of "ask your administrator". Feature
-							     switched off / error stay hidden. -->
-							<button
-								v-if="wikiEmpty"
-								class="jv-iconbtn jv-unavailable"
-								aria-disabled="true"
-								title="No wiki pages yet"
-								aria-label="No wiki pages yet"
-								style="
-									width: 30px;
-									height: 30px;
-									display: flex;
-									align-items: center;
-									justify-content: center;
-									background: transparent;
-									border: none;
-									border-radius: 7px;
-									cursor: default;
-									color: var(--text-3);
-								"
-								@click="
-									notify(
-										`No wiki pages yet. I'll ask when something's worth remembering, or add one in Wiki.`,
-										{ type: 'info' }
-									)
-								"
-							>
-								<svg
-									width="16"
-									height="16"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.7"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-									<path
-										d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"
-									/>
-								</svg>
-							</button>
-							<button
-								v-if="ui.wiki_enabled"
-								class="jv-iconbtn"
-								:title="
-									groundNextTurn
-										? 'Wiki grounding armed. Your next message will be answered from the wiki (click to turn off)'
-										: 'Ground your next message on the org wiki'
-								"
-								:disabled="holdActive"
-								@click="groundNextTurn = !groundNextTurn"
-								:aria-pressed="String(groundNextTurn)"
-								:style="{
-									height: '30px',
-									display: 'flex',
-									alignItems: 'center',
-									gap: '4px',
-									padding: groundNextTurn ? '0 8px' : '0',
-									width: groundNextTurn ? 'auto' : '30px',
-									justifyContent: 'center',
-									background: 'transparent',
-									border: groundNextTurn ? '1px solid var(--cta)' : 'none',
-									borderRadius: '7px',
-									cursor: 'pointer',
-									color: groundNextTurn ? 'var(--cta)' : 'var(--text-3)',
-									fontSize: '12px',
-									fontWeight: '500',
-								}"
-							>
-								<svg
-									width="16"
-									height="16"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.7"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-									<path
-										d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"
-									/>
-								</svg>
-								<span v-if="groundNextTurn">Wiki</span>
-							</button>
-							<!-- Connector-focus pill: scope this conversation to one connected +
-							     enabled app (the bench limits the turn's tools to it, see sendCtx.focus_connector
-							     in send()). Connectors are a default feature, so this is always
-							     shown, even before the first app is connected, so the picker's
-							     "Browse connectors" row is the way in; a focus already armed still
-							     shows the pill so it stays clearable even if that connector was
-							     since disabled. The pill's
-							     border/background live on this wrapping span (not on either
-							     button), because Composer.vue's own convention is that a remove
-							     control is a SIBLING button, never nested inside the one it sits
-							     on - the ×, below, is exactly that sibling, not a nested control.
-
-							     The picker itself is a frappe-ui Dropdown (same idiom as the
-							     header's support pill above) rather than a hand-rolled overlay:
-							     this span is its default-slot trigger, so open/close and
-							     outside-click/Escape are the component's, not ours - see
-							     connectorFocusMenuOptions and onConnectorFocusOpenChange below.
-							     side="top" because this toolbar sits at the BOTTOM of the
-							     composer, unlike the header pill which opens downward. The as-
-							     child trigger attaches its open-on-click behaviour to this span,
-							     so a click on either inner button bubbles up and opens the menu -
-							     the × must stop that bubbling (.stop) or clearing focus would
-							     reopen the picker in the same click. -->
-							<Dropdown
-								:options="connectorFocusMenuOptions"
-								side="top"
-								@update:open="onConnectorFocusOpenChange"
-							>
-								<span
-									class="jv-connfocus-pill"
-									:class="{ 'jv-connfocus-pill--on': connectorFocus }"
-									:style="{
-										display: 'flex',
-										alignItems: 'center',
-										height: '30px',
-										padding: connectorFocus ? '0 2px 0 8px' : '0',
-										borderRadius: '7px',
-										border: connectorFocus
-											? '1px solid var(--border)'
-											: 'none',
-										background: connectorFocus
-											? 'var(--surface-1)'
-											: 'transparent',
-										color: connectorFocus ? 'var(--text)' : 'var(--text-3)',
-									}"
-								>
-									<button
-										class="jv-iconbtn"
-										:title="
-											connectorFocus
-												? `Focused on ${connectorFocus.label}. Click to change.`
-												: 'Focus this chat on one connected app'
-										"
-										:aria-pressed="String(!!connectorFocus)"
-										:style="{
-											height: connectorFocus ? '26px' : '30px',
-											display: 'flex',
-											alignItems: 'center',
-											gap: '4px',
-											padding: 0,
-											width: connectorFocus ? 'auto' : '30px',
-											justifyContent: 'center',
-											background: 'transparent',
-											border: 'none',
-											borderRadius: connectorFocus ? '6px' : '7px',
-											cursor: 'pointer',
-											color: 'inherit',
-											fontSize: '12px',
-											fontWeight: '500',
-										}"
-									>
-										<ConnectorLogo
-											v-if="connectorFocus"
-											:preset="connectorFocus.preset"
-											:size="14"
-										/>
-										<svg
-											v-else
-											width="16"
-											height="16"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.7"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="M12 22v-5" />
-											<path d="M9 8V2" />
-											<path d="M15 8V2" />
-											<path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
-										</svg>
-										<span
-											v-if="connectorFocus"
-											style="
-												max-width: 100px;
-												overflow: hidden;
-												text-overflow: ellipsis;
-												white-space: nowrap;
-											"
-											>{{ connectorFocus.label }}</span
-										>
-									</button>
-									<button
-										v-if="connectorFocus"
-										class="jv-iconbtn"
-										title="Clear focus"
-										aria-label="Clear connector focus"
-										style="
-											width: 20px;
-											height: 20px;
-											display: flex;
-											align-items: center;
-											justify-content: center;
-											background: transparent;
-											border: none;
-											border-radius: 50%;
-											cursor: pointer;
-											color: inherit;
-											font-size: 13px;
-											line-height: 1;
-										"
-										@click.stop="setConnectorFocus(null)"
-									>
-										×
-									</button>
-								</span>
-							</Dropdown>
 							<!-- Auto mode (#581): last in this group, after connectors. Same shape and
 							     on-state colour as the Wiki toggle; the icon is the two filled
 							     triangles Claude Code shows for its auto mode. -->
@@ -14550,9 +14301,7 @@ function _saveConnectorFocusFor(id, row) {
 		else localStorage.removeItem(_connectorFocusStorageKey(id));
 	} catch (e) {}
 }
-// Called from the picker (a row click) and from the pill's own × (row = null).
-// The Dropdown closes itself on either path (item select or the ×'s own
-// click), so there is no open flag to clear here.
+// Called from the "+" menu's connector list (a row) and from the focus pill's × (null).
 function setConnectorFocus(row) {
 	connectorFocus.value = row
 		? { key: row.key, label: row.label, preset: row.preset || "" }
@@ -14578,91 +14327,16 @@ async function loadConnectorFocusOptions() {
 		connectorFocusOptions.value = [];
 	}
 }
-// Same plug mark as the pill's own unfocused-state icon (see the template),
-// as a bare render function so it can go through an item's `slots.prefix`
-// below - Dropdown's `icon` field renders a component but passes it no
-// props, and a bare svg has none to pass, so this needs no wrapper.
-function _connectorFocusPlugIcon() {
-	return h(
-		"svg",
-		{
-			width: 16,
-			height: 16,
-			viewBox: "0 0 24 24",
-			fill: "none",
-			stroke: "currentColor",
-			"stroke-width": "1.7",
-			"stroke-linecap": "round",
-			"stroke-linejoin": "round",
-		},
-		[
-			h("path", { d: "M12 22v-5" }),
-			h("path", { d: "M9 8V2" }),
-			h("path", { d: "M15 8V2" }),
-			h("path", { d: "M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" }),
-		]
-	);
-}
-// Dropdown items for the picker: "Clear focus" first (only when a focus is
-// armed), one row per usable connected app, then an always-shown "Browse
-// connectors" row in its own group so the divide-y border lands in the same
-// place its old footer border did. A logo needs a per-row `preset` prop, and
-// the plain `icon` field has no way to carry one, so both icons render
-// through the item's own `slots.prefix` (same idiom supportMenuOptions above
-// uses for its `slots.suffix` count) instead of `icon`.
-const connectorFocusMenuOptions = computed(() => {
-	const rows = [];
-	if (connectorFocus.value) {
-		rows.push({ label: "Clear focus", onClick: () => setConnectorFocus(null) });
-	}
-	if (connectorFocusOptions.value.length) {
-		for (const row of connectorFocusOptions.value) {
-			rows.push({
-				label: row.label,
-				selected: connectorFocus.value?.key === row.key,
-				onClick: () => setConnectorFocus(row),
-				slots: { prefix: () => h(ConnectorLogo, { preset: row.preset, size: 16 }) },
-			});
-		}
-	} else {
-		rows.push({ label: "No connected apps yet.", disabled: true });
-	}
-	return [
-		{ group: "", hideLabel: true, items: rows },
-		{
-			group: "",
-			hideLabel: true,
-			items: [
-				{
-					label: "Browse connectors",
-					onClick: browseConnectors,
-					slots: { prefix: () => h(_connectorFocusPlugIcon) },
-				},
-			],
-		},
-	];
-});
-// Refetch on every open: an app connected in Settings a moment ago must show
-// up here without a page reload (the mount-time prefetch only decides the
-// pill's first paint). Hooked to the Dropdown's own update:open - fired by
-// reka-ui however the menu opened (click, keyboard) or closed (selection,
-// outside click, Escape) - rather than a manual toggle, so there is no open
-// flag here to keep in sync with the component's own state.
-// The "+" menu opened: fresh skills and connected apps, as the plug picker refetches on
-// open, so one added a moment ago in Settings shows without a reload.
+// The "+" menu opened: fresh skills and connected apps on every open, so one added a
+// moment ago in Settings shows without a reload (the mount-time prefetch only decides
+// the first paint).
 function onPlusMenuOpen() {
 	mention.value = { ...mention.value, open: false };
 	loadCustomSkills();
 	connectorFocusLoaded.value = false;
 	loadConnectorFocusOptions();
 }
-function onConnectorFocusOpenChange(open) {
-	if (!open) return;
-	mention.value = { ...mention.value, open: false };
-	connectorFocusLoaded.value = false;
-	loadConnectorFocusOptions();
-}
-// Footer row of the picker (both the populated and empty states). Uses
+// The connector list's "Browse connectors" row (both the populated and empty states). Uses
 // store.openSettings, not the local settingsTab ref: settingsTab only
 // drives ChatView's own macroruns-poll gate, it is not wired to the
 // hoisted SettingsDialog (which reads store.settingsSection, written by
@@ -15276,20 +14950,6 @@ onUnmounted(() => {
 }
 .jv-iconbtn:hover svg {
 	stroke: var(--surface) !important;
-}
-/* The FOCUSED connector pill (--on) is a labeled chip, not a bare icon. The
-   default .jv-iconbtn:hover bold-inverts to a solid var(--text) fill, which
-   painted the whole pill black on the light theme. Give its inner buttons a
-   subtle, theme-aware surface hover instead, keeping the accent border and
-   label readable. Unfocused, the pill is a bare icon and falls through to the
-   shared .jv-iconbtn hover like Wiki and Auto. (Dark has a matching override
-   below.) */
-.jv-connfocus-pill--on .jv-iconbtn:hover {
-	background: var(--surface-2) !important;
-	color: var(--cta) !important;
-}
-.jv-connfocus-pill--on .jv-iconbtn:hover svg {
-	stroke: var(--cta) !important;
 }
 .jv-ctxbtn:hover {
 	background: var(--surface-2);
@@ -18379,16 +18039,6 @@ onUnmounted(() => {
 }
 .jv-dark .jv-modelpill:hover span {
 	color: var(--text) !important;
-}
-/* Focused connector chip hover in dark: subtle surface, accent kept (matches
-   the light-theme override above rather than the bold neutral iconbtn hover).
-   The bare unfocused icon uses the shared .jv-dark .jv-iconbtn hover. */
-.jv-dark .jv-connfocus-pill--on .jv-iconbtn:hover {
-	background: var(--surface-3) !important;
-	color: var(--cta) !important;
-}
-.jv-dark .jv-connfocus-pill--on .jv-iconbtn:hover svg {
-	stroke: var(--cta) !important;
 }
 .jv-dark .jv-confirm-yes:hover,
 .jv-dark .jv-action-primary:hover {
