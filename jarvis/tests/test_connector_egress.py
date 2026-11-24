@@ -7,6 +7,7 @@ resolver treats as the same host (built by ``_spellings``) must get the same ans
 
 from __future__ import annotations
 
+import fnmatch
 import ipaddress
 import random
 import socket
@@ -261,11 +262,14 @@ class TestForeignGlobRules(unittest.TestCase):
 				self.assertTrue(egress.egress_match("plain.com", rule))
 				self.assertFalse(egress.egress_match(host, rule[1:] + "\nplain.com"))
 
-	def test_ascii_alternative_in_a_mixed_class_is_not_blocked(self):
-		# Behaviour note: write the ASCII spelling as its own rule.
-		self.assertFalse(egress.egress_match("\u00fcber.com", "![\u00fcu]ber.com"))
-		self.assertTrue(egress.egress_match("uber.com", "![\u00fcu]ber.com"))
-		self.assertFalse(egress.egress_match("uber.com", "![\u00fcu]ber.com\n!uber.com"))
+	def test_mixed_class_deny_keeps_its_ascii_members(self):
+		rule = "![\u00fcu]ber.com"
+		for host in ("uber.com", "UBER.com.", "\u00fcber.com", "xn--ber-goa.com"):
+			with self.subTest(host=host):
+				self.assertFalse(egress.egress_match(host, rule))
+		self.assertTrue(egress.egress_match("cyber.com", rule))
+		self.assertFalse(egress.egress_match("abc\u00fccd.com", "!*\u00fc*.com"))
+		self.assertFalse(egress.egress_match("uber.xn--bcher-kva.de", "![\u00fcu]ber.b\u00fccher.de"))
 
 	def test_allow_matches_nothing(self):
 		self.assertFalse(egress.egress_match("\u00fcber.com", "*\u00fc*.com"))
@@ -278,6 +282,74 @@ class TestForeignGlobRules(unittest.TestCase):
 
 	def test_fullwidth_wildcard_is_a_wildcard(self):
 		self.assertFalse(egress.egress_match("a.evil.com", "!\uff0a.evil.com"))
+
+
+def _develop_allows(host: str, raw: str) -> bool:
+	"""The deny-list verdict on ``develop`` before host normalisation (an oracle)."""
+	host = host.lower()
+	for line in raw.splitlines():
+		rule = line.strip().lower()
+		if rule.startswith("!"):
+			rule = rule[1:].strip()
+			if rule and (fnmatch.fnmatch(host, rule) or host == rule or host.endswith("." + rule)):
+				return False
+	return True
+
+
+class TestOnlyAddsBlocks(unittest.TestCase):
+	"""Every deny the old grammar gave is still a deny."""
+
+	RULES = (
+		"!evil.com",
+		"!*.example.com",
+		"!a?b.com",
+		"![\u00fcu]ber.com",
+		"![\u00fcu]ber.b\u00fccher.de",
+		"!*\u00fc*.com",
+		"!*\u00fc*",
+		"!\u00fc*.com",
+		"!b\u00fccher.de",
+		"!stra\u00dfe.de",
+		"!*\u05e9\u05dc\u05d5\u05dd*.com",
+		"!34.1.2.3",
+		"!34.1.2.*",
+		"!34.1.2.0/24",
+		"!2606:4700:4700::*",
+		"![a:b]",
+		"!*\u00ad*",
+		"!" + "9" * 300,
+	)
+	HOSTS = (
+		"evil.com",
+		"sub.evil.com",
+		"a.example.com",
+		"a\u00adb.com",
+		"a\u00dfb.com",
+		"uber.com",
+		"\u00fcber.com",
+		"xn--ber-goa.com",
+		"uber.b\u00fccher.de",
+		"uber.xn--bcher-kva.de",
+		"abc\u00fccd.com",
+		"\u00fcber.org",
+		"b\u00fccher.de",
+		"stra\u00dfe.de",
+		"\u05e9\u05dc\u05d5\u05dd.com",
+		"34.1.2.3",
+		"x.34.1.2.3",
+		"34.1.2.evil",
+		"2606:4700:4700::1",
+		"a",
+		"ok.com",
+		"9" * 300,
+	)
+
+	def test_new_denied_is_a_superset_of_develop_denied(self):
+		for rule in self.RULES:
+			for host in self.HOSTS:
+				if not _develop_allows(host, rule):
+					with self.subTest(rule=rule, host=host):
+						self.assertFalse(egress.egress_match(host, rule))
 
 
 class TestRuleProblems(unittest.TestCase):
