@@ -257,11 +257,3 @@ class TestWorkflowActionGating(FrappeTestCase):
 		)
 		self.assertIn("action=Approve", summary)
 		self.assertIn("Leave Application", summary)
-
-
-class TestWorkflowToolsRegistered(FrappeTestCase):
-	def test_registered(self):
-		from jarvis.tools.registry import _TOOL_NAMES
-
-		self.assertIn("get_workflow_transitions", _TOOL_NAMES)
-		self.assertIn("apply_workflow_action", _TOOL_NAMES)

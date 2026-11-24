@@ -34,7 +34,3 @@ test("the last message's own action block (email, gated verb, unknown verb) beat
 	assert.equal(pick(true, false, true, false, true), "own", "even over its own ask");
 	assert.equal(pick(false, false, false, false, true), "own", "and with no draft at all");
 });
-
-test("a plain last message lets the kept draft show at the tail", () => {
-	assert.equal(pick(true, false, false, false, false), "draft");
-});

@@ -16,8 +16,7 @@
 // It also fences the ONE path this rewrite must not regress: the payload-bound
 // captureSentInPayload → acknowledge release, which has its own extensive suites.
 //
-// Run: `node --test voiceDictationLifecycle.test.js`, or via the python suite
-// (jarvis/tests/test_voice_dictation_lifecycle_client.py subprocess-runs it every CI run).
+// Run: `node --test voiceDictationLifecycle.test.js`, or via `npm run test:node`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

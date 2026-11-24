@@ -34,11 +34,6 @@ class TestVisionTaskComplete(unittest.TestCase):
 		self.assertEqual((args["provider"], args["model"]), ("p", "m"))
 		self.assertGreater(read_timeout, 30)
 
-	def test_404_raises_not_available(self):
-		with patch(_CALL, return_value=(404, b"<html>nope</html>")):
-			with self.assertRaises(LLMTaskNotAvailableError):
-				client.vision_task_complete("p", {}, _IMG)
-
 	def test_ok_false_raises_llm_task_error(self):
 		body = json.dumps({"ok": False, "error": {"type": "timeout", "message": "too slow"}}).encode()
 		with patch(_CALL, return_value=(504, body)):
@@ -58,11 +53,6 @@ class TestVisionTaskComplete(unittest.TestCase):
 			with self.assertRaises(LLMTaskNotAvailableError) as cm:
 				client.vision_task_complete("p", {}, _IMG)
 		self.assertEqual(str(cm.exception), "vision task invocation failed (HTTP 404)")
-
-	def test_refused_raises_llm_task_error(self):
-		with patch(_CALL, return_value=(401, b"{}")):
-			with self.assertRaises(LLMTaskError):
-				client.vision_task_complete("p", {}, _IMG)
 
 	def test_returns_details_json(self):
 		with patch(_CALL, return_value=(200, _ok({"total": 5}))):

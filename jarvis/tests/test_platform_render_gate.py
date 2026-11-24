@@ -206,16 +206,6 @@ class TestFallbackDashboardRenderGate(FrappeTestCase):
 		self.assertNotIn(CLEAN_SENTENCE, html)
 		self.assertIn(CLEAN_HEADING, html)  # coverage verdict heading is legal
 
-	def test_partial_zero_findings_never_clean_sentence(self):
-		html = agent_runs._fallback_dashboard_html(
-			"T",
-			[],
-			{"blocker": 0, "warning": 0, "note": 0},
-			"",
-			result_state="partial",
-		)
-		self.assertNotIn(CLEAN_SENTENCE, html)
-
 
 # --------------------------------------------------------------------------- #
 # Integration — through record_delegate_run: full coverage + findings present

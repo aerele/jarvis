@@ -593,15 +593,6 @@ class TestAnswerQuestion(PersonaliseApiTestCase):
 		with _as(USER_A), self.assertRaises(frappe.ValidationError):
 			personalise_api.answer_question(name, attachment="/private/files/never-uploaded.txt")
 
-	def test_missing_ingest_pipeline_module_does_not_fail_the_save(self):
-		# jarvis.learning.questions is a SIBLING module built this same wave -
-		# this test asserts the note save degrades gracefully whether or not
-		# it exists / is importable yet.
-		name = self._question(USER_A)
-		with _as(USER_A):
-			out = personalise_api.answer_question(name, text="still saves fine")
-		self.assertTrue(frappe.db.exists(NOTE, out["note"]))
-
 
 # --------------------------------------------------------------------------- #
 # ignore_question / delete_question

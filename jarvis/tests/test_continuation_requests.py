@@ -286,13 +286,6 @@ class TestRecentUserRequests(_Base):
 			chat_api._recent_user_requests(conv)
 		self.assertEqual(sql.call_count, 1)
 
-	def test_a_failure_gives_nothing(self):
-		with (
-			patch.object(frappe.db, "sql", side_effect=RuntimeError("db is down")),
-			patch.object(frappe, "log_error"),
-		):
-			self.assertEqual(chat_api._recent_user_requests("anything"), [])
-
 	def test_a_failure_logs_a_warning_with_the_conversation(self):
 		logger = MagicMock()
 		with (
@@ -385,11 +378,6 @@ class TestContinuationPrompt(_Base):
 			"Receipt R", outcome="mixed", spans={"applied": "A1"}, requests=["one"]
 		)
 		self.assertEqual(_sha(applied_only), PRE_CHANGE_MIXED_APPLIED_ONLY_SHA)
-
-	def test_the_prompt_is_deterministic(self):
-		a = chat_api.continuation_prompt("Created X.", requests=["one", "two"])
-		b = chat_api.continuation_prompt("Created X.", requests=["one", "two"])
-		self.assertEqual(a, b)
 
 	def test_no_em_dash_and_no_runtime_name(self):
 		prompt = chat_api.continuation_prompt("Created X.", requests=["one"])

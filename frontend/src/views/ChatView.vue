@@ -6108,7 +6108,7 @@ const currentMsgId = ref(null); // in-flight assistant row id (from run:start) �
 const errorMeta = ref({}); // { [message_id]: { code, changed_data } } from a live run:error (not persisted; a refresh falls back to classifying the error string)
 // Pump streaming (Relay Pump) end-to-end epoch/seq fence (CDX-3 + CDX-12). The pure fence
 // logic lives in @/utils/eventFence.js (extracted so it is unit-tested by a real node test
-// — jarvis/tests/test_event_fence_client.py runs frontend/src/utils/eventFence.test.js).
+// — see frontend/src/utils/eventFence.test.js).
 // The fence is RUN-SCOPED — ONE entry per run_id — and is applied to EVERY pump event type
 // (deltas, run:start/recovering/error/end, and ALL tool events incl. jarvis__*). CDX-12:
 // the FIRST terminal at the current epoch is accepted on seq equality (it shares the delta
@@ -18431,6 +18431,15 @@ onUnmounted(() => {
 /* The two lines that already carry a 14px left margin keep it on top of the indent. */
 .jv-thread-inner > :is(.jv-stack-hint, .jv-pending-older-note) {
 	margin-left: calc(var(--jv-reply-indent) + 14px);
+}
+/* A card or note right after a reply belongs to that reply: it sits 8px under the reply's hover
+   row (time, copy), not a full thread gap (26px) below it. The hover row keeps its place. Only the
+   first one after a reply moves; the next items keep the thread gap. A reply with no hover row
+   (still streaming) is left alone: there the row's own height is not there to keep the distance. */
+.jv-thread-inner
+	> .jv-amsg:has(.jv-metabar:not(:empty))
+	+ :is(.jv-receipt, .jv-toolfail, .jv-action, .jv-tool-draft, .jv-fbw, .jv-rrc) {
+	margin-top: -18px;
 }
 .jv-tool-draft :deep(.dc) {
 	margin: 0;

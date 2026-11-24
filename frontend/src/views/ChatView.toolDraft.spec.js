@@ -732,4 +732,19 @@ describe("every agent-side card and note starts where the agent's replies do", (
 		for (const left of [".jv-umsg", ".jv-ububble", ".jv-daydivider", ".jv-macrobar"])
 			expect(listed, left).not.toContain(left);
 	});
+
+	// Break: a new card type gets the indent but not the pull, so it hangs a full thread gap below
+	// its reply while its siblings sit close.
+	it("the card or note pulled up under a reply is the same list that gets the indent", () => {
+		const cards =
+			/\.jv-thread-inner > :is\(([^)]+)\) \{\s*margin-left: var\(--jv-reply-indent\)/.exec(
+				src
+			)?.[1];
+		const pulled =
+			/\.jv-thread-inner\s*> \.jv-amsg:has\(\.jv-metabar:not\(:empty\)\)\s*\+ :is\(([^)]+)\) \{\s*margin-top: -\d+px;/.exec(
+				src
+			)?.[1];
+		expect(cards).toBeTruthy();
+		expect(pulled).toBe(cards);
+	});
 });
