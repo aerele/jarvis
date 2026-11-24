@@ -1445,6 +1445,7 @@ def _assemble_prompt(
 		binding,
 		msg_row.get("origin"),
 		live_draft_clause,
+		context=context,
 	)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
@@ -2885,7 +2886,7 @@ def _runs_without_cards(conv, binding) -> bool:
 	)
 
 
-def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
+def _drafting_clause(conv, binding, origin, live_draft_clause: str = "", *, context=None) -> str:
 	"""``DRAFTING_CLAUSE`` when the site flag ``jarvis_draft_cards`` is on and an agent call to
 	``create_doc`` / ``update_doc`` in this turn would park a draft card, else "".
 
@@ -2902,6 +2903,9 @@ def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
 	change) gets nothing: the note forbids the block, the reminder asks for it, and the site
 	shows that one card either way. A waiting parked draft gets both: its reminder says to
 	call the tool again only for a change, which agrees with "one draft at a time".
+
+	Also nothing on a turn with a connector focus (``context.focus_connector``: the gate refuses
+	``create_doc`` / ``update_doc`` then).
 
 	Also nothing on a turn whose message invokes exactly one armed skill: the gate offers "Approve
 	& run" on that write's card, and only the ordinary card has that control, so the write is not a
@@ -2920,9 +2924,12 @@ def _drafting_clause(conv, binding, origin, live_draft_clause: str = "") -> str:
 		# A builder chat (the app's own ``_BUILDER_ORIGINS``: Dashboard Builder, Triggers) shows a
 		# draft card only as a title and a link to the full chat, so it keeps today's text. Imported
 		# here: the api module is where the set lives, and the import is lazy like this module's others.
+		from jarvis.chat import connector_focus
 		from jarvis.chat.api import _BUILDER_ORIGINS
 
 		if conv.get("origin_page") in _BUILDER_ORIGINS:
+			return ""
+		if connector_focus.focus_of(context):
 			return ""
 		if _TYPED_CHANGE in live_draft_clause:
 			return ""
