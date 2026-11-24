@@ -82,18 +82,27 @@ describe("ComposerPlusMenu", () => {
 		expect(w.find(".jv-plus-empty").text()).toContain("No skills yet");
 	});
 
-	test("the chosen skill shows as a pill whose × clears it, unless the host shows it", async () => {
-		make({ selectedSkill: "invoicing" });
-		expect(w.find(".jv-skillpill").text()).toContain("invoicing");
-		await w.find(".jv-skillpill-x").trigger("click");
+	test("what is on shows as pills beside +, each × clears its own; off when the host shows them", async () => {
+		make({ selectedSkill: "invoicing", wikiOn: true, focus: { key: "gh", label: "GitHub" } });
+		const pills = w.findAll(".jv-skillpill");
+		expect(pills.map((p) => p.find(".jv-skillpill-text").text())).toEqual([
+			"invoicing",
+			"Wiki",
+			"GitHub",
+		]);
+		await pills[0].find(".jv-skillpill-x").trigger("click");
+		await pills[1].find(".jv-skillpill-x").trigger("click");
+		await pills[2].find(".jv-skillpill-x").trigger("click");
 		expect(w.emitted("skill")).toEqual([[null]]);
+		expect(w.emitted("wiki")).toEqual([[false]]);
+		expect(w.emitted("connector")).toEqual([[null]]);
 		w.unmount();
-		make({ selectedSkill: "invoicing", showPill: false });
+		make({ selectedSkill: "invoicing", wikiOn: true, showPill: false });
 		expect(w.find(".jv-skillpill").exists()).toBe(false);
 	});
 
 	test("connectors: pick one, see it ticked, clear it", async () => {
-		make({ connectorKey: "sl" });
+		make({ focus: { key: "sl", label: "Slack" } });
 		await openMenu();
 		expect(w.findAll(".jv-plus-hint").map((h) => h.text())).toContain("Slack");
 		await w.findAll(".jv-plus-item")[2].trigger("click");
@@ -108,17 +117,54 @@ describe("ComposerPlusMenu", () => {
 		expect(w.emitted("connector")[1]).toEqual([null]);
 	});
 
-	test("wiki toggles from its current state, and is absent when the wiki is off", async () => {
+	test("wiki is a check item: ticked when on, a tap flips it", async () => {
 		make({ wikiOn: true });
 		await openMenu();
 		const wiki = w.findAll(".jv-plus-item")[3];
+		expect(wiki.attributes("role")).toBe("menuitemcheckbox");
 		expect(wiki.attributes("aria-checked")).toBe("true");
+		expect(wiki.find(".jv-plus-check").exists()).toBe(true);
 		await wiki.trigger("click");
 		expect(w.emitted("wiki")).toEqual([[false]]);
+		w.unmount();
+		make({ wikiOn: false });
+		await openMenu();
+		expect(w.findAll(".jv-plus-item")[3].find(".jv-plus-check").exists()).toBe(false);
+	});
+
+	test("an empty wiki shows why, and does nothing; a wiki that is off is not offered", async () => {
+		make({ wikiAvailable: false, wikiEmpty: true });
+		await openMenu();
+		const wiki = w.findAll(".jv-plus-item")[3];
+		expect(wiki.text()).toContain("No wiki pages yet");
+		expect(wiki.attributes("aria-disabled")).toBe("true");
+		await wiki.trigger("click");
+		expect(w.emitted("wiki")).toBeUndefined();
 		w.unmount();
 		make({ wikiAvailable: false });
 		await openMenu();
 		expect(labels()).not.toContain("Ground in wiki");
+	});
+
+	test("the panel lines up with the composer box and opens above it", async () => {
+		const box = document.createElement("div");
+		box.className = "jv-composer";
+		document.body.appendChild(box);
+		w = mount(ComposerPlusMenu, { props: { skills }, attachTo: box });
+		box.getBoundingClientRect = () => ({ left: 100, top: 500, right: 700, bottom: 600 });
+		w.find(".jv-plus").element.getBoundingClientRect = () => ({
+			left: 112,
+			top: 560,
+			right: 142,
+			bottom: 590,
+		});
+		await openMenu();
+		const style = w.find(".jv-plus-panel").attributes("style");
+		expect(style).toContain("left: -12px");
+		expect(style).toContain("bottom: 98px"); // 590 - 500 + 8: just above the box
+		w.unmount();
+		box.remove();
+		w = null;
 	});
 
 	test("Escape steps back from a sub-list, then closes, wherever focus is", async () => {
