@@ -27,12 +27,11 @@ from unittest.mock import patch
 import frappe
 import frappe.installer
 
-from jarvis.payment_calendar import batch_permission, compatibility, read_log
+from jarvis.payment_calendar import batch_permission, compatibility, read_log, snapshot
 from jarvis.tests.batch_permission_fixtures import SI, BatchCase, clear_plan_memo
 from jarvis.tests.test_batch_permission_limits import PRIVATE_BREAKER, FakeClock, Recorder, redis
 
 SWITCH = batch_permission.SWITCH
-DB_CLASS = type(frappe.db._get_current_object())  # `frappe.db` is a proxy: patch the real class
 CUSTOMER = "Customer"
 EXPECT = (SI, CUSTOMER)
 WRITES = ("insert", "update", "delete", "replace", "alter", "create", "drop", "truncate")
@@ -67,12 +66,13 @@ class DifferentialCase(BatchCase):
 		self.evaluate = stack.enter_context(
 			patch.object(batch_permission, "_evaluate_batch", wraps=batch_permission._evaluate_batch)
 		)
-		# Patched on the class, never on the instance: `"rollback" in vars(frappe.db)` is how the code tells that
-		# a snapshot view is open, and it must stay as in production (false) in these tests.
-		self.commit = stack.enter_context(patch.object(DB_CLASS, "commit", autospec=True))
+		# Patched on the connection object itself: another test's preview sandbox leaves `commit` and `rollback`
+		# there, and a patch of the class would not be reached. The code tells an open snapshot view by
+		# `snapshot.view_is_open`, which must be false in these tests.
+		self.commit = stack.enter_context(patch.object(frappe.db, "commit"))
 		# The differential ends with a rollback; here that would also drop the uncommitted fixtures.
-		self.rollback = stack.enter_context(patch.object(DB_CLASS, "rollback", autospec=True))
-		self.assertNotIn("rollback", vars(frappe.db))
+		self.rollback = stack.enter_context(patch.object(frappe.db, "rollback"))
+		self.assertFalse(snapshot.view_is_open())
 		for patcher in (
 			patch.object(batch_permission, "BREAKER_KEY", PRIVATE_BREAKER),
 			patch.object(frappe.installer, "update_site_config", self.recorder),
@@ -393,7 +393,7 @@ class TestNothingIsWritten(DifferentialCase):
 		self.assertEqual(self.keys(), keys)
 		self.assertEqual(list(getattr(frappe.local, "pcal_permission_events", None) or []), events)
 		self.assertFalse(getattr(frappe.local, batch_permission.QUIET, False))
-		self.assertNotIn("rollback", vars(frappe.db))
+		self.assertFalse(snapshot.view_is_open())
 
 	def test_an_identity_failure_is_reported_and_nothing_is_written(self):
 		before, result = self.run_with(self.wrapper)

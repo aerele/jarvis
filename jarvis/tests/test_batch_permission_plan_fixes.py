@@ -292,7 +292,10 @@ class TestTranscribedBlocksCiteFrappe(BatchCase):
 				self.assertLessEqual(start, first)
 				self.assertLessEqual(first, last)
 				self.assertLessEqual(last, end)
-				self.assertEqual(cite["version"], frappe.__version__)
+				# The installed source is the judge of the ranges (above), so a point release of the same
+				# major line is fine: CI's image and a developer's bench rarely carry the same patch level.
+				# A cite of another major line is not.
+				self.assertEqual(cite["version"].split(".")[0], frappe.__version__.split(".")[0])
 
 	def test_every_cited_pin_is_a_pinned_name(self):
 		pinned = compatibility._PERMISSION_PINS["16"]

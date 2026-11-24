@@ -499,8 +499,38 @@ class FixtureCase(TestCase):
 			)
 
 
+# What `batch_permission` keeps for one request or job on `frappe.local`. `frappe.destroy` drops all of it
+# between requests; in a test process only a test can, so every `BatchCase` starts and ends clean.
+# `pcal_permission_plan_noted` (`_note_plan_reason`) has no constant.
+BATCH_LOCALS = (
+	batch_permission.TRIPPED,
+	batch_permission.FREEZE,
+	batch_permission.EVENTS,
+	batch_permission.QUIET,
+	batch_permission.STATS,
+	batch_permission.SAMPLE_SPENT,
+	batch_permission.SAMPLE_RUNS,
+	batch_permission.REFUSAL,
+	batch_permission.CONFIG_PENDING,
+	"pcal_permission_plan_noted",
+)
+
+
+def forget_local() -> None:
+	"""What `frappe.destroy` does to the state of the batch: nothing of one job reaches the next."""
+	for name in BATCH_LOCALS:
+		if hasattr(frappe.local, name):
+			delattr(frappe.local, name)
+	setattr(frappe.local, batch_permission.PLAN_MEMO, None)
+
+
 class BatchCase(FixtureCase):
 	"""The genuine Frappe functions are bound for the class: apps of this bench wrap some of them."""
+
+	def setUp(self):
+		super().setUp()
+		forget_local()
+		self.addCleanup(forget_local)
 
 	@classmethod
 	def setUpClass(cls):

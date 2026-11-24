@@ -240,8 +240,11 @@ def queue_event(operation: str, message: str) -> None:
 	"""
 	event = {"operation": operation, "message": message}
 	_local(EVENTS, list).append(event)
-	# The test that `routing._poison_view` uses for an open view; `differential` writes nothing at all.
-	if "rollback" not in vars(frappe.db) and not getattr(frappe.local, QUIET, False):
+	# The test of an open view is `snapshot.view_is_open`, as in `routing._poison_view`; `differential` writes
+	# nothing at all.
+	from jarvis.payment_calendar.snapshot import view_is_open
+
+	if not view_is_open() and not getattr(frappe.local, QUIET, False):
 		try:
 			write_event(event)
 			event["written"] = True

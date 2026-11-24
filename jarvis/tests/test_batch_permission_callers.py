@@ -24,6 +24,7 @@ from jarvis.tests.batch_permission_fixtures import (
 	hooks,
 	session_as,
 )
+from jarvis.tools._preview_sandbox import preview_sandbox
 
 CUSTOMER = "Customer"
 ALLOW_ALL = HOOK_PATH + "deny_listed"
@@ -178,6 +179,23 @@ class TestNoTestLeavesAnErrorLogRow(BatchCase):
 		self.assertEqual(
 			frappe.db.count("Error Log", {"method": ("like", "Payment Calendar batch permission%")}), rows
 		)
+
+
+class TestAnEventAfterAPreviewSandbox(BatchCase):
+	"""A preview sandbox leaves `commit` and `rollback` on `frappe.db`; that is not an open snapshot view."""
+
+	def test_an_event_outside_a_view_is_written_at_once_and_no_rollback_is_sent(self):
+		left = set(vars(frappe.db))
+		self.addCleanup(lambda: [vars(frappe.db).pop(name, None) for name in set(vars(frappe.db)) - left])
+		with preview_sandbox():
+			pass
+		with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as sql:
+			batch_permission.queue_event(
+				batch_permission.EVENT_PLAN, "permission plan runs per document: test"
+			)
+			routing_statements = [c.args[0].strip().lower() for c in sql.call_args_list if c.args]
+		self.error_log_once.assert_called_once()
+		self.assertEqual([s for s in routing_statements if s.startswith("rollback")], [])
 
 
 class TestFixtureBuildRetry(TestCase):

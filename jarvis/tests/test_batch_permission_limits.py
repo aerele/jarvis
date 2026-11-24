@@ -57,6 +57,7 @@ from jarvis.tests.batch_permission_fixtures import (
 	SI,
 	BatchCase,
 	clear_plan_memo,
+	forget_local,
 	hooks,
 	oracle,
 	session_as,
@@ -129,28 +130,15 @@ class Fault:
 		return patch.object(batch_permission, "_evaluate_batch", self)
 
 
-def forget_local():
-	"""What `frappe.destroy` does to the state of the batch: nothing of one job reaches the next."""
-	for name in (
-		batch_permission.TRIPPED,
-		batch_permission.FREEZE,
-		batch_permission.EVENTS,
-		batch_permission.STATS,
-		batch_permission.SAMPLE_RUNS,
-		batch_permission.REFUSAL,
-	):
-		if hasattr(frappe.local, name):
-			delattr(frappe.local, name)
-	setattr(frappe.local, batch_permission.PLAN_MEMO, None)
-
-
 @contextmanager
 def fake_view():
 	"""The marker of `snapshot.consistent_read` without its rollback (the fixtures are not committed).
 
-	Inside, `frappe.db.rollback` is the view's refusal; on a clean exit a broken view fails the job.
+	Inside, `snapshot.view_is_open` is true and `frappe.db.rollback` is the view's refusal; on a clean exit a
+	broken view fails the job. Both markers are reset in `finally`, also when the body raises.
 	"""
 	token = snapshot._VIEW_BROKEN.set(False)
+	open_token = snapshot._VIEW_OPEN.set(True)
 
 	def refuse(*args, **kwargs):
 		snapshot._VIEW_BROKEN.set(True)
@@ -162,6 +150,7 @@ def fake_view():
 			if snapshot.view_is_broken():
 				refuse()
 	finally:
+		snapshot._VIEW_OPEN.reset(open_token)
 		snapshot._VIEW_BROKEN.reset(token)
 
 
@@ -634,9 +623,7 @@ class JobCase(LimitsCase):
 		self.addCleanup(store.purge_actor, self.f.u1)
 		self.outcomes = []
 		self.view_open_at_event = []
-		self.error_log.side_effect = lambda *a, **k: self.view_open_at_event.append(
-			"rollback" in vars(frappe.db)
-		)
+		self.error_log.side_effect = lambda *a, **k: self.view_open_at_event.append(snapshot.view_is_open())
 
 	def clean_routing(self):
 		for number in range(routing.READER_SLOTS):
