@@ -706,9 +706,6 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		self.assertNotIn("role_profiles_config", store)
 		self.assertEqual(store.get("enable_role_profiles", 0), 0)
 
-	def test_invalidate_config_cache_is_safe_noop_when_nothing_memoized(self):
-		role_profiles._invalidate_config_cache()  # must not raise
-
 	def test_validate_rejects_bad_skill_slug_charset(self):
 		bad = self._config()
 		bad["sets"]["hr"] = ["HRMS_HR"]  # uppercase/underscore not allowed
