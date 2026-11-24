@@ -433,6 +433,7 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 
 	def test_real_supplier_user_permission_blocks_receipt_fetch(self):
 		frappe.set_user("Administrator")
+		values = self.receipt_values()
 		other = frappe.copy_doc(frappe.get_doc("Supplier", self.supplier))
 		other.supplier_name = "_JLCV787 Allowed Supplier"
 		other.insert()
@@ -450,7 +451,7 @@ class TestLandedCostReceiptDetails(LandedCostFixtures):
 		frappe.set_user(self.reader)
 		self.assertFalse(frappe.has_permission("Purchase Receipt", "read", doc=self.receipt.name))
 		with self.assertRaises(PermissionDeniedError):
-			build_doc("Landed Cost Voucher", self.receipt_values())
+			build_doc("Landed Cost Voucher", values)
 
 	def test_source_mask_blocks_generic_and_source_backed_previews(self):
 		from frappe.custom.doctype.property_setter.property_setter import make_property_setter

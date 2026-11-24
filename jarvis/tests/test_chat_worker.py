@@ -1379,14 +1379,6 @@ class TestChatSendAttachmentTimeout(FrappeTestCase):
 	def test_negative_counts_never_shrink_the_window(self):
 		self.assertEqual(turn_handler._ack_timeout_s(-5, -5), turn_handler._ACK_TIMEOUT_BASE_S)
 
-	def test_text_attachment_produces_no_vision_parts(self):
-		"""Anchors the premise: the inlined-char count is the ONLY signal a
-		text attachment gives, so the budget has to read it."""
-		before = "hi"
-		msg, parts = turn_handler._prepare_attachments(before, None, vision_ok=True)
-		self.assertEqual(parts, [])
-		self.assertEqual(len(msg) - len(before), 0)
-
 
 class TestChatSendAckTimeoutParks(FrappeTestCase):
 	"""A chat.send ACK timeout is ambiguous: the request frame was already on

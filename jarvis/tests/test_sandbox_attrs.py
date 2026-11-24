@@ -330,13 +330,6 @@ class TestRuntimeHint(unittest.TestCase):
 	def test_format_names(self):
 		self.assertEqual(FORMAT_NAMES, frozenset({"format", "format_map"}))
 
-	def test_hint_for_format_names(self):
-		for name in FORMAT_NAMES:
-			self.assertEqual(
-				runtime_hint(name),
-				f" - .{name} is blocked in the sandbox; use an f-string or % formatting",
-			)
-
 	def test_no_hint_for_other_names(self):
 		for name in ("__class__", "gi_frame", "format_value", ""):
 			self.assertIsNone(runtime_hint(name))

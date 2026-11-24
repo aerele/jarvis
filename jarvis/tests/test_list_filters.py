@@ -981,6 +981,10 @@ class TestQueryBarrierAndFacets(unittest.TestCase):
 			"((owner = %(me)s OR name IN %(shared)s)) AND (enabled = %(enabled)s) "
 			"AND (`tabJarvis Custom Skill`.`user_invocable` = %(jf0_0)s)",
 		)
+		self.assertEqual(
+			{k: q.params()[k] for k in ("me", "shared", "enabled")},
+			{"me": USER_A, "shared": ("a",), "enabled": 1},
+		)
 
 	def test_params_refuses_to_overwrite_a_bound_predicate_value(self):
 		q = new_query("macros", user=USER_A)

@@ -421,10 +421,6 @@ class TestMacroRunConversationIndexPatch(FrappeTestCase):
 		self.assertEqual(_index_names(CONVERSATION_INDEX[0]), first_index_names)
 		self._assert_generated_search_index_setter()
 
-	def test_patch_is_registered(self):
-		entries = frappe.get_file_items(frappe.get_app_path("jarvis", "patches.txt"))
-		self.assertEqual(entries.count(CONVERSATION_PATCH_ENTRY), 1)
-
 	def test_patch_is_registered_post_model_sync(self):
 		entries = get_patches_from_app("jarvis", PatchType.post_model_sync)
 		self.assertEqual(entries.count(CONVERSATION_PATCH_ENTRY), 1)

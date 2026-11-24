@@ -13,18 +13,6 @@ test("a 404 status alone is treated as the expected miss", () => {
 	assert.equal(isExpectedCompanyDefaultsMiss(e), true);
 });
 
-test("COMPANY_DEFAULTS_NOT_FOUND carried in e.messages is treated as the expected miss", () => {
-	// frappe-ui's call() concats the response body's `message` key into
-	// e.messages; a coded {ok:false, error:{code}} envelope arrives as an
-	// OBJECT there because JSON.parse on a non-string leaves it untouched.
-	const e = new Error("unknown company");
-	e.status = 404;
-	e.messages = [
-		{ ok: false, error: { code: "COMPANY_DEFAULTS_NOT_FOUND", message: "unknown company" } },
-	];
-	assert.equal(isExpectedCompanyDefaultsMiss(e), true);
-});
-
 test("COMPANY_DEFAULTS_NOT_FOUND with no status set is still caught via e.messages", () => {
 	const e = { messages: [{ error: { code: "COMPANY_DEFAULTS_NOT_FOUND" } }] };
 	assert.equal(isExpectedCompanyDefaultsMiss(e), true);

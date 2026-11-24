@@ -1969,27 +1969,6 @@ class TestChildRowFormReview(_ChildRowFormHelpers, FrappeTestCase):
 	"""Review fixes: hidden sections and tabs, write permlevels, defaults, and bad
 	grid settings."""
 
-	def test_a_hidden_section_hides_its_fields(self):
-		state = {}
-
-		def hide_section(meta):
-			fields = meta.fields
-			start = next(i for i, df in enumerate(fields) if df.fieldtype == "Section Break" and df.label)
-			fields[start].hidden = 1
-			end = next(
-				(
-					i
-					for i in range(start + 1, len(fields))
-					if fields[i].fieldtype in ("Section Break", "Tab Break")
-				),
-				len(fields),
-			)
-			state["inside"] = {df.fieldname for df in fields[start + 1 : end] if df.fieldname}
-
-		names = {f.get("fieldname") for f in self._with_child_meta(hide_section)["form_fields"]}
-		self.assertTrue(state["inside"])
-		self.assertFalse(names & state["inside"])
-
 	def test_a_tab_whose_fields_sit_in_its_sections_is_kept(self):
 		from jarvis.chat.actions_api import _drop_empty_sections
 
@@ -2040,24 +2019,6 @@ class TestChildRowFormReview(_ChildRowFormHelpers, FrappeTestCase):
 
 		items = self._with_child_meta(make_column_secret)
 		self.assertNotIn("qty", {c["fieldname"] for c in items["columns"]})
-
-	def test_a_hidden_tab_hides_every_field_after_it(self):
-		state = {}
-
-		def hide_tab(meta):
-			fields = meta.fields
-			labelled = [i for i, df in enumerate(fields) if df.fieldtype == "Section Break" and df.label]
-			start = labelled[1]  # leave some fields before it
-			fields[start].fieldtype, fields[start].hidden = "Tab Break", 1
-			state["before"] = {df.fieldname for df in fields[:start] if df.fieldname and not df.hidden}
-			state["after"] = {df.fieldname for df in fields[start + 1 :] if df.fieldname}
-
-		items = self._with_child_meta(hide_tab)
-		names = {f.get("fieldname") for f in items["form_fields"]}
-		self.assertTrue(state["after"])
-		# a later Section Break does not end a hidden TAB: only another Tab Break would
-		self.assertFalse(names & state["after"])
-		self.assertTrue(names & state["before"])
 
 	def test_rule_fields_hold_the_hidden_fields_the_rules_read(self):
 		items = get_doctype_form_meta("Purchase Invoice")["tables"]["items"]

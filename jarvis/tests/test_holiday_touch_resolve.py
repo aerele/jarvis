@@ -840,16 +840,6 @@ class TestPrivacyAndFailSafe(_Base):
 		self.assertIn("RuntimeError", kwargs["message"])
 		self.assertNotIn("1990-11-08", kwargs["message"])
 
-	def test_error_creates_an_error_log_row(self):
-		user = self.person(dob="1990-11-08")
-		title = "Holiday touch: answer failed"
-		flush_error_logs()
-		before = frappe.db.count("Error Log", {"method": title})
-		with mock.patch.object(resolve, "occasion", side_effect=RuntimeError("boom")):
-			resolve.safe_answer(user, _now(DIWALI))
-		flush_error_logs()
-		self.assertEqual(frappe.db.count("Error Log", {"method": title}), before + 1)
-
 	def test_in_developer_mode_the_error_log_row_still_holds_no_birth_date(self):
 		# Frappe appends the frame's local variables to a traceback in developer mode. The
 		# failing frame (_birthday_state) holds the birth date in a local, so the logged

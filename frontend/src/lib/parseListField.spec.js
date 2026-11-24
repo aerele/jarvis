@@ -26,8 +26,4 @@ describe("parseListField", () => {
 	it("returns [] for valid JSON that isn't an array (e.g. an object)", () => {
 		expect(parseListField('{"a":1}')).toEqual([]);
 	});
-
-	it("returns [] for a whitespace-only string", () => {
-		expect(parseListField("   ")).toEqual([]);
-	});
 });

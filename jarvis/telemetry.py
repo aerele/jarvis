@@ -8,6 +8,8 @@
   {"kind": "result_budget", ...}     (record_budget_event)
   {"kind": "export", ...}            (record_export_event; record_export_intent
                                       emits it with mode "intent")
+  {"kind": "report_snapshot", ...}   (record_snapshot_event / record_snapshot_failure; own
+                                      logger and file, events read/reload_start/reload_end/failure)
   {"kind": "pc_handoff_hint", ts, site, user_hash, run_id, outcome}
   {"kind": "pc_handoff_goto", ts, site, conversation, run_id, count}
 
@@ -35,6 +37,8 @@ import re
 import frappe
 
 _LOGGER = "jarvis.tool_telemetry"
+_SNAPSHOT_LOGGER = "jarvis.report_snapshot"
+_CONVERSATION_MEMO = "jarvis_snapshot_conversation"  # frappe.local: (session key, user) -> chat
 _TRACKED_TARGET_TOOLS = frozenset({"get_schema", "query", "get_list"})
 _TRACKED_TOOL = "describe_customizations"
 
@@ -78,27 +82,117 @@ def record_tool(tool: str, args, conversation: str | None, duration_ms: int, res
 
 
 def record_budget_event(
-	tool: str, outcome: str, original_chars: int | None, shown: int | None, total: int | None
+	tool: str,
+	outcome: str,
+	original_chars: int | None,
+	shown: int | None,
+	total: int | None,
+	snapshot: str | None = None,
+	snapshot_bytes: int | None = None,
+	snapshot_error: str | None = None,
+	snapshot_create_ms: int | None = None,
 ) -> None:
 	"""One line per agent-boundary result-size guard event (truncation or an
 	uncapped-but-oversized result). Unlike ``record_tool``, this is not gated
 	on a custom-doctype target - every event is signal for sizing the budget
 	itself. The guard outcome rides under ``outcome`` (truncated / bounded_document /
 	uncapped / uncapped_nonrow / bounded_connector / measure_failed) - NOT ``event`` - so it does not collide
-	with this line's own ``kind`` discriminator. Never raises."""
+	with this line's own ``kind`` discriminator. A cut inline ``run_report`` adds
+	``snapshot`` (``created`` / ``skipped:<reason>`` / ``failed``) and, once stored,
+	``snapshot_bytes`` (the gzip size); when a snapshot failed or was skipped with
+	``error``, ``snapshot_error`` names the exception class. When a create ran,
+	``snapshot_create_ms`` is its wall time. All four keys are absent on every other line.
+	Never raises."""
 	try:
-		_emit(
-			{
-				"kind": "result_budget",
-				"ts": frappe.utils.now(),
-				"site": getattr(frappe.local, "site", None),
-				"tool": tool,
-				"outcome": outcome,
-				"original_chars": original_chars,
-				"shown": shown,
-				"total": total,
-			}
-		)
+		line = {
+			"kind": "result_budget",
+			"ts": frappe.utils.now(),
+			"site": getattr(frappe.local, "site", None),
+			"tool": tool,
+			"outcome": outcome,
+			"original_chars": original_chars,
+			"shown": shown,
+			"total": total,
+		}
+		if snapshot is not None:
+			line["snapshot"] = snapshot
+		if snapshot_bytes is not None:
+			line["snapshot_bytes"] = snapshot_bytes
+		if snapshot_error is not None:
+			line["snapshot_error"] = snapshot_error
+		if snapshot_create_ms is not None:
+			line["snapshot_create_ms"] = snapshot_create_ms
+		_emit(line)
+	except Exception:
+		pass
+
+
+def _snapshot_logger() -> logging.Logger:
+	# Own file with longer retention, so 7 days of snapshot events survive (the shared
+	# tool log rotates at 100 KB x 20). The level is pinned to INFO as above.
+	logger = frappe.logger(_SNAPSHOT_LOGGER, max_size=1_000_000, file_count=30)
+	if logger.level == 0 or logger.level > logging.INFO:
+		logger.setLevel(logging.INFO)
+	return logger
+
+
+def _snapshot_conversation() -> str | None:
+	"""The caller's chat, looked up once per (session, user) on `frappe.local`: one reload
+	writes several events. A missing chat is not remembered."""
+	try:
+		from jarvis.tools._agent_run_ctx import get_session_key
+		from jarvis.tools._export.jobs import current_conversation
+
+		key = (get_session_key(), frappe.session.user)
+		memo = getattr(frappe.local, _CONVERSATION_MEMO, None)
+		if memo and memo[0] == key:
+			return memo[1]
+		conversation = current_conversation()
+		if conversation:
+			setattr(frappe.local, _CONVERSATION_MEMO, (key, conversation))
+		return conversation
+	except Exception:
+		return None
+
+
+def _snapshot_line(event: str, outcome: str, fields: dict) -> str:
+	"""The JSON line of one snapshot event. ``snapshot_id`` is hashed, never written;
+	``conversation`` defaults to the caller's current chat."""
+	snapshot_id = fields.pop("snapshot_id", None)
+	conversation = fields.pop("conversation", None) or _snapshot_conversation()
+	return json.dumps(
+		{
+			"kind": "report_snapshot",
+			"event": event,
+			"outcome": outcome,
+			"ts": frappe.utils.now(),
+			"site": getattr(frappe.local, "site", None),
+			"user_hash": _user_hash(frappe.session.user),
+			"conversation": conversation,
+			"snapshot_hash": hashlib.sha256(snapshot_id.encode()).hexdigest()[:12] if snapshot_id else None,
+			**fields,
+		},
+		default=str,
+	)
+
+
+def record_snapshot_event(event: str, outcome: str, **fields) -> None:
+	"""One line per report-snapshot event (``read``, ``reload_start``, ``reload_end``) in
+	the INFO-pinned snapshot log. Never raises."""
+	try:
+		_snapshot_logger().info(_snapshot_line(event, outcome, fields))
+	except Exception:
+		pass
+
+
+def record_snapshot_failure(reason: str, exc: BaseException | None = None, *, level: str = "warning") -> None:
+	"""One ``failure`` line for a snapshot fault that is not a ``read`` or reload event
+	(a failed write, delete or stamp). The reason code and the exception CLASS only: never
+	a filter value or a message. Written through the INFO-pinned snapshot logger, so it
+	survives the production default of ERROR. Never raises."""
+	try:
+		fields = {"error": type(exc).__name__} if exc is not None else {}
+		getattr(_snapshot_logger(), level)(_snapshot_line("failure", reason, fields))
 	except Exception:
 		pass
 

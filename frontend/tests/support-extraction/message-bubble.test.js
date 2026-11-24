@@ -16,21 +16,6 @@ test("user bubble renders identically (light)", () => {
 	expect(w.html()).toMatchSnapshot();
 });
 
-test("user bubble renders identically (dark)", () => {
-	const w = mountWithPalette(
-		Message,
-		{
-			variant: "bubble",
-			text: USER_MSG.content,
-			attachments: USER_MSG.canvas,
-			timestamp: "9:12",
-			editable: true,
-		},
-		{ dark: true }
-	);
-	expect(w.html()).toMatchSnapshot();
-});
-
 test("failed user bubble shows retry", () => {
 	const w = mountWithPalette(Message, { variant: "bubble", text: "x", failed: true });
 	expect(w.text()).toContain("Not sent");

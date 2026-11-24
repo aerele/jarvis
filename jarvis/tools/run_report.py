@@ -4,7 +4,13 @@ import frappe
 from frappe.desk.query_report import run as frappe_run_report
 
 from jarvis.chat import macro_report_wait
-from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
+from jarvis.exceptions import (
+	DelegateReportRefused,
+	FefoScopeRefused,
+	InvalidArgumentError,
+	PermissionDeniedError,
+	SnapshotReloadRefused,
+)
 from jarvis.tools import _prepared_reports
 from jarvis.tools._report_scope import attach_scope, resolve_scope
 
@@ -23,6 +29,14 @@ def run_report(report_name: str, filters: dict | str | None = None) -> dict:
 	frappe.PermissionError on denial; we translate that to PermissionDeniedError
 	so all tools share one exception contract.
 	"""
+	return _run_report(report_name, filters)
+
+
+def _run_report(report_name: str, filters: dict | str | None = None, *, inline_only: bool = False) -> dict:
+	"""The body of ``run_report``. ``inline_only`` is for a report snapshot reload and is
+	not a tool argument: a Prepared Report raises ``SnapshotReloadRefused`` instead of
+	being enqueued, and the given filters are used as they are: a Custom Report's saved
+	default filters (which Frappe would substitute) cannot move the scope of a reload."""
 	if not report_name:
 		raise InvalidArgumentError("report_name is required")
 	filters = _normalize_filters(filters)
@@ -30,7 +44,10 @@ def run_report(report_name: str, filters: dict | str | None = None) -> dict:
 	# request must not reveal another source or reach the report engine.
 	from jarvis.chat.agent_scope import assert_active_fefo_report_scope
 
-	assert_active_fefo_report_scope(report_name, filters)
+	try:
+		assert_active_fefo_report_scope(report_name, filters)
+	except InvalidArgumentError as e:
+		raise FefoScopeRefused(str(e)) from e
 	# A snapshot-config delegate gets configuration only from its immutable Run.
 	# Saved report definitions are mutable data-access policy, so this execution-
 	# boundary guard refuses them even for an already-started run that still carries
@@ -39,7 +56,7 @@ def run_report(report_name: str, filters: dict | str | None = None) -> dict:
 
 	refusal = _delegate_capability.snapshot_config_report_refusal(report_name)
 	if refusal:
-		raise PermissionDeniedError(refusal)
+		raise DelegateReportRefused(refusal)
 
 	if not frappe.db.exists("Report", report_name):
 		raise InvalidArgumentError(f"unknown Report: {report_name}")
@@ -48,6 +65,8 @@ def run_report(report_name: str, filters: dict | str | None = None) -> dict:
 	# A raw get_value on the named report reads the correct flag even for a
 	# Custom Report (get_report_doc carries the custom doc's own prepared_report).
 	if frappe.db.get_value("Report", report_name, "prepared_report"):
+		if inline_only:
+			raise SnapshotReloadRefused("prepared")
 		# Inside a macro run's own step a copy must be as new as the run (see macro_report_wait).
 		ctx = macro_report_wait.current_context()
 		return attach_scope(
@@ -58,7 +77,11 @@ def run_report(report_name: str, filters: dict | str | None = None) -> dict:
 		)
 
 	try:
-		return attach_scope(frappe_run_report(report_name=report_name, filters=filters), scope)
+		# A reload runs with the filters stored with the snapshot: `are_default_filters=False`
+		# keeps Frappe from substituting a Custom Report's saved defaults (v15 and v16 both
+		# have the argument). A normal run is called exactly as before.
+		pinned = {"are_default_filters": False} if inline_only else {}
+		return attach_scope(frappe_run_report(report_name=report_name, filters=filters, **pinned), scope)
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"no permission to run report {report_name}") from e
 

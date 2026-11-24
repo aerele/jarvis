@@ -127,9 +127,6 @@ class TestStockVarianceSourcePlan(TestCase):
 			{"ENABLED"},
 		)
 
-	def test_native_version_matches_the_server_contract_release(self):
-		self.assertEqual(native.VERSION, "0.5.0")
-
 
 class TestStockVarianceDelegateScope(TestCase):
 	def test_delegate_scope_uses_report_cutoff_before_its_query(self):

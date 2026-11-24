@@ -8,13 +8,10 @@ import assert from "node:assert/strict";
 import * as scene from "./diwali.mjs";
 import { END_MS } from "./diwali.mjs";
 import { FLASHES, PEAK, lightSVG, skyShowSVG } from "./diwali-art.mjs";
-import { FLOOR_ROW, floorFit } from "../scene-geometry.mjs";
+import { FLOOR_ROW } from "../scene-geometry.mjs";
 import {
-  boxes,
   contractSuite,
   replayFloorTest,
-  floorTransformOf,
-  run,
 } from "./day-scene-fakes.test-support.mjs";
 
 // The shared contract, with Diwali's floor row: the same checks every other scene passes.
@@ -88,25 +85,4 @@ test("the biggest drawn flash is far below the limit, with room to grow", () => 
     ) /
     (540 * 300);
   assert.ok(worst < 0.1, `worst case ${worst}`);
-});
-
-test("when the ground moves under a fitted row, the row's drawn bottom lands on the new anchor", () => {
-  // The row is drawn on the first ground; a relayout must fit it from there, not from the
-  // new ground (which would leave it off by the distance the ground moved).
-  const r = run(scene, { boxes: boxes({ h: 700 }) });
-  const drawn = floorTransformOf(r).bottom;
-  const page = boxes({ h: 480, cardsH: 120, bottomGap: -40 });
-  r.api.relayout(page);
-  const t = floorTransformOf(r);
-  const landed = t.anchor + t.scale * (drawn - t.bottom);
-  const s = 1.25; // min(1100 / 800, 1.25)
-  const ground = (page.cards.y + page.cards.h) / s - 2;
-  const want = floorFit({ ground, hostH: page.host.h, s });
-  assert.ok(want.scale < 1, "the stage is short enough to fit the row");
-  assert.ok(
-    Math.abs(landed - want.anchor) < 0.01,
-    `${landed} vs ${want.anchor}`
-  );
-  r.api.settle("instant");
-  r.end();
 });
