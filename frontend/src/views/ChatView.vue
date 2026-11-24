@@ -3393,6 +3393,29 @@
 							</div>
 						</template>
 						<template #left-toolbar="{ pickFiles }">
+							<!-- The "+" menu (Claude / ChatGPT style): files, a skill, a connector
+							     focus and wiki grounding in one place. It drives the same state as
+							     the paperclip, wiki and plug buttons beside it, so they agree. A
+							     chosen skill rides on the next message as its "/skill_name" token
+							     (see send(): withSkillToken). -->
+							<ComposerPlusMenu
+								:disabled="holdActive"
+								:skills="customSkills"
+								:selected-skill="armedSkill"
+								:connectors="connectorFocusOptions"
+								:connector-key="connectorFocus?.key || ''"
+								:wiki-available="!!ui.wiki_enabled"
+								:wiki-on="groundNextTurn"
+								can-manage-skills
+								can-browse-connectors
+								@open="onPlusMenuOpen"
+								@attach="pickFiles"
+								@skill="armedSkill = $event ? $event.skill_name : ''"
+								@connector="setConnectorFocus"
+								@wiki="groundNextTurn = $event"
+								@manage-skills="router.push('/skills')"
+								@browse-connectors="browseConnectors"
+							/>
 							<button
 								class="jv-iconbtn"
 								title="Attach file"
@@ -4599,6 +4622,8 @@ const CHECK_DEADLINE_MS = 15000;
 import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
+import ComposerPlusMenu from "@/components/chat/ComposerPlusMenu.vue";
+import { withSkillToken } from "@/lib/skillToken.js";
 import FilePreview from "@/components/FilePreview.vue";
 import FileBoxUseAsSource from "@/components/chat/FileBoxUseAsSource.vue";
 import DocumentBlocks from "@/components/DocumentBlocks.vue";
@@ -5610,6 +5635,9 @@ onMounted(() => {
 // context.ground_wiki flag so the backend injects relevant wiki page bodies
 // into that turn. Cleared after each send (see send()).
 const groundNextTurn = ref(false);
+// The skill picked in the composer's "+" menu (its skill_name), or "". Folded into the
+// NEXT main-composer message as "/skill_name" (send()), then cleared, like a typed one.
+const armedSkill = ref("");
 const groundSelectionVersion = ref(0);
 watch(
 	groundNextTurn,
@@ -7222,7 +7250,7 @@ const headerSub = computed(() => {
 const canSend = computed(
 	() =>
 		!booting.value &&
-		(input.value.trim().length > 0 || pendingFiles.value.length > 0) &&
+		(input.value.trim().length > 0 || pendingFiles.value.length > 0 || !!armedSkill.value) &&
 		!sending.value &&
 		// A compaction (auto mid-turn, or one we started) must never race a turn
 		// writing the same context — Composer has no bare `disabled` prop, so this
@@ -11026,6 +11054,8 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// One-shot wiki grounding is per-turn: never carry an armed pill into a
 	// different conversation (matches how modelOverride/auto-apply reload here).
 	groundNextTurn.value = false;
+	// Same for a skill picked in the "+" menu.
+	armedSkill.value = "";
 	// Trigger-build mode is per-conversation too: switching chats clears it.
 	triggerMode.value = false;
 	createMenuOpen.value = false;
@@ -12201,6 +12231,9 @@ async function send(textArg, resendAck) {
 		: fromMain
 		? pendingFiles.value.slice()
 		: [];
+	// A skill picked in the "+" menu rides in front as its "/skill_name" token (the
+	// server resolves and checks it), so the skill alone is a message too.
+	if (fromMain && armedSkill.value) text = withSkillToken(text, armedSkill.value);
 	if ((!text && !attachments.length) || sending.value) return;
 	// aerele/jarvis#2191: a Reply's quote rides in front of the typed question (only a
 	// main-composer message with words of its own; the history keeps just the question).
@@ -12237,6 +12270,7 @@ async function send(textArg, resendAck) {
 	if (fromMain) {
 		input.value = "";
 		replyQuote.value = "";
+		armedSkill.value = "";
 		pendingFiles.value = [];
 		failedUploads.value = [];
 		mention.value = { ...mention.value, open: false };
@@ -14614,6 +14648,14 @@ const connectorFocusMenuOptions = computed(() => {
 // reka-ui however the menu opened (click, keyboard) or closed (selection,
 // outside click, Escape) - rather than a manual toggle, so there is no open
 // flag here to keep in sync with the component's own state.
+// The "+" menu opened: fresh skills and connected apps, as the plug picker refetches on
+// open, so one added a moment ago in Settings shows without a reload.
+function onPlusMenuOpen() {
+	mention.value = { ...mention.value, open: false };
+	loadCustomSkills();
+	connectorFocusLoaded.value = false;
+	loadConnectorFocusOptions();
+}
 function onConnectorFocusOpenChange(open) {
 	if (!open) return;
 	mention.value = { ...mention.value, open: false };
