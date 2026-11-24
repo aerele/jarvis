@@ -87,3 +87,4 @@ jarvis.patches.v2_32_reload_jarvis_user_activity_report
 jarvis.patches.v2_32_seed_activity_rollup
 jarvis.patches.v2_19_drop_connectors_kill_switch
 jarvis.patches.v2_21_drop_allow_custom_urls
+jarvis.patches.v2_33_openai_subscription_default_sol
