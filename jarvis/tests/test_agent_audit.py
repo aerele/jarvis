@@ -163,7 +163,6 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 		self.assertEqual(new[0]["bulk_count"], 3)
 		self.assertEqual(new[0]["ref_doctype"], "ToDo")
 
-	# NOTE (version-16-hotfix backport): the develop test
 	def test_connector_inner_failure_is_filed_as_failed(self):
 		# call_connector is a write that dispatches but returns its OWN {ok:false}
 		# envelope. envelope_ok must file it as failed, not a false ERP-write success.
