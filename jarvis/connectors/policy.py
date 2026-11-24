@@ -114,22 +114,24 @@ def egress_address_match(address: str, raw: str | None) -> bool:
 
 def normalise_host(host: str | None) -> str | None:
 	"""Canonical form of a host or rule for matching, or ``None`` if it cannot be
-	one. Lower-cases, drops ONE trailing dot, turns every IP literal the resolver
-	accepts (``127.1``, ``0x7f.1``, a bare decimal, long IPv6, IPv4-mapped IPv6)
-	into its canonical text, and IDNA-encodes names to ASCII - the same codec
-	``getaddrinfo`` applies to a ``str`` host."""
-	text = (host or "").strip().lower()
-	if text.endswith("."):
-		text = text[:-1]
+	one. IDNA-encodes to ASCII first (the same codec ``getaddrinfo`` applies to a
+	``str`` host; it also maps U+3002, U+FF0E and U+FF61 to a dot), lower-cases,
+	THEN drops ONE trailing dot, so a dot-like ending cannot hide behind the strip.
+	Every IP literal the resolver accepts (``127.1``, ``0x7f.1``, a bare decimal,
+	long IPv6, IPv4-mapped IPv6) becomes its canonical text. An empty result, an
+	empty label (``a..b``, ``.a``) or a second trailing dot is refused."""
+	text = (host or "").strip()
 	if not text:
 		return None
-	ip = canonical_ip(text)
-	if ip:
-		return ip
 	try:
-		return text.encode("idna").decode("ascii").lower()
+		text = text.encode("idna").decode("ascii").lower()
 	except UnicodeError:
 		return None
+	if text.endswith("."):
+		text = text[:-1]
+	if not text or text.startswith(".") or text.endswith(".") or ".." in text:
+		return None
+	return canonical_ip(text) or text
 
 
 def canonical_ip(text: str | None) -> str | None:
