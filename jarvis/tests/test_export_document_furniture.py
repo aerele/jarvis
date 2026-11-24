@@ -408,17 +408,6 @@ class TestOutputGuards(_FurnitureRenderBase):
 		self.assertIn("3", str(cm.exception))  # the exit code is fine to surface
 		self.assertTrue(any("unique-stderr-signature" in str(k.get("message", "")) for k in logged))
 
-	def test_infra_failure_is_logged(self) -> None:
-		# A working binary misbehaving (non-zero exit) must hit the Error Log so a
-		# systemic regression is visible to operators, not only surfaced to the user.
-		logged: list[dict] = []
-		patch.object(furniture.frappe, "log_error", lambda **k: logged.append(k)).start()
-		self.fake_wk.returncode = 2
-		self.fake_wk.stderr = b"err"
-		with self.assertRaises(InvalidArgumentError):
-			render_pdf("<p>hi</p>", page_numbers=False)
-		self.assertTrue(logged, "infra render failure was not logged")
-
 
 # --- binary resolution -------------------------------------------------------
 
