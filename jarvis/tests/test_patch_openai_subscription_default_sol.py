@@ -116,6 +116,8 @@ class TestChatGPTPool(_Base):
 		terra, sol = self._row(TERRA, idx=101), self._row(SOL, idx=102)
 		p.execute()
 		self.assertEqual((self._model(terra), self._model(sol)), (TERRA, SOL))
+		# llm_model mirrors the first row (still Terra), so it must not move either.
+		self.assertEqual(self._default(), TERRA)
 		self.assertEqual(self._resyncs(), [])
 
 	def test_a_non_chatgpt_subscription_row_is_untouched(self):
