@@ -158,6 +158,10 @@ _THROWAWAY_LABEL_PREFIXES = (
 	"jarvis-title-",
 	"jarvis-polish-",
 	"jarvis-preflight-",
+	# new-chat suggestions (jarvis.chat.suggestions) and suggested replies
+	# (jarvis.chat.suggest_replies): one-shots on throwaway sessions like titles
+	"jarvis-suggest-",
+	"jarvis-replies-",
 )
 THROWAWAY_GRACE_HOURS = 1
 

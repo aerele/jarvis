@@ -36,6 +36,7 @@
     "draft_saved_as",
     "canvas",
     "steps",
+    "suggested_replies",
     "reply_duration_ms",
     "model",
     "provider",
@@ -272,6 +273,15 @@
       "read_only": 1,
       "no_copy": 1,
       "description": "Progress lines the steps box showed while this reply ran: [{text, at}], saved at settlement."
+    },
+    {
+      "fieldname": "suggested_replies",
+      "fieldtype": "JSON",
+      "label": "Suggested Replies",
+      "hidden": 1,
+      "read_only": 1,
+      "no_copy": 1,
+      "description": "The user's likely next messages, offered as chips under this reply while it is the latest one: {replies: [one to three]}. Written by jarvis.chat.suggest_replies after the turn ends (short-queue one-shot); empty when none were offered."
     },
     {
       "fieldname": "reply_duration_ms",
