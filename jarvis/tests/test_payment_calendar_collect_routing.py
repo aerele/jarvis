@@ -290,8 +290,7 @@ class TestOutcomesInCollect(CollectRoutingCase):
 		self.log_error, self.in_view = MagicMock(), []
 
 		def log_error(*args, **kwargs):
-			# Inside the snapshot view `consistent_read` has replaced `frappe.db.sql` on the instance.
-			self.in_view.append("sql" in vars(frappe.db))
+			self.in_view.append(snapshot.view_is_open())
 
 		self.log_error.side_effect = log_error
 		for patcher in (
