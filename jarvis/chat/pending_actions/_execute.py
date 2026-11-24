@@ -700,7 +700,7 @@ def _claim_and_run(
 		result = _held_to_the_card(name, args, structure, result)
 	if crash_tb or not (isinstance(result, dict) and result.get("ok")):
 		_discard_failed_dispatch(row, args, crash_tb, result=result, record=structure is None)
-	ok = not crash_tb and bool(isinstance(result, dict) and result.get("ok"))
+	ok = not crash_tb and api.envelope_ok(row.tool, result)
 	if not ok and row.kind == "chat" and not row.get("collaboration_binding"):
 		# ...and a card that fails ends the run, as a failed write does.
 		from jarvis.chat import turn_message_binding
