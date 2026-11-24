@@ -247,6 +247,20 @@ class TestForeignGlobRules(unittest.TestCase):
 		self.assertTrue(egress.egress_match("plain.com", rules))
 		self.assertTrue(egress.egress_match("\u00fcber.org", rules))
 
+	def test_right_to_left_wildcard_deny_still_blocks(self):
+		# nameprep refuses these labels (a wildcard at the edge of Hebrew or Arabic).
+		for rule, host in (
+			("!*\u05e9\u05dc\u05d5\u05dd*.com", "\u05e9\u05dc\u05d5\u05dd.com"),
+			("!*\u0633\u0644\u0627\u0645*.com", "\u0633\u0644\u0627\u0645.com"),
+			("![\u0633]\u0644\u0627\u0645.com", "\u0633\u0644\u0627\u0645.com"),
+			("!\u05e9\u05dc\u05d5*.com", "\u05e9\u05dc\u05d5\u05dd.com"),
+			("!*\u00fc*\u200e.com", "\u00fcber.com"),
+		):
+			with self.subTest(rule=rule):
+				self.assertFalse(egress.egress_match(host, rule))
+				self.assertTrue(egress.egress_match("plain.com", rule))
+				self.assertFalse(egress.egress_match(host, rule[1:] + "\nplain.com"))
+
 	def test_ascii_alternative_in_a_mixed_class_is_not_blocked(self):
 		# Behaviour note: write the ASCII spelling as its own rule.
 		self.assertFalse(egress.egress_match("\u00fcber.com", "![\u00fcu]ber.com"))

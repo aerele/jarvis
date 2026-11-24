@@ -178,7 +178,7 @@ def _parse_rule(text: str, deny: bool) -> list:
 		return [_NetworkRule(network) if network else _PatternRule(text, raw=True)]
 	labels, trailing = _split(text)
 	encoded = [_encode(label) for label in labels]
-	if None in encoded:
+	if any(code is None and not _foreign(label, code) for label, code in zip(labels, encoded, strict=True)):
 		return [_PatternRule(text, raw=True)]
 	rules = [_name_rule(text, labels, encoded, trailing, deny)]
 	alternate = [_idna2008(label) or code for label, code in zip(labels, encoded, strict=True)]
@@ -276,16 +276,22 @@ def _join(encoded: list, trailing: bool) -> str | None:
 	return name
 
 
-def _foreign(label: str, code: str) -> bool:
-	"""A typed non-ASCII label whose punycode carries a glob character: ``ü*``."""
-	return not label.isascii() and code.startswith("xn--") and _has_glob(code)
+def _foreign(label: str, code: str | None) -> bool:
+	"""A typed non-ASCII label with a glob character: its punycode carries the glob
+	(``ü*``), or it does not encode at all (nameprep refuses ``*`` at the edge of a
+	right-to-left label)."""
+	if label.isascii():
+		return False
+	if code is None:
+		return _has_glob(unicodedata.normalize("NFKC", label))
+	return code.startswith("xn--") and _has_glob(code)
 
 
 def _plain_suffix(encoded: list, trailing: bool) -> str:
 	"""The trailing run of glob-free labels, as a name ("" when there is none)."""
 	suffix: list = []
 	for code in reversed(encoded):
-		if _has_glob(code):
+		if code is None or _has_glob(code):
 			break
 		suffix.insert(0, code)
 	return _join(suffix, trailing) or ""
