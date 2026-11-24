@@ -326,6 +326,78 @@ class TestDisabledCatalogPreset(_ConnectorApiTestCase):
 		self.assertNotIn(self.DISABLED_PRESET, names)
 
 
+class TestOperatorKeyOverride(_ConnectorApiTestCase):
+	"""The operator's per-preset "Use a key instead" switch (jarvis.connector_catalogue).
+	It decides whether a NEW key row is allowed; rows saved before keep saving."""
+
+	def _override(self, **by_name: bool) -> None:
+		self._set_single("connector_key_overrides", json.dumps(by_name))
+
+	def _key_doc(self, preset: str, key: str):
+		return frappe.get_doc(
+			{
+				"doctype": CONNECTOR,
+				"key": key,
+				"label": preset,
+				"preset": preset,
+				"scope": "Personal",
+				"auth_method": "API Key",
+				"base_url": catalog.base_urls()[preset],
+				"credential": "tok",
+			}
+		)
+
+	def _public(self, name: str) -> dict:
+		frappe.set_user(PLAIN_A)
+		return {row["name"]: row for row in connectors_api.list_connectors()["catalog"]}[name]
+
+	def test_override_on_offers_the_key_and_allows_a_key_row(self):
+		self.assertFalse(self._public("Sentry")["accepts_key"])
+		self._override(Sentry=True)
+		self.assertTrue(self._public("Sentry")["accepts_key"])
+		out = connectors_api.add_connector(preset="Sentry", scope="Personal", credential="tok")
+		self._connectors.append(out["name"])
+		self.assertEqual(frappe.db.get_value(CONNECTOR, out["name"], "auth_method"), "API Key")
+		doc = self._key_doc("Sentry", "sentry_raw")
+		doc.insert()
+		self._connectors.append(doc.name)
+
+	def test_override_off_hides_the_key_and_refuses_a_new_key_row(self):
+		self.assertTrue(self._public("Linear")["accepts_key"])
+		self._override(Linear=False)
+		self.assertFalse(self._public("Linear")["accepts_key"])
+		before = frappe.db.count(CONNECTOR, {"preset": "Linear"})
+		with self.assertRaises(frappe.ValidationError):
+			connectors_api.add_connector(preset="Linear", scope="Personal", credential="tok")
+		with self.assertRaises(frappe.PermissionError):
+			self._key_doc("Linear", "linear_raw").insert()
+		self.assertEqual(frappe.db.count(CONNECTOR, {"preset": "Linear"}), before)
+
+	def test_an_existing_key_row_still_saves_after_the_key_is_switched_off(self):
+		doc = self._key_doc("Linear", "linear_old")
+		doc.insert(ignore_permissions=True)
+		self._connectors.append(doc.name)
+		self._override(Linear=False)
+		frappe.set_user(PLAIN_A)
+		doc.reload()
+		doc.label = "Linear (old key)"
+		doc.save()
+		self.assertEqual(frappe.db.get_value(CONNECTOR, doc.name, "label"), "Linear (old key)")
+
+	def test_override_on_a_key_only_preset_is_ignored(self):
+		self._override(Stripe=False)
+		self.assertTrue(self._public("Stripe")["accepts_key"])
+		out = connectors_api.add_connector(preset="Stripe", scope="Personal", credential="tok")
+		self._connectors.append(out["name"])
+
+	def test_override_on_an_unknown_name_is_ignored(self):
+		self._override(**{"No Such App": False})
+		frappe.set_user(PLAIN_A)
+		catalog_names = {row["name"] for row in connectors_api.list_connectors()["catalog"]}
+		self.assertNotIn("No Such App", catalog_names)
+		self.assertEqual(len(catalog_names), sum(1 for p in catalog.PROVIDERS if p.enabled))
+
+
 class TestOperatorDisabledPreset(_ConnectorApiTestCase):
 	"""A preset the operator switched off fleet-wide (jarvis.connector_catalogue).
 	It leaves the picker and refuses new rows on every path; a row saved before
