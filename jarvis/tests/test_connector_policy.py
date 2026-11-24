@@ -6,6 +6,7 @@ duck-typed row (a dict-backed ``.get``) drives it with no bench.
 from __future__ import annotations
 
 import json
+import socket
 import unittest
 
 from jarvis.connectors import policy
@@ -128,6 +129,118 @@ class TestEgressMatch(unittest.TestCase):
 		rules = "*.example.com\n!secret.example.com"
 		self.assertTrue(policy.egress_match("ok.example.com", rules))
 		self.assertFalse(policy.egress_match("secret.example.com", rules))
+
+	def test_normal_hostnames_and_wildcards_unchanged(self):
+		self.assertFalse(policy.egress_match("api.github.com", "!api.github.com"))
+		self.assertTrue(policy.egress_match("api.github.com", "api.github.com"))
+		self.assertTrue(policy.egress_match("mcp.atlassian.com", "*.atlassian.com"))
+		self.assertFalse(policy.egress_match("atlassian.com.evil.io", "*.atlassian.com"))
+		self.assertFalse(policy.egress_match("API.GitHub.com", "!api.github.com"))
+
+	def test_trailing_dot_host_hits_deny_rule(self):
+		self.assertFalse(policy.egress_match("evil.com.", "!evil.com"))
+		self.assertFalse(policy.egress_match("sub.evil.com.", "!evil.com"))
+		self.assertTrue(policy.egress_match("api.github.com.", "api.github.com"))
+
+	def test_trailing_dot_rule_matches_plain_host(self):
+		self.assertFalse(policy.egress_match("evil.com", "!evil.com."))
+
+	def test_non_canonical_ipv4_hits_deny_rule(self):
+		rule = "!34.1.2.3"
+		for host in (
+			"34.1.2.3",
+			"0x22.1.2.3",
+			"0x22010203",
+			"570491395",
+			"042.1.2.3",
+			"34.66051",
+			"34.1.515",
+		):
+			with self.subTest(host=host):
+				self.assertFalse(policy.egress_match(host, rule))
+
+	def test_non_canonical_ip_in_rule_matches_plain_host(self):
+		self.assertFalse(policy.egress_match("34.1.2.3", "!0x22.1.2.3"))
+		self.assertTrue(policy.egress_match("34.1.2.3", "0x22.1.2.3"))
+
+	def test_ipv6_forms_hit_deny_rule(self):
+		rule = "!2606:4700:4700::1111"
+		for host in ("2606:4700:4700:0:0:0:0:1111", "2606:4700:4700::1111", "2606:4700:4700:0000::1111"):
+			with self.subTest(host=host):
+				self.assertFalse(policy.egress_match(host, rule))
+		self.assertFalse(policy.egress_match("2606:4700:4700::1111", "![2606:4700:4700:0:0:0:0:1111]"))
+
+	def test_ipv4_mapped_ipv6_hits_ipv4_rule(self):
+		self.assertFalse(policy.egress_match("::ffff:34.1.2.3", "!34.1.2.3"))
+		self.assertFalse(policy.egress_match("::ffff:2201:203", "!34.1.2.3"))
+		self.assertFalse(policy.egress_match("34.1.2.3", "!::ffff:34.1.2.3"))
+
+	def test_unicode_and_punycode_hosts_compare_equal(self):
+		self.assertFalse(policy.egress_match("b\u00fccher.example", "!xn--bcher-kva.example"))
+		self.assertFalse(policy.egress_match("xn--bcher-kva.example", "!b\u00fccher.example"))
+		self.assertFalse(policy.egress_match("sub.b\u00fccher.example", "!xn--bcher-kva.example"))
+
+	def test_ideographic_dot_host_hits_deny_rule(self):
+		# the resolver's idna codec reads U+3002 as a label dot
+		self.assertFalse(policy.egress_match("evil\u3002com", "!evil.com"))
+
+	def test_unnormalisable_host_denied_when_rules_exist(self):
+		self.assertFalse(policy.egress_match("evil..com", "!other.com"))
+		self.assertFalse(policy.egress_match("", "ok.example.com"))
+		self.assertTrue(policy.egress_match("evil..com", "# only a comment"))
+
+	def test_malformed_ip_is_a_name_not_an_ip(self):
+		for text in ("08.1.2.3", "1.2.3.4.5", "256.1.1.1", "0x", "1.2.3.4x", "1.-2.3.4"):
+			with self.subTest(text=text):
+				self.assertIsNone(policy.canonical_ip(text))
+
+
+class TestInetAtonParity(unittest.TestCase):
+	"""The loose-IPv4 parser must agree with the C resolver on every clean form."""
+
+	def test_matches_socket_inet_aton(self):
+		forms = [
+			"127.1",
+			"0x7f.1",
+			"2130706433",
+			"0x7f000001",
+			"0177.0.0.1",
+			"10.1.2",
+			"34.66051",
+			"1.2.3.4",
+			"0.0.0.0",
+			"0",
+			"255.255.255.255",
+			"4294967295",
+			"0x22.1.2.3",
+			"08.1.2.3",
+			"1.2.3.4.5",
+			"256.1.1.1",
+			"4294967296",
+			"1.2.65536",
+			"0xg",
+			"1..2",
+		]
+		for text in forms:
+			with self.subTest(text=text):
+				try:
+					expected = socket.inet_ntoa(socket.inet_aton(text))
+				except OSError:
+					expected = None
+				self.assertEqual(policy.canonical_ip(text), expected)
+
+
+class TestEgressAddressMatch(unittest.TestCase):
+	def test_ip_deny_rule_blocks_resolved_address(self):
+		self.assertFalse(policy.egress_address_match("34.1.2.3", "!34.1.2.3"))
+		self.assertFalse(policy.egress_address_match("::ffff:34.1.2.3", "!0x22.1.2.3"))
+		self.assertTrue(policy.egress_address_match("34.1.2.4", "!34.1.2.3"))
+
+	def test_hostname_and_allow_rules_do_not_apply_to_addresses(self):
+		self.assertTrue(policy.egress_address_match("34.1.2.3", "!evil.com\napi.github.com"))
+		self.assertTrue(policy.egress_address_match("34.1.2.3", "*.atlassian.com"))
+		self.assertTrue(policy.egress_address_match("34.1.2.3", None))
+		self.assertTrue(policy.egress_address_match("34.1.2.3", "# comment"))
 
 
 if __name__ == "__main__":

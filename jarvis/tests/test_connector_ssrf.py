@@ -110,6 +110,22 @@ class TestValidateUrl(unittest.TestCase):
 		self.assertEqual(cm.exception.kind, ssrf.ERR_EGRESS_DENIED)
 		self.assertFalse(called["resolved"], "egress deny should short-circuit before DNS")
 
+	def test_egress_address_hook_denies_resolved_ip(self):
+		# A name whose DNS record points at a denied IP is refused after resolution.
+		hook = lambda host: True  # noqa: E731
+		hook.address_allowed = lambda addr: addr != PUBLIC_IP
+		with mock.patch.object(ssrf.socket, "getaddrinfo", return_value=_addrinfo(PUBLIC_IP)):
+			with self.assertRaises(ssrf.SsrfError) as cm:
+				ssrf._validate_url("https://ok.example.com/mcp", hook)
+		self.assertEqual(cm.exception.kind, ssrf.ERR_EGRESS_DENIED)
+
+	def test_egress_address_hook_allow_passes(self):
+		hook = lambda host: True  # noqa: E731
+		hook.address_allowed = lambda addr: True
+		with mock.patch.object(ssrf.socket, "getaddrinfo", return_value=_addrinfo(PUBLIC_IP)):
+			_parsed, ip = ssrf._validate_url("https://ok.example.com/mcp", hook)
+		self.assertEqual(ip, PUBLIC_IP)
+
 	def test_egress_hook_allow_passes(self):
 		with mock.patch.object(ssrf.socket, "getaddrinfo", return_value=_addrinfo(PUBLIC_IP)):
 			parsed, ip = ssrf._validate_url("https://ok.example.com/mcp", lambda host: True)

@@ -11,9 +11,15 @@ allowed. No frappe import here.
 from __future__ import annotations
 
 import fnmatch
+import ipaddress
 import json
+import re
 
 from jarvis.connectors import schema
+
+_HEX_PART = re.compile(r"0x[0-9a-f]+", re.ASCII)
+_OCTAL_PART = re.compile(r"0[0-7]*", re.ASCII)
+_DECIMAL_PART = re.compile(r"[1-9][0-9]*", re.ASCII)
 
 
 def action_decision(row, action: str) -> tuple[str, str] | None:
@@ -72,25 +78,127 @@ def egress_match(host: str, raw: str | None) -> bool:
 	  * any DENY rule matches           -> deny
 	  * ALLOW rules exist but none match -> deny (allow-list mode)
 	  * no ALLOW rules (deny-list/empty) -> allow
-	"""
+
+	Host and rules are both put through :func:`normalise_host` first, so a
+	trailing dot, an unusual IP spelling or a unicode name compares like for like
+	(the resolver connects to all of those). A host that cannot be normalised is
+	denied whenever any rule exists."""
 	if not raw:
 		return True
-	host = (host or "").lower()
+	allows, denies = _parse_rules(raw)
+	if not allows and not denies:
+		return True
+	norm = normalise_host(host)
+	if norm is None:
+		return False
+	if any(_host_matches(norm, r) for r in denies):
+		return False
+	if allows and not any(_host_matches(norm, r) for r in allows):
+		return False
+	return True
+
+
+def egress_address_match(address: str, raw: str | None) -> bool:
+	"""Check a RESOLVED address against the DENY rules that name an IP, so a
+	hostname whose DNS record points at a denied IP cannot slip past an IP rule.
+	Only IP-literal deny rules apply here: allow rules and hostname rules are
+	about names, and applying them to an address would deny every call in
+	allow-list mode."""
+	if not raw:
+		return True
+	denied = {ip for ip in map(canonical_ip, _parse_rules(raw)[1]) if ip}
+	if not denied:
+		return True
+	return canonical_ip(address) not in denied
+
+
+def normalise_host(host: str | None) -> str | None:
+	"""Canonical form of a host or rule for matching, or ``None`` if it cannot be
+	one. Lower-cases, drops ONE trailing dot, turns every IP literal the resolver
+	accepts (``127.1``, ``0x7f.1``, a bare decimal, long IPv6, IPv4-mapped IPv6)
+	into its canonical text, and IDNA-encodes names to ASCII - the same codec
+	``getaddrinfo`` applies to a ``str`` host."""
+	text = (host or "").strip().lower()
+	if text.endswith("."):
+		text = text[:-1]
+	if not text:
+		return None
+	ip = canonical_ip(text)
+	if ip:
+		return ip
+	try:
+		return text.encode("idna").decode("ascii").lower()
+	except UnicodeError:
+		return None
+
+
+def canonical_ip(text: str | None) -> str | None:
+	"""Canonical text of an IP literal in any form the resolver accepts, else
+	``None``. IPv4-mapped IPv6 collapses to the IPv4. A rule with glob characters
+	is never an IP."""
+	text = (text or "").strip().lower()
+	if text.startswith("[") and text.endswith("]"):
+		text = text[1:-1]
+	if not text or any(ch in text for ch in "*?[]"):
+		return None
+	if ":" in text:
+		return _canonical_ipv6(text)
+	value = _parse_inet_aton(text)
+	return str(ipaddress.IPv4Address(value)) if value is not None else None
+
+
+def _canonical_ipv6(text: str) -> str | None:
+	try:
+		ip = ipaddress.IPv6Address(text.split("%", 1)[0])
+	except ValueError:
+		return None
+	return str(ip.ipv4_mapped or ip)
+
+
+def _parse_inet_aton(text: str) -> int | None:
+	"""Strict parser for the ``inet_aton`` grammar: 1-4 dot-separated parts, each
+	decimal, ``0``-prefixed octal or ``0x`` hex; the last part fills the remaining
+	bytes. ``socket.inet_aton`` itself tolerates trailing junk, so it is not used."""
+	parts = text.split(".")
+	if len(parts) > 4:
+		return None
+	numbers = [_inet_part(p) for p in parts]
+	if None in numbers:
+		return None
+	*head, last = numbers
+	if any(n > 255 for n in head) or last >= 256 ** (5 - len(parts)):
+		return None
+	value = last
+	for index, n in enumerate(head):
+		value |= n << (8 * (3 - index))
+	return value
+
+
+def _inet_part(part: str) -> int | None:
+	if _HEX_PART.fullmatch(part):
+		return int(part, 16)
+	if _OCTAL_PART.fullmatch(part):
+		return int(part, 8)
+	if _DECIMAL_PART.fullmatch(part):
+		return int(part)
+	return None
+
+
+def _parse_rules(raw: str) -> tuple[list[str], list[str]]:
+	"""Split the rules text into normalised ``(allows, denies)``. A rule that will
+	not normalise is kept lower-cased: dropping a deny rule would fail open."""
 	allows: list[str] = []
 	denies: list[str] = []
 	for line in raw.splitlines():
 		rule = line.strip().lower()
 		if not rule or rule.startswith("#"):
 			continue
-		if rule.startswith("!"):
-			denies.append(rule[1:].strip())
-		else:
-			allows.append(rule)
-	if any(_host_matches(host, r) for r in denies):
-		return False
-	if allows and not any(_host_matches(host, r) for r in allows):
-		return False
-	return True
+		is_deny = rule.startswith("!")
+		rule = rule[1:].strip() if is_deny else rule
+		if not rule:
+			continue
+		(denies if is_deny else allows).append(normalise_host(rule) or rule)
+	return allows, denies
 
 
 def _host_matches(host: str, rule: str) -> bool:
