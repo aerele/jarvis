@@ -65,7 +65,9 @@ test("one loop over the shown order: a draft item is the inline card, everything
 test("typed approval sends the tokens in the order the cards are shown and numbered", () => {
 	assert.match(
 		view,
-		/sendRecovery\.stage\(\s*cid,[^;]*?\binput\.value,\s*ready,\s*orderedPending\.value\.map\(\(p\) => p\.token\)\s*\)/
+		// (the text is the composer's, with a "+" menu skill token in front when one is picked;
+		// the "+" menu's context follows the tokens)
+		/sendRecovery\.stage\(\s*cid,[^;]*?\bbody,\s*ready,\s*orderedPending\.value\.map\(\(p\) => p\.token\),\s*plusSendContext\(\)\s*\)/
 	);
 	assert.match(view, /items: orderedPending\.value,/); // the draft cards' numbers
 	assert.match(view, /`\$\{pi \+ 1\} of \$\{orderedPending\.length\}: `/); // the tiles' numbers
