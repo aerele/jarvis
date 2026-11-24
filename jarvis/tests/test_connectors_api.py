@@ -492,6 +492,91 @@ class TestOperatorDisabledPreset(_ConnectorApiTestCase):
 		self.assertEqual(frappe.db.get_value(CONNECTOR, name, "last_test_status"), "Passed")
 
 
+class TestComingSoonPreset(_ConnectorApiTestCase):
+	"""A preset the operator marked "Coming soon": it stays in the Browse catalog flagged
+	``coming_soon`` but cannot be added; a hidden (disabled) one stays absent and rows
+	saved before the switch keep working."""
+
+	PRESET = "Linear"
+	HIDDEN = "Stripe"
+
+	def _mark(self, soon: list[str], disabled: list[str] | None = None) -> None:
+		self._set_single("connector_catalogue_disabled", json.dumps(disabled or soon))
+		self._set_single("connector_catalogue_coming_soon", json.dumps(soon))
+
+	def _catalog(self) -> dict[str, dict]:
+		frappe.set_user(PLAIN_A)
+		return {row["name"]: row for row in connectors_api.list_connectors()["catalog"]}
+
+	def test_list_connectors_shows_it_flagged_and_omits_a_hidden_one(self):
+		self._mark([self.PRESET], disabled=[self.PRESET, self.HIDDEN])
+		rows = self._catalog()
+		self.assertTrue(rows[self.PRESET]["coming_soon"])
+		self.assertNotIn("base_url", rows[self.PRESET])
+		self.assertNotIn(self.HIDDEN, rows)
+		self.assertFalse(rows["GitHub"]["coming_soon"])
+		self.assertEqual(len(rows), sum(1 for p in catalog.PROVIDERS if p.enabled) - 1)
+
+	def test_nothing_is_flagged_without_a_policy(self):
+		self.assertFalse(any(row["coming_soon"] for row in self._catalog().values()))
+
+	def test_add_connector_refuses_it_as_coming_soon(self):
+		self._mark([self.PRESET])
+		frappe.set_user(PLAIN_A)
+		before = frappe.db.count(CONNECTOR, {"preset": self.PRESET})
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			connectors_api.add_connector(preset=self.PRESET, scope="Personal", credential="tok")
+		self.assertIn("This app is coming soon.", str(ctx.exception))
+		self.assertNotIn("turned off", str(ctx.exception))
+		self.assertEqual(frappe.db.count(CONNECTOR, {"preset": self.PRESET}), before)
+
+	def test_add_connector_keeps_the_old_message_for_a_hidden_preset(self):
+		self._mark([self.PRESET], disabled=[self.PRESET, self.HIDDEN])
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			connectors_api.add_connector(preset=self.HIDDEN, scope="Personal", credential="tok")
+		self.assertIn("turned off for your workspace", str(ctx.exception))
+
+	def test_controller_refuses_a_raw_insert_as_coming_soon(self):
+		self._mark([self.PRESET])
+		doc = frappe.get_doc(
+			{
+				"doctype": CONNECTOR,
+				"key": "linear-soon",
+				"label": self.PRESET,
+				"preset": self.PRESET,
+				"scope": "Personal",
+				"base_url": catalog.base_urls()[self.PRESET],
+				"credential": "tok",
+			}
+		)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			doc.insert(ignore_permissions=True)
+		self.assertIn("This app is coming soon.", str(ctx.exception))
+
+	def test_an_existing_row_still_saves(self):
+		name = self._mk(
+			"Personal",
+			"linear-old",
+			owner=PLAIN_A,
+			preset=self.PRESET,
+			base_url=catalog.base_urls()[self.PRESET],
+		)
+		self._mark([self.PRESET])
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.update_connector(name, label="Linear (old)")
+		self.assertEqual(out["label"], "Linear (old)")
+
+	def test_an_older_control_plane_marks_nothing_coming_soon(self):
+		# The list is held but no states marker ever arrived: the preset is only hidden.
+		self._set_single("connector_catalogue_disabled", json.dumps([self.PRESET]))
+		self._set_single("connector_catalogue_coming_soon", "")
+		self.assertNotIn(self.PRESET, self._catalog())
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			connectors_api.add_connector(preset=self.PRESET, scope="Personal", credential="tok")
+		self.assertIn("turned off for your workspace", str(ctx.exception))
+
+
 class TestListConnectors(_ConnectorApiTestCase):
 	def test_never_returns_credential_and_splits_shared_vs_mine(self):
 		shared = self._mk("Shared", "shared-key", credential="shared-secret")
@@ -559,6 +644,7 @@ class TestListConnectorsCatalog(_ConnectorApiTestCase):
 			"token_help_url",
 			"guide_url",
 			"accepts_key",
+			"coming_soon",
 		}
 		for entry in entries:
 			self.assertEqual(set(entry), allowed, entry.get("name"))

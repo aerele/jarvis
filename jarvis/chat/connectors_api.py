@@ -684,8 +684,9 @@ def list_connectors() -> dict:
 
 	``catalog`` is the in-app provider list (public fields only, no ``base_url``,
 	no secrets, disabled entries absent, including the presets the operator
-	switched off via ``jarvis.connector_catalogue``) the SPA builds its preset picker, logos,
-	hints, help links and per-preset flow from, so the flow a preset takes is
+	switched off via ``jarvis.connector_catalogue``, except the ones it marked "Coming soon":
+	those stay, flagged ``coming_soon: true``, and cannot be added) the SPA builds its
+	preset picker, logos, hints, help links and per-preset flow from, so the flow a preset takes is
 	decided once, here, rather than duplicated in the client."""
 	rows = frappe.get_list(
 		CONNECTOR,
@@ -797,7 +798,7 @@ def add_connector(
 	if connector_catalogue.is_disabled(preset):
 		# The operator switched this preset off fleet-wide. Refused again in the
 		# connector controller so a raw DocType insert cannot slip past.
-		frappe.throw(_("This app is turned off for your workspace."))
+		frappe.throw(connector_catalogue.refusal_message(preset))
 	if scope not in _SCOPES:
 		frappe.throw(_("Scope must be Shared or Personal."))
 	if auth_method not in _AUTH_METHODS:
