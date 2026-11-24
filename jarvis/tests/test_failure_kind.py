@@ -159,6 +159,26 @@ class TestEnvelopeKind(FrappeTestCase):
 			with self.subTest(result=result):
 				self.assertEqual(fk.envelope_kind(result), want)
 
+	def test_connector_inner_failure_is_read_by_its_code(self):
+		def inner(code):
+			return {"ok": True, "data": {"ok": False, "error": {"code": code, "message": "m"}}}
+
+		rows = [
+			(inner("invalid_arguments"), fk.FIXABLE),
+			(inner("circuit_open"), fk.RETRY_LATER),
+			(inner("at_capacity"), fk.RETRY_LATER),
+			(inner("action_denied"), fk.NOT_FIXABLE),
+			(inner("connector_not_ready"), fk.NOT_FIXABLE),
+			(inner("tool_error"), fk.NOT_FIXABLE),
+			(inner("transport_error"), fk.NOT_FIXABLE),
+			(inner("ssrf_blocked"), fk.NOT_FIXABLE),
+			({"ok": True, "data": {"ok": False}}, fk.NOT_FIXABLE),
+			({"ok": True, "data": {"ok": True}}, fk.NOT_FIXABLE),
+		]
+		for result, want in rows:
+			with self.subTest(result=result):
+				self.assertEqual(fk.envelope_kind(result), want)
+
 
 class TestRealSavesClassified(FrappeTestCase):
 	"""Real saves through the write path; the class rolls back."""

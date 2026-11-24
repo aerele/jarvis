@@ -50,6 +50,7 @@ _SNAPSHOTTED_FIELDS = (
 	"release_notice_active",
 	"latest_jarvis_version",
 	"release_notice_message",
+	"connector_key_overrides",
 )
 
 
@@ -126,6 +127,33 @@ class TestSyncConnection(FrappeTestCase):
 		self.assertEqual(s.release_notice_active, 1)
 		self.assertEqual(s.latest_jarvis_version, "0.0.2")
 		self.assertEqual(s.release_notice_message, "Faster search.")
+
+	def test_sync_mirrors_the_connector_key_overrides(self):
+		"""The operator's "Use a key instead" switches ride the same pull and land on
+		Jarvis Settings; a payload without the marker keeps what is held."""
+		_set_token("tok")
+		base = {"agent_url": "ws://localhost:19000", "agent_token": "k", "tenant_status": "running"}
+		payload = {
+			**base,
+			"connector_key_policy_supported": True,
+			"connector_key_overrides": {"Sentry": True},
+		}
+		with patch("jarvis.onboarding.admin_client.get_connection", return_value=payload):
+			onboarding.sync_connection()
+		self.assertEqual(
+			frappe.parse_json(
+				frappe.db.get_single_value("Jarvis Settings", "connector_key_overrides", cache=False)
+			),
+			{"Sentry": True},
+		)
+		with patch("jarvis.onboarding.admin_client.get_connection", return_value=base):
+			onboarding.sync_connection()
+		self.assertEqual(
+			frappe.parse_json(
+				frappe.db.get_single_value("Jarvis Settings", "connector_key_overrides", cache=False)
+			),
+			{"Sentry": True},
+		)
 
 	def test_sync_clears_release_notice(self):
 		"""A payload without a notice clears a previously-mirrored one - the

@@ -93,6 +93,7 @@ class TestOutcomeTable(FrappeTestCase):
 			("Failed", "stale", "run_method", "failed"),
 			("Failed", "target_missing", "update_doc", "failed"),
 			("Failed", "tampered", "call_connector", "failed"),
+			("Failed", "not_sent", "call_connector", "failed"),
 			("Failed", "unverifiable", "update_doc", "failed"),
 			("Failed", "interrupted", "update_doc", "unknown"),
 			("Failed", "partial", "run_import", "partial"),
