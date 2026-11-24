@@ -389,6 +389,10 @@ class TestShareReads(SharingCase):
 							"reply_duration_ms",
 							"model",
 							"provider",
+							# Owner-only: the owner's likely next messages. A recipient cannot
+							# send in the owner's chat, and share_projection's ROW_KEYS
+							# allowlist drops the key for them.
+							"suggested_replies",
 							"created_at",
 							"recent",
 							"pending_card_safe",

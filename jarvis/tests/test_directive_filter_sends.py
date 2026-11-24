@@ -95,6 +95,11 @@ ALLOWED = {
 		"stream_agent_turn",
 	): "agent RPC (no directive parser, see above)",
 	(
+		"chat/suggest_replies.py",
+		"_generate_via_gateway",
+		"stream_agent_turn",
+	): "agent RPC (no directive parser, see above)",
+	(
 		"learning/polish.py",
 		"_run_gateway_turn",
 		"stream_agent_turn",
