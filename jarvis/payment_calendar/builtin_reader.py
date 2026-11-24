@@ -43,9 +43,11 @@ feed init only: never the update pass, the control total or a row.
 
 Time: a caller may pass a `deadline` (`time.monotonic()` value). The reader checks it cooperatively and ends in
 `ReaderFallback("deadline")`, never a `TimeoutError`. The permission filter (`sources._assemble`, which always
-runs: invariant I1 in `eligibility`) is held to the same limit exactly: while it runs, `frappe.has_permission` is
-wrapped, and each per-document check raises `ReaderFallback("deadline")` once `deadline + ASSEMBLE_GRACE_S` has
-passed (`_permission_deadline`). Memory is bounded by `READER_MAX_ROWS` (`assemble_budget`).
+runs: invariant I1 in `eligibility`) is held to the same limit exactly: its permission checks raise
+`ReaderFallback("deadline")` once `deadline + ASSEMBLE_GRACE_S` has passed (`_permission_deadline`). With the
+batch permission switch on, that is a context stop that `batch_permission` checks (`permission_stop`); with it
+off, `frappe.has_permission` is wrapped while the filter runs. Memory is bounded by `READER_MAX_ROWS`
+(`assemble_budget`).
 
 Nothing here writes, commits or rolls back. `routing` and `shadow` are the only callers outside the tests.
 """
@@ -65,7 +67,7 @@ from frappe.query_builder.functions import Count, Sum
 from pypika.functions import Cast
 from pypika.terms import Function, LiteralValue
 
-from jarvis.payment_calendar import compatibility, sources
+from jarvis.payment_calendar import batch_permission, compatibility, sources
 from jarvis.payment_calendar.books import validate_obligation_books
 from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.eligibility import reader_ineligibility
@@ -1101,18 +1103,35 @@ def _check_row_cap(engine) -> None:
 
 @contextmanager
 def _permission_deadline(deadline: float | None):
-	"""Hold `sources._assemble` to the reader's time: its per-document permission checks stop at the hard stop.
+	"""Hold `sources._assemble` to the reader's time: its permission checks stop at the hard stop.
 
-	While the permission filter runs, `frappe.has_permission` is wrapped; each call checks the clock first and
-	raises `ReaderFallback("deadline")` past `deadline + ASSEMBLE_GRACE_S`. The wrapper changes no answer, and the
-	filter still runs for every row while time lasts (invariant I1). It is installed only when a
-	`has_permission` hook is registered: without one `visible_names` makes no per-document check, so there is
-	nothing slow to stop and no wrapper cost.
+	The checks raise `ReaderFallback("deadline")` past `deadline + ASSEMBLE_GRACE_S`. They change no answer, and
+	the filter still runs for every row while time lasts (invariant I1). The batch permission switch is read
+	once, here, and picks the mechanism:
+
+	* on: nothing is rebound. A `batch_permission.permission_stop` is active, and `batch_permission` checks it
+	  before each chunk and each per-document call;
+	* off (today): `frappe.has_permission` is wrapped, only when a `has_permission` hook is registered. Without
+	  one `visible_names` makes no per-document check, so there is nothing slow to stop and no wrapper cost.
 	"""
-	if deadline is None or not effective_hooks("has_permission"):
+	switch_on = batch_permission.switch_enabled()
+	if deadline is None:
 		yield
-		return
-	original, stop = frappe.has_permission, deadline + ASSEMBLE_GRACE_S
+	elif switch_on:
+		stop = deadline + ASSEMBLE_GRACE_S
+		with batch_permission.permission_stop(stop, lambda: ReaderFallback("deadline")):
+			yield
+	elif not effective_hooks("has_permission"):
+		yield
+	else:
+		with _wrapped_has_permission(deadline + ASSEMBLE_GRACE_S):
+			yield
+
+
+@contextmanager
+def _wrapped_has_permission(stop: float):
+	"""Today's mechanism (switch off): each `frappe.has_permission` call checks the clock first."""
+	original = frappe.has_permission
 
 	def checked(*args, **kwargs):
 		if monotonic() >= stop:
@@ -1172,14 +1191,25 @@ def read_obligations(
 		)
 		if deadline is not None:
 			_check_row_cap(engine)
-		with _permission_deadline(deadline):
-			return sources._assemble(engine, report, account_type, start, end, company_values)
+		mark = batch_permission.stats_mark()
+		try:
+			with _permission_deadline(deadline):
+				return sources._assemble(engine, report, account_type, start, end, company_values)
+		finally:
+			_note_permission_stats(engine, mark)
 	except ReaderFallback as exc:
 		if stats is not None:
 			note_fallback(stats, exc)
 		raise
 	except (AttributeError, KeyError, TypeError) as exc:
 		raise CalendarSourceUnavailable() from exc
+
+
+def _note_permission_stats(engine, mark: int) -> None:
+	"""Add the name-free permission counts of this read to the engine's `counts` (nothing with the switch off)."""
+	summary = batch_permission.stats_summary(mark)
+	if summary:
+		engine.reader_stats["counts"].update(summary)
 
 
 def note_fallback(stats: dict, fallback: ReaderFallback) -> None:

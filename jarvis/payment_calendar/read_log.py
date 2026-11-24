@@ -185,6 +185,21 @@ def day_counts(digest: str, date: str) -> dict[str, int]:
 		return {}
 
 
+def site_count(klass: str, date: str) -> int:
+	"""Count one site-level event of the day and return the new count.
+
+	One Redis string `jarvis:pcal:site:day:<date>:<klass>` (INCR, `COUNTER_TTL_S`): no company digest, because
+	the permission batch has no company. `klass` is a fixed name, which may end in a doctype name. A cache error
+	propagates: the caller decides what an unknown count means.
+	The count and the expiry are two commands: a failure between them leaves a day counter without an expiry
+	(a counter of at most one site day, deleted by `reset_breaker`), which is accepted.
+	"""
+	key = frappe.cache.make_key(f"jarvis:pcal:site:day:{date}:{klass}")
+	count = frappe.cache.execute_command("INCR", key)
+	frappe.cache.execute_command("EXPIRE", key, COUNTER_TTL_S)
+	return int(count)
+
+
 def reader_outcomes(records: list[dict], date: str) -> None:
 	"""Log and count the records of `routing.read_side`; never raises (a job deadline excepted).
 
@@ -327,9 +342,34 @@ def _info(record: dict, klass: str, digest: str | None, recovered: bool) -> None
 		"today_ms": _number(record.get("today_ms")),
 		"reader_ms": _number(record.get("reader_ms")),
 		"view_ms": _number(record.get("view_ms")),
+		**_permission_fields(record.get("counts")),
 	}
 	line = "reader_outcome " + " ".join(f"{name}={value}" for name, value in fields.items())
 	frappe.logger("payment_calendar").info(line + (" recovered=1" if recovered else ""))
+
+
+def _permission_fields(counts) -> dict[str, str]:
+	"""`permission_mode` and `permission_reason` of a side whose reader counts carry the batch permission counts.
+
+	Empty when they do not (the batch switch is off): the line is then byte-identical to the one without them.
+	`permission_mode` is `batch`, `per_doc` or `mixed`; `permission_reason` the per-document reasons joined by a
+	comma, or `-`. Fixed words only.
+	"""
+	if not isinstance(counts, dict) or not _number(counts.get("permission_calls")):
+		return {}
+	batch, per_doc = (
+		_number(counts.get("permission_mode_batch")),
+		_number(counts.get("permission_mode_per_doc")),
+	)
+	reasons = sorted(
+		_safe(name.removeprefix("permission_reason_"))
+		for name, value in counts.items()
+		if isinstance(name, str) and name.startswith("permission_reason_") and _number(value)
+	)
+	return {
+		"permission_mode": "mixed" if batch and per_doc else "per_doc" if per_doc else "batch",
+		"permission_reason": ",".join(reasons) or "-",
+	}
 
 
 def _row_message(record: dict, klass: str, digest: str) -> str:

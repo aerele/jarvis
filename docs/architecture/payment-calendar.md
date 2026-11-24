@@ -424,6 +424,7 @@ other save performs.
 | Budget before the reader starts | 90 s from the job start |
 | Whole snapshot view | 120 s (the reader's limit is cut to what is left) |
 | Reader limit per side | 30 s, plus a hard stop 5 s later inside the permission filter |
+| Job permission stop (batch switch on only) | 280 s from the job start, around collect and the publish check (`jobs.JOB_PERMISSION_STOP_S`) |
 | Probe cap | `READER_LEDGER_CAP` 100,000 ledger rows (= `sources.MAX_LEDGER_ROWS` = the shadow's cap) |
 | Rows after the engine | `READER_MAX_ROWS` 50,000 (a memory guard: `assemble_budget`; AC-4 sets it from the snapshot bytes) |
 | Slots | 2 per site |
@@ -431,13 +432,15 @@ other save performs.
 | Slot and in-flight marker | 420 s |
 
 **The exact deadline in the permission step.** The permission filter (`sources._assemble` -> `visible_names`)
-always runs in full: that is invariant I1. Its time is held to the reader's limit exactly, not by an estimate:
+always runs in full: that is invariant I1. Its time is held to the reader's limit exactly, not by an estimate.
+With the batch permission switch off (the default; with it on, see "Batch permission check (S2b-batch)" below):
 while `_assemble` runs and only then, `frappe.has_permission` is wrapped, and each per-document check raises
 `ReaderFallback("deadline")` once the hard stop (the deadline plus 5 s, `ASSEMBLE_GRACE_S`) has passed. The
 wrapper answers every check as before. It is installed only when a `has_permission` hook is registered, because
 without one `visible_names` makes no per-document check, so a user with no hook pays nothing for it. No cost
 estimate, calibration or hook timing exists any more. The worst view is about the deadline plus 5 s plus one
-check, below the 300 s job limit.
+check, below the 300 s job limit. With the switch on nothing is wrapped: the same hard stop is a context stop
+that the batch checks (see below).
 
 **Invariant I1.** The reader's rows reach a user only through `sources._assemble` -> `visible_names`, which
 runs every `has_permission` hook per voucher and party in that user's own session (the snapshot job runs as
@@ -450,6 +453,11 @@ the reader re-applies them. In S2, Company permissions with `applicable_for` set
 `column_filter` through Account and Project match filters, so today's `too_large` stays for both. A support
 person sees it as the counter
 `ineligible:column_filter` in `shadow.status()` (below). A later slice may relax this.
+
+`visible_names` may evaluate in batch; it must stay exactly equal to the per-document `frappe.has_permission`.
+With the batch switch on, "runs every `has_permission` hook per voucher and party" is done by
+`batch_permission.batch_visible` (see "Batch permission check (S2b-batch)" below), which returns the set that
+the loop would return, for the session user. With the switch off the loop of today runs.
 
 **Logs, counters and Error Log classes.** `read_log.reader_outcomes` runs in a `finally` after the view and
 never raises. Every line, key and row names a company only by `company_digest` (a keyed HMAC of the site's
@@ -608,6 +616,311 @@ PYTHONPATH=$W bench --site jarvis_playground.localhost execute jarvis.tests.paym
 PYTHONPATH=$W bench --site jarvis_playground.localhost execute jarvis.tests.payment_calendar_reader_acceptance.shadow_once --kwargs "{'company': '<company>', 'out': '$O/shadow-once.json'}"
 PYTHONPATH=$W bench --site test_jarvis execute jarvis.tests.payment_calendar_reader_acceptance.limits_at_guard_size --kwargs "{'out': '$O/limits-guard.json'}"
 ```
+
+## Batch permission check (S2b-batch)
+
+`permissions.visible_names` is the one visibility gate of every Payment Calendar read and publish: the
+reader's `_assemble`, the voucher and party checks in `collect`, at publish and on every read
+(`access._check_rows`). When a `has_permission` hook applies to the doctype, it checks every name that
+`frappe.get_list` returned with one `frappe.has_permission(doctype, ptype, doc=name)` call: 4-26 ms per
+document for a user with a Company User Permission. The batch replaces that loop with a faster evaluation
+that returns the same set. It is behind a site switch that is **off by default**.
+
+**Scope (what this does not do).** The reader serves a side only up to its ceilings: 100k live ledger rows
+(the probe) and 50k assembled rows (`READER_MAX_ROWS`). This slice makes the permission filter fast and exact
+inside those ceilings. The 1-lakh invoices per side x 10-year target is not met here: such a side is refused
+by the probe at once, as today. That target stays with the cache slices (S4, S5) and the settled-parts slice (S6). S4 refuses
+Company-UP users in the cache until a later amendment, so at that size no slice serves a Company-UP user yet.
+**Child-row denial stays.** A Company-UP user does not see a Customer that has a Customer Credit Limit row
+for another company, nor an invoice with a Tax Withholding Entry row for another company (in strict mode, or
+with an empty one), because today's `has_permission` denies it. The batch is exactly today's rule (I1), so it
+keeps this; a change of the rule would be a separate slice.
+
+**How it works.** `visible_names` keeps its `get_list` step and its branch condition unchanged. When the
+per-document branch is taken, it calls `batch_permission.batch_visible(doctype, allowed, ptype)`. The old
+loop stays as `permissions._visible_names_per_doc` (the fallback, and the oracle of the tests).
+`batch_permission` is the public entry (live gate, stop, stats, sample oracle, breaker, `status`, `reset_breaker`,
+`differential`). The metadata plan is in `batch_permission_plan` and the evaluator in `batch_permission_eval`.
+
+- The evaluator calls the real Frappe functions (`get_role_permissions`, `has_user_permission`, and the
+  known `has_permission` hooks) on a read-only stand-in document (`_PermDoc`). Only the glue between them is
+  transcribed from `frappe.permissions`, in Frappe's order and with its short circuits.
+- Data comes from chunked SQL reads (500 names per chunk, as `get_list`): the parent columns, the child
+  rows by a join on the child `parent` index, and the share rows. Table and column names come from the meta
+  and information_schema, never from user input. These schema facts (table columns, whether a restricted
+  master exists) live for one request or job, so no worker restart is needed after a migrate.
+- Hooks are dispatched through `frappe.call` with the method strings of raw `frappe.get_hooks`, in the order
+  of Frappe. A hook that the evaluator does not know runs on a real lazy document, per document.
+- A document whose stand-in cannot answer (`ShimMiss`) gets the per-document call. An error from the batch's
+  own SQL propagates; the function never returns a partial set.
+- The first release serves users whose User Permission keys are a subset of `{"Company"}` (no User Permission,
+  or Company permissions, scoped ones included).
+
+**When it falls back to the loop (`permission_mode=per_doc`).** The reason is one fixed word; the result is
+always the loop's, so it is exact and only slower.
+
+| Reason | Meaning |
+| --- | --- |
+| `switch_off`, `breaker`, `breaker_unknown` | The live gate: the switch is off, a breaker key exists for the doctype, or Redis did not answer the breaker read |
+| `tripped` | The batch tripped earlier in this job or request, so the rest of it takes the loop (the trip flag) |
+| `small_input` | The user has no User Permission and the input has 4 names or fewer (`SMALL_INPUT`): the loop is cheaper. Not a result of the metadata plan (`batch_plan`): it is neither frozen for the job nor sampled |
+| `scope_users` | The user has a User Permission on a doctype other than Company |
+| `table_doctype`, `single_parent`, `virtual_parent`, `computed_table`, `virtual_child`, `no_table`, `no_column`, `custom_ptype`, `collation` | The doctype's metadata is outside what the evaluator reads exactly (any table field counts, relevant or not) |
+| `controller_override` | A controller class of the doctype or of one of its child tables defines a method that changes how a document loads or reads a value, and is not on the allowlist |
+| `entry_patched` | A pinned callable is not the audited one (see "Pins and identity") |
+| `pin_drift` | A pinned source changed (see "Pins and identity"). It is checked first, before every other plan reason |
+| `plan_error` | The plan could not be built (any unexpected error, for example an older Frappe API). One Error Log event `pcal_permission_plan_error`; a stop (timeout) still propagates |
+
+**Time limits with the switch on (no cost estimate; the limit is exact).** With the switch off nothing below applies: the
+reader wraps `frappe.has_permission` as above and a job has no permission stop (today's behaviour).
+
+- Reader: `_permission_deadline` rebinds nothing. It enters `permission_stop(deadline + ASSEMBLE_GRACE_S)`
+  around `sources._assemble`, and `check_permission_stop()` raises `ReaderFallback("deadline")` once that
+  time has passed. The checks run before each `get_list` chunk, each batch chunk, each real hook call and each
+  per-document call.
+- Job: `run_snapshot` enters `permission_stop(job_start + JOB_PERMISSION_STOP_S)` (`JOB_PERMISSION_STOP_S =
+  280`) around `collect` and the publish check. The stop raises `TimeoutError`, which is in `TIMEOUTS`: no
+  router or reader frame catches it, the view rolls back, and the job fails `timeout` (the code of today's RQ
+  kill), with the worker free at once. A test asserts that `JOB_PERMISSION_STOP_S` is larger than
+  `JOB_BUDGET_S + READER_DEADLINE_S + ASSEMBLE_GRACE_S`, so the job stop is never active inside the reader.
+- Reads (`verify_returned_rows`): no stop, as today; the batch only makes them faster.
+- One mode per job: the first `batch_visible` call of a doctype in a job freezes (live gate, plan). A later
+  call that differs (a breaker key set by another process, a mode change) poisons the view and fails the job
+  `source_changed`. A read request has no freeze.
+
+**Switch.** `payment_calendar_batch_permission` in `site_config.json`, default off. The value is read with Frappe's
+`cint`: `1` and `"1"` allow the batch; `0`, `"0"`, `"false"`, `"off"` and an empty value give `switch_off`.
+
+- A job reads the site config fresh at its start, so a change applies at the next job. A web request reads
+  through a per-process cache with a 60 s TTL, so reads follow within 60 s. No restart is needed.
+- The switch is read on every `batch_visible` call (the live gate), never from a memo.
+- **Turn-on rule.** Turn it on per site only after the bounded differential (`differential`, below) is clean on
+  that site's prod copy (`gate_passed` true) and the site passes the host check.
+- **Host check.** Turn it on only on a self-hosted bench where (a) the operator has shell access for
+  `bench --site <site> execute` and `set-config`, and (b) nothing outside the bench writes
+  `site_config.json` (no hosting dashboard, configuration-management tool or container entrypoint). Write both
+  answers in the site's turn-on record next to the differential result. On Frappe Cloud, shared benches, or
+  any host that can push its own `site_config.json`, keep the switch off: a config push could set it to 1
+  again after a trip, and the Redis breaker key alone is not durable (eviction, Redis restart). Those sites
+  keep today's speed until a later amendment adds a database latch.
+- **What runs with the switch off.** Only: the loop (moved to `_visible_names_per_doc`, same statements),
+  `check_permission_stop()` calls that do nothing without an active stop, one `frappe.conf.get` and one trip
+  flag read per per-document branch, and today's `_permission_deadline` body. No plan, no pin parse, no stat,
+  no day counter, no event, no `site_count` call.
+- **Deploy effect.** `batch_permission`, `batch_permission_plan` and `batch_permission_eval` are in
+  `FIGURE_MODULES`, so `reader_build` (and `cache_build` once S4 lands) change at deploy, also with the switch
+  off. A change to a figure module starts the count of shadow nights again (see "The gate" above).
+
+**Pins and identity.** The batch is exact only while Frappe and ERPNext are the code that was audited. Two
+checks send the batch to `per_doc` when that is not so; neither changes a result.
+
+- **Pins.** `compatibility._PERMISSION_PINS` holds the sha256 of every Frappe and ERPNext definition that the
+  per-document path runs and the evaluator transcribes or calls (and, when installed, the playground hook).
+  `compatibility.permission_pin_drift()` lists the drifted names. It is separate from `reader_pin_drift()`:
+  a permission pin drift never makes the reader fall back with `pin_drift`; it only gives the batch
+  `permission_mode=per_doc reason=pin_drift`. A pinned file that cannot be read counts as drift. The
+  parsed pins are memoised per process by (path, mtime, size): the first plan in a process parses the files
+  (about 260 ms), later ones only `stat` them. Without the Redis cache below, a forked RQ job pays the parse once per job. Definition hashes
+  are also cached in Redis under `jarvis:pcal:srcdefs:` for 24 h, keyed by file path, mtime and size, so a new
+  worker process does not parse the pinned files again; an edited file never matches an old record.
+- **Identity.** For each callable that the per-document path resolves at call time, the batch checks that the
+  live object at that exact lookup name (for example `frappe.get_lazy_doc`, not
+  `frappe.model.document.get_lazy_doc`) is the function defined in the pinned file. Methods resolve with
+  `inspect.getattr_static` on the class that the per-document path instantiates. A wrapper from another app
+  fails the check, also one made with `functools.wraps`. There is no allowlist of wrappers. Failure gives
+  `permission_mode=per_doc reason=entry_patched`.
+- **Lookup row ids.** `compatibility.PERMISSION_LOOKUP` lists every name that the per-document path resolves at
+  call time, with an id per row. `status()` and the Error Log row name the failed ids. Kind B: used by the
+  per-document path only (the batch bypasses or transcribes it). Kind S: the batch calls the same binding
+  (checked anyway). Kind X: shared and not checked (`frappe.get_hooks`, `frappe.get_meta`). A child id carries
+  the class name (`42:Name`). An id `allowlist:<Class>.<method>` is an allowlisted ERPNext controller method
+  (`SalesInvoice.__init__`, `PurchaseInvoice.__init__`, `PaymentEntry.__init__`, `JournalEntry.__init__`,
+  `SellingController.__setup__`, `BuyingController.__setup__`, `SubcontractingController.__init__`) that is no
+  longer the pinned definition; a bare `allowlist` means the allowlist check itself could not run.
+- **Operator note (dev bench).** An app that wraps a pinned Frappe callable keeps the batch at `per_doc`
+  (`entry_patched`) in every process where the wrapper is bound. That is safe: the identity check runs in each
+  process, and a job freezes one mode. On this dev bench optimus wraps `frappe.permissions.has_permission` and
+  ugly_code wraps `frappe.get_all`, even on sites where those apps are not installed. Both install their wrap
+  when their package is imported. `bench_helper.get_app_groups()` imports the `.commands` of every app on disk,
+  so every `bench ...` process is wrapped (`bench worker`, `bench serve`, `bench execute`, `bench console`). A
+  plain `frappe.init(site)` process is wrapped only when the Redis key `app_modules` is missing
+  (`frappe/__init__.py:224`). A job or request init is clean unless its parent process was wrapped. So the
+  workers started by `bench worker` and the bench web server stay at `per_doc`, and the mode can differ between
+  processes. `status()` run through `bench execute` also reports the state of a wrapped process. The proof of
+  the batch is the CI fixtures (which put the genuine bindings back) plus the playground runs (the speed check
+  and the real-Chrome flow that shows `permission_mode=batch`). A playground run must come from a process where
+  no wrapper is bound.
+
+**Sample oracle and breaker.** Only in a job (`collect`), never on a read and never on a `small_input` call.
+Per doctype up to 3 names are checked against a fresh `frappe.has_permission` call: first names that took a
+non-default branch (a share, a child-row deny, owner-only, a hook candidate, `ShimMiss`), then a stride that
+changes each run. The cap is 0.5 s per job. On a difference the batch runs again over the same input set and
+the same chunk partition, with every batch memo cleared, and the sampled name is compared with a second fresh
+per-document call.
+
+| Outcome | What happens |
+| --- | --- |
+| Difference repeats (`mismatch`), the stop fires during the re-check (`mismatch_unresolved`), a second transient for one doctype in one site day (`transient_limit`), or the transient counter cannot be written (`transient_unknown`) | Confirmed: trip (below), an event `permission batch mismatch confirmed: doctype=<dt> reason=<reason> branch=<special|plain> direction=<batch_only|per_doc_only> user=<keyed digest> job=<id>` (operation `pcal_permission_batch_mismatch`), the day counters `permission_mismatch` and `breaker_trip`, the view is poisoned and the job fails `source_changed` (`mismatch_unresolved`: the stop's `timeout`). The side is never routed to the reader and never answered by the loop in place of the batch |
+| Difference does not repeat (transient), first one for that doctype in the site day | No trip. An event `permission_mismatch_transient: doctype=<dt> branch=<...> direction=<...> user=<...> job=<...>` (operation `pcal_permission_batch_mismatch`), the view is poisoned, the job fails `source_changed`, and the day counter `permission_mismatch_transient:<doctype>` is increased. The limit is 2 per doctype per site day |
+
+`branch` says whether the sampled name took a non-default branch (`special`) or not (`plain`); `direction` says which side allowed it; `user` is a keyed digest. The failure record of a job refused by the batch (the Error Log body of the failed job) gains `permission_detail` = `permission_mismatch`, or `permission_mode_changed` for a mode change.
+
+**Trip.** At once, one ERROR line `permission_batch_trip doctype=<dt> reason=<reason> user=<digest> job=<id>` goes to
+`logs/payment_calendar.log`. Then, in this order: (1) a Redis key `jarvis:pcal:permission_breaker:<doctype>`
+with the time and the reason, **without TTL**; (2) `payment_calendar_batch_permission = 0` in the site config
+(`update_site_config`, file lock); (3) a flag on `frappe.local` (it lives for that job or request only). A
+failure of step (1) is queued as the event `breaker_write_failed:breaker_key` (Error Log operation
+`pcal_permission_breaker`), and the other steps still run.
+
+- **Latch key.** `jarvis:pcal:permission_breaker:_latch_write_failed` stops every doctype (reason `breaker`),
+  not only the tripped one. It is set when the site-config write fails or is deferred. `status()` shows it as
+  `latch_write_failed`.
+- **Deferred config write.** A trip inside a job with less than 35 s before the job stop, and every
+  `mismatch_unresolved` trip, does not write the site config at once (the write takes a file lock and cannot
+  be cut). The Redis key, the latch key and the trip flag stop the batch at once, and the event
+  `breaker_write_deferred:site_config` is queued. The job writes the config at its end, after the event
+  flush. On success the latch key is deleted. On failure it stays, and the event
+  `breaker_write_failed:site_config` is written. If the worker dies before that, the latch key also stays. The deferred write runs at the end of the job, still
+  inside the RQ hard timeout. If the worker is killed in the middle of that write, `site_config.json` can be
+  left empty: the latch key still stops the batch. Restore the file from a backup (see "If a trip left
+  `site_config.json` empty or invalid" in the runbook below).
+- **Effect.** A trip turns the batch off for the whole site, for every doctype, and it stays off until an
+  operator resets it. The site config survives a Redis eviction or restart and the 5-minute watchdog clear
+  (the scheduler job that clears the Redis cache; keys under the `persistent_cache_keys` prefix `jarvis:pcal:`
+  survive it). The Redis key propagates the trip to other processes before the 60 s cache and records which
+  doctype tripped.
+- **Non-atomic write.** The config write truncates and then writes the file, so a process that reads the
+  config in that window can fail once. This is the same window as `bench set-config`, and a trip is rare.
+
+**Operator visibility.** Nothing is written with the switch off. With the switch on:
+
+- Per call, a name-free record on `frappe.local`: `doctype`, `permission_mode`, `reason`, `names`, `ms`,
+  `real_hook_calls`, `candidates`, `shim_miss`, `samples`, `mismatches` and `permission_refusal` (`mismatch`,
+  `mismatch_unresolved`, `transient_limit`, `transient_unknown`, `mismatch_transient`, `mode_changed`). A doctype
+  name is metadata; no document or user name appears.
+- Log fields. The reader's counts (`permission_calls`, `permission_mode_<mode>`, `permission_reason_<reason>`,
+  and the sums of the fields above) go into the reader record. With the switch on, the `reader_outcome` line of
+  a side ends with `permission_mode=<batch|per_doc|mixed> permission_reason=<reason[,reason]|->`. A job also
+  writes one INFO line `permission_batch permission_calls=N ...` with the same counts, only when calls were
+  recorded. With the switch off neither the fields nor the line appear.
+- Site-level day counters through `read_log.site_count(klass, date)` (it returns the new value; keys under
+  `jarvis:pcal:`, TTL `read_log.COUNTER_TTL_S`): `permission_batch:<reason>`, `permission_mismatch`,
+  `permission_mismatch_transient:<doctype>`, `breaker_trip`. `permission_batch:<reason>` counts each recorded
+  per-document call by its reason (also `breaker`, `breaker_unknown`, `tripped`, `small_input`); a batch call
+  adds none. With the plain switch off nothing is counted; a trip in the current job or request is counted.
+- Error Log. One row per distinct event, with the title `Payment Calendar batch permission <operation>`; search
+  the Error Log on the title (the `method` field). Operations: `pcal_permission_pin_drift`,
+  `pcal_permission_identity`, `pcal_permission_plan_error`, `pcal_permission_plan` (a doctype runs per document
+  for a reason other than `scope_users`, `pin_drift`, `entry_patched` and `plan_error`; the message names the
+  doctype and the reason), `pcal_permission_batch_mismatch` and `pcal_permission_breaker`. A repeat of the same
+  message dedupes inside a window. The persistent operations (`pin_drift`, `identity`, `plan`) write at most
+  one row per day per distinct message; the mismatch and breaker events keep the 300 s window. Outside a
+  snapshot view (a read, the publish check) an event is written at once. Inside a job's view the insert is
+  refused, so the batch queues the events on `frappe.local` and `run_snapshot` writes them in a `finally`,
+  after the view; an event already written is skipped by that flush. The mode-change event is
+  `permission_mode_changed: doctype=<dt> user=<digest> job=<id>` (operation `pcal_permission_breaker`).
+- Log lines in `logs/payment_calendar.log`: ERROR `permission_batch_trip doctype= reason= user= job=`; INFO
+  `permission_batch_reset doctype= user= breakers= counters=` (written by `reset_breaker`); WARNING
+  `permission_breaker_unreadable error=<Class>` (the class of the error behind `breaker_unknown`);
+  `permission_event_unavailable operation= error=<Class>` (an event that could not be written: ERROR for the
+  mismatch and breaker operations, else WARNING); ERROR `permission_differential_rollback_failed error=<Class>`.
+- `bench --site <site> execute jarvis.payment_calendar.batch_permission.status` (kwarg `user`, default the
+  session user) returns `{switch, breakers, latch_write_failed, pin_drift, identity_failures, counters, plans}`:
+  the live switch (read with `cint`), the breaker keys (each with `doctype`, `reason` and `set_at`), the
+  failed-latch flag, the drifted pin names, the identity failures (lookup row ids), today's `permission_*` and
+  `breaker_*` day counters (read only, nothing is counted) and, for the user, `plans`
+  (`{doctype: {mode, reason}}` for the six default doctypes). `plans` shows a doctype that stays per document
+  for a reason that nothing else reports. No document or user name appears. `bench execute` runs as
+  Administrator, so without `user` the `plans` block shows the Administrator shortcut. Pass the user to inspect:
+  `bench --site <site> execute jarvis.payment_calendar.batch_permission.status --kwargs "{'user': '<user>'}"`.
+
+**Runbook (batch permission).**
+
+| Task | How |
+| --- | --- |
+| Turn on (per site) | Check the host (host check above) and write it in the turn-on record. Run the differential on the site's prod copy; it must pass. Then `bench --site <site> set-config payment_calendar_batch_permission 1`. Jobs pick it up at the next job, reads within 60 s. Run `status()` and read the first jobs' `permission_mode` |
+| Turn off | `bench --site <site> set-config payment_calendar_batch_permission 0`. Same pickup time. The loop of today runs again; nothing else to undo |
+| Status | `bench --site <site> execute jarvis.payment_calendar.batch_permission.status` |
+| Differential, pin drift, identity failure, mismatch, reset | The entries below |
+
+**Differential (gate).** `bench --site <site> execute jarvis.payment_calendar.batch_permission.differential`
+with these kwargs:
+
+- `users` (a list or tuple; default: every user with a User Permission, last login first, and 5 without; pass the visitor here; a string is a `TypeError`), `names` (a dict `{user: {doctype: [names]}}` with the names the calendar passes to `visible_names`, captured by the outside pilot script), `expect_batch`, `time_box_s` (default 4 h) and `show_users` (default `False`).
+- Signature: `differential(users=None, *, names=None, expect_batch=..., time_box_s=4*3600, show_users=False)`. Run it in its own `bench execute`.
+- Read-only: SELECT only, rolls back, writes no breaker key, site config, counter or Error Log row. The plan events that it would have written (pin drift, identity) come back in `plan_events` instead. An error in the rollback is logged (ERROR `permission_differential_rollback_failed error=<Class>`) and does not hide an earlier error.
+- It calls the evaluator directly, so it runs with the switch at 0 and after a trip.
+- Compared set per user and doctype: the supplied names plus SQL selectors `owner` (documents they own), `shared` (a read share for the user or for everyone), `child_row` (a relevant child row whose User Permission value is outside the allowed values or empty) and `restricted_master` (a link to a master with `restrict_to_companies = 1`).
+- Each selector is capped at `DIFFERENTIAL_NAME_LIMIT` (50,000); a cut goes to `names_cut` and fails the gate.
+- The time box is checked between users and between doctypes.
+- It compares the batch with `frappe.has_permission` per name and returns `users` (per user and doctype: mode, reason, `batch_evaluated`, compared, supplied, selected, differences, branches), `gate_failed` (user, doctype, reason; reasons are the plan reason of a doctype that did not run as `batch`, `not_evaluated`, `doctype_missing` and `not_exercised`; a missing doctype may show `plan_error`), `not_compared` (Administrator, Guest and users with `scope_users`), `not_done` (users the box did not reach), `names_cut`, `differences` (total), `elapsed_s`, `gate_passed` and `plan_events`. Users appear as a keyed digest unless `show_users=True`.
+- **Gate: `gate_passed` is true** (no `gate_failed`, no differences, no `names_cut`, no `not_done`). A pass needs at least one compared user and every `expect_batch` doctype compared with names above 0 for some user (`not_exercised` otherwise).
+- A doctype in `expect_batch` (default Sales Invoice, Purchase Invoice, Payment Entry, Journal Entry, Customer, Supplier) that did not run as `batch` for a user whose User Permission keys are a subset of `{"Company"}` fails the gate with its reason.
+- Run it on the prod copy of each pilot site.
+- In a process where a wrapper is bound to a pinned Frappe callable (`entry_patched`, see "Operator note") the gate cannot pass, so run it from a process where no wrapper is bound.
+
+**Pin drift.**
+
+- `status()` or `compatibility.permission_pin_drift()` names the drifted definitions. One Error Log row with the
+  title `Payment Calendar batch permission pcal_permission_pin_drift` (search the title).
+- Results stay exact; the batch is `per_doc` (`pin_drift`).
+- Audit the upstream diff against the evaluator's transcribed glue. Find that code with
+  `grep -n "Mirrors" jarvis/payment_calendar/batch_permission_eval.py jarvis/payment_calendar/batch_permission_plan.py`:
+  each block cites `frappe/<file>:<fn> L<a>-<b>` and the pin. Then add the new hash next to the old one
+  with the version in the comment (as for the reader pins).
+- Run the permission pin test (`jarvis.tests.test_batch_permission_pins`, on a test site), restart the workers
+  and re-run the differential.
+
+**Identity failure.**
+
+- One Error Log row with the title `Payment Calendar batch permission pcal_permission_identity` (search the
+  title) names the failed lookup rows. `status()` reports the same row ids; they map to callables in
+  `compatibility.PERMISSION_LOOKUP` (legend above).
+- `entry_patched` is safe (`per_doc`). Find the app that rebinds the callable at import and remove or replace
+  the patch. Example for `frappe.permissions.has_permission`: read
+  `frappe.permissions.has_permission.__code__.co_filename` on the console. The same check applies to the other
+  rows (for example `frappe.get_all`).
+- Do not add an allowlist of wrappers.
+
+**Mismatch (trip).**
+
+- The job failed `source_changed`; its failure record carries `permission_detail` (`permission_mismatch` or
+  `permission_mode_changed`). The Error Log has a row titled
+  `Payment Calendar batch permission pcal_permission_batch_mismatch` (search the title); a failed or deferred
+  latch write or a mode change adds `... pcal_permission_breaker`. The log file has the ERROR line
+  `permission_batch_trip`.
+- The breaker key exists and the site config holds 0 (after a deferred write, it holds 0 at the end of the job). Users get today's speed from the next job.
+- Find the cause, then do the reset below.
+
+**Reset after a trip (self-hosted).**
+
+0. When `status()` shows switch 1 together with a breaker key or `latch_write_failed` (the config write of a
+   trip failed, was deferred and failed, or the worker died before it), first run
+   `bench --site <site> set-config payment_calendar_batch_permission 0`, so the switch is off before you go on.
+1. Run `bench --site <site> execute jarvis.payment_calendar.batch_permission.status` and read the doctype, the reason and the time.
+2. Find the cause (pin, controller, data, or code fault); fix it or keep the switch off.
+3. Run `bench --site <site> execute jarvis.payment_calendar.batch_permission.reset_breaker`.
+4. Run the differential again on the site's prod copy; it must pass.
+5. Run `bench --site <site> set-config payment_calendar_batch_permission 1`.
+6. Restart the workers (`bench restart`, or the supervisor/systemd worker group). With the trip flag on `frappe.local` this is not needed for correctness, also in a no-fork worker; it clears the process memos (pin memo, `frappe.lazy_controllers`; the schema facts live for one request or job) so that the next job evaluates from fresh state.
+7. Run `status()` again: switch 1, no breaker key, no pin drift, no identity failure.
+
+`reset_breaker(doctype=None)` deletes every breaker key and the failed-latch flag, or only the key of `doctype`.
+It also deletes the transient mismatch counters, returns `{breakers, latch_write_failed, transient_counters}` (what
+it deleted) and writes the INFO line `permission_batch_reset`. It does not turn the switch on. After a Redis eviction the
+trip stays in force through the site config (`switch_off`) until the operator sets the switch to 1.
+
+**If a trip left `site_config.json` empty or invalid.** The config write truncates the file and then writes it,
+so a crash in that window can leave it empty. Restore the file from the site backup, then go on at step 1.
+
+**Revert the release.** Run `reset_breaker` before the revert, or delete the Redis keys
+`jarvis:pcal:permission_breaker:*` after it (the old code has no `reset_breaker`). The site-config key
+`payment_calendar_batch_permission` and the Error Log rows are inert for the old code.
+
+**Frappe or ERPNext upgrade checklist.** The pins are strict, so an upgrade that changes a pinned definition sends
+the batch to `per_doc` (`pin_drift`) until you act. After the upgrade: audit the changed definitions against the
+evaluator, add the new hashes next to the old ones (with the version in the comment), run the permission pin
+test, restart the workers, and re-run the differential (it must pass) before you rely on `permission_mode=batch`.
 
 ## Company floor and coherent reads
 
@@ -952,14 +1265,15 @@ them in production. The production signals are the ERROR lines and the Error Log
 | `Payment Calendar API <method>` | `api._safe` | An unexpected error in an API call (`internal_error`). The body is JSON: `operation`, `exception_class`, `cause_class` (the class that was wrapped, for a hook error inside the identifier check), and `detail` (key names or a fixed code) when there is one. At most one row per operation and exception class in 300 s. |
 | `Payment Calendar snapshot` / `Payment Calendar balances` | `jobs._fail_safely` | A job failed with a code other than `scope_changed`, `forbidden` or `expired`. The body has `code`, `kind`, `exception_class`, `stage` (`admission`, `sources`, `publish`) and `duration_ms`. |
 | `Payment Calendar refusal loop` | `read_log.count_discard` | Three different snapshots of one user were refused and discarded inside 300 s. The body has the count and the last check kind. Look for a hook, a permission edit or a changing policy input that refuses every new snapshot. A refusal caused only by the site day changing is never counted. |
+| `Payment Calendar batch permission <operation>` | `batch_permission.EVENT_TITLE` (class `batch_permission`) | A batch permission event. The `<operation>` is `pcal_permission_pin_drift`, `pcal_permission_identity`, `pcal_permission_plan_error`, `pcal_permission_plan`, `pcal_permission_batch_mismatch` or `pcal_permission_breaker`; search on the title. Written at once outside a snapshot view, and after the view inside a job (see "Batch permission check (S2b-batch)"). The body has no document or user name. Follow the runbook entry of that operation. |
 
 **Codes.** A failed job and a failed call carry one `code` from `errors.SAFE_CODES`.
 
 | `code` | Meaning |
 | --- | --- |
 | `internal_error` | An unexpected error. The Error Log row has the class and the stage. |
-| `timeout` | The job passed the 300 s RQ timeout. |
-| `source_changed` | The source view changed while the job read it (a write inside the repeatable-read view). |
+| `timeout` | The job passed the 300 s RQ timeout. With the batch permission switch on, also the 280 s job permission stop (`jobs.JOB_PERMISSION_STOP_S`), which ends the job first. |
+| `source_changed` | The source view changed while the job read it (a write inside the repeatable-read view). With the batch permission switch on, also a confirmed or transient batch mismatch and a permission mode change inside a job (see "Batch permission check (S2b-batch)"). |
 | `scope_changed` | A permission, setting, account, day or stored proof no longer holds. The client requests a new snapshot. |
 | `forbidden` | Company or report access is missing. |
 | `expired` | The result is gone (300 s lifetime, a purge or an eviction). Also the code of an unknown or foreign id. |
