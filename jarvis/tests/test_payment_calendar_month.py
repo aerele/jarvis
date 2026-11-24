@@ -168,6 +168,11 @@ class TestPaymentCalendarMonthSnapshot(TestCase):
 			store.purge_actor("Administrator")
 
 	def test_collect_stamps_schema_two_and_keeps_month_a_string_with_month_totals(self):
+		# The fixture schedules fall due 10 days out, which is next month for the last
+		# 10 days of every month. Pin both inside the current month.
+		for invoice in (self.ap, self.ar):
+			frappe.db.set_value("Payment Schedule", {"parent": invoice}, "due_date", nowdate())
+		frappe.db.commit()
 		legacy = scope.normalize_scope(self.fx.company, [self.fx.bank])
 		full = snapshot.collect(legacy, authorize_scope(legacy)["fingerprint"])
 		self.assertEqual(full["schema"], 2)
