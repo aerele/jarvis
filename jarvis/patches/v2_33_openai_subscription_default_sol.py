@@ -79,12 +79,14 @@ def _repoint_pool_rows(rows: list) -> list[str]:
 
 
 def _repoint_workspace_default(rows: list, moved_rows: list[str]) -> bool:
-	"""``llm_model`` moves when the direct lane is a ChatGPT login, or when it mirrors
-	a pool whose first row just moved (Settings copies models[0] into llm_model)."""
+	"""With ChatGPT pool rows, ``llm_model`` mirrors models[0], so it moves only when
+	that first row just moved. Without them it moves when the direct lane is a
+	ChatGPT login."""
 	model = (frappe.db.get_single_value(SETTINGS, "llm_model") or "").strip()
 	if model != OLD_DEFAULT:
 		return False
-	if not (_direct_lane_is_openai_subscription() or _first_row_moved(moved_rows)):
+	should_move = _first_row_moved(moved_rows) if rows else _direct_lane_is_openai_subscription()
+	if not should_move:
 		return False
 	frappe.db.set_single_value(SETTINGS, "llm_model", NEW_DEFAULT)
 	return True
