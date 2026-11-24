@@ -184,6 +184,33 @@ class TestEgressMatch(unittest.TestCase):
 		# the resolver's idna codec reads U+3002 as a label dot
 		self.assertFalse(policy.egress_match("evil\u3002com", "!evil.com"))
 
+	def test_dot_like_trailing_character_hits_deny_rule(self):
+		# U+3002, U+FF0E, U+FF61: the resolver reads each as a trailing dot.
+		for tail in ("\u3002", "\uff0e", "\uff61"):
+			with self.subTest(tail=hex(ord(tail))):
+				self.assertFalse(policy.egress_match("evil.com" + tail, "!evil.com"))
+				self.assertFalse(policy.egress_match("sub.evil.com" + tail, "!evil.com"))
+				self.assertFalse(policy.egress_match("evil.com", "!evil.com" + tail))
+
+	def test_dot_like_middle_character_hits_deny_rule(self):
+		for mid in ("\u3002", "\uff0e", "\uff61"):
+			with self.subTest(mid=hex(ord(mid))):
+				self.assertFalse(policy.egress_match("evil" + mid + "com", "!evil.com"))
+
+	def test_fullwidth_digit_ip_hits_deny_rule(self):
+		self.assertFalse(policy.egress_match("\uff13\uff14.1.2.3", "!34.1.2.3"))
+
+	def test_empty_label_hosts_refused_when_rules_exist(self):
+		for host in ("evil.com..", ".evil.com", "a..b", "...", ".", "evil.com\u3002\u3002"):
+			with self.subTest(host=host):
+				self.assertIsNone(policy.normalise_host(host))
+				self.assertFalse(policy.egress_match(host, "!other.com"))
+				self.assertFalse(policy.egress_match(host, "api.github.com"))
+
+	def test_one_real_trailing_dot_still_normalises(self):
+		self.assertEqual(policy.normalise_host("api.github.com."), "api.github.com")
+		self.assertEqual(policy.normalise_host("API.GitHub.com"), "api.github.com")
+
 	def test_unnormalisable_host_denied_when_rules_exist(self):
 		self.assertFalse(policy.egress_match("evil..com", "!other.com"))
 		self.assertFalse(policy.egress_match("", "ok.example.com"))
