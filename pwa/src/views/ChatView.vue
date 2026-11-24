@@ -89,6 +89,9 @@ import SelectionActions from "@shared/components/chat/SelectionActions.vue";
 import ReplyQuote from "@shared/components/chat/ReplyQuote.vue";
 import SuggestedReplies from "@shared/components/chat/SuggestedReplies.vue";
 import { suggestRepliesOn } from "@shared/lib/suggestRepliesPref";
+import ComposerPlusMenu from "@shared/components/chat/ComposerPlusMenu.vue";
+import SkillPill from "@shared/components/chat/SkillPill.vue";
+import { withSkillToken } from "@shared/lib/skillToken.js";
 import { createReader } from "@jsshared/read_aloud.mjs";
 import {
 	boundedDelivery,
@@ -375,7 +378,71 @@ reader.subscribe((id) => (speakingId.value = id));
 watch(convId, () => {
 	reader.stop();
 	replyQuote.value = "";
+	armedSkill.value = "";
+	groundWiki.value = false;
+	connectorFocus.value = loadConnectorFocus(convId.value);
 });
+
+// ── the composer's "+" menu (ComposerPlusMenu, shared with the desktop chat) ──
+// A picked skill rides on the next message as its "/skill_name" token (send()); wiki
+// grounding is one-shot, like the desktop's book button; a connector focus holds for the
+// chat until cleared, stored under the SAME per-chat key the desktop uses (same origin),
+// so both screens show the same focus.
+const plusSkills = ref([]);
+const plusConnectors = ref([]);
+const armedSkill = ref("");
+const groundWiki = ref(false);
+const connectorFocus = ref(null);
+const _focusKey = (id) => `jarvis-connector-focus:${id}`;
+function loadConnectorFocus(id) {
+	if (!id) return null;
+	try {
+		const raw = localStorage.getItem(_focusKey(id));
+		const row = raw ? JSON.parse(raw) : null;
+		return row && row.key && row.label ? row : null;
+	} catch {
+		return null;
+	}
+}
+function setConnectorFocus(row) {
+	connectorFocus.value = row
+		? { key: row.key, label: row.label, preset: row.preset || "" }
+		: null;
+	if (!convId.value) return;
+	try {
+		if (connectorFocus.value)
+			localStorage.setItem(_focusKey(convId.value), JSON.stringify(connectorFocus.value));
+		else localStorage.removeItem(_focusKey(convId.value));
+	} catch {
+		// private mode: the focus still holds for this visit
+	}
+}
+connectorFocus.value = loadConnectorFocus(convId.value);
+// Fresh lists each time the menu opens, so a skill or app added a moment ago shows.
+async function onPlusMenuOpen() {
+	try {
+		plusSkills.value = (await api.listCustomSkills()) || [];
+	} catch {
+		plusSkills.value = [];
+	}
+	try {
+		const res = await api.listConnectors();
+		// Usable right now: enabled, and signed in when it is an OAuth app (as the desktop).
+		plusConnectors.value = [...(res?.shared || []), ...(res?.mine || [])].filter(
+			(r) => r.enabled && (r.auth_method !== "OAuth" || r.oauth_connected)
+		);
+	} catch {
+		plusConnectors.value = [];
+	}
+}
+// What the "+" menu adds to this send's context (the server allow-lists both keys).
+function plusSendContext() {
+	const ctx = {};
+	if (groundWiki.value) ctx.ground_wiki = 1;
+	if (connectorFocus.value)
+		ctx.focus_connector = { key: connectorFocus.value.key, label: connectorFocus.value.label };
+	return Object.keys(ctx).length ? ctx : null;
+}
 const selectionActions = computed(() => [
 	{ key: "reply", label: "Reply" },
 	...(reader.supported ? [{ key: "read", label: "Listen" }] : []),
@@ -1186,16 +1253,19 @@ async function send() {
 		// holds one: the send below scrolls to the bottom, where the new message lands just
 		// under that card.
 	}
-	if ((!text && !ready.length) || sending.value) return;
+	if ((!text && !ready.length && !armedSkill.value) || sending.value) return;
 	errorBanner.value = "";
+	// A skill picked in the "+" menu rides in front as its "/skill_name" token.
+	const body = armedSkill.value ? withSkillToken(input.value, armedSkill.value) : input.value;
 	let request;
 	try {
 		request = sendRecovery.stage(
 			cid,
 			// aerele/jarvis#2191: a Reply's quote rides in front of the typed question.
-			text && replyQuote.value ? quoteMarkdown(replyQuote.value) + input.value : input.value,
+			text && replyQuote.value ? quoteMarkdown(replyQuote.value) + body : body,
 			ready,
-			orderedPending.value.map((p) => p.token)
+			orderedPending.value.map((p) => p.token),
+			plusSendContext()
 		);
 	} catch {
 		errorBanner.value = "Could not prepare the message. Your draft is preserved.";
@@ -1204,6 +1274,8 @@ async function send() {
 	if (!cid) Object.assign(request, recoveryState.newChatPicks);
 	input.value = "";
 	replyQuote.value = "";
+	armedSkill.value = "";
+	groundWiki.value = false;
 	composer.value?.reset();
 	// The preserved request uses durable file URLs; release only local thumbnails.
 	attachments.value.forEach((a) => a.preview && URL.revokeObjectURL(a.preview));
@@ -2452,6 +2524,8 @@ onUnmounted(() => {
 		:placeholder="
 			chosenSuggestion ? 'Send the chosen follow-up, or untick it to type' : undefined
 		"
+		:extra-sendable="!!armedSkill"
+		:show-attach="false"
 		:auto-mode="!!conversation?.auto_mode"
 		@send="send"
 		@stop="stop"
@@ -2460,6 +2534,24 @@ onUnmounted(() => {
 		@preview="onPreviewPending"
 		@mic="voiceOpen = true"
 	>
+		<template #leading="{ pickFiles }">
+			<ComposerPlusMenu
+				:disabled="holdActive || sending"
+				:skills="plusSkills"
+				:selected-skill="armedSkill"
+				:connectors="plusConnectors"
+				:focus="connectorFocus"
+				:wiki-available="!!settings?.wiki_enabled"
+				:wiki-empty="settings?.wiki_state === 'empty'"
+				:wiki-on="groundWiki"
+				:show-pill="false"
+				@open="onPlusMenuOpen"
+				@attach="pickFiles"
+				@skill="armedSkill = $event ? $event.skill_name : ''"
+				@connector="setConnectorFocus"
+				@wiki="groundWiki = $event"
+			/>
+		</template>
 		<template #top>
 			<ReplyQuote
 				v-if="replyQuote"
@@ -2467,6 +2559,17 @@ onUnmounted(() => {
 				:who="agentName"
 				@close="clearReplyQuote"
 			/>
+			<!-- what the "+" menu armed for this message: the row is too narrow for pills -->
+			<div v-if="armedSkill || groundWiki || connectorFocus" class="jv-plus-picks">
+				<SkillPill v-if="armedSkill" :name="armedSkill" @clear="armedSkill = ''" />
+				<SkillPill v-if="groundWiki" kind="wiki" name="Wiki" @clear="groundWiki = false" />
+				<SkillPill
+					v-if="connectorFocus"
+					kind="connector"
+					:name="connectorFocus.label"
+					@clear="setConnectorFocus(null)"
+				/>
+			</div>
 		</template>
 	</Composer>
 
@@ -2574,6 +2677,13 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* what the "+" menu armed for the next message, above the input */
+.jv-plus-picks {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding: 2px 2px 6px;
+}
 .jv-head {
 	flex: 1;
 	min-width: 0;
