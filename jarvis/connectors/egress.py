@@ -15,11 +15,14 @@ Grammar, one rule per line (blank lines and ``#`` comments ignored; ``!`` = deny
   * a plain name: that name or any subdomain.
   * a label mixing a wildcard with non-ASCII letters has no ASCII form. As a DENY
     it blocks every name with an ``xn--`` label under the rule's plain suffix (it
-    over-blocks on purpose); as an ALLOW it matches nothing.
+    over-blocks on purpose) and still globs the ASCII name; as an ALLOW it matches
+    nothing.
   * anything else is kept as lower-cased text, never dropped.
 
-Deny wins; any allow rule turns on allow-list mode. Only deny rules apply to a
-resolved address. :func:`rule_problems` names rules an admin should rewrite.
+Deny wins, and a deny rule also matches the host as typed, exactly as before
+normalisation, so the module can only add blocks. Any allow rule turns on
+allow-list mode. Only deny rules apply to a resolved address.
+:func:`rule_problems` names rules an admin should rewrite.
 """
 
 from __future__ import annotations
@@ -46,13 +49,13 @@ def egress_match(host, raw) -> bool:
 	that cannot be normalised is denied whenever any rule exists."""
 	if not raw:
 		return True
-	allows, denies = _rules(str(raw))
+	allows, denies, floor = _rules(str(raw))
 	if not allows and not denies:
 		return True
 	target = _target(host)
 	if target is None:
 		return False
-	if any(rule.matches(target) for rule in denies):
+	if any(rule.matches(target) for rule in denies) or any(rule.matches(host.lower()) for rule in floor):
 		return False
 	return not allows or any(rule.matches(target) for rule in allows)
 
@@ -109,11 +112,11 @@ class _PatternRule:
 		self.glob = _has_glob(pattern)
 
 	def matches(self, target) -> bool:
-		if not isinstance(target, str):
-			return self.glob and any(_glob_match(text, self.pattern) for text in ip_texts(target))
-		if self.glob:
-			return _glob_match(target, self.pattern)
-		return target == self.pattern or target.endswith("." + self.pattern)
+		texts = (target,) if isinstance(target, str) else ip_texts(target)
+		return any(self._matches_text(text) for text in texts)
+
+	def _matches_text(self, text: str) -> bool:
+		return _glob_match(text, self.pattern) or text == self.pattern or text.endswith("." + self.pattern)
 
 
 class _NetworkRule:
@@ -121,10 +124,13 @@ class _NetworkRule:
 
 	def __init__(self, network):
 		self.network = network
+		single = network.num_addresses == 1
+		# Kept from the old grammar: ``!34.1.2.3`` also matched ``x.34.1.2.3``.
+		self.suffix = "." + str(to_ip(str(network.network_address))) if single else None
 
 	def matches(self, target) -> bool:
 		if isinstance(target, str):
-			return False
+			return bool(self.suffix) and target.endswith(self.suffix)
 		return any(ip.version == self.network.version and ip in self.network for ip in ip_forms(target))
 
 
@@ -147,13 +153,18 @@ class _ForeignRule:
 
 
 @functools.lru_cache(maxsize=32)
-def _rules(raw: str) -> tuple[tuple, tuple]:
-	"""Parse the rules text into ``(allows, denies)``. Cached: it is read per call."""
+def _rules(raw: str) -> tuple[tuple, tuple, tuple]:
+	"""Parse the rules text into ``(allows, denies, floor)``. ``floor`` is each deny
+	rule as typed, matched against the host as typed: the grammar before host
+	normalisation, kept so this module can only add blocks. Cached: read per call."""
 	allows: list = []
 	denies: list = []
+	floor: list = []
 	for deny, text in _rule_lines(raw):
 		(denies if deny else allows).extend(_parse_rule(text, deny))
-	return tuple(allows), tuple(denies)
+		if deny:
+			floor.append(_PatternRule(text))
+	return tuple(allows), tuple(denies), tuple(floor)
 
 
 def _rule_lines(raw: str):
@@ -173,31 +184,55 @@ def _parse_rule(text: str, deny: bool) -> list:
 		return [_PatternRule(text, raw=True)]
 	if ":" in text and text.startswith("[") and text.endswith("]"):
 		text = text[1:-1]
-	if "/" in text:
-		network = cidr(text)
-		return [_NetworkRule(network) if network else _PatternRule(text, raw=True)]
+	network = cidr(text) if "/" in text else None
+	if network is not None:
+		return [_NetworkRule(network)]
 	labels, trailing = _split(text)
 	encoded = [_encode(label) for label in labels]
 	if any(code is None and not _foreign(label, code) for label, code in zip(labels, encoded, strict=True)):
-		return [_PatternRule(text, raw=True)]
-	rules = [_name_rule(text, labels, encoded, trailing, deny)]
+		if text.isascii() or not _has_glob(unicodedata.normalize("NFKC", text)):
+			return [_PatternRule(text, raw=True)]
+		# A non-ASCII wildcard rule that will not encode: fail closed as foreign.
+		return _foreign_rules(text, labels, encoded, trailing, deny)
+	rules = _name_rule(text, labels, encoded, trailing, deny)
 	alternate = [_idna2008(label) or code for label, code in zip(labels, encoded, strict=True)]
 	if deny and alternate != encoded:
-		rules.append(_name_rule(text, labels, alternate, trailing, deny))
+		rules += _name_rule(text, labels, alternate, trailing, deny)
 	return rules
 
 
-def _name_rule(text: str, labels: list, encoded: list, trailing: bool, deny: bool):
-	pairs = list(zip(labels, encoded, strict=True))
-	if any(_foreign(label, code) for label, code in pairs):
-		return _ForeignRule(_plain_suffix(encoded, trailing), deny)
+def _name_rule(text: str, labels: list, encoded: list, trailing: bool, deny: bool) -> list:
+	if any(_foreign(label, code) for label, code in zip(labels, encoded, strict=True)):
+		return _foreign_rules(text, labels, encoded, trailing, deny)
 	name = _join(encoded, trailing)
 	if name is None:
-		return _PatternRule(text, raw=True)
+		return [_PatternRule(text, raw=True)]
 	ip = parse_ip(name)
 	if ip is not None:
-		return _NetworkRule(ipaddress.ip_network((ip, ip.max_prefixlen)))
-	return _PatternRule(name)
+		return [_NetworkRule(ipaddress.ip_network((ip, ip.max_prefixlen)))]
+	return [_PatternRule(name)]
+
+
+def _foreign_rules(text: str, labels: list, encoded: list, trailing: bool, deny: bool) -> list:
+	"""A deny blocks every ``xn--`` name under the plain suffix, AND keeps the rule's
+	glob on the ASCII host (``[üu]ber.com`` still blocks ``uber.com``): as typed, and
+	label by label with the wildcard labels as typed or NFKC-folded and the rest in
+	punycode. An allow matches nothing, so it can never allow more than before."""
+	rules: list = [_ForeignRule(_plain_suffix(encoded, trailing), deny)]
+	if not deny:
+		return rules
+	typed = [
+		(label, code is None or _foreign(label, code), code)
+		for label, code in zip(labels, encoded, strict=True)
+	]
+	patterns = {
+		text,
+		".".join(label if as_typed else code for label, as_typed, code in typed),
+		".".join(
+			unicodedata.normalize("NFKC", label) if as_typed else code for label, as_typed, code in typed
+		),
+	}
+	return rules + [_PatternRule(pattern) for pattern in sorted(patterns)]
 
 
 def _problem(shown: str, deny: bool, rules: list) -> str | None:
@@ -206,8 +241,7 @@ def _problem(shown: str, deny: bool, rules: list) -> str | None:
 		where = foreign.suffix or "any domain"
 		return (
 			f"{shown}: a wildcard mixed with non-English letters cannot be matched exactly, so it "
-			f"blocks every non-English name under {where}. Write the xn-- spelling, and any "
-			"plain-English spelling, as their own rules."
+			f"blocks every non-English name under {where}. Write the xn-- spelling as its own rule."
 		)
 	if foreign:
 		return (
@@ -215,7 +249,7 @@ def _problem(shown: str, deny: bool, rules: list) -> str | None:
 			"rule allows nothing. Write the xn-- spelling instead."
 		)
 	patterns = [rule for rule in rules if isinstance(rule, _PatternRule)]
-	if any(rule.raw for rule in patterns):
+	if any(rule.raw or "/" in rule.pattern for rule in patterns):
 		return (
 			f"{shown}: not a valid host name, IP address or CIDR range, so it only matches this exact text."
 		)
@@ -282,9 +316,9 @@ def _foreign(label: str, code: str | None) -> bool:
 	right-to-left label)."""
 	if label.isascii():
 		return False
-	if code is None:
+	if code is None or code.startswith("xn--"):
 		return _has_glob(unicodedata.normalize("NFKC", label))
-	return code.startswith("xn--") and _has_glob(code)
+	return False
 
 
 def _plain_suffix(encoded: list, trailing: bool) -> str:
