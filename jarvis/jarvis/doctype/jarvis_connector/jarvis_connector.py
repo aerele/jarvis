@@ -80,7 +80,7 @@ class JarvisConnector(NotRenamable, Document):
 		if not (self.is_new() or self.has_value_changed("preset")):
 			return
 		if connector_catalogue.is_disabled(self.preset or ""):
-			frappe.throw(_("This app is turned off for your workspace."))
+			frappe.throw(connector_catalogue.refusal_message(self.preset))
 
 	def _normalize_key(self) -> None:
 		key = (self.key or "").strip().lower()[:MAX_KEY]
