@@ -205,6 +205,42 @@ class TestEgressFailClosed(unittest.TestCase):
 			self.assertTrue(broker._egress_allowed("api.example.com"))
 
 
+class TestEgressAddressHook(unittest.TestCase):
+	def _allowed(self, raw, address="34.1.2.3"):
+		fake = mock.MagicMock()
+		fake.db.get_single_value.return_value = raw
+		with mock.patch.object(broker, "frappe", fake), mock.patch.object(broker, "egress_hook", None):
+			return broker._egress_address_allowed(address)
+
+	def test_hook_exposes_address_check(self):
+		self.assertIs(broker._egress_allowed.address_allowed, broker._egress_address_allowed)
+
+	def test_ip_deny_rule_blocks_address(self):
+		self.assertFalse(self._allowed("!0x22.1.2.3"))
+
+	def test_glob_ip_deny_rules_block_address(self):
+		self.assertFalse(self._allowed("!34.1.2.*", "34.1.2.5"))
+		self.assertTrue(self._allowed("!34.1.2.*", "34.1.3.5"))
+		self.assertFalse(self._allowed("!2606:4700:4700::*", "2606:4700:4700::1111"))
+		self.assertTrue(self._allowed("!2606:4700:4700::*", "2606:4700:4701::1"))
+
+	def test_cidr_and_full_form_glob_rules_block_address(self):
+		self.assertFalse(self._allowed("!34.1.2.0/24", "34.1.2.5"))
+		self.assertTrue(self._allowed("!34.1.2.0/24", "34.1.3.5"))
+		self.assertFalse(self._allowed("!2606:4700:4700::/48", "2606:4700:4700::1111"))
+		self.assertFalse(self._allowed("!2606:4700:4700:0:*", "2606:4700:4700::1111"))
+
+	def test_hostname_rules_and_empty_policy_allow_address(self):
+		self.assertTrue(self._allowed("!evil.com\napi.github.com"))
+		self.assertTrue(self._allowed(None))
+
+	def test_read_error_denies(self):
+		fake = mock.MagicMock()
+		fake.db.get_single_value.side_effect = RuntimeError("db down")
+		with mock.patch.object(broker, "frappe", fake), mock.patch.object(broker, "egress_hook", None):
+			self.assertFalse(broker._egress_address_allowed("34.1.2.3"))
+
+
 class TestGuardedTestProbe(unittest.TestCase):
 	"""``broker.test_connector`` must run the outbound probe inside the same
 	breaker + concurrency cap as a real call, so the Test button cannot bypass the
