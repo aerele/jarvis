@@ -38,7 +38,11 @@ on:
   # skipped check satisfies a required check, so a title edit after a red run would mask
   # the failure. release-guard.yml instead fails a PR whose base changed until it is pushed
   # to or reopened, which is what makes this workflow run against the new base.
+  # ready_for_review: a draft release PR (into version-15 / version-16) skips every job below
+  # while backports keep landing on its hotfix head; marking it ready runs CI once on the
+  # final code. A draft cannot merge, so its skipped checks never satisfy a merge.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
     # version-15 is the stable line customers install from; version-15-hotfix is where its
     # backports collect until a release merges them into it. See CONTRIBUTING.md.
@@ -55,6 +59,7 @@ permissions:
 
 jobs:
   runtime-branding:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     uses: ./.github/workflows/runtime-branding.yml
 
   # The Frappe Marketplace audit's Semgrep ruleset: fails on what fails the audit.
@@ -63,6 +68,7 @@ jobs:
     if: >-
       github.event_name == 'pull_request' && contains(fromJSON('["develop", "version-15",
       "version-15-hotfix", "version-16", "version-16-hotfix"]'), github.base_ref)
+      && !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref))
     uses: ./.github/workflows/marketplace-semgrep.yml
 
   # Runs the same .pre-commit-config.yaml the local hook runs, so the checks hold
@@ -70,6 +76,7 @@ jobs:
   # the tests environment: this needs only python + node, and it should report in
   # under a minute rather than waiting on a bench.
   lint:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -97,6 +104,7 @@ jobs:
   # range: the 1.6.0 floor and the newest release inside it. It needs only Python and
   # cryptography (for the local TLS pair): no bench, no Frappe, no network beyond pip.
   ws-contract:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -127,6 +135,7 @@ jobs:
   # Python job below. The SPA is served identically on v15 and v16 sites, so this job is
   # identical to develop's.
   frontend-tests:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -198,6 +207,7 @@ jobs:
 
   # Real-browser Board regression gate, independent of the Python/bench shards.
   approval-layout:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -234,6 +244,7 @@ jobs:
   # the PWA build reuses it. Node 18 is deliberate: FC v15 benches build on 18.16.0, so a
   # break that only shows up there must fail here, not at deploy time.
   frontend-build:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # Keep the FC Node 18 compatibility check; give Vite enough heap for the SPA.
@@ -287,6 +298,7 @@ jobs:
   # IMPORT those modules — so both erpnext AND hrms (version-15) must be installed, or those
   # tests error.
   tests:
+    if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     runs-on: ubuntu-latest
     # From-scratch v15 bench build + the full unsharded suite. Headroom over the
     # v16 PR job (which restores a baked image and shards 4 ways): as the v15 gap
