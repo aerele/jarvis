@@ -181,7 +181,8 @@ def _validate_url(
 	hook, resolve + vet the host, and return ``(parsed, pinned_ip)``.
 
 	``egress_allowed`` (if given) is consulted with the bare hostname BEFORE any
-	DNS lookup, so an operator deny-list short-circuits the resolution too.
+	DNS lookup, so an operator deny-list short-circuits the resolution too. If it
+	carries an ``address_allowed`` callable, each resolved address is checked too.
 	``resolve_timeout`` bounds the DNS lookup (see :func:`_validate_host`)."""
 	parsed = urlparse(url)
 	if parsed.scheme not in _ALLOWED_SCHEMES:
@@ -198,7 +199,23 @@ def _validate_url(
 			kind=ERR_EGRESS_DENIED,
 		)
 	vetted = _validate_host(parsed.hostname, resolve_timeout)
+	_check_resolved_addresses(egress_allowed, parsed.hostname, vetted)
 	return parsed, vetted[0]
+
+
+def _check_resolved_addresses(egress_allowed, hostname: str, addresses: list[str]) -> None:
+	"""Run the hook's optional ``address_allowed`` check on every vetted address, so
+	an operator deny rule naming an IP also catches a hostname that resolves to it.
+	A hook without that attribute (the plain one-argument form) is host-only."""
+	address_allowed = getattr(egress_allowed, "address_allowed", None)
+	if address_allowed is None:
+		return
+	for addr in addresses:
+		if not address_allowed(addr):
+			raise SsrfError(
+				f"Egress to host {hostname} is not permitted by policy (resolves to {addr}).",
+				kind=ERR_EGRESS_DENIED,
+			)
 
 
 # --------------------------------------------------------------------------- #
