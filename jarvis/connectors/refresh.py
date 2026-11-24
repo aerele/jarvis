@@ -27,6 +27,8 @@ from datetime import timedelta
 import frappe
 from frappe.utils import get_datetime, now_datetime
 
+from jarvis._redis_lock import claim
+from jarvis._session import impersonate
 from jarvis.connectors import oauth
 
 CONNECTOR_DOCTYPE = "Jarvis Connector"
@@ -84,8 +86,8 @@ def ttl_seconds(ttl_ms) -> float:
 
 def request(row_name: str) -> bool:
 	"""Enqueue one refresh for ``row_name`` unless one was queued in the last
-	``DEBOUNCE_S`` seconds (Redis SET NX window) or one is already queued/running (a
-	stable ``job_id`` with ``deduplicate``). Returns True when a job was queued."""
+	``DEBOUNCE_S`` seconds or one is already queued/running (a stable ``job_id`` with
+	``deduplicate``). Returns True when a job was queued."""
 	if not _claim(row_name):
 		return False
 	# Queued NOW, not after commit: the debounce claim above is already taken, so a
@@ -110,12 +112,7 @@ def _job_id(row_name: str) -> str:
 
 
 def _claim(row_name: str) -> bool:
-	"""Set-if-absent on the debounce flag: the first caller wins the window."""
-	return bool(frappe.cache().set(_debounce_key(row_name), 1, ex=DEBOUNCE_S, nx=True))
-
-
-def _debounce_key(row_name: str) -> str:
-	return frappe.cache().make_key(f"jarvis:connectors:refresh:{row_name}")
+	return claim(f"jarvis:connectors:refresh:{row_name}", DEBOUNCE_S)
 
 
 def refresh_tools_cache(name: str) -> None:
@@ -159,7 +156,7 @@ def reprobe_all() -> None:
 	  * a Shared OAuth row runs as the user holding the most recently modified
 	    ``MCP OAuth Token`` for that connector, and is SKIPPED when nobody has signed
 	    in (there is no bearer to probe with).
-	``frappe.set_user`` is restored in a ``finally``. The scheduler is paused locally,
+	``impersonate`` restores the user after each row. The scheduler is paused locally,
 	so run this by hand: ``bench --site e2e2.localhost execute
 	jarvis.connectors.refresh.reprobe_all`` (then the queued jobs run on the workers)."""
 	# System (scheduler) context: get_all is intentional here. There is no session
@@ -173,14 +170,13 @@ def reprobe_all() -> None:
 	if not rows:
 		return
 	shared_owners = _shared_oauth_owners([r["name"] for r in rows if _is_shared_oauth(r)])
-	previous_user = frappe.session.user
 	for row in rows:
 		as_user = _reprobe_user(row, shared_owners)
 		if not as_user:
 			continue  # Shared OAuth with no stored sign-in: nobody to run as.
 		try:
-			frappe.set_user(as_user)
-			request(row["name"])
+			with impersonate(as_user):
+				request(row["name"])
 		except Exception:
 			try:
 				frappe.logger("jarvis.connectors").warning(
@@ -188,8 +184,6 @@ def reprobe_all() -> None:
 				)
 			except Exception:
 				pass
-		finally:
-			frappe.set_user(previous_user)
 
 
 def _is_shared_oauth(row) -> bool:
