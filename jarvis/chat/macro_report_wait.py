@@ -1192,9 +1192,7 @@ def write_refusal(conversation: str | None, tool: str) -> dict | None:
 
 	Refused: every tool in ``api._WRITE_TOOLS``, the bench's own list of what mutates
 	(the gated writes the bench parks cards for, ``send_email`` among them, and the
-	ungated ones: file exports, ``save_dashboard``, ``remember``, the agent write-backs),
-	and every gated write too: on the version-15/16 lines ``call_connector`` is gated
-	but missing from ``_WRITE_TOOLS``.
+	ungated ones: file exports, ``save_dashboard``, ``remember``, the agent write-backs).
 	Reads are never touched.
 
 	* the step's live turn already got a ``waiting: true`` answer that no later read of
@@ -1217,11 +1215,7 @@ def write_refusal(conversation: str | None, tool: str) -> dict | None:
 	try:
 		from jarvis import api
 
-		if (
-			(tool not in api._WRITE_TOOLS and tool not in api._GATED_WRITES)
-			or not conversation
-			or not enabled()
-		):
+		if tool not in api._WRITE_TOOLS or not conversation or not enabled():
 			return None
 		return _write_refusal(conversation)
 	except Exception:

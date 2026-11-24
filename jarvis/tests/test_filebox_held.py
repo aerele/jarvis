@@ -348,7 +348,7 @@ class TestPolicy(_Base):
 			"add_tag": {"doctype": "Supplier", "name": "x", "tag": "t"},
 			"attach_to_doc": {"doctype": "Supplier", "name": "x", "file_url": "/files/x"},
 			"create_custom_skill": {"skill_name": "x"},
-			# call_connector omitted: no connector tool on this branch (not in _WRITE_TOOLS).
+			"call_connector": {"connector": "x", "action": "y"},
 			"follow_document": {"doctype": "Supplier", "names": ["a", "b"]},
 		}
 		with (

@@ -3445,10 +3445,9 @@ def _activity_target(tool: str, args) -> tuple[str, str]:
 def _record_tool_activity(tool: str, args, data, *, is_write: bool) -> None:
 	"""One ``read`` event per completed non-write tool call, and one ``export`` event
 	per delivered export (an export tool is a write, so it also keeps its Agent Write
-	row). Introspection tools are not logged (plan E4). This branch has no
-	envelope_ok / _ENVELOPE_TOOLS machinery (the connector-envelope feature is not on
-	the hotfix branches), so a dispatched call is ``ok``, consistent with the
-	Agent Write row recorded "applied" above. Never raises, never commits."""
+	row). Introspection tools are not logged (plan E4). A tool that dispatched but
+	answered ``{ok: false}`` in its OWN envelope (``_ENVELOPE_TOOLS``) is a `failed`
+	read, not an `ok` one. Never raises, never commits."""
 	from jarvis import activity_log
 
 	if is_write:
@@ -3466,7 +3465,7 @@ def _record_tool_activity(tool: str, args, data, *, is_write: bool) -> None:
 		method=method,
 		ref_doctype=ref_doctype,
 		row_count=activity_log.row_count_of(tool, data),
-		outcome="ok",
+		outcome="ok" if envelope_ok(tool, {"ok": True, "data": data}) else "failed",
 	)
 
 
@@ -3670,27 +3669,38 @@ def _dispatch_and_wrap(
 		# Both audit sinks get the projected pair: a private App Learning write
 		# must never reach either one with its raw args or result.
 		_record_tool_audit(tool, args, data)
-		audit_args, audit_data = _app_learning_audit_payload(tool, args, data)
 		# Manager audit: a dispatched write (one metadata-only row; bulk collapses
-		# to one row + bulk_count). Own savepoint, never commits. This branch
-		# (version-15-hotfix) has no envelope_ok / _ENVELOPE_TOOLS machinery, so a
-		# dispatched write is recorded "applied" — consistent with the audit.record
-		# ok=True above; the call_connector inner-failure nuance is part of the
-		# connector-envelope feature that is not on this branch.
+		# to one row + bulk_count). Own savepoint, never commits. Use envelope_ok
+		# so an _ENVELOPE_TOOLS call (call_connector) that dispatched but returned
+		# its OWN {ok:false} is filed as failed, not a false success - mirroring
+		# _record_tool_audit and the receipt chip.
 		from jarvis import agent_audit
 
+		outcome = "applied" if envelope_ok(tool, {"ok": True, "data": data}) else "failed"
+		audit_args, audit_data = _app_learning_audit_payload(tool, args, data)
 		agent_audit.record_write(
 			actor=frappe.session.user,
 			tool=tool,
 			args=audit_args,
 			result=audit_data,
-			outcome="applied",
+			outcome=outcome,
 			provenance=provenance,
 			provenance_name=provenance_name,
 		)
 	# Activity events (plan 4.3(1)): after the savepoint release, so they ride the
 	# envelope's commit like the Agent Write row above.
 	_record_tool_activity(tool, args, data, is_write=is_write)
+	if not envelope_ok(tool, {"ok": True, "data": data}):
+		# A connector call that dispatched but answered {ok: false} inside its own
+		# envelope: the agent got a failure under an outer ok:true, so no failure
+		# branch above saw it.
+		from jarvis import api_errors
+
+		api_errors.record_tool_failure(
+			tool,
+			_app_learning_safe_error(tool, data.get("error") if isinstance(data, dict) else None),
+		)
+		frappe.local.jarvis_tool_failure_recorded = True
 	return {"ok": True, "data": data}
 
 

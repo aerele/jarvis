@@ -898,8 +898,24 @@ class TestFailureCleanup(PendingActionTestMixin, FrappeTestCase):
 
 		name, out, _ = self._run(raised, tool="call_connector", args={"connector": "c1", "action": "a"})
 		self.assertEqual((self.row(name).reason_code, out["outcome"]), ("failed", "unknown"))
-		# Backport note: develop's inner {ok: false} connector half is omitted - it
-		# relies on envelope_ok / _ENVELOPE_TOOLS (connector feature, not on this branch).
+
+		def inner(tool, args):
+			frappe.get_doc({"doctype": "ToDo", "description": "pa-test inner kept"}).insert(
+				ignore_permissions=True
+			)
+			return {"ok": False, "error": {"code": "transport_error", "message": "down"}}
+
+		frappe.db.delete(AGENT_WRITE, {"actor": OWNER})
+		frappe.db.commit()
+		name, out, _ = self._run(inner, tool="call_connector", args={"connector": "c1", "action": "b"})
+		row = self.row(name)
+		self.assertEqual((row.status, row.reason_code, out["outcome"]), ("Failed", "failed", "unknown"))
+		self.assertTrue(
+			frappe.db.exists("ToDo", {"description": "pa-test inner kept"}), "inner failure: no rollback"
+		)
+		self.assertEqual(
+			self._failed_audit_rows("call_connector"), ["failed"], "its own audit row, not a duplicate"
+		)
 
 	def test_connector_card_the_app_never_saw_settles_as_not_sent(self):
 		"""A connector call refused before it was sent (the tool's own ``{ok: False}``

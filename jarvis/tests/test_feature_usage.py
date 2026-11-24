@@ -214,8 +214,6 @@ class TestGetUsedFeatures(FrappeTestCase):
 		self.assertIn("triggers_connectors", get_used_features(USER, self.since))
 
 	def test_connector_log_detected(self):
-		if not frappe.db.exists("DocType", "Jarvis Connector Log"):
-			self.skipTest("connectors DocType is not on this release line")
 		frappe.get_doc(
 			{
 				"doctype": "Jarvis Connector Log",
