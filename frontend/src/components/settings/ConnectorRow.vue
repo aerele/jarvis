@@ -79,7 +79,7 @@ import { Badge, Button, Switch, Tooltip, confirmDialog, toast } from "frappe-ui"
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 import { signIn } from "@/components/settings/oauthSignin";
 import { disconnectOauth } from "@/api";
-import { agentName } from "@/branding";
+import { brand } from "@/branding";
 import { errHtml } from "@/lib/errors";
 import { timeAgo } from "@/utils/datetime";
 
@@ -191,7 +191,10 @@ async function doSignIn() {
 		// there's no Cancel affordance here, only in AddConnectorDialog) that
 		// resolves once the flow has a verdict; passing the row's own name
 		// (not a factory) since the row already exists.
-		const result = await signIn(props.row.name, { label: props.row.label, agentName });
+		const result = await signIn(props.row.name, {
+			label: props.row.label,
+			agentName: brand.agentName,
+		});
 		if (result.status === "connected") {
 			emit("reload");
 		} else if (result.status === "error") {
@@ -210,7 +213,7 @@ async function doSignIn() {
 function doDisconnect() {
 	confirmDialog({
 		title: "Disconnect this app?",
-		message: `${agentName} will no longer be able to use "${props.row.label}" until you connect again.`,
+		message: `${brand.agentName} will no longer be able to use "${props.row.label}" until you connect again.`,
 		onConfirm: async ({ hideDialog }) => {
 			disconnecting.value = true;
 			try {
