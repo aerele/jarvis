@@ -26,6 +26,17 @@ KEEP on any doubt. Cases:
   readers, so they take effect if a later release ships that preset.
 
 ``Custom URL`` is a flow, not a shipped preset, so this policy can never turn it off.
+
+A second, independent policy rides the same pull: per-preset "Use a key instead"
+overrides (marker ``connector_key_policy_supported``, key ``connector_key_overrides``, a
+``{preset: bool}`` map). An override says whether the paste-a-key option is offered; absent
+means the code default (``Provider.accepts_key``). It only applies to a switchable preset
+(``dcr`` / ``static``): a key-only (``token``) or ``open`` preset always takes a key, and
+Custom URL is never governed. Same KEEP-on-doubt table as above (marker absent, key absent
+or malformed -> KEEP; a well-formed map, ``{}`` included, is authoritative). Consumers:
+``accepts_key()`` (the ``add_connector`` and controller guards) and ``public_catalog()``
+(the picker). A key row saved before the override keeps saving, as for a disabled preset.
+
 Never raises: it runs from the daily scheduler and the "Sync now" button; every failure
 degrades and is logged.
 """
@@ -41,6 +52,10 @@ _MARKER = "connector_catalogue_supported"
 _KEY = "connector_catalogue_disabled"
 _FIELD = "connector_catalogue_disabled"
 _SYNCED_AT = "connector_catalogue_synced_at"
+_KEY_MARKER = "connector_key_policy_supported"
+_KEY_OVERRIDES = "connector_key_overrides"
+_KEY_SYNCED_AT = "connector_key_overrides_synced_at"
+_SWITCHABLE_AUTHS = frozenset({catalog.AUTH_DCR, catalog.AUTH_STATIC})
 
 
 def disabled_names() -> set[str]:
@@ -84,6 +99,42 @@ def providers() -> tuple[catalog.Provider, ...]:
 		return catalog.PROVIDERS
 
 
+def key_overrides() -> dict[str, bool]:
+	"""The operator's ``{preset: offer a key}`` map as last applied, unknown names included.
+
+	Cached read. ``{}`` on any read or parse error: that falls back to the code defaults,
+	so the failure is logged and self-heals on the next good pull."""
+	try:
+		raw = frappe.get_cached_value(SETTINGS, SETTINGS, _KEY_OVERRIDES)
+		data = frappe.parse_json(raw) if raw else {}
+		if not isinstance(data, dict):
+			return {}
+		return {name: value for name, value in data.items() if isinstance(value, bool)}
+	except Exception:
+		frappe.log_error(
+			title="connector_catalogue.key_overrides read failed", message=frappe.get_traceback()
+		)
+		return {}
+
+
+def accepts_key(name: str) -> bool:
+	"""Whether ``name`` may be connected with a pasted key, operator override applied.
+
+	The override wins only on a switchable (``dcr`` / ``static``) preset; anything else
+	(key-only, open, Custom URL, unknown) keeps the code default."""
+	return _accepts_key(name, key_overrides())
+
+
+def public_catalog() -> list[dict]:
+	"""``catalog.to_public`` for the picker: operator-disabled presets dropped and each
+	``accepts_key`` set to its effective value (the overlay seam never changes it)."""
+	overrides = key_overrides()
+	return [
+		{**row, "accepts_key": _accepts_key(row["name"], overrides)}
+		for row in catalog.to_public(providers=providers())
+	]
+
+
 def persist_from_connection(conn: dict) -> None:
 	"""Store the disabled-preset policy from a full ``get_connection`` payload.
 
@@ -105,6 +156,65 @@ def persist_from_connection(conn: dict) -> None:
 		frappe.log_error(
 			title="connector_catalogue.persist_from_connection failed", message=frappe.get_traceback()
 		)
+
+
+def persist_key_overrides_from_connection(conn: dict) -> None:
+	"""Store the "Use a key instead" overrides from a full ``get_connection`` payload.
+
+	Same KEEP-on-doubt table as ``persist_from_connection``. Never raises."""
+	try:
+		if not conn.get(_KEY_MARKER):
+			if key_overrides():
+				frappe.logger("jarvis").info(
+					"connector_catalogue: KEEP key overrides, connection lacks "
+					"connector_key_policy_supported (old or rolled-back control plane)"
+				)
+			return
+		if _KEY_OVERRIDES not in conn:
+			return  # partial payload (the CP omits the key on a read error): KEEP
+		_apply_key_overrides(conn.get(_KEY_OVERRIDES))
+	except Exception:
+		frappe.log_error(
+			title="connector_catalogue.persist_key_overrides_from_connection failed",
+			message=frappe.get_traceback(),
+		)
+
+
+def _apply_key_overrides(policy) -> None:
+	normalized = _normalize_key_overrides(policy)
+	if normalized is None:
+		frappe.log_error(
+			title="connector_catalogue apply skipped: malformed key overrides",
+			message=f"phase=validate payload={repr(policy)[:2000]}",
+		)
+		return  # KEEP last-applied
+
+	fresh = {_KEY_SYNCED_AT: frappe.utils.now()}
+	stored = frappe.as_json(normalized)
+	if frappe.get_cached_value(SETTINGS, SETTINGS, _KEY_OVERRIDES) != stored:
+		fresh[_KEY_OVERRIDES] = stored
+	frappe.db.set_single_value(SETTINGS, fresh, update_modified=False)
+
+
+def _normalize_key_overrides(policy) -> dict[str, bool] | None:
+	"""A ``{stripped name: bool}`` dict, or None when the payload is not a dict of
+	non-empty string names to real booleans (one bad entry, or two names that collide
+	after stripping with different values, rejects the whole payload)."""
+	if not isinstance(policy, dict):
+		return None
+	out = {}
+	for name, value in policy.items():
+		if not isinstance(name, str) or not name.strip() or not isinstance(value, bool):
+			return None
+		if out.setdefault(name.strip(), value) != value:
+			return None
+	return out
+
+
+def _accepts_key(name: str, overrides: dict[str, bool]) -> bool:
+	if name in overrides and catalog.auth_of(name) in _SWITCHABLE_AUTHS:
+		return overrides[name]
+	return catalog.accepts_key_of(name)
 
 
 def _apply(policy) -> None:
