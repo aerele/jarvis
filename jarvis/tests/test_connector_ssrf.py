@@ -113,9 +113,10 @@ class TestValidateUrl(unittest.TestCase):
 	def test_oversized_host_refused_fast_with_and_without_rules(self):
 		from jarvis.connectors import policy
 
-		url = "https://" + "\u00fc" * 16384 + ".example/mcp"
 		hooks = (None, lambda host: policy.egress_match(host, "!evil.com"))
-		for hook in hooks:
+		hosts = ("\u00fc" * 16384 + ".example", "\u00fc." * 8192 + "example")
+		for hook, host in ((hook, host) for hook in hooks for host in hosts):
+			url = f"https://{host}/mcp"
 			started = time.monotonic()
 			with mock.patch.object(ssrf.socket, "getaddrinfo") as resolve:
 				with self.assertRaises(ssrf.SsrfError) as cm:
