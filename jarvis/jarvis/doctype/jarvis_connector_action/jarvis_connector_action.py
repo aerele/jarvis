@@ -1,5 +1,7 @@
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class JarvisConnectorAction(Document):
+
+class JarvisConnectorAction(NotRenamable, Document):
 	pass

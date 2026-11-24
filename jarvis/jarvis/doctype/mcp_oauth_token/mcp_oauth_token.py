@@ -24,6 +24,8 @@ from __future__ import annotations
 
 from frappe.model.document import Document
 
+from jarvis.permissions import NotRenamable
 
-class MCPOAuthToken(Document):
+
+class MCPOAuthToken(NotRenamable, Document):
 	pass
