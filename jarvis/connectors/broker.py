@@ -149,9 +149,10 @@ def _egress_allowed(host: str) -> bool:
 	anyway - denying egress is the safe outcome, not a regression.
 
 	POLICY GRAMMAR (``Jarvis Settings.connector_egress_rules``, one rule per line;
-	blank lines and ``#`` comments ignored). A rule is a host glob (``fnmatch``);
-	a bare domain also matches its subdomains. A line beginning with ``!`` is a
-	DENY rule, otherwise it is an ALLOW rule:
+	blank lines and ``#`` comments ignored). A rule is a name (also matching its
+	subdomains), an ASCII glob, an IP or a CIDR range; hosts and rules share one
+	normal form (the full grammar is in ``jarvis.connectors.egress``). A line
+	beginning with ``!`` is a DENY rule, otherwise it is an ALLOW rule:
 
 	  * any DENY rule matching the host        -> deny
 	  * ALLOW rules exist but none match       -> deny (allow-list mode)
@@ -174,6 +175,26 @@ def _egress_allowed(host: str) -> bool:
 		frappe.logger("jarvis.connectors").warning("connector egress rules read failed", exc_info=True)
 		return False
 	return policy.egress_match(host, raw)
+
+
+def _egress_address_allowed(address: str) -> bool:
+	"""Same policy, applied to a RESOLVED address: only deny rules that name an IP
+	count (see ``policy.egress_address_match``). Fails closed on a read error, like
+	``_egress_allowed``. An ``egress_hook`` override is host-level only, so it is
+	not consulted here."""
+	if egress_hook is not None:
+		return True
+	try:
+		raw = frappe.db.get_single_value(SETTINGS_DOCTYPE, "connector_egress_rules")
+	except Exception:
+		frappe.logger("jarvis.connectors").warning("connector egress rules read failed", exc_info=True)
+		return False
+	return policy.egress_address_match(address, raw)
+
+
+# ``ssrf`` looks this up on the hook it is given, so the one-argument hook
+# signature stays unchanged for every caller.
+_egress_allowed.address_allowed = _egress_address_allowed
 
 
 # --------------------------------------------------------------------------- #

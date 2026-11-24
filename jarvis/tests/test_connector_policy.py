@@ -1,6 +1,7 @@
 """Unit tests for ``jarvis.connectors.policy`` - the allowed-actions gate and the
 argument check. Plain ``unittest``; the policy module is frappe-free, so a simple
-duck-typed row (a dict-backed ``.get``) drives it with no bench.
+duck-typed row (a dict-backed ``.get``) drives it with no bench. The egress host
+rules are tested in ``test_connector_egress``.
 """
 
 from __future__ import annotations
@@ -100,34 +101,6 @@ class TestArgumentPolicy(unittest.TestCase):
 			tools_cache={"tools": [{"name": "get_x", "inputSchema": {"type": "object", "required": ["a"]}}]}
 		)
 		self.assertIsNotNone(policy.argument_error(row, "get_x", {}))
-
-
-class TestEgressMatch(unittest.TestCase):
-	def test_empty_rules_allow_all(self):
-		self.assertTrue(policy.egress_match("api.githubcopilot.com", None))
-		self.assertTrue(policy.egress_match("api.githubcopilot.com", ""))
-		self.assertTrue(policy.egress_match("api.githubcopilot.com", "  \n # comment\n"))
-
-	def test_deny_rule_blocks(self):
-		rules = "!evil.example.com"
-		self.assertFalse(policy.egress_match("evil.example.com", rules))
-		self.assertTrue(policy.egress_match("good.example.com", rules))
-
-	def test_allow_list_mode_denies_unlisted(self):
-		rules = "api.githubcopilot.com\napi.linear.app"
-		self.assertTrue(policy.egress_match("api.linear.app", rules))
-		self.assertFalse(policy.egress_match("api.stripe.com", rules))
-
-	def test_bare_domain_matches_subdomains(self):
-		self.assertTrue(policy.egress_match("mcp.githubcopilot.com", "githubcopilot.com"))
-
-	def test_glob_matches(self):
-		self.assertTrue(policy.egress_match("mcp.atlassian.net", "*.atlassian.net"))
-
-	def test_deny_wins_over_allow(self):
-		rules = "*.example.com\n!secret.example.com"
-		self.assertTrue(policy.egress_match("ok.example.com", rules))
-		self.assertFalse(policy.egress_match("secret.example.com", rules))
 
 
 if __name__ == "__main__":
