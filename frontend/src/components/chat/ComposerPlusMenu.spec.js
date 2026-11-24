@@ -204,4 +204,72 @@ describe("ComposerPlusMenu", () => {
 		expect(w.find(".jv-plus-panel").exists()).toBe(false);
 		expect(w.emitted("open")).toBeUndefined();
 	});
+
+	describe("on desktop, a sub-list opens beside the menu on hover", () => {
+		const hoverScreen = () =>
+			(window.matchMedia = (q) => ({ matches: q.includes("hover: hover") }));
+		afterEach(() => delete window.matchMedia);
+
+		test("hovering Use a skill opens the skills box; the menu stays; a plain row closes it", async () => {
+			hoverScreen();
+			make();
+			await openMenu();
+			const rows = () => w.findAll(".jv-plus-panel > .jv-plus-item");
+			await rows()[1].trigger("mouseenter");
+			expect(w.find(".jv-plus-fly").exists()).toBe(true);
+			expect(w.find(".jv-plus-fly").text()).toContain("/month-end");
+			expect(w.find(".jv-plus-fly .jv-plus-back").exists()).toBe(false);
+			expect(rows()).toHaveLength(4); // the menu itself stays
+			expect(rows()[1].classes()).toContain("on");
+			expect(rows()[1].attributes("aria-expanded")).toBe("true");
+			await rows()[2].trigger("mouseenter");
+			expect(w.find(".jv-plus-fly").text()).toContain("Focus on one app");
+			await rows()[0].trigger("mouseenter");
+			expect(w.find(".jv-plus-fly").exists()).toBe(false);
+		});
+
+		test("a pick in the box beside it arms the skill and closes everything", async () => {
+			hoverScreen();
+			make();
+			await openMenu();
+			await w.findAll(".jv-plus-panel > .jv-plus-item")[1].trigger("mouseenter");
+			await w.findAll(".jv-plus-fly .jv-plus-item")[1].trigger("click");
+			expect(w.emitted("skill")[0][0].skill_name).toBe("invoicing");
+			expect(w.find(".jv-plus-panel").exists()).toBe(false);
+		});
+
+		test("keyboard: → opens it on its search, Escape comes back to the row", async () => {
+			hoverScreen();
+			make();
+			await openMenu();
+			const skillsRow = w.findAll(".jv-plus-panel > .jv-plus-item")[1].element;
+			skillsRow.focus();
+			const key = (k) => document.dispatchEvent(new KeyboardEvent("keydown", { key: k }));
+			key("ArrowRight");
+			await w.vm.$nextTick();
+			await w.vm.$nextTick();
+			expect(document.activeElement).toBe(w.find(".jv-plus-fly .jv-plus-search").element);
+			key("Escape");
+			await w.vm.$nextTick();
+			await w.vm.$nextTick();
+			expect(w.find(".jv-plus-fly").exists()).toBe(false);
+			expect(w.find(".jv-plus-panel").exists()).toBe(true);
+			expect(document.activeElement).toBe(skillsRow);
+		});
+	});
+
+	test("rows that take you elsewhere carry the ↗ arrow", async () => {
+		make({ canManageSkills: true, canBrowseConnectors: true });
+		await openMenu();
+		await w.findAll(".jv-plus-item")[1].trigger("click");
+		const manage = w.find(".jv-plus-foot");
+		expect(manage.text()).toBe("Manage skills");
+		expect(manage.find(".jv-plus-ext").exists()).toBe(true);
+		await manage.trigger("click");
+		expect(w.emitted("manage-skills")).toHaveLength(1);
+		await openMenu();
+		await w.findAll(".jv-plus-item")[2].trigger("click");
+		expect(w.find(".jv-plus-foot").text()).toBe("Browse connectors");
+		expect(w.find(".jv-plus-foot .jv-plus-ext").exists()).toBe(true);
+	});
 });
