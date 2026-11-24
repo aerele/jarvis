@@ -142,6 +142,13 @@
 					:disabled="!holidayTouchesLoaded || holidayTouchesSaving"
 					@update:modelValue="onToggleHolidayTouches"
 				/>
+				<ToggleRow
+					title="Suggest follow-up replies"
+					:help="`A few likely next messages under ${brand.agentName}'s latest reply. Tap one to send it.`"
+					:modelValue="suggestReplies"
+					:disabled="!suggestRepliesLoaded || suggestRepliesSaving"
+					@update:modelValue="onToggleSuggestReplies"
+				/>
 			</div>
 
 			<hr class="my-8" />
@@ -338,6 +345,7 @@ import JvSpinner from "@/components/JvSpinner.vue";
 import { humaniseSyncStatus } from "@/lib/syncStatus";
 import { brand } from "@/branding";
 import { holidayTouch } from "@/holidayTouch";
+import { suggestRepliesOn } from "@/lib/suggestRepliesPref";
 import * as api from "@/api";
 import { errHtml } from "@/lib/errors";
 import { fmtTokens, contextReading } from "@/lib/tokens.js";
@@ -575,6 +583,11 @@ const usage = ref(null);
 const showHolidayTouches = ref(true);
 const holidayTouchesLoaded = ref(false);
 const holidayTouchesSaving = ref(false);
+// Personal switch for suggested follow-up replies, the same way: the server row is the
+// truth (default on); disabled until it answered and while a save runs.
+const suggestReplies = ref(true);
+const suggestRepliesLoaded = ref(false);
+const suggestRepliesSaving = ref(false);
 // This chat's context reading (usage.context, from get_usage()'s
 // per-conversation block).
 const context = computed(() => contextReading(usage.value));
@@ -603,12 +616,17 @@ async function loadSettings() {
 				showHolidayTouches.value = !!res.data.show_holiday_touches;
 				holidayTouch.setShown(showHolidayTouches.value);
 			}
+			if (res.data.suggest_replies !== undefined) {
+				suggestReplies.value = !!res.data.suggest_replies;
+				suggestRepliesOn.value = suggestReplies.value;
+			}
 		}
 	} catch (e) {
 		/* prefs stay on the localStorage cache */
 	} finally {
-		// Settled, one way or the other: the holiday switch can be used now.
+		// Settled, one way or the other: the holiday and suggestion switches can be used now.
 		holidayTouchesLoaded.value = true;
+		suggestRepliesLoaded.value = true;
 	}
 }
 // The three fetches are independent, so they run together instead of one
@@ -679,6 +697,22 @@ async function onToggleHolidayTouches(value) {
 		toast.error(errHtml(e));
 	} finally {
 		holidayTouchesSaving.value = false;
+	}
+}
+
+async function onToggleSuggestReplies(value) {
+	if (suggestRepliesSaving.value) return;
+	const previous = suggestReplies.value;
+	suggestReplies.value = !!value;
+	suggestRepliesSaving.value = true;
+	try {
+		await api.updateMySettings({ suggest_replies: value ? 1 : 0 });
+		suggestRepliesOn.value = !!value;
+	} catch (e) {
+		suggestReplies.value = previous;
+		toast.error(errHtml(e));
+	} finally {
+		suggestRepliesSaving.value = false;
 	}
 }
 

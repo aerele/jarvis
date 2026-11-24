@@ -419,7 +419,10 @@ describe("maintenance hold banner + send gate", () => {
 		const c = chatSrc.indexOf("<Composer");
 		expect(c, "ChatView must render the Composer").not.toBe(-1);
 		const end = chatSrc.indexOf(">", c);
-		expect(chatSrc.slice(c, end)).toContain(':disabled="holdActive || booting"');
+		// (also while a suggested reply is ticked: SuggestedReplies, Send it or untick it)
+		expect(chatSrc.slice(c, end)).toContain(
+			':disabled="holdActive || booting || !!chosenSuggestion"'
+		);
 	});
 
 	it("orders the send-gate maintenance branch between release-update and workspace-resetting", () => {
