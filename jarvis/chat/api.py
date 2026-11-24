@@ -788,6 +788,9 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 		# to a steady thread.
 		"model",
 		"provider",
+		# The user's likely next messages, offered as chips under the latest reply
+		# (jarvis.chat.suggest_replies): {replies}, or empty.
+		"suggested_replies",
 		# What the row is about. The SPA reads it for one thing: an assistant row
 		# whose ref_doctype is "Jarvis Macro Run" is the engine's closing message
 		# (macros._post_closing_message), not a reply, so it must not take the
@@ -834,8 +837,20 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 	_live_turn_steps(messages)
 	if paged:
 		_compact_tool_results(rows)
-	# canvas + steps + pending_card are stored as JSON strings; hand the UI real objects (or None).
+	# canvas + steps + pending_card + suggested_replies are stored as JSON strings; hand the
+	# UI real objects (or None).
+	from jarvis.chat.suggest_replies import user_enabled
+
+	show_suggestions = user_enabled(frappe.session.user)
 	for m in rows:
+		if m.get("suggested_replies"):
+			try:
+				# A user who switched suggestions off sees none, also ones stored before.
+				m["suggested_replies"] = (
+					frappe.parse_json(m["suggested_replies"]) if show_suggestions else None
+				)
+			except Exception:
+				m["suggested_replies"] = None
 		if m.get("steps"):
 			try:
 				m["steps"] = frappe.parse_json(m["steps"])
@@ -3506,8 +3521,7 @@ def get_chat_ui_settings() -> dict:
 		# See _catalog_models_for_pool.
 		"catalog_models": _catalog_models_for_pool(settings, routable_only=True),
 		# Effort levels, minus the empty "auto" entry the UI renders separately.
-		# Empty when no route this tenant has can think: the clients then hide the
-		# effort control (see turn_handler.offered_thinking_levels).
+		# Always all three: every model and route takes an effort level.
 		"thinking_levels": offered_thinking_levels(settings),
 		# Site timezone: server datetimes are naive strings in THIS zone; the
 		# SPA feeds it to frappe-ui's setConfig("systemTimezone") so dayjsLocal
