@@ -36,6 +36,9 @@ export const setStar = (conversation, starred) =>
 // is allowed to appear (STT is off unless the admin configured a transcription
 // key).
 export const getChatUiSettings = () => call(CHAT + "get_chat_ui_settings");
+// The "+" menu's lists: your own and shared skills, and the connected apps.
+export const listCustomSkills = () => call("jarvis.chat.custom_skills_api.list_custom_skills");
+export const listConnectors = () => call("jarvis.chat.connectors_api.list_connectors");
 
 // Starter prompts for the empty new-chat screen: a few example asks, synthesised
 // server-side from the user's own recent chats (the same endpoint the desktop
@@ -273,6 +276,8 @@ export const sendRecoverableMessage = (request) =>
 		...(request.model ? { model_override: request.model } : {}),
 		...(request.thinking ? { thinking_override: request.thinking } : {}),
 		...(request.autoMode ? { auto_mode: 1 } : {}),
+		// Wiki grounding / connector focus from the "+" menu; the server allow-lists it.
+		...(request.context ? { context: JSON.stringify(request.context) } : {}),
 	});
 export const checkDelivery = (requestId) =>
 	call("jarvis.chat.send_requests.check_delivery", { request_id: requestId });
