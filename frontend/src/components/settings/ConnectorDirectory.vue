@@ -1,11 +1,18 @@
 <template>
 	<div class="flex flex-col gap-4">
+		<!-- Same search control as AgentsList / NotesView: fixed width, search
+		     icon prefix, left-aligned with the category chips below it. -->
 		<FormControl
 			type="text"
+			class="w-72 max-w-full"
 			placeholder="Search apps"
 			:modelValue="query"
 			@update:modelValue="(v) => (query = v)"
-		/>
+		>
+			<template #prefix>
+				<FeatherIcon name="search" class="size-4 text-ink-gray-5" />
+			</template>
+		</FormControl>
 
 		<!-- Option-chip idiom (TriggerDetail.vue's ACTION_TYPES row): plain Buttons
 		     toggling solid/subtle, not TabButtons - a segmented control reads wrong
