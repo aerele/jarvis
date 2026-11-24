@@ -464,6 +464,7 @@ class TestNativeBankReconEvidence(FrappeTestCase):
 		):
 			snap = self.snapshot()
 		self.assertEqual(snap["reason_code"], "run_truncated_watermark")
+		self.assertFalse(snap["complete"])
 		self.assertNotIn("Payment Entry", seen)
 
 	def test_journal_cap_counts_entries_not_bank_rows(self):
