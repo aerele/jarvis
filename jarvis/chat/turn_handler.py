@@ -109,6 +109,13 @@ _ACK_TIMEOUT_CEILING_S = 180.0
 # blocking here is fine.
 _YIELD_MEDIA_POLL_INTERVAL_S = 2.0
 _YIELD_MEDIA_POLL_TIMEOUT_S = 20.0
+# Media generation the agent runtime runs as a DETACHED task (2026.11+ detaches every chat
+# session's image/video/music generation): the tool returns "Background task started", the
+# turn ends with "it will appear here when ready", and the media lands in the session
+# transcript seconds to minutes later via the runtime's own completion turn. A turn that
+# called one of these tools and got no media back is watched by a background job.
+_DETACHED_MEDIA_TOOLS = frozenset({"image_generate", "video_generate", "music_generate"})
+_DETACHED_MEDIA_POLL_TIMEOUT_S = 240.0
 
 
 def persist_rich_outputs(
@@ -162,6 +169,27 @@ def persist_rich_outputs(
 		except Exception:
 			frappe.log_error(
 				title="chat worker: post-yield media harvest failed",
+				message=frappe.get_traceback(),
+			)
+
+	if not media_rels and not media_urls and not (yield_continuation or harvest_history):
+		try:
+			if _turn_started_detached_media(conversation_id, assistant_msg_name):
+				frappe.enqueue(
+					"jarvis.chat.turn_handler.harvest_detached_media",
+					queue="long",
+					job_id=f"jarvis-detached-media:{assistant_msg_name}",
+					deduplicate=True,
+					enqueue_after_commit=True,
+					assistant_msg_name=assistant_msg_name,
+					conversation_id=conversation_id,
+					user=user,
+					run_id=run_id,
+					turn_start_ms=turn_start_ms,
+				)
+		except Exception:
+			frappe.log_error(
+				title="chat worker: detached media watch not queued",
 				message=frappe.get_traceback(),
 			)
 
@@ -355,8 +383,50 @@ def _scan_history_for_media(messages: list, turn_start_ms: int) -> tuple[list[st
 	return (rels, []) if rels else ([], urls)
 
 
+def _turn_started_detached_media(conversation_id: str, assistant_msg_name: str) -> bool:
+	"""Whether this turn called a media-generation tool the runtime detaches. A turn's tool
+	steps are stored after its assistant message (higher ``seq``)."""
+	seq = frappe.db.get_value(MSG, assistant_msg_name, "seq")
+	if seq is None:
+		return False
+	return bool(
+		frappe.db.exists(
+			MSG,
+			{
+				"conversation": conversation_id,
+				"role": "tool",
+				"seq": [">", seq],
+				"tool_name": ["in", sorted(_DETACHED_MEDIA_TOOLS)],
+			},
+		)
+	)
+
+
+def harvest_detached_media(
+	assistant_msg_name: str, conversation_id: str, user: str, run_id: str, turn_start_ms: int
+) -> None:
+	"""Background job: wait for a detached media task's result to land in the session
+	transcript, then attach it to the turn's assistant message through the same path a
+	final's own media takes. Gives up quietly after ``_DETACHED_MEDIA_POLL_TIMEOUT_S``."""
+	try:
+		rels, urls = _harvest_post_yield_media(
+			conversation_id, turn_start_ms, poll=True, timeout_s=_DETACHED_MEDIA_POLL_TIMEOUT_S
+		)
+	except Exception:
+		frappe.log_error(title="chat worker: detached media harvest failed", message=frappe.get_traceback())
+		return
+	if rels or urls:
+		persist_rich_outputs(
+			assistant_msg_name, conversation_id, user, run_id, turn_start_ms, media_rels=rels, media_urls=urls
+		)
+
+
 def _harvest_post_yield_media(
-	conversation_id: str, turn_start_ms: int, *, poll: bool = True
+	conversation_id: str,
+	turn_start_ms: int,
+	*,
+	poll: bool = True,
+	timeout_s: float = _YIELD_MEDIA_POLL_TIMEOUT_S,
 ) -> tuple[list[str], list[dict]]:
 	"""Poll the session's display transcript (chat.history) for the deferred-
 	reply yield's actual media - it arrives as separate transcript messages
@@ -373,7 +443,7 @@ def _harvest_post_yield_media(
 	gateway_url = (settings.agent_url or "").replace("http://", "ws://").replace("https://", "wss://")
 	if not session_key or not gateway_url:
 		return [], []
-	deadline = time.monotonic() + _YIELD_MEDIA_POLL_TIMEOUT_S
+	deadline = time.monotonic() + timeout_s
 	while True:
 		try:
 			with agent_session_pool.checkout(gateway_url) as sess:

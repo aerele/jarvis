@@ -950,3 +950,75 @@ class TestHarvestPostYieldMediaPolling(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class TestDetachedMediaWatch(unittest.TestCase):
+	"""A turn whose media-generation tool ran as a detached task (it returns at once and the
+	media lands in the transcript later) gets a background watch instead of losing the media."""
+
+	def _persist(self, *, detached, media_urls=None, yield_continuation=False):
+		from jarvis.chat import turn_handler
+
+		with (
+			patch.object(turn_handler, "_turn_started_detached_media", return_value=detached),
+			patch.object(turn_handler, "_harvest_post_yield_media", return_value=([], [])),
+			patch("frappe.enqueue") as enqueue,
+			patch("frappe.get_single", return_value=Mock(agent_url="ws://h:1")),
+			patch("frappe.db.get_value", side_effect=TestSeedBlockWiring._ordinary_message_value()),
+			patch("frappe.get_all", return_value=[]),
+			patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
+			patch("jarvis.chat.generated_media.seed_media", return_value=[]),
+			patch("jarvis.chat.generated_media.seed_media_urls", return_value=[]),
+			patch("jarvis.chat.turn_handler._publish_to_user"),
+		):
+			turn_handler.persist_rich_outputs(
+				"MSG-1", "C1", "u@x", "run1", 0, media_urls=media_urls, yield_continuation=yield_continuation
+			)
+		return [c for c in enqueue.call_args_list if c.args and c.args[0].endswith("harvest_detached_media")]
+
+	def test_a_detached_media_turn_without_media_is_watched(self):
+		calls = self._persist(detached=True)
+		self.assertEqual(len(calls), 1)
+		self.assertEqual(calls[0].kwargs["job_id"], "jarvis-detached-media:MSG-1")
+
+	def test_no_watch_when_the_media_already_came_back_or_no_media_tool_ran(self):
+		self.assertEqual(self._persist(detached=True, media_urls=[{"url": "/x", "mime_type": None}]), [])
+		self.assertEqual(self._persist(detached=False), [])
+
+	def test_the_yield_path_keeps_its_inline_harvest(self):
+		self.assertEqual(self._persist(detached=True, yield_continuation=True), [])
+
+	def test_the_watch_attaches_what_it_finds_with_the_long_timeout(self):
+		from jarvis.chat import turn_handler
+
+		found = [{"url": "/api/chat/media/outgoing/s/x/full", "mime_type": "image/png"}]
+		with (
+			patch.object(turn_handler, "_harvest_post_yield_media", return_value=([], found)) as harvest,
+			patch.object(turn_handler, "persist_rich_outputs") as persist,
+		):
+			turn_handler.harvest_detached_media("MSG-1", "C1", "u@x", "run1", 5)
+		self.assertEqual(harvest.call_args.kwargs["timeout_s"], turn_handler._DETACHED_MEDIA_POLL_TIMEOUT_S)
+		persist.assert_called_once_with("MSG-1", "C1", "u@x", "run1", 5, media_rels=[], media_urls=found)
+
+	def test_the_watch_gives_up_quietly(self):
+		from jarvis.chat import turn_handler
+
+		with (
+			patch.object(turn_handler, "_harvest_post_yield_media", return_value=([], [])),
+			patch.object(turn_handler, "persist_rich_outputs") as persist,
+		):
+			turn_handler.harvest_detached_media("MSG-1", "C1", "u@x", "run1", 5)
+		persist.assert_not_called()
+
+	def test_detection_looks_only_at_this_turns_tool_rows(self):
+		from jarvis.chat import turn_handler
+
+		with (
+			patch("frappe.db.get_value", return_value=7),
+			patch("frappe.db.exists", return_value="ROW") as exists,
+		):
+			self.assertTrue(turn_handler._turn_started_detached_media("C1", "MSG-1"))
+		filters = exists.call_args.args[1]
+		self.assertEqual(filters["seq"], [">", 7])
+		self.assertEqual(filters["role"], "tool")
+		self.assertIn("image_generate", filters["tool_name"][1])
