@@ -298,6 +298,15 @@ def resolved_model_identity(row: dict | None) -> tuple[str, str]:
 	# ``activeModelProvider`` (verified in the 2026.11.7 session-row builder; absent on older runtimes,
 	# on a run the selected model answered, and once a recovered model's notice is cleared). The
 	# transcript and the usage bucket must name the model that answered, never the one that was asked.
+	# Best source: the transcript entry of the run's own final answer (``answeredModel`` /
+	# ``answeredModelProvider``, laid over the row by ``with_run_identity``). Live 2026-11-25: the
+	# session row names the SELECTED model after the run (``activeModel`` is gone by then), while each
+	# assistant transcript entry carries the ``model`` / ``provider`` that really produced it.
+	answered = row.get("answeredModel")
+	answered_provider = row.get("answeredModelProvider")
+	if isinstance(answered, str) and answered.strip() and isinstance(answered_provider, str):
+		if answered_provider.strip():
+			return answered.strip(), provider_from_gateway(answered_provider.strip())
 	active_model = row.get("activeModel")
 	active_provider = row.get("activeModelProvider")
 	if isinstance(active_model, str) and active_model.strip() and isinstance(active_provider, str):
@@ -528,6 +537,67 @@ def sum_run_cache(messages: list, min_seq: int, max_seq: int | None = None) -> d
 				totals[key] += count
 				reported = True
 	return totals if reported else None
+
+
+def _is_delivery_mirror(message: dict) -> bool:
+	"""The runtime's own transcript copy of a delivered reply (provider ``openclaw``, model
+	``delivery-mirror``): not a model answer."""
+	return bool(
+		message.get("openclawDeliveryMirror")
+		or (message.get("model") or "") == "delivery-mirror"
+		or (message.get("provider") or "") == "openclaw"
+	)
+
+
+def run_answering_identity(messages: list, min_seq: int, max_seq: int | None = None) -> dict | None:
+	"""``{"answeredModel", "answeredModelProvider"}`` of the LAST real assistant message with
+	transcript seq in (min_seq, max_seq]: the model that produced this run's final answer, also
+	when a fallback member answered a turn that asked for another (tool-calling turns are several
+	model calls; the last one is the reply). None when no such message names both."""
+	from jarvis.chat.runtime_profile import get_profile
+
+	meta_key = get_profile().message_metadata_key
+	found = None
+	for m in messages or []:
+		if not isinstance(m, dict) or (m.get("role") or "").lower() != "assistant":
+			continue
+		seq = _msg_seq(m, meta_key)
+		if seq is None or seq <= min_seq or (max_seq is not None and seq > max_seq):
+			continue
+		if _is_delivery_mirror(m):
+			continue
+		model, provider = m.get("model"), m.get("provider")
+		if isinstance(model, str) and model.strip() and isinstance(provider, str) and provider.strip():
+			found = {"answeredModel": model.strip(), "answeredModelProvider": provider.strip()}
+	return found
+
+
+def with_run_identity(row: dict | None, identity: dict | None) -> dict | None:
+	"""``row`` with the run's answering model laid over it; the row itself when there is none."""
+	if not row or not identity:
+		return row
+	return {**row, **identity}
+
+
+def fetch_run_transcript(sess, session_key: str, run_id: str | None) -> tuple[dict | None, dict | None]:
+	"""``(cache, identity)`` for this run from ONE transcript-tail read: the summed cache usage
+	(``sum_run_cache``) and the answering model (``run_answering_identity``). Same bounds and
+	best-effort contract as ``fetch_run_cache``: ``(None, None)`` when the run cannot be bounded
+	or the tail is cut."""
+	try:
+		window = _run_seq_window(run_id)
+		if not window:
+			return None, None
+		min_seq, max_seq = window
+		messages = sess.get_session_messages(session_key, limit=_RUN_CACHE_TAIL_LIMIT)
+		if len(messages) >= _RUN_CACHE_TAIL_LIMIT and _tail_starts_after(messages, min_seq):
+			return None, None
+		return sum_run_cache(messages, min_seq, max_seq), run_answering_identity(messages, min_seq, max_seq)
+	except Exception as e:
+		if txn.is_write_conflict(e):
+			raise
+		frappe.logger("jarvis.usage").warning("run transcript read failed for %s", session_key, exc_info=True)
+		return None, None
 
 
 def fetch_run_cache(sess, session_key: str, run_id: str | None) -> dict | None:

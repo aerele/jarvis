@@ -462,10 +462,12 @@ def _effect_usage(ctx: _Ctx) -> None:
 	with agent_session_pool.checkout(gateway_url) as sess:
 		row = _usage.fetch_fresh_session_row(sess, session_key)
 		# sessions.list carries no cache numbers; the transcript's per-message usage does.
-		cache = _usage.fetch_run_cache(sess, session_key, ctx.run_id)
+		# ... and its per-message model / provider, which names who really answered.
+		cache, identity = _usage.fetch_run_transcript(sess, session_key, ctx.run_id)
 	# Reply length for the claude-cli output estimate: read once, BEFORE the fresh snapshot (a
 	# read after it would open a new snapshot right before the guard CAS on the same Turn row),
 	# outside the replayed unit, and only for a row that can use it. None on any lookup failure.
+	row = _usage.with_run_identity(row, identity)
 	reply_chars = _usage.reply_char_count(ctx.run_id) if _usage.is_claude_cli_row(row) else None
 	# The poll held the job's transaction open for up to ~4.5 s; drop that snapshot so
 	# the unit below starts on the present. Nothing is pending: the runner committed its
