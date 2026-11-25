@@ -121,6 +121,17 @@ export function subModelSuggestions(apiSubscriptionModels) {
 export function defaultSubscriptionModel(upstream, catalog) {
 	return ((catalog || {})[upstream] || [])[0] || "";
 }
+// Options for the Model dropdown on a chat-subscription row: the admin catalog's
+// ids for that upstream, with the row's saved model kept selectable even when the
+// catalog no longer lists it (so opening the row never rewrites it). [] when the
+// provider has fewer than two catalog models: nothing to choose, so no dropdown.
+export function subscriptionModelOptions(upstream, catalog, current) {
+	const ids = ((catalog || {})[upstream] || []).filter(Boolean);
+	if (ids.length < 2) return [];
+	const cur = (current || "").trim();
+	if (cur && !ids.includes(cur)) ids.unshift(cur);
+	return ids.map((id) => ({ value: id, label: id }));
+}
 export function validatePool(models, preset) {
 	if (!Array.isArray(models) || models.length === 0)
 		return { ok: false, error: "Add at least one model." };

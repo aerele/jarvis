@@ -1026,6 +1026,29 @@
 								>
 							</JvCombo>
 						</div>
+						<!-- Model of a chat subscription: only the provider's catalog ids (no free
+                 text), hidden when the provider offers fewer than two. Writes
+                 panelRow.model, which buildSaveModels sends and poolSnapshot diffs,
+                 so the normal "Save and apply" picks it up. -->
+						<div
+							v-if="subscriptionModelOpts(panelRow).length"
+							class="jv-pool-field"
+							data-testid="sub-model-field"
+						>
+							<label class="jv-pool-lab">Model</label>
+							<JvCombo
+								:model-value="panelRow.model"
+								:options="subscriptionModelOpts(panelRow)"
+								:editable="editable"
+								placeholder="Model"
+								@update:model-value="
+									(v) => {
+										if (v === panelRow.model) return;
+										panelRow.model = v;
+									}
+								"
+							/>
+						</div>
 					</div>
 
 					<!-- jarvis#934: same non-blocking backstop warning as the main list,
@@ -2438,6 +2461,7 @@ import {
 	seedRowsFromConfig,
 	defaultSubscriptionModel,
 	subModelSuggestions,
+	subscriptionModelOptions,
 	poolBackstopWarning,
 	apiKeyModelHealth,
 	subscriptionAccountHealth,
@@ -2588,6 +2612,9 @@ function fillBlankModels() {
 const subscriptionSuggestions = computed(() =>
 	subModelSuggestions(modelCatalog.value.subscription_models)
 );
+function subscriptionModelOpts(m) {
+	return subscriptionModelOptions(m.upstream, subscriptionSuggestions.value, m.model);
+}
 const rows = ref([]); // canonical camelCase rows (single source of truth)
 const llmMode = ref("quick"); // "quick" | "preset" | "custom"
 const selectedPreset = ref("");
