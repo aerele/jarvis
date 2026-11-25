@@ -165,6 +165,11 @@ process and stays false until that worker restarts. It covers only the one pinne
 only; it is not part of the stored result. An ERPNext upgrade needs a worker restart for the pins to
 be checked again; a deploy restarts the workers.
 
+With the reader switch `on` and the company served (see "Bank read: one pass and one Payment Ledger scan per
+view"), a snapshot that selected bank accounts adds two more fields at the end of the line:
+`bank_path=one_pass` (or `today`) and `bank_ms=<n>`. They hold no name. With the switch off, or with no
+selected account, the line is the text above, unchanged.
+
 Slice 1a proves the output with a differential test. `jarvis/tests/test_payment_calendar_speedups.py`
 re-runs every scenario of `test_payment_calendar_sources` and `test_payment_calendar_reconciliation`
 with `read_obligations` replaced by a comparator. The comparator calls the real function and the
@@ -503,7 +508,8 @@ counters, the Error Log rows and `shadow.status()`.
 
 **Shadow.** One cron entry, `"*/15 2-5 * * *"` -> `shadow.dispatch`, starts or resumes the night's chain from
 02:00 to 05:59 site time. A unit is one company, one side and one scope (previous, current and next month and
-the legacy window). One RQ job (`long` queue, 600 s, `job_id` `pcal-shadow:<date>:<n>`) runs one unit under
+the legacy window); each company also has one bank unit, `Bank:all` (see "Bank read: one pass and one Payment
+Ledger scan per view"). One RQ job (`long` queue, 600 s, `job_id` `pcal-shadow:<date>:<n>`) runs one unit under
 the lease `jarvis:pcal:shadow:lease` (900 s, so a job RQ kills late cannot outlive it), then enqueues the next.
 The start company rotates by one each night, so a company late in the order is not starved every night by the
 night's budget. A unit runs both reads, today's with its guards lifted and the reader, as Administrator in one
@@ -527,13 +533,15 @@ visitor flow.
 
 **The gate.** `shadow.summary(days=7)` passes a company when, for every side and scope, at least 7 nights hold a
 `compared` record on the deployed reader build (`routing.reader_build()`: a hash of the figure-deciding
-modules, listed in `routing.FIGURE_MODULES` (`books`, `builtin_reader`, `compatibility`, `eligibility`, `errors`,
+modules, listed in `routing.FIGURE_MODULES` (`banks`, `books`, `builtin_reader`, `compatibility`, `eligibility`, `errors`,
 `permissions`, `reconciliation`, `scope` and `sources`), and the Frappe and ERPNext versions, computed once per process; a
 test makes every `jarvis/payment_calendar/*.py` file a figure module or not), and the period has no diff or
 error row, no `would_deadline` and no `deadline` or `assemble_budget` fallback. The period is tonight and the 7
 nights before it, so a missing tonight never fails the gate. `missing` lists the side and scope that lack
 nights, and `reasons` counts why the units that were not compared were not. A change to a figure module starts
-the count again.
+the count again. Every company also needs the bank unit (`Bank:all`) `compared` on the same nights, with no
+diff or error record; a company whose bank unit cannot be compared never passes (see "Companies that never
+reach `Bank:all` `compared`" in "Bank read: one pass and one Payment Ledger scan per view").
 
 The nights and the day counters live in `redis_cache` (no persistence, an LRU eviction policy): a Redis restart
 or an eviction silently resets the count. That fails safe (the gate then says "missing"), but it is not
@@ -922,6 +930,168 @@ the batch to `per_doc` (`pin_drift`) until you act. After the upgrade: audit the
 evaluator, add the new hashes next to the old ones (with the version in the comment), run the permission pin
 test, restart the workers, and re-run the differential (it must pass) before you rely on `permission_mode=batch`.
 
+## Bank read: one pass and one Payment Ledger scan per view
+
+The bank card and the "Show all accounts" dialog read company-currency book cash through
+`banks.read_bank_balances`. Today it checks the finance books of the selected accounts (a GL scan and a scan
+of the whole Payment Ledger), then calls `get_balance_on` once per account. Two speed-ups make that cheaper
+and keep the figures and the refusals exactly equal. Both are behind the reader switch ("Reader routing (S2)")
+and are **off by default**: with the switch off, or with a company that is not on the served list, today's
+path runs.
+
+**When they apply.** The reader mode is `on` and the company is on the served list (see "Reader routing
+(S2)"), and the Frappe major is 16. In mode `shadow`, and in mode `off`, nothing serves from the new paths.
+The mode and the lists are read once per view and shared by both speed-ups; a failed read counts as `off`.
+This read happens in **every** snapshot view, also with the mode `off` and also on v15: it is one extra
+`tabSingles` read per view, made before the company is checked. If that read fails with a database error
+(a deadlock or a statement timeout), the answer is `off`, but the failed statement also poisons the view
+(`routing._poison_view`), so a view that would have passed today can end as `source_changed`. This is rare and
+transient; the next snapshot request reads again.
+
+**One pass over the ledger.** For the selected accounts (at most 50, `banks.validate_bank_accounts`), one GL
+query replaces the book scan and the per-account `get_balance_on` calls. It sums `ROUND(debit, p) -
+ROUND(credit, p)` per account and finance book over the rows of the company with `is_cancelled = 0` and a
+posting date up to the as-of date. `p` is the raw `get_currency_precision()` that `get_balance_on` rounds with
+(0 is allowed); the reply still shows `p or 2` decimals. These rules decide the figure:
+
+- A group whose finance book is not NULL, blank or the company default refuses `multibook_unsupported`, the
+  code of today's gate. The Payment Ledger half of today's book gate still runs (see the next section).
+- An account with no row is 0. The balance of an account is the exact decimal sum of its groups, converted
+  once with `flt`, as `get_balance_on` does.
+- Every account still gets `check_permission("read")`; a refused account raises the same error as today.
+- The query body copies the audited `get_balance_on`. It runs only when the source hash of that function is
+  one of the two audited 16.x hashes that include the default book (`compatibility.bank_one_pass_pinned`).
+  Any other source, an unreadable source and v15 keep today's path and refuse nothing. A new ERPNext revision
+  needs an audit and a pin bump, like the other pins; until then today's path runs.
+- `IGNORE INDEX (company)` is a query-plan hint only. If the database says the key does not exist (MySQL error
+  1176), the one pass returns nothing and the caller reads today's way, so a missing index never loses a
+  figure. Any other database error propagates. The fallback is not silent in the shadow: the bank unit
+  records `not_compared` with the reason `one_pass_unavailable`, so a site without the index never passes
+  the gate for the bank unit.
+
+**One Payment Ledger scan per view.** `snapshot.consistent_read` opens a view-scoped memo
+(`books.book_memo`). Inside it, the first book check of a (company, as-of date) pair reads the Payment Ledger
+book groups once (`account_type`, `finance_book` over the company's non-delinked rows up to the date). The
+bank check uses all groups; a side check uses the groups of its account type. The view is one repeatable-read
+snapshot, so every check sees the same rows and the answer equals today's by construction. The memo holds only
+pairs of account type and book name. It never leaves the process, is never written, and is removed when the
+view ends, also after an exception. The memo serves only when the switch is `on`, the company is served and
+the source is v16. Outside a view, and in every other case, today's query runs. With the memo, one view runs
+one Payment Ledger book query for the bank and both sides.
+
+**Bank shadow unit `Bank:all`.** The nightly shadow gains a ninth unit per company, after the eight side
+units. It reads the company's enabled Bank and Cash leaf accounts with today's `get_balance_on` path and with
+the one pass, both in one `consistent_read()` view as Administrator. A company with more than 50 accounts
+(`banks.MAX_BANK_ACCOUNTS`, the most one read takes) is not compared (`shadow_too_large`). It calls the
+two paths directly, whatever the switch says, and it serves nothing. In mode `on` for a served company it also
+compares the Payment Ledger book decision of the view memo with a direct query that never uses the memo; a
+difference is recorded as a `diff` (with the counts `memo_refuses` and `direct_refuses`). The comparison is per account on the
+text the reply shows. Outcomes:
+
+| Outcome | Meaning |
+| --- | --- |
+| `compared` | Equal figures for every account |
+| `diff` | At least one account differs, or one path refused where the other did not. The counts and the digests of the differing account names are recorded, never the names; an Error Log row is written once per company and night, like any shadow diff |
+| `agree_refusal` | Both paths refuse with the same code, for example `multibook_unsupported` |
+| `not_compared` | `fiscal_year_unavailable`, `shadow_too_large` (more than 50 accounts), `unpinned` (the `get_balance_on` source is not audited), `one_pass_unavailable` (error 1176, above), or `error:<class>` for an unexpected exception. `unpinned`, `one_pass_unavailable` and `shadow_too_large` also write one "Payment Calendar reader shadow fallback" Error Log row per company and night |
+
+**Gate effect.** `shadow.summary` and `shadow.status` treat `Bank:all` as one more unit of every company on
+the lists. A company passes the gate only when `Bank:all` also has the required number of `compared` nights
+on the deployed build and no `diff` or error record. `missing` shows it as `Bank:all <n>/<nights>`. A company
+without bank accounts compares an empty set and passes with `compared`. `agree_refusal` does not count as a
+compared night.
+
+**Deploy effect.** `banks` is in `routing.FIGURE_MODULES`, so `reader_build` changes at deploy, also with the
+switch off. A change to a figure module starts the count of shadow nights again (see "The gate" in "Reader
+routing (S2)").
+
+- Deploy this change together with the other figure-module changes, so the count restarts once.
+- Deploy outside the shadow window (02:00-05:59 site time) and never twice in one night. A deploy inside the
+  window changes the number of units of a company (nine, not eight) while a chain runs: the night restarts
+  once and writes a `units_changed` incomplete row, and a second change the same night stops it
+  (`units_changed_again`). Records already written on the old build stay on the old build, so that night
+  counts for no unit of the new build.
+- Restart the workers and the scheduler at the deploy, as for any change of a figure module: `reader_build`
+  is computed once per process, so a process that is not restarted still reports (and records) the old build.
+  No migrate is needed: no DocType, field or index changes.
+
+**Logs.** Three fields at the end of the collect line (`collect complete ...`) describe the bank read of a
+served company, in this order: `bank_path=one_pass|today`, `bank_ms=<n>` and, only with `today`,
+`bank_fallback=<cause>`. They are written only when the switch is `on`, the company is served and the snapshot
+has selected accounts. With the switch off the line is byte-equal to the line before this change. No field holds
+a name.
+
+- **They are INFO diagnostics.** The production log level is ERROR (see "Reading the logs"), so a production
+  file does not hold the collect line. To see it, lower the level for one process on a dev server, a staging
+  site or a worker started for the purpose.
+- **Causes** (`bank_fallback`): `unpinned` (the installed `get_balance_on` is not an audited source, or is
+  wrapped or from another module), `v15` (the Frappe major is not 16), `missing_index` (MySQL error 1176: see
+  "Index check"), `account_label` (the ledger names a selected account in a spelling that is not the selected
+  name, so the one pass cannot map its rows).
+- **The production signals** are two, both name-free and both visible at ERROR level or in Redis:
+  1. One ERROR line per cause and worker process, `speed_fallback method=bank_one_pass:<cause> hash=<sha or
+     none> erpnext=<version>` (the same line as the other speed overrides, see "Reading the logs"). It repeats
+     only after a worker restart, so a cause that persists shows as one line per restart.
+  2. A site day counter per cause, `jarvis:pcal:site:day:<date>:bank_today:<cause>` (one Redis string, `INCR`,
+     35 days), counted once per snapshot that read `today` for a served company. It is the volume signal: a
+     rising count on a company that should be served by the one pass is the alarm. Read it on the console with
+     `frappe.cache.execute_command("GET", frappe.cache.make_key("jarvis:pcal:site:day:<date>:bank_today:unpinned"))`.
+  `bank_ms` has no production signal; read it at INFO when the bank read is slow.
+
+**Companies that never reach `Bank:all` `compared`.** The gate stays failed for a company whose bank unit
+cannot be compared. `bench --site <site> execute jarvis.payment_calendar.shadow.status` prints the newest
+bank-unit record and, under the gate, the `reasons` of the nights that were not compared. Act on the reason:
+
+| Reason (`Bank:all`) | Cause | Action |
+| --- | --- | --- |
+| `fiscal_year_unavailable` | No fiscal year covers the night's date | Create the fiscal year. Without one the bank read refuses `fiscal_year_unavailable` too |
+| `unpinned` | The installed `get_balance_on` is not an audited source | Audit it and bump the pin (see "Pin bump" below). Until then today's path runs and the company cannot pass |
+| `one_pass_unavailable` | MySQL error 1176: the `company` index of `tabGL Entry` is missing | See "Index check" below |
+| `agree_refusal` (an outcome, not a reason) | Both paths refuse alike, for example `multibook_unsupported` (a finance book other than blank or the company default holds rows) | Not a defect of the one pass, but the night does not count as `compared`: such a company cannot pass the gate while the refusal stands |
+| `error:<class>` | An unexpected exception in a path | A defect: take the company off the served list and file it |
+
+**Pin bump.** `compatibility._BANK_HELPER_HASHES` holds the audited sources of ERPNext's `get_balance_on`,
+in ONE constant that both the bank-arguments adapter (`bank_balance_arguments`) and the one-pass read
+(`bank_one_pass_blocker`) use. When ERPNext changes the function: audit the new source against the query in
+`banks` (the filters, the per-row `ROUND`, the finance-book union, the permission and dimension checks), add the
+new hash to `_BANK_HELPER_HASHES` next to the old ones, and run `test_payment_calendar_banks_one_pass` (the
+`TestOnePassPin` tests fail first) and `test_payment_calendar_compatibility`. Also follow the pin bump of
+"Speed overrides fall back to upstream, never refuse" for the other pins. A hash that the code does not know
+gives today's path with the cause `unpinned`, never a refusal. The hash covers the body of `get_balance_on`
+only: the functions it calls (`get_currency_precision`, the fiscal-year check) are not hashed, and the nightly
+`Bank:all` comparison is what catches a change in them. A bump needs a worker restart.
+
+**Index check.** The one-pass query carries `IGNORE INDEX (company)`. It needs the index named `company`
+on `tabGL Entry` (ERPNext creates it from the `company` field, which has `search_index`). Check it:
+
+```
+bench --site <site> mariadb -e "SHOW INDEX FROM \`tabGL Entry\` WHERE Key_name = 'company'"
+```
+
+An empty result means error 1176 on the one pass. Restore the index through ERPNext's own schema sync
+(migrate), not by hand, or leave the company on today's path.
+
+**Mapping a digest to an account.** A bank-unit record and a diff row name accounts and the company only by
+HMAC digests. In a console on the site, compute the digest of each bank account and compare:
+
+```
+# bench --site <site> console
+from jarvis.payment_calendar import read_log, shadow, shadow_state
+company = "<company>"
+for name in shadow._bank_accounts(company):
+    print(read_log.ops_digest(name), name)
+digest = read_log.company_digest(company)
+print(shadow_state.records(digest, "<night, YYYY-MM-DD>").get("Bank:all"))   # outcome, counts, digests
+```
+
+**Rollback.** No restart and no migrate. Remove the company from the served list or set the mode to `off`
+(rollback steps R0 and R1 in the Runbook of "Reader routing (S2)"): the next job reads today's way, for the
+bank and for both book checks, and a snapshot already published stays until its `RESULT_TTL` ends. With the
+switch off nothing here runs except the one read of the mode per view. The figures do not change, because both
+paths are exactly equal. Reverting the release (R2) changes `reader_build` back, so the nights restart again.
+Records of `Bank:all` that remain in Redis after a revert are inert: no reader looks at a field that is not in
+its unit list, the old build hash does not match them, and they expire with the night keys.
+
 ## Company floor and coherent reads
 
 `Jarvis Payment Calendar Settings` has a stable random ID and unique Company
@@ -1257,6 +1427,8 @@ them in production. The production signals are the ERROR lines and the Error Log
 | WARNING | `slow balances job complete duration_ms=<n> accounts=<n>` | A balances job ran 150 s or longer (RQ timeout 300 s). |
 | WARNING | `<kind> job scope_changed\|forbidden\|expired exception_class=<class> stage=<stage>` | An expected job outcome: access or scope changed while the job ran. |
 | WARNING | `refusal_counter_unavailable` | The refusal-loop counter failed (Redis). The reply was not affected. |
+| INFO | `collect complete duration_ms=<n> projections_ms=<n> payable_rows=<n> receivable_rows=<n> fast_path=<bool>` and, for a served company with selected accounts, `bank_path=<one_pass\|today> bank_ms=<n> [bank_fallback=<cause>]` | The end of one snapshot read. Hidden at the production level (ERROR). `bank_path=today` with a cause means the one-pass bank read did not run: see "Bank read: one pass and one Payment Ledger scan per view". The ERROR line `speed_fallback method=bank_one_pass:<cause>` and the site day counter `bank_today:<cause>` are the production signals. |
+| WARNING | `bank_counter_unavailable` | The `bank_today:<cause>` day counter could not be written (Redis). The reply was not affected. |
 
 **Error Log titles to filter on.**
 
