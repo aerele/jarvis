@@ -499,6 +499,10 @@ def resolve_on_user_message(conversation: str, seed_message: str | None = None) 
 		open_filter["sheet"] = ["is", "not set"]
 	if not frappe.db.exists(APPROVAL, open_filter):
 		return
+	if seed_message and frappe.db.get_value("Jarvis Chat Message", seed_message, "origin") == "continuation":
+		# The system's own "carry on" after a confirmed card is not the user answering:
+		# a question asked in the same turn must stay open on the board.
+		return
 	# Lock exactly the Pending rows that this answer wins. A simultaneous
 	# reviewer decision cannot be announced as answered or resumed twice.
 	a = frappe.qb.DocType(APPROVAL)
