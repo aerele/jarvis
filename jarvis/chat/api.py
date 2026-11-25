@@ -1859,6 +1859,14 @@ def _send_rejection(user: str, reason: str) -> dict:
 	monthly) fires the same code but leaves the window out, and the SPA keeps
 	its period-neutral copy."""
 	out = {"ok": False, "reason": reason}
+	# A refused send is a 200 with ok false and nothing else in any log: say so on the latency log,
+	# so "the send did nothing" can be told from a send that never arrived.
+	try:
+		from jarvis.chat.latency import get_logger as _get_latency_logger
+
+		_get_latency_logger().info("send_rejected reason=%s user=%s", str(reason)[:80], user)
+	except Exception:
+		pass
 	if reason == "site_is_copy":
 		from jarvis.chat import site_pin
 
