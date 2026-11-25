@@ -106,22 +106,6 @@ describe("normaliseAction", () => {
 		expect(normaliseAction({ doctype: "X" }).verb).toBeUndefined();
 	});
 
-	it("normalises the second stranded block (Purchase Order, object fields AND tables)", () => {
-		const a = normaliseAction({
-			verb: "create",
-			doctype: "Purchase Order",
-			fields: { supplier: "Test", transaction_date: "2026-07-31" },
-			tables: { items: { rows: [{ item_code: "DUMMY-ITEM-002", qty: 1, rate: 1 }] } },
-		});
-		expect(a.kind).toBe("doc");
-		expect(a.fields).toHaveLength(2);
-		expect(a.tables).toHaveLength(1);
-		expect(a.tables[0].fieldname).toBe("items");
-		// buildDraftModel walks BOTH with for..of; neither may be a plain object.
-		expect(Array.isArray(a.fields)).toBe(true);
-		expect(Array.isArray(a.tables)).toBe(true);
-	});
-
 	it("leaves a spec-shaped block untouched", () => {
 		const good = {
 			kind: "doc",

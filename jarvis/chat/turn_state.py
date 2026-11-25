@@ -123,6 +123,7 @@ EFFECT_NAMES = (
 	"macro_advance",
 	"auto_title",
 	"wiki_nudge",
+	"suggest_replies",
 	"usage",
 	"telemetry_flush",
 )
@@ -154,7 +155,9 @@ VISIBLE_EFFECT_NAMES = (
 	"auto_title",
 	"wiki_nudge",
 )
-INVISIBLE_EFFECT_NAMES = ("usage", "telemetry_flush")
+# suggest_replies only ENQUEUES its job (the model call runs on the short queue and lands
+# over realtime later), so it has nothing for the "Finishing..." affordance to wait for.
+INVISIBLE_EFFECT_NAMES = ("suggest_replies", "usage", "telemetry_flush")
 assert set(VISIBLE_EFFECT_NAMES) | set(INVISIBLE_EFFECT_NAMES) == set(EFFECT_NAMES)
 assert not (set(VISIBLE_EFFECT_NAMES) & set(INVISIBLE_EFFECT_NAMES))
 

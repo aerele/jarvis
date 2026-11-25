@@ -1,9 +1,7 @@
 // "Open in Dashboards" — the owner-reported gap between main chat and the
 // Dashboards builder, fenced by a real executable test. Plain node built-ins
 // (node:test + node:assert), like dashboardRestore.test.js. Run directly
-// (`node --test dashboardOpen.test.js`) or via the python suite
-// (jarvis/tests/test_dashboard_open_from_chat_client.py subprocess-runs it
-// every CI run).
+// (`node --test dashboardOpen.test.js`) or via `npm run test:node`.
 //
 // The builder's conversation shows up in the main chat list. Opening it there
 // shows the prompt and the dashboard, but that canvas never runs its queries —

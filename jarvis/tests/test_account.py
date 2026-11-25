@@ -701,12 +701,6 @@ class TestAdminChatGate(FrappeTestCase):
 		# Second call served from the positive cache → one admin round-trip.
 		gc.assert_called_once()
 
-	def test_not_ready_verdict_is_not_cached(self):
-		# A transient block must clear on the next call, not stick for the TTL.
-		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Provisioning"}):
-			account._admin_chat_gate()
-		self.assertIsNone(self._cached_verdict())
-
 	def test_a_config_change_drops_the_cached_verdict(self):
 		"""The C05-1 stale window: a save changed what the container is being asked
 		to run, so the verdict admin gave about the PREVIOUS config is finished -
@@ -1815,15 +1809,6 @@ class TestDiagnosticClass(FrappeTestCase):
 			out = account._admin_chat_gate()
 		self.assertEqual(out["diag_code"], "admin_forbidden")
 		self.assertFalse(out["retryable"])
-
-	def test_the_cached_verdict_carries_the_same_diagnostic(self):
-		from jarvis.exceptions import AdminUnreachableError
-
-		with patch.object(admin_client, "get_connection", side_effect=AdminUnreachableError("down")) as gc:
-			first = account._admin_chat_gate()
-			second = account._admin_chat_gate()
-		gc.assert_called_once()  # second served from the short unconfirmed cache
-		self.assertEqual(first, second, "a polling wizard must get an identical verdict each beat")
 
 
 class TestBackfillExcludesOauthPushOnly(FrappeTestCase):

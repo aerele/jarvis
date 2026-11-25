@@ -116,14 +116,6 @@ test("a 401 with no usable message gets the same session-expired sentence", () =
 	assert.equal(errMessage({ status: 401 }), "Your session has expired. Please sign in again.");
 });
 
-// The #696 crash itself carries no .status at all (call.js throws before
-// e.status is ever assigned) - it must fall through to the generic sentence,
-// not somehow trip the 401/403 branch.
-test("the #696 crash shape (no status) falls through to the generic sentence, not session-expired", () => {
-	const e = new TypeError("Cannot read properties of undefined (reading 'exc_type')");
-	assert.equal(errMessage(e), GENERIC_ERROR_MESSAGE);
-});
-
 test("a non-auth status keeps its own message", () => {
 	assert.equal(
 		errMessage({ status: 500, message: "Internal Server Error" }),

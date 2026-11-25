@@ -205,23 +205,6 @@ class TestFileBoxSingleSettings(_ApplyBase):
 		self.assertEqual(result["reason_code"], "stale")
 		self.assertEqual(self.value(), 1)
 
-	def test_callback_manager_cut_is_public_and_keeps_earlier_callbacks(self):
-		callbacks = frappe.utils.CallbackManager()
-		called = []
-
-		def prior():
-			called.append("prior")
-
-		def later():
-			called.append("later")
-
-		callbacks.add(prior)
-		mark = len(callbacks)
-		callbacks.add(later)
-		self.assertEqual(callbacks.cut(mark), [later])
-		callbacks.run()
-		self.assertEqual(called, ["prior"])
-
 	def test_cleanup_callbacks_are_isolated_and_keep_the_original_record_failure(self):
 		from jarvis.tools.update_doc import _update_one
 

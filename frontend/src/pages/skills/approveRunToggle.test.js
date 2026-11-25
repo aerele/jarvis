@@ -1,10 +1,8 @@
 // Real executable test for the "Approve & run" arming toggle's gating + copy
 // (skill approve-and-run, P2). Plain node built-ins (node:test + node:assert) —
 // no browser, the promotionBudget.test.js precedent. Run directly
-// (`node --test approveRunToggle.test.js`), via `npm run test:node`, or through
-// the python suite (jarvis/tests/test_approve_run_toggle_client.py subprocess-runs
-// it so the kill-switch matrix + risk-disclosure contract lives in the suite
-// forever). `node --test` exits non-zero on any failed assertion.
+// (`node --test approveRunToggle.test.js`) or via `npm run test:node` (the CI
+// frontend-tests job). `node --test` exits non-zero on any failed assertion.
 //
 // Why this exists: `armToggleLocked` is a 3-boolean truth table where one wrong
 // sign silently (a) LOCKS the kill switch for an armed skill's owner, or (b)

@@ -82,7 +82,7 @@
    "fieldname": "reason_code",
    "fieldtype": "Select",
    "label": "Reason Code",
-   "options": "\nfailed\nalready_handled\nbusy\nsuperseded\nstale\ntarget_missing\nunverifiable\ntampered\nidentity_refused\ninterrupted\npartial\nowner_disabled\ncancelled\narchived\ndiscarded\nexpired\nuse_existing\nstuck\nsafety_update"
+   "options": "\nfailed\nalready_handled\nbusy\nsuperseded\nstale\ntarget_missing\nunverifiable\ntampered\nidentity_refused\ninterrupted\npartial\nowner_disabled\ncancelled\narchived\ndiscarded\nexpired\nuse_existing\nstuck\nsafety_update\nnot_sent"
   },
   {
    "description": "Fixed bench text only; never tool args or error text.",
@@ -414,7 +414,7 @@
  "in_create": 1,
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-10-13 12:00:00.000000",
+ "modified": "2026-11-23 12:00:00.000000",
  "module": "Jarvis",
  "name": "Jarvis Pending Action",
  "naming_rule": "Random",

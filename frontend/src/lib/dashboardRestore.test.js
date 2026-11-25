@@ -1,8 +1,6 @@
 // The owner-reported Dashboards builder defects, fenced by a real executable
 // test. Plain node built-ins (node:test + node:assert), like eventFence.test.js.
-// Run directly (`node --test dashboardRestore.test.js`) or via the python suite
-// (jarvis/tests/test_dashboard_builder_ux_client.py subprocess-runs it every CI
-// run).
+// Run directly (`node --test dashboardRestore.test.js`) or via `npm run test:node`.
 //
 // D1 the composer kept the text it had just sent. D3 the canvas vanished on a
 // tab switch or a navigation, with no way back and no warning that it was gone

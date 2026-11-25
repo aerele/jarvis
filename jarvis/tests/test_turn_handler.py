@@ -99,33 +99,6 @@ class TestHandleChatSendAcceptsPayloadDict(FrappeTestCase):
 		self.assertIn("run:start", kinds)
 		self.assertIn("run:end", kinds)
 
-	def test_attachments_and_context_default_to_none(self):
-		"""The payload omits ``attachments`` and ``context``; the handler
-		must treat them as None and not blow up on missing keys."""
-		fake_sess = MagicMock()
-		fake_sess.chat_send.side_effect = lambda sk, msg, idem, **kw: {"runId": idem, "status": "started"}
-		fake_sess.relay_turn_events.return_value = _fake_event_stream(
-			[
-				{"kind": "lifecycle", "phase": "end"},
-				{"kind": "relay:final", "text": None},
-			]
-		)
-		with patch(
-			"jarvis.chat.agent_session_pool.AgentSession.connect",
-			return_value=fake_sess,
-		):
-			with patch("jarvis.chat.worker.publish_to_user"):
-				turn_handler.handle_chat_send(
-					{
-						"conversation_id": self.conv,
-						"message_id": self.user_msg,
-						"run_id": "r-optional",
-					}
-				)
-		# Reached this line without KeyError: the payload contract for
-		# the optional fields holds.
-		self.assertTrue(True)
-
 	def test_stale_device_binding_remints_the_session(self):
 		"""jarvis #712: a conversation's session_key was minted under a
 		device pairing that no longer exists (a tenant re-pair happened

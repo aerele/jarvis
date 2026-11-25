@@ -228,7 +228,9 @@ def _queried_run(row: dict) -> list[str]:
 
 def _ready_answers(newest: dict, queried: set) -> list[dict]:
 	"""The ``ready`` list of ``step_reads``: the newest ready answer per report and
-	filters that was read, plus every queried run no answer is for."""
+	filters that was read, plus every queried run no answer is for. A report snapshot
+	(``rs_`` id) is not a Prepared Report: reading it answers no awaited report."""
+	queried = {run for run in queried if not run.startswith("rs_")}
 	ready = [
 		{"report_name": r["report_name"], "run": r["run"] or "", "key": r["key"]}
 		for r in newest.values()

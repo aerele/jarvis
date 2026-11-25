@@ -4,8 +4,7 @@
 // exercised by the browser QA kit; these are the rules that decide whether audio is offered back,
 // rebuilt correctly, or silently lost.
 //
-// Run directly (`node --test voiceAudioMirror.test.js`) or via the python suite:
-// jarvis/tests/test_voice_audio_mirror_client.py subprocess-runs it every CI run.
+// Run directly (`node --test voiceAudioMirror.test.js`) or via `npm run test:node`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { adoptionOps, filterOrphanFragments, groupOrphanRecordings } from "./voiceAudioMirror.js";

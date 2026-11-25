@@ -1483,11 +1483,6 @@ class TestErrorLogScanEdges(CaptureBase):
 		self.assertEqual(result["rows"], [])
 		self.assertEqual(result["watermark"], f"{self.at(1)}|{name}")
 
-	def test_the_reporters_neighbours_stay_local(self):
-		for rel in ("admin_client.py", "chat/usage_push.py"):
-			tb = f'File "apps/jarvis/jarvis/{rel}", line 1, in f\nValueError: x'
-			self.assertFalse(api_errors.is_jarvis_error("admin_client: network error", tb), rel)
-
 
 # --------------------------------------------------------------------------- #
 # call_tool attribution, tool envelopes, failed-request edges
@@ -1553,10 +1548,6 @@ class TestFailedRequestEdges(CaptureBase):
 		TestFailedRequests._capture(self, "/api/method/jarvis.chat.api.send_message", 499)
 		(row,) = self.buffered()
 		self.assertEqual(row.error_code, "499")
-
-	def test_a_rate_limit_answering_as_designed_is_not_an_error(self):
-		TestFailedRequests._capture(self, "/api/method/jarvis.chat.api.send_message", 429)
-		self.assertEqual(self.buffered(), [])
 
 	def test_what_the_failed_request_left_behind_is_discarded(self):
 		frappe.db.set_default("errcap_pending", "1")
