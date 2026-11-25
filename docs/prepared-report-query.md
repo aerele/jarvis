@@ -70,3 +70,74 @@ represent current balances. If access or source changed, inspect the same run ag
 If the snapshot cannot be read safely, generate a fresh report in Desk. Do not retry
 the same cached run in a loop. Later Customer changes still use the existing preview,
 approval, and batch limits. This reader does not change that flow.
+
+# Inline report snapshots (`rs_` ids)
+
+`run_report` stores the rows of a large inline run in Redis. The agent reads them with
+`query_report(prepared_report="rs_...")`, the same way as a Prepared Report. This section
+is for the operator.
+
+## Configuration
+
+Set both keys in `site_config.json` (or `common_site_config.json`). Jarvis reads them on
+every call. Do not restart a service and do not run `bench migrate`.
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `jarvis_report_snapshots` | `1` | `0` turns snapshots off. `run_report` stops creating snapshots. An existing `rs_` id is refused at once: its rows stay in Redis until their TTL, but nobody can read them. |
+| `jarvis_report_snapshot_reload` | `1` | `0` turns off the re-run of an expired snapshot. A snapshot that is still in Redis stays readable. An expired one gives the "run run_report again" error. Snapshots off also turns reload off. |
+
+Each key uses `frappe.utils.cint`. A missing key means `1`. `0`, `"0"`, `""`, `null` and
+any text that is not a number mean `0`. Any other number means `1`.
+
+Fixed limits: rows live 60 minutes, the record that allows a reload lives 24 hours, a user
+keeps at most 5 snapshots, and a user can start at most 6 reloads in a fixed hour. A reload
+returns the tool error `snapshot_reloaded`. The agent then reads the fresh rows with its next call.
+
+## Free the memory by hand
+
+The snapshot keys are in `persistent_cache_keys` (`jarvis/hooks.py`). They survive the
+5-minute watchdog cache clear and `bench clear-cache`. To free the memory before the TTL,
+delete the keys by hand. Use the port of `redis_cache` from `common_site_config.json`.
+
+```bash
+redis-cli -p <redis_cache port> --scan --pattern '*|jarvis:report_snapshot*' \
+  | xargs -r -n 100 redis-cli -p <redis_cache port> DEL
+```
+
+The pattern matches all five key families: content, meta, index, reload lock, reload rate.
+First run the `--scan` part alone and read the keys. After a purge, the agent runs
+`run_report` again when it needs the rows.
+
+## Rollout watch
+
+For the first 7 days, run the signals script on the bench every day:
+
+```bash
+bench --site <site> execute jarvis.scripts.report_snapshot_signals.run
+bench --site <site> execute jarvis.scripts.report_snapshot_signals.run --kwargs "{'days': 7}"
+```
+
+The script reads the `jarvis.report_snapshot` log (the bench-wide copy, so every site),
+changes nothing, and prints a JSON result. It gives per-site signals, one `pooled` entry for
+the sites with fewer than 20 reloads, and one top-level `abort` list. Read the `warnings`
+list first. A warning means the log is missing, empty, old, or cut by rotation
+(`window_truncated`). Do not trust the result then. With `FRAPPE_STREAM_LOGGING` set, the
+events go to stdout and the script finds no file.
+
+Turn `jarvis_report_snapshot_reload` off when `abort` names any of these (the script
+checks them with at least 20 reloads, except the eviction rule):
+
+- S5: the reload p95 is above 12 seconds.
+- Capped or busy reloads are above 10 % of reloads (busy counts once per snapshot and generation).
+- S4 is below 90 %: too few reloads are followed by a query that runs SQL. S4 is undefined when no reload is ok.
+- Failed reloads are above 20 %. The message lists the `failed:<class>` counts.
+- Killed reloads: more than 5 % of attempts have a `reload_start` and no `reload_end`.
+- Any `refused:prepared` outcome.
+- Evicted reads are above 5 % of reads (checked with at least 20 reads, also on a small site).
+
+Turn `jarvis_report_snapshots` off for any report of wrong rows or wrong access.
+
+The result also holds the server-wide Redis `evicted_keys` and `uptime_in_seconds`. They are
+a manual check only: compare two runs. Redis `allkeys-lru` can evict a snapshot or a reload
+lock early. The worst case is one extra run or a reset reload cap, never wrong rows.

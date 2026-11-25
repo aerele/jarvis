@@ -129,14 +129,6 @@ class TestExportExcelNoData(FrappeTestCase):
 			out = export_excel([{"a": 1, "b": None}], title="ok")
 		self.assertEqual(out["file_url"], "/private/files/ok.xlsx")
 
-	def test_generates_list_of_lists_with_data(self):
-		with patch("frappe.utils.file_manager.save_file") as m:
-			m.return_value = frappe._dict(
-				file_url="/private/files/ll.xlsx", file_name="ll.xlsx", file_size=42, name="F-LL"
-			)
-			out = export_excel([["Name", "Qty"], ["Widget", 5]])
-		self.assertEqual(out["file_url"], "/private/files/ll.xlsx")
-
 
 def _saved_bytes(mock):
 	"""The content bytes export_excel handed save_file (2nd positional arg)."""

@@ -44,6 +44,11 @@ def is_controlled_count_mutation(doc) -> bool:
 	return bool(flags and flags.get("cycle_count_controlled_mutation_token") is _CONTROLLED_MUTATION_TOKEN)
 
 
+def mark_stored_copy(stored) -> None:
+	"""Mark the stored copy of a document an endpoint is already writing."""
+	_mark_controlled_count_mutation(stored)
+
+
 def _parse_json(value, label: str):
 	if isinstance(value, str):
 		try:

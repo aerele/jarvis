@@ -88,6 +88,20 @@ class TestSourceReceipts(unittest.TestCase):
 		self.assertEqual(source_receipt("update_doc", args, result), (args, result))
 
 
+class TestQueryExecutedFollowsTheCall(unittest.TestCase):
+	def executed(self, args, data, tool="query_report"):
+		stored_args, _ = source_receipt(tool, args, {"ok": True, "data": data})
+		return stored_args["source_query_executed"]
+
+	def test_the_call_decides_and_the_result_field_is_not_read(self):
+		run = "rs_" + "a" * 32
+		self.assertIs(
+			self.executed({"prepared_report": run, "sql": "SELECT 1"}, {"sql_executed": False}), True
+		)
+		self.assertIs(self.executed({"prepared_report": run}, {"sql_executed": True}), False)
+		self.assertIs(self.executed({"file_id": "F", "sql": "SELECT 1"}, {"rows": []}, "query_file"), True)
+
+
 class TestStoredSourceReceipt(FrappeTestCase):
 	def test_actual_receipt_and_realtime_event_do_not_contain_source_values(self):
 		from jarvis import api

@@ -674,6 +674,9 @@ class TestLearnedApi(unittest.TestCase):
 			with self.assertRaises(frappe.ValidationError):
 				learned_api.polish_learned_draft(name)
 
+	# ------------------------------------------------------------------ #
+	# LLM polish endpoint (plan 5.5 Phase 2)
+	# ------------------------------------------------------------------ #
 	def test_polish_refuses_non_a_class(self):
 		# B/C drafts embed raw party names; the polish prompt must stay
 		# A-class-clean by construction (polish.py), so the endpoint gates on

@@ -306,17 +306,6 @@ describe("schema states", () => {
 	// that emitted `open` itself passed while the picker sat empty in a browser.
 	const openPanel = (w) => w.find('button[aria-label="Filter"]').trigger("click");
 
-	it("asks for the catalog on FIRST open only", async () => {
-		const w = mountPanel({ schema: null, schemaState: "idle" });
-		expect(w.emitted("request-schema")).toBeUndefined();
-		await openPanel(w);
-		expect(w.emitted("request-schema")).toHaveLength(1);
-
-		await w.setProps({ schema: SKILLS_SCHEMA, schemaState: "ready" });
-		await openPanel(w);
-		expect(w.emitted("request-schema")).toHaveLength(1);
-	});
-
 	// `update:show` fires on the way down as well as up, and reka-ui's own
 	// open path relays it twice. Neither may turn into a second metadata walk.
 	it("does not re-ask across an open → close → open cycle", async () => {

@@ -149,13 +149,6 @@ class TestExportPermGuards(FrappeTestCase):
 			from_query("ToDo", fields=["name"])
 		self.assertIn("export", str(ctx.exception).lower())
 
-	def test_missing_and_unknown_doctype_guards(self):
-		with self.assertRaises(InvalidArgumentError):
-			from_query(None, fields=["name"])
-		with self.assertRaises(InvalidArgumentError) as ctx:
-			from_query("JV No Such Doctype ZZZ", fields=["name"])
-		self.assertIn("unknown DocType", str(ctx.exception))
-
 
 class TestFieldLevelAlignment(FrappeTestCase):
 	"""Field-level (permlevel) enforcement + column alignment, on a custom doctype

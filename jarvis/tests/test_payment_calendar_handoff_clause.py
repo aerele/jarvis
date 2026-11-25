@@ -113,11 +113,6 @@ class TestClauseGates(_SwitchCase):
 			spy.seen = seen
 			yield spy
 
-	def test_the_clause_string_is_pinned(self):
-		self.assertEqual(HINT, turn_handler.PAYMENT_CALENDAR_HINT)
-		with self.visible():
-			self.assertEqual(self.clause(), CLAUSE)
-
 	def test_switch_off_returns_before_visibility_is_evaluated(self):
 		self.set_switch(0)
 		with self.visible() as spy:

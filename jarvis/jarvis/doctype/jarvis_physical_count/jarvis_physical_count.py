@@ -27,6 +27,23 @@ class JarvisPhysicalCount(NotRenamable, Document):
 				)
 		return super().check_permission(permtype, permlevel)
 
+	def load_doc_before_save(self, *args, **kwargs):
+		"""Carry the endpoint's controlled-mutation marker to the stored copy.
+
+		Newer Frappe also asks ``has_permission`` about the stored document
+		(``doc_before_save``) when it submits or cancels. That copy is a fresh DB
+		load with no flags, so the controlled-mutation permission hook would deny
+		our own endpoint. Re-mark it only when this in-memory write was marked by
+		an endpoint; a Desk or REST write is never marked, so it is still refused.
+		"""
+		result = super().load_doc_before_save(*args, **kwargs)
+		from jarvis.chat.cycle_count_entry import is_controlled_count_mutation, mark_stored_copy
+
+		stored = getattr(self, "_doc_before_save", None)
+		if stored is not None and is_controlled_count_mutation(self):
+			mark_stored_copy(stored)
+		return result
+
 	def before_insert(self):
 		refuse_in_tool_dispatch()
 		if self.docstatus not in (0, None):

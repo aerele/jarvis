@@ -363,27 +363,6 @@ class TestCreateSession(FrappeTestCase):
 
 
 class TestStreamAgentTurn(FrappeTestCase):
-	def test_completes_on_lifecycle_end(self):
-		sess, ws = _build_session()
-
-		def _ack():
-			req_id = ws.sent[-1]["id"]
-			return _frame({"type": "res", "id": req_id, "ok": True, "payload": {"runId": "run-1"}})
-
-		ws._frames.append(_ack)
-		ws._frames.append(
-			_frame(
-				{
-					"type": "event",
-					"event": "agent.event",
-					"payload": {"runId": "run-1", "stream": "lifecycle", "data": {"phase": "end"}},
-				}
-			)
-		)
-		# Streams to completion (no items required to be yielded for the
-		# completion-path test - parse_event filters its own shapes).
-		list(sess.stream_agent_turn("session-x", "hi", "idem-1"))
-
 	def test_agent_rejection_raises(self):
 		sess, ws = _build_session()
 

@@ -177,6 +177,7 @@
   "announcement_link_label",
   "system_tab",
   "chat_sharing_enabled",
+  "suggest_replies_enabled",
   "deployment_section",
   "deployment_mode",
   "admin_connection_section",
@@ -200,7 +201,10 @@
   "catalogue_visibility_synced_at",
   "connector_catalogue_section",
   "connector_catalogue_disabled",
+  "connector_catalogue_coming_soon",
   "connector_catalogue_synced_at",
+  "connector_key_overrides",
+  "connector_key_overrides_synced_at",
   "holiday_policy_section",
   "holiday_policy_disabled",
   "holiday_policy_disabled_designs",
@@ -1313,6 +1317,13 @@
    "default": "1"
   },
   {
+   "fieldname": "suggest_replies_enabled",
+   "fieldtype": "Check",
+   "label": "Suggest follow-up replies",
+   "default": "1",
+   "description": "After a reply, offer the user one to three likely next messages as chips they can tap to send. Costs one short extra model call per reply, on the Claude plan too (a short turn on the user's subscription)."
+  },
+  {
    "fieldname": "deployment_section",
    "fieldtype": "Section Break",
    "label": "Deployment Mode",
@@ -1474,9 +1485,32 @@
    "description": "Canonical JSON list of the preset names the operator switched off, as last applied. Names this release does not ship are kept but ignored. Empty [] = nothing disabled; empty string = never pulled (or every pull kept last-known)."
   },
   {
+   "fieldname": "connector_catalogue_coming_soon",
+   "fieldtype": "Small Text",
+   "label": "Coming Soon Connector Presets",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Canonical JSON list of the preset names the operator marked Coming soon, as last applied: a subset of the disabled list that stays visible in Browse but cannot be added yet. Empty [] = none; empty string = never pulled (or every pull kept last-known)."
+  },
+  {
    "fieldname": "connector_catalogue_synced_at",
    "fieldtype": "Datetime",
    "label": "Connector Catalogue Synced At",
+   "hidden": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "connector_key_overrides",
+   "fieldtype": "Small Text",
+   "label": "Connector Key Overrides",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Canonical JSON object {preset name: true|false}: whether the operator offers \"Use a key instead\" for that preset, as last applied. Absent = the code default. Empty {} = no overrides; empty string = never pulled (or every pull kept last-known)."
+  },
+  {
+   "fieldname": "connector_key_overrides_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Connector Key Overrides Synced At",
    "hidden": 1,
    "read_only": 1
   },
@@ -1555,5 +1589,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-13 19:00:00.000000"
+ "modified": "2026-11-24 13:00:00.000000"
 }

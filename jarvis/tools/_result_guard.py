@@ -65,8 +65,45 @@ _NOTE_NONROW = (
 )
 
 
+# A cut run_report whose rows were stored as a report snapshot (api._dispatch_from_session
+# sets ``run`` = ``rs_...`` and ``_jarvis_snapshot``): the model reads the full source
+# through query_report, never from these preview rows. At most 600 chars with the largest
+# counts and a 35-char id (a test measures it).
+_SNAPSHOT_NOTE = (
+	"Partial preview: {shown} of {total} rows. Use query_report with prepared_report={run}: "
+	"first without sql to inspect, then pin version for SELECTs over all rows. report_totals "
+	"holds the report's appended total row; report_rows may still contain the report's own "
+	"label or subtotal rows — check before summing. Use decimal_sum etc. After 60 min the "
+	"server may reload it with the same filters; if it says it reloaded, inspect again. "
+	"Never total preview rows."
+)
+_SNAPSHOT_FLAG = "_jarvis_snapshot"
+
+
 def _size(obj) -> int:
 	return len(_json_text(obj))
+
+
+def measure(data) -> int | None:
+	"""The model-facing size of ``data``, or None when it cannot be serialized.
+	``enforce_result_budget`` takes it as ``measured`` so a caller that needs the size
+	first (the report snapshot gate) does not serialize a large result twice."""
+	try:
+		return _size(data)
+	except Exception:
+		return None
+
+
+def _snapshot_note(shown: int, total: int, run: str) -> str:
+	return _SNAPSHOT_NOTE.format(shown=shown, total=total, run=run)
+
+
+def _snapshot_run(data) -> str | None:
+	"""The ``rs_`` id of a snapshotted run_report result, else None."""
+	if not isinstance(data, dict) or data.get(_SNAPSHOT_FLAG) is not True:
+		return None
+	run = data.get("run")
+	return run if isinstance(run, str) and run.startswith("rs_") else None
 
 
 def _json_text(obj) -> str:
@@ -109,8 +146,11 @@ def _fit(rows: list, budget: int) -> list:
 	return rows[:lo]
 
 
-def _envelope(data, kind: str, key: str | None, kept: list, n: int, note: str) -> dict:
-	"""Build the ``_truncated`` PARTIAL envelope. Metadata (``_truncated``/``shown``/
+def _envelope(
+	data, kind: str, key: str | None, kept: list, n: int, note: str, snapshot: str | None = None
+) -> dict:
+	"""Build the ``_truncated`` PARTIAL envelope. ``snapshot`` is the ``rs_`` id of a
+	snapshotted ``run_report`` result (the caller decides: only that tool has one). Metadata (``_truncated``/``shown``/
 	``total``/``note``) is placed BEFORE the row key so it survives the chat SPA's
 	4000-char pretty-print slice even when the surviving/non-row content is large."""
 	if kind == "bare":
@@ -128,9 +168,12 @@ def _envelope(data, kind: str, key: str | None, kept: list, n: int, note: str) -
 	# authoritative values (metadata is emitted first for the debug view, but must
 	# always win over a colliding data key).
 	for k, v in data.items():
-		if k != key and k not in _META_KEYS:
+		if k != key and k not in _META_KEYS and k != _SNAPSHOT_FLAG:
 			out[k] = v
-	if data.get("prepared_report") and data.get("status") == "ready" and isinstance(data.get("run"), str):
+	if snapshot:
+		out["preview_complete"] = False
+		out["note"] = _snapshot_note(len(kept), n, snapshot)
+	elif data.get("prepared_report") and data.get("status") == "ready" and isinstance(data.get("run"), str):
 		out["preview_complete"] = False
 		out["note"] = (
 			"Partial prepared-report preview. Use query_report with the returned run ID to inspect "
@@ -165,7 +208,7 @@ def _paged_note(shown: int, next_start: int | None) -> str:
 	return _PAGED_NOTE.format(shown=shown, next_start=next_start)
 
 
-def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
+def enforce_result_budget(data, tool: str, measured: int | None = None) -> tuple[Any, dict | None]:
 	"""Cap a tool result's model-facing serialized size on the agent path.
 
 	Returns ``(data, event)``. ``event is None`` means the result is within budget
@@ -180,6 +223,10 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 	                            part and the get_doc call that reads it.
 	                            ``shown``/``total`` count child rows (documents
 	                            for a batch).
+	  * ``"bounded_connector"`` - a call_connector answer over budget was cut (whole
+	                            list items, else characters) with a visible marker.
+	                            ``shown``/``total`` are the first cut's counts, None
+	                            when only a repeated ``structuredContent`` was dropped.
 	  * ``"uncapped"``        - no truncatable top-level row list; passed through
 	                            unchanged.
 	  * ``"uncapped_nonrow"`` - a row list exists but the surrounding non-row
@@ -189,10 +236,13 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 	  * ``"measure_failed"``  - the result could not be serialized/measured; passed
 	                            through unchanged (distinct from an in-budget None).
 
+	``measured`` is the result's ``measure(data)`` when the caller already took it;
+	it is then not measured again.
+
 	Never raises: a measurement failure yields a ``measure_failed`` event and the
 	original ``data``."""
 	try:
-		total = _size(data)
+		total = _size(data) if measured is None else measured
 	except Exception:
 		# Could not even measure the result: do not truncate blind, but surface it
 		# as its own signal (distinct from an in-budget "small" result -> None).
@@ -212,6 +262,9 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 		# shown/total count child rows (documents, for a batch), not chars.
 		return out, {"kind": "bounded_document", "original_chars": total, "shown": shown, "total": parts}
 
+	if tool == "call_connector":
+		return _bound_connector(data, total)
+
 	kind, key, rows = _find_list(data)
 	if rows is None:
 		return data, {"kind": "uncapped", "original_chars": total, "shown": None, "total": None}
@@ -219,17 +272,38 @@ def enforce_result_budget(data, tool: str) -> tuple[Any, dict | None]:
 	n = len(rows)
 	# Measured with the longer of the two notes the envelope can carry, so the note
 	# itself can never push the result past the cap (_SAFETY pads digits only).
-	longest = max(_NOTE.format(shown=n, total=n), _NOTE_NONE, key=len)
-	overhead = _size(_envelope(data, kind, key, [], n, longest))
+	snapshot = _snapshot_run(data) if tool == "run_report" else None
+	notes = [_NOTE.format(shown=n, total=n), _NOTE_NONE]
+	if snapshot:
+		notes.append(_snapshot_note(n, n, snapshot))
+	longest = max(notes, key=len)
+	overhead = _size(_envelope(data, kind, key, [], n, longest, snapshot))
 	row_budget = MAX_RESULT_CHARS - overhead - _SAFETY
 	if row_budget <= 0:
 		# Non-row bulk (e.g. a huge query `sql`) is itself over budget: truncating
 		# rows can't get under the cap. Bound the blast radius by dropping ALL rows
 		# (an honest zero-row PARTIAL) rather than shipping the whole result.
-		out = _envelope(data, kind, key, [], n, _NOTE_NONROW)
+		out = _envelope(data, kind, key, [], n, _NOTE_NONROW, snapshot)
 		return out, {"kind": "uncapped_nonrow", "original_chars": total, "shown": 0, "total": n}
 
 	kept = _fit(rows, row_budget)
 	note = _NOTE.format(shown=len(kept), total=n) if kept else _NOTE_NONE
-	out = _envelope(data, kind, key, kept, n, note)
+	out = _envelope(data, kind, key, kept, n, note, snapshot)
 	return out, {"kind": "truncated", "original_chars": total, "shown": len(kept), "total": n}
+
+
+def _bound_connector(data, total: int) -> tuple[Any, dict]:
+	"""A connector answer is ``{ok, result: {content: [...]}}``: ``result`` is a dict, so the
+	row-list path below never sees it. ``bound_tool_result`` cuts it and marks the cut."""
+	from jarvis.connectors.result_view import bound_tool_result
+
+	out, cuts = bound_tool_result(data, MAX_RESULT_CHARS - _SAFETY)
+	if cuts is None:
+		return data, {"kind": "uncapped", "original_chars": total, "shown": None, "total": None}
+	first = cuts[0] if cuts else {}
+	return out, {
+		"kind": "bounded_connector",
+		"original_chars": total,
+		"shown": first.get("shown"),
+		"total": first.get("total"),
+	}

@@ -36,13 +36,19 @@ marketplace agent is a privilege escalation, not an ordinary tool call.
 from __future__ import annotations
 
 from jarvis.connectors import broker
+from jarvis.connectors.secret_scrub import scrub_counted
 from jarvis.tools._agent_run_ctx import get_session_key
+
+_REDACTION_NOTE = (
+	"Secrets in this answer were hidden as [REDACTED-SECRET]. "
+	"If a signed link was hidden, open it from the app itself."
+)
 
 _NOT_READY_ERROR = {
 	"ok": False,
 	"error": {
 		"code": "connector_not_ready",
-		"message": "This connector needs to be tested in Settings before it can be used.",
+		"message": broker.NOT_READY_MESSAGE,
 	},
 }
 
@@ -59,7 +65,8 @@ def call_connector(connector: str, action: str, args: dict | None = None) -> dic
 	not-yet-enabled actions confirm too). ``preview`` is not supported - there is
 	nothing to dry-run against a live third-party API.
 
-	Returns the broker's structured result verbatim: ``{"ok": True, "result":
+	Returns the broker's structured result, with credential-shaped values in it
+	masked (``secret_scrub``): ``{"ok": True, "result":
 	<the MCP tools/call result>}`` on success, or ``{"ok": False, "error":
 	{"code", "message"}}`` on any failure (unknown connector, disabled
 	connector, connector not yet tested (``connector_not_ready``), action not
@@ -75,19 +82,30 @@ def call_connector(connector: str, action: str, args: dict | None = None) -> dic
 	# falls through to broker.call unchanged, so the model sees THAT error
 	# (connector_not_found / connector_disabled) rather than a misleading
 	# "needs to be tested" for a connector an admin turned off on purpose.
-	if row is not None and row.get("enabled") and not _has_passed_test(row):
+	if row is not None and row.get("enabled") and not broker.has_passed_test(row):
 		return _NOT_READY_ERROR
-	return broker.call(connector, action, args, run_id=get_session_key())
+	return _scrubbed(broker.call(connector, action, args, run_id=get_session_key()))
 
 
-def _has_passed_test(row) -> bool:
-	"""An enabled connector may only be called once it has an actual PASSING
-	connection test on file: ``last_test_status`` and ``tools_cache`` both go
-	blank the moment the SPA's ``update_connector`` sees a credential/base_url
-	edit (a stale cache would otherwise validate arguments - or not - against
-	a schema that no longer describes what is actually listening at that
-	URL), so either being empty means the connector's current configuration
-	has never been proven to work."""
-	if (row.get("last_test_status") or "") != "Passed":
-		return False
-	return bool(row.get("tools_cache"))
+def _scrubbed(result):
+	"""``result`` with every credential-shaped value masked. This is the one point where
+	an app's answer enters the bench, so the agent, the stored transcript, realtime
+	and the receipts all get the masked copy. A signed link is masked too: the agent
+	cannot hand over a working one, and the note says what to do instead."""
+	try:
+		scrubbed, count = scrub_counted(result)
+	except Exception:
+		# A pathological answer (nested thousands deep) must not reach the agent unmasked.
+		# ``internal_error`` is not a pre-send code, so a confirmed card stays "unknown".
+		return {
+			"ok": False,
+			"error": {
+				"code": "internal_error",
+				"message": "The connector's answer could not be read safely.",
+			},
+		}
+	if not count:
+		return result
+	if isinstance(scrubbed, dict):
+		scrubbed["redaction_note"] = _REDACTION_NOTE
+	return scrubbed

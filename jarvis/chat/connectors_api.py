@@ -684,8 +684,9 @@ def list_connectors() -> dict:
 
 	``catalog`` is the in-app provider list (public fields only, no ``base_url``,
 	no secrets, disabled entries absent, including the presets the operator
-	switched off via ``jarvis.connector_catalogue``) the SPA builds its preset picker, logos,
-	hints, help links and per-preset flow from, so the flow a preset takes is
+	switched off via ``jarvis.connector_catalogue``, except the ones it marked "Coming soon":
+	those stay, flagged ``coming_soon: true``, and cannot be added) the SPA builds its
+	preset picker, logos, hints, help links and per-preset flow from, so the flow a preset takes is
 	decided once, here, rather than duplicated in the client."""
 	rows = frappe.get_list(
 		CONNECTOR,
@@ -728,7 +729,7 @@ def list_connectors() -> dict:
 
 	return {
 		"oauth_redirect_uri": oauth_redirect_uri(),
-		"catalog": catalog.to_public(providers=connector_catalogue.providers()),
+		"catalog": connector_catalogue.public_catalog(),
 		"shared": shared,
 		"mine": mine,
 	}
@@ -797,7 +798,7 @@ def add_connector(
 	if connector_catalogue.is_disabled(preset):
 		# The operator switched this preset off fleet-wide. Refused again in the
 		# connector controller so a raw DocType insert cannot slip past.
-		frappe.throw(_("This app is turned off for your workspace."))
+		frappe.throw(connector_catalogue.refusal_message(preset))
 	if scope not in _SCOPES:
 		frappe.throw(_("Scope must be Shared or Personal."))
 	if auth_method not in _AUTH_METHODS:
@@ -808,9 +809,10 @@ def add_connector(
 		# request leaves, and refused again in the connector controller so a raw
 		# DocType write cannot take the shortcut this rejects.
 		frappe.throw(_("This app connects with a key, not a sign-in."))
-	if auth_method != oauth.OAUTH_AUTH_METHOD and not catalog.accepts_key_of(preset):
-		# Its server takes only its own sign-in tokens (catalog accepts_key=False), so a
-		# pasted key could never work. Refused here and again in the controller.
+	if auth_method != oauth.OAUTH_AUTH_METHOD and not connector_catalogue.accepts_key(preset):
+		# Its server takes only its own sign-in tokens (catalog accepts_key=False, or the
+		# operator switched the key option off), so a pasted key is refused. Refused here and
+		# again in the controller.
 		frappe.throw(_("This app connects with a sign-in, not a key."))
 
 	if preset == catalog.CUSTOM_URL:

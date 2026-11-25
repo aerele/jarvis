@@ -19,12 +19,24 @@ from jarvis import compat
 from jarvis.exceptions import InvalidArgumentError, PermissionDeniedError
 from jarvis.permission_hooks import effective_hooks
 from jarvis.tools._file_source import FileCapacityError, read_bounded
-from jarvis.tools._report_query_data import CONTRACT, MAX_COMPRESSED, encode
+from jarvis.tools._report_query_data import CONTRACT, MAX_COLUMNS, MAX_COMPRESSED, encode
 from jarvis.tools._report_scope import _assert_company_readable
 from jarvis.tools.get_report_filters import get_report_filters
 
+MAX_RECEIPT_BYTES = 4000
+# The only filters a receipt shows when the user's column policy hides or denies a column.
+RECEIPT_SCOPE_KEYS = frozenset({"company", "report_date", "from_date", "to_date"})
 MISSING = "No prepared report is available for this identifier."
 SCOPE_CHANGED = "Access to the stored report has changed. Generate a fresh report in Desk before querying it."
+
+
+# The standard AR/AP reports: report name -> (party doctype, its name field aliased as party_name).
+PARTY_REPORTS = {
+	"Accounts Receivable": ("Customer", "customer_name"),
+	"Accounts Receivable Summary": ("Customer", "customer_name"),
+	"Accounts Payable": ("Supplier", "supplier_name"),
+	"Accounts Payable Summary": ("Supplier", "supplier_name"),
+}
 
 
 def _canonical(value):
@@ -48,6 +60,26 @@ def _denied_columns(meta, columns, user, aliases=None):
 		for col in columns
 		if aliases.get(col["fieldname"], col["fieldname"]) in fields - permitted
 	}
+
+
+def _column_policy(ref_meta, columns, user, report_name):
+	"""Return `(masked, denied)` sets of `sql_column` names the user may not read.
+
+	Covers the source DocType's unreadable and masked fields. The standard AR/AP
+	reports also alias the party name, so a newly masked or unreadable Customer or
+	Supplier name must not leak through `party_name`.
+	"""
+	denied = _denied_columns(ref_meta, columns, user)
+	mask_names = {df.fieldname for df in _masked_fields(ref_meta)}
+	masked = {c["sql_column"] for c in columns if c["fieldname"] in mask_names}
+	if report_name not in PARTY_REPORTS:
+		return masked, denied
+	party_doctype, party_field = PARTY_REPORTS[report_name]
+	party_meta = frappe.get_meta(party_doctype)
+	denied.update(_denied_columns(party_meta, columns, user, {"party_name": party_field}))
+	if party_field in {df.fieldname for df in _masked_fields(party_meta)}:
+		masked.update(c["sql_column"] for c in columns if c["fieldname"] in {"party_name", party_field})
+	return masked, denied
 
 
 @contextmanager
@@ -142,6 +174,59 @@ def _group_values(doctype, values):
 		return set(values)
 
 
+def gate_report(report_name, filters, user):
+	"""The gate every read of a stored report passes, shared by `ReportSource` and the
+	snapshot source: the report is enabled, the user may run it with these filters, the
+	company scope is readable, and an AR/AP report has the company and date it ran with.
+	Returns `(report, filter_defs)`. Raises `InvalidArgumentError` for an unusable scope
+	and `PermissionDeniedError` when access is gone."""
+	# frappe.throw also queues its raw message for the HTTP JSON envelope.
+	# Keep the framework's exception, but suppress its saved-scope popup text.
+	mute_messages = frappe.flags.mute_messages
+	frappe.flags.mute_messages = True
+	try:
+		try:
+			report = get_report_doc(report_name)
+		except frappe.ValidationError:
+			raise InvalidArgumentError(
+				"The selected report is unavailable. Choose an enabled report."
+			) from None
+		metadata = get_report_filters(report_name)
+		filter_defs = metadata.get("filters") or []
+		validate_filters_permissions(report_name, filters, user, js_filters=metadata.get("filters") or [])
+		company = filters.get("company")
+		if company:
+			companies = [company] if isinstance(company, str) else company
+			if not isinstance(companies, list) or not all(isinstance(c, str) and c for c in companies):
+				raise InvalidArgumentError("Stored report company scope is invalid.")
+			for company in companies:
+				_assert_company_readable(company, supplied=True)
+		# Standard AR/AP reports need a stored company and date. Never apply today's defaults.
+		if report.name in PARTY_REPORTS and (not filters.get("company") or not filters.get("report_date")):
+			raise InvalidArgumentError(
+				"The saved accounting report lacks its company or report date. Regenerate it."
+			)
+		return report, filter_defs
+	except (frappe.PermissionError, frappe.ValidationError):
+		raise PermissionDeniedError(
+			"You do not have permission to read this report or its saved scope."
+		) from None
+	finally:
+		frappe.flags.mute_messages = mute_messages
+
+
+def scope_digest(filters):
+	return hashlib.sha256(_canonical(filters).encode()).hexdigest()
+
+
+def receipt_filters(filters, context):
+	"""The filters a receipt shows: all of them, or only the scope keys when the user's
+	column policy masks or denies a column (a filter value could name a hidden field)."""
+	if not context.get("masked_columns") and not context.get("denied_columns"):
+		return filters
+	return {k: v for k, v in filters.items() if k in RECEIPT_SCOPE_KEYS}
+
+
 class ReportSource:
 	def __init__(self, name, *, version=None):
 		self.name = name
@@ -209,46 +294,7 @@ class ReportSource:
 		return meta
 
 	def _gate(self):
-		# frappe.throw also queues its raw message for the HTTP JSON envelope.
-		# Keep the framework's exception, but suppress its saved-scope popup text.
-		mute_messages = frappe.flags.mute_messages
-		frappe.flags.mute_messages = True
-		try:
-			try:
-				self.report = get_report_doc(self.meta.report_name)
-			except frappe.ValidationError:
-				raise InvalidArgumentError(
-					"The selected report is unavailable. Choose an enabled report."
-				) from None
-			metadata = get_report_filters(self.meta.report_name)
-			self.filter_defs = metadata.get("filters") or []
-			validate_filters_permissions(
-				self.meta.report_name, self.filters, self.user, js_filters=metadata.get("filters") or []
-			)
-			company = self.filters.get("company")
-			if company:
-				companies = [company] if isinstance(company, str) else company
-				if not isinstance(companies, list) or not all(isinstance(c, str) and c for c in companies):
-					raise InvalidArgumentError("Stored report company scope is invalid.")
-				for company in companies:
-					_assert_company_readable(company, supplied=True)
-			# Standard AR/AP reports need a stored company and date. Never apply today's defaults.
-			if self.report.name in {
-				"Accounts Receivable",
-				"Accounts Receivable Summary",
-				"Accounts Payable",
-				"Accounts Payable Summary",
-			}:
-				if not self.filters.get("company") or not self.filters.get("report_date"):
-					raise InvalidArgumentError(
-						"The saved accounting report lacks its company or report date. Regenerate it."
-					)
-		except (frappe.PermissionError, frappe.ValidationError):
-			raise PermissionDeniedError(
-				"You do not have permission to read this report or its saved scope."
-			) from None
-		finally:
-			frappe.flags.mute_messages = mute_messages
+		self.report, self.filter_defs = gate_report(self.meta.report_name, self.filters, self.user)
 
 	def read(self):
 		content = read_bounded(frappe.get_cached_doc("File", self.file.name))
@@ -276,34 +322,14 @@ class ReportSource:
 		if (
 			not isinstance(schema, dict)
 			or not isinstance(schema.get("columns"), list)
-			or len(schema["columns"]) > 128
+			or len(schema["columns"]) > MAX_COLUMNS
 		):
 			raise InvalidArgumentError("Report worker returned an invalid schema.")
 		self.schema = schema
 		columns = schema["columns"]
 		deadline.check()
-		masked = set()
 		ref_meta = frappe.get_meta(self.report.ref_doctype)
-		denied = _denied_columns(ref_meta, columns, self.user)
-		mask_names = {df.fieldname for df in _masked_fields(ref_meta)}
-		masked.update(c["sql_column"] for c in columns if c["fieldname"] in mask_names)
-		# Known aliases in the standard AR/AP reports must not reveal newly masked party names.
-		if self.report.name in {"Accounts Receivable", "Accounts Receivable Summary"}:
-			party_meta = frappe.get_meta("Customer")
-			denied.update(_denied_columns(party_meta, columns, self.user, {"party_name": "customer_name"}))
-			party_masks = {df.fieldname for df in _masked_fields(party_meta)}
-			if "customer_name" in party_masks:
-				masked.update(
-					c["sql_column"] for c in columns if c["fieldname"] in {"party_name", "customer_name"}
-				)
-		elif self.report.name in {"Accounts Payable", "Accounts Payable Summary"}:
-			party_meta = frappe.get_meta("Supplier")
-			denied.update(_denied_columns(party_meta, columns, self.user, {"party_name": "supplier_name"}))
-			party_masks = {df.fieldname for df in _masked_fields(party_meta)}
-			if "supplier_name" in party_masks:
-				masked.update(
-					c["sql_column"] for c in columns if c["fieldname"] in {"party_name", "supplier_name"}
-				)
+		masked, denied = _column_policy(ref_meta, columns, self.user, self.report.name)
 		static = {c["options"] for c in columns if c["fieldtype"] == "Link" and c["options"]}
 		dynamic_types = set()
 		for col in columns:
@@ -514,23 +540,14 @@ class ReportSource:
 			raise InvalidArgumentError("Prepared report attachment changed or was removed. Inspect it again.")
 
 	def receipt(self):
-		filters = (
-			self.filters
-			if not self.context.get("masked_columns") and not self.context.get("denied_columns")
-			else {
-				k: v
-				for k, v in self.filters.items()
-				if k in {"company", "report_date", "from_date", "to_date"}
-			}
-		)
 		result = {
 			"prepared_report": self.name,
 			"report_name": self.meta.report_name,
 			"as_of": str(self.meta.report_end_time or self.meta.creation),
-			"filters": filters,
-			"scope_digest": hashlib.sha256(_canonical(self.filters).encode()).hexdigest(),
+			"filters": receipt_filters(self.filters, self.context),
+			"scope_digest": scope_digest(self.filters),
 			"version": self.version,
 		}
-		if len(encode(result)) > 4000:
+		if len(encode(result)) > MAX_RECEIPT_BYTES:
 			raise InvalidArgumentError("Saved report scope exceeds the metadata budget. Narrow the report.")
 		return result

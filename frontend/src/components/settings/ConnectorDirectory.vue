@@ -44,10 +44,20 @@
 			No apps match.
 		</p>
 		<div v-else class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+			<!-- A coming-soon preset keeps its card but is muted and inert, the same
+			     treatment AgentsList gives a masked agent teaser (opacity-50, default
+			     cursor, no hover), with an accessible name instead of an Add button. -->
 			<div
 				v-for="entry in filtered"
 				:key="entry.name"
-				class="flex flex-col gap-2 rounded-lg border p-3 transition-colors hover:border-outline-gray-2 hover:shadow-sm"
+				:role="entry.coming_soon ? 'img' : undefined"
+				:aria-label="entry.coming_soon ? `${entry.name}, coming soon` : undefined"
+				class="flex flex-col gap-2 rounded-lg border p-3 transition-colors"
+				:class="
+					entry.coming_soon
+						? 'cursor-default select-none opacity-50'
+						: 'hover:border-outline-gray-2 hover:shadow-sm'
+				"
 			>
 				<div class="flex items-center gap-2">
 					<ConnectorLogo
@@ -62,6 +72,14 @@
 				<p class="line-clamp-2 min-h-8 text-xs text-ink-gray-5">{{ entry.description }}</p>
 				<div class="mt-1 flex items-center justify-between gap-2">
 					<Badge
+						v-if="entry.coming_soon"
+						variant="subtle"
+						size="sm"
+						theme="blue"
+						label="Coming soon"
+					/>
+					<Badge
+						v-else
 						variant="subtle"
 						size="sm"
 						:theme="authBadge(entry).theme"
@@ -73,14 +91,14 @@
 						"
 					/>
 					<span
-						v-if="isAdded(entry)"
+						v-if="!entry.coming_soon && isAdded(entry)"
 						class="inline-flex items-center gap-1 text-xs text-ink-green-3"
 					>
 						<FeatherIcon name="check" class="size-3.5" />
 						Added
 					</span>
 					<Button
-						v-else
+						v-else-if="!entry.coming_soon"
 						variant="subtle"
 						size="sm"
 						iconLeft="plus"
@@ -106,8 +124,8 @@ import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
 
 const props = defineProps({
 	// listConnectors()'s catalog: [{ name, key, auth, category, description,
-	// logo, help_url, hint, token_hint, token_help_url, guide_url }], enabled providers
-	// in catalog order.
+	// logo, help_url, hint, token_hint, token_help_url, guide_url, coming_soon }],
+	// enabled providers in catalog order. A coming_soon one is shown but cannot be added.
 	catalog: { type: Array, default: () => [] },
 	// Every row visible to the current viewer (Shared + their own Mine, exactly
 	// what ConnectorsPane's Installed tab renders) - drives the "Added" badge
@@ -153,7 +171,7 @@ const categories = computed(() => {
 
 const filtered = computed(() => {
 	const q = query.value.trim().toLowerCase();
-	return props.catalog.filter((entry) => {
+	const matches = props.catalog.filter((entry) => {
 		if (activeCategory.value !== "all" && entry.category !== activeCategory.value)
 			return false;
 		if (!q) return true;
@@ -162,6 +180,8 @@ const filtered = computed(() => {
 			(entry.description || "").toLowerCase().includes(q)
 		);
 	});
+	// Coming-soon cards go last; the sort is stable, so catalog order holds inside each group.
+	return matches.sort((a, b) => Boolean(a.coming_soon) - Boolean(b.coming_soon));
 });
 
 // F9: a Personal row is always the viewer's own, so it always counts; a

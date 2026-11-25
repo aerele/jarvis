@@ -18,7 +18,7 @@ these run with no site. What is proven here:
     surfaces only the actions ``policy.action_decision`` currently allows;
   * with an ``action``, ``list_connector_actions`` returns that one action's
     ``input_schema`` (read from ``tools_cache`` in one bounded ``get_values``)
-    only when the gate allows it and size-capped at 16 KiB - a denied or
+    only when the gate allows it and, past 24,000 characters, shortened with its field types kept - a denied or
     unknown action reads no cache and yields empty actions, and the no-action
     output is unchanged.
 
@@ -39,7 +39,7 @@ import json
 import unittest
 from unittest import mock
 
-from jarvis.connectors import action_rows
+from jarvis.connectors import action_rows, listing_budget, readiness
 from jarvis.tools import call_connector, list_connector_actions
 
 
@@ -65,6 +65,55 @@ class TestCallConnectorDelegation(unittest.TestCase):
 			result = call_connector.call_connector("github", "create_issue", {"title": "x"})
 		broker_call.assert_called_once_with("github", "create_issue", {"title": "x"}, run_id="sess-1")
 		self.assertIs(result, broker_result)
+
+	def _call_with(self, broker_result):
+		with (
+			mock.patch.object(call_connector, "get_session_key", return_value=None),
+			mock.patch.object(call_connector.broker, "resolve_for_status", return_value=_ready_row()),
+			mock.patch.object(call_connector.broker, "call", return_value=broker_result),
+		):
+			return call_connector.call_connector("cashfree", "get_report")
+
+	def test_an_aws_key_id_and_a_presigned_url_in_the_answer_are_masked(self):
+		url = (
+			"https://bucket.s3.amazonaws.com/r.csv?X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20261123"
+			"&X-Amz-Signature=0123456789abcdef&X-Amz-Security-Token=FwoGZXIvYXdz&X-Amz-Expires=300"
+		)
+		answer = {
+			"url": url,
+			"key_id": "AKIAIOSFODNN7EXAMPLE",
+			"client_secret": "s3cr3t-value",
+			"key": "user-42",
+		}
+		result = self._call_with(
+			{"ok": True, "result": {"structuredContent": answer, "content": [{"type": "text", "text": url}]}}
+		)
+		dumped = json.dumps(result)
+		for leaked in ("AKIAIOSFODNN7EXAMPLE", "0123456789abcdef", "FwoGZXIvYXdz", "s3cr3t-value"):
+			self.assertNotIn(leaked, dumped)
+		self.assertIn("X-Amz-Expires=300", dumped)  # only the credential parts go
+		self.assertEqual(result["result"]["structuredContent"]["key"], "user-42")
+		self.assertIn("open it from the app itself", result["redaction_note"])
+
+	def test_an_answer_nested_too_deep_to_scrub_is_never_returned_raw(self):
+		deep = leaf = {}
+		for _ in range(2000):
+			leaf["n"] = {}
+			leaf = leaf["n"]
+		leaf["secret"] = "AKIAIOSFODNN7EXAMPLE"
+		result = self._call_with({"ok": True, "result": deep})
+		self.assertEqual(result["ok"], False)
+		self.assertEqual(result["error"]["code"], "internal_error")
+		self.assertNotIn("result", result)
+		from jarvis.connectors.outcome import NOT_SENT_CODES
+
+		self.assertNotIn("internal_error", NOT_SENT_CODES)
+
+	def test_a_clean_answer_is_returned_untouched_with_no_note(self):
+		answer = {"ok": True, "result": {"content": [{"type": "text", "text": "issue_key=ABC-1"}]}}
+		result = self._call_with(answer)
+		self.assertIs(result, answer)
+		self.assertNotIn("redaction_note", result)
 
 	def test_broker_error_result_passed_through_unmodified(self):
 		broker_result = {"ok": False, "error": {"code": "action_denied", "message": "nope"}}
@@ -443,14 +492,21 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 		result = self._run(fake, connector="github", action="read_issue")
 		self.assertEqual(result["connectors"][0]["actions"][0]["input_schema"], schema)
 
-	def test_oversize_schema_returns_top_level_summary(self):
-		# > 16 KiB serialised; required carries a non-string the summary must drop.
+	def test_oversize_schema_is_shortened_and_keeps_property_types(self):
+		# > 24,000 serialised; required carries a non-string the view must drop.
 		big = {
 			"type": "object",
-			"properties": {f"field_{i}": {"type": "string", "description": "x" * 300} for i in range(100)},
-			"required": ["field_0", 123, "field_1"],
+			"properties": {
+				f"field_{i}": {
+					"type": "integer" if i % 2 else "string",
+					"description": "x" * 300,
+					"examples": ["e" * 50],
+				}
+				for i in range(150)
+			},
+			"required": ["field_0", "field_1"],
 		}
-		self.assertGreater(len(json.dumps(big)), 16 * 1024)
+		self.assertGreater(len(json.dumps(big)), 24 * 1000)
 		fake = self._fake_frappe(
 			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
 			[self._action("conn-1", "read_issue", read_only=1, allowed=1)],
@@ -459,11 +515,43 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 		result = self._run(fake, connector="github", action="read_issue")
 		schema_out = result["connectors"][0]["actions"][0]["input_schema"]
 		self.assertTrue(schema_out["truncated"])
+		self.assertIn("full schema still checks", schema_out["note"])
+		self.assertLessEqual(len(json.dumps(schema_out)), 24 * 1000)
 		self.assertEqual(schema_out["required"], ["field_0", "field_1"])
-		self.assertEqual(schema_out["properties"], [f"field_{i}" for i in range(100)])
+		props = schema_out["properties"]
+		self.assertEqual(len(props), 150)
+		self.assertEqual(props["field_0"]["type"], "string")
+		self.assertEqual(props["field_1"]["type"], "integer")
+		self.assertNotIn("examples", props["field_0"])
+
+	def test_schema_too_big_for_every_step_keeps_types_by_name(self):
+		huge = {
+			"type": "object",
+			"properties": {f"f{i}_" + "n" * 100: {"type": "number"} for i in range(400)},
+			"required": ["f0_" + "n" * 100],
+		}
+		fake = self._fake_frappe(
+			[{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}],
+			[self._action("conn-1", "read_issue", read_only=1, allowed=1)],
+			caches={"conn-1": self._cache({"read_issue": huge})},
+		)
+		result = self._run(fake, connector="github", action="read_issue")
+		schema_out = result["connectors"][0]["actions"][0]["input_schema"]
+		self.assertTrue(schema_out["truncated"])
+		self.assertEqual(len(schema_out["properties"]), 100)
+		self.assertEqual(set(schema_out["properties"].values()), {"number"})
 
 	def test_no_action_path_is_unchanged_and_reads_no_cache(self):
-		connectors = [{"name": "conn-1", "key": "github", "label": "GitHub", "scope": "Shared"}]
+		connectors = [
+			{
+				"name": "conn-1",
+				"key": "github",
+				"label": "GitHub",
+				"scope": "Shared",
+				"last_test_status": "Passed",
+				"auth_method": "API Key",
+			}
+		]
 		fake = self._fake_frappe(connectors, [self._action("conn-1", "read_issue", read_only=1, allowed=1)])
 		for action in (None, ""):
 			result = self._run(fake, action=action)
@@ -476,6 +564,7 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 							"label": "GitHub",
 							"scope": "Shared",
 							"actions": [{"action": "read_issue", "description": "d"}],
+							"ready": True,
 						}
 					]
 				},
@@ -485,10 +574,177 @@ class TestListConnectorActionsSchema(unittest.TestCase):
 		# Pin the resolution query so the shared _resolve_connectors refactor
 		# cannot drift the fields / ordering / cap that make Personal win.
 		kwargs = fake.get_list.call_args.kwargs
-		self.assertEqual(kwargs["fields"], ["name", "key", "label", "scope"])
+		self.assertEqual(
+			kwargs["fields"], ["name", "key", "label", "scope", "last_test_status", "auth_method"]
+		)
 		self.assertEqual(kwargs["order_by"], "scope asc, label asc")
-		self.assertEqual(kwargs["limit_page_length"], 30)
+		# 200 listed, plus one row read to tell a cut from an exact fit.
+		self.assertEqual(kwargs["limit_page_length"], 201)
 		self.assertEqual(kwargs["filters"], {"enabled": 1})
+
+
+class TestListingReadiness(unittest.TestCase):
+	"""The no-argument listing flags each connector ``ready`` or says why not,
+	lists past the old 30-row cap, and bounds its own size."""
+
+	def _row(self, name, status="Passed", auth="API Key", scope="Shared"):
+		return {
+			"name": name,
+			"key": name,
+			"label": name.title(),
+			"scope": scope,
+			"last_test_status": status,
+			"auth_method": auth,
+		}
+
+	def _action(self, parent, action, allowed=1, description="d"):
+		return {
+			"parent": parent,
+			"action": action,
+			"allowed": allowed,
+			"read_only": 1,
+			"destructive": 0,
+			"description": description,
+		}
+
+	def _run(self, rows, actions, token_connectors=()):
+		fake = mock.MagicMock()
+		fake.get_list.return_value = rows
+		fake.get_all.return_value = actions
+		token_fake = mock.MagicMock()
+		token_fake.session.user = "u@example.com"
+		token_fake.get_all.return_value = list(token_connectors)
+		with (
+			mock.patch.object(list_connector_actions, "frappe", fake),
+			mock.patch.object(action_rows, "frappe", fake),
+			mock.patch.object(readiness, "frappe", token_fake),
+		):
+			result = list_connector_actions.list_connector_actions()
+		return result, token_fake
+
+	def _by_key(self, result):
+		return {c["connector"]: c for c in result["connectors"]}
+
+	def test_untested_connector_is_listed_not_ready(self):
+		result, _ = self._run([self._row("a", status="Failed")], [self._action("a", "read")])
+		entry = self._by_key(result)["a"]
+		self.assertEqual((entry["ready"], entry["reason"]), (False, "not_tested"))
+
+	def test_never_tested_connector_is_not_tested(self):
+		result, _ = self._run([self._row("a", status=None)], [self._action("a", "read")])
+		self.assertEqual(self._by_key(result)["a"]["reason"], "not_tested")
+
+	def test_zero_allowed_actions_is_not_ready(self):
+		rows = [self._row("zoom"), self._row("bare")]
+		result, _ = self._run(rows, [self._action("zoom", "read", allowed=0)])
+		by_key = self._by_key(result)
+		self.assertEqual(by_key["zoom"]["reason"], "no_allowed_actions")
+		self.assertEqual(by_key["bare"]["reason"], "no_allowed_actions")
+		self.assertEqual(by_key["zoom"]["actions"], [])
+
+	def test_ready_connector_has_no_reason(self):
+		result, _ = self._run([self._row("a")], [self._action("a", "read")])
+		self.assertTrue(self._by_key(result)["a"]["ready"])
+		self.assertNotIn("reason", self._by_key(result)["a"])
+
+	def test_oauth_row_without_a_token_is_not_signed_in(self):
+		rows = [self._row("a", auth="OAuth"), self._row("b", auth="OAuth")]
+		actions = [self._action("a", "read"), self._action("b", "read")]
+		result, token_fake = self._run(rows, actions, token_connectors=["b"])
+		by_key = self._by_key(result)
+		self.assertEqual(by_key["a"]["reason"], "not_signed_in")
+		self.assertTrue(by_key["b"]["ready"])
+		# One bounded read, pinned to the session user and the listed OAuth rows.
+		token_fake.get_all.assert_called_once()
+		filters = token_fake.get_all.call_args.kwargs["filters"]
+		self.assertEqual(filters, {"connector": ["in", ["a", "b"]], "user": "u@example.com"})
+
+	def test_no_token_read_when_no_oauth_row_is_otherwise_ready(self):
+		rows = [self._row("a", auth="OAuth", status="Failed"), self._row("b")]
+		_, token_fake = self._run(rows, [self._action("b", "read")])
+		token_fake.get_all.assert_not_called()
+
+	def test_more_than_30_rows_are_all_listed(self):
+		rows = [self._row(f"app{i:02d}") for i in range(45)]
+		actions = [self._action(row["name"], "read") for row in rows]
+		result, _ = self._run(rows, actions)
+		self.assertEqual(len(result["connectors"]), 45)
+		self.assertNotIn("truncated", result)
+
+	def test_hitting_the_row_limit_says_so(self):
+		rows = [self._row(f"app{i:03d}") for i in range(201)]
+		result, _ = self._run(rows, [])
+		self.assertEqual(len(result["connectors"]), 200)
+		self.assertTrue(result["truncated"])
+
+	def test_exactly_200_rows_is_not_truncated(self):
+		rows = [self._row(f"app{i:03d}") for i in range(200)]
+		result, _ = self._run(rows, [])
+		self.assertEqual(len(result["connectors"]), 200)
+		self.assertNotIn("truncated", result)
+
+	def test_a_60_action_connector_is_compacted_with_more_actions(self):
+		rows = [self._row(f"big{i:02d}") for i in range(20)]
+		actions = [
+			self._action(row["name"], f"action_number_{j:02d}", description="x" * 190)
+			for row in rows
+			for j in range(60)
+		]
+		result, _ = self._run(rows, actions)
+		self.assertLessEqual(len(json.dumps(result)), listing_budget.LISTING_MAX_CHARS)
+		self.assertEqual(len(result["connectors"]), 20, "no connector is ever dropped")
+		first = result["connectors"][0]
+		self.assertEqual(len(first["actions"]), 10)
+		self.assertEqual(first["more_actions"], 50)
+		self.assertIn("connector=<key>", first["hint"])
+
+	def test_a_listing_under_budget_is_untouched(self):
+		rows = [self._row("a")]
+		actions = [self._action("a", f"act{j}", description="y" * 190) for j in range(20)]
+		result, _ = self._run(rows, actions)
+		entry = result["connectors"][0]
+		self.assertEqual(len(entry["actions"]), 20)
+		self.assertEqual(len(entry["actions"][0]["description"]), 190)
+		self.assertNotIn("more_actions", entry)
+
+
+class TestListingBudgetSteps(unittest.TestCase):
+	def _listing(self, connectors=3, actions=40, description=190):
+		return {
+			"connectors": [
+				{
+					"connector": f"c{i}",
+					"actions": [
+						{"action": f"a{j}", "description": "x" * description} for j in range(actions)
+					],
+				}
+				for i in range(connectors)
+			]
+		}
+
+	def test_descriptions_are_clipped_first(self):
+		listing = self._listing()
+		budget = len(json.dumps(listing)) - 100
+		out = listing_budget.bound(listing, budget)
+		self.assertEqual(len(out["connectors"][0]["actions"][0]["description"]), 100)
+		self.assertNotIn("more_actions", out["connectors"][0])
+
+	def test_then_names_only(self):
+		out = listing_budget.bound(self._listing(), 3000)
+		self.assertEqual(out["connectors"][0]["actions"][0], {"action": "a0"})
+		self.assertEqual(len(out["connectors"][0]["actions"]), 40)
+
+	def test_then_first_ten_actions(self):
+		out = listing_budget.bound(self._listing(), 1500)
+		entry = out["connectors"][0]
+		self.assertEqual(len(entry["actions"]), 10)
+		self.assertEqual(entry["more_actions"], 30)
+
+	def test_connector_names_survive_the_last_resort(self):
+		out = listing_budget.bound(self._listing(connectors=50), 1)
+		self.assertEqual(len(out["connectors"]), 50)
+		self.assertEqual(out["connectors"][0]["actions"], [])
+		self.assertEqual(out["connectors"][0]["more_actions"], 40)
 
 
 class TestSchemaSummaryBounds(unittest.TestCase):

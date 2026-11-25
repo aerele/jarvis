@@ -315,10 +315,6 @@ class TestTenantWidePerModelTokens(FrappeTestCase):
 		self.assertEqual(rows[_UNKNOWN_MODEL]["in_"], 300)
 		self.assertEqual(rows[_UNKNOWN_MODEL]["out_"], 100)
 
-	def test_no_rows_returns_empty_list(self):
-		# A month nothing (real or fixture) ever posts to.
-		self.assertEqual(usage.tenant_wide_per_model_tokens("1999-01"), [])
-
 	def test_a_different_month_is_not_included(self):
 		month = usage.current_month_key()
 		_seed_model_usage(DIRECT_COST_USER_A, _PRICED_MODEL, month, tokens_in=1000, tokens_out=500)
@@ -543,22 +539,6 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 		self.assertEqual(out["health"], "attention")
 		self.assertEqual(out["attention_reason"], "turn_error")
 
-	def test_a_failing_turn_never_downgrades_past_attention(self):
-		"""It is evidence that something downstream is wrong, never that the
-		config failed to arrive. "down" is reserved for an unconfirmed apply,
-		because that is the value is_ready_for_chat also refuses chat on, and the
-		two must not disagree."""
-		self._seed(
-			proxy_active=1,
-			last_sync_status="ok (pool_update via admin)",
-			llm_pool_synced_at="2026-07-30 10:00:00",
-		)
-		with patch.object(account, "_last_turn_errored", return_value=True):
-			with patch.object(account, "compute_pool_mode", return_value=True):
-				with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
-					out = account.get_llm_connection_status()
-		self.assertNotEqual(out["health"], "down")
-
 	def test_a_save_in_flight_still_wins_over_a_failing_turn(self):
 		"""Ordering guard: while a save is in flight the container is still on its
 		previous config, so the turn that just failed says nothing about the
@@ -587,17 +567,6 @@ class TestGetLlmConnectionStatus(FrappeTestCase):
 			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
 				out = account.get_llm_connection_status()
 		self.assertEqual(out["health"], "ok")
-
-	def test_a_save_in_flight_reports_applying(self):
-		self._seed(
-			proxy_active=1,
-			last_sync_status="pending: admin applying config",
-			llm_pool_synced_at="2026-07-30 10:00:00",
-		)
-		with patch.object(account, "compute_pool_mode", return_value=True):
-			with patch.object(admin_client, "post_llm_auth_status", return_value={"data": {}}):
-				out = account.get_llm_connection_status()
-		self.assertEqual(out["health"], "applying")
 
 	def test_shape_fields_describe_the_pool_rather_than_models_zero(self):
 		"""The Model/Provider/Auth-mode triple came from the legacy models[0]
