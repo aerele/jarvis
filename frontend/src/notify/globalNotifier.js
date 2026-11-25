@@ -25,6 +25,7 @@ import { report as reportError } from "@/lib/errorReporter";
 // listeners on this socket cannot disagree about what counts as a duplicate.
 import { fenceAccept, fenceReject } from "@/utils/eventFence";
 import { brand } from "@/branding";
+import { draftTitleOfItem } from "../../../jarvis/public/js/shared/draft_pending.mjs";
 import { macroDoneSignal } from "@/lib/macroRunOutcome";
 
 // ---- toast state (rendered by NotifyToaster.vue) -----------------------------
@@ -284,7 +285,9 @@ export function attachGlobalNotifier({ socket, router }) {
 				// keyed `conversation` (may be "" when the server can't resolve one —
 				// it still reached THIS user's socket, so fall back to the active chat)
 				const conv = p.conversation || store.currentConvId || null;
-				const tool = p.tool ? String(p.tool).replace(/^jarvis__/, "") : "";
+				// A server draft card is told by its title, never by the raw tool name.
+				const tool =
+					draftTitleOfItem(p) || (p.tool ? String(p.tool).replace(/^jarvis__/, "") : "");
 				if (conv === dashboardsPaneConv() && !document.hidden) return;
 				signal({
 					conv,

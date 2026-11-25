@@ -50,13 +50,18 @@
 		     detail pane previously made the latter unreachable: the page clipped
 		     its horizontal overflow. Stack below lg, like AgentRunsBoard, and let
 		     each pane keep its own vertical scroll. -->
-		<div data-testid="approvals-split-view" class="flex min-h-0 flex-1 flex-col lg:flex-row">
+		<div
+			ref="splitView"
+			data-testid="approvals-split-view"
+			class="flex min-h-0 flex-1 flex-col lg:flex-row"
+		>
 			<!-- LEFT rail: inbox-style rows on a standing gray-1 surface so the
 			     selected row's white chip + shadow reads in light mode (CRM
 			     sidebar pattern; dark gray-1 ≠ surface-selected per §2.5) -->
 			<div
 				data-testid="approvals-rail"
-				class="max-h-[30vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[360px] lg:border-b-0 lg:border-r"
+				:style="{ '--approvals-rail-w': railWidth + 'px' }"
+				class="max-h-[30vh] w-full shrink-0 overflow-y-auto border-b bg-surface-gray-1 lg:max-h-none lg:w-[var(--approvals-rail-w)] lg:max-w-[60%] lg:border-b-0 lg:border-r"
 			>
 				<!-- "Waiting for your reply" strip (notify-approvals Part 3): prose
 				     questions the agent asked in chat — derived server-side
@@ -390,6 +395,20 @@
 						}}</span>
 					</div>
 				</div>
+			</div>
+
+			<!-- Split handle (lg and up; below lg the rail is stacked, so it is hidden
+			     and its handlers refuse to act). 8px hit area straddling the rail's
+			     border; the visible line shows on hover, drag and keyboard focus. -->
+			<div
+				v-bind="railSeparatorProps"
+				data-testid="approvals-rail-resizer"
+				class="group relative z-10 -mx-1 hidden w-2 shrink-0 cursor-col-resize touch-none outline outline-2 -outline-offset-2 outline-transparent focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-outline-gray-4 lg:block"
+			>
+				<span
+					class="pointer-events-none absolute inset-y-0 left-1/2 w-0.5 -translate-x-1/2 transition-colors group-hover:bg-surface-gray-4 group-focus-visible:bg-surface-gray-5"
+					:class="railDragging ? 'bg-surface-gray-5' : ''"
+				/>
 			</div>
 
 			<!-- RIGHT pane: review + act on the selected approval -->
@@ -928,6 +947,7 @@ import CommentsSection from "@/components/doc/CommentsSection.vue";
 import JvSpinner from "@/components/JvSpinner.vue";
 import { useDocmeta } from "@/composables/useDocmeta";
 import { useListPage } from "@/composables/useListPage";
+import { useResizableRail } from "@/composables/useResizableRail";
 import {
 	useActionRows,
 	filterActionRows,
@@ -948,6 +968,18 @@ import { isPermissionDenied } from "@/lib/wikiReview";
 const route = useRoute();
 const router = useRouter();
 const store = useShellStore();
+
+// Draggable split between the rail and the detail pane (lg and up), width kept
+// per user so one person's preference never leaks to another on a shared browser.
+const splitView = ref(null);
+const {
+	width: railWidth,
+	dragging: railDragging,
+	separatorProps: railSeparatorProps,
+} = useResizableRail({
+	storageKey: `jarvis-approvals-rail-width:${session.user || "anon"}`,
+	hostEl: splitView,
+});
 
 // ── rail config ──────────────────────────────────────────────────────────────
 // "Answered" = a chat ask the user resolved IN CHAT (chat_asks.resolve_on_

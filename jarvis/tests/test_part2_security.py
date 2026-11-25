@@ -787,6 +787,59 @@ class TestSkillPromotionSurfacing(Part2Base):
 		self.assertNotIn("System Manager", roles)
 		self.assertNotIn("Administrator", roles)
 
+	def _give_user_a_jarvis_named_role(self, role: str) -> None:
+		"""USER_A holds a role in Jarvis's own namespace that is NOT one of the named
+		tenant roles - the prefix rule, not the tuple, has to catch it. Uncommitted:
+		the per-test rollback removes it; the cache is dropped in cleanup."""
+		if not frappe.db.exists("Role", role):
+			frappe.get_doc({"doctype": "Role", "role_name": role, "desk_access": 1}).insert(
+				ignore_permissions=True
+			)
+		frappe.get_doc("User", USER_A).add_roles(role)
+		self.addCleanup(frappe.clear_cache, user=USER_A)
+
+	def test_promotable_target_roles_exclude_jarvis_app_roles(self):
+		# #800: Jarvis's own roles (held by every app user) are no team to promote to.
+		from jarvis.chat import custom_skills_api
+
+		self._give_user_a_jarvis_named_role("Jarvis Promo Test Role")
+		frappe.get_doc("User", USER_A).add_roles("Jarvis Skill Reviewer", "Jarvis Admin")
+		with _as(USER_A):
+			roles = custom_skills_api.promotable_target_roles()["roles"]
+		self.assertEqual([r for r in roles if r.lower().startswith("jarvis")], [])
+		self.assertIn("Sales User", roles)
+
+	def test_reviewer_targetable_roles_exclude_jarvis_app_roles(self):
+		from jarvis.chat import skill_permissions
+
+		self._give_user_a_jarvis_named_role("Jarvis Promo Test Role")
+		roles = skill_permissions.reviewer_targetable_roles()
+		self.assertEqual([r for r in roles if r.lower().startswith("jarvis")], [])
+		self.assertIn("Sales User", roles)
+
+	def test_request_skill_promotion_refuses_jarvis_roles(self):
+		from jarvis.chat import custom_skills_api
+
+		self._give_user_a_jarvis_named_role("Jarvis Promo Test Role")
+		skill = _mk_skill(USER_A, f"{PFX}-jarvis-role", scope="User")
+		for roles in (["Jarvis User"], ["Sales User", "Jarvis Admin"], ["jarvis promo test role"]):
+			with _as(USER_A):
+				with self.assertRaises(frappe.ValidationError) as ctx:
+					custom_skills_api.request_skill_promotion(skill.name, "Role", target_roles=roles)
+			self.assertIn("are not team roles", str(ctx.exception))
+		# The legacy single-role argument is refused the same way.
+		with _as(USER_A), self.assertRaises(frappe.ValidationError):
+			custom_skills_api.request_skill_promotion(skill.name, "Role", target_role="Jarvis User")
+		self.assertFalse(frappe.db.exists(SKILL_PROMO, {"skill": skill.name}))
+
+	def test_request_skill_promotion_still_accepts_a_team_role(self):
+		from jarvis.chat import custom_skills_api
+
+		skill = _mk_skill(USER_A, f"{PFX}-team-role", scope="User")
+		with _as(USER_A):
+			out = custom_skills_api.request_skill_promotion(skill.name, "Role", target_roles=["Sales User"])
+		self.assertTrue(out["ok"])
+
 	# ── negative gates: the reviewer reads refuse a non-reviewer ────────────────
 	def test_non_reviewer_denied_on_reviewer_reads(self):
 		# USER_B holds only "Jarvis User" — NOT a reviewer role. Both the reviewer

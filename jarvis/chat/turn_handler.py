@@ -54,7 +54,7 @@ from jarvis.chat.filebox_source import SourceLost
 from jarvis.chat.runtime_profile import get_profile
 from jarvis.chat.session_repair import Repair, ensure_session_usable
 from jarvis.exceptions import AgentUnreachableError
-from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription, pool_primary_model
+from jarvis.jarvis.pool_serialize import compute_pool_mode, has_native_claude_subscription
 
 CONV = "Jarvis Conversation"
 MSG = "Jarvis Chat Message"
@@ -802,47 +802,22 @@ def _session_model_patch(conv) -> tuple[bool, str | None]:
 	return True, f"{provider}/{model}" if provider and model else model
 
 
-# Effort levels the chat pickers offer. Mirrors ``Jarvis Conversation.thinking_override``,
-# a Select limited to low/medium/high; the agent knows more levels, but offering one the
-# Select rejects would fail the save.
-#
-# The proxy route cannot think at all. Its models are a custom ``openai_compat`` provider
-# with no ``reasoning`` flag, so the agent allows only "off" there, and an explicit
-# per-turn level is not clamped: the agent answers it with an error reply instead of
-# running the turn (Aerele-RnD/jarvis-admin-v2#648). A Claude-plan leg runs on the native
-# claude-cli runtime and keeps the full range.
+# Effort levels the chat pickers offer, for every model and route. Mirrors
+# ``Jarvis Conversation.thinking_override``, a Select limited to low/medium/high; the agent
+# knows more levels, but offering one the Select rejects would fail the save. The fleet
+# agent renders every model so it takes all three, and treats a turn with no level
+# ("Auto" in the UI) as medium.
 CHAT_THINKING_LEVELS = ("low", "medium", "high")
 
 
 def offered_thinking_levels(settings) -> list[str]:
-	"""The effort levels to offer: none when every turn runs on the proxy."""
-	if getattr(settings, "proxy_active", 0) and not has_native_claude_subscription(settings):
-		return []
+	"""The effort levels to offer: always all of them, whatever the route."""
 	return list(CHAT_THINKING_LEVELS)
 
 
 def _turn_thinking(conv) -> str | None:
-	"""The thinking level to send with this turn, or None to send none.
-
-	The conversation keeps its stored level: a later pin to a Claude-plan model can use it.
-	"""
-	level = (conv.thinking_override or "").strip() or None
-	if level and _runs_on_proxy_route(conv):
-		return None
-	return level
-
-
-def _runs_on_proxy_route(conv) -> bool:
-	settings = frappe.get_cached_doc("Jarvis Settings")
-	if not settings.proxy_active:
-		return False
-	model, provider = _resolve_model_and_provider(conv)
-	if provider == PROXY_DOOR_PROVIDER:  # a proxy-leg pick named through the Bifrost door
-		return True
-	if provider:  # a Claude-plan pick, served by claude-cli
-		return False
-	# A pinned bare id resolves through the proxy; an unpinned turn runs the pool primary.
-	return not _is_native_claude_pick(settings, model or pool_primary_model(settings))
+	"""The thinking level to send with this turn, or None to send none (the agent default)."""
+	return (conv.thinking_override or "").strip() or None
 
 
 def _org_locale_clause() -> str:
@@ -1436,6 +1411,15 @@ def _assemble_prompt(
 	# An unsaved draft card is on the user's screen (``live_draft``): tell the agent once per
 	# turn, so it reminds the user instead of drafting again. Decides every skip itself.
 	live_draft_clause = _live_draft_clause(conv, binding)
+	# Site flag ``jarvis_draft_cards`` on: tell the agent to draft with the tool, on the turns
+	# where the gate would park a draft card. "" with the flag off, so the bytes are today's.
+	drafting_clause = _drafting_clause(
+		conv,
+		binding,
+		msg_row.get("origin"),
+		live_draft_clause,
+		context=context,
+	)
 	# Learned skills (plan section 6.6, the reliable activation path): deterministically
 	# name the role-matched managed learned-<domain> skills for THIS chat user, so the
 	# agent applies them without depending on agent's undocumented auto-retrieval.
@@ -1565,7 +1549,7 @@ def _assemble_prompt(
 		# customizations clause is org-level too, so it sits with the org
 		# clauses - before personal, which stays last.
 		f"[Context: today is {today}{locale_clause}{assistant_name_clause}{persona_clause}; chat user: {_chat_user_identity(chat_user, user_message)}"
-		f"; conv: {conversation_id}{armed_run}{autorun_run}{auto_run}{live_draft_clause}{skill_clause}{learned_clause}"
+		f"; conv: {conversation_id}{armed_run}{autorun_run}{auto_run}{drafting_clause}{live_draft_clause}{skill_clause}{learned_clause}"
 		f"{wiki_notes_clause}{custom_site_clause}{payment_calendar_clause}{server_scripts_clause}{personal_clause}{notes_clause}]"
 		f"{ground_block}"
 		f"\n\n{user_message or ''}"
@@ -1575,6 +1559,14 @@ def _assemble_prompt(
 	# already date/user-augmented user_message built above. Prompt-only;
 	# the persisted/visible user message is unchanged.
 	user_message = _prepend_doc_context(user_message, context, conversation_id)
+	# The caller's usable connectors, so the agent reaches for one unprompted.
+	# Skipped under connector focus: the focus line below already names the app.
+	user_message = _prepend_connected_apps(user_message, context, chat_user)
+	# Composer connector-focus pill: a SEPARATE, additive prepend (not folded
+	# into _prepend_doc_context's branches above) so it can co-exist with a
+	# doc/report/page context and never has to touch that function's existing,
+	# individually-pinned branches.
+	user_message = _prepend_connector_focus(user_message, context)
 	# Vision is gated by the operator toggle and the model's provider being
 	# multimodal. When off, image/PDF attachments degrade to a short note (no
 	# OCR fallback any more).
@@ -1710,6 +1702,14 @@ def handle_chat_send(payload: dict) -> None:
 			title="turn_message_binding: bind_turn_message failed",
 			message=frappe.get_traceback(),
 		)
+	# Connector focus binds (or clears) for THIS turn, before dispatch, so the
+	# tool gate enforces what the prompt line says. Best-effort like the bind above.
+	try:
+		from jarvis.chat import connector_focus
+
+		connector_focus.bind_turn(conversation_id, connector_focus.focus_of(context))
+	except Exception:
+		frappe.log_error(title="connector_focus: bind_turn failed", message=frappe.get_traceback())
 	# User-message intake: the user replied, so any Pending chat-sourced
 	# approval materialized from a previous ```jarvis-ask fence is answered
 	# in chat now — flip it to Answered so the board never offers a stale
@@ -2574,6 +2574,47 @@ def _dashboard_has_asked(conversation_id: str) -> bool:
 		return True
 
 
+def _prepend_connector_focus(user_message: str, context) -> str:
+	"""Prepend the composer's connector-focus pill directive, when armed.
+
+	``context.focus_connector`` is ``{key, label}`` (jarvis/chat/api.py's
+	allow-list, both required, length-capped). The line matches what the tool
+	gate enforces for this turn (``jarvis.chat.connector_focus``, bound at turn
+	start): only the two connector tools for that key run, anything else is
+	refused. A malformed/absent context is a no-op, matching
+	``_prepend_doc_context``'s contract.
+	"""
+	from jarvis.chat import connector_focus
+
+	focus = connector_focus.focus_of(context)
+	if not focus:
+		return user_message
+	label, key = focus["label"], focus["key"]
+	return (
+		f"[Context: The user turned on connector focus for this turn, the '{label}' "
+		f"connector (key: {key}). The only tools you may call this turn are "
+		f"list_connector_actions and call_connector for the '{label}' connector. Other "
+		"tools will be refused; tell the user to clear the focus if they need them.]"
+		f"\n\n{user_message}"
+	)
+
+
+def _prepend_connected_apps(user_message: str, context, chat_user: str) -> str:
+	"""Prepend the caller's usable connectors (``jarvis.chat.connected_apps``).
+	Omitted when they have none, and under connector focus. Best-effort: a
+	failed lookup must never break the turn."""
+	from jarvis.chat import connected_apps, connector_focus
+
+	if connector_focus.focus_of(context):
+		return user_message
+	try:
+		line = connected_apps.prompt_line(chat_user)
+	except Exception:
+		frappe.log_error(title="connected apps prompt line failed", message=frappe.get_traceback())
+		return user_message
+	return f"{line}\n\n{user_message}" if line else user_message
+
+
 def _prepend_doc_context(user_message: str, context, conversation_id: str = "") -> str:
 	"""Prepend the ERP doc / report the user was viewing (floating-widget
 	auto-context) as a leading ``[Viewing: ...]`` line, so questions like
@@ -2782,6 +2823,100 @@ def _escape_untrusted_tag(match: "re.Match[str]") -> str:
 	)
 
 
+# What the agent is told to do for a change to a waiting draft: a parked draft is its own tool
+# call, a typed one is a block. ``_drafting_clause`` reads the second to stay out of the way.
+_PARKED_CHANGE = "call the tool again"
+_TYPED_CHANGE = "re-emit the block"
+
+# Which user rows start a turn in which a person can be shown a draft card: a send from the
+# app, the follow-up turn after a decision, or a Board answer. A macro step, a system or
+# agent-run turn, a File Box drop and a delegated re-entry are not (a blank origin is a legacy
+# row, as in the Payment Calendar hint's scope).
+_DRAFT_TURN_ORIGINS = frozenset({"", "human", "continuation", "board_answer"})
+
+# The drafting note, the only text that tells the agent to draft with the tool. ONE constant: the
+# persona and the tests quote it. It is the whole clause, leading "; " included, like the
+# neighbours in the bracket, and a single line without backticks.
+DRAFTING_CLAUSE = (
+	"; drafts: to propose one new or changed record call create_doc or update_doc, "
+	"the site then shows the user a draft card to check, edit, save or cancel, "
+	"write no jarvis-action block for it, one draft at a time"
+)
+
+
+def _runs_without_cards(conv, binding) -> bool:
+	"""Whether this chat runs ``create_doc`` / ``update_doc`` with no card for a person to
+	read, or is not a plain one-owner chat: a shared chat, a File Box chat, auto mode, an
+	armed macro, an approved skill run, a typed "confirm all". These are the conversation
+	flags ``api._run_tool`` reads to skip or hold the park, so the waiting-draft reminder and
+	the drafting note skip on the same set."""
+	return bool(
+		binding is not None
+		or conv.get("file_box")
+		or conv.get("auto_mode")
+		or conv.get("skip_confirmation")
+		or conv.get("skill_autorun")
+		or conv.get("request_autorun")
+	)
+
+
+def _drafting_clause(conv, binding, origin, live_draft_clause: str = "", *, context=None) -> str:
+	"""``DRAFTING_CLAUSE`` when the site flag ``jarvis_draft_cards`` is on and an agent call to
+	``create_doc`` / ``update_doc`` in this turn would park a draft card, else "".
+
+	The gate (``api._run_tool``) parks a draft card for a single create / update unless the
+	chat runs it uncarded or holds it (see ``_runs_without_cards``), so those turns get
+	nothing, as does a turn another server path started (``_DRAFT_TURN_ORIGINS``) and any
+	builder chat (``origin_page`` in ``api._BUILDER_ORIGINS``). What the
+	gate decides per call cannot be known here and is left to it: a sensitive or structural
+	write, a batch or a ``Jarvis Dashboard`` write keeps its one-tap card (the clause says
+	"one new or changed record"), and a second call in a turn is refused. A continuation turn
+	of an ordinary chat gets the note: the agent stages its next step then.
+
+	A waiting TYPED draft (``live_draft_clause`` tells the agent to re-emit its block for a
+	change) gets nothing: the note forbids the block, the reminder asks for it, and the site
+	shows that one card either way. A waiting parked draft gets both: its reminder says to
+	call the tool again only for a change, which agrees with "one draft at a time".
+
+	Also nothing on a turn with a connector focus (``context.focus_connector``: the gate refuses
+	``create_doc`` / ``update_doc`` then).
+
+	Also nothing on a turn whose message invokes exactly one armed skill: the gate offers "Approve
+	& run" on that write's card, and only the ordinary card has that control, so the write is not a
+	draft card (``draft_card.wanted``, ``offers_run``). The signal is the gate's own,
+	``api._resolve_approve_run_offer`` (the turn's bound message, one read, none unless the
+	message holds a ``/slug``), run last so the cheap skips come first.
+
+	Best-effort like the neighbouring clauses: a failure is logged and leaves the note out."""
+	from jarvis.chat import draft_card
+
+	if not draft_card.enabled():
+		return ""
+	try:
+		if _runs_without_cards(conv, binding) or (origin or "") not in _DRAFT_TURN_ORIGINS:
+			return ""
+		# A builder chat (the app's own ``_BUILDER_ORIGINS``: Dashboard Builder, Triggers) shows a
+		# draft card only as a title and a link to the full chat, so it keeps today's text. Imported
+		# here: the api module is where the set lives, and the import is lazy like this module's others.
+		from jarvis.chat import connector_focus
+		from jarvis.chat.api import _BUILDER_ORIGINS
+
+		if conv.get("origin_page") in _BUILDER_ORIGINS:
+			return ""
+		if connector_focus.focus_of(context):
+			return ""
+		if _TYPED_CHANGE in live_draft_clause:
+			return ""
+		from jarvis import api
+
+		if api._resolve_approve_run_offer(conv.get("name"))[0]:
+			return ""
+		return DRAFTING_CLAUSE
+	except Exception:
+		frappe.log_error(title="drafting note failed", message=frappe.get_traceback())
+		return ""
+
+
 def _live_draft_clause(conv, binding) -> str:
 	"""The context clause for a waiting draft card, or "". Self-contained and best-effort:
 	every skip is decided here from the binding and the conversation's own flags, and any
@@ -2793,14 +2928,16 @@ def _live_draft_clause(conv, binding) -> str:
 	own card, and a draft the server turned into a gated confirmation card. Plain reads only:
 	prompt assembly takes no lock. The doctype is named only when it is a real DocType."""
 	try:
-		if binding is not None or not frappe.conf.get("jarvis_live_draft_context", 1):
-			return ""
-		if conv.get("file_box") or conv.get("auto_mode") or conv.get("skip_confirmation"):
-			return ""
-		if conv.get("skill_autorun") or conv.get("request_autorun"):
+		if not frappe.conf.get("jarvis_live_draft_context", 1) or _runs_without_cards(conv, binding):
 			return ""
 		from jarvis.chat import live_draft
 
+		parked = _pending_draft_card(conv)
+		if parked:
+			# A parked draft card wins over a typed draft (the shared rule retires the typed one,
+			# so both exist only in a chat that parked the card first). It needs none of the typed
+			# draft's checks: its block cannot be broken and no reply card hides it.
+			return _draft_clause_text(f"{parked[0]} {parked[1] or 'a record'}", parked[2], parked=True)
 		rows = live_draft.load_rows(conv.name)
 		draft = live_draft.pick(rows)
 		if not draft or draft["bad"]:
@@ -2811,14 +2948,43 @@ def _live_draft_clause(conv, binding) -> str:
 			return ""  # parked behind its own confirmation card: the clients show "waiting"
 		what = f"{draft['verb']} {live_draft.real_doctype(draft['doctype']) or 'a record'}"
 		button = "Save" if draft["verb"] == "update" else "Create"  # the card's own words
-		return (
-			f"; unsaved draft waiting: {what}, its card with {button} and Cancel is on the user's screen: "
-			"remind them in one line to choose, re-emit the block only for a change they ask for, "
-			"never say it is above"
-		)
+		return _draft_clause_text(what, button)
 	except Exception:
 		frappe.log_error(title="live draft context failed", message=frappe.get_traceback())
 		return ""
+
+
+def _draft_clause_text(what: str, button: str, parked: bool = False) -> str:
+	"""The clause for a waiting draft, typed or parked: ``what`` is "verb Doctype", ``button``
+	the card's own word for the save button. A parked card is the agent's own tool call, so
+	for it the agent is told to call the tool again for a change, not to re-emit a block."""
+	change = _PARKED_CHANGE if parked else _TYPED_CHANGE
+	return (
+		f"; unsaved draft waiting: {what}, its card with {button} and Cancel is on the user's screen: "
+		f"remind them in one line to choose, {change} only for a change they ask for, "
+		"never say it is above"
+	)
+
+
+def _pending_draft_card(conv) -> tuple[str, str, str] | None:
+	"""``(verb, doctype, button)`` of this chat's newest Pending draft card (the agent's own
+	``create_doc`` / ``update_doc`` call parked as a draft), or None. The button is the card's
+	own word: ``Create`` for a create, ``Save changes`` for an update. The doctype has passed
+	``safe_doctype`` and ``real_doctype`` inside ``live_draft.pending_draft_cards``: nothing the
+	agent wrote reaches the clause unchecked, and a name that is no DocType comes back "".
+
+	No flag check here: a draft card exists only if ``jarvis_draft_cards`` was on when it was
+	parked, and the clause itself sits behind ``jarvis_live_draft_context``. One plain read, no
+	lock: prompt assembly never locks or writes."""
+	from jarvis.chat import live_draft
+
+	cards = live_draft.pending_draft_cards(
+		conversations=[conv.name], owner=conv.owner, limit=_PARKED_CARDS_READ
+	)
+	if not cards:
+		return None
+	card = cards[0]
+	return card["verb"], card["doctype"], "Save changes" if card["verb"] == "update" else "Create"
 
 
 # A draft parks one gated card; a few more cover a batch waiting in the same chat.

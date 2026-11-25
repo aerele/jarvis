@@ -10,6 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import { defineComponent, h, nextTick, reactive, ref } from "vue";
 
+// frappe-ui's pickers (DateControl, #833) do not load under jsdom.
+vi.mock("frappe-ui", () => ({
+	DatePicker: { name: "DatePicker", template: "<input />" },
+	DateTimePicker: { name: "DateTimePicker", template: "<input />" },
+	TimePicker: { name: "TimePicker", template: "<input />" },
+}));
 vi.mock("@/lib/rowForm", async (orig) => {
 	const m = await orig();
 	return { ...m, rowStatus: vi.fn(m.rowStatus), rowFormLayout: vi.fn(m.rowFormLayout) };
@@ -492,11 +498,17 @@ describe("a row's status follows the row", () => {
 	});
 });
 
-describe("ChatView reads rows through the memo", () => {
-	const src = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
+describe("the draft edit form reads rows through the memo", () => {
+	const view = fs.readFileSync(path.resolve(__dirname, "../views/ChatView.vue"), "utf8");
+	const src = fs.readFileSync(
+		path.resolve(__dirname, "../components/chat/DraftEditForm.vue"),
+		"utf8"
+	);
 	it("has no panel-wide status computed or whole-record parent any more", () => {
-		expect(src).toMatch(/createRowStatusMemo\(\(\) => draftPanel\.value\)/);
-		expect(src).not.toMatch(/draftRowStatuses|draftParentValues/);
+		expect(src).toMatch(/createRowStatusMemo\(\(\) => props\.model\)/);
+		expect(src + view).not.toMatch(/draftRowStatuses|draftParentValues/);
+		// the view no longer builds the memo: the form owns it, with the form's own effect scope
+		expect(view).not.toMatch(/createRowStatusMemo/);
 		expect(src).toMatch(/const rowStatusFor = rowMemo\.rowStatusFor/);
 		expect(src).toMatch(/const draftChangeSummaries = rowMemo\.summaries/);
 	});

@@ -18,7 +18,55 @@ _ITEM_CONTEXTS = {
 }
 
 
+# erpnext/accounts/doctype/payment_entry/payment_entry.js: references set_query.
+# Type: Desk narrows it by the payment's party type (Customer: Sales Order, Sales Invoice,
+# Journal Entry, Dunning; Supplier: Purchase Order, Purchase Invoice, Journal Entry). A static
+# filter cannot branch on party_type, so the picker offers their union; the save still refuses
+# a type that does not fit the party (PaymentEntry.validate_reference_documents).
+_PAYMENT_REFERENCE_TYPES = [
+	"Sales Order",
+	"Sales Invoice",
+	"Purchase Order",
+	"Purchase Invoice",
+	"Journal Entry",
+	"Dunning",
+]
+# Name: submitted documents of the payment's company, and for these the payment's party in the
+# document's own party field (Desk sets filters[party_type.lower()] = party).
+_PAYMENT_REFERENCE_PARTY_FIELD = {
+	"Sales Order": "customer",
+	"Sales Invoice": "customer",
+	"Dunning": "customer",
+	"Purchase Order": "supplier",
+	"Purchase Invoice": "supplier",
+}
+
+
+def _payment_reference_filters(df):
+	if df.fieldname == "reference_doctype" and df.fieldtype == "Link" and df.options == "DocType":
+		return [["DocType", "name", "in", list(_PAYMENT_REFERENCE_TYPES)]]
+	if (
+		df.fieldname == "reference_name"
+		and df.fieldtype == "Dynamic Link"
+		and df.options == "reference_doctype"
+	):
+		# One set per DocType the Name can point at; the card applies the current Type's.
+		out = []
+		for target in _PAYMENT_REFERENCE_TYPES:
+			out += [[target, "docstatus", "=", 1], [target, "company", "=", "eval:parent.company"]]
+			if target in _PAYMENT_REFERENCE_PARTY_FIELD:
+				out.append([target, _PAYMENT_REFERENCE_PARTY_FIELD[target], "=", "eval:parent.party"])
+		return out
+	return []
+
+
 def draft_link_query_filters(doctype, df, parent_doctype=None, parentfield=None):
+	if (
+		doctype == "Payment Entry Reference"
+		and parent_doctype == "Payment Entry"
+		and parentfield == "references"
+	):
+		return _payment_reference_filters(df)
 	if df.fieldtype != "Link":
 		return []
 	# ERPNext sales_common.js and buying.js: canonical items/item_code queries.

@@ -27,6 +27,18 @@ test("request snapshot retains files and ordered approval tokens independently o
 	assert.equal(r.text, "Review invoice");
 	assert.match(recoveryCopy(r).title, /Maintenance/);
 });
+test("the + menu's context rides on the request as a snapshot, and is absent without one", () => {
+	const { recovery } = setup();
+	const context = { ground_wiki: 1, focus_connector: { key: "gh", label: "GitHub" } };
+	const r = recovery.stage("A", "/month-end close March", [], [], context);
+	context.ground_wiki = 0;
+	assert.deepEqual(r.context, {
+		ground_wiki: 1,
+		focus_connector: { key: "gh", label: "GitHub" },
+	});
+	const plain = recovery.stage("A", "hi", []);
+	assert.equal("context" in plain, false);
+});
 test("unknown, malformed and empty responses never authorize a retry", () => {
 	for (const response of [
 		null,

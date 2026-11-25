@@ -147,6 +147,22 @@ export function typedApprovalHint(cards) {
   return allRecent ? 'or type "go ahead"' : 'or type "confirm 1"';
 }
 
+// The hint the panel prints under its stack. A typed "go ahead" or "confirm all" approves every
+// card it binds, a draft among them, and the panel cannot show what a draft holds (it only offers
+// "Review in full chat"). So while ANY card is a draft (`draft_title`, pending_items.mjs) the hint
+// never offers a bare or stack-wide phrase; it offers only the number of each ORDINARY card, its
+// 1-based position in the shown order (= the sent approval_tokens order, which is what the server
+// binds "confirm N" to). All drafts: no hint. The composer still works; a typed reply is not blocked.
+export function visibleTypedHint(cards) {
+  const list = cards || [];
+  if (!list.some((c) => c && c.draft_title)) return typedApprovalHint(list);
+  const numbers = [];
+  list.forEach((c, i) => {
+    if (c && !c.draft_title) numbers.push(`"confirm ${i + 1}"`);
+  });
+  return numbers.length ? `or type ${numbers.join(" or ")}` : "";
+}
+
 // An accepted send means the user just spoke: the cards on screen when they sent
 // (`tokens`) are now older than their latest message.
 export function markCardsEarlier(cards, tokens) {

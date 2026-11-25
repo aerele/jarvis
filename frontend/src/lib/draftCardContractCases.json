@@ -1,0 +1,145 @@
+{
+	"about": "The values contract of save_draft_card, written once for both sides. Each case: `sealed` is the sealed call's values (create) or changes (update): one child table `rows` plus maybe a top-level field. `values` is what the form sends; `written` is what the server must hand to the write (create_doc values / update_doc changes). The server test (jarvis/tests/test_draft_card_edit.py) runs edited_call(sealed, values) and expects `written`; the app test (draftCardValues.spec.js) builds the form from `sealed` (+ `savedRows` on an update, the record's stored rows), replays `form`, and expects the payload to equal `values`. `form` ops: {op: set, row, cell, value}, {op: remove, row}, {op: insert, row, cells}, {op: append, cells}; `row` is the position in the form's list at that moment. `side: server` marks a case the form cannot produce (see `why`). The table columns the app builds: item, qty (Float), note, and so_detail (read-only: the form shows it and never sends it).",
+	"cases": [
+		{
+			"id": "create-kept-row-one-edited-cell",
+			"verb": "create",
+			"sealed": { "title": "T", "rows": [{ "item": "A", "qty": 1 }, { "item": "B", "qty": 2 }] },
+			"form": [{ "op": "set", "row": 1, "cell": "qty", "value": "5" }],
+			"values": { "rows": [{ "_draft_row": 0 }, { "_draft_row": 1, "qty": 5 }] },
+			"written": { "title": "T", "rows": [{ "item": "A", "qty": 1 }, { "item": "B", "qty": 5 }] }
+		},
+		{
+			"id": "create-inserted-row-in-the-middle",
+			"verb": "create",
+			"sealed": { "rows": [{ "item": "A", "qty": 1 }, { "item": "B", "qty": 2 }] },
+			"form": [{ "op": "insert", "row": 1, "cells": { "item": "N" } }],
+			"values": { "rows": [{ "_draft_row": 0 }, { "item": "N" }, { "_draft_row": 1 }] },
+			"written": { "rows": [{ "item": "A", "qty": 1 }, { "item": "N" }, { "item": "B", "qty": 2 }] }
+		},
+		{
+			"id": "create-row-removed",
+			"verb": "create",
+			"sealed": { "rows": [{ "item": "A", "qty": 1 }, { "item": "B", "qty": 2 }] },
+			"form": [{ "op": "remove", "row": 0 }],
+			"values": { "rows": [{ "_draft_row": 1 }] },
+			"written": { "rows": [{ "item": "B", "qty": 2 }] }
+		},
+		{
+			"id": "create-cell-emptied",
+			"verb": "create",
+			"sealed": { "rows": [{ "item": "A", "qty": 1, "note": "x" }] },
+			"form": [{ "op": "set", "row": 0, "cell": "note", "value": "" }],
+			"values": { "rows": [{ "_draft_row": 0, "note": "" }] },
+			"written": { "rows": [{ "item": "A", "qty": 1 }] }
+		},
+		{
+			"id": "create-nothing-edited",
+			"verb": "create",
+			"sealed": { "title": "T", "rows": [{ "item": "A", "qty": 1 }] },
+			"form": [],
+			"values": {},
+			"written": { "title": "T", "rows": [{ "item": "A", "qty": 1 }] }
+		},
+		{
+			"id": "update-named-row-one-edit-the-draft-set-two",
+			"verb": "update",
+			"sealed": { "rows": [{ "name": "r1", "item": "Agent", "qty": 2 }, { "name": "r2" }] },
+			"savedRows": [
+				{ "name": "r1", "item": "Saved", "qty": 1, "note": "n1" },
+				{ "name": "r2", "item": "Two", "qty": 9 }
+			],
+			"form": [{ "op": "set", "row": 0, "cell": "item", "value": "Person" }],
+			"values": { "rows": [{ "name": "r1", "item": "Person" }, { "name": "r2" }] },
+			"written": { "rows": [{ "name": "r1", "item": "Person", "qty": 2 }, { "name": "r2" }] }
+		},
+		{
+			"id": "update-named-row-cell-emptied",
+			"verb": "update",
+			"sealed": { "rows": [{ "name": "r1", "item": "Agent", "note": "agent" }] },
+			"savedRows": [{ "name": "r1", "item": "Saved", "note": "n1" }],
+			"form": [{ "op": "set", "row": 0, "cell": "note", "value": "" }],
+			"values": { "rows": [{ "name": "r1", "note": "" }] },
+			"written": { "rows": [{ "name": "r1", "item": "Agent", "note": "" }] }
+		},
+		{
+			"id": "update-row-of-a-table-the-draft-did-not-list",
+			"verb": "update",
+			"sealed": { "title": "T" },
+			"savedRows": [
+				{ "name": "r1", "item": "One", "qty": 1 },
+				{ "name": "r2", "item": "Two", "qty": 2 }
+			],
+			"form": [{ "op": "set", "row": 1, "cell": "qty", "value": "7" }],
+			"values": { "rows": [{ "name": "r1" }, { "name": "r2", "qty": 7 }] },
+			"written": { "title": "T", "rows": [{ "name": "r1" }, { "name": "r2", "qty": 7 }] }
+		},
+		{
+			"id": "update-saved-row-the-draft-did-not-name",
+			"side": "server",
+			"why": "the form shows the draft's own list in place of the stored rows, so it cannot send a saved row the draft dropped; a stale or hand-made client can, and it is written as sent (the write merges it with the saved row)",
+			"verb": "update",
+			"sealed": { "rows": [{ "name": "r1", "item": "Agent" }] },
+			"values": { "rows": [{ "name": "r1" }, { "name": "r5", "qty": 2 }] },
+			"written": { "rows": [{ "name": "r1", "item": "Agent" }, { "name": "r5", "qty": 2 }] }
+		},
+		{
+			"id": "update-drafted-new-row-one-edited-cell",
+			"verb": "update",
+			"sealed": {
+				"rows": [{ "name": "r1" }, { "item": "New", "qty": 3, "so_detail": "SO-D1" }]
+			},
+			"savedRows": [{ "name": "r1", "item": "One", "qty": 1 }],
+			"form": [{ "op": "set", "row": 1, "cell": "qty", "value": "4" }],
+			"values": { "rows": [{ "name": "r1" }, { "_draft_row": 1, "qty": 4 }] },
+			"written": {
+				"rows": [{ "name": "r1" }, { "item": "New", "qty": 4, "so_detail": "SO-D1" }]
+			}
+		},
+		{
+			"id": "update-drafted-new-row-removed",
+			"verb": "update",
+			"sealed": {
+				"rows": [{ "name": "r1" }, { "item": "New", "qty": 3, "so_detail": "SO-D1" }]
+			},
+			"savedRows": [{ "name": "r1", "item": "One", "qty": 1 }],
+			"form": [{ "op": "remove", "row": 1 }],
+			"values": { "rows": [{ "name": "r1" }] },
+			"written": { "rows": [{ "name": "r1" }] }
+		},
+		{
+			"id": "update-person-added-row",
+			"verb": "update",
+			"sealed": {
+				"rows": [{ "name": "r1" }, { "item": "New", "qty": 3, "so_detail": "SO-D1" }]
+			},
+			"savedRows": [{ "name": "r1", "item": "One", "qty": 1 }],
+			"form": [{ "op": "append", "cells": { "item": "Mine", "qty": "1" } }],
+			"values": {
+				"rows": [{ "name": "r1" }, { "_draft_row": 1 }, { "item": "Mine", "qty": 1 }]
+			},
+			"written": {
+				"rows": [
+					{ "name": "r1" },
+					{ "item": "New", "qty": 3, "so_detail": "SO-D1" },
+					{ "item": "Mine", "qty": 1 }
+				]
+			}
+		},
+		{
+			"id": "update-nothing-edited",
+			"verb": "update",
+			"sealed": {
+				"title": "T",
+				"rows": [{ "name": "r1", "qty": 2 }, { "item": "New", "so_detail": "SO-D1" }]
+			},
+			"savedRows": [{ "name": "r1", "item": "One", "qty": 1 }],
+			"form": [],
+			"values": {},
+			"written": {
+				"title": "T",
+				"rows": [{ "name": "r1", "qty": 2 }, { "item": "New", "so_detail": "SO-D1" }]
+			}
+		}
+	]
+}

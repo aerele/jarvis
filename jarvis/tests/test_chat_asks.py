@@ -231,6 +231,43 @@ class TestParseAsk(unittest.TestCase):
 		self.assertEqual(qs[0]["type"], "single")
 		self.assertEqual(qs[0]["options"], ["Acme", "Globex"])
 
+	def test_object_options_show_their_label_not_a_dict_repr(self):
+		# #837: the model wrote {label, value} objects; str() drew "{'label': ...}".
+		body = json.dumps(
+			[
+				{
+					"q": "Where should the remaining 30 minutes go?",
+					"type": "single",
+					"options": [
+						{"label": "14:00 to 14:30", "value": "14:00-14:30"},
+						{"value": "17:00-17:30"},
+						{"title": "Another time you specify"},
+						{"id": 7},
+						None,
+						"",
+						42,
+					],
+				}
+			]
+		)
+		qs = parse_ask("```jarvis-ask\n" + body + "\n```")
+		self.assertEqual(
+			qs[0]["options"], ["14:00 to 14:30", "17:00-17:30", "Another time you specify", "42"]
+		)
+
+	def test_scalar_options_read_like_the_chat_card(self):
+		# Same input and expectation as chatAsk.test.js, so the chat card and the
+		# Approval Board row show the same chip text.
+		body = '[{"q":"Pick","type":"single","options":[true,false,1.0,2.5,{"value":true},{"label":3.0}]}]'
+		qs = parse_ask("```jarvis-ask\n" + body + "\n```")
+		self.assertEqual(qs[0]["options"], ["true", "false", "1", "2.5", "true", "3"])
+
+	def test_the_option_cap_counts_only_kept_options(self):
+		options = ["", None, *[f"o{i}" for i in range(12)]]
+		body = json.dumps([{"q": "Pick", "type": "single", "options": options}])
+		qs = parse_ask("```jarvis-ask\n" + body + "\n```")
+		self.assertEqual(qs[0]["options"], [f"o{i}" for i in range(8)])
+
 	def test_last_fence_wins(self):
 		content = (
 			_fence([_ask(q="old question?", options=("A", "B"))])

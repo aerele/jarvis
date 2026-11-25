@@ -151,6 +151,9 @@ def manageable_roles(user: str | None = None) -> list[str]:
 	enabled desk role; a Jarvis Admin targets roles they hold. The wiki's
 	non-targetable set (framework/blanket roles) is excluded in both cases —
 	targeting e.g. "Desk User" would be an org-wide side door."""
+	# Intentionally NOT filtered for Jarvis's own roles (#800): this direct-create path is
+	# the admin tier placing a dashboard itself; the Jarvis-role rule
+	# (wiki_permissions.is_promotion_target_role) governs promotion requests only.
 	user = user or frappe.session.user
 	if _is_sm(user):
 		return [

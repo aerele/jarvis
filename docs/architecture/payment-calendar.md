@@ -85,6 +85,114 @@ budget and deployment-specific memory/concurrency checks before pilot. No source
 work belongs in a synchronous dashboard request. Restricted-user post-filters can
 add queries; production capacity is not established by these fixtures.
 
+### Slice 1a measurement (exact speed-ups)
+
+Slice 1a makes the Payable read faster without changing its output (see "Speed overrides" below).
+It was measured on a populated site (`jarvis_playground.localhost`, MariaDB; 11,386 live Payable
+and 33,618 live Receivable ledger rows), read-only as Administrator inside
+`snapshot.consistent_read()`, one fresh process per run. "Before" is the frozen oracle
+(`jarvis/tests/payment_calendar_oracle_1a.py`, a copy of the code before slice 1a); "after" is
+`read_obligations`. The measurement ran on the final tree, after the party pre-seed amendment (see
+"Speed overrides" below). Wall time and peak RSS are medians of 3 runs (month scope: 5 runs). The
+SQL count is the number of `frappe.db.sql` calls made inside the read; it is the median too. The
+count is stable (month "after" 102 and legacy "after" 107 in every run). The one outlier, 816
+instead of 476 for the month "before" in the first process of the series, came from a cold Frappe
+metadata cache: that process loaded 26 DocType definitions (13 queries each) that later processes
+read from cache. An earlier series had the same effect on one "after" run (243 instead of 102).
+Peak RSS is the whole process (about 87-95 MiB of it is the process before the read starts).
+
+| Side, scope | Rows | Wall time before / after | SQL calls before / after | Peak RSS before / after |
+| --- | --- | --- | --- | --- |
+| Payable, current month | 192 | 2.46 s / 1.88 s | 476 / 102 | 143.7 / 148.2 MiB |
+| Payable, legacy (no month) | 2,071 | 6.90 s / 2.14 s | 4,282 / 107 | 146.5 / 150.4 MiB |
+| Receivable, either scope | refused | `too_large` on both | 38-51 / 39-53 | 180-181 / 179-180 MiB |
+
+The canonical result (rows without their ids, excluded rows, notes, totals, completeness and scope
+reasons) was identical before and after in every Payable run. Receivable on this site is refused
+with `too_large` before and after, so no figure compares an output. Receivable "after" makes one or
+two more calls than "before" (the bounded size probe is one query); the refusal is the same. The
+month scope saves SQL calls, not wall time: its time is dominated by the upstream ledger queries,
+which are unchanged, and the "before" and "after" runs overlap (1.87-3.04 s against 1.78-2.45 s), so
+the median gap is not a claimed gain. The legacy scope reads the schedule of every invoice, so it
+gains the most.
+
+## Speed overrides fall back to upstream, never refuse
+
+`CalendarReport` overrides one ERPNext report method only to read faster, with the same output.
+`get_payment_terms` reads the Payment Schedule rows of up to 500 invoices in one query instead of
+two queries per invoice, and reproduces upstream's body (including the `is_return = 0` filter and
+the term order) around that read. It is the only pinned override.
+
+Party details are pre-seeded, not overridden. `build_data` (v16 only) fills `party_details` for
+every party in `voucher_balance` before upstream's `build_data` runs: one query per chunk of up to
+500 parties, on Customer for Receivable or Supplier for Payable, with the same fields as upstream's
+`get_party_details` and `None` for a party without a record. On MariaDB a party id that differs
+only in letter case matches the record, as upstream's lookup does there; on Postgres the match is
+exact. Upstream's `get_party_details` then only reads the dict, so no upstream body is copied and no
+pin is needed. The seed runs after `set_defaults` (which resets `party_details` at the start of
+`run`) and after `get_data` has filled `voucher_balance`. If upstream stops reading `party_details`,
+the seed is unused and upstream looks parties up itself. The `native()` clone is a shallow copy and
+shares the seeded dict. The seed may read a few parties that upstream would not have read; the
+output is the same.
+
+On v16 the ledger query also gets `name` as its last ORDER BY key. Upstream orders by posting
+date and party only, so lines that tie came back in an undefined order. This needs no hash pin
+because no upstream body is copied.
+
+Two more changes copy no upstream body either, so they need no pin. Both apply on v16 only; v15
+keeps today's code.
+
+- One-pass repair rebuild (`build_data`). The old loop rebuilt `self.data` once per repaired
+  invoice, which is quadratic. The loop now collects the replacements in `pre` order and rebuilds
+  `self.data` once: the surviving rows in their order, then the replacements. The result order is
+  the same. The copies are also flat: the `voucher_balance` entries used for `pre` hold scalars and
+  dates only, so `frappe._dict(row)` is a full copy there (v15 keeps `deepcopy`); `metadata` is
+  copied per entry because upstream pops `due_date` from the entries; `err_journals` becomes a set
+  because only membership is used.
+- Bounded size probe before the finance-book scan (`_read_obligations`). The ledger size check is
+  `_ledger_rows_exceed`, a count over a derived table of `SELECT 1 ... LIMIT limit + 1`, so it
+  reads at most 100,001 rows and never counts the whole table. On v16 it runs before
+  `validate_obligation_books`. Visible change: a company that is both multi-book and too large is
+  now refused as `too_large`; it was `multibook_unsupported`. Both refuse the read, and the refusal
+  does not hide anything. On v15 the finance-book check still runs first.
+
+The collect log line (`collect complete ...`, INFO level) ends with `fast_path=True` or
+`fast_path=False`. It is an INFO field, so production (ERROR level) does not write it; the
+`speed_fallback` ERROR line is the production signal. It reads `sources.FAST_PATH` when the line is
+written. The flag is process-local and sticky: it turns false at the first fallback in a worker
+process and stays false until that worker restarts. It covers only the one pinned override
+(`get_payment_terms`), not the other changes of this slice. It is a log field
+only; it is not part of the stored result. An ERPNext upgrade needs a worker restart for the pins to
+be checked again; a deploy restarts the workers.
+
+Slice 1a proves the output with a differential test. `jarvis/tests/test_payment_calendar_speedups.py`
+re-runs every scenario of `test_payment_calendar_sources` and `test_payment_calendar_reconciliation`
+with `read_obligations` replaced by a comparator. The comparator calls the real function and the
+frozen oracle with the same arguments, and fails on any difference in the result (rows sorted and
+without ids, excluded rows, notes, totals, completeness, scope reasons) or in the refusal code. The
+one accepted difference is the `too_large` / `multibook_unsupported` precedence change above.
+A scenario opts out with `@no_oracle_compare(reason)`.
+
+These overrides are separate from the fail-closed classification pins
+(`reconciliation.check_allocation_contract`, `_check_contract`), which still refuse a read on an
+unknown source. A speed override is guarded by the sha256 of the upstream method source,
+`compatibility._SPEED_PINS[major][name]`. When the installed source is not pinned (a new ERPNext
+release, or v15, which has no pins), the override calls the upstream method instead. The output
+stays correct and only the speed is lost. The first fallback per method in a process logs one
+`speed_fallback` line at ERROR level (see "Reading the logs") with the method name, the installed hash
+and the ERPNext version, and sets `sources.FAST_PATH` to false. The logging is best effort: nothing in
+it can raise into the read. An unreadable source is not remembered as unknown; its hash is read again
+on the next call.
+
+Bump procedure when ERPNext changes a pinned method:
+
+1. Run `test_pinned_hashes_match_installed_source`; it fails and prints the new hash.
+2. Audit the upstream diff of the method against the override; the output must stay identical.
+3. Add the hash to `_SPEED_PINS` next to the old one, with the ERPNext commit reference in the comment.
+
+The pin is computed against the ERPNext source of the CI base image (`version-16` head) and the
+local release; accept both when they differ.
+
 ## Company floor and coherent reads
 
 `Jarvis Payment Calendar Settings` has a stable random ID and unique Company
@@ -340,7 +448,7 @@ eviction (`expired`). A proof field missing from a present hash is a stored-data
 
 **Logs.** `payment_calendar` logger, no names. At WARNING: `read_refused endpoint=... kind=... side=...`,
 `slow_read endpoint=... ms=... rows=... parties=...` above 300 ms and `part_missing endpoint=... part=...`; at
-ERROR: `worker_unavailable` and `job_lost` (see "Reading the logs"; the production level hides WARNING). Each
+ERROR: `worker_unavailable`, `job_lost` and `speed_fallback` (see "Reading the logs"; the production level hides WARNING). Each
 read-path discard is counted once per snapshot in a 300 s window (`jarvis:pcal:{owner}:refusals`); the third
 different snapshot writes one Error Log row, "Payment Calendar refusal loop", with counts and the check kind
 only. A refusal caused only by the site day changing (`kind=anchor`) discards the snapshot but is not counted.
@@ -412,6 +520,7 @@ them in production. The production signals are the ERROR lines and the Error Log
 | Level | Line | Meaning and first action |
 | --- | --- | --- |
 | ERROR | `worker_unavailable kind=<snapshot\|balances> reason=<class>` | The job could not be put on the `long` queue. `reason` is the exception class, or `not_queued` when the enqueue returned nothing. The user sees `worker_unavailable`. Check Redis and the `long` worker. |
+| ERROR | `speed_fallback method=<name> hash=<sha or none> erpnext=<version>` | The speed override `get_payment_terms` found an ERPNext source that is not pinned and ran upstream instead. Reads stay correct and only slower. Logged once per method per worker process, on v16 only. Run the pin bump procedure in "Speed overrides fall back to upstream, never refuse". `hash=none` means the source could not be read. |
 | ERROR | `job_lost kind=<kind> age_s=<n>` | A queued or running job has no active RQ job (a worker crash, a flushed queue). Logged only when the status row was marked failed. Check the worker log of that time. |
 | WARNING | `read_refused endpoint=<name> kind=<kind> side=<side or ->` | A read refused and discarded a snapshot. `kind`: `scope` (the stored scope no longer holds), `anchor` (the site day changed), `fingerprint` (a permission or setting input changed), `voucher`, `party`, `proof` (a returned row is now hidden or changed), `obligation` (`restricted_obligations`). |
 | WARNING | `slow_read endpoint=<name> ms=<n> rows=<n> parties=<n>` | A read took longer than 300 ms (`read_log.SLOW_MS`). |
@@ -442,7 +551,7 @@ them in production. The production signals are the ERROR lines and the Error Log
 | `source_configuration_unavailable` | A site setting the calendar needs is missing (for example the company currency). |
 | `fiscal_year_unavailable` | No fiscal year covers a balance read. |
 | `multibook_unsupported` | Ledger rows exist in a finance book the calendar cannot combine. |
-| `too_large` | A cap was passed (companies, accounts, rows or invoices; see the cap table). |
+| `too_large` | A cap was passed (companies, accounts, rows or invoices; see the cap table). (v16: also returned for a multi-book company over the row cap.) |
 | `invalid_source_amount` | A source amount is not a valid number. |
 | `reconciliation_mismatch` | The invoice rows and the ledger do not reconcile. |
 | `currency_reconciliation_unavailable` | A foreign-currency invoice cannot be reconciled. |

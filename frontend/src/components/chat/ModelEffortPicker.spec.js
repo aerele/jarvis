@@ -140,8 +140,8 @@ describe("ModelEffortPicker narrow-host geometry", () => {
 	});
 });
 
-// A proxy-only workspace's model cannot think, so the server lists no effort levels
-// (jarvis-admin-v2#648). The picker must not offer a choice the turn would drop.
+// The server lists all effort levels for every route; an empty list (no choice to offer)
+// still hides the row.
 describe("ModelEffortPicker effort row", () => {
 	const effortRow = (w) => w.findAll(".mep-item").filter((b) => b.text().startsWith("Effort"));
 

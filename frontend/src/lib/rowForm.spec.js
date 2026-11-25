@@ -4,6 +4,7 @@ import { buildDraftTable } from "./draftTables";
 import {
 	changeDisplay,
 	ruleHolds,
+	ruleState,
 	rowChangedSet,
 	rowExtraValues,
 	rowFormLayout,
@@ -81,6 +82,23 @@ describe("typedRow", () => {
 		expect(doc.qty).toBe(2.5);
 		expect(typedRow(rowFields(table), row({ is_free_item: "1" })).is_free_item).toBe(1);
 		expect(typedRow(rowFields(table), row({ qty: "" })).qty).toBe(0);
+	});
+});
+
+describe("ruleState", () => {
+	// Break: a rule that cannot be read here (a global that is not there, a form-script rule, a
+	// syntax error) answers false, so the form cannot tell "not required" from "cannot tell"; or
+	// ruleHolds stops returning its own fallback for the same rules.
+	it("is null for a rule it cannot evaluate, while ruleHolds keeps its fallback", () => {
+		const rule = "eval:gst_settings.validate_hsn_code && doc.is_sales_item";
+		expect(ruleState(rule, { is_sales_item: 1 }, {})).toBeNull();
+		expect(ruleState("fn:some_method", {}, {})).toBeNull();
+		expect(ruleState("eval:doc.(", {}, {})).toBeNull();
+		expect(ruleState("eval:doc.qty > 1", { qty: 2 }, {})).toBe(true);
+		expect(ruleState("eval:doc.qty > 1", { qty: 1 }, {})).toBe(false);
+		expect(ruleHolds(rule, {}, {}, false)).toBe(false);
+		expect(ruleHolds(rule, {}, {}, true)).toBe(true);
+		expect(ruleHolds("fn:some_method", {}, {}, false)).toBe(false);
 	});
 });
 

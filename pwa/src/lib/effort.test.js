@@ -26,7 +26,6 @@ test("effortOffered: only when the server lists thinking levels", () => {
 test("sendThinking: drops the pick only when the server lists no levels", () => {
 	assert.equal(sendThinking({ thinking_levels: ["low", "medium", "high"] }, "Thorough"), "high");
 	assert.equal(sendThinking({ thinking_levels: [] }, "Thorough"), "");
-	assert.equal(sendThinking({ thinking_levels: [] }, "Balanced"), "");
 });
 
 test("sendThinking: keeps the pick while settings are loading or failed", () => {

@@ -1,8 +1,7 @@
 // Real executable tests for the shared ```jarvis-ask contract (chatAsk.js), plus
 // source assertions fencing the ONE renderer it feeds. Plain node built-ins
 // (node:test + node:assert), like eventFence.test.js / voiceSendGlue.test.js.
-// Run directly (`node --test chatAsk.test.js`) or via the python suite
-// (jarvis/tests/test_chat_ask_client.py subprocess-runs it every CI run).
+// Run directly (`node --test chatAsk.test.js`) or via `npm run test:node`.
 //
 // What is being defended: the clarifying-question cards used to exist only
 // inside ChatView, and the Dashboards builder pane DELETED the block instead of
@@ -65,6 +64,33 @@ test("boolean is normalised to yesno and an unknown type falls back to single", 
 	// `link` is accepted under either key; only link questions keep a doctype.
 	assert.equal(spec.questions[2].doctype, "Customer");
 	assert.equal(spec.questions[0].doctype, "");
+});
+
+test("object options show their label, else their value, never [object Object] (#837)", () => {
+	const spec = parseAsk(
+		fence(
+			'[{"q":"Where should the remaining 30 minutes go?","type":"single","options":[' +
+				'{"label":"14:00 to 14:30","value":"14:00-14:30"},' +
+				'{"value":"17:00-17:30"},' +
+				'{"title":"Another time you specify"},' +
+				'{"id":7},null,"",42]}]'
+		)
+	);
+	assert.deepEqual(spec.questions[0].options, [
+		"14:00 to 14:30",
+		"17:00-17:30",
+		"Another time you specify",
+		"42",
+	]);
+});
+
+test("scalar options read the same as the Approval Board row (chat_asks.py)", () => {
+	const spec = parseAsk(
+		fence(
+			'[{"q":"Pick","type":"single","options":[true,false,1.0,2.5,{"value":true},{"label":3.0}]}]'
+		)
+	);
+	assert.deepEqual(spec.questions[0].options, ["true", "false", "1", "2.5", "true", "3"]);
 });
 
 test("choice questions with no options are dropped; field types survive without them", () => {
@@ -341,8 +367,8 @@ test("an answered ask stays inert: every control disables on `answered`, not jus
 	const disabledOnAnswered = (askCardSrc.match(/:disabled="answered"/g) || []).length;
 	assert.equal(
 		disabledOnAnswered,
-		9,
-		"yesno + single/multi option buttons, date, datetime, text, select, number, link and Other inputs must all gate on `answered`"
+		8,
+		"yesno + single/multi option buttons, the date/datetime picker (one DateControl, #833), text, select, number, link and Other inputs must all gate on `answered`"
 	);
 });
 

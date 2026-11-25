@@ -1,0 +1,124 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-09-04 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "connector",
+  "user",
+  "action",
+  "status",
+  "error_code",
+  "message",
+  "duration_ms",
+  "run_id",
+  "args_summary",
+  "response_bytes"
+ ],
+ "fields": [
+  {
+   "fieldname": "connector",
+   "fieldtype": "Data",
+   "label": "Connector",
+   "length": 140,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Jarvis Connector docname. Deliberately a Data field, not a Link: deleting a connector must never be blocked by its own audit trail."
+  },
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "label": "User",
+   "options": "User",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "The impersonated caller the tool call ran as (set server-side, never from the client)."
+  },
+  {
+   "fieldname": "action",
+   "fieldtype": "Data",
+   "label": "Action",
+   "length": 140,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "The connector action/tool name that was called."
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Status",
+   "options": "Success\nFailed\nDenied\nBlocked",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "description": "Success: call completed. Failed: the remote gateway returned an error. Denied: the action was not in the allow list or the kill switch was off. Blocked: refused before dispatch (SSRF guard, circuit breaker, concurrency cap)."
+  },
+  {
+   "fieldname": "error_code",
+   "fieldtype": "Data",
+   "label": "Error Code",
+   "length": 64,
+   "in_standard_filter": 1,
+   "description": "Classified code for a non-Success row (timeout / denied / blocked_ssrf / circuit_open / provider_error / ...)."
+  },
+  {
+   "fieldname": "message",
+   "fieldtype": "Small Text",
+   "label": "Message",
+   "description": "Short, bounded outcome message. Never the raw response body."
+  },
+  {
+   "fieldname": "duration_ms",
+   "fieldtype": "Int",
+   "label": "Duration (ms)",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "run_id",
+   "fieldtype": "Data",
+   "label": "Run ID",
+   "length": 140,
+   "in_standard_filter": 1,
+   "description": "The chat run id this call happened under, for correlation with the conversation."
+  },
+  {
+   "fieldname": "args_summary",
+   "fieldtype": "Small Text",
+   "label": "Args Summary",
+   "description": "Truncated, redacted summary of the call arguments. Never the raw args - secrets and long values are stripped before this is written."
+  },
+  {
+   "fieldname": "response_bytes",
+   "fieldtype": "Int",
+   "label": "Response Bytes",
+   "description": "Size of the raw response the gateway returned, for spotting oversized payloads without storing them."
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-04 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Connector Log",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "write": 1,
+   "delete": 1,
+   "role": "System Manager"
+  },
+  {
+   "read": 1,
+   "role": "Jarvis Admin"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

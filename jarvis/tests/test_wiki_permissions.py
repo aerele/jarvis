@@ -482,3 +482,36 @@ class TestWriteMatrix(WikiPermTestCase):
 		# ignore_permissions.
 		self.assertFalse(bool(frappe.has_permission(WIKI, ptype="write", doc=my_doc, user=USER_KW)))
 		self.assertTrue(bool(frappe.has_permission(WIKI, ptype="write", doc=my_doc, user=USER_SM)))
+
+
+class TestJarvisRolePredicates(FrappeTestCase):
+	"""#800: the Jarvis-namespace rule behind the promotion picker and its server refusal."""
+
+	def test_is_jarvis_app_role(self):
+		for role, expected in (
+			(None, False),
+			("", False),
+			("Jarvis", True),
+			("Jarvisx", False),
+			("Jarvis Support", True),
+			("JARVIS user", True),
+			("  jarvis admin ", True),
+			("Sales User", False),
+		):
+			with self.subTest(role=role):
+				self.assertIs(wiki_permissions.is_jarvis_app_role(role), expected)
+
+	def test_is_promotion_target_role(self):
+		for role, expected in (
+			(None, False),
+			("", False),
+			("Jarvis", False),
+			("Jarvisx", True),
+			("Jarvis Support", False),
+			("JARVIS user", False),
+			("Desk User", False),
+			("System Manager", False),
+			("Sales User", True),
+		):
+			with self.subTest(role=role):
+				self.assertIs(wiki_permissions.is_promotion_target_role(role), expected)

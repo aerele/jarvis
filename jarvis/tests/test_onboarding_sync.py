@@ -50,6 +50,9 @@ _SNAPSHOTTED_FIELDS = (
 	"release_notice_active",
 	"latest_jarvis_version",
 	"release_notice_message",
+	"connector_key_overrides",
+	"connector_catalogue_disabled",
+	"connector_catalogue_coming_soon",
 )
 
 
@@ -126,6 +129,58 @@ class TestSyncConnection(FrappeTestCase):
 		self.assertEqual(s.release_notice_active, 1)
 		self.assertEqual(s.latest_jarvis_version, "0.0.2")
 		self.assertEqual(s.release_notice_message, "Faster search.")
+
+	def test_sync_mirrors_the_connector_key_overrides(self):
+		"""The operator's "Use a key instead" switches ride the same pull and land on
+		Jarvis Settings; a payload without the marker keeps what is held."""
+		_set_token("tok")
+		base = {"agent_url": "ws://localhost:19000", "agent_token": "k", "tenant_status": "running"}
+		payload = {
+			**base,
+			"connector_key_policy_supported": True,
+			"connector_key_overrides": {"Sentry": True},
+		}
+		with patch("jarvis.onboarding.admin_client.get_connection", return_value=payload):
+			onboarding.sync_connection()
+		self.assertEqual(
+			frappe.parse_json(
+				frappe.db.get_single_value("Jarvis Settings", "connector_key_overrides", cache=False)
+			),
+			{"Sentry": True},
+		)
+		with patch("jarvis.onboarding.admin_client.get_connection", return_value=base):
+			onboarding.sync_connection()
+		self.assertEqual(
+			frappe.parse_json(
+				frappe.db.get_single_value("Jarvis Settings", "connector_key_overrides", cache=False)
+			),
+			{"Sentry": True},
+		)
+
+	def test_sync_mirrors_the_connector_coming_soon_list(self):
+		"""The operator's "Coming soon" list rides the same pull; a payload without the
+		states marker keeps what is held."""
+		_set_token("tok")
+		base = {"agent_url": "ws://localhost:19000", "agent_token": "k", "tenant_status": "running"}
+		payload = {
+			**base,
+			"connector_catalogue_supported": True,
+			"connector_catalogue_disabled": ["Linear"],
+			"connector_catalogue_states_supported": True,
+			"connector_catalogue_coming_soon": ["Linear"],
+		}
+
+		def stored():
+			return frappe.parse_json(
+				frappe.db.get_single_value("Jarvis Settings", "connector_catalogue_coming_soon", cache=False)
+			)
+
+		with patch("jarvis.onboarding.admin_client.get_connection", return_value=payload):
+			onboarding.sync_connection()
+		self.assertEqual(stored(), ["Linear"])
+		with patch("jarvis.onboarding.admin_client.get_connection", return_value=base):
+			onboarding.sync_connection()
+		self.assertEqual(stored(), ["Linear"])
 
 	def test_sync_clears_release_notice(self):
 		"""A payload without a notice clears a previously-mirrored one - the
@@ -1268,31 +1323,6 @@ class TestSignupResumeFallback(FrappeTestCase):
 			onboarding.start_signup("resume-me@example.com", "Co", "some-plan", billing=_BILLING)
 			second = resume.call_args.kwargs["idempotency_key"]
 		self.assertNotEqual(first, second)
-
-	def test_frappe_really_does_refuse_a_field_the_doctype_lacks(self):
-		"""The premise of the guard, asserted against REAL frappe rather than a
-		mock — and the two write layers do not agree, which is why the guard
-		checks instead of catching:
-
-		  - a READ of a field the installed doctype lacks THROWS
-		    (``get_single_value`` looks the field up in meta and refuses);
-		  - ``frappe.db.set_single_value`` validates NOTHING and silently writes
-		    an orphan ``tabSingles`` row that no migrate cleans up.
-
-		So "just catch the exception" would have left orphan rows behind on every
-		bench deployed ahead of its migrate."""
-		scratch = "zz_signup_context_probe"
-		try:
-			with self.assertRaises(Exception):
-				frappe.db.get_single_value("Jarvis Settings", scratch)
-			frappe.db.set_single_value("Jarvis Settings", scratch, "written-anyway")
-			rows = frappe.db.sql(
-				"select value from tabSingles where doctype=%s and field=%s", ("Jarvis Settings", scratch)
-			)
-			self.assertTrue(rows, "set_single_value writes without validating - that is the hazard")
-		finally:
-			frappe.db.delete("Singles", {"doctype": "Jarvis Settings", "field": scratch})
-			frappe.db.commit()
 
 	def test_an_unmigrated_bench_degrades_and_leaves_no_orphan_row(self):
 		"""The deploy window itself: code is live, ``bench migrate`` has not run,

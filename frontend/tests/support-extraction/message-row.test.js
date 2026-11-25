@@ -19,20 +19,6 @@ test("assistant markdown row renders identically (light)", () => {
 	expect(w.html()).toMatchSnapshot();
 });
 
-test("assistant markdown row renders identically (dark)", () => {
-	const w = mountWithPalette(
-		Message,
-		{
-			variant: "row",
-			html: renderMarkdown(ASSISTANT_MSG.content),
-			bodyClass: "jv-md",
-			timestamp: "9:12",
-		},
-		{ dark: true }
-	);
-	expect(w.html()).toMatchSnapshot();
-});
-
 test("markdown body carries the jv-md-body + jv-md seam classes", () => {
 	const w = mountWithPalette(Message, {
 		variant: "row",

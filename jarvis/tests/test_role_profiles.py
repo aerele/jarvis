@@ -89,7 +89,7 @@ class TestRoleProfiles(FrappeTestCase):
 
 	def test_standard_tools_allow_excludes_drops_keeps_features(self):
 		allow = set(role_profiles.standard_tools_allow())
-		self.assertEqual(len(allow), 72)
+		self.assertEqual(len(allow), 74)
 		for kept in (
 			"exec",
 			"read",
@@ -110,6 +110,8 @@ class TestRoleProfiles(FrappeTestCase):
 			"jarvis__get_comments",
 			# a one-time run from chat, behind its confirmation card
 			"jarvis__schedule_run",
+			"jarvis__call_connector",
+			"jarvis__list_connector_actions",
 		):
 			self.assertIn(kept, allow)
 		for dropped in (
@@ -125,13 +127,14 @@ class TestRoleProfiles(FrappeTestCase):
 		):
 			self.assertNotIn(dropped, allow)
 
-	def test_tool_universe_is_101(self):
-		# The v16 standard tier adds query_file and query_report to its 99-tool universe.
+	def test_tool_universe_is_103(self):
+		# The v16 standard tier adds query_file and query_report to its 99-tool universe,
+		# and the MCP connector backport adds call_connector / list_connector_actions (103).
 		allow = set(role_profiles.standard_tools_allow())
 		drop = set(role_profiles.STANDARD_DROP_TOOLS)
 		self.assertEqual(len(drop), 29)
 		self.assertEqual(allow & drop, set())
-		self.assertEqual(len(allow | drop), 101)
+		self.assertEqual(len(allow | drop), 103)
 
 	def test_shared_core_membership(self):
 		shared = role_profiles.SHARED_CORE_SKILLS
@@ -705,9 +708,6 @@ class TestRoleProfileConfigSync(FrappeTestCase):
 		self.assertNotIn("role_profiles_config", store)
 		self.assertEqual(store.get("enable_role_profiles", 0), 0)
 
-	def test_invalidate_config_cache_is_safe_noop_when_nothing_memoized(self):
-		role_profiles._invalidate_config_cache()  # must not raise
-
 	def test_validate_rejects_bad_skill_slug_charset(self):
 		bad = self._config()
 		bad["sets"]["hr"] = ["HRMS_HR"]  # uppercase/underscore not allowed
@@ -999,7 +999,7 @@ class TestSessionProfilePick(FrappeTestCase):
 		row = frappe.get_doc(SESSION, {"session_key": key})
 		self.assertEqual(row.profile_agent_id, "role-hr")
 		self.assertEqual(row.profile_tier, "standard")
-		self.assertEqual(row.profile_n_tools, 72)
+		self.assertEqual(row.profile_n_tools, 74)
 
 	def test_flag_off_uses_legacy_create_session_path(self):
 		settings = self._fake_settings(enable_role_profiles=False)

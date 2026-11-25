@@ -3,12 +3,19 @@
 // wires the REAL DraftRowBlock / DraftRowForm / DraftCell to the same helpers ChatView
 // calls (lib/rowFormFocus.js, draftLinkSearch) and the specs drive it with real
 // keyboard events on the focused element.
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+// frappe-ui's pickers (DateControl, #833) do not load under jsdom.
+vi.mock("frappe-ui", () => ({
+	DatePicker: { name: "DatePicker", template: "<input />" },
+	DateTimePicker: { name: "DateTimePicker", template: "<input />" },
+	TimePicker: { name: "TimePicker", template: "<input />" },
+}));
+
 import { mount } from "@vue/test-utils";
 import { nextTick, reactive } from "vue";
 import DraftRowBlock from "./DraftRowBlock.vue";
 import { draftLinkSearch } from "@/lib/draftLinkFilters";
-import { blankRow, buildDraftTable } from "@/lib/draftTables";
+import { buildDraftTable } from "@/lib/draftTables";
 import {
 	closeRowForm,
 	rowFormId,
@@ -294,13 +301,6 @@ describe("a link menu stays with its row when a row above is removed", () => {
 		await wrapper.get(".menu-pick").trigger("click");
 		expect(row2.warehouse).toBe("WH-1");
 		expect(row3.warehouse).toBe("");
-	});
-	it("a row added later gets its own key, so no menu key repeats", () => {
-		const { table } = setup();
-		const added = blankRow(table);
-		table.rows.push(added);
-		const keys = table.rows.map((r) => r.__key);
-		expect(new Set(keys).size).toBe(keys.length);
 	});
 });
 

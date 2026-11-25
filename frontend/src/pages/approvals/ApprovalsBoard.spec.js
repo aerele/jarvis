@@ -324,7 +324,8 @@ describe("ApprovalsBoard one inbox", () => {
 				"w-full",
 				"max-h-[30vh]",
 				"border-b",
-				"lg:w-[360px]",
+				"lg:w-[var(--approvals-rail-w)]",
+				"lg:max-w-[60%]",
 				"lg:max-h-none",
 				"lg:border-b-0",
 				"lg:border-r",
@@ -1184,6 +1185,305 @@ describe("ApprovalsBoard one inbox", () => {
 			state.reports = [report()];
 			w = await board({ status: "Decided" });
 			expect(reports(w).exists()).toBe(false);
+		});
+	});
+
+	describe("resizable rail", () => {
+		const KEY = "jarvis-approvals-rail-width:me@example.com";
+		const sep = (w) => w.get('[data-testid="approvals-rail-resizer"]');
+		const railW = (w) => rail(w).element.style.getPropertyValue("--approvals-rail-w");
+		const valueNow = (w) => Number(sep(w).attributes("aria-valuenow"));
+		const press = (w, key) => sep(w).trigger("keydown", { key });
+		let matches;
+		beforeEach(() => {
+			localStorage.clear();
+			matches = true;
+			// jsdom has no layout: a 1200px board, so the max is min(640, 720) = 640
+			vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(1200);
+			window.matchMedia = vi.fn(() => ({
+				matches,
+				addEventListener() {},
+				removeEventListener() {},
+			}));
+		});
+		afterEach(() => {
+			vi.restoreAllMocks();
+			delete window.matchMedia;
+			localStorage.clear();
+		});
+
+		it("renders an accessible vertical separator that is hidden below lg", async () => {
+			const w = await board();
+			const s = sep(w);
+			expect(s.attributes()).toMatchObject({
+				role: "separator",
+				"aria-orientation": "vertical",
+				"aria-label": "Resize list",
+				tabindex: "0",
+				"aria-valuemin": "260",
+				"aria-valuemax": "640",
+				"aria-valuenow": "360",
+			});
+			expect(s.classes()).toEqual(expect.arrayContaining(["hidden", "lg:block"]));
+			expect(railW(w)).toBe("360px");
+			// DOM order: rail, separator, detail pane
+			const split = w.get('[data-testid="approvals-split-view"]').element;
+			expect([...split.children].indexOf(s.element)).toBe(1);
+		});
+
+		it("arrow keys step by 16px and Home/End jump to the clamps", async () => {
+			const w = await board();
+			await press(w, "ArrowRight");
+			expect(valueNow(w)).toBe(376);
+			expect(railW(w)).toBe("376px");
+			await press(w, "ArrowLeft");
+			await press(w, "ArrowLeft");
+			expect(valueNow(w)).toBe(344);
+			await press(w, "Home");
+			expect(valueNow(w)).toBe(260);
+			await press(w, "ArrowLeft");
+			expect(valueNow(w)).toBe(260);
+			await press(w, "End");
+			expect(valueNow(w)).toBe(640);
+			await press(w, "ArrowRight");
+			expect(valueNow(w)).toBe(640);
+			await press(w, "a");
+			expect(valueNow(w)).toBe(640);
+		});
+
+		it("caps the max at 60% of a narrower board", async () => {
+			vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(800);
+			const w = await board();
+			await press(w, "End");
+			expect(valueNow(w)).toBe(480);
+			expect(sep(w).attributes("aria-valuemax")).toBe("480");
+		});
+
+		it("drags with pointer events and capture, clamped, persisting on release", async () => {
+			const w = await board();
+			const s = sep(w);
+			const capture = vi.fn();
+			const release = vi.fn();
+			s.element.setPointerCapture = capture;
+			s.element.releasePointerCapture = release;
+			await s.trigger("pointerdown", { clientX: 360, pointerId: 7, button: 0 });
+			expect(capture).toHaveBeenCalledWith(7);
+			await s.trigger("pointermove", { clientX: 460 });
+			expect(valueNow(w)).toBe(460);
+			await s.trigger("pointermove", { clientX: 5000 });
+			expect(valueNow(w)).toBe(640);
+			await s.trigger("pointermove", { clientX: -5000 });
+			expect(valueNow(w)).toBe(260);
+			await s.trigger("pointermove", { clientX: 420 });
+			expect(localStorage.getItem(KEY)).toBeNull(); // not until release
+			await s.trigger("pointerup", { pointerId: 7 });
+			expect(release).toHaveBeenCalledWith(7);
+			expect(localStorage.getItem(KEY)).toBe("420");
+			// moves after release do nothing
+			await s.trigger("pointermove", { clientX: 600 });
+			expect(valueNow(w)).toBe(420);
+		});
+
+		it("persists keyboard changes per user and restores them on the next mount", async () => {
+			let w = await board();
+			await press(w, "ArrowRight");
+			expect(localStorage.getItem(KEY)).toBe("376");
+			w.unmount();
+			mounted = [];
+			w = await board();
+			expect(valueNow(w)).toBe(376);
+			expect(railW(w)).toBe("376px");
+		});
+
+		it("falls back to the default on a corrupt stored value", async () => {
+			for (const bad of ["abc", "", "-40", "0", "Infinity", "NaN"]) {
+				localStorage.setItem(KEY, bad);
+				const w = await board();
+				expect(valueNow(w)).toBe(360);
+				w.unmount();
+				mounted = [];
+			}
+		});
+
+		it("clamps an out-of-range stored width", async () => {
+			localStorage.setItem(KEY, "9000");
+			let w = await board();
+			expect(valueNow(w)).toBe(640);
+			w.unmount();
+			mounted = [];
+			localStorage.setItem(KEY, "40");
+			w = await board();
+			expect(valueNow(w)).toBe(260);
+		});
+
+		it("keeps working when localStorage throws", async () => {
+			vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+				throw new Error("blocked");
+			});
+			vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+				throw new Error("blocked");
+			});
+			const w = await board();
+			expect(valueNow(w)).toBe(360);
+			await press(w, "ArrowRight");
+			expect(valueNow(w)).toBe(376);
+		});
+
+		it("double-click resets to the default and forgets the stored width", async () => {
+			const w = await board();
+			await press(w, "End");
+			expect(localStorage.getItem(KEY)).toBe("640");
+			await sep(w).trigger("dblclick");
+			expect(valueNow(w)).toBe(360);
+			expect(railW(w)).toBe("360px");
+			expect(localStorage.getItem(KEY)).toBeNull();
+		});
+
+		const bodyDragging = () =>
+			document.body.classList.contains("select-none") &&
+			document.body.classList.contains("cursor-col-resize");
+		const bodyClean = () =>
+			!document.body.classList.contains("select-none") &&
+			!document.body.classList.contains("cursor-col-resize");
+		const startDrag = (w) =>
+			sep(w).trigger("pointerdown", { clientX: 360, pointerId: 3, button: 0 });
+		const setHost = (px) =>
+			vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(px);
+
+		it("adds the body classes on drag start and removes them on pointerup", async () => {
+			const w = await board();
+			expect(bodyClean()).toBe(true);
+			await startDrag(w);
+			expect(bodyDragging()).toBe(true);
+			await sep(w).trigger("pointerup", { pointerId: 3 });
+			expect(bodyClean()).toBe(true);
+		});
+
+		it.each(["pointercancel", "lostpointercapture"])(
+			"%s ends the drag: body classes cleared, later moves ignored, width persisted",
+			async (type) => {
+				const w = await board();
+				await startDrag(w);
+				await sep(w).trigger("pointermove", { clientX: 440 });
+				expect(valueNow(w)).toBe(440);
+				await sep(w).trigger(type, { pointerId: 3 });
+				expect(bodyClean()).toBe(true);
+				expect(localStorage.getItem(KEY)).toBe("440");
+				await sep(w).trigger("pointermove", { clientX: 600 });
+				expect(valueNow(w)).toBe(440);
+			}
+		);
+
+		it("a throwing setPointerCapture never leaves the drag stuck", async () => {
+			const w = await board();
+			sep(w).element.setPointerCapture = () => {
+				throw new DOMException("stale pointer", "NotFoundError");
+			};
+			await startDrag(w);
+			// the drag still runs, and ends cleanly
+			await sep(w).trigger("pointermove", { clientX: 420 });
+			expect(valueNow(w)).toBe(420);
+			await sep(w).trigger("pointerup", { pointerId: 3 });
+			expect(bodyClean()).toBe(true);
+			await sep(w).trigger("pointermove", { clientX: 500 });
+			expect(valueNow(w)).toBe(420);
+		});
+
+		it("exposes aria-valuetext in pixels", async () => {
+			const w = await board();
+			expect(sep(w).attributes("aria-valuetext")).toBe("360 pixels");
+			await press(w, "ArrowRight");
+			expect(sep(w).attributes("aria-valuetext")).toBe("376 pixels");
+		});
+
+		it("without ResizeObserver, a window resize re-measures and re-clamps", async () => {
+			const w = await board();
+			await press(w, "End");
+			expect(valueNow(w)).toBe(640);
+			setHost(800);
+			window.dispatchEvent(new Event("resize"));
+			await flushPromises();
+			expect(sep(w).attributes("aria-valuemax")).toBe("480");
+			expect(valueNow(w)).toBe(480);
+			expect(railW(w)).toBe("480px");
+			// the preference survives: the board growing back restores it
+			setHost(1200);
+			window.dispatchEvent(new Event("resize"));
+			await flushPromises();
+			expect(valueNow(w)).toBe(640);
+		});
+
+		it("without ResizeObserver, unmounting removes the window listener", async () => {
+			const add = vi.spyOn(window, "addEventListener");
+			const remove = vi.spyOn(window, "removeEventListener");
+			const w = await board();
+			expect(add.mock.calls.filter(([t]) => t === "resize")).toHaveLength(1);
+			w.unmount();
+			mounted = [];
+			expect(remove.mock.calls.filter(([t]) => t === "resize")).toHaveLength(1);
+		});
+
+		describe("with ResizeObserver", () => {
+			let observers;
+			beforeEach(() => {
+				observers = [];
+				globalThis.ResizeObserver = class {
+					constructor(cb) {
+						this.cb = cb;
+						this.observe = vi.fn();
+						this.disconnect = vi.fn();
+						observers.push(this);
+					}
+				};
+			});
+			afterEach(() => delete globalThis.ResizeObserver);
+
+			it("observes the board, re-clamps when it shrinks, and disconnects on unmount", async () => {
+				const add = vi.spyOn(window, "addEventListener");
+				const w = await board();
+				expect(observers).toHaveLength(1);
+				const split = w.get('[data-testid="approvals-split-view"]').element;
+				expect(observers[0].observe).toHaveBeenCalledWith(split);
+				// the observer replaces the window listener
+				expect(add.mock.calls.filter(([t]) => t === "resize")).toHaveLength(0);
+				await press(w, "End");
+				expect(valueNow(w)).toBe(640);
+				// the sidebar expands: the board narrows without any window resize
+				setHost(700);
+				observers[0].cb();
+				await flushPromises();
+				expect(sep(w).attributes("aria-valuemax")).toBe("420");
+				expect(valueNow(w)).toBe(420);
+				expect(sep(w).attributes("aria-valuetext")).toBe("420 pixels");
+				w.unmount();
+				mounted = [];
+				expect(observers[0].disconnect).toHaveBeenCalledOnce();
+			});
+		});
+
+		it("ends an active drag when the layout flips to stacked", async () => {
+			const w = await board();
+			await startDrag(w);
+			expect(bodyDragging()).toBe(true);
+			matches = false;
+			window.dispatchEvent(new Event("resize"));
+			await flushPromises();
+			expect(bodyClean()).toBe(true);
+			await sep(w).trigger("pointermove", { clientX: 500 });
+			expect(valueNow(w)).toBe(360);
+		});
+
+		it("is inert below lg: keys, drag and double-click change nothing", async () => {
+			matches = false;
+			const w = await board();
+			await press(w, "ArrowRight");
+			await press(w, "End");
+			expect(valueNow(w)).toBe(360);
+			await sep(w).trigger("pointerdown", { clientX: 360, pointerId: 1, button: 0 });
+			await sep(w).trigger("pointermove", { clientX: 500 });
+			expect(valueNow(w)).toBe(360);
+			expect(document.body.classList.contains("select-none")).toBe(false);
+			expect(localStorage.getItem(KEY)).toBeNull();
 		});
 	});
 });
