@@ -107,6 +107,9 @@ _RELEASE = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del
 # The modules whose code decides a figure the reader returns (the reader, the rules it applies, the source it
 # must equal, and today's reconciliation). A change to any of them is a new build for the shadow gate.
 FIGURE_MODULES = (
+	"batch_permission",
+	"batch_permission_eval",
+	"batch_permission_plan",
 	"books",
 	"builtin_reader",
 	"compatibility",
