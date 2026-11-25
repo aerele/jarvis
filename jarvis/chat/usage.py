@@ -292,6 +292,17 @@ def resolved_model_identity(row: dict | None) -> tuple[str, str]:
 	reading it costs nothing extra: finalize already polls it for usage."""
 	if not isinstance(row, dict):
 		return "", ""
+	# Runtime 2026.11: ``model`` / ``modelProvider`` are the SELECTED model (a pinned conversation's
+	# override), also when that candidate failed and the gateway fell back to another member. While a
+	# fallback is active the row carries who really answers in ``activeModel`` (the model id) and
+	# ``activeModelProvider`` (verified in the 2026.11.7 session-row builder; absent on older runtimes,
+	# on a run the selected model answered, and once a recovered model's notice is cleared). The
+	# transcript and the usage bucket must name the model that answered, never the one that was asked.
+	active_model = row.get("activeModel")
+	active_provider = row.get("activeModelProvider")
+	if isinstance(active_model, str) and active_model.strip() and isinstance(active_provider, str):
+		if active_provider.strip():
+			return active_model.strip(), provider_from_gateway(active_provider.strip())
 	# The gateway names a few providers differently on agent runtime 2026.11 (moonshot_api);
 	# the rest of the app, and admin, know the plain id.
 	return (row.get("model") or "").strip(), provider_from_gateway((row.get("modelProvider") or "").strip())
