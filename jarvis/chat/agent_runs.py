@@ -872,17 +872,37 @@ _REASON_PLACEHOLDER = {
 }
 
 
+# Words that make a ``detail`` a sentence rather than the short subject a template slot
+# expects ("Stock Settings", "erpnext"). Evaluators send both.
+_SENTENCE_WORDS = frozenset(
+	("is", "are", "was", "were", "has", "have", "had", "did", "does", "do", "not", "no", "cannot", "could")
+)
+
+
+def _is_subject(detail: str) -> bool:
+	words = detail.rstrip(".").split()
+	return 0 < len(words) <= 4 and not any(w.lower() in _SENTENCE_WORDS for w in words)
+
+
 def _remediation_text(reason_code: str, detail: str = "") -> str:
 	"""Customer-facing PP-3 remediation for a reason code, with its ``{...}``
 	placeholder filled from the typed manifest ``detail`` (a neutral noun when the
 	evaluator supplied none) so a literal ``{app}`` / ``{setting}`` brace NEVER
-	reaches the customer. Reason codes without a placeholder pass straight through."""
+	reaches the customer. Reason codes without a placeholder pass straight through.
+
+	A ``detail`` that is a whole sentence ("The evaluator scope did not match ...")
+	is not spliced into the slot, which read "A customisation on The evaluator scope
+	... is not supported by this check": the slot takes the neutral noun and the
+	sentence follows on its own."""
 	slot = _REASON_PLACEHOLDER.get(reason_code)
 	if not slot:
 		return cr.remediation_for(reason_code)
 	key, default = slot
-	subject = (detail or "").strip() or default
-	return cr.remediation_for(reason_code, **{key: subject})
+	detail = (detail or "").strip()
+	if not detail or _is_subject(detail):
+		return cr.remediation_for(reason_code, **{key: detail or default})
+	sentence = detail if detail.endswith((".", "!", "?")) else detail + "."
+	return f"{cr.remediation_for(reason_code, **{key: default})} {sentence}"
 
 
 def _parse_token_json(raw) -> set:
