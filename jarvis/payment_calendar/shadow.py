@@ -296,7 +296,7 @@ def _finish(digest: str, night: str, field: str, record: dict) -> None:
 	except Exception:
 		# The record is stored; a failed row (a database blip) must not skip the commit or the next unit.
 		frappe.logger("payment_calendar").warning("shadow_row_unavailable")
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- a background job, outside any request; one commit per unit
 
 
 def _write_unit_row(digest: str, night: str, field: str, record: dict) -> None:
@@ -322,13 +322,13 @@ def _unit_row(title: str, operation: str, klass: str, field: str, record: dict, 
 def _measure(company: str, side: str, scope_key: str) -> dict:
 	"""Both reads of one unit in one view, as Administrator; the record of what they showed."""
 	original_user = frappe.session.user
-	frappe.set_user("Administrator")
+	frappe.set_user("Administrator")  # nosemgrep: frappe-setuser -- the audited impersonation seam
 	try:
 		scope = _scope(company, scope_key)
 		args = (company, side, scope["anchor"], scope["window_start"], scope["window_end"])
 		return _read_both(args)
 	finally:
-		frappe.set_user(original_user)
+		frappe.set_user(original_user)  # nosemgrep: frappe-setuser -- restores the caller
 
 
 def _scope(company: str, scope_key: str) -> dict:
@@ -417,7 +417,7 @@ def _error_record(error: BaseException) -> dict:
 
 
 def _rss_mb() -> float:
-	with open("/proc/self/statm") as statm:
+	with open("/proc/self/statm") as statm:  # nosemgrep: frappe-security-file-traversal -- constant path
 		return int(statm.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
 
 

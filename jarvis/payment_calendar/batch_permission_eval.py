@@ -280,7 +280,7 @@ class _Run:
 	# differently) goes to the per-document path.
 	def _parent_rows(self, chunk: list[str]) -> dict[str, dict]:
 		columns = ", ".join(f"`{name}`" for name in self.columns)
-		rows = frappe.db.sql(
+		rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection -- table and column names of the doctype layout; the names are bound
 			f"SELECT {columns} FROM {self.layout.quoted} WHERE `name` IN %(names)s",
 			{"names": tuple(chunk)},
 			as_dict=True,

@@ -600,6 +600,7 @@ class _SourceIndex:
 
 	@classmethod
 	def parse(cls, path: str) -> "_SourceIndex":
+		# nosemgrep: frappe-security-file-traversal -- the `__file__` of installed code, never input
 		with open(path, encoding="utf-8") as handle:
 			text = handle.read()
 		lines = text.split("\n")

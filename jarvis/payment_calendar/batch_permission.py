@@ -800,7 +800,7 @@ def _plans_for(user: str) -> dict[str, dict]:
 	plans = {}
 	with _quiet_events():
 		try:
-			frappe.set_user(user)
+			frappe.set_user(user)  # nosemgrep: frappe-setuser -- operator `status`; restored in finally
 			setattr(frappe.local, PLAN_MEMO, None)
 			for doctype in EXPECT_BATCH:
 				plan = batch_plan(
@@ -808,7 +808,7 @@ def _plans_for(user: str) -> dict[str, dict]:
 				)  # a doctype that cannot be planned is the per-document plan `plan_error`
 				plans[doctype] = {"mode": plan.mode, "reason": plan.reason}
 		finally:
-			frappe.set_user(original)
+			frappe.set_user(original)  # nosemgrep: frappe-setuser -- restores the caller
 			setattr(frappe.local, PLAN_MEMO, None)
 	return plans
 
@@ -913,7 +913,7 @@ def differential(
 				):
 					out["not_done"].append(label)
 	finally:
-		frappe.set_user(original)
+		frappe.set_user(original)  # nosemgrep: frappe-setuser -- restores the caller
 		setattr(frappe.local, PLAN_MEMO, None)
 		_rollback_quietly()
 	out["plan_events"] = plan_events
@@ -964,7 +964,7 @@ def _gate_not_exercised(out: dict, expect_batch) -> None:
 
 def _differential_user(user: str, label: str, supplied: dict, expect_batch, out: dict, over_the_box) -> bool:
 	"""Run the doctypes of one user; False when the time box ended before the last one."""
-	frappe.set_user(user)
+	frappe.set_user(user)  # nosemgrep: frappe-setuser -- the caller restores it in finally
 	setattr(frappe.local, PLAN_MEMO, None)
 	rows = out["users"][label] = {}
 	for position, doctype in enumerate(expect_batch):

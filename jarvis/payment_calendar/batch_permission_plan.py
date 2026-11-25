@@ -99,7 +99,9 @@ def has_restricted_row(master: str) -> bool:
 	"""
 	found = _fact(_RESTRICTED)
 	if master not in found:
-		rows = frappe.db.sql(f"SELECT 1 FROM {_quoted(master)} WHERE `restrict_to_companies` = 1 LIMIT 1")
+		rows = frappe.db.sql(  # nosemgrep: frappe-sql-format-injection -- only the quoted table name of a Link target doctype; no value
+			f"SELECT 1 FROM {_quoted(master)} WHERE `restrict_to_companies` = 1 LIMIT 1"
+		)
 		found[master] = bool(rows)
 	return found[master]
 
