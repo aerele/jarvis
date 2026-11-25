@@ -112,6 +112,11 @@ CONNECT_TIMEOUT_SECONDS = 10
 # with headroom and sits well inside the turn's prepare deadline (turn_state.PREPARE_DEADLINE_S = 300;
 # the session is created after the prepare claim). Every other request keeps CONNECT_TIMEOUT_SECONDS.
 SESSION_CREATE_TIMEOUT_SECONDS = 45
+# sessions.patch (the per-conversation model pin, and the reset of a builder chat's session)
+# answered in 6-16 s on a loaded 2026.11 gateway with delegates installed, so the shared 10 s
+# budget failed the turn with "sessions.patch timed out" before it started. Same reasoning as
+# SESSION_CREATE_TIMEOUT_SECONDS, and still well inside the prepare deadline.
+SESSION_PATCH_TIMEOUT_SECONDS = 30
 
 # The 2026.10.x agent runtime answers ``UNAVAILABLE`` ("Agent main has not completed startup inspection and
 # preparation", "The model catalog is still loading") for ~40 s after a restart, even after
@@ -1485,7 +1490,7 @@ class AgentSession:
 		session_key: str,
 		model_ref: str | None,
 		*,
-		timeout_s: float = CONNECT_TIMEOUT_SECONDS,
+		timeout_s: float = SESSION_PATCH_TIMEOUT_SECONDS,
 	) -> None:
 		"""Point the session at ``model_ref`` (``"<provider>/<model>"`` or
 		bare ``"<model>"``) via ``sessions.patch``. chat.send has no per-turn

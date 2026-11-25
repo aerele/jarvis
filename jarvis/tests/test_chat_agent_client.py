@@ -303,6 +303,24 @@ class TestCreateSession(FrappeTestCase):
 			[("sessions.create", agent_client.SESSION_CREATE_TIMEOUT_SECONDS)] * 2,
 		)
 
+	def test_session_model_patch_uses_its_own_budget(self):
+		# A loaded 2026.11 gateway answered sessions.patch in 6-16 s: the 10 s connect budget
+		# failed builder turns before they started.
+		from jarvis.chat import agent_client
+
+		self.assertGreater(agent_client.SESSION_PATCH_TIMEOUT_SECONDS, 16)
+		self.assertLess(agent_client.SESSION_PATCH_TIMEOUT_SECONDS, _prepare_deadline())
+		sess, _ws = _build_session()
+		seen = []
+
+		def fake_request(method, params, timeout_s=None):
+			seen.append((method, timeout_s))
+			return {}
+
+		with patch.object(sess, "_request", side_effect=fake_request):
+			sess.set_session_model("k", "openai/gpt-x")
+		self.assertEqual(seen, [("sessions.patch", agent_client.SESSION_PATCH_TIMEOUT_SECONDS)])
+
 	def test_rejection_raises(self):
 		sess, ws = _build_session()
 
