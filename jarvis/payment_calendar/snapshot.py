@@ -1,17 +1,19 @@
 """Worker-only coherent primary-database reads, with scoped cache bypasses."""
 
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from datetime import date as Date
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 
 import frappe
 
+from jarvis.payment_calendar import read_log, routing
 from jarvis.payment_calendar import sources as obligation_sources
 from jarvis.payment_calendar.access import authorize_scope
 from jarvis.payment_calendar.banks import read_bank_balances
 from jarvis.payment_calendar.compatibility import source_profile
-from jarvis.payment_calendar.errors import CalendarSourceUnavailable
+from jarvis.payment_calendar.errors import TIMEOUTS, CalendarSourceUnavailable
 from jarvis.payment_calendar.projection import horizon_summary, project_snapshot
 from jarvis.payment_calendar.sources import read_obligations
 from jarvis.payment_calendar.store import RESULT_SCHEMA
@@ -19,6 +21,11 @@ from jarvis.payment_calendar.store import RESULT_SCHEMA
 # `store.RESULT_SCHEMA` is stamped on every result; `store.split_result` refuses a result without it at
 # publish, and no reader accepts another shape. `horizon` is always stored, null only without `with_horizon`.
 HORIZON_DAYS = 30
+_VIEW_BROKEN = ContextVar("payment_calendar_view_broken", default=False)
+# Set for the whole body of `consistent_read`. Code that must tell whether a snapshot view is open asks
+# `view_is_open`; it never reads the attributes of `frappe.db`, which other code leaves behind (a preview
+# sandbox puts `commit` and `rollback` on it for good).
+_VIEW_OPEN = ContextVar("payment_calendar_view_open", default=False)
 
 
 @contextmanager
@@ -120,6 +127,16 @@ def fiscal_years_read(hits) -> bool:
 	return ("hget", "fiscal_years") in hits
 
 
+def view_is_open() -> bool:
+	"""Whether the current code runs inside `consistent_read` (set on entry, reset in `finally`)."""
+	return _VIEW_OPEN.get()
+
+
+def view_is_broken() -> bool:
+	"""Whether the current source view has refused a write or transaction control."""
+	return _VIEW_BROKEN.get()
+
+
 @contextmanager
 def consistent_read():
 	"""Pin a real repeatable read, refusing helper writes or transaction controls."""
@@ -132,11 +149,11 @@ def consistent_read():
 	db.sql("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY")
 	connection = db._conn
 	original_sql = db.sql
-	broken = False
+	view_token = _VIEW_BROKEN.set(False)
+	open_token = _VIEW_OPEN.set(True)
 
 	def refuse(*args, **kwargs):
-		nonlocal broken
-		broken = True
+		_VIEW_BROKEN.set(True)
 		raise CalendarSourceUnavailable("source_changed")
 
 	def read_sql(query, *args, **kwargs):
@@ -160,9 +177,15 @@ def consistent_read():
 				stack.enter_context(_replace(db, name, replacement))
 			hits = stack.enter_context(_source_caches())
 			yield hits
-			if broken or db._conn is not connection or not original_sql("SELECT @@in_transaction")[0][0]:
+			if (
+				view_is_broken()
+				or db._conn is not connection
+				or not original_sql("SELECT @@in_transaction")[0][0]
+			):
 				refuse()
 	finally:
+		_VIEW_BROKEN.reset(view_token)
+		_VIEW_OPEN.reset(open_token)
 		db.rollback()
 
 
@@ -226,8 +249,44 @@ def _horizon(scope, sources, bank, floor, precision):
 
 
 def collect(scope: dict, fingerprint: str) -> dict:
-	"""All financial sources share the fixed view; fresh policy also fences publish."""
-	started, profile = monotonic(), source_profile()
+	"""All financial sources share the fixed view; fresh policy also fences publish.
+
+	The routed sides leave records (`routing.read_side`); they are logged in a `finally` after the view
+	has ended, so a job that then fails still reports, and no log row is written inside the view.
+	"""
+	started, outcomes = monotonic(), []
+	try:
+		return _collect(scope, fingerprint, started, outcomes)
+	finally:
+		_write_outcomes(outcomes, started)
+
+
+def _write_outcomes(outcomes: list[dict], started: float) -> None:
+	"""Stamp the records with the view length and the reader build, then log them. Never raises."""
+	try:
+		view_ms = elapsed_ms(started)
+		build = _reader_build() if any(record.get("routed") for record in outcomes) else None
+		for record in outcomes:
+			record.update(view_ms=view_ms, reader_build=build)
+		read_log.reader_outcomes(outcomes, routing._today())
+	except TIMEOUTS:
+		raise
+	except Exception:
+		frappe.logger("payment_calendar").warning("reader_outcome_unavailable")
+
+
+def _reader_build() -> str | None:
+	"""The build id of the reader code, or None: a failed lookup must not drop the records."""
+	try:
+		return routing.reader_build()[:12]
+	except TIMEOUTS:
+		raise
+	except Exception:
+		return None
+
+
+def _collect(scope: dict, fingerprint: str, started: float, outcomes: list[dict]) -> dict:
+	profile = source_profile()
 	with consistent_read() as hits:
 		cutoff = datetime.now(timezone.utc).isoformat()
 		proof = authorize_scope(scope, expected_fingerprint=fingerprint)
@@ -244,8 +303,16 @@ def collect(scope: dict, fingerprint: str) -> dict:
 				unavailable[side] = "forbidden"
 				continue
 			try:
-				sources[side] = read_obligations(
-					scope["company"], side, scope["anchor"], scope["window_start"], scope["window_end"]
+				# Today's read decides; the router tries the reader only after a `too_large` refusal.
+				sources[side] = routing.read_side(
+					read_obligations,
+					scope["company"],
+					side,
+					scope["anchor"],
+					scope["window_start"],
+					scope["window_end"],
+					started=started,
+					outcomes=outcomes,
 				)
 				if proof["scope_reasons"]:
 					sources[side]["complete_for_company"] = False

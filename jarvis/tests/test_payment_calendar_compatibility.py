@@ -273,10 +273,14 @@ class TestPaymentCalendarCompatibility(TestCase):
 				"reader_error",
 				"rekey_unresolved",
 				"too_many_lines",
+				"deadline",
+				"assemble_budget",
 			},
 		)
 		codes = {
 			"too_many_lines": "too_large",
+			"deadline": "too_large",
+			"assemble_budget": "too_large",
 			"control_total": "reconciliation_mismatch",
 			"pin_drift": "source_contract_unavailable",
 			"unsupported_major": "source_contract_unavailable",

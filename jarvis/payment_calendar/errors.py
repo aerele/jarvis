@@ -44,12 +44,17 @@ READER_FALLBACK_REASONS = frozenset(
 		"reader_error",
 		"rekey_unresolved",
 		"too_many_lines",
+		# The reader ran out of its own time or its estimated time before the permission filter.
+		"deadline",
+		"assemble_budget",
 	}
 )
 # The refusal a caller that cannot fall back gives for a reason; other reasons have none. Kept as the one
 # written mapping (a test pins it), so such a caller does not invent its own.
 _FALLBACK_REFUSALS = {
 	"too_many_lines": "too_large",
+	"deadline": "too_large",
+	"assemble_budget": "too_large",
 	"control_total": "reconciliation_mismatch",
 	"pin_drift": "source_contract_unavailable",
 	"unsupported_major": "source_contract_unavailable",

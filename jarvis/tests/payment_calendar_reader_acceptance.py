@@ -10,9 +10,10 @@ Safety:
   whole run, so any write would fail loudly; the reads sit in `consistent_read()` views and nothing is written.
 * `skip_eligibility=True` (acceptance only, default off) runs the reader for Administrator with the reader's
   eligibility call patched to "eligible" for the duration of the read, and records `eligibility_skipped`
-  in the summary. It exists for a site where another app registers a permission hook that the gate (rightly)
-  cannot audit: the run is then an exactness check of the reader against today's read, not an eligibility
-  check. Every other guard stays: site check first, READ ONLY session, `consistent_read`, no writes.
+  in the summary. It exists for a site where another app registers a permission query hook
+  (`permission_query_conditions`) that the gate (rightly) cannot audit: the run is then an exactness check of
+  the reader against today's read, not an eligibility check. (A `has_permission` hook needs no bypass since
+  I1: its answer is applied to every row afterwards.) Every other guard stays: site check first, READ ONLY session, `consistent_read`, no writes.
 * `drift` and `timing_guard_size` run only on `test_jarvis`. Their writes sit in a savepoint, under
   `write_guards` (a commit or full rollback raises), and are rolled back in `finally`.
 * `drift` first makes sure the shared ledger company exists, OUTSIDE `write_guards`, and then commits: on a
@@ -21,6 +22,10 @@ Safety:
   both probes count companies.
 * Each timed read runs in a forked child (`run_isolated`), so its memory figures are its own: a lifetime
   peak (`ru_maxrss`) would carry the fixture builder and earlier reads.
+* S2: `routed_playground` and `shadow_once` run only on the playground, in a READ ONLY session, and write
+  nothing to the database. The router's own Redis keys (slot, memo) are deleted at the end of the first;
+  the second holds the shadow lease key while it runs and deletes it. `limits_at_guard_size` runs only on
+  `test_jarvis`, with its fixture in a savepoint under `write_guards`, rolled back in `finally`.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from frappe.utils import getdate, nowdate
 
 from jarvis.payment_calendar import builtin_reader, compatibility, snapshot
 from jarvis.tests import _erpnext_masters as masters
+from jarvis.tests import payment_calendar_routed_support as routed
 from jarvis.tests.payment_calendar_acceptance_support import (
 	PLAYGROUND_SITE,
 	SIDES,
@@ -97,6 +103,129 @@ def playground(company: str, out: str, anchor: str | None = None, skip_eligibili
 	}
 	write_out(path, {"summary": summary, "sides": sides})
 	return summary
+
+
+def routed_playground(company: str, out: str, user: str, anchor: str | None = None) -> dict:
+	"""AC-9: both sides through the router as `user` (a visitor or Administrator), compared with today's read.
+
+	The mode is patched on for `company` (nothing is saved). One read view, both sides, then each side's
+	oracle (today's read, guards lifted). Read only; the router's Redis keys are deleted at the end.
+	"""
+	require_site(PLAYGROUND_SITE)
+	path = prepare_out(out)
+	anchor = str(getdate(anchor or nowdate()))
+	_require_company(company)
+	_require_user(user)
+	with read_only_session():
+		sides = routed.routed_sides(company, anchor, user)
+	summary = {
+		"site": "playground",
+		"company": digest(company),
+		"user": digest(user),
+		"anchor": anchor,
+		"diffs": sum(record["diffs"] for record in sides.values()),
+		"paths": {side: record["path"] for side, record in sides.items()},
+		"max_side_seconds": max(record["seconds"] for record in sides.values()),
+		"served_by_reader": [side for side, record in sides.items() if record["path"] == "reader"],
+	}
+	write_out(path, {"summary": summary, "sides": sides})
+	return summary
+
+
+def shadow_once(company: str, out: str) -> dict:
+	"""AC-11: every shadow unit of `company` once, as the night job runs it. Read only.
+
+	Holds the shadow lease while it runs and deletes it; writes no record, Error Log row or setting.
+	"""
+	require_site(PLAYGROUND_SITE)
+	path = prepare_out(out)
+	_require_company(company)
+	with read_only_session():
+		done = routed.shadow_units_once(company)
+	summary = {
+		"site": "playground",
+		"company": digest(company),
+		"lease_deleted": done["lease_deleted"],
+		**routed.shadow_summary(done["units"]),
+	}
+	write_out(path, {"summary": summary, "units": done["units"]})
+	return summary
+
+
+def limits_at_guard_size(
+	out: str,
+	user: str | None = None,
+	vouchers: int | None = None,
+	ledger_rows: int | None = None,
+	cap_ledger_rows: int | None = None,
+) -> dict:
+	"""AC-4: the reader's limits at guard size, as a non-Administrator user with a read-neutral `"*"` hook. Test site only.
+
+	Three runs, each in a forked child on the uncommitted fixture: a deadline of now + 1 s (expect
+	`fallback:deadline` within 16 s); both sides through the router at guard + 1 (the whole job time, the peak
+	memory, the snapshot bytes); and the same at `READER_LEDGER_CAP` ledger rows (peak memory, longest
+	statement). Timings are recorded as numbers and booleans, never asserted. `user` is an existing
+	non-Administrator user, or None for a temporary one inside the rolled-back savepoint.
+	Defaults: vouchers = voucher guard + 1; ledger rows stay within today's guard and the router's cap.
+	"""
+	from jarvis.payment_calendar import routing, sources
+	from jarvis.tests.payment_calendar_guard_fixture import GuardCompany
+
+	require_site(TEST_SITE)
+	if user == "Administrator":
+		raise RuntimeError("the limits run is for a non-Administrator user")
+	path = prepare_out(out)
+	vouchers = vouchers if vouchers is not None else sources.MAX_VOUCHERS + 1
+	ledger_rows = (
+		ledger_rows if ledger_rows is not None else min(sources.MAX_LEDGER_ROWS, routing.READER_LEDGER_CAP)
+	)
+	cap_ledger_rows = cap_ledger_rows if cap_ledger_rows is not None else routing.READER_LEDGER_CAP
+	frappe.db.savepoint(GUARD_SAVEPOINT)
+	started, companies, figures = time.monotonic(), [], {}
+	try:
+		with write_guards() as guards:
+			builders = [
+				(label, GuardCompany(vouchers, rows))
+				for label, rows in (("guard", ledger_rows), ("cap", cap_ledger_rows))
+			]
+			actor = user or routed.temporary_user(builders[0][1].fx.prefix)
+			for label, builder in builders:
+				companies.append(builder.fx.company)
+				figures[label] = {"fixture": builder.build()}
+				sync_outstanding(builder.fx.company)
+				figures[label].update(
+					_limits_runs(builder.fx.company, builder.fx.today, actor, label == "guard")
+				)
+	finally:
+		_clean_up(GUARD_SAVEPOINT)
+	leftover = sum(frappe.db.count("Payment Ledger Entry", {"company": company}) for company in companies)
+	summary = {
+		"site": "test_jarvis guard size",
+		"companies": [digest(company) for company in companies],
+		"user": digest(actor),
+		"vouchers_per_side": vouchers,
+		"ledger_rows": {"guard": ledger_rows, "cap": cap_ledger_rows},
+		**routed.limits_summary(figures["guard"]["deadline"], figures["guard"]["job"], figures["cap"]["job"]),
+		"cleaned": leftover == 0 and guards["commits"] == 0,
+		"seconds": round(time.monotonic() - started, 1),
+	}
+	write_out(path, {"summary": summary, "runs": figures})
+	return summary
+
+
+def _limits_runs(company: str, today, user: str, with_deadline: bool) -> dict:
+	"""The child runs of one fixture company: the deadline run (first fixture only) and the routed job."""
+	anchor = str(getdate(today))
+	args = (company, "Receivable", anchor, *window(getdate(anchor)))
+	anchors = {side: (anchor, *window(getdate(anchor))) for side in SIDES}
+	frappe.clear_cache()
+	runs = {}
+	if with_deadline:
+		work, memory = run_isolated(lambda: routed.deadline_read(args, user), reopen=False)
+		runs["deadline"] = {**work, **memory}
+	work, memory = run_isolated(lambda: routed.routed_job(company, anchors, user), reopen=False)
+	runs["job"] = {**work, **memory}
+	return runs
 
 
 def _clean_up(savepoint: str) -> None:
@@ -434,6 +563,11 @@ def _eligibility_skipped(skip: bool):
 		return
 	with patch.object(builtin_reader, "reader_ineligibility", return_value=[]):
 		yield
+
+
+def _require_user(user: str) -> None:
+	if not isinstance(user, str) or not frappe.db.exists("User", user):
+		raise RuntimeError("no such user on this site")
 
 
 def _require_company(company: str) -> None:

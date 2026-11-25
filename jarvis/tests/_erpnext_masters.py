@@ -13,6 +13,7 @@ defaults and fiscal-year caches the inserts filled.
 from __future__ import annotations
 
 import datetime
+from unittest.mock import patch
 
 import frappe
 from frappe.utils import getdate
@@ -125,7 +126,15 @@ def ensure_customer(name: str, *, credit_limit: float | None = None) -> str:
 	}
 	if credit_limit is not None:
 		doc["credit_limits"] = [{"company": ensure_ledger_company(), "credit_limit": credit_limit}]
-	return frappe.get_doc(doc).insert(ignore_permissions=True).name
+	# The requested name is the Customer's name whatever the site's naming policy is (a site on a naming
+	# series would generate another one): only this read of the one default is answered by the test.
+	real_default = frappe.defaults.get_global_default
+
+	def by_name(key, *args, **kwargs):
+		return "Customer Name" if key == "cust_master_name" else real_default(key, *args, **kwargs)
+
+	with patch.object(frappe.defaults, "get_global_default", by_name):
+		return frappe.get_doc(doc).insert(ignore_permissions=True).name
 
 
 def ensure_selling_price_list() -> str:

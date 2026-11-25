@@ -13,9 +13,12 @@ import time
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
+from uuid import uuid4
 
 import frappe
 
+from jarvis.payment_calendar import routing, shadow_state, sources
+from jarvis.payment_calendar.errors import TIMEOUTS
 from jarvis.tests import payment_calendar_reader_acceptance as acceptance
 from jarvis.tests.payment_calendar_acceptance_support import (
 	read_only_session,
@@ -29,17 +32,44 @@ from jarvis.tests.payment_calendar_fixtures import (
 )
 
 SIDES = ("Receivable", "Payable")
+TEST_KEY = "t" * 44
+
+
+def use_test_key(case):
+	"""A fixed encryption key for this test: a CI site has none, and every digest needs one.
+
+	Set on `frappe.conf` directly (a patcher would be stopped by `patch.stopall`) and put back by a cleanup that
+	is registered first, so it runs last and the digest-based cleanups still have the key. Never written to site_config.
+	"""
+	previous = frappe.conf.get("encryption_key")
+	frappe.conf["encryption_key"] = TEST_KEY
+
+	def restore():
+		if previous is None:
+			frappe.conf.pop("encryption_key", None)
+		else:
+			frappe.conf["encryption_key"] = previous
+
+	case.addCleanup(restore)
+
+
 CALLS = {
 	"playground": {"company": "X"},
 	"timing": {"company": "X"},
 	"drift": {"seed": 1, "ops": 1},
 	"timing_guard_size": {"vouchers": 1, "ledger_rows": 1},
+	"routed_playground": {"company": "X", "user": "Administrator"},
+	"shadow_once": {"company": "X"},
+	"limits_at_guard_size": {},
 }
 SITES = {
 	"playground": "test_jarvis",
 	"timing": "test_jarvis",
 	"drift": "jarvis_playground.localhost",
 	"timing_guard_size": "jarvis_playground.localhost",
+	"routed_playground": "test_jarvis",
+	"shadow_once": "test_jarvis",
+	"limits_at_guard_size": "jarvis_playground.localhost",
 }
 
 
@@ -50,6 +80,10 @@ HARNESS = (
 	"import json, sys, frappe\n"
 	"frappe.init(sys.argv[1], sites_path=sys.argv[2])\n"
 	"frappe.connect()\n"
+	# The key is set from the parent's environment, never written to site_config: a CI site has none, and the
+	# digests of the child (memo keys, summaries) must be the parent's.
+	"import os\n"
+	"if os.environ.get('PCAL_TEST_KEY'): frappe.conf['encryption_key'] = os.environ['PCAL_TEST_KEY']\n"
 	"from jarvis.tests.test_payment_calendar_reader_acceptance import PROBES\n"
 	"print('RESULT:' + json.dumps(PROBES[sys.argv[3]](**json.loads(sys.argv[4])), default=str))\n"
 )
@@ -63,6 +97,7 @@ def in_fresh_process(probe: str, **kwargs):
 		capture_output=True,
 		text=True,
 		timeout=600,
+		env={**os.environ, "PCAL_TEST_KEY": frappe.conf.get("encryption_key") or ""},
 	)
 	if done.returncode != 0:
 		raise AssertionError(f"probe {probe} failed ({done.returncode}):\n{done.stderr[-3000:]}")
@@ -111,6 +146,16 @@ def probe_read_with_memory(kind):
 
 def probe_guard_size(out):
 	return acceptance.timing_guard_size(out, vouchers=40, ledger_rows=400)
+
+
+def probe_limits_tiny(out):
+	"""The default limits fixture at a small size, one voucher above today's guard."""
+	with (
+		patch.object(sources, "MAX_VOUCHERS", 39),
+		patch.object(sources, "MAX_LEDGER_ROWS", 400),
+		patch.object(routing, "READER_LEDGER_CAP", 500),
+	):
+		return acceptance.limits_at_guard_size(out)
 
 
 def probe_child_failure():
@@ -177,6 +222,7 @@ PROBES = {
 	"connection": probe_isolated_read_keeps_the_connection,
 	"memory": probe_read_with_memory,
 	"guard_size": probe_guard_size,
+	"limits_tiny": probe_limits_tiny,
 }
 
 
@@ -294,6 +340,9 @@ class TestAcceptanceSiteGuards(TestCase):
 
 
 class TestResultDiff(TestCase):
+	def setUp(self):
+		use_test_key(self)
+
 	def test_the_content_diff_leaves_ids_to_the_comparison_that_counts_them(self):
 		found = result_diff(result(row(id="a")), result(row(id="b")))
 		self.assertEqual(found["diffs"], 0)
@@ -329,6 +378,7 @@ class TestAcceptanceRuns(TestCase):
 	"""Committed fixtures with cleanup: `consistent_read` rolls back first, so a savepoint would not survive."""
 
 	def setUp(self):
+		use_test_key(self)
 		require_calendar_test_site()
 		frappe.set_user("Administrator")
 		self.out = Path(tempfile.mkdtemp()) / "out.json"
@@ -389,13 +439,15 @@ class TestAcceptanceRuns(TestCase):
 			self.assertIn("Administrator", str(raised.exception))
 		self.assertFalse(self.out.exists())
 
-	def test_skip_eligibility_reads_where_an_unaudited_hook_makes_the_gate_refuse(self):
+	def test_skip_eligibility_reads_where_an_unaudited_query_hook_makes_the_gate_refuse(self):
+		# Since I1 a `has_permission` hook is no eligibility rule (every row passes `visible_names`); a
+		# `permission_query_conditions` hook still is: nothing after the reader re-applies it.
 		self.committed_company()
 		real = frappe.get_hooks
 
 		def hooks(hook=None, *args, **kwargs):
-			if hook == "has_permission":
-				return {"Sales Invoice": ["some_app.access.has_permission"]}
+			if hook == "permission_query_conditions":
+				return {"Sales Invoice": ["jarvis.tests.test_payment_calendar_reply_matrix.no_narrowing"]}
 			return real(hook, *args, **kwargs)
 
 		with patch.object(frappe, "get_hooks", hooks):
@@ -504,3 +556,367 @@ class TestAcceptanceRuns(TestCase):
 		self.assertGreaterEqual(fixture["ledger_rows"], 800)
 		self.assertNotIn("_JPC_", self.out.read_text())
 		self.assertIn("after_fixture", saved["memory_mb"])
+
+
+class TestRoutedAcceptancePure(TestCase):
+	def setUp(self):
+		use_test_key(self)
+
+	def test_the_neutral_hook_is_added_beside_the_real_ones_and_hides_nothing(self):
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		real = frappe.get_hooks("has_permission")
+		events = frappe.get_hooks("scheduler_events")
+		with support.neutral_wildcard_hook():
+			hooks = frappe.get_hooks("has_permission")
+			self.assertIn(support.HOOK_PATH, hooks["*"])
+			self.assertEqual(
+				{k: v for k, v in hooks.items() if k != "*"}, {k: v for k, v in real.items() if k != "*"}
+			)
+			self.assertEqual(frappe.get_hooks("scheduler_events"), events)
+		self.assertEqual(frappe.get_hooks("has_permission"), real)
+		self.assertIs(support.read_neutral_hook(doc=object()), True)
+
+	def test_the_statement_timer_counts_and_keeps_the_longest(self):
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		with support.statement_timer() as seen:
+			frappe.db.sql("SELECT 1")
+			frappe.db.sql("SELECT SLEEP(0.05)")
+			frappe.db.sql("SELECT 1")
+		self.assertEqual(seen["count"], 3)
+		self.assertGreaterEqual(seen["max_seconds"], 0.05)
+		self.assertLess(seen["max_seconds"], 5)
+
+	def test_cleanup_keeps_other_workers_slots_and_deletes_only_owned_memos(self):
+		from jarvis.payment_calendar import routing
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		company = f"Cleanup {uuid4().hex}"
+		keys = [
+			frappe.cache.make_key(f"pcal-acceptance-test:{uuid4().hex}:{n}")
+			for n in range(routing.READER_SLOTS)
+		]
+		for key in keys:
+			frappe.cache.execute_command("SET", key, "worker-token", "EX", 60)
+			self.addCleanup(frappe.cache.execute_command, "DEL", key)
+		memo = routing.memo_key(company, "Payable")
+		frappe.cache.execute_command("SET", memo, "acceptance-token", "EX", 60)
+		self.addCleanup(frappe.cache.execute_command, "DEL", memo)
+		with patch.object(routing, "slot_key", side_effect=lambda n: keys[n]):
+			self.assertEqual(support.clear_routing_keys(company, {memo: "acceptance-token"}), 1)
+			self.assertEqual(support.clear_routing_keys(company, {memo: "acceptance-token"}), 0)
+			frappe.cache.execute_command("SET", memo, "next-worker", "EX", 60)
+			self.assertEqual(support.clear_routing_keys(company, {memo: "acceptance-token"}), 0)
+		self.assertEqual(frappe.cache.execute_command("GET", memo), b"next-worker")
+		self.assertEqual(
+			[frappe.cache.execute_command("GET", key) for key in keys], [b"worker-token"] * len(keys)
+		)
+
+	def figures(self, **changes):
+		deadline = {"outcome": "fallback:deadline", "seconds": 2.0}
+		job = {
+			"job_seconds": 100.0,
+			"peak_rss_mb": 500.0,
+			"sides": {
+				"Payable": {"path": "reader", "outcome": "served", "snapshot_bytes": 10},
+				"Receivable": {"path": "reader", "outcome": "served", "snapshot_bytes": 20},
+			},
+		}
+		cap = {"job_seconds": 120.0, "peak_rss_mb": 900.0, "longest_statement_s": 3.0, "sides": job["sides"]}
+		deadline.update(changes.pop("deadline", {}))
+		job.update(changes.pop("job", {}))
+		cap.update(changes.pop("cap", {}))
+		return deadline, job, cap
+
+	def test_the_default_limits_fixture_crosses_the_voucher_guard_but_stays_within_the_ledger_cap(self):
+		with (
+			patch(
+				"jarvis.tests.payment_calendar_guard_fixture.GuardCompany",
+				side_effect=RuntimeError("fixture-stop"),
+			) as builder,
+			patch.object(acceptance, "prepare_out"),
+			patch.object(acceptance, "_clean_up"),
+			patch.object(frappe.db, "savepoint"),
+			self.assertRaisesRegex(RuntimeError, "fixture-stop"),
+		):
+			acceptance.limits_at_guard_size("unused")
+		vouchers, ledger_rows = builder.call_args.args
+		self.assertEqual(vouchers, sources.MAX_VOUCHERS + 1)
+		self.assertLessEqual(ledger_rows, sources.MAX_LEDGER_ROWS)
+		self.assertLessEqual(ledger_rows, routing.READER_LEDGER_CAP)
+
+	def test_limits_require_both_sides_to_serve_reader_results_in_both_runs(self):
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		served = {"path": "reader", "outcome": "served", "snapshot_bytes": 10}
+		for run in ("job", "cap"):
+			for missing in (
+				{},
+				{"Payable": served},
+				{"Payable": served, "Receivable": {**served, "outcome": "refusal:too_large"}},
+				{"Payable": served, "Receivable": {**served, "path": "today"}},
+				{"Payable": served, "Receivable": {**served, "snapshot_bytes": None}},
+			):
+				with self.subTest(run=run, sides=missing):
+					summary = support.limits_summary(*self.figures(**{run: {"sides": missing}}))
+					self.assertFalse(summary[f"{run}_both_readers_served"])
+					self.assertFalse(summary["pass"])
+
+	def test_both_timeout_classes_fail_the_job_and_cap_timeout_checks(self):
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		for run in ("job", "cap"):
+			for timeout in TIMEOUTS:
+				with self.subTest(run=run, timeout=timeout.__name__):
+					sides = {"Payable": {"outcome": f"error:{timeout.__name__}", "snapshot_bytes": None}}
+					summary = support.limits_summary(*self.figures(**{run: {"sides": sides}}))
+					self.assertFalse(summary[f"{run}_has_no_timeout"])
+					self.assertFalse(summary["pass"])
+
+	def test_the_routed_job_records_the_reader_path_and_snapshot_bytes(self):
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		value = result(row())
+
+		def read(today, company, side, *args, outcomes, **kwargs):
+			outcomes.append({"side": side, "path": "reader", "outcome": "served"})
+			return value
+
+		with patch.object(routing, "read_side", side_effect=read):
+			job = support.routed_job("X", dict.fromkeys(SIDES, FAKE_ARGS[2:]), "Administrator")
+		for side in SIDES:
+			self.assertEqual(job["sides"][side]["path"], "reader")
+			self.assertEqual(
+				job["sides"][side]["snapshot_bytes"], len(json.dumps(value, default=str).encode())
+			)
+
+	def test_the_limits_summary_turns_each_figure_into_a_flag_beside_the_number(self):
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		summary = support.limits_summary(*self.figures())
+		for flag in (
+			"pass",
+			"deadline_ended_in_time",
+			"job_within_150s",
+			"job_has_no_timeout",
+			"job_both_readers_served",
+			"cap_both_readers_served",
+			"cap_has_no_timeout",
+			"cap_peak_under_1gb",
+			"cap_longest_statement_under_15s",
+		):
+			self.assertTrue(summary[flag], flag)
+		self.assertEqual(summary["snapshot_bytes"], {"Payable": 10, "Receivable": 20})
+		self.assertEqual(summary["cap_snapshot_bytes"], {"Payable": 10, "Receivable": 20})
+		cases = {
+			"deadline_ended_in_time": {"deadline": {"seconds": 17.0}},
+			"job_within_150s": {"job": {"job_seconds": 150.0}},
+			"cap_peak_under_1gb": {"cap": {"peak_rss_mb": 1024.0}},
+			"cap_longest_statement_under_15s": {"cap": {"longest_statement_s": 15.0}},
+		}
+		for flag, change in cases.items():
+			with self.subTest(flag):
+				self.assertFalse(support.limits_summary(*self.figures(**change))[flag])
+		self.assertFalse(
+			support.limits_summary(*self.figures(deadline={"outcome": "served"}))["deadline_ended_in_time"]
+		)
+		timed_out = {"sides": {"Payable": {"outcome": "error:TimeoutError", "snapshot_bytes": None}}}
+		self.assertFalse(support.limits_summary(*self.figures(job=timed_out))["job_has_no_timeout"])
+
+	def test_the_shadow_summary_counts_outcomes_and_names_the_units_that_were_not_compared(self):
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		units = {
+			"Payable:current": {"outcome": "compared", "rss_mb": 100},
+			"Payable:next": {"outcome": "diff", "rss_mb": 120, "would_deadline": True},
+			"Receivable:current": {"outcome": "not_compared", "reason": "fallback:deadline"},
+		}
+		summary = support.shadow_summary(units)
+		self.assertEqual((summary["units"], summary["compared"], summary["diffs"]), (3, 1, 1))
+		self.assertEqual(summary["not_compared"], {"Receivable:current": "fallback:deadline"})
+		self.assertEqual((summary["would_deadline"], summary["max_rss_mb"]), (1, 120))
+		self.assertFalse(summary["all_sides_and_scopes_compared"])
+
+	def test_the_limits_run_refuses_the_administrator(self):
+		require_calendar_test_site()
+		with self.assertRaises(RuntimeError) as raised:
+			acceptance.limits_at_guard_size("/tmp/none.json", user="Administrator")
+		self.assertIn("non-Administrator", str(raised.exception))
+
+
+class TestRoutedAcceptanceRuns(TestCase):
+	"""Committed fixtures with cleanup, as `TestAcceptanceRuns`: the routed and shadow runs open read views."""
+
+	def setUp(self):
+		use_test_key(self)
+		require_calendar_test_site()
+		frappe.set_user("Administrator")
+		self.out = Path(tempfile.mkdtemp()) / "out.json"
+		self.fx = CalendarFixtures()
+		for side in SIDES:
+			self.fx.invoice((40, 60), side=side, paid=30, credit=5)
+			self.fx.invoice((100,), side=side, paid=100)
+		self.fx.fiscal_year()
+		sync_outstanding(self.fx.company)
+		frappe.db.commit()
+		# A key prefix of this test only: another session may run the shadow on the shared site meanwhile.
+		self.prefix = f"jarvis:pcal:shadowtest-{uuid4().hex[:8]}:"
+		prefix = patch.object(shadow_state, "PREFIX", self.prefix)
+		prefix.start()
+		self.addCleanup(prefix.stop)
+		self.addCleanup(frappe.cache.delete_keys, self.prefix)
+		self.addCleanup(self.cleanup)
+
+	def cleanup(self):
+		frappe.set_user("Administrator")
+		frappe.db.rollback()
+		for doctype, name in reversed(self.fx.created):
+			frappe.db.delete(doctype, {"name": name})
+		frappe.db.commit()
+		frappe.cache.hdel("fiscal_years", self.fx.company)
+		frappe.clear_document_cache("Company", self.fx.company)
+
+	def here(self):
+		return patch.object(acceptance, "PLAYGROUND_SITE", frappe.local.site)
+
+	def error_rows(self):
+		return frappe.db.count("Error Log")
+
+	def test_the_routed_run_below_the_guard_reads_today_and_nothing_is_written(self):
+		before = self.error_rows()
+		with self.here():
+			summary = acceptance.routed_playground(
+				self.fx.company, str(self.out), "Administrator", anchor=self.fx.today
+			)
+		self.assertEqual(summary["diffs"], 0)
+		self.assertEqual(summary["paths"], {"Payable": "today", "Receivable": "today"})
+		self.assertEqual(summary["served_by_reader"], [])
+		self.assertEqual(self.error_rows(), before)
+		self.assertNotIn(self.fx.company, self.out.read_text())
+
+	def test_the_routed_run_above_the_guard_serves_both_sides_from_the_reader_equal_to_today(self):
+		from jarvis.payment_calendar import sources
+
+		before = self.error_rows()
+		mode_before = frappe.db.get_single_value("Jarvis Settings", "payment_calendar_reader", cache=False)
+		with self.here(), patch.object(sources, "MAX_VOUCHERS", 0):
+			summary = acceptance.routed_playground(
+				self.fx.company, str(self.out), "Administrator", anchor=self.fx.today
+			)
+		self.assertEqual(summary["diffs"], 0, summary)
+		self.assertEqual(sorted(summary["served_by_reader"]), ["Payable", "Receivable"])
+		saved = json.loads(self.out.read_text())
+		for side in SIDES:
+			self.assertEqual(saved["sides"][side]["ids"], "equal")
+			self.assertGreater(saved["sides"][side]["rows"], 0)
+		self.assertEqual(self.error_rows(), before)
+		for side in SIDES:
+			self.assertFalse(
+				frappe.cache.execute_command("EXISTS", routing.inflight_key(self.fx.company, side))
+			)
+			self.assertFalse(frappe.cache.execute_command("EXISTS", routing.memo_key(self.fx.company, side)))
+		# The run changed no setting: whatever the site had (a configured site may have `on`), it still has.
+		self.assertEqual(
+			frappe.db.get_single_value("Jarvis Settings", "payment_calendar_reader", cache=False), mode_before
+		)
+
+	def test_routed_cleanup_keeps_a_live_workers_slot_and_a_replaced_token(self):
+		from jarvis.payment_calendar import builtin_reader, routing, sources
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		keys = [
+			frappe.cache.make_key(f"pcal-acceptance-test:{uuid4().hex}:{n}")
+			for n in range(routing.READER_SLOTS)
+		]
+		for key in keys:
+			self.addCleanup(frappe.cache.execute_command, "DEL", key)
+		frappe.cache.execute_command("SET", keys[0], "live-worker", "EX", 60)
+		memo = routing.memo_key(self.fx.company, "Receivable")
+		self.addCleanup(frappe.cache.execute_command, "DEL", memo)
+		real = builtin_reader.read_obligations
+
+		def replaced(*args, **kwargs):
+			result = real(*args, **kwargs)
+			frappe.cache.execute_command("SET", keys[1], "next-worker", "EX", 60)
+			frappe.cache.execute_command("SET", memo, "next-worker", "EX", 60)
+			return result
+
+		with (
+			patch.object(sources, "MAX_VOUCHERS", 0),
+			patch.object(routing, "slot_key", side_effect=lambda n: keys[n]),
+			patch.object(builtin_reader, "read_obligations", side_effect=replaced) as reader,
+		):
+			support.routed_sides(self.fx.company, self.fx.today, "Administrator")
+		reader.assert_called_once()
+		self.assertEqual(frappe.cache.execute_command("GET", keys[0]), b"live-worker")
+		self.assertEqual(frappe.cache.execute_command("GET", keys[1]), b"next-worker")
+		self.assertEqual(frappe.cache.execute_command("GET", memo), b"next-worker")
+
+	def test_routed_cleanup_keeps_foreign_memos_and_removes_its_own_fallback_memo(self):
+		from jarvis.payment_calendar import builtin_reader
+		from jarvis.payment_calendar.errors import ReaderFallback
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		foreign = routing.memo_key(self.fx.company, "Receivable")
+		own = routing.memo_key(self.fx.company, "Payable")
+		for key in (foreign, own):
+			self.addCleanup(frappe.cache.execute_command, "DEL", key)
+		for token in ("worker-token", "1"):
+			with self.subTest(token):
+				frappe.cache.execute_command("SET", foreign, token, "EX", 60)
+				with (
+					patch.object(sources, "MAX_VOUCHERS", 0),
+					patch.object(
+						builtin_reader, "read_obligations", side_effect=ReaderFallback("control_total")
+					) as reader,
+				):
+					support.routed_sides(self.fx.company, self.fx.today, "Administrator")
+				reader.assert_called_once()
+				self.assertEqual(reader.call_args.args[1], "Payable")
+				self.assertEqual(frappe.cache.execute_command("GET", foreign), token.encode())
+				self.assertFalse(frappe.cache.execute_command("EXISTS", own))
+
+	def test_a_database_write_inside_the_routed_run_fails(self):
+		from jarvis.tests import payment_calendar_routed_support as support
+
+		def writes(*args, **kwargs):
+			frappe.db.sql("UPDATE tabSeries SET current = current WHERE name = '_none_'")
+			return {}
+
+		with self.here(), patch.object(support, "routed_sides", writes), self.assertRaises(Exception):
+			acceptance.routed_playground(self.fx.company, str(self.out), "Administrator")
+
+	def test_the_shadow_run_compares_every_unit_and_leaves_no_lease_record_or_row(self):
+		before = self.error_rows()
+		with self.here():
+			summary = acceptance.shadow_once(self.fx.company, str(self.out))
+		self.assertEqual(summary["units"], 8)
+		self.assertTrue(summary["all_sides_and_scopes_compared"], summary)
+		self.assertEqual(summary["diffs"], 0)
+		self.assertTrue(summary["lease_deleted"])
+		self.assertFalse(shadow_state.lease_held())
+		self.assertEqual(frappe.cache.get_keys(self.prefix), [])
+		self.assertEqual(self.error_rows(), before)
+		self.assertNotIn(self.fx.company, self.out.read_text())
+
+	def test_the_shadow_run_refuses_while_a_unit_holds_the_lease(self):
+		token = shadow_state.take_lease()
+		self.addCleanup(shadow_state.release_lease, token)
+		with self.here(), self.assertRaises(RuntimeError):
+			acceptance.shadow_once(self.fx.company, str(self.out))
+		self.assertTrue(shadow_state.lease_held())
+
+	def test_the_limits_run_at_a_tiny_size_is_served_by_the_reader_and_cleaned_up(self):
+		before = frappe.db.count("Payment Ledger Entry")
+		summary = in_fresh_process("limits_tiny", out=str(self.out))
+		self.assertTrue(summary["cleaned"], summary)
+		self.assertEqual(frappe.db.count("Payment Ledger Entry"), before)
+		saved = json.loads(self.out.read_text())
+		job = saved["runs"]["guard"]["job"]
+		self.assertEqual([record["path"] for record in job["records"]], ["reader", "reader"])
+		self.assertTrue(all(side["snapshot_bytes"] for side in job["sides"].values()))
+		self.assertIn("deadline", saved["runs"]["guard"])
+		self.assertNotIn("deadline", saved["runs"]["cap"])
+		self.assertEqual(summary["ledger_rows"], {"guard": 400, "cap": 500})
+		self.assertNotIn("_JPC_", self.out.read_text())

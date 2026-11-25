@@ -22,7 +22,9 @@ inherited Counter refuses `multiple_invoice_accounts` exactly when today does.
 
 Residual error boundary: `_reader_errors` wraps the reader's own steps (control, discovery, line and detail
 reads, control-total check) and maps a programming error or a Decimal error there to a fallback. Other database
-errors (lock wait 1205, deadlock 1213, 1969) are not mapped and propagate: the caller must classify them. `init_voucher_balance`, `update_voucher_balance` and `build_data` run on the
+errors (lock wait 1205, deadlock 1213, 1969) are not mapped and propagate: the caller decides. A lost
+connection or transaction needs no special case: `snapshot.consistent_read` checks its view at exit and fails
+the job, whatever a catch-all swallowed on the way. `init_voucher_balance`, `update_voucher_balance` and `build_data` run on the
 reader-built inputs OUTSIDE it, because an upstream error there must map to today's refusal. So a bug in the
 SHAPE of a reader-built input (for example an `invoice_details` entry that is not a mapping) surfaces as
 today's `CalendarSourceUnavailable`, not as a fallback; a MISSING `invoice_details` entry is read as `{}` by
@@ -39,7 +41,15 @@ than the full ledger does (a voucher whose first line pays an invoice the read s
 also sees the other lines of the vouchers whose key a read line creates (`_other_lines_of_read_vouchers`). They
 feed init only: never the update pass, the control total or a row.
 
-Nothing here writes, commits or rolls back, and nothing outside the tests imports this module (yet).
+Time: a caller may pass a `deadline` (`time.monotonic()` value). The reader checks it cooperatively and ends in
+`ReaderFallback("deadline")`, never a `TimeoutError`. The permission filter (`sources._assemble`, which always
+runs: invariant I1 in `eligibility`) is held to the same limit exactly: its permission checks raise
+`ReaderFallback("deadline")` once `deadline + ASSEMBLE_GRACE_S` has passed (`_permission_deadline`). With the
+batch permission switch on, that is a context stop that `batch_permission` checks (`permission_stop`); with it
+off, `frappe.has_permission` is wrapped while the filter runs. Memory is bounded by `READER_MAX_ROWS`
+(`assemble_budget`).
+
+Nothing here writes, commits or rolls back. `routing` and `shadow` are the only callers outside the tests.
 """
 
 import copy
@@ -49,7 +59,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from decimal import Decimal
 from functools import cache
-from time import perf_counter
+from time import monotonic, perf_counter
 
 import frappe
 from frappe.query_builder import Criterion
@@ -57,11 +67,12 @@ from frappe.query_builder.functions import Count, Sum
 from pypika.functions import Cast
 from pypika.terms import Function, LiteralValue
 
-from jarvis.payment_calendar import compatibility, sources
+from jarvis.payment_calendar import batch_permission, compatibility, sources
 from jarvis.payment_calendar.books import validate_obligation_books
 from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.eligibility import reader_ineligibility
 from jarvis.payment_calendar.errors import TIMEOUTS, CalendarSourceUnavailable, ReaderFallback
+from jarvis.permission_hooks import effective_hooks
 
 # Names per `IN` list, the same size as the other batched reads of the calendar.
 CHUNK = 500
@@ -89,6 +100,10 @@ RANK_PARTY_CAP = 200_000
 # The two composite indexes ERPNext adds to the ledger table: every line read by voucher goes through them.
 LEDGER_TABLE = "tabPayment Ledger Entry"
 LEDGER_INDEXES = ("against_voucher_no_against_voucher_type_index", "voucher_no_voucher_type_index")
+# Seconds the permission filter may run past the reader's own deadline (the hard stop is deadline + this).
+ASSEMBLE_GRACE_S = 5
+# Provisional: rows `_assemble` may be asked to filter (AC-4 sets it from a measured snapshot size).
+READER_MAX_ROWS = 50_000
 # Probe rounds before the re-key fixed point is given up as unresolved.
 MAX_REKEY_ROUNDS = 8
 JOURNAL_ENTRY = "Journal Entry"
@@ -191,7 +206,7 @@ def _hint_errors():
 	except frappe.db.OperationalError as exc:
 		if exc.args and exc.args[0] == MISSING_KEY:
 			_INDEXES.clear()
-			raise ReaderFallback("reader_error") from exc
+			raise ReaderFallback("reader_error", ("missing_index_hint",)) from exc
 		raise
 
 
@@ -222,7 +237,7 @@ def require_ledger_indexes() -> None:
 	"""`ReaderFallback` unless the two composite ledger indexes exist: without them the by-voucher reads scan."""
 	for index in LEDGER_INDEXES:
 		if not _index_exists(LEDGER_TABLE, index):
-			raise ReaderFallback("reader_error")
+			raise ReaderFallback("reader_error", ("ledger_index_missing",))
 
 
 @dataclass(frozen=True)
@@ -350,7 +365,7 @@ def column_collations(columns: tuple[str, ...]) -> dict[str, str | None]:
 def _safe_collation(collation: str | None) -> str | None:
 	"""The name goes into the statement text (a collation cannot be a parameter): a plain name only."""
 	if collation and not COLLATION_NAME.fullmatch(collation):
-		raise ReaderFallback("reader_error")
+		raise ReaderFallback("reader_error", ("unsafe_collation",))
 	return collation
 
 
@@ -462,8 +477,22 @@ def _builtin_class():
 			"""The reader never refuses `too_large`; its own line caps end in a `too_many_lines` fallback."""
 			return None
 
+		# The caller's `time.monotonic()` limit for this read, or None (see `read_obligations`).
+		deadline = None
+
+		def _check_deadline(self):
+			"""`ReaderFallback("deadline")` once the caller's limit has passed; never a `TimeoutError`.
+
+			The check is cooperative: it runs at every timed step and between the chunks of a loop, so one
+			statement can still run past the limit. A `TimeoutError` would be re-raised by every broad
+			`except` and fail the whole job; a fallback ends only this read.
+			"""
+			if self.deadline is not None and monotonic() >= self.deadline:
+				raise ReaderFallback("deadline")
+
 		@contextmanager
 		def _timed(self, name):
+			self._check_deadline()
 			started = perf_counter()
 			try:
 				yield
@@ -562,7 +591,7 @@ def _builtin_class():
 			]
 			if not accounts:
 				# Without accounts the report would not filter by account at all: not a read to narrow.
-				raise ReaderFallback("reader_error")
+				raise ReaderFallback("reader_error", ("no_side_accounts",))
 			return accounts
 
 		# ------------------------------------------------------------------ discovery
@@ -753,7 +782,7 @@ def _builtin_class():
 			of every company. The index is the one ERPNext declares on the ledger's `account` field.
 			"""
 			if frappe.db.db_type != "mariadb":
-				raise ReaderFallback("reader_error")
+				raise ReaderFallback("reader_error", ("not_mariadb",))
 			ple = self.ple
 			distinct_keys = Function("COUNT", LiteralValue("DISTINCT `account`, `party`"))
 			null_party_accounts = Function(
@@ -835,6 +864,7 @@ def _builtin_class():
 			def read_against(names):
 				read_invoices.update(names)
 				for chunk in _chunks(sorted(names)):
+					self._check_deadline()
 					add(
 						self._read((ple.against_voucher_type == doctype) & ple.against_voucher_no.isin(chunk))
 					)
@@ -906,6 +936,7 @@ def _builtin_class():
 			ple, other = self.ple, {}
 			for voucher_type, names in sorted(by_type.items()):
 				for chunk in _chunks(sorted(names)):
+					self._check_deadline()
 					for row in self._read((ple.voucher_type == voucher_type) & ple.voucher_no.isin(chunk)):
 						key = (row.account, row.voucher_type, row.voucher_no, row.party)
 						# `IN` matches letter case loosely; the key match is exact.
@@ -921,6 +952,7 @@ def _builtin_class():
 			"""
 			found, ple = [], self.ple
 			for chunk in _chunks(sorted({voucher_no for (_, _, voucher_no, _) in targets})):
+				self._check_deadline()
 				rows = self._read(ple.voucher_no.isin(chunk))
 				# `IN` matches letter case loosely; the key match is exact.
 				found += add(
@@ -1004,6 +1036,7 @@ def _builtin_class():
 					# exact test of a non-empty string: `<> ''` ignores trailing spaces (PAD SPACE).
 					query = query.where(Function("CHAR_LENGTH", table.bill_no) > 0)
 				for chunk in _chunks(sorted(names[doctype]), DETAIL_CHUNK):
+					self._check_deadline()
 					with _hint_errors():
 						rows = query.where(
 							(table.posting_date <= anchor)
@@ -1040,18 +1073,76 @@ def _builtin_class():
 	return BuiltinReport
 
 
-def _engine_factory(stats: dict | None):
-	"""The engine class, or a callable building it with the caller's stats dict; `_run_engine` calls either."""
+def _engine_factory(stats: dict | None, deadline: float | None = None):
+	"""The engine class, or a callable building it with the caller's stats dict and deadline; `_run_engine` calls either."""
 	engine_class = _builtin_class()
-	if stats is None:
+	if stats is None and deadline is None:
 		return engine_class
 
 	def build(filters, window_start, window_end):
 		engine = engine_class(filters, window_start, window_end)
 		engine.stats_sink = stats
+		engine.deadline = deadline
 		return engine
 
 	return build
+
+
+def _check_row_cap(engine) -> None:
+	"""`ReaderFallback("assemble_budget")` when the permission filter would be asked to hold too many rows.
+
+	The rows are the data, the excluded rows and all terms (what `sources._assemble` filters). Memory only:
+	time is bounded by `_permission_deadline`.
+	"""
+	terms = sum(len(group) for group in engine.terms.values())
+	rows = len(engine.data) + len(engine.excluded) + terms
+	engine.reader_stats["counts"]["assemble_rows"] = rows
+	if rows > READER_MAX_ROWS:
+		raise ReaderFallback("assemble_budget")
+
+
+@contextmanager
+def _permission_deadline(deadline: float | None):
+	"""Hold `sources._assemble` to the reader's time: its permission checks stop at the hard stop.
+
+	The checks raise `ReaderFallback("deadline")` past `deadline + ASSEMBLE_GRACE_S`. They change no answer, and
+	the filter still runs for every row while time lasts (invariant I1). The batch permission switch is read
+	once, here, and picks the mechanism:
+
+	* on: nothing is rebound. A `batch_permission.permission_stop` is active, and `batch_permission` checks it
+	  before each chunk and each per-document call;
+	* off (today): `frappe.has_permission` is wrapped, only when a `has_permission` hook is registered. Without
+	  one `visible_names` makes no per-document check, so there is nothing slow to stop and no wrapper cost.
+	"""
+	switch_on = batch_permission.switch_enabled()
+	if deadline is None:
+		yield
+	elif switch_on:
+		stop = deadline + ASSEMBLE_GRACE_S
+		with batch_permission.permission_stop(stop, lambda: ReaderFallback("deadline")):
+			yield
+	elif not effective_hooks("has_permission"):
+		yield
+	else:
+		with _wrapped_has_permission(deadline + ASSEMBLE_GRACE_S):
+			yield
+
+
+@contextmanager
+def _wrapped_has_permission(stop: float):
+	"""Today's mechanism (switch off): each `frappe.has_permission` call checks the clock first."""
+	original = frappe.has_permission
+
+	def checked(*args, **kwargs):
+		if monotonic() >= stop:
+			raise ReaderFallback("deadline")
+		return original(*args, **kwargs)
+
+	frappe.has_permission = checked
+	try:
+		yield
+	finally:
+		frappe.has_permission = original
 
 
 def read_obligations(
@@ -1062,6 +1153,7 @@ def read_obligations(
 	window_end: str,
 	*,
 	stats: dict | None = None,
+	deadline: float | None = None,
 ) -> dict:
 	"""Today's `sources.read_obligations` result without the full-history scan, or `ReaderFallback`.
 
@@ -1073,7 +1165,13 @@ def read_obligations(
 	refusal today's read gives (`CalendarSourceUnavailable`); one raised in code only the reader runs (and
 	a Decimal error there) is `ReaderFallback("reader_error")` (inside `get_data`), so a reader bug never
 	looks like a refusal. Other database errors (lock wait, deadlock) propagate unmapped: the caller
-	must classify them.
+	decide (the view's exit check fails the job when the connection or transaction is gone).
+
+	`deadline`, when given, is a `time.monotonic()` value. Past it the read ends in `ReaderFallback("deadline")`
+	at the next timed step or chunk (one statement can still overrun it), and the permission filter is stopped
+	at `deadline + ASSEMBLE_GRACE_S` (`_permission_deadline`). Rows above `READER_MAX_ROWS` end in
+	`ReaderFallback("assemble_budget")` before the filter. A read without a deadline has none of these limits. None of
+	them raises a `TimeoutError`.
 
 	`stats`, when given, is filled with timings (ms), counts and control totals, no names, also when the read
 	falls back after the control total was measured. A fallback sets `stats["fallback"]` to its reason (and
@@ -1085,15 +1183,33 @@ def read_obligations(
 		)
 		validate_obligation_books(company, account_type, anchor)
 		engine = sources._run_engine(
-			_engine_factory(stats), sources._engine_filters(company, anchor), account_type, start, end
+			_engine_factory(stats, deadline),
+			sources._engine_filters(company, anchor),
+			account_type,
+			start,
+			end,
 		)
-		return sources._assemble(engine, report, account_type, start, end, company_values)
+		if deadline is not None:
+			_check_row_cap(engine)
+		mark = batch_permission.stats_mark()
+		try:
+			with _permission_deadline(deadline):
+				return sources._assemble(engine, report, account_type, start, end, company_values)
+		finally:
+			_note_permission_stats(engine, mark)
 	except ReaderFallback as exc:
 		if stats is not None:
 			note_fallback(stats, exc)
 		raise
 	except (AttributeError, KeyError, TypeError) as exc:
 		raise CalendarSourceUnavailable() from exc
+
+
+def _note_permission_stats(engine, mark: int) -> None:
+	"""Add the name-free permission counts of this read to the engine's `counts` (nothing with the switch off)."""
+	summary = batch_permission.stats_summary(mark)
+	if summary:
+		engine.reader_stats["counts"].update(summary)
 
 
 def note_fallback(stats: dict, fallback: ReaderFallback) -> None:

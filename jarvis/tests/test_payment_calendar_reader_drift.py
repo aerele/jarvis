@@ -32,8 +32,8 @@ from frappe.tests.utils import FrappeTestCase
 from frappe.utils import add_days, add_months, get_first_day, get_last_day
 
 from jarvis.payment_calendar import builtin_reader
-from jarvis.payment_calendar import sources as today_sources
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
+from jarvis.payment_calendar.shadow import today_unguarded
 from jarvis.tests import _erpnext_masters as masters
 from jarvis.tests import payment_calendar_drift as drift_module
 from jarvis.tests.payment_calendar_differential import READER_TALLY, compare_reader_with_today
@@ -63,15 +63,10 @@ REQUIRED_KINDS = {
 # A controller error rolls its operation back and is counted. More than this means an operation is broken.
 MAX_FAILURES = 4
 SIDES = ("Receivable", "Payable")
-LIFTED = 10**12
 
 
 def today_with_lifted_guards(*args):
-	with (
-		patch.object(today_sources, "MAX_VOUCHERS", LIFTED),
-		patch.object(today_sources, "MAX_LEDGER_ROWS", LIFTED),
-	):
-		return today_sources.read_obligations(*args)
+	return today_unguarded(*args)
 
 
 def window(anchor: date) -> tuple[str, str]:
@@ -202,6 +197,7 @@ class TestReaderDrift(FrappeTestCase):
 		from frappe.utils import data as frappe_data
 
 		name = "jarvis_pcal_clock_probe"
+		real_now_datetime = frappe_data.now_datetime
 		with frozen_clock(FROZEN):
 			module = types.ModuleType(name)
 			module.now_datetime = frappe_data.now_datetime  # a lazy `from frappe.utils import now_datetime`
@@ -209,8 +205,14 @@ class TestReaderDrift(FrappeTestCase):
 			self.assertEqual(module.now_datetime().year, 2025)
 			self.assertEqual(frappe_data.nowdate(), "2025-06-16")
 		try:
-			self.assertIs(module.now_datetime, frappe_data.now_datetime)
-			self.assertNotEqual(frappe_data.nowdate(), "2025-06-16")
+			# By identity, not by date: a run on the frozen date itself must pass too.
+			self.assertIs(module.now_datetime, real_now_datetime)
+			self.assertIs(frappe_data.now_datetime, real_now_datetime)
+			# Read the real date on both sides of nowdate to allow a midnight change.
+			before_date = real_now_datetime().date().isoformat()
+			restored_date = frappe_data.nowdate()
+			after_date = real_now_datetime().date().isoformat()
+			self.assertIn(restored_date, {before_date, after_date})
 		finally:
 			sys.modules.pop(name, None)
 		importlib.invalidate_caches()

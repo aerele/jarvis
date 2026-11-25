@@ -122,6 +122,7 @@ class VoucherCase(ReaderCase):
 		}
 
 	def employee(self, tag="A"):
+		require_doctypes("Employee")  # a site without HRMS has none: skip before any insert
 		name = self.fx.prefix + "Employee" + tag
 		if frappe.db.exists("Employee", name):
 			return name
@@ -361,6 +362,8 @@ class TestVoucherTypeScenarios(VoucherCase):
 		self.add_loan_lines(side, "Customer", "Customer", self.fx.customer)
 
 	def add_loan_employee(self, side):
+		# The doctypes first: `self.employee()` inserts an Employee, which a site without HRMS or Lending lacks.
+		require_doctypes("Loan", "Loan Disbursement", "Loan Repayment", "Employee")
 		self.add_loan_lines(side, "Employee", "Employee", self.employee())
 
 	def add_loan_repayment_on_invoice(self, side):

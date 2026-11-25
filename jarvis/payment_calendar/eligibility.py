@@ -3,6 +3,13 @@
 The reader reads the ledger without the report's per-user narrowing (match conditions, permission
 aware invoice details, Sales Person scope). It is correct only when that narrowing removes nothing
 for the user, so every rule here fails closed: any doubt, error or unknown input is ineligible.
+
+Invariant I1: `has_permission` hooks are NOT an eligibility rule. The reader's rows reach a user only
+through `sources._assemble` -> `visible_names`, which runs every `has_permission` hook per voucher and party
+in that user's own session (the snapshot job runs as the actor). Any path that skips that step (cache
+rows, shared generations, a stored snapshot served to other users) must bring the `has_permission` rule back.
+Query hooks, Server Script queries, User Permissions and the other rules stay: nothing after the reader
+re-applies them.
 """
 
 import frappe
@@ -33,6 +40,7 @@ GUARDED_DOCTYPES = (
 _COMPANY_RESTRICTION = "erpnext.stock.doctype.company_restriction.company_restriction."
 
 # The same ERPNext functions as permission_hooks.AUDITED_WILDCARD_HOOKS, plus the doctype-specific pair.
+# Both kinds are pinned against drift; only the query kind makes a user ineligible (I1, see above).
 AUDITED_HOOKS = {
 	"permission_query_conditions": frozenset(
 		{
@@ -47,6 +55,8 @@ AUDITED_HOOKS = {
 		}
 	),
 }
+
+COUNTED_HOOK_KINDS = ("permission_query_conditions",)
 
 _AUDITED_SOURCE_NAMES = tuple(sorted(path for paths in AUDITED_HOOKS.values() for path in paths))
 
@@ -118,7 +128,8 @@ def ineligibility_reasons(
 ) -> list[str]:
 	"""Sorted reasons the reader must not serve this user; an empty list means eligible.
 
-	Pure: no frappe calls. `masked_report_fields` is True when any field the reader reads on the
+	Pure: no frappe calls. A `has_permission` hook in `hooks` is ignored (invariant I1, module docstring).
+	`masked_report_fields` is True when any field the reader reads on the
 	four voucher doctypes is masked or permlevel-restricted for the user. `server_script_queries` is the
 	set of doctypes that have an enabled Server Script permission query: one on a guarded doctype
 	narrows what the report reads, and nothing audits its code.
@@ -129,6 +140,9 @@ def ineligibility_reasons(
 	# A User Permission on a doctype nothing links to narrows nothing; Company is judged below.
 	if any(doctype != "Company" and doctype in linked_doctypes for doctype in user_permissions):
 		reasons.add("user_permission")
+	# Scoped Company permissions can narrow today's reads differently from the reader's reads.
+	if any(permission.get("applicable_for") for permission in user_permissions.get("Company", [])):
+		reasons.add("scoped_company_permission")
 	if allowed_companies is not None:
 		if company not in allowed_companies:
 			reasons.add("company_permission")
@@ -162,7 +176,7 @@ def _hook_paths(hooks):
 	if not isinstance(hooks, dict):
 		yield "unknown", None
 		return
-	for kind in AUDITED_HOOKS:
+	for kind in COUNTED_HOOK_KINDS:
 		for doctype in GUARDED_DOCTYPES:
 			paths = _registered(hooks, kind, doctype)
 			if paths is None:
@@ -245,7 +259,7 @@ def reader_ineligibility(
 			user_permissions=user_permissions,
 			allowed_companies=allowed,
 			restriction_configured=permission_hooks._restriction_configured(),
-			hooks={kind: frappe.get_hooks(kind, {}) for kind in AUDITED_HOOKS},
+			hooks={kind: frappe.get_hooks(kind, {}) for kind in COUNTED_HOOK_KINDS},
 			server_script_queries=frozenset(get_server_script_map()["permission_query"]),
 			audited_sources_ok=(
 				compatibility.reader_pin_drift(_AUDITED_SOURCE_NAMES) == []
