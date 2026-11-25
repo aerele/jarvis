@@ -5,6 +5,7 @@ the first on, the site derives no proxy; with the second at 2026.11 or later, th
 provider ids the gateway renames are translated at one boundary (``chat.gateway_ids``).
 Fixtures are bare ``frappe._dict`` settings: no site data is read or changed."""
 
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -768,6 +769,47 @@ class TestKeyedRowNumberingMatchesFleet(unittest.TestCase):
 		self.assertEqual(turn_handler._native_pick_provider(settings, "zzz"), "anthropic-0")
 		self.assertEqual(turn_handler._native_pick_provider(settings, "aaa"), "openai_compat-1")
 		self.assertEqual(turn_handler._native_pick_provider(settings, "glm-4.6"), "openai_compat-2")
+
+
+class TestKeyedGeminiAndDeepseekMembersOnTheNativePool(unittest.TestCase):
+	"""Customer shapes: ChatGPT + Anthropic key + Gemini key, and a Claude plan + DeepSeek key."""
+
+	def _errors(self, models):
+		return pool_serialize.validate_models(_settings(models, native_subscription_pool=1))
+
+	def test_chatgpt_sign_in_with_anthropic_and_gemini_keys_validates(self):
+		models = [
+			_sub("gpt-5.6-terra", "openai", order=0, accounts=[_acct("openai", "O1")]),
+			_keyrow("claude-sonnet-5", "anthropic", 1),
+			_keyrow("gemini-2.5-pro", "gemini", 2),
+		]
+		self.assertEqual(self._errors(models), [])
+
+	@staticmethod
+	def _claude_account():
+		acct = _acct("anthropic", "C1")
+		acct.oauth_blob = json.dumps(
+			{"type": "oauth", "provider": "anthropic", "credential_kind": "claude_cli_login"}
+		)
+		return acct
+
+	def test_claude_plan_with_a_deepseek_key_validates_and_pins_the_numbered_id(self):
+		models = [
+			_sub("claude-sonnet-5", "anthropic", order=0, accounts=[self._claude_account()]),
+			_keyrow("deepseek-chat", "deepseek", 1),
+		]
+		self.assertEqual(self._errors(models), [])
+		self.assertEqual(
+			turn_handler._native_pick_provider(
+				_settings(models, native_subscription_pool=1), "deepseek-chat"
+			),
+			"deepseek-0",
+		)
+
+	def test_the_plain_deepseek_id_is_renamed_only_on_a_2026_11_gateway(self):
+		self.assertEqual(gateway_ids.provider_to_gateway("deepseek", frappe._dict(V11)), "deepseek_api")
+		self.assertEqual(gateway_ids.provider_to_gateway("deepseek", frappe._dict()), "deepseek")
+		self.assertEqual(gateway_ids.provider_to_gateway("gemini", frappe._dict(V11)), "gemini")
 
 
 class TestNativeClaudeAndSignInIdRules(unittest.TestCase):
