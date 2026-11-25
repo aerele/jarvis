@@ -552,6 +552,10 @@ jobs:
           # source path: /opt/frappe-bench/apps/jarvis. `coverage report` has to read those
           # sources to count statements, so the checkout is placed at that exact path.
           # Cheaper and far less fragile than a [paths] remap in a .coveragerc.
+          # On a self-hosted runner /opt persists between jobs (no container here), so clear
+          # the previous run's copy first. Without this, `cp -r` nests the new checkout at
+          # apps/jarvis/app and coverage reads the stale sources left behind.
+          sudo rm -rf /opt/frappe-bench/apps/jarvis
           sudo mkdir -p /opt/frappe-bench/apps
           sudo cp -r app /opt/frappe-bench/apps/jarvis
 
