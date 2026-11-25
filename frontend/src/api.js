@@ -377,6 +377,20 @@ export const ruleValues = (doctype, table, links) =>
 	call(AC + "rule_values", { doctype, table, links: JSON.stringify(links) });
 export const applyAction = (action) =>
 	call(AC + "apply_action", { action: JSON.stringify(action) });
+// Cancel an unsaved draft card for good: the server records a "discarded" receipt for
+// the DRAFT row's message, so the card stays gone after a reload and on the phone.
+export const dismissDraft = (conversation, message) =>
+	call(AC + "dismiss_draft", { conversation, message });
+// Save an edited SERVER draft card: `values` is only what the person changed (lib/draftCardValues.js).
+// The server claims the card and runs the edited call itself (the stored card and arguments are
+// never rewritten): the card ends as the decided row, or stays Pending when the reply says
+// `card_open`. Same envelopes as applyAction.
+export const saveDraftCard = (token, conversation, values) =>
+	call(AC + "save_draft_card", {
+		token,
+		conversation: conversation || "",
+		values: JSON.stringify(values || {}),
+	});
 // Park the confirm card for a create receipt's suggested next step (#621). Same
 // card the assistant's own submit/workflow call gets; nothing runs until Confirm.
 export const proposeNextAction = (conversation, step) =>
@@ -472,18 +486,23 @@ export async function sendMessage(
 	if (approvalTokens && approvalTokens.length)
 		args.approval_tokens = JSON.stringify(approvalTokens);
 	// Forward context for a viewing-context doc/report, the one-shot "ground on
-	// wiki" flag (which can arrive without a doc), OR a page marker ("triggers" /
+	// wiki" flag (which can arrive without a doc), a page marker ("triggers" /
 	// "dashboards") that primes the agent for that surface's flow from the main
-	// chat, OR the payment-calendar hand-off capability (context.handoff_pages,
-	// see isPaymentCalendarHandoff). The backend re-applies the same allow-list
-	// (chat.api.send_message).
+	// chat, OR the composer's connector-focus pill ({key, label} of the one
+	// connector the user scoped this turn to; the bench limits the turn's tools
+	// to that connector), OR the payment-calendar hand-off capability
+	// (context.handoff_pages, see isPaymentCalendarHandoff). The backend
+	// re-applies the same allow-list (chat.api.send_message).
 	if (
 		context &&
 		(context.doctype ||
 			context.ground_wiki ||
 			context.page === "triggers" ||
 			context.page === "dashboards" ||
-			isPaymentCalendarHandoff(context.handoff_pages))
+			isPaymentCalendarHandoff(context.handoff_pages) ||
+			(context.focus_connector &&
+				context.focus_connector.key &&
+				context.focus_connector.label))
 	)
 		args.context = JSON.stringify(context);
 	if (requestId) {
@@ -1088,6 +1107,57 @@ export const fileboxRerun = (conversation) =>
 export const fileboxRerunBulk = (conversations) =>
 	call("jarvis.chat.filebox.bulk_rerun_inbound", {
 		conversations: JSON.stringify(conversations || []),
+	});
+
+// --- MCP Connectors (MCP_CONNECTORS_PLAN.md P4; broker + SSRF guard live
+// entirely server-side in jarvis.connectors, this is just the SPA's thin CRUD
+// + test-probe surface). All eleven calls run @require_jarvis_user and re-check
+// row permissions server-side (jarvis.chat.connector_permissions) regardless
+// of what the client believes about scope/role. ---
+const CN = "jarvis.chat.connectors_api.";
+// {oauth_redirect_uri, catalog, shared:[row], mine:[row]}.
+export const listConnectors = () => call(CN + "list_connectors");
+// p = {label, preset, base_url, scope, credential, auth_method?, enabled?,
+// key?}. Presets other than "Custom URL" ignore base_url server-side (pinned
+// to the vendor endpoint). enabled defaults to 1 server-side; the dialog
+// always passes 0 when creating from a connect press (F8) so a row nobody
+// has finished setting up isn't visible to anyone else until Save (step 2)
+// flips it back on.
+export const addConnector = (p) => call(CN + "add_connector", p);
+// Runs a live initialize + tools/list through the broker; on success writes
+// tools_cache + merges allowed_actions. {ok, tools:[...]} | {ok:false, error}.
+export const testConnector = (name) => call(CN + "test_connector", { name });
+// actions: [{action, allowed}] - JSON-stringified like every other list/dict
+// param this codebase posts through call() (see personalise_api's payload
+// convention); read_only/destructive are always server-recomputed, never
+// trusted from here.
+export const setConnectorAllowedActions = (name, actions) =>
+	call(CN + "set_allowed_actions", { name, actions: JSON.stringify(actions || []) });
+// p = {label?, base_url?, credential?, enabled?}. base_url only takes effect
+// on a Custom URL connector; a blank/omitted credential means "keep the saved
+// one" - the SPA never round-trips the real secret back to resubmit it.
+export const updateConnector = (name, p) => call(CN + "update_connector", { name, ...(p || {}) });
+export const deleteConnector = (name) => call(CN + "delete_connector", { name });
+// OAuth tier: {ok, url, started_at} to redirect the browser to, or {ok:false, error}.
+// The return trip is handled by connectors_api.mcp_oauth_callback for every row.
+export const connectOauth = (name) => call(CN + "connect_oauth", { name });
+// Poll target for oauthSignin.js's tab flow: {ok, connected, connected_at, error}.
+// `error` is one-shot - the server clears it once this has read it.
+export const oauthSigninStatus = (name) => call(CN + "oauth_signin_status", { name });
+// Deletes the CURRENT user's sign-in for this connector. Idempotent.
+export const disconnectOauth = (name) => call(CN + "disconnect_oauth", { name });
+// Checks whether an address needs a sign-in, WITHOUT creating anything - call it
+// before addConnector so the user can be shown where they would sign in.
+// {ok, needs_signin, signin_host, registration, scopes} | {ok:false, error}.
+export const probeConnectorAuth = (base_url) => call(CN + "probe_connector_auth", { base_url });
+// Admin only, and only for a connector whose row reports needs_static_client:
+// the id/secret an admin got by registering this workspace at the provider
+// (against the row's oauth_redirect_uri). A blank secret keeps the stored one.
+export const setOauthClientCredentials = (name, client_id, client_secret) =>
+	call(CN + "set_oauth_client_credentials", {
+		name,
+		client_id,
+		client_secret: client_secret || "",
 	});
 
 // --- Support panel (Plan 3) -------------------------------------------------

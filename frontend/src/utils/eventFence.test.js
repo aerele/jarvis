@@ -1,8 +1,7 @@
 // Real executable client-fence test (CDX-12 / CDX-3). Plain node built-ins (node:test +
 // node:assert) — no external framework. Run directly (`node --test eventFence.test.js`) or
-// via the python suite: jarvis/tests/test_event_fence_client.py subprocess-runs this so
-// codex's 5-step client walk lives in the suite forever. `node --test` exits non-zero on
-// any failed assertion, which the python runner asserts.
+// via `npm run test:node`, so codex's 5-step client walk is enforced by CI. `node --test`
+// exits non-zero on any failed assertion.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fenceKey, fenceReject, fenceAccept } from "./eventFence.js";

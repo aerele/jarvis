@@ -72,14 +72,11 @@ def _synced_apps() -> list[str] | None:
 
 
 def _admin_configured() -> bool:
-	"""jarvis_admin_url set (site config outranks the Settings field)."""
-	try:
-		if (frappe.conf.get("jarvis_admin_url") or "").strip():
-			return True
-		settings = frappe.get_cached_doc(SETTINGS)
-		return bool((settings.get("jarvis_admin_url") or "").strip())
-	except Exception:
-		return False
+	"""Same gate as every other background push to admin; see
+	``usage_push._admin_configured``."""
+	from jarvis.chat.usage_push import _admin_configured as admin_configured
+
+	return admin_configured()
 
 
 def _pool_active() -> bool | None:

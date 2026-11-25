@@ -6,7 +6,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { errMessage, isSessionExpired, turnErrorInfo, GENERIC_ERROR_MESSAGE } from "./errors.js";
+import {
+	OFFLINE_MESSAGE,
+	errMessage,
+	isSessionExpired,
+	turnErrorInfo,
+	GENERIC_ERROR_MESSAGE,
+} from "./errors.js";
 import rules from "../../../jarvis/public/js/turn_error_rules.mjs";
 
 test("extracts the first server message when present", () => {
@@ -52,10 +58,11 @@ test("also catches the null-target form of the same crash", () => {
 // on undefined/null" shape may be suppressed; every other TypeError (and any
 // ReferenceError/SyntaxError) must surface its own message like any other Error.
 test("a TypeError that is NOT the property-read crash still surfaces its own message", () => {
-	assert.equal(errMessage(new TypeError("Failed to fetch")), "Failed to fetch");
+	// A network failure is named in plain words instead (see the OFFLINE_MESSAGE test below).
+	assert.equal(errMessage(new TypeError("Invalid file type")), "Invalid file type");
 	assert.equal(
-		errMessage(new TypeError("NetworkError when attempting to fetch resource.")),
-		"NetworkError when attempting to fetch resource."
+		errMessage(new TypeError("Value is not a valid date")),
+		"Value is not a valid date"
 	);
 });
 
@@ -107,14 +114,6 @@ test("a 403 with no usable message becomes a session-expired sentence", () => {
 
 test("a 401 with no usable message gets the same session-expired sentence", () => {
 	assert.equal(errMessage({ status: 401 }), "Your session has expired. Please sign in again.");
-});
-
-// The #696 crash itself carries no .status at all (call.js throws before
-// e.status is ever assigned) - it must fall through to the generic sentence,
-// not somehow trip the 401/403 branch.
-test("the #696 crash shape (no status) falls through to the generic sentence, not session-expired", () => {
-	const e = new TypeError("Cannot read properties of undefined (reading 'exc_type')");
-	assert.equal(errMessage(e), GENERIC_ERROR_MESSAGE);
 });
 
 test("a non-auth status keeps its own message", () => {
@@ -597,4 +596,19 @@ test("#644: a non-auth error is never an expired session", () => {
 		assert.equal(isSessionExpired({ status: 500, message: "boom" }), false);
 		assert.equal(errMessage({ status: 500, message: "boom" }), "boom");
 	});
+});
+
+test("a request that never reached the server is named in plain words", () => {
+	for (const message of [
+		"Failed to fetch",
+		"NetworkError when attempting to fetch resource.",
+		"Load failed",
+	])
+		assert.equal(errMessage(new TypeError(message)), OFFLINE_MESSAGE);
+	// A server that answered keeps its own words, and our own thrown sentences still show.
+	assert.equal(
+		errMessage({ status: 500, messages: ["Failed to fetch the invoice"] }),
+		"Failed to fetch the invoice"
+	);
+	assert.equal(errMessage({ message: "boom" }), "boom");
 });

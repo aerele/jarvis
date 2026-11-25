@@ -75,12 +75,37 @@
 								applying ? 'cursor-not-allowed opacity-50' : '',
 							]"
 							:aria-current="section === item.key ? 'page' : undefined"
+							:aria-label="
+								item.route ? __('{0} (opens a page)', [item.label]) : undefined
+							"
 							:aria-disabled="applying"
 							:disabled="applying"
 							@click="go(item.key)"
 						>
-							<FeatherIcon :name="item.icon" class="size-4 shrink-0" />
+							<svg
+								v-if="item.icon === 'plug'"
+								class="size-4 shrink-0"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="1.7"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							>
+								<path d="M12 22v-5" />
+								<path d="M9 8V2" />
+								<path d="M15 8V2" />
+								<path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
+							</svg>
+							<FeatherIcon v-else :name="item.icon" class="size-4 shrink-0" />
 							<span class="truncate">{{ item.label }}</span>
+							<!-- A page, not a pane: the arrow says this entry leaves the dialog. -->
+							<FeatherIcon
+								v-if="item.route"
+								name="arrow-up-right"
+								class="ml-auto size-3.5 shrink-0 text-ink-gray-5"
+								aria-hidden="true"
+							/>
 							<span
 								v-if="railDot(item.key)"
 								class="ml-auto size-1.5 shrink-0 rounded-full bg-surface-red-5"
@@ -128,6 +153,7 @@
 <script setup>
 import { __ } from "@/lib/i18n";
 import { computed, defineAsyncComponent, inject, onMounted, onBeforeUnmount } from "vue";
+import { routerKey } from "vue-router";
 import { Dialog, FeatherIcon } from "frappe-ui";
 // Straight from reka-ui, the same primitives frappe-ui's Dialog uses
 // internally. Needed because overriding the #body slot drops the ones it
@@ -148,6 +174,8 @@ import { useJarvisTheme } from "@/theme";
 import { confirmState } from "@/composables/useConfirm";
 
 const store = useShellStore();
+// Optional: an entry that is a page (not a pane) navigates with it. Absent in a bare mount.
+const router = inject(routerKey, null);
 const { effectiveDark: dark, paletteVars } = useJarvisTheme();
 
 // Panes are lazy: this dialog is mounted eagerly by AppShell for EVERY user, so
@@ -170,6 +198,9 @@ const UsageAdminPane = defineAsyncComponent(() =>
 const BrandingPane = defineAsyncComponent(() => import("@/components/settings/BrandingPane.vue"));
 const PdfTemplatesPane = defineAsyncComponent(() =>
 	import("@/components/settings/PdfTemplatesPane.vue")
+);
+const ConnectorsPane = defineAsyncComponent(() =>
+	import("@/components/settings/ConnectorsPane.vue")
 );
 
 // ACCOUNT AND BILLING is the tenant-admin tier (System Manager OR Jarvis Admin,
@@ -201,6 +232,7 @@ const PANES = {
 	usage: UsagePane,
 	activity: ActivityPane,
 	shortcuts: ShortcutsPane,
+	connectors: ConnectorsPane,
 	plan: PlanBillingPane,
 	aimodels: AiModelsPane,
 	branding: BrandingPane,
@@ -220,6 +252,13 @@ const NAV = [
 			{ key: "usage", label: "Usage", icon: "bar-chart-2" },
 			{ key: "activity", label: "Activity", icon: "activity" },
 			{ key: "shortcuts", label: "Shortcuts", icon: "command" },
+			{
+				key: "connectors",
+				label: "Connectors",
+				// A plug (not feather's grid, which the user menu already uses for
+				// Switch to Desk); drawn inline because feather has no plug.
+				icon: "plug",
+			},
 		],
 	},
 	{
@@ -236,8 +275,18 @@ const NAV = [
 		name: "Administration",
 		gate: () => isAdmin,
 		items: [
-			{ key: "usageadmin", label: "User usage", icon: "users" },
+			{ key: "usageadmin", label: __("User usage"), icon: "users" },
 			{ key: "sharedchats", label: __("Shared chats"), icon: "share-2" },
+			// A page, not a pane: it needs the width of the whole window, so the entry closes
+			// this dialog and navigates (see go()).
+			{
+				key: "useractivity",
+				label: __("User activity"),
+				// Not "activity": the Workspace group already has an Activity pane, and
+				// this one is the admin's view of other people.
+				icon: "eye",
+				route: "UserActivity",
+			},
 		],
 	},
 ];
@@ -262,7 +311,8 @@ const confirmOpen = computed(() => confirmState.value !== null);
 // together.
 const LEGACY_SECTION_ALIASES = { billing: "usage" };
 
-// A gated section requested by a user without the role falls back to General.
+// A section requested by a user without the role for its group (group gate)
+// falls back to General.
 const section = computed(() => {
 	let s = store.settingsSection;
 	if (LEGACY_SECTION_ALIASES[s]) s = LEGACY_SECTION_ALIASES[s];
@@ -286,6 +336,13 @@ const pane = computed(() => PANES[section.value]);
 const applying = computed(() => !!store.settingsApplying);
 
 function go(key) {
+	const item = NAV.flatMap((g) => g.items).find((i) => i.key === key);
+	if (item && item.route) {
+		if (applying.value) return;
+		store.settingsOpen = false;
+		if (router) router.push({ name: item.route });
+		return;
+	}
 	// Locked while an apply is in flight: switching sections would drop the
 	// applying pane's scrim and abandon the apply mid-flight. The dialog's own
 	// close (X) button is untouched, so a hung apply never traps the user.

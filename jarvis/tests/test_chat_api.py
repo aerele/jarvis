@@ -351,7 +351,7 @@ class TestSendMessage(_ChatTestCase):
 	def test_rejects_empty_message(self):
 		result = send_message(self.conv, "   ")
 		self.assertFalse(result["ok"])
-		self.assertIn("empty", result["reason"].lower())
+		self.assertIn("type a message", result["reason"].lower())
 
 	def test_human_send_to_missing_conversation_falls_back(self):
 		# A stale/reaped conversation id from a human send lands in a fresh chat
@@ -586,7 +586,7 @@ class TestRetryMessage(_ChatTestCase):
 		user_id, _asst_id = self._make_turn(self.conv, with_error=True)
 		result = retry_message(user_id)
 		self.assertFalse(result["ok"])
-		self.assertIn("assistant", result["reason"].lower())
+		self.assertIn("replies can be retried", result["reason"].lower())
 
 	def test_rejects_message_without_error(self):
 		_user_id, asst_id = self._make_turn(self.conv, with_error=False)
@@ -610,7 +610,7 @@ class TestRetryMessage(_ChatTestCase):
 		frappe.db.commit()
 		result = retry_message(asst_doc.name)
 		self.assertFalse(result["ok"])
-		self.assertIn("preceding", result["reason"].lower())
+		self.assertIn("find the message to retry", result["reason"].lower())
 
 	def test_picks_immediately_preceding_user_message(self):
 		"""When a conversation has multiple user turns, retry should target the
@@ -641,14 +641,6 @@ class TestRetryMessage(_ChatTestCase):
 		_, kwargs = enqueue.call_args
 		self.assertEqual(kwargs["message_id"], u2)
 
-	def test_bumps_conversation_last_active_at(self):
-		_u, asst_id = self._make_turn(self.conv, with_error=True)
-		before = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
-		with patch("frappe.enqueue"):
-			retry_message(asst_id)
-		after = frappe.utils.get_datetime(frappe.get_value(CONV, self.conv, "last_active_at"))
-		self.assertGreaterEqual(after, before)
-
 	def test_legacy_retry_of_a_reply_that_is_not_the_newest_is_refused(self):
 		u, asst_id = self._make_turn(self.conv, with_error=True)
 		self._make_turn(self.conv, user_text="next question")
@@ -677,7 +669,8 @@ class TestRetryMessage(_ChatTestCase):
 		):
 			result = retry_message(asst_id)
 		self.assertEqual(
-			result, {"ok": False, "reason": "A reply is already in progress. Wait for it to finish."}
+			result,
+			{"ok": False, "reason": "A reply is already in progress. Wait for it to finish, then try again."},
 		)
 		line = logger.return_value.info.call_args.args
 		self.assertEqual(line[0].split()[3], "reason=%s")

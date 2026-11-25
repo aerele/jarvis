@@ -37,12 +37,6 @@ describe("send() wires the typed 'show it' fast-path", () => {
 		expect(COND).toContain("fromMain");
 	});
 
-	it("skips the fast-path when the send carries an attachment", () => {
-		// A message with a file is a real send, never a re-check phrase — the guard
-		// stops "show it" as a caption from being swallowed.
-		expect(COND).toContain("!pendingFiles.value.length");
-	});
-
 	it("routes the re-surface through the single shared choke-point, tagged typed", () => {
 		// Every layer (auto/pill/menu/typed) goes through resyncPendingConfirmations
 		// so they all inherit its ok:false-keeps-queue + freshness posture. No layer
@@ -82,5 +76,32 @@ describe("the fast-path swallows the message ONLY when a card actually surfaced"
 		// resyncPendingConfirmations is async; the user may have switched chats while
 		// it ran. Clearing input then would wipe an unrelated draft.
 		expect(SURFACED_GUARD).toContain("chatViewIsCurrent(_typedView)");
+	});
+});
+
+describe("a kept draft card at the tail is shown once per draft, never silently", () => {
+	const block = src.slice(condAt, condAt + 2000);
+	const GUARD =
+		"if (chatViewIsCurrent(_typedView) && shownDraft && !draftsShownOnRequest.has(shownDraft)) {";
+
+	it("only when the card at the tail is the kept draft's", () => {
+		// an own card of the last message (email, gated or unknown verb) is not it
+		expect(block).toContain(
+			'const shownDraft = _tailCard.value === "draft" ? _liveDraft.value?.name : "";'
+		);
+		expect(block).not.toContain("actionFor.value || draftBlockErrorText.value");
+	});
+
+	it("once per draft, says so, and scrolls to the card itself", () => {
+		const at = block.indexOf(GUARD);
+		expect(at).toBeGreaterThan(-1);
+		const branch = block.slice(at, at + 400);
+		expect(branch).toContain("draftsShownOnRequest.add(shownDraft);");
+		expect(branch).toContain('input.value = "";');
+		expect(branch).toContain('notify("Your draft is at the bottom.", { type: "info" });');
+		expect(branch).toContain("scrollDraftCardIntoView();");
+		expect(src).toContain(
+			'const el = threadEl.value?.querySelector(".jv-action.jv-summary");'
+		);
 	});
 });

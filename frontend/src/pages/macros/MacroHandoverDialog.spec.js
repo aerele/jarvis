@@ -52,8 +52,9 @@ const USERS = [
 	{ user: "full@example.test", full_name: "Full User", macros: 25 },
 ];
 
-async function open(props = {}) {
+async function open(props = {}, options = {}) {
 	const w = mount(MacroHandoverDialog, {
+		...options,
 		props: {
 			modelValue: true,
 			name: "m1",
@@ -284,6 +285,25 @@ describe("MacroHandoverDialog", () => {
 		expect(toast.success.mock.calls[0][0]).toBe(
 			"Handed “&lt;img src=x onerror=alert(1)&gt;” to &lt;b&gt;X&lt;/b&gt; (x@example.test)"
 		);
+	});
+
+	it("a tick empties the search box, brings the full list back and keeps focus there (#829)", async () => {
+		vi.useFakeTimers();
+		const w = await open({}, { attachTo: document.body });
+		api.adminHandoverTargets.mockResolvedValue({ users: [USERS[1]], max: 25 });
+		await w.find(".jv-macro-handover-search").setValue("ben");
+		vi.advanceTimersByTime(300);
+		await flushPromises();
+		expect(api.adminHandoverTargets).toHaveBeenLastCalledWith("ben");
+		api.adminHandoverTargets.mockResolvedValue({ users: USERS, max: 25 });
+		await pick(w, "ben@example.test");
+		await flushPromises();
+		expect(w.find(".jv-macro-handover-search").element.value).toBe("");
+		expect(api.adminHandoverTargets).toHaveBeenLastCalledWith("");
+		expect(w.findAll(".jv-macro-handover-user")).toHaveLength(3);
+		expect(chips(w)).toEqual(["ben@example.test"]);
+		expect(document.activeElement).toBe(w.find(".jv-macro-handover-search").element);
+		w.unmount();
 	});
 
 	it("searches when the typing stops, and keeps a pick the new results do not show", async () => {

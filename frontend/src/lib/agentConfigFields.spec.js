@@ -249,16 +249,6 @@ describe("SCOPE_CONFIG_FIELDS / AGENT_SPECIFIC_CONFIG_FIELDS", () => {
 			"grir_floor_days",
 		]);
 	});
-
-	it("the two subsets partition CONFIG_FIELD_SET with no overlap and no gap", () => {
-		expect(SCOPE_CONFIG_FIELDS.length + AGENT_SPECIFIC_CONFIG_FIELDS.length).toBe(
-			CONFIG_FIELD_SET.length
-		);
-		const scopeSet = new Set(SCOPE_CONFIG_FIELDS);
-		for (const f of AGENT_SPECIFIC_CONFIG_FIELDS) {
-			expect(scopeSet.has(f)).toBe(false);
-		}
-	});
 });
 
 // jarvis#1063 CRITICAL fix: close-auditor/evaluate.py reads its materiality

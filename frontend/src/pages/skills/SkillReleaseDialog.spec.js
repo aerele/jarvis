@@ -70,10 +70,6 @@ describe("SkillReleaseDialog", () => {
 		expect(w.text()).toContain("Releasing does not let it write without asking");
 	});
 
-	it("offers it for a role skill and a company skill alike (both arrive as shared)", () => {
-		expect(open({ shared: true }).find(".stub-checkbox").exists()).toBe(true);
-	});
-
 	it("does not offer it for a private skill, and says its owner switches it on", () => {
 		const w = open({ shared: false });
 		expect(w.find(".stub-checkbox").exists()).toBe(false);

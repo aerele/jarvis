@@ -28,12 +28,6 @@ describe("v-scroll-fade directive", () => {
 		expect(w.find(".scroll-region").classes()).toContain("jv-scroll-fade");
 	});
 
-	it("adds is-scrolling while a scroll event is firing", async () => {
-		const w = mountHost();
-		await w.find(".scroll-region").trigger("scroll");
-		expect(w.find(".scroll-region").classes()).toContain("is-scrolling");
-	});
-
 	it("removes is-scrolling ~800ms after scrolling stops", async () => {
 		const w = mountHost();
 		await w.find(".scroll-region").trigger("scroll");

@@ -1,9 +1,10 @@
 [pre_model_sync]
 # Patches added in this section will be executed before doctypes are migrated
 # Read docs to understand patches: https://docs.frappe.io/framework/user/en/database-migrations
-# Release v15.8.2 (2026-11-15): this line changes on each patch release so Frappe Cloud sees patches.txt and runs bench migrate.
+# Release v15.8.4 (2026-11-18): this line changes on each patch release so Frappe Cloud sees patches.txt and runs bench migrate.
 
 jarvis.patches.v1_0_migrate_legacy_agent_settings
+jarvis.patches.v2_32_rename_agent_write_log_report
 
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
@@ -80,3 +81,10 @@ jarvis.patches.v2_31_disable_reorder_replenishment_installations
 jarvis.patches.v2_31_disable_ticket_triage_installations
 jarvis.patches.v2_31_reset_false_foreign_session_counters
 jarvis.patches.v2_31_reload_trigger_activity_for_intake_indexes
+jarvis.patches.v2_32_chat_message_conv_seq_index
+jarvis.patches.v2_32_fill_trigger_doc_events
+jarvis.patches.v2_32_reload_jarvis_user_activity_report
+jarvis.patches.v2_32_seed_activity_rollup
+jarvis.patches.v2_19_drop_connectors_kill_switch
+jarvis.patches.v2_21_drop_allow_custom_urls
+jarvis.patches.v2_33_openai_subscription_default_sol

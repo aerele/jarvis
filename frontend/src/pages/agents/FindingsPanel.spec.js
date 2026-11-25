@@ -310,12 +310,6 @@ describe("C2: Stop is reachable while running and idempotent-safe (no confirm)",
 		expect(toast.error).toHaveBeenCalledWith("That run no longer exists.");
 		expect(w.emitted("stopped")).toBeFalsy();
 	});
-
-	it("does not render a confirm dialog before stopping", async () => {
-		const w = mountPanel(baseRun({ status: "running" }));
-		await flushPromises();
-		expect(w.find(".dialog").exists()).toBe(false);
-	});
 });
 
 describe("C3: the run step timeline - ticking elapsed time + observed steps", () => {

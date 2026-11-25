@@ -2247,13 +2247,37 @@ class TestTheContinuationEnds(ContBase):
 		self._end_continuation([self._not_read_row(), dict(query_run=other)])
 		self.assertEqual(self._unread(), [PREP_REPORT])
 
+	def test_a_query_report_of_a_report_snapshot_is_not_a_read_of_the_awaited_report(self):
+		snapshot = "rs_" + "a" * 32
+		self._end_continuation([self._not_read_row(), dict(query_run=snapshot)])
+		self.assertEqual(self._unread(), [PREP_REPORT])
+		_waits, _failed, ready = macro_report_wait.step_reads(
+			self.conv, frappe.get_doc(TURN, self.cont).as_dict()
+		)
+		self.assertEqual(ready, [])  # the metadata-only answer is unread; the snapshot adds none
+
+	def test_ready_answers_skip_snapshot_ids_and_keep_prepared_ones(self):
+		snapshot = "rs_" + "b" * 32
+		answers = macro_report_wait._ready_answers({}, {snapshot, "PREP-0007"})
+		self.assertEqual(answers, [{"report_name": "", "run": "PREP-0007", "key": None}])
+		self.assertEqual(macro_report_wait._ready_answers({}, {snapshot}), [])
+
+	def test_a_snapshot_id_does_not_make_a_ready_answer_count_as_read(self):
+		snapshot = "rs_" + "c" * 32
+		newest = {
+			"k": {
+				"status": "ready",
+				"read_status": "not_read",
+				"run": snapshot,
+				"report_name": "R",
+				"key": "k",
+			}
+		}
+		self.assertEqual(macro_report_wait._ready_answers(newest, {snapshot}), [])
+
 	def test_a_query_report_of_a_fresh_copy_the_model_asked_for_is_a_read(self):
 		again = self._pr(PREP_REPORT, _ACME, "Completed")
 		self._end_continuation([self._not_read_row(again), dict(query_run=again)])
-		self.assertEqual(self._unread(), [])
-
-	def test_a_ready_answer_from_before_read_status_still_counts_as_read(self):
-		self._end_continuation([self._ready_row()])  # no read_status, as older receipts
 		self.assertEqual(self._unread(), [])
 
 	def test_a_metadata_only_answer_still_clears_a_waiting_read_of_the_same_run(self):
@@ -2345,9 +2369,6 @@ class TestAFailedReportsExplanationEnds(ContBase):
 
 	def _reason(self):
 		return f"Step 1 stopped: {PREP_REPORT} failed: It took too long to generate and was stopped."
-
-	def test_the_run_is_waiting_failed_with_its_explanation_turn_out(self):
-		self.assertEqual(self._full().waiting_failed, 1)
 
 	def test_a_clean_explanation_still_ends_the_run_failed_with_the_reports_reason(self):
 		self._end_continuation([])

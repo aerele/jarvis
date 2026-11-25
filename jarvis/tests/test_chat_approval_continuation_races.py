@@ -251,7 +251,10 @@ class TestChatApprovalContinuationRaces(continuation_fixture.ComposedChatReviewF
 
 				def resume(*args, _real=real_resume, _main=main, **kwargs):
 					if threading.get_ident() == _main:  # a known refusal before any insert
-						return {"ok": False, "reason": "a reply is already in progress - hang on a moment"}
+						return {
+							"ok": False,
+							"reason": "A reply is already in progress. Wait for it to finish, then try again.",
+						}
 					return _real(*args, **kwargs)
 
 				def read(name, _real=real_read, _main=main, _other=other, _mode=mode):

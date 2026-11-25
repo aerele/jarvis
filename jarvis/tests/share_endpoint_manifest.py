@@ -82,6 +82,14 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.activity_report",
+	"Admin-only (require_jarvis_admin) User activity read model: per-person counts and event metadata from the activity tables; no transcript lookup, so shared chat identifiers grant no authority.",
+	"""
+    get_user_activity
+    """,
+)
+
+_unrelated(
 	"jarvis.api",
 	"Agent credential administration; tool dispatch is separately classified as chat-scoped.",
 	"""
@@ -246,6 +254,25 @@ _unrelated(
     list_app_learning_runs_page
     list_custom_apps
     schedule_app_learning
+    """,
+)
+
+_unrelated(
+	"jarvis.chat.connectors_api",
+	"Connector ownership/admin gates and current-user OAuth state, not chat sharing.",
+	"""
+    add_connector
+    connect_oauth
+    delete_connector
+    disconnect_oauth
+    list_connectors
+    mcp_oauth_callback
+    oauth_signin_status
+    probe_connector_auth
+    set_allowed_actions
+    set_oauth_client_credentials
+    test_connector
+    update_connector
     """,
 )
 
@@ -785,6 +812,10 @@ ENDPOINTS.update(
 			"arguments": {"conversation": "$conversation", "token": "$token"},
 			"scope": "chat_scoped",
 		},
+		"jarvis.chat.actions_api.dismiss_draft": {
+			"arguments": {"conversation": "$conversation", "message": "$message"},
+			"scope": "chat_scoped",
+		},
 		"jarvis.chat.actions_api.dismiss_tool": {
 			"arguments": {"conversation": "$conversation", "token": "$token"},
 			"scope": "chat_scoped",
@@ -816,6 +847,14 @@ ENDPOINTS.update(
 				"doctype": "Jarvis Conversation",
 				"kind": "update",
 				"name": "$conversation",
+			},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.actions_api.save_draft_card": {
+			"arguments": {
+				"conversation": "$conversation",
+				"token": "$token",
+				"values": {"title": "recipient edit"},
 			},
 			"scope": "chat_scoped",
 		},

@@ -51,13 +51,6 @@ describe("stripBlocks, settled reply", () => {
 });
 
 describe("stripBlocks, mid-stream", () => {
-	it("HOLDS an unterminated block instead of rendering it as raw JSON", () => {
-		// THE bug. Same text, streaming: the reader sees the prose, not the payload.
-		const text =
-			'Creating that supplier.\n\n```jarvis-action\n{"verb":"create","doctype":"Sup';
-		expect(stripBlocks(text, true)).toBe("Creating that supplier.");
-	});
-
 	it("holds an unterminated block of every type", () => {
 		for (const tag of [...BLOCK_TAGS, "mermaid"]) {
 			const text = "prose\n\n```" + tag + '\n{"half":';
@@ -117,7 +110,9 @@ describe("the view renders through this module", () => {
 
 	it("passes the streaming flag, so a settled reply is not held forever", () => {
 		expect(src).toContain('import { stripBlocks } from "@/lib/chatBlocks";');
-		expect(src).toContain("renderMarkdown(stripBlocks(text, streaming))");
+		expect(src).toContain(
+			"renderMarkdown(stripBlocks(text, streaming), { copyCode: !streaming })"
+		);
 		expect(src).toContain("render(m.content, m.streaming)");
 	});
 

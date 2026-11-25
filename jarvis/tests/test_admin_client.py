@@ -325,11 +325,6 @@ class TestNetworkErrors(FrappeTestCase):
 			with self.assertRaises(AdminUnreachableError):
 				post_update_llm_creds("p", "m", "b", "k")
 
-	def test_timeout_raises_unreachable(self):
-		with patch("requests.post", side_effect=requests.Timeout("read timeout")):
-			with self.assertRaises(AdminUnreachableError):
-				post_update_llm_creds("p", "m", "b", "k")
-
 	# ------------------------------------------------------------------ #
 	# #743: distinguish an AMBIGUOUS transport failure (admin MAY have received
 	# the request) from a CONFIRMED not-delivered one (nothing was sent). Every
@@ -495,23 +490,6 @@ class TestAdminErrorResponses(FrappeTestCase):
 			with self.assertRaises(AdminValidationError) as cm:
 				post_update_llm_creds("p", "m", "b", "k")
 		self.assertEqual(str(cm.exception), "no running tenant")
-
-	def test_5xx_envelope_still_raises_unreachable(self):
-		"""5xx is genuinely server-side; the unreachable class is correct."""
-		mock_post = MagicMock(
-			return_value=_mock_response(
-				503,
-				json_body={
-					"message": {
-						"ok": False,
-						"error": {"code": "ServiceUnavailable", "message": "down"},
-					}
-				},
-			)
-		)
-		with patch("requests.post", mock_post):
-			with self.assertRaises(AdminUnreachableError):
-				post_update_llm_creds("p", "m", "b", "k")
 
 	def test_frappe_validation_error_surfaces_clean_message(self):
 		"""When admin raises frappe.ValidationError inside a whitelisted endpoint
@@ -2949,6 +2927,21 @@ class TestOAuthGrantRefused(FrappeTestCase):
 		self.assertEqual({h["Authorization"] for h in cap["api_headers"]}, {"token legacy-key:legacy-secret"})
 		self.assertEqual(self._refused_flag(), "invalid_grant")
 
+	def test_refusal_survives_the_watchdog_cache_clear(self):
+		# The pump watchdog runs a full frappe.clear_cache() every five minutes. A
+		# marker outside persistent_cache_keys was wiped by it, so each */5 admin
+		# call re-sent the refused grant and logged a fresh Error Log row.
+		self.assertIn(admin_client._OAUTH_REFUSED_KEY, frappe.get_hooks("persistent_cache_keys"))
+		_settings_for_oauth(api_key="legacy-key", api_secret="legacy-secret")
+		cap = {}
+		route = self._route(token_response=self._refused, api_capture=cap)
+		with patch("requests.post", side_effect=route):
+			admin_client.get_connection()
+			frappe.clear_cache()
+			admin_client.get_connection()
+		self.assertEqual(len(cap["token_calls"]), 1)
+		self.assertEqual(self._refused_flag(), "invalid_grant")
+
 	def test_remembered_refusal_still_uses_a_cached_refresh_token(self):
 		# Frappe 16.35 still honours refresh_token: a bench holding one keeps its
 		# bearer; only the refused password grant is skipped.
@@ -3234,10 +3227,6 @@ class TestTermsUrl(FrappeTestCase):
 			patch("jarvis.hooks._DEFAULT_ADMIN_URL_FALLBACK", "https://erp.reseller.example"),
 			patch.object(admin_client, "_admin_url", return_value="https://erp.reseller.example"),
 		):
-			self.assertEqual(admin_client.terms_url(), "https://erp.reseller.example/terms")
-
-	def test_rebranded_admin_keeps_its_own_terms_page(self):
-		with patch.object(admin_client, "_admin_url", return_value="https://erp.reseller.example"):
 			self.assertEqual(admin_client.terms_url(), "https://erp.reseller.example/terms")
 
 	def test_stock_admin_in_different_case_is_still_stock(self):

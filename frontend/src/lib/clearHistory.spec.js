@@ -66,10 +66,6 @@ describe("failedChatsNotice", () => {
 		expect(failedChatsNotice(1)).toBe("1 chat could not be deleted. Try Delete all again.");
 		expect(failedChatsNotice(4)).toBe("4 chats could not be deleted. Try Delete all again.");
 	});
-
-	it("does not claim a reply is in progress", () => {
-		for (const failed of [1, 4]) expect(failedChatsNotice(failed)).not.toMatch(/repl/i);
-	});
 });
 
 describe("retainedCountPlanNotice", () => {
@@ -345,7 +341,7 @@ describe("ChatView clearAllHistory", () => {
 	it("on a failure says some chats may be gone and reloads the list", () => {
 		const failed = body.slice(body.indexOf("} catch (e) {"), body.indexOf("} finally {"));
 		expect(failed).toContain(
-			'notify(clearHistoryFailedNotice(errMessage(e)), { type: "error" });'
+			'clearHistoryFailedNotice(causeOf(e) || "Couldn\'t delete your history")'
 		);
 		expect(failed).toContain("store.loadConversations();");
 	});

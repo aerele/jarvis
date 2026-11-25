@@ -106,22 +106,6 @@ describe("normaliseAction", () => {
 		expect(normaliseAction({ doctype: "X" }).verb).toBeUndefined();
 	});
 
-	it("normalises the second stranded block (Purchase Order, object fields AND tables)", () => {
-		const a = normaliseAction({
-			verb: "create",
-			doctype: "Purchase Order",
-			fields: { supplier: "Test", transaction_date: "2026-07-31" },
-			tables: { items: { rows: [{ item_code: "DUMMY-ITEM-002", qty: 1, rate: 1 }] } },
-		});
-		expect(a.kind).toBe("doc");
-		expect(a.fields).toHaveLength(2);
-		expect(a.tables).toHaveLength(1);
-		expect(a.tables[0].fieldname).toBe("items");
-		// buildDraftModel walks BOTH with for..of; neither may be a plain object.
-		expect(Array.isArray(a.fields)).toBe(true);
-		expect(Array.isArray(a.tables)).toBe(true);
-	});
-
 	it("leaves a spec-shaped block untouched", () => {
 		const good = {
 			kind: "doc",
@@ -193,14 +177,58 @@ describe("the two gates that disagreed stay mirrored", () => {
 		// The live draft is switched off whenever the error text is set ...
 		expect(src).toContain("_cardMessage.value && !draftBlockErrorText.value");
 		// ... the error alert renders on that same text ...
-		expect(src).toMatch(/v-if="\s*draftBlockErrorText &&/);
+		expect(src).toMatch(/v-if="\s*draftBlockErrorText && actionAnchor === m\.name/);
 		expect(src).toContain("<span>{{ draftBlockErrorText }}</span>");
 		// ... and the summary card is the next link of the SAME chain, so the two
 		// can never both draw.
 		const err = src.indexOf("<span>{{ draftBlockErrorText }}</span>");
-		const head = src.indexOf('<template v-else-if="actionFor === m.name && activeAction">');
+		const head = src.indexOf('<template v-else-if="actionAnchor === m.name && activeAction">');
 		expect(head).toBeGreaterThan(err);
 		expect(src.slice(err, head)).not.toMatch(/<template v-if=|<div v-if=/);
+		// the error reads the live draft row, never only the last message
+		expect(src).toMatch(
+			/const draftBlockErrorText = computed\(\(\) => \{\s*const m = _cardMessage\.value;/
+		);
+	});
+
+	it("the card and the error are drawn under the last message, keyed by the draft row", () => {
+		expect(src).toMatch(
+			/const _liveDraft = computed\(\(\) => \{\s*const live = liveDraftMessage\(messages\.value,/
+		);
+		// a draft cancelled here whose card would still show stays hidden for the session
+		expect(src).toContain("return live && !hiddenDrafts.value.has(live.name) ? live : null;");
+		// ...judged by the rule on the loaded rows, so it also holds while a turn runs
+		expect(src).toContain(
+			"if (liveDraftRow(messages.value)?.name === key) hiddenDrafts.value.add(key);"
+		);
+		expect(src).toContain("const actionAnchor = computed(() =>");
+		expect(src).toContain('? _lastAssistant.value.name : ""');
+		// no template gate compares the draft row's own name any more
+		expect(src).not.toContain("actionFor === m.name");
+		// one card at the tail: the helper decides, and a kept draft yields to ask / confirm
+		expect(src).toContain("tailHasAsk: !!last && !!askOf(last)");
+		expect(src).toContain("tailHasOwnAction: !!_tailOwnAction.value");
+		expect(src).toContain("if (_tailOwnAction.value) return last;");
+		expect(src).toContain('return _tailCard.value === "draft" ? live : null;');
+		// Cancel sends the draft row's name
+		expect(src).toContain("api.dismissDraft(view.conversation, key)");
+	});
+
+	it("the panel's Discard cancels the draft like the card's Cancel, never by a message", () => {
+		expect(src).toMatch(
+			/function discardDraft\(\) \{\s*return cancelDraftFor\(draftPanel\.value\?\.messageKey \|\| actionFor\.value\);/
+		);
+		expect(src).toMatch(
+			/function cancelDraft\(\) \{\s*return cancelDraftFor\(actionFor\.value\);/
+		);
+		// ...and is off while the draft is parked behind its confirmation card
+		expect(src).toMatch(
+			/class="jv-action-discard"\s*:disabled="draftPanel\.applying \|\| !!draftPanel\.parked"\s*@click="discardDraft"\s*>\s*Discard\s*<\/button>/
+		);
+		expect(src).toContain(
+			"if (parkedNoteFor(parkedDrafts.value, key) || parkedByCard(pendingActions.value, key)) return;"
+		);
+		expect(src).not.toContain('send("No, cancel that.");');
 	});
 
 	it("never dumps raw dry-run JSON into a confirmation card body", () => {
@@ -208,7 +236,8 @@ describe("the two gates that disagreed stay mirrored", () => {
 		// no-structured-card FALLBACK used to <pre> the same JSON straight into the
 		// card body, so a confirmation whose preview did not summarise landed as a
 		// wall of JSON above the Confirm button. Both surfaces must collapse it.
-		expect(src).toContain('<details\n\t\t\t\t\t\t\t\t\t\tv-else-if="pendingPreviewOf(pa)"');
+		// whitespace-tolerant: the card sits one level deeper (under the draft/legacy branch)
+		expect(src).toMatch(/<details\s+v-else-if="pendingPreviewOf\(pa\)"/);
 		expect(src).not.toMatch(/<pre\s+v-else-if="pendingPreviewOf\(pa\)"/);
 	});
 

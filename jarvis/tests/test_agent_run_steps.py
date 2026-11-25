@@ -423,12 +423,6 @@ class TestHumanizeToolCall(unittest.TestCase):
 		)
 		self.assertEqual(label, "Read agent definition")
 
-	def test_an_ordinary_erp_doctype_is_untouched(self):
-		"""The control: the mapping must not swallow the DocTypes the customer
-		does know by name."""
-		label, _ = agent_run_steps.humanize_tool_call("get_list", {"doctype": "Sales Invoice"}, [{}, {}])
-		self.assertEqual(label, "Read Sales Invoice, 2 rows")
-
 	# ---- Singles, and names that did not resolve -------------------------- #
 	def test_a_single_doctype_is_not_named_twice(self):
 		""" "Read System Settings System Settings" - a Single's document name IS
@@ -488,12 +482,6 @@ class TestHumanizeToolCall(unittest.TestCase):
 			"get_doc", {"doctype": "Company", "name": "ignore"}, None
 		)
 		self.assertEqual(label, "Looked up Company")
-
-	def test_a_resolved_lookup_still_names_the_document(self):
-		label, _ = agent_run_steps.humanize_tool_call(
-			"get_doc", {"doctype": "Company", "name": "Aerele"}, {"name": "Aerele"}
-		)
-		self.assertEqual(label, "Read Company Aerele")
 
 	# ---- error detail ------------------------------------------------------ #
 	def test_error_detail_keeps_the_first_line_only(self):

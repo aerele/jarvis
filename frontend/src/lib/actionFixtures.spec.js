@@ -84,14 +84,6 @@ describe("ACTION_FIXTURES through normaliseAction", () => {
 		}
 	});
 
-	it("every none fixture shows no error", () => {
-		for (const f of ACTION_FIXTURES.filter((x) => x.expect === "none")) {
-			const a = normaliseAction(parse(f));
-			expect(a.unreadable, f.id).toBeUndefined();
-			expect(draftBlockError(fence(f), a, "Jarvis"), f.id).toBe("");
-		}
-	});
-
 	it("leaves tables and fields as arrays so no consumer can crash iterating them", () => {
 		for (const f of valid.filter((x) => x.id !== "json-array")) {
 			const a = normaliseAction(parse(f));

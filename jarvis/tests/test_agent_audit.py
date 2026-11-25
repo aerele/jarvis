@@ -163,11 +163,18 @@ class TestCaptureAtChokepoint(FrappeTestCase):
 		self.assertEqual(new[0]["bulk_count"], 3)
 		self.assertEqual(new[0]["ref_doctype"], "ToDo")
 
-	# NOTE (version-15-hotfix backport): the develop test
-	# test_connector_inner_failure_is_filed_as_failed is intentionally omitted here.
-	# It asserts envelope_ok files a dispatched-but-{ok:false} call_connector as
-	# "failed"; envelope_ok / _ENVELOPE_TOOLS are part of the connector-envelope
-	# feature that is not on this branch, so a dispatched write records "applied".
+	def test_connector_inner_failure_is_filed_as_failed(self):
+		# call_connector is a write that dispatches but returns its OWN {ok:false}
+		# envelope. envelope_ok must file it as failed, not a false ERP-write success.
+		before = _all_names()
+		inner_fail = {"ok": False, "error": {"code": "transport_error", "message": "x"}}
+		with m.patch("jarvis.api.dispatch", return_value=inner_fail):
+			api._dispatch_and_wrap(
+				"call_connector", {"connector": "c", "action": "a"}, is_write=True, provenance="chat"
+			)
+		new = _new_rows(before, tool="call_connector")
+		self.assertEqual(len(new), 1)
+		self.assertEqual(new[0]["outcome"], "failed")
 
 	def test_unknown_outcome_coerced_to_applied(self):
 		name = agent_audit.record_write(
@@ -286,8 +293,10 @@ class TestDiscardCapture(FrappeTestCase):
 
 
 class TestAgentWriteReport(FrappeTestCase):
+	"""Agent Write rows as seen through the Jarvis User Activity report (Events view)."""
+
 	def test_execute_returns_safe_columns_and_respects_filter(self):
-		from jarvis.jarvis.report.agent_write_log.agent_write_log import execute
+		from jarvis.jarvis.report.jarvis_user_activity.jarvis_user_activity import execute
 
 		# Seed both outcomes so the outcome filter has something to EXCLUDE (an
 		# empty result would make the all() assertion trivially true).
@@ -305,14 +314,14 @@ class TestAgentWriteReport(FrappeTestCase):
 			at=frappe.utils.add_to_date(now, minutes=-10),
 		)
 
-		columns, data = execute({"outcome": "failed"})
+		columns, data, _message = execute({"outcome": "failed"})
 		safe = {c["fieldname"] for c in columns}
 		self.assertFalse(_FORBIDDEN & safe)  # no content columns, ever
 		self.assertTrue(data)  # the seeded failed row is present
 		self.assertTrue(all(r.get("outcome") == "failed" for r in data))
 
 	def test_execute_gate_refuses_non_admin(self):
-		from jarvis.jarvis.report.agent_write_log.agent_write_log import execute
+		from jarvis.jarvis.report.jarvis_user_activity.jarvis_user_activity import execute
 
 		frappe.set_user("Guest")
 		try:

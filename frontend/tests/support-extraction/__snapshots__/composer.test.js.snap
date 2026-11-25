@@ -5,6 +5,8 @@ exports[`composer renders identically (light) 1`] = `
   <!-- Host content directly above the box, in flow (chat's wiki nudge card). -->
   <div data-v-680708eb="" class="jv-composer" style="position: relative; border: 1px solid var(--border); border-radius: 13px; background: var(--surface-2); box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07); padding: 5px 6px 6px 6px; transition: border-color 0.12s, box-shadow 0.12s;">
     <!--v-if-->
+    <!-- Host content inside the box, above attachments and text (chat's Reply
+		     quote, aerele/jarvis#2191). -->
     <!-- pending attachments: image thumbnails (Claude-style) + file chips.
 		     Purely a projection of the \`attachments\` prop — an entry with a
 		     \`preview_url\` is a thumbnail, one with \`uploading\` is the in-flight
@@ -52,6 +54,8 @@ exports[`dark render 1`] = `
   <!-- Host content directly above the box, in flow (chat's wiki nudge card). -->
   <div data-v-680708eb="" class="jv-composer" style="position: relative; border: 1px solid var(--border); border-radius: 13px; background: var(--surface-2); box-shadow: 0 2px 12px rgba(0, 0, 0, 0.07); padding: 5px 6px 6px 6px; transition: border-color 0.12s, box-shadow 0.12s;">
     <!--v-if-->
+    <!-- Host content inside the box, above attachments and text (chat's Reply
+		     quote, aerele/jarvis#2191). -->
     <!-- pending attachments: image thumbnails (Claude-style) + file chips.
 		     Purely a projection of the \`attachments\` prop — an entry with a
 		     \`preview_url\` is a thumbnail, one with \`uploading\` is the in-flight

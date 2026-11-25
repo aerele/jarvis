@@ -11,18 +11,24 @@
 <template>
 	<div role="alert">
 		<Banner type="error" :title="headline" :message="err.message">
-			<div v-if="err.hint" class="jv-ae-hint">{{ err.hint }}</div>
+			<div v-if="hint" class="jv-ae-hint">{{ hint }}</div>
 			<details v-if="err.detail" class="jv-ae-details">
 				<summary>Show details</summary>
 				<div class="jv-ae-detail">{{ err.detail }}</div>
 			</details>
 			<FailureReference :id="reference" />
+			<div v-if="reportable" class="jv-ae-report">
+				<Button size="sm" variant="subtle" @click="emit('report', { reference })">
+					Report error
+				</Button>
+			</div>
 		</Banner>
 	</div>
 </template>
 
 <script setup>
 import { computed } from "vue";
+import { Button } from "frappe-ui";
 import { failureReferenceOf, personError } from "@/lib/actionSummary";
 import Banner from "./Banner.vue";
 import FailureReference from "./FailureReference.vue";
@@ -30,7 +36,10 @@ import FailureReference from "./FailureReference.vue";
 const props = defineProps({
 	// The envelope's `error` object, or a plain message string (fallback path).
 	error: { type: [Object, String], default: () => ({}) },
+	// The host can open a support ticket (Report error). Only an internal failure gets the action.
+	canReport: { type: Boolean, default: false },
 });
+const emit = defineEmits(["report"]);
 
 // Plain-language headline keyed by the wire `code`. This is the ACTION-failure
 // axis - distinct from ChatView's run/transport taxonomy (lib/errors.js
@@ -49,6 +58,16 @@ const HEADLINES = {
 const err = computed(() => personError(props.error));
 
 const headline = computed(() => HEADLINES[err.value.code] || "Something went wrong");
+// Internal = nobody on the workspace can fix it: the bench's InternalError, or a 5xx.
+const internal = computed(
+	() => err.value.code === "InternalError" || Number(err.value.status) >= 500
+);
+const reportable = computed(() => props.canReport && internal.value);
+const hint = computed(
+	() =>
+		err.value.hint ||
+		(reportable.value ? "Try again. If it keeps happening, report it to support." : "")
+);
 // A failed confirmation's own id, for support (absent on a draft-panel failure).
 const reference = computed(() => failureReferenceOf(err.value));
 </script>
@@ -62,6 +81,9 @@ const reference = computed(() => failureReferenceOf(err.value));
 }
 .jv-ae-details {
 	margin-top: 6px;
+}
+.jv-ae-report {
+	margin-top: 8px;
 }
 .jv-ae-details summary {
 	font-size: 11.5px;

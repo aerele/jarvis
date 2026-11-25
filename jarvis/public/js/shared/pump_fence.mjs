@@ -19,8 +19,8 @@
 // frontend/src/views/ChatView.vue (pumpFenceReject/pumpFenceAccept, lines 4006-4012,
 // applied at lines 7156-7157, 7174-7175, 7223-7224, 7241-7242, 7254-7255,
 // 7279-7280 and 7380-7381 at that snapshot). Desktop can adopt this module verbatim
-// when JF-013 refactors ChatView; jarvis/tests/test_pump_fence_shared_client.py runs
-// a decision-parity walk against the desktop copy so the two cannot silently drift.
+// when JF-013 refactors ChatView; pump_fence.test.mjs runs a decision-parity walk
+// against the desktop copy so the two cannot silently drift.
 //
 // State shape: fence = { [runKey]: { epoch, seq, terminated } }
 //   * epoch/seq  — the GREATEST accepted (pump_epoch, event_seq).

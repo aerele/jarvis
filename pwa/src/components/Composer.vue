@@ -18,6 +18,11 @@ const props = defineProps({
 	// on the new-chat screen, so here it is only ever shown, locked.
 	autoMode: { type: Boolean, default: false },
 	placeholder: { type: String, default: () => `Message ${agentName}…` },
+	// Something besides text/files makes the message sendable: a skill picked in the
+	// "+" menu (ChatView folds its "/skill_name" token into the message).
+	extraSendable: { type: Boolean, default: false },
+	// The paperclip; the chat turns it off, its "+" menu has "Add files or photos".
+	showAttach: { type: Boolean, default: true },
 });
 const emit = defineEmits([
 	"update:modelValue",
@@ -43,7 +48,9 @@ const uploading = computed(() => props.attachments.some((a) => a.uploading));
 const canSend = computed(
 	() =>
 		!uploading.value &&
-		(props.modelValue.trim().length > 0 || props.attachments.some((a) => a.file_url))
+		(props.modelValue.trim().length > 0 ||
+			props.attachments.some((a) => a.file_url) ||
+			props.extraSendable)
 );
 
 function onInput(e) {
@@ -76,11 +83,22 @@ function pick(e) {
 function reset() {
 	autoGrow();
 }
-defineExpose({ reset });
+// Focus with the caret at the end, after the host filled the text (a Reply quote).
+function focusEnd() {
+	const el = inputEl.value;
+	if (!el) return;
+	autoGrow();
+	el.focus();
+	el.setSelectionRange(el.value.length, el.value.length);
+}
+defineExpose({ reset, focusEnd });
 </script>
 
 <template>
 	<div class="jv-composer jv-safe-bottom">
+		<!-- Host content above the attachments and the text (the chat's Reply quote,
+		     aerele/jarvis#2191). -->
+		<div v-if="$slots.top" class="jv-composer-top"><slot name="top" /></div>
 		<div v-if="props.attachments.length" class="jv-atts">
 			<div v-for="a in props.attachments" :key="a.key" class="jv-att">
 				<!-- Preview triggers are real <button>s: keyboard-focusable and
@@ -142,7 +160,11 @@ defineExpose({ reset });
 
 		<div class="jv-composer-row">
 			<input ref="fileEl" type="file" multiple hidden @change="pick" />
+			<!-- Host controls before the attach button (chat: the "+" menu); handed this
+			     composer's own file picker so its "Add files or photos" opens it. -->
+			<slot name="leading" :pick-files="() => fileEl.click()" />
 			<button
+				v-if="props.showAttach"
 				class="jv-icon-btn"
 				aria-label="Attach a file"
 				:disabled="props.sending || props.disabled"
@@ -239,6 +261,13 @@ defineExpose({ reset });
 	flex: none;
 	background: var(--menu-bar);
 	border-top: 1px solid var(--border);
+}
+/* The slotted Reply quote lines up with the input row below it. */
+.jv-composer-top {
+	padding: 8px 10px 0;
+}
+.jv-composer-top:empty {
+	display: none;
 }
 .jv-composer-row {
 	display: flex;

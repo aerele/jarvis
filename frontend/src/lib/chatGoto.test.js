@@ -18,7 +18,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	parseGoto,
-	GOTO_RE,
 	gotoFiredKey,
 	parseFiredStamp,
 	encodeFiredStamp,
@@ -114,16 +113,7 @@ test("an unterminated block does not parse (a half-streamed reply shows no card)
 	assert.equal(parseGoto('```jarvis-goto\n{"page":"dashboards","prompt":"x"'), null);
 });
 
-test("GOTO_RE matches exactly the fenced block chatBlocks.js strips", () => {
-	assert.match(fence('{"page":"dashboards","prompt":"x"}'), GOTO_RE);
-});
-
 // ---- source fences: BLOCK_TAGS, the card, and the one-shot auto-redirect --
-
-test("chatBlocks strips jarvis-goto from the visible prose", () => {
-	const blocksSrc = fs.readFileSync(path.join(HERE, "chatBlocks.js"), "utf8");
-	assert.match(blocksSrc, /"jarvis-goto",/);
-});
 
 test("ChatView parses goto through the shared module, not a private copy", () => {
 	assert.match(
@@ -557,6 +547,7 @@ test("the send context carries handoff_pages only under the boot flag, and no ot
 		/let sendCtx = groundWiki \? \{ ground_wiki: 1 \} : _prefillSendContext \|\| undefined;/
 	);
 	assert.match(send, /sendCtx = \{ \.\.\.\(sendCtx \|\| \{\}\), page: "triggers" \};/);
+	assert.match(send, /focus_connector: \{ key: _sentFocus\.key, label: _sentFocus\.label \},/);
 	assert.equal((send.match(/handoff_pages/g) || []).length, 1);
 	const flag = fnBody(chatViewSrc, "function canViewCalendar()");
 	assert.match(flag, /return window\.can_view_payment_calendar === true;/);

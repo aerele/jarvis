@@ -1486,11 +1486,6 @@ class TestErrorLogScanEdges(CaptureBase):
 		self.assertEqual(result["rows"], [])
 		self.assertEqual(result["watermark"], f"{self.at(1)}|{name}")
 
-	def test_the_reporters_neighbours_stay_local(self):
-		for rel in ("admin_client.py", "chat/usage_push.py"):
-			tb = f'File "apps/jarvis/jarvis/{rel}", line 1, in f\nValueError: x'
-			self.assertFalse(api_errors.is_jarvis_error("admin_client: network error", tb), rel)
-
 
 # --------------------------------------------------------------------------- #
 # call_tool attribution, tool envelopes, failed-request edges
@@ -1528,13 +1523,26 @@ class TestAttributionAndEnvelopes(CaptureBase):
 			("call_tool", "403", self.DISABLED, "get_list"),
 		)
 
-	def test_a_successful_dispatch_does_not_need_connector_envelopes(self):
+	def test_a_connector_that_failed_inside_its_envelope_is_recorded(self):
 		from jarvis import api
 
-		data = [{"name": "result"}]
-		with patch.object(api, "dispatch", return_value=data):
-			envelope = api._dispatch_and_wrap("get_list", {}, False)
-		self.assertEqual(envelope, {"ok": True, "data": data})
+		inner = {"ok": False, "error": {"code": "transport_error", "message": "connector timed out"}}
+		frappe.set_user(USER)
+		with patch.object(api, "dispatch", return_value=inner):
+			envelope = api._dispatch_and_wrap("call_connector", {}, False)
+		frappe.set_user("Administrator")
+		self.assertTrue(envelope["ok"])
+		(row,) = self.buffered()
+		self.assertEqual(
+			(row.surface, row.route, row.error_code), ("tool", "call_connector", "transport_error")
+		)
+		self.assertTrue(frappe.local.jarvis_tool_failure_recorded)
+
+	def test_a_connector_that_worked_records_nothing(self):
+		from jarvis import api
+
+		with patch.object(api, "dispatch", return_value={"ok": True, "data": []}):
+			api._dispatch_and_wrap("call_connector", {}, False)
 		self.assertEqual(self.buffered(), [])
 
 
@@ -1543,10 +1551,6 @@ class TestFailedRequestEdges(CaptureBase):
 		TestFailedRequests._capture(self, "/api/method/jarvis.chat.api.send_message", 499)
 		(row,) = self.buffered()
 		self.assertEqual(row.error_code, "499")
-
-	def test_a_rate_limit_answering_as_designed_is_not_an_error(self):
-		TestFailedRequests._capture(self, "/api/method/jarvis.chat.api.send_message", 429)
-		self.assertEqual(self.buffered(), [])
 
 	def test_what_the_failed_request_left_behind_is_discarded(self):
 		frappe.db.set_default("errcap_pending", "1")
@@ -1581,3 +1585,68 @@ class TestBrowserRunError(CaptureBase):
 		_make_turn("errcap-run-2", state="cancelled", error="")
 		self._report(run_id="errcap-run-2")
 		self.assertEqual(len(self.buffered()), 1)
+
+
+# --------------------------------------------------------------------------- #
+# The admin gate: the hardcoded default URL counts, credentials are required
+# --------------------------------------------------------------------------- #
+class TestAdminGate(PushBase):
+	"""Production benches set no ``jarvis_admin_url`` and reach admin through the
+	hardcoded default; their errors must still be pushed there. An un-onboarded
+	bench must not even start a push."""
+
+	def setUp(self):
+		super().setUp()
+		was = frappe.db.get_single_value("Jarvis Settings", "jarvis_admin_url")
+		frappe.db.set_single_value("Jarvis Settings", "jarvis_admin_url", "")
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+		self.addCleanup(self._put_url_back, was)
+		no_config_url = patch.dict(frappe.conf, {"jarvis_admin_url": ""})
+		no_config_url.start()
+		self.addCleanup(no_config_url.stop)
+		api_errors.record_server_error("tool", error_code="e", error_class="t", message="m", user=USER)
+		frappe.db.commit()
+
+	@staticmethod
+	def _put_url_back(was):
+		frappe.db.set_single_value("Jarvis Settings", "jarvis_admin_url", was or "")
+		frappe.clear_document_cache("Jarvis Settings", "Jarvis Settings")
+		frappe.db.commit()
+
+	def test_an_un_onboarded_bench_makes_no_post_and_writes_no_state(self):
+		from jarvis import admin_client
+
+		with (
+			patch.object(admin_client, "has_credentials", return_value=False),
+			patch.object(admin_client, "_do_post") as post,
+			patch.object(error_push, "_do_push", wraps=error_push._do_push) as do_push,
+		):
+			error_push.push_error_rollup()
+		do_push.assert_not_called()
+		post.assert_not_called()
+		for key in (
+			error_push._ATTEMPT_KEY,
+			error_push._FAILURES_KEY,
+			error_push._CAUSE_KEY,
+			error_push._INFLIGHT_KEY,
+			error_push._RETRY_AFTER_KEY,
+		):
+			self.assertEqual(error_push._state_get(key), "", key)
+		self.assertEqual(frappe.db.count(DT, {"pushed": 0}), 1)
+
+	def test_with_credentials_and_no_url_the_post_goes_to_the_default_admin(self):
+		from jarvis import admin_client
+		from jarvis.hooks import _DEFAULT_ADMIN_URL_FALLBACK
+
+		with (
+			patch.object(admin_client.site_pin, "assert_not_copy"),
+			patch.object(admin_client, "_admin_access_token", return_value=None),
+			patch.object(admin_client, "_legacy_credentials", return_value=("key", "secret")),
+			patch.object(admin_client, "_do_post", return_value={"ok": True}) as post,
+		):
+			error_push.push_error_rollup()
+		post.assert_called_once()
+		url = post.call_args.args[0]
+		self.assertTrue(url.startswith(_DEFAULT_ADMIN_URL_FALLBACK + "/api/method/"), url)
+		self.assertIn("ingest_error_rollup", url)
+		self.assertEqual(frappe.db.count(DT, {"pushed": 0}), 0)

@@ -41,6 +41,7 @@ from jarvis.chat.pending_actions._store import (
 	get_row,
 	stash_undo,
 )
+from jarvis.connectors.outcome import connector_reason
 from jarvis.permissions import is_valid_unattended_owner, refuse_in_tool_dispatch
 
 _PROVENANCE = {"chat": "chat", "file_box_held": "approval", SHEET: "approval"}
@@ -352,18 +353,25 @@ def _report_structure_failure(row, args: dict, structure: _Structure, result, no
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist the log
 
 
-def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None, bool, str]:
+def _dispatch(
+	row, args: dict, *, user: str | None = None, allow_risky: bool = True, savepoint: bool = False
+) -> tuple[dict | None, bool, str]:
 	"""Run the sealed call as ``exec_user`` (or ``user``: an Edit & create runs as the
 	approver). Returns ``(result, interfered, crash_tb)``.
 
 	``interfered``: the transaction was not ours start to finish (a mid-dispatch commit
 	such as ``run_import`` or DDL, or a mid-dispatch full rollback), so a failure may
-	have left part of the write behind (``jarvis._commit_watch``)."""
+	have left part of the write behind (``jarvis._commit_watch``).
+
+	``allow_risky=False``: the call is a person's own edited values, not the card they
+	were shown, so the write-risk guard admits no sensitive record. ``savepoint``: also
+	see a commit the sentinel cannot (a raw COMMIT), as ``apply_action`` does."""
 	from jarvis import api
 
-	watch = CommitWatch().arm()
+	watch = CommitWatch().arm(savepoint=savepoint)
 	crash_tb = ""
 	result = None
+	deadlock = False
 	try:
 		with impersonate(user or row.exec_user):
 			# allow_risky: a human approved this row, so the write-risk guard admits
@@ -373,12 +381,14 @@ def _dispatch(row, args: dict, *, user: str | None = None) -> tuple[dict | None,
 				args,
 				provenance=_PROVENANCE[row.kind],
 				provenance_name=row.name if row.kind != "chat" else "",
-				allow_risky=True,
+				allow_risky=allow_risky,
 			)
 			api._apply_run_method_read_filter(row.tool, result)
-	except Exception:
+	except Exception as e:
+		# InnoDB's own rollback after a deadlock drops the savepoint too: not a commit.
+		deadlock = isinstance(e, frappe.QueryDeadlockError)
 		crash_tb = frappe.get_traceback() or "dispatch raised"
-	return result, watch.disarm(), crash_tb
+	return result, watch.disarm(probe=savepoint and not deadlock), crash_tb
 
 
 def _record_failed_write(
@@ -690,7 +700,7 @@ def _claim_and_run(
 		result = _held_to_the_card(name, args, structure, result)
 	if crash_tb or not (isinstance(result, dict) and result.get("ok")):
 		_discard_failed_dispatch(row, args, crash_tb, result=result, record=structure is None)
-	ok = not crash_tb and bool(isinstance(result, dict) and result.get("ok"))
+	ok = not crash_tb and api.envelope_ok(row.tool, result)
 	if not ok and row.kind == "chat" and not row.get("collaboration_binding"):
 		# ...and a card that fails ends the run, as a failed write does.
 		from jarvis.chat import turn_message_binding
@@ -708,6 +718,9 @@ def _claim_and_run(
 	# is on the form could not be verified.
 	nothing_left = note is not None and note.clean and not lock_lost
 	code = None if ok else ("partial" if lock_lost or (interfered and not nothing_left) else "failed")
+	if code == "failed" and row.tool == "call_connector" and not crash_tb:
+		# A refusal raised before the app was called reads "nothing changed", not "unknown".
+		code = connector_reason(result)
 	outcome = outcome_for(status, code, row.tool)
 	if crash_tb:
 		result = api._error(

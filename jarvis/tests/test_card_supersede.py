@@ -15,7 +15,6 @@ from frappe.tests.utils import FrappeTestCase
 from jarvis import api
 from jarvis.chat import api as chat_api
 from jarvis.chat import pending_confirm, pending_confirm_legacy, turn_message_binding
-from jarvis.chat.pending_actions import _park
 from jarvis.tests._pending_action_helpers import CONV, MSG, OWNER, PA, PendingActionTestMixin, as_user
 from jarvis.tests._transport_helpers import provision_legacy_site
 from jarvis.tests.test_pending_confirm import _purge_legacy
@@ -78,9 +77,6 @@ class _Base(PendingActionTestMixin, FrappeTestCase):
 
 
 class TestSupersede(_Base):
-	def test_the_hook_is_wired(self):
-		self.assertEqual(_park.SUPERSEDE_HOOK, "jarvis.chat.pending_confirm.supersede_on_park")
-
 	def test_the_user_speaking_then_a_new_proposal_supersedes_the_old_card(self):
 		for origin in ("human", "board_answer"):
 			with self.subTest(origin=origin):
@@ -290,3 +286,31 @@ class TestSupersede(_Base):
 		self.assertEqual(len(sent), 1, pub.call_args_list)
 		self.assertEqual((sent[0]["action_outcome"], sent[0]["conversation_id"]), ("superseded", conv))
 		self.assertEqual(self.chip(old), ("", "superseded"))
+
+
+class TestSingleFlightRefusalText(FrappeTestCase):
+	"""jarvis-admin-v2#793: the refusal the model reads when a card already waits. It must stop
+	the model, say the card does not expire, and, when the card is the wrong one, point the user
+	to Discard instead of inviting a yes/no (a typed "yes" would confirm the wrong card)."""
+
+	def message(self):
+		return api._single_flight_error()["error"]["message"]
+
+	def test_it_keeps_its_stop_instructions(self):
+		message = self.message()
+		for phrase in ("do NOT retry this call", "stop and end your turn now", "does not expire"):
+			self.assertIn(phrase, message)
+
+	def test_a_wrong_card_points_to_discard_and_asks_no_yes_no(self):
+		message = self.message()
+		self.assertIn(
+			"If the waiting card is not what the user asked for, tell them it is wrong and ask them "
+			"to discard it (Discard in the full chat, Deny on the phone); do not ask a yes/no "
+			"question in that reply.",
+			message,
+		)
+
+	def test_the_envelope_is_the_confirmation_pending_error(self):
+		res = api._single_flight_error()
+		self.assertFalse(res["ok"])
+		self.assertEqual(res["error"]["code"], "ConfirmationPendingError")

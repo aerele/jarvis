@@ -114,7 +114,7 @@ function harness(pendingStore) {
 		},
 		raiseHold: noop,
 		recheckMaintenance: noop,
-		sendRejectionCopy: () => ({ message: "Rejected" }),
+		rejectionCopy: () => ({ message: "Rejected" }),
 		brand: { agentName: "Jarvis" },
 		voiceStore: {
 			captureSentInPayload: () => null,
@@ -134,6 +134,7 @@ function harness(pendingStore) {
 		store: { conversations: [{ name: "A" }], loadConversations: noop },
 		route: { params: { id: "A" } },
 		router: { replace: noop },
+		_saveConnectorFocusFor: noop,
 		_checkPulseOnce: noop,
 		onTypedConfirmResolved: async () => {
 			s.typedConfirmCalls = (s.typedConfirmCalls || 0) + 1;
@@ -166,6 +167,7 @@ function harness(pendingStore) {
 		groundNextTurn: false,
 		groundSelectionVersion: 0,
 		triggerMode: false,
+		connectorFocus: { key: "erp", label: "ERP" },
 		visiblePendingActions: [{ token: "approval-1" }],
 		modelOverride: "model-a",
 		thinkingOverride: "high",
@@ -216,6 +218,7 @@ for (const [label, text, files] of [
 		const original = h.calls[0];
 		h.s.input.value = "Newer draft";
 		h.s.pendingFiles.value = [{ file_url: "/private/files/new.pdf", file_name: "new.pdf" }];
+		h.s.connectorFocus.value.key = "different";
 		h.s.visiblePendingActions.value = [{ token: "different" }];
 		h.f.setPrefill({ doctype: "Customer", name: "Other" });
 		h.s.autoView.value.on = false;
@@ -247,11 +250,13 @@ test("the Payment Calendar capability rides the send context only when the boot 
 	// a plain send (no other context key) carries the capability alone
 	const plain = harness();
 	plain.s.win.can_view_payment_calendar = true;
+	plain.s.connectorFocus.value = null;
 	plain.f.setPrefill(null);
 	await plain.f.send();
 	assert.deepEqual(plain.calls[0][4], { handoff_pages: ["payment-calendar"] });
 	// and today's plain send still sends no context at all
 	const none = harness();
+	none.s.connectorFocus.value = null;
 	none.f.setPrefill(null);
 	await none.f.send();
 	assert.ok(

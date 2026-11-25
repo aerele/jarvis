@@ -73,15 +73,21 @@ _PROFILE_RE = re.compile(r"role-[a-z0-9_+-]{1,63}")
 
 
 def _admin_configured() -> bool:
-	"""jarvis_admin_url is set (site config outranks the Settings field). Mirrors
-	installed_apps_sync._admin_configured. Credential *presence* is not checked
-	here - admin_client raises AdminAuthError when unonboarded, which the caller
-	treats as a quiet skip."""
+	"""The gate every background push to admin shares (usage, errors, heartbeat,
+	feedback, installed apps): an admin URL resolves AND the bench is onboarded.
+
+	The URL resolves the way ``admin_client`` resolves it: site/common config,
+	then the Settings field, then the hardcoded default in ``jarvis.hooks``. A bench
+	with no URL set reaches admin through that default, so its pushes must run too.
+	Because the default always resolves, credentials are required as well: an
+	un-onboarded bench (air-gapped, CI, before signup) must not scan, claim and
+	revert every cycle only to be told it is not onboarded. A local read, no
+	network; never raises."""
 	try:
-		if (frappe.conf.get("jarvis_admin_url") or "").strip():
-			return True
+		from jarvis import admin_client
+
 		settings = frappe.get_cached_doc("Jarvis Settings")
-		return bool((settings.get("jarvis_admin_url") or "").strip())
+		return bool(admin_client._admin_url(settings)) and admin_client.has_credentials()
 	except Exception:
 		return False
 

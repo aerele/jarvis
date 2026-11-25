@@ -479,3 +479,44 @@ class AdminRateLimitedError(JarvisError):
 		self.code = code
 		self.recovery = recovery
 		self.error = error or {}
+
+
+class SnapshotReloadRefused(JarvisError):
+	"""A report snapshot reload that ``run_report`` refuses to run inline-only (the report
+	became a Prepared Report: a reload never enqueues a job). The reason code is the
+	first argument. Never shown to the model: the reload turns it into its own text."""
+
+	@property
+	def reason(self) -> str:
+		return str(self.args[0]) if self.args else ""
+
+
+class FefoScopeRefused(InvalidArgumentError):
+	"""``run_report`` refused the call at the FEFO scope gate. A subclass only so a snapshot
+	reload can tell a context refusal (keep the snapshot) from a definite one; the wire
+	code, hint and failure kind stay those of ``InvalidArgumentError``."""
+
+	envelope_code = "InvalidArgumentError"
+
+
+class DelegateReportRefused(PermissionDeniedError):
+	"""``run_report`` refused a saved report to a snapshot-config delegate. A subclass only
+	so a snapshot reload can tell a context refusal from a permission change; the wire
+	code, hint and activity ``denied`` event stay those of ``PermissionDeniedError``."""
+
+	envelope_code = "PermissionDeniedError"
+
+
+class SnapshotReloadedError(JarvisError):
+	"""``query_report`` found a report snapshot expired and re-ran its report with the same
+	filters. The call is answered with this error, never with rows: nothing the model asked
+	for ran against the old rows, and a plugin only accepts a result whose version is the
+	pinned one. The message carries the reload note and, when an inspect fitted the call
+	budget, the new version. ``version`` is that version (or None). The wire code is
+	``snapshot_reloaded``."""
+
+	envelope_code = "snapshot_reloaded"
+
+	def __init__(self, message: str, version: str | None = None):
+		super().__init__(message)
+		self.version = version

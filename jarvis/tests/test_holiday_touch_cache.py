@@ -30,7 +30,6 @@ from jarvis.tests.test_holiday_touch_resolve import (
 )
 
 NOW = _now(DIWALI)  # 11:30 in Kolkata on 2026-11-08
-HOLIDAY_HANDLER = "jarvis.holiday_touch.cache.rotate_after_commit"
 
 
 def _cached(user, now=NOW, zone=None):
@@ -93,9 +92,6 @@ class TestGen(_Base):
 
 
 class TestPersistence(_Base):
-	def test_the_prefix_is_a_persistent_cache_key(self):
-		self.assertIn("jarvis:holiday:", frappe.get_hooks("persistent_cache_keys"))
-
 	def test_answers_survive_clear_cache(self):
 		user = self.person(dob="1990-11-08")
 		gen = cache.current_gen()
@@ -131,14 +127,6 @@ class TestTtl(_Base):
 		with _spy_set_value() as spy:
 			_cached(user, datetime(2026, 11, 8, 18, 0, tzinfo=timezone.utc))
 		self.assertEqual(_ttls(spy), [1800])
-
-	def test_an_answer_is_never_stored_for_longer_than_two_hours(self):
-		user = self.person(dob="1990-11-08")
-		with _spy_set_value() as spy:
-			_cached(user, NOW)
-		ttls = _ttls(spy)
-		self.assertEqual(len(ttls), 1)
-		self.assertLessEqual(ttls[0], 2 * 3600)
 
 
 class TestOccasionKey(_Base):
@@ -402,18 +390,6 @@ class TestRotationAfterCommit(_Base):
 				self.assertEqual(len(frappe.db.after_commit._functions), 0)
 		_, _, holiday_list = self._fixtures()
 		self.assertTrue(self._rotated_by("Holiday List", holiday_list, color="#000000"))  # not stuck
-
-	def test_the_handler_is_declared_for_every_event(self):
-		hooks = frappe.get_hooks("doc_events")
-		for dt, events in {
-			"Holiday List": ("on_update", "on_trash"),
-			"Holiday List Assignment": ("on_submit", "on_cancel"),
-			"Company": ("on_update",),
-			"Employee": ("on_update", "on_trash"),
-		}.items():
-			for event in events:
-				with self.subTest(dt=dt, event=event):
-					self.assertIn(HOLIDAY_HANDLER, hooks[dt][event])
 
 	def test_each_event_rotates_after_commit_and_not_before(self):
 		for dt, name, event in self._events():

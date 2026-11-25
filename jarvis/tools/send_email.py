@@ -23,6 +23,10 @@ Two shapes:
   in ONE atomic savepoint: if any message is invalid, NONE are queued or sent.
   "One message to many people" is already the single call's ``recipients`` list;
   this adds the per-document case.
+- **Merge from a query:** ``send_email(recipients_from={result_id | spec, email_field,
+  name_field?, doctype?}, subject, content)`` -> one message per row of a query the
+  bench runs, ``{{ column }}`` filled per row. The model never types an address
+  (``jarvis.tools._email_merge``); up to ``MAX_MERGE`` per call, one card.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ def send_email(
 	print_format: str | None = None,
 	messages: list | None = None,
 	attachments: list[str] | None = None,
+	recipients_from: dict | None = None,
 ) -> dict:
 	"""Send an email about ``doctype/name`` - or a mail-merge batch when
 	``messages`` is given.
@@ -55,8 +60,27 @@ def send_email(
 	export tools. Each file must be readable by the caller.
 
 	Single: returns ``{communication_name, recipients, subject, doctype, name}``.
-	Batch: returns ``{sent:[{name, recipients, communication_name}], count}``.
+	Batch and merge: return ``{sent:[{name, recipients, communication_name}], count}``.
 	"""
+	if recipients_from is not None:
+		from jarvis.tools import _email_merge
+
+		# The card's messages (set by the gate's _email_merge.expand) must still be what
+		# the query gives now; an uncarded run has none and sends what it gives.
+		merged = _email_merge.assert_unchanged(
+			{
+				"recipients_from": recipients_from,
+				"messages": messages,
+				"subject": subject,
+				"content": content,
+				"cc": cc,
+				"bcc": bcc,
+				"print_format": print_format,
+				"send_me_a_copy": send_me_a_copy or None,
+				"attachments": attachments,
+			}
+		)
+		return _send_batch(merged, max_batch=_email_merge.MAX_MERGE)
 	if messages is not None:
 		if attachments is not None:
 			raise InvalidArgumentError("put attachments inside each message when using messages")
@@ -81,6 +105,43 @@ def send_email(
 		"doctype": doctype,
 		"name": name,
 	}
+
+
+NO_OUTGOING_ACCOUNT_MESSAGE = (
+	"Email is not set up on this site: there is no enabled outgoing Email Account, so this "
+	"email cannot be sent. Nothing was sent. Do not draft or retry it until an administrator "
+	"adds an outgoing Email Account (Email Account settings)."
+)
+
+
+def require_outgoing_account(doctypes) -> None:
+	"""Refuse early when the send would fail for want of an outgoing Email Account.
+
+	Asks Frappe the exact question ``communication.email.make`` asks just before it
+	sends (``Communication.get_outgoing_email_account``): the account matching the
+	sender (the current user), else one whose Append To is the reference doctype,
+	else the default outgoing one, the site-config account, or the muted-mail dummy.
+	The confirmation gate calls this before showing a card, so a site without email
+	is told at once instead of after the user confirms (#834). One doctype without
+	an account refuses the whole call, like the batch itself. The send itself needs
+	no copy of this check: ``make`` raises ``OutgoingEmailError`` in the same case,
+	which the confirmed path already returns with the same code and hint."""
+	from frappe.email.doctype.email_account.email_account import EmailAccount
+	from frappe.utils import get_formatted_email
+
+	sender = get_formatted_email(frappe.session.user)
+	for doctype in dict.fromkeys(doctypes or [None]):
+		if not EmailAccount.find_outgoing(match_by_email=sender, match_by_doctype=doctype or None):
+			raise frappe.OutgoingEmailError(NO_OUTGOING_ACCOUNT_MESSAGE)
+
+
+def call_doctypes(args: dict) -> list:
+	"""The reference doctypes a ``send_email`` call would send about: each message's
+	in a batch (or an expanded merge), else the single call's."""
+	messages = args.get("messages")
+	if isinstance(messages, list) and messages:
+		return [m.get("doctype") if isinstance(m, dict) else None for m in messages]
+	return [args.get("doctype")]
 
 
 def _send_one(
@@ -132,7 +193,7 @@ def _send_one(
 	return (result or {}).get("name")
 
 
-def _send_batch(messages: list) -> dict:
+def _send_batch(messages: list, *, max_batch: int | None = None) -> dict:
 	if not isinstance(messages, list) or not messages:
 		raise InvalidArgumentError(
 			"messages must be a non-empty list of {doctype, name, recipients, subject, content}"
@@ -161,7 +222,12 @@ def _send_batch(messages: list) -> dict:
 		)
 		return {"name": m.get("name"), "recipients": m.get("recipients"), "communication_name": cn}
 
-	sent = run_atomic_batch(prepared, _do, label=lambda m: m.get("name") or str(m.get("recipients")))
+	sent = run_atomic_batch(
+		prepared,
+		_do,
+		label=lambda m: m.get("name") or str(m.get("recipients")),
+		**({"max_batch": max_batch} if max_batch else {}),
+	)
 	return {"sent": sent, "count": len(sent)}
 
 

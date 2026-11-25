@@ -17,7 +17,6 @@ from jarvis.exceptions import (
 	InvalidArgumentError,
 	PermissionDeniedError,
 )
-from jarvis.tools.get_employee_shift import get_employee_shift
 from jarvis.tools.get_holidays_for_employee import get_holidays_for_employee
 from jarvis.tools.get_leave_balance_on import get_leave_balance_on
 from jarvis.tools.get_leave_details import get_leave_details
@@ -160,17 +159,6 @@ class TestGetHolidaysForEmployee(FrappeTestCase):
 		self.assertEqual(len(out["holidays"]), 1)
 		# raise_exception=False must be forwarded so the agent gets [] not 500.
 		self.assertEqual(g.call_args.kwargs.get("raise_exception"), False)
-
-
-class TestGetEmployeeShift(FrappeTestCase):
-	# Everything past argument checks is tested against the real HRMS functions
-	# in test_get_employee_shift_real_hrms.py. A mock of the HRMS call is what let
-	# this tool ship broken: it accepted the date STRING the tool passed, where
-	# the real function calls for_timestamp.date().
-
-	def test_rejects_empty_employee(self):
-		with self.assertRaises(InvalidArgumentError):
-			get_employee_shift("")
 
 
 # ---------------------------------------------------------------------

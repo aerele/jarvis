@@ -193,6 +193,21 @@ class TestChatReportCard(FrappeTestCase):
 		_tool(self.conv, 2, "ready", newer, filters={"company": "Acme"})
 		self.assertEqual(_states(self.conv), [])
 
+	def test_a_report_snapshot_run_never_closes_a_card(self):
+		# A cut inline run_report stored as a snapshot answers with an rs_ id for the same
+		# report and filters. It is not a Prepared Report, so it must not replace the card.
+		run = _pr("Completed")
+		_tool(self.conv, 1, "started", run)
+		for seq, status in ((2, "ready"), (3, None), (4, "started")):
+			_tool(self.conv, seq, status, "rs_" + "a" * 32)
+			self.assertEqual(_states(self.conv), [(run, "ready")], status)
+			with patch.object(report_runs, "_json_functions_available", return_value=False):
+				self.assertEqual(_states(self.conv), [(run, "ready")], status)
+
+	def test_a_report_snapshot_run_never_opens_a_card(self):
+		_tool(self.conv, 1, "started", "rs_" + "b" * 32)
+		self.assertEqual(_states(self.conv), [])
+
 	def test_results_for_other_filters_leave_it_open(self):
 		run, other = _pr("Completed"), _pr("Completed")
 		_tool(self.conv, 1, "started", run)

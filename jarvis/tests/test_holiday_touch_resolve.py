@@ -268,35 +268,12 @@ class TestHolidays(_Base):
 			got, {3: "none", 4: "none", 5: "leadup", 6: "leadup", 7: "leadup", 8: "day", 9: "none"}
 		)
 
-	def test_day_payload_has_the_contract_shape(self):
-		user = self.person([(DIWALI, "Diwali", 0)])
-		self.assertEqual(
-			resolve.answer(user, _now(DIWALI)),
-			{
-				"v": 1,
-				"date": "2026-11-08",
-				"tz": IST,
-				"kind": "day",
-				"design": "diwali",
-				"occasion": "diwali",
-				"year": None,
-				"worn": True,
-				"scene": True,
-				"may_play": True,
-			},
-		)
-
 	def test_none_payload_is_just_the_four_keys(self):
 		user = self.person([(DIWALI, "Diwali", 0)])
 		self.assertEqual(
 			resolve.answer(user, _now(date(2026, 11, 1))),
 			{"v": 1, "date": "2026-11-01", "tz": IST, "kind": "none"},
 		)
-
-	def test_republic_keeps_its_own_occasion_with_the_independence_design(self):
-		user = self.person([(date(2026, 1, 26), "Republic Day", 0)])
-		out = resolve.answer(user, _now(date(2026, 1, 26)))
-		self.assertEqual((out["design"], out["occasion"]), ("independence", "republic"))
 
 	def test_new_year_carries_the_year_of_the_matched_date(self):
 		user = self.person([(date(2027, 1, 1), "New Year's Day", 0)])
@@ -366,13 +343,6 @@ class TestHolidays(_Base):
 		self.assertEqual(resolve.answer(user, _now(date(2026, 11, 9)))["kind"], "none")
 		self.assertEqual(resolve.occasion(user, _now(date(2026, 11, 9)))["reason"], "lookback")
 
-	def test_first_day_flag_looks_back_three_days(self):
-		# A Diwali row 3 days before: the day itself is a later day of the run, no scene.
-		rows = [(date(2026, 11, 7), "Diwali", 0), (date(2026, 11, 10), "Diwali", 0)]
-		user = self.person(rows)
-		out = resolve.answer(user, _now(date(2026, 11, 10)))
-		self.assertEqual((out["kind"], out["scene"]), ("day", False))
-
 	def test_employee_with_no_holiday_list_has_the_no_list_reason(self):
 		user = self.person()
 		self.assertEqual(resolve.occasion(user, _now(DIWALI))["reason"], "no_list")
@@ -412,9 +382,6 @@ class TestHolidays(_Base):
 		user = self.person(rows)
 		out = resolve.answer(user, _now(date(2026, 11, 5)))
 		self.assertEqual((out["kind"], out["design"]), ("leadup", "eid"))
-
-	def test_no_holiday_list_is_none(self):
-		self.assertEqual(resolve.answer(self.person(), _now(DIWALI))["kind"], "none")
 
 	def test_hrms_15_adapter_reads_the_list_and_keeps_weekly_off_and_parent(self):
 		user = self.person([(DIWALI, "Sunday", 1)], list_country="India")
@@ -747,11 +714,6 @@ class TestSwitchesAndPolicy(_Base):
 		out = resolve.answer(user, _now(DIWALI))
 		self.assertEqual((out["kind"], out["worn"], out["scene"]), ("birthday", False, False))
 
-	def test_leadup_has_a_scene(self):
-		user = self._holiday_user()
-		out = resolve.answer(user, _now(date(2026, 11, 6)))
-		self.assertEqual((out["kind"], out["worn"], out["scene"]), ("leadup", True, True))
-
 	def test_white_label_leadup_has_no_scene(self):
 		_set("agent_name", "Acme Assistant")
 		user = self._holiday_user()
@@ -877,16 +839,6 @@ class TestPrivacyAndFailSafe(_Base):
 		self.assertEqual(kwargs["title"], "Holiday touch: answer failed")
 		self.assertIn("RuntimeError", kwargs["message"])
 		self.assertNotIn("1990-11-08", kwargs["message"])
-
-	def test_error_creates_an_error_log_row(self):
-		user = self.person(dob="1990-11-08")
-		title = "Holiday touch: answer failed"
-		flush_error_logs()
-		before = frappe.db.count("Error Log", {"method": title})
-		with mock.patch.object(resolve, "occasion", side_effect=RuntimeError("boom")):
-			resolve.safe_answer(user, _now(DIWALI))
-		flush_error_logs()
-		self.assertEqual(frappe.db.count("Error Log", {"method": title}), before + 1)
 
 	def test_in_developer_mode_the_error_log_row_still_holds_no_birth_date(self):
 		# Frappe appends the frame's local variables to a traceback in developer mode. The

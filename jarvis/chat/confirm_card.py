@@ -74,6 +74,7 @@ import secrets
 
 import frappe
 
+from jarvis.chat import draft_card
 from jarvis.chat._record_summary import (
 	_MAX_BODY,
 	_MAX_BULK_BODY,
@@ -130,14 +131,16 @@ _CONSEQUENCE = {
 }
 
 
-def build_card(tool: str, args, preview) -> dict | None:
+def build_card(tool: str, args, preview, draft: bool = False) -> dict | None:
 	"""Structured, render-ready confirmation summary, or None to fall back to the
 	SPA's summary + raw-preview rendering. Best-effort: never raises (a card is
-	UX, not correctness), so a failure just yields None."""
+	UX, not correctness), so a failure just yields None. ``draft``: a create card
+	also shows the columns the DocType lists on its child tables, with the trial's
+	computed values (``draft_card``)."""
 	if not isinstance(args, dict):
 		return None
 	try:
-		card = _card_of(tool, args, preview)
+		card = _card_of(tool, args, preview, draft)
 		if isinstance(card, dict):
 			if _is_sensitive(preview):
 				# Names, titles and targets too, not only the values: a record name
@@ -199,7 +202,7 @@ def _add_warning(card: dict, preview) -> None:
 		card["warning"] = {"jobs": jobs, "rolled_back": rolled_back}
 
 
-def _card_of(tool: str, args: dict, preview) -> dict | None:
+def _card_of(tool: str, args: dict, preview, draft: bool = False) -> dict | None:
 	would = preview.get("would") if isinstance(preview, dict) else None
 	full = _is_sensitive(preview)
 	if tool in ("create_doc", "update_doc"):
@@ -209,12 +212,12 @@ def _card_of(tool: str, args: dict, preview) -> dict | None:
 	if tool == "create_doc":
 		if bulk_key == "docs":
 			return _batch_create_card(args, would, full)
-		return _create_card(args, would, full)
+		return _create_card(args, would, full, draft)
 	if tool == "update_doc" and not bulk_key:
 		# A guarded structure card (a Workflow) shows its tables whole even when an
 		# edit leaves them as they are: what is being switched on is the point.
 		whole = isinstance(preview, dict) and preview.get("structural") is True
-		return _update_card(args, would, full, whole)
+		return _update_card(args, would, full, whole, draft)
 	if tool == "update_doc" and bulk_key == "updates":
 		return _bulk_update_card(args, bulk_items, full)
 	if tool in _VERB:
@@ -277,7 +280,7 @@ def _label(meta, fieldname: str) -> str:
 	return fieldname
 
 
-def _create_card(args: dict, would, full: bool = False) -> dict:
+def _create_card(args: dict, would, full: bool = False, draft: bool = False) -> dict:
 	doctype = args.get("doctype")
 	values = args.get("values") if isinstance(args.get("values"), dict) else {}
 	meta = _meta(doctype)
@@ -295,7 +298,13 @@ def _create_card(args: dict, would, full: bool = False) -> dict:
 		if isinstance(would, dict) and key not in would:
 			continue  # perm-dropped from the resolved doc: the save will not write it
 		t = table_rows(
-			meta, key, _resulting_rows(meta, key, value, []) if full else _trial_rows(key, value, would), full
+			meta,
+			key,
+			_resulting_rows(meta, key, value, [])
+			if full
+			else _trial_rows(key, value, would, _list_view_fields(meta, key) if draft else ()),
+			full,
+			draft=draft,
 		)
 		if t:
 			tables.append(t)
@@ -431,7 +440,7 @@ def _stored_args(tool: str, args: dict) -> dict:
 	return out
 
 
-def _trial_rows(key: str, rows: list, would) -> list:
+def _trial_rows(key: str, rows: list, would, extra=()) -> list:
 	"""The rows of child table ``key`` as the trial run left them, for an ordinary
 	create card (the full card builds its rows with ``_resulting_rows``).
 
@@ -445,7 +454,11 @@ def _trial_rows(key: str, rows: list, would) -> list:
 	A cell the resolved row does not carry stays as sent: ``table_rows`` still counts
 	a key that is not a child field as unknown. The call's rows are kept whole when
 	the trial holds no list of the same length for the table (no dry run, as on a
-	held create; a validate that added or removed rows, which position cannot pair)."""
+	held create; a validate that added or removed rows, which position cannot pair).
+
+	``extra``: field names (a draft card passes the child DocType's ``in_list_view``
+	fields) that are added from the resolved row when the call did not set them, so a
+	computed Hrs or Amount shows with the value the trial gave it."""
 	resolved = would.get(key) if isinstance(would, dict) else None
 	if not isinstance(resolved, list) or len(resolved) != len(rows):
 		return rows
@@ -454,8 +467,21 @@ def _trial_rows(key: str, rows: list, would) -> list:
 		if not isinstance(sent, dict) or not isinstance(got, dict):
 			out.append(sent)
 			continue
-		out.append({k: got[k] if k in got else v for k, v in sent.items()})
+		row = {k: got[k] if k in got else v for k, v in sent.items()}
+		row.update({k: got[k] for k in extra if k not in row and k in got})
+		out.append(row)
 	return out
+
+
+def _list_view_fields(meta, key: str) -> tuple:
+	"""The ``in_list_view`` fieldnames of the child DocType of table field ``key``."""
+	df = meta.get_field(key) if meta else None
+	if df is None or not df.options or df.fieldtype not in ("Table", "Table MultiSelect"):
+		return ()
+	try:
+		return tuple(d.fieldname for d in frappe.get_meta(df.options).fields if d.in_list_view)
+	except Exception:
+		return ()
 
 
 def _resulting_rows(meta, key, rows: list, stored, doc=None) -> list:
@@ -647,7 +673,7 @@ def _crlf_as_lf(text: str) -> str:
 	return text.replace("\r\n", "\n")
 
 
-def _update_card(args: dict, would, full: bool = False, whole: bool = False) -> dict:
+def _update_card(args: dict, would, full: bool = False, whole: bool = False, draft: bool = False) -> dict:
 	doctype = args.get("doctype")
 	name = args.get("name")
 	changes = args.get("changes") if isinstance(args.get("changes"), dict) else {}
@@ -689,10 +715,45 @@ def _update_card(args: dict, would, full: bool = False, whole: bool = False) -> 
 			if not whole and _same_rows(meta, key, to_val, from_val):
 				continue  # every row kept as it is: nothing to show
 		df = meta.get_field(key) if meta else None
-		if same_value(from_val, to_val, df):
+		as_draft = draft and not full and not whole
+		same = same_value(from_val, to_val, df)
+		# A draft card judges a listed table by its rows: the trial's rows can read as the saved
+		# ones while the write still changes a row (a masked secret, a clipped or rounded value).
+		listed_table = (
+			as_draft
+			and df is not None
+			and df.fieldtype in ("Table", "Table MultiSelect")
+			and (isinstance(changes.get(key), list) or changes.get(key) is None)
+		)
+		if same and not listed_table:
 			continue  # the save would not change the stored value
 		# Never a password / secret value (_diff_row masks it).
-		diff.append(_diff_row(meta, key, from_val, to_val, doc, full))
+		entry = _diff_row(meta, key, from_val, to_val, doc, full)
+		if as_draft:
+			# A draft card shows a table's row changes. ``from_val`` is the stored rows read
+			# (permission-checked) above: no second read. The trial's rows give the computed cells.
+			draft_card.decorate_update_entry(
+				entry,
+				meta,
+				key,
+				changes.get(key),
+				from_val,
+				to_val,
+				would.get(key) if isinstance(would, dict) else None,
+			)
+			rc = entry.get("row_changes")
+			if rc is not None:
+				# Fail closed: a table is hidden only after a full comparison found nothing
+				# (an ``unverified`` table is kept, and says it could not be compared).
+				if not draft_card.has_row_change(entry) and not rc.get("unverified"):
+					continue
+			elif listed_table:
+				# No comparison could be made (it failed or had nothing to compare): never drop a
+				# table on "reads the same"; the plain "N rows" entry stays, marked ``unverified``.
+				entry["unverified"] = True
+			elif same:
+				continue
+		diff.append(entry)
 		if not full and len(diff) >= _MAX_ROWS:
 			break
 	if full:
@@ -1056,12 +1117,20 @@ def _bulk_email_card(messages: list) -> dict | None:
 		)
 	if not shown:
 		return None
-	return {
+	card = {
 		"kind": "bulk_email",
 		"count": len(messages),
 		"messages": shown,
 		"extra": max(0, len(messages) - len(shown)),
 	}
+	if card["extra"]:
+		# Every address Confirm will email, not only the first _MAX_ROWS messages: a
+		# merge from a query (send_email recipients_from) can hold hundreds, and a
+		# reviewer must be able to read who gets one before confirming.
+		card["all_recipients"] = [
+			fmt(_recips(m.get("recipients") or "")) for m in messages if isinstance(m, dict)
+		]
+	return card
 
 
 def _skill_card(args: dict) -> dict:
@@ -1084,6 +1153,9 @@ def _skill_card(args: dict) -> dict:
 		"description": fmt(args.get("description") or "", limit=_MAX_VAL),
 		"instructions": fmt(args.get("instructions") or "", limit=_MAX_BODY),
 	}
+
+
+_MAX_SUMMARY = 500  # jarvis_wiki_page.MAX_SUMMARY_LEN
 
 
 def _wiki_card(args: dict) -> dict:
@@ -1129,7 +1201,8 @@ def _wiki_card(args: dict) -> dict:
 		# `summary` is PERSISTED (update_wiki.py:141-142, :164) - a call setting only
 		# summary would otherwise render as an empty "meta" card and the human would
 		# approve stored text they never saw.
-		"summary": fmt(args.get("summary") or "", limit=_MAX_VAL),
+		# The stored summary is whitespace-collapsed and up to 500 characters; show that, not the 200 cap.
+		"summary": fmt(" ".join(str(args.get("summary") or "").split()), limit=_MAX_SUMMARY),
 		"mode": mode,
 		"body": fmt(body_src, limit=_MAX_BODY),  # the body the TOOL will write
 	}

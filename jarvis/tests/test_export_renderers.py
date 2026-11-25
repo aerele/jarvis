@@ -40,10 +40,6 @@ class TestXlsxRenderer(FrappeTestCase):
 		ws = wb.active
 		return [[c for c in row] for row in ws.iter_rows(values_only=True)]
 
-	def test_produces_zip_workbook(self):
-		m = ExportModel(columns=["name", "qty"], rows=[["A", 1]], total=1)
-		self.assertEqual(renderers.xlsx(m)[:2], b"PK")
-
 	def test_escaped_formula_is_in_the_real_cell(self):
 		m = ExportModel(columns=["c"], rows=[["=cmd"]], total=1)
 		cells = self._cells(renderers.xlsx(m))

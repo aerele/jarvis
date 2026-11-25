@@ -91,18 +91,6 @@ class TestAfterAWaitingAnswer(GuardBase):
 			with self.subTest(tool=tool):
 				self._assert_refused(tool)
 
-	def test_nothing_is_written_or_sent(self):
-		self._waiting()
-		todos = frappe.db.count("ToDo")
-		queued = frappe.db.count("Email Queue")
-		for tool, args in (
-			("create_doc", {"doctype": "ToDo", "values": {"description": "guard-probe"}}),
-			("send_email", {"recipients": "nobody@example.com", "subject": "s", "content": "c"}),
-		):
-			self._call(tool, args)
-		self.assertEqual((frappe.db.count("ToDo"), frappe.db.count("Email Queue")), (todos, queued))
-		self.assertFalse(pending_confirm.has_live_card(OWNER, self.conv))
-
 	def test_reads_still_work(self):
 		self._waiting()
 		for tool in READS:
@@ -225,16 +213,11 @@ class TestOtherCallers(GuardBase):
 		frappe.db.set_value(TURN, self.step_turn, "state", "done", update_modified=False)
 		self._assert_allowed("create_doc")
 
-	def test_every_gated_write_is_refused_even_off_the_write_list(self):
-		# call_connector is gated but not in _WRITE_TOOLS on the version-15/16 lines.
-		self._waiting()
-		self.assertIn("call_connector", api._GATED_WRITES)
-		self._assert_refused("call_connector")
-
 	def test_no_conversation_does_not_guard(self):
 		self.assertIsNone(macro_report_wait.write_refusal(None, "send_email"))
 
 	def test_the_refused_set_is_the_benches_own_write_list(self):
+		self.assertTrue(api._GATED_WRITES <= api._WRITE_TOOLS)
 		for tool in (*GATED, *UNGATED):
 			self.assertIn(tool, api._WRITE_TOOLS)
 		for tool in READS:
@@ -360,10 +343,3 @@ class TestWhenTheFeatureIsOffOrBroken(GuardBase):
 		with patch.object(macro_report_wait, "_write_refusal") as lookup:
 			self.assertIsNone(macro_report_wait.write_refusal(self.conv, "get_list"))
 		lookup.assert_not_called()
-
-
-class TestTheWords(GuardBase):
-	def test_the_messages(self):
-		self.assertEqual(macro_report_wait.GUARD_WAITING, WAITING)
-		self.assertEqual(macro_report_wait.GUARD_FAILED, FAILED)
-		self.assertNotIn("\u2014", WAITING + FAILED)

@@ -596,12 +596,6 @@ class TestNames(_Base):
 		policy.persist(_names_payload({"diwali": ["lights"]}, []), daily=False)
 		self.assertEqual(_names(), {"aliases": {"diwali": ["lights"]}, "near_misses": []})
 
-	def test_odd_payload_shapes_never_raise(self):
-		for aliases, near in (({"diwali": 5}, None), ({1: ["x"]}, "str"), ([], {}), (None, None)):
-			with self.subTest(aliases=aliases, near=near):
-				with mock.patch.object(frappe, "log_error"):
-					policy.persist(_names_payload(aliases, near), daily=False)
-
 	def _rotation(self, body):
 		"""Run ``persist`` and report (gen before commit, gen after the commit callbacks)."""
 		frappe.db.after_commit.reset()

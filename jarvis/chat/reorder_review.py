@@ -398,9 +398,16 @@ def collect(run, config, *, review_execution_user=None):
 			refuse()
 		from erpnext.stock.doctype.bin.bin import RECALCULATED_FIELDS
 
+		# native_stock_guard reads stock_value and valuation_rate off every Bin row, so ask for
+		# them by name. ERPNext 16 lists both in RECALCULATED_FIELDS and ERPNext 15 does not:
+		# there they came back empty and the guard refused every company that holds stock.
+		bin_fields = dict.fromkeys(
+			("name", "item_code", "warehouse", "projected_qty", "stock_value", "valuation_rate")
+			+ tuple(RECALCULATED_FIELDS)
+		)
 		data["bins"] = readable_rows(
 			"Bin",
-			["name", "item_code", "warehouse", "projected_qty", *RECALCULATED_FIELDS],
+			list(bin_fields),
 			{"warehouse": ["in", [w.name for w in data["warehouses"]]]},
 		)
 		data["policies"] = children(

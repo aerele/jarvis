@@ -486,11 +486,29 @@
 							<pre v-if="turnErrorShowsRaw" class="jvp-turn-err-raw">{{
 								turnError
 							}}</pre>
-							<div v-if="turnErrorDetails.retryable" class="jvp-turn-err-acts">
-								<button class="jvp-btn-subtle" type="button" @click="retryLast">
+							<div
+								v-if="turnErrorDetails.retryable || reportOpen"
+								class="jvp-turn-err-acts"
+							>
+								<button
+									v-if="turnErrorDetails.retryable"
+									class="jvp-btn-subtle"
+									type="button"
+									@click="retryLast"
+								>
 									Retry
 								</button>
+								<button
+									v-if="reportOpen"
+									class="jvp-btn-subtle"
+									type="button"
+									:disabled="reporting"
+									@click="reportError"
+								>
+									Report error
+								</button>
 							</div>
+							<div v-if="reportNote" class="jvp-turn-err-hint">{{ reportNote }}</div>
 						</div>
 					</div>
 				</template>
@@ -549,10 +567,14 @@
 					</div>
 				</div>
 				<div v-for="(p, pi) in orderedPending" :key="p.token" class="jvp-pending-row">
-					<div class="jvp-pending-txt">
+					<div class="jvp-pending-txt" :class="{ 'jvp-pending-draft': p.draft_title }">
 						<b v-if="orderedPending.length > 1"
 							>{{ pi + 1 }} of {{ orderedPending.length }}: </b
-						>{{ p.summary || "Jarvis wants to make a change." }}
+						>{{
+							p.draft_title
+								? draftLine(p.draft_title)
+								: p.summary || "Jarvis wants to make a change."
+						}}
 						<!-- Parked before the user's latest message: only its number binds it. -->
 						<span v-if="!isRecentCard(p)" class="jvp-pending-earlier">Earlier</span>
 					</div>
@@ -564,15 +586,20 @@
 						     see the plan or the Approve & run choice. Deflect to the full
 						     chat instead, and make that deflect the PRIMARY action so it
 						     reads as the thing to do, not a secondary escape hatch. -->
+						<!-- A server draft card (draft_title) gets the same treatment, for the same
+						     reason: this panel cannot show what the draft holds, so it never
+						     offers Confirm for it. -->
 						<button
-							:class="p.approve_run ? 'jvp-btn-solid' : 'jvp-btn-subtle'"
+							:class="
+								p.approve_run || p.draft_title ? 'jvp-btn-solid' : 'jvp-btn-subtle'
+							"
 							type="button"
 							@click="$emit('open-full')"
 						>
 							Review in full chat
 						</button>
 						<button
-							v-if="!p.approve_run"
+							v-if="!p.approve_run && !p.draft_title"
 							class="jvp-btn-solid"
 							type="button"
 							:disabled="resolving === p.token"
@@ -583,7 +610,7 @@
 					</div>
 				</div>
 				<!-- Both ways to approve, shown once under the stack. -->
-				<div v-if="orderedPending.length" class="jvp-typehint">
+				<div v-if="typedApprovalHint" class="jvp-typehint">
 					{{ typedApprovalHint }}
 				</div>
 			</div>
@@ -827,16 +854,12 @@ import { wornLayerBox } from "./fab_worn.mjs";
 import { tileUnits } from "../../shared/holiday/worn-room.mjs";
 import { prefersReduced, watchReducedMotion } from "./reduced_motion.mjs";
 import { classifyReadiness, degradedActionable, shouldWarnWorkers } from "./panel_readiness.mjs";
-import { sendRefusalMessage } from "./panel_send_copy.mjs";
+import { isKnownRefusal, sendRefusalMessage } from "./panel_send_copy.mjs";
+import { failureCopy, failureKind, uploadFailureCopy } from "../../shared/chat_failure_copy.mjs";
+import { openErrorReport, showReportError } from "../../shared/support_error_report.mjs";
 import { advanceViewGeneration, isViewCurrent } from "./view_generation.mjs";
 import { maintenance, foldSend, startPollIfHeld } from "./maintenance_state.mjs";
-import {
-	emptyStream,
-	applyEvent,
-	applyEventEx,
-	visibleMessages,
-	pendingApproveRun,
-} from "./chat_stream.mjs";
+import { emptyStream, applyEvent, applyEventEx, visibleMessages } from "./chat_stream.mjs";
 import {
 	discardedTokens,
 	dropDiscarded,
@@ -847,10 +870,12 @@ import {
 	settledReasonMessage,
 	safetyUpdateTransition,
 	sortPendingCards,
-	typedApprovalHint as hintFor,
+	visibleTypedHint as hintFor,
 	withExcluded,
 	withoutTokens,
 } from "./pending_order.mjs";
+import { listPendingItem, mergePendingByToken, rowPendingItem } from "./pending_items.mjs";
+import { draftLine } from "../../shared/draft_pending.mjs";
 import { ONBOARDING_URL } from "./config.mjs";
 import {
 	listConversations,
@@ -861,6 +886,7 @@ import {
 	listPendingConfirmations,
 	uploadFile,
 	transcribeAudio,
+	getErrorReportDetails,
 	getChatUiSettings,
 	isReadyForChat,
 	resyncLlm,
@@ -1003,10 +1029,39 @@ const turnErrorHint = computed(() => turnErrorDetails.value.hint);
 const turnErrorShowsRaw = computed(
 	() => !!(turnError.value || "").trim() && showsRawReason(turnErrorDetails.value)
 );
+// Report error: only where Aerele support is the one who can fix the failure, and only for a
+// user who can raise a ticket (boot flag jarvis_can_report_error, see jarvis/boot.py).
+const supportOn = !!window.frappe?.boot?.jarvis_can_report_error;
+const reportOpen = computed(() => showReportError(turnErrorDetails.value, supportOn));
+const reporting = ref(false);
+const reportNote = ref("");
+async function reportError() {
+	if (reporting.value || !reportOpen.value) return;
+	reporting.value = true;
+	reportNote.value = "";
+	try {
+		const row = messages.value.find((m) => m.name === turnErrorMsgId.value);
+		const opened = await openErrorReport({
+			info: turnErrorDetails.value,
+			conversation: convId.value,
+			message: turnErrorMsgId.value,
+			at: row?.modified || row?.creation,
+			fetchDetails: getErrorReportDetails,
+			openTab: (url, target) => window.open(url, target),
+			navigate: (url) => window.location.assign(url),
+		});
+		if (!opened) reportNote.value = "Could not open Support. Try again.";
+	} catch {
+		reportNote.value = "Could not open Support. Try again.";
+	} finally {
+		reporting.value = false;
+	}
+}
 function clearTurnError() {
 	turnError.value = "";
 	turnErrorCode.value = "";
 	turnErrorMsgId.value = "";
+	reportNote.value = "";
 }
 const draft = ref("");
 const sending = ref(false);
@@ -1085,7 +1140,8 @@ function observePassiveSafetyUpdates(rows) {
 	}
 }
 // Typed approval works in the widget too. An "Earlier" card never gets the
-// bare-phrase hint: only its number binds it (pending_order.mjs).
+// bare-phrase hint: only its number binds it, and a stack holding a draft card gets only the
+// numbered hints of its ordinary cards (pending_order.mjs visibleTypedHint).
 const typedApprovalHint = computed(() => hintFor(orderedPending.value));
 const lastSent = ref("");
 // Prompt recall, matching the full chat: Up walks back through prompts sent from
@@ -1522,20 +1578,7 @@ async function resyncPending(source) {
 					m.pending_card_safe === true &&
 					m.tool_call_id
 			)
-			.map((m) => ({
-				token: m.tool_call_id,
-				tool: m.tool_name || "",
-				summary: m.tool_name || "",
-				// The row has no dedicated created_at field; its own creation
-				// timestamp is stamped in the same request as the mint and is close
-				// enough for ordering (the comparator falls back to expires_at
-				// anyway when this is missing).
-				created_at: toEpoch(m.creation),
-				expires_at: toEpoch(m.expires_at),
-				approve_run: !!(m.pending_card && m.pending_card.approve_run),
-				recent: m.recent !== false,
-				pending_card_safe: true,
-			}));
+			.map((m) => rowPendingItem(m, toEpoch));
 		const pc = await listPendingConfirmations(cid, source);
 		// A resync in flight across a startNewChat / conversation switch must not write the
 		// previous conversation's cards onto the new one. The generation matters when a
@@ -1547,26 +1590,11 @@ async function resyncPending(source) {
 		// blip on open must still show a parked card's durable row). Mirrors the PWA.
 		const clean = !!(pc && pc.ok !== false && Array.isArray(pc.data?.pending));
 		const backstop = clean
-			? pc.data.pending
-					.filter((r) => r?.pending_card_safe === true)
-					.map((r) => ({
-						token: r.token,
-						tool: r.tool || "",
-						summary: r.summary || r.preview || "",
-						created_at: r.created_at ?? null,
-						expires_at: r.expires_at ?? null,
-						approve_run: pendingApproveRun(r.preview),
-						recent: r.recent !== false,
-						pending_card_safe: true,
-					}))
+			? pc.data.pending.filter((r) => r?.pending_card_safe === true).map(listPendingItem)
 			: [];
 		const base = clean ? [] : stream.value.pending || [];
-		const byToken = new Map();
-		for (const c of [...base, ...rowItems, ...backstop]) {
-			if (c.token && !byToken.has(c.token)) byToken.set(c.token, c);
-		}
 		const merged = keepEarlier(
-			[...byToken.values()],
+			mergePendingByToken(base, rowItems, backstop),
 			stream.value.pending,
 			rowItems,
 			backstop
@@ -1712,7 +1740,10 @@ async function load() {
 			viewGeneration === generation &&
 			(!requestedConversation || convId.value === requestedConversation)
 		)
-			loadError.value = "Could not load your conversation.";
+			loadError.value = failureCopy(
+				e,
+				"Could not load your conversation. Close the chat and open it again."
+			);
 	} finally {
 		if (
 			viewGeneration === generation &&
@@ -1776,8 +1807,7 @@ async function onFilePicked(e) {
 			attachments.value.push(uploaded);
 		}
 	} catch (err) {
-		if (isCurrentView(generation, conversation))
-			loadError.value = err?.serverReason || "That file could not be attached.";
+		if (isCurrentView(generation, conversation)) loadError.value = uploadFailureCopy(err);
 	} finally {
 		if (isCurrentView(generation, conversation)) uploading.value = false;
 	}
@@ -1891,7 +1921,7 @@ async function toggleVoice() {
 		return;
 	}
 	if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-		loadError.value = "Recording is not supported in this browser.";
+		loadError.value = "Recording is not supported in this browser. Type your message instead.";
 		return;
 	}
 	const generation = viewGeneration;
@@ -1931,7 +1961,10 @@ async function toggleVoice() {
 				}
 			} catch (err) {
 				if (isCurrentView(generation, conversation))
-					loadError.value = "Could not transcribe that recording.";
+					loadError.value = failureCopy(
+						err,
+						"Could not transcribe that recording. Try again, or type your message instead."
+					);
 			} finally {
 				if (isCurrentView(generation, conversation)) transcribing.value = false;
 			}
@@ -1940,7 +1973,8 @@ async function toggleVoice() {
 		recording.value = true;
 	} catch (err) {
 		if (isCurrentView(generation, conversation))
-			loadError.value = "Microphone permission was refused.";
+			loadError.value =
+				"Microphone permission was refused. Allow it in your browser settings, then try again.";
 	}
 }
 
@@ -2049,9 +2083,9 @@ async function send() {
 				return;
 			}
 			loadError.value =
-				res.reason === "release_update_required"
-					? sendRefusalMessage(res.reason, brandName)
-					: res.error?.message || sendRefusalMessage(res.reason, brandName);
+				isKnownRefusal(res.reason) || !res.error?.message
+					? sendRefusalMessage(res.reason, brandName, res)
+					: res.error.message;
 			return;
 		}
 		// A go-ahead on the parked card ran the confirmation instead of starting a
@@ -2084,7 +2118,10 @@ async function send() {
 	} catch (e) {
 		if (!isCurrentView(generation, sentConversation)) return;
 		sending.value = false;
-		loadError.value = "Could not send. Your message was not delivered.";
+		loadError.value = failureCopy(
+			e,
+			"Could not send. Your message was not delivered. Try sending it again."
+		);
 	}
 }
 
@@ -2139,7 +2176,10 @@ async function resolvePending(token) {
 		stream.value = applyEvent(stream.value, { kind: "action:resolved", token });
 	} catch (e) {
 		if (!actionIsCurrent()) return;
-		loadError.value = "Could not confirm that action.";
+		loadError.value = failureCopy(
+			e,
+			"Could not confirm that action. Check your connection and try again."
+		);
 	} finally {
 		if (actionIsCurrent() && resolving.value === token) resolving.value = "";
 	}
@@ -2337,6 +2377,8 @@ function startPolling() {
 	stopPolling();
 	const generation = viewGeneration;
 	const before = shownMessages.value.length;
+	// The last poll's failure: if the wait ends with nothing, say why instead of a bare "no reply".
+	let lastPollError = null;
 	pollTimer = window.setInterval(async () => {
 		if (viewGeneration !== generation) return;
 		pollTicks += 1;
@@ -2348,7 +2390,11 @@ function startPolling() {
 			// typing dots and "Jarvis did not reply" at the same time — it claims to
 			// be working on a turn it has just abandoned.
 			settle();
-			if (gaveUp) loadError.value = "Jarvis did not reply. Try again.";
+			if (gaveUp)
+				loadError.value = failureCopy(
+					lastPollError,
+					"Jarvis did not reply in time. Try again in a minute."
+				);
 			return;
 		}
 		const cid = convId.value;
@@ -2369,7 +2415,8 @@ function startPolling() {
 				stickToBottom();
 			}
 		} catch (e) {
-			/* transient - keep polling */
+			// Transient: keep polling, but remember it for the give-up message.
+			lastPollError = failureKind(e) === "other" ? null : e;
 		}
 	}, 2500);
 }
@@ -3656,6 +3703,11 @@ defineExpose({ load, startNewChat, convId });
 	font-size: 13px;
 	line-height: 1.45;
 	color: var(--jv-ink);
+}
+/* a draft's title is the user's or a model's own words: a long unbroken one must wrap, not widen the
+   panel (draft items only: an ordinary item's text is unchanged) */
+.jvp-pending-draft {
+	overflow-wrap: anywhere;
 }
 .jvp-pending-earlier {
 	margin-left: 6px;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { sendRejectionCopy } from "./sendRejectionCopy";
+import { sendRejectionCopy, rejectionCopy } from "./sendRejectionCopy";
 
 const FALLBACK = "Couldn't send your message.";
 
@@ -33,11 +33,6 @@ describe("sendRejectionCopy", () => {
 		expect(sendRejectionCopy("subscription_suspended", "Jarvis").message).toContain(
 			"subscription"
 		);
-	});
-
-	it("shows a server sentence verbatim", () => {
-		const sentence = "A reply is already in progress.";
-		expect(sendRejectionCopy(sentence, "Jarvis").message).toBe(sentence);
 	});
 
 	it("never surfaces an unknown machine code", () => {
@@ -87,5 +82,28 @@ describe("sendRejectionCopy, usage limit window", () => {
 				"You've reached your usage limit. Ask your Jarvis admin to raise it."
 			);
 		}
+	});
+});
+
+describe("rejectionCopy", () => {
+	it("maps a known code and the new busy code", () => {
+		expect(rejectionCopy({ reason: "queue_full" }, "Jarvis").message).toBe(
+			"Jarvis is busy right now. Wait a moment, then send it again."
+		);
+	});
+	it("shows the server's sentence, never a bare code", () => {
+		expect(
+			rejectionCopy({ reason: "macro_armed", message: "Finish the run first." }, "J").message
+		).toBe("Finish the run first.");
+		expect(rejectionCopy({ reason: "macro_armed" }, "J").message).toBe(FALLBACK);
+		expect(rejectionCopy({ reason: "macro_armed" }, "J", "Couldn't retry that.").message).toBe(
+			"Couldn't retry that."
+		);
+		expect(rejectionCopy({ reason: "A reply is already in progress." }, "J").message).toBe(
+			"A reply is already in progress."
+		);
+	});
+	it("copes with no envelope", () => {
+		expect(rejectionCopy(undefined, "J").message).toBe(FALLBACK);
 	});
 });
