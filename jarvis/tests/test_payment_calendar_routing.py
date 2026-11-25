@@ -415,8 +415,16 @@ class TestReaderSettingsSaveIsInert(RoutingSettingsCase):
 		self.assertEqual(routing.reader_settings().mode, "shadow")
 
 	def test_a_save_that_also_changes_the_llm_config_still_syncs(self):
+		# A model makes the legacy single-model path "configured", and api_key mode (the default) then requires
+		# a key. A CI site has none, so the save carries a valid config of its own. The key and the mode live in
+		# this test's transaction and roll back with it.
+		llm_config = {
+			"llm_model": "pc-routing-test-model",
+			"llm_auth_mode": "api_key",
+			"llm_api_key": "pc-routing-test-key",
+		}
 		with patch.object(jarvis_settings.JarvisSettings, "_on_update_single_model_legacy") as legacy:
-			_save_as_administrator(**{MODE: "shadow", "llm_model": "pc-routing-test-model"})
+			_save_as_administrator(**{MODE: "shadow", **llm_config})
 		legacy.assert_called_once()
 
 	def test_an_unrelated_save_on_a_failed_sync_still_retries(self):
