@@ -53,6 +53,15 @@ permissions:
   packages: read   # to pull the base image from GHCR
 
 jobs:
+  # RUNNER SELECTION. Every job's `runs-on` picks the self-hosted Mac Studio pool
+  # (repo variable RUNNER_LABEL=linux-container: 6 ARM64 runners in a Linux VM) for
+  # pushes, manual runs and PRs from branches of THIS repo, and GitHub-hosted
+  # `ubuntu-latest` for PRs from forks. Fork PRs must never reach a self-hosted runner:
+  # this repo is public and the runners are persistent machines. Note that a fork PR can
+  # rewrite this file, so this expression is not the guard on its own; the repo's
+  # "require approval for all outside contributors" Actions setting is.
+  # Kill switch: delete the RUNNER_LABEL variable and every job falls back to
+  # ubuntu-latest (an unset variable is falsy in the expression).
   runtime-branding:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     uses: ./.github/workflows/runtime-branding.yml
@@ -72,7 +81,7 @@ jobs:
   # under a minute rather than waiting on a bench.
   lint:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -99,7 +108,7 @@ jobs:
   # cryptography (for the local TLS pair): no bench, no Frappe, no network beyond pip.
   ws-contract:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -131,7 +140,7 @@ jobs:
   # independently of the Python shards above.
   frontend-tests:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       # Full-repo checkout, not a sparse frontend/ one: frontend/package.json depends on
@@ -143,7 +152,9 @@ jobs:
           # Node 24 is this repo's canonical dev/bench version and what the suite is validated
           # against locally. (The lint job runs 20 because it only shells pre-commit hooks.)
           node-version: "24"
-          cache: npm
+          # Skip the cache on self-hosted: its post-step upload crawls over the office WAN and
+          # can hang the job for 15+ min after it has passed. The local disk is warm anyway.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend deps
@@ -204,14 +215,16 @@ jobs:
   # Real-browser Board regression gate, independent of the Python/bench shards.
   approval-layout:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: npm
+          # Skip the cache on self-hosted: its post-step upload crawls over the office WAN and
+          # can hang the job for 15+ min after it has passed. The local disk is warm anyway.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           cache-dependency-path: frontend/package-lock.json
       - name: Install frontend deps and Chrome
         working-directory: frontend
@@ -241,14 +254,16 @@ jobs:
   # path as the SPA's, which the stub step below satisfies (pwa/vite.config.js aliases it like the SPA's).
   frontend-build:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: npm
+          # Skip the cache on self-hosted: its post-step upload crawls over the office WAN and
+          # can hang the job for 15+ min after it has passed. The local disk is warm anyway.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           cache-dependency-path: |
             frontend/package-lock.json
             pwa/package-lock.json
@@ -279,7 +294,7 @@ jobs:
 
   tests:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.RUNNER_LABEL || 'ubuntu-latest' }}
     # Shards now cover about 4,000 tests each. The first shard can exceed
     # 25 minutes on hosted runners; allow it to finish and upload coverage.
     timeout-minutes: 35
@@ -500,7 +515,7 @@ jobs:
   # Deliberately NOT in the base image: this needs python and `coverage` and nothing else
   # from the bench, so running it here skips a second 65s image pull.
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.RUNNER_LABEL || 'ubuntu-latest' }}
     needs: tests
     timeout-minutes: 10
     steps:
