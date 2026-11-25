@@ -53,3 +53,35 @@ class TestRefusedSendIsLogged(FrappeTestCase):
 		self.assertEqual(out, {"ok": False, "reason": "maintenance"})
 		self.assertIn("send_rejected", logger.info.call_args.args[0])
 		self.assertEqual(logger.info.call_args.args[1], "maintenance")
+
+
+class TestNativeNeverOpensASwitchHold(FrappeTestCase):
+	def _hold(self, native, switch=True, primary=True):
+		from unittest.mock import MagicMock, patch
+
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import JarvisSettings
+
+		doc = MagicMock()
+		doc._is_pool_switch.return_value = switch
+		doc._primary_changed.return_value = primary
+		with patch("jarvis.native_runtime.is_native_pool", return_value=native):
+			return JarvisSettings._needs_switch_hold(doc)
+
+	def test_a_native_tenant_holds_nothing_for_a_reorder_or_a_new_primary(self):
+		self.assertFalse(self._hold(True))
+
+	def test_a_proxied_tenant_keeps_the_hold_exactly_as_before(self):
+		self.assertTrue(self._hold(False, True, False))
+		self.assertTrue(self._hold(False, False, True))
+		self.assertFalse(self._hold(False, False, False))
+
+	def test_both_save_paths_ask_the_one_predicate(self):
+		import inspect
+
+		from jarvis import onboarding
+		from jarvis.jarvis.doctype.jarvis_settings import jarvis_settings as js
+
+		self.assertIn("_needs_switch_hold()", inspect.getsource(onboarding.save_llm_pool))
+		self.assertIn(
+			"is_switch=self._needs_switch_hold()", inspect.getsource(js.JarvisSettings._enqueue_pool_sync)
+		)

@@ -1497,6 +1497,18 @@ class JarvisSettings(Document):
 			return False
 		return bool(compute_proxy_active(self)) != bool(getattr(before, "proxy_active", 0))
 
+	def _needs_switch_hold(self) -> bool:
+		"""Whether this pool push must wait behind an ``llm_switch`` hold (open replies finish, chats
+		are told, then the container is recreated). A native tenant never needs one: it has no
+		proxy <-> direct leg to switch, and the runtime applies a pool save, a reorder and a new
+		primary by hot reload, with no restart (confirmed live 2026-11-25: a reorder held every
+		send for minutes and no restart followed)."""
+		from jarvis.native_runtime import is_native_pool
+
+		if is_native_pool(self):
+			return False
+		return bool(self._is_pool_switch() or self._primary_changed())
+
 	def _primary_changed(self) -> bool:
 		"""True when THIS save changes the FIRST enabled model of an already-
 		serving pool (admin-v2#629). The fleet renders the first model as the
@@ -1714,7 +1726,7 @@ class JarvisSettings(Document):
 		_switch_or_enqueue(
 			self,
 			"jarvis.jarvis.doctype.jarvis_settings.jarvis_settings._enqueued_sync_via_admin_pool",
-			is_switch=self._is_pool_switch() or self._primary_changed(),
+			is_switch=self._needs_switch_hold(),
 			# A teardown push carries its own job id. Sharing the ordinary one
 			# would let dedup drop it behind an already-queued normal sync, and
 			# the surviving job would run WITHOUT converge_teardown, hit the

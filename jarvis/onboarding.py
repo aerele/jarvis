@@ -1068,7 +1068,7 @@ def save_llm_pool(
 	elif compute_pool_mode(s):
 		from jarvis.chat import llm_switch
 
-		if s._is_pool_switch() or s._primary_changed() or llm_switch.is_active():
+		if s._needs_switch_hold() or llm_switch.is_active():
 			# jarvis#1425 follow-up (seamless switch, spec Part C; review round
 			# 2): this Apply either flips proxy_active itself (adding a model
 			# back turns the proxy back on, or a converge-teardown turns it
