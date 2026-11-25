@@ -691,6 +691,7 @@ def _chat_final_media_urls(payload: dict) -> list[dict]:
 		if not isinstance(block, dict):
 			continue
 		btype = block.get("type")
+		artifact_id = block.get("artifactId")
 		if btype in ("image", "audio", "video"):
 			url, mime = block.get("url"), block.get("mimeType")
 		elif btype == "attachment":
@@ -702,7 +703,10 @@ def _chat_final_media_urls(payload: dict) -> list[dict]:
 			continue
 		if not _valid_media_url(url):
 			continue
-		out.append({"url": url, "mime_type": mime})
+		item = {"url": url, "mime_type": mime}
+		if isinstance(artifact_id, str) and artifact_id:
+			item["artifact_id"] = artifact_id
+		out.append(item)
 		if len(out) >= _MAX_MEDIA_URLS_PER_TURN:
 			break
 	return out

@@ -316,6 +316,7 @@ def persist_rich_outputs(
 				settings.agent_url or "",
 				device.device_bearer(),
 				media_urls,
+				session_key=frappe.db.get_value(CONV, conversation_id, "session_key") or "",
 			)
 			if url_items:
 				all_items = (
@@ -387,17 +388,19 @@ def _turn_started_detached_media(conversation_id: str, assistant_msg_name: str) 
 	"""Whether this turn called a media-generation tool the runtime detaches. A turn's tool
 	steps are stored after its assistant message (higher ``seq``)."""
 	seq = frappe.db.get_value(MSG, assistant_msg_name, "seq")
-	if seq is None:
+	if not isinstance(seq, int):
 		return False
 	return bool(
-		frappe.db.exists(
+		frappe.get_all(
 			MSG,
-			{
+			filters={
 				"conversation": conversation_id,
 				"role": "tool",
 				"seq": [">", seq],
 				"tool_name": ["in", sorted(_DETACHED_MEDIA_TOOLS)],
 			},
+			pluck="name",
+			limit=1,
 		)
 	)
 

@@ -5,7 +5,7 @@ transports is covered by the worker / pump / recovery tests.
 """
 
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from jarvis.chat import generated_media as gm
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
@@ -1015,10 +1015,90 @@ class TestDetachedMediaWatch(unittest.TestCase):
 
 		with (
 			patch("frappe.db.get_value", return_value=7),
-			patch("frappe.db.exists", return_value="ROW") as exists,
+			patch("frappe.get_all", return_value=["ROW"]) as get_all,
 		):
 			self.assertTrue(turn_handler._turn_started_detached_media("C1", "MSG-1"))
-		filters = exists.call_args.args[1]
+		filters = get_all.call_args.kwargs["filters"]
 		self.assertEqual(filters["seq"], [">", 7])
 		self.assertEqual(filters["role"], "tool")
 		self.assertIn("image_generate", filters["tool_name"][1])
+
+
+class TestTicketedMediaDownload(unittest.TestCase):
+	"""From 2026.11 the media route refuses the device bearer; a one-time ticket from
+	``artifacts.download`` (issued over the device's own session) is the download path."""
+
+	_ITEM = {**_URL_ITEM, "artifact_id": "artifact_managed_image_12345678-1234-1234-1234-123456789012"}
+
+	def test_the_scanner_keeps_the_artifact_id(self):
+		from jarvis.chat.agent_client import _chat_final_media_urls
+
+		block = {
+			"type": "image",
+			"url": _URL_ITEM["url"],
+			"mimeType": "image/png",
+			"artifactId": self._ITEM["artifact_id"],
+		}
+		self.assertEqual(
+			_chat_final_media_urls({"message": {"content": [block]}}),
+			[{"url": _URL_ITEM["url"], "mime_type": "image/png", "artifact_id": self._ITEM["artifact_id"]}],
+		)
+
+	def _seed(self, item, session_key, *, bearer=None, ticket=b"PNG"):
+		ps = TestSeedMediaUrls._patch_db(Mock(), existing_canvas=None)
+		with (
+			ps[0],
+			ps[1],
+			ps[2],
+			ps[3],
+			patch.object(gm, "fetch_media_url", return_value=bearer),
+			patch.object(gm, "fetch_media_by_ticket", return_value=ticket) as tk,
+			patch("frappe.log_error"),
+		):
+			items = gm.seed_media_urls("MSG-1", "ws://h:1", "tok", [item], session_key=session_key)
+		return items, tk
+
+	def test_a_refused_bearer_falls_back_to_a_ticket(self):
+		items, tk = self._seed(self._ITEM, "agent:main:dashboard:x")
+		tk.assert_called_once_with(
+			"ws://h:1", "agent:main:dashboard:x", self._ITEM["artifact_id"], mime_type="image/png"
+		)
+		self.assertEqual(len(items), 1)
+
+	def test_no_ticket_without_an_artifact_id_or_session_key(self):
+		for item, sk in ((_URL_ITEM, "agent:main:dashboard:x"), (self._ITEM, "")):
+			items, tk = self._seed(item, sk)
+			tk.assert_not_called()
+			self.assertEqual(items, [])
+
+	def test_a_working_bearer_needs_no_ticket(self):
+		items, tk = self._seed(self._ITEM, "agent:main:dashboard:x", bearer=b"PNG")
+		tk.assert_not_called()
+		self.assertEqual(len(items), 1)
+
+	def _ticket(self, returned_url):
+		sess = Mock()
+		sess._request.return_value = {"ok": True, "payload": {"url": returned_url}}
+		pool = MagicMock()
+		pool.checkout.return_value.__enter__.return_value = sess
+		with (
+			patch("jarvis.chat.agent_session_pool.checkout", pool.checkout),
+			patch.object(gm, "fetch_media_url", return_value=b"PNG") as fm,
+		):
+			out = gm.fetch_media_by_ticket(
+				"http://h:1", "agent:main:dashboard:x", "artifact_x", mime_type="image/png"
+			)
+		return out, sess, fm
+
+	def test_the_ticket_is_downloaded_without_a_bearer_on_the_same_session(self):
+		url = _URL_ITEM["url"].replace(".png", "") + "?mediaTicket=abc"
+		out, sess, fm = self._ticket(url)
+		self.assertEqual(out, b"PNG")
+		self.assertEqual(sess._request.call_args.args[0], "artifacts.download")
+		fm.assert_called_once_with("http://h:1", "", url, mime_type="image/png", ticketed=True)
+
+	def test_an_untrusted_or_ticketless_url_is_refused(self):
+		for bad in ("https://evil.example/x?mediaTicket=1", _URL_ITEM["url"], "/api/other?mediaTicket=1"):
+			out, _, fm = self._ticket(bad)
+			self.assertIsNone(out)
+			fm.assert_not_called()
