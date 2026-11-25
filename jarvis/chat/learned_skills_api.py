@@ -120,7 +120,7 @@ def enqueue_learned_skills_push(chain_custom_reconcile: bool = False) -> dict:
 	}
 
 
-def _enqueued_push_learned_skills(chain_custom_reconcile: bool = False) -> None:
+def _enqueued_push_learned_skills(chain_custom_reconcile: bool = False, confirm: int = 0) -> None:
 	"""Background worker: push the compiled learned bundles via admin -> fleet ->
 	container. Re-builds the payload fresh from the managed rows (never trust a
 	payload across the queue boundary) and mirrors
@@ -133,11 +133,19 @@ def _enqueued_push_learned_skills(chain_custom_reconcile: bool = False) -> None:
 	(not at Apply time) so the custom restart can only start after the learned
 	restart finished; on any failure/skip path the reconcile is NOT enqueued
 	(the stale dirs keep the OLD guidance live; a later custom apply / restart
-	resync self-heals)."""
+	resync self-heals).
+
+	A push whose answer timed out may have landed: it is re-sent once (``confirm``,
+	keeping ``chain_custom_reconcile``) after the assistant answers again, see
+	``push_confirm``."""
 	from jarvis import admin_client
 	from jarvis._redis_lock import redis_lock
+	from jarvis.chat import push_confirm
 	from jarvis.learning.compiler import learned_push_split
 
+	if confirm:
+		push_confirm.wait_for_agent()
+	confirm_next = False
 	with redis_lock(_LOCK_NAME, timeout_s=180, blocking_timeout_s=60.0) as acquired:
 		if not acquired:
 			frappe.db.set_single_value(
@@ -169,9 +177,17 @@ def _enqueued_push_learned_skills(chain_custom_reconcile: bool = False) -> None:
 			terminal_written = True
 			frappe.log_error(title="Jarvis: learned-skills admin auth failed", message=frappe.get_traceback())
 		except admin_client.AdminUnreachableError as e:
-			_fail(f"failed: admin unreachable: {e}")
 			terminal_written = True
-			frappe.log_error(title="Jarvis: learned-skills admin unreachable", message=frappe.get_traceback())
+			if not confirm and push_confirm.is_unconfirmed(e):
+				frappe.db.set_single_value(
+					_SETTINGS, "learned_skills_sync_status", push_confirm.CONFIRMING, update_modified=False
+				)
+				confirm_next = True
+			else:
+				_fail(f"failed: admin unreachable: {e}")
+				frappe.log_error(
+					title="Jarvis: learned-skills admin unreachable", message=frappe.get_traceback()
+				)
 		except admin_client.AdminRateLimitedError as e:
 			retry = getattr(e, "retry_after_seconds", 0) or 0
 			retry_str = f"retry_after={retry}s" if retry > 0 else "retry shortly"
@@ -193,6 +209,12 @@ def _enqueued_push_learned_skills(chain_custom_reconcile: bool = False) -> None:
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist sync status
 		if push_ok and chain_custom_reconcile:
 			_enqueue_cutover_custom_reconcile()
+	if confirm_next:
+		push_confirm.enqueue_confirm(
+			"jarvis.chat.learned_skills_api._enqueued_push_learned_skills",
+			_PUSH_JOB_ID,
+			chain_custom_reconcile=chain_custom_reconcile,
+		)
 
 
 def _enqueue_cutover_custom_reconcile() -> None:

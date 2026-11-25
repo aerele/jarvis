@@ -1905,7 +1905,7 @@ def _apply_custom_skills_impl() -> dict:
 	return {"ok": True, "custom_skills_sync_status": "pending: applying skills", "count": len(skills)}
 
 
-def _enqueued_push_custom_skills() -> None:
+def _enqueued_push_custom_skills(confirm: int = 0) -> None:
 	"""Background worker: push the enabled skills via admin → fleet → container.
 
 	Re-builds the payload fresh (never trust a payload passed across the queue
@@ -1914,10 +1914,17 @@ def _enqueued_push_custom_skills() -> None:
 	unattended (post-restart resync), where an over-cap raise would leave a
 	rebuilt container skill-less - truncate gracefully instead (the build logs
 	the truncation loudly).
+
+	A push whose answer timed out may have landed: it is re-sent once (``confirm``)
+	after the assistant answers again, see ``push_confirm``.
 	"""
 	from jarvis import admin_client
 	from jarvis._redis_lock import redis_lock
+	from jarvis.chat import push_confirm
 
+	if confirm:
+		push_confirm.wait_for_agent()
+	confirm_next = False
 	with redis_lock(_LOCK_NAME, timeout_s=180, blocking_timeout_s=60.0) as acquired:
 		if not acquired:
 			frappe.db.set_single_value(
@@ -1948,9 +1955,15 @@ def _enqueued_push_custom_skills() -> None:
 			terminal_written = True
 			frappe.log_error(title="Jarvis: custom-skills admin auth failed", message=frappe.get_traceback())
 		except admin_client.AdminUnreachableError as e:
-			_fail(f"failed: admin unreachable: {e}")
 			terminal_written = True
-			frappe.log_error(title="Jarvis: custom-skills admin unreachable", message=frappe.get_traceback())
+			if not confirm and push_confirm.is_unconfirmed(e):
+				frappe.db.set_single_value(_SETTINGS, "custom_skills_sync_status", push_confirm.CONFIRMING)
+				confirm_next = True
+			else:
+				_fail(f"failed: admin unreachable: {e}")
+				frappe.log_error(
+					title="Jarvis: custom-skills admin unreachable", message=frappe.get_traceback()
+				)
 		except admin_client.AdminRateLimitedError as e:
 			retry = getattr(e, "retry_after_seconds", 0) or 0
 			retry_str = f"retry_after={retry}s" if retry > 0 else "retry shortly"
@@ -1975,6 +1988,10 @@ def _enqueued_push_custom_skills() -> None:
 				except Exception:
 					pass
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- terminal status survives later failure
+	if confirm_next:
+		push_confirm.enqueue_confirm(
+			"jarvis.chat.custom_skills_api._enqueued_push_custom_skills", _PUSH_JOB_ID
+		)
 
 
 # How many times one push job sends at most.
