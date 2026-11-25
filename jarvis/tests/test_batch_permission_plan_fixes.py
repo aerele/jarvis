@@ -288,13 +288,21 @@ class TestTranscribedBlocksCiteFrappe(BatchCase):
 		for cite in found:
 			with self.subTest(cite=cite["qualname"], first=cite["first"]):
 				first, last = int(cite["first"]), int(cite["last"])
-				start, end = definition_lines(FRAPPE / cite["path"], cite["qualname"])
-				self.assertLessEqual(start, first)
 				self.assertLessEqual(first, last)
-				self.assertLessEqual(last, end)
-				# The installed source is the judge of the ranges (above), so a point release of the same
-				# major line is fine: CI's image and a developer's bench rarely carry the same patch level.
-				# A cite of another major line is not.
+				# The qualname must still resolve in the installed file (it raises when the function is gone).
+				start, end = definition_lines(FRAPPE / cite["path"], cite["qualname"])
+				if cite["version"] == frappe.__version__:
+					# The cited version is the installed one: the absolute lines are exact.
+					self.assertLessEqual(start, first)
+					self.assertLessEqual(last, end)
+				else:
+					# Absolute lines are valid only on the cited version: a patch release moves a function.
+					# CI's image and a developer's bench rarely carry the same patch level, so here the
+					# cited range only has to fit inside the installed function. The bodies themselves are
+					# guarded by the source pins (compatibility._PERMISSION_PINS and the identity checks), so
+					# a patch release that changes a cited body is caught there, not here.
+					self.assertLessEqual(last - first, end - start)
+				# A cite of another major line is never fine.
 				self.assertEqual(cite["version"].split(".")[0], frappe.__version__.split(".")[0])
 
 	def test_every_cited_pin_is_a_pinned_name(self):
