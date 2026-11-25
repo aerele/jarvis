@@ -10,7 +10,7 @@ import frappe
 
 READ_TOOLS = frozenset(
 	"""
-describe_customizations download_pdf download_vcard export_document export_excel
+compute describe_customizations download_pdf download_vcard export_document export_excel
 export_query find_skills get_balance_on get_bank_recon_inputs get_comments
 get_creation_context get_customer_outstanding get_doc get_employee_shift
 get_engagement_config get_exchange_rate get_file_pages get_fiscal_year

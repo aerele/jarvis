@@ -104,6 +104,7 @@ _STANDARD_TOOLS_ALLOW = [
 	"jarvis__attach_to_doc",
 	"jarvis__call_connector",
 	"jarvis__cancel_doc",
+	"jarvis__compute",
 	"jarvis__create_custom_skill",
 	"jarvis__create_dashboard",
 	"jarvis__create_dashboard_chart",
@@ -174,7 +175,8 @@ def standard_tools_allow() -> list[str]:
 	the drop list for the fleet-wide native cross-user memory deny; the per-user
 	bench memory tools remember/recall added so standard-tier memory works;
 	get_comments added as the read side of add_comment;
-	schedule_run added: a standard user may set a one-time run, behind its card)."""
+	schedule_run added: a standard user may set a one-time run, behind its card;
+	compute added: a read that runs under the user's own permissions, like query)."""
 	return list(_STANDARD_TOOLS_ALLOW)
 
 

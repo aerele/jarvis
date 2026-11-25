@@ -1,0 +1,1685 @@
+"""The sandbox behind the ``compute`` tool: read-only Python that runs as the chat user.
+
+The model writes a short script that reads records and reports, then filters, groups,
+sums and ranks them, and assigns the small answer to ``result``. This module compiles
+and runs that script. ``jarvis.tools.compute`` is the tool around it.
+
+Why not Frappe's own ``safe_exec``
+----------------------------------
+``frappe.utils.safe_exec.safe_exec`` refuses to run unless ``server_script_enabled``
+is set for the whole bench, and its namespace (``get_safe_globals``) is built for
+Server Scripts: it has ``frappe.db.sql``, ``get_all``, ``set_value``, ``enqueue``,
+``sendmail``, HTTP helpers and document writes. This sandbox is far narrower: it is
+read-only, every data function in it runs under the chat user's own permissions,
+and its namespace is an allowlist built here. So it does not depend on that switch,
+and it does not reuse that namespace. It reuses only Frappe's RestrictedPython
+pieces (the ``FrappeTransformer`` compile policy and its attribute/item guards)
+where the installed Frappe has them, with fallbacks for names that differ on
+version 15.
+
+What the script can reach
+-------------------------
+Exactly what ``build_namespace`` puts in its globals: permissioned wrappers over
+``frappe.get_list`` / ``get_doc`` / ``get_value`` / ``count`` / ``exists`` /
+``get_meta`` and Jarvis's own ``run_report`` path, safe date and number helpers,
+``json.loads/dumps``, ``frappe._dict``, the user's name and default company, and a
+small set of builtins. There is no ``frappe.db.sql``, query builder, ``get_all``,
+write, job, mail, HTTP, file or ``frappe.local``. A name that is not there fails
+with a message saying what to write instead.
+
+Read-only, in depth
+-------------------
+1. The namespace offers no write path.
+2. The run happens inside ``_preview_sandbox.preview_sandbox``: a savepoint that is
+   ALWAYS rolled back, ``frappe.db.commit`` neutralised, a bare rollback redirected to
+   the savepoint, and background jobs recorded instead of sent.
+3. While the script runs, ``frappe.db.sql`` refuses every statement that is not a
+   read (``_no_writes``) BEFORE it reaches the database, and the whole call fails,
+   even when the code (or a report it ran) catches the error. A report that writes
+   when it runs therefore cannot be used from compute.
+
+``frappe.flags.read_only`` was considered and not used: on Frappe 16.51 (and 15) it
+only changes the mode of the NEXT ``START TRANSACTION`` (``Database.begin``), which
+cannot apply to the request's transaction that is already open, and it turns some
+writes (Error Log, View Log) into deferred Redis inserts that are saved later,
+outside any rollback. 16.51 has no ``frappe.db.read_only()`` context.
+
+Limits
+------
+Constants below, each with its reason. A limit that is hit fails the whole call even
+when the script catches the error (``_Run.fail`` raises a ``BaseException``, and the
+failure is recorded on the run), so a partial total can never come back as a
+complete one.
+
+Not covered (bounded only by the worker): a single C-level operation that runs long
+or allocates a lot (``"x".ljust(10**9)``), and what a report's own Python does
+outside the database (HTTP, email sent directly, a realtime event).
+"""
+
+from __future__ import annotations
+
+import ast
+import datetime
+import decimal
+import json
+import re
+import sys
+import time
+import types
+from contextlib import contextmanager
+
+import frappe
+import RestrictedPython.Guards as _rp_guards
+from RestrictedPython import compile_restricted
+from RestrictedPython.transformer import IOPERATOR_TO_STR, RestrictingNodeTransformer, copy_locations
+
+from jarvis.exceptions import ComputeCodeError, InvalidArgumentError, PermissionDeniedError
+
+try:  # Frappe 15 and 16: the policy safe_exec compiles with (allows the name ``_dict``)
+	from frappe.utils.safe_exec import FrappeTransformer as _BasePolicy
+except ImportError:  # pragma: no cover - an older Frappe
+	_BasePolicy = RestrictingNodeTransformer
+
+try:
+	from frappe.utils.safe_exec import UNSAFE_ATTRIBUTES as _FRAPPE_UNSAFE_ATTRIBUTES
+except ImportError:  # pragma: no cover
+	_FRAPPE_UNSAFE_ATTRIBUTES = frozenset()
+
+try:
+	from frappe.utils.inplacevar import protected_inplacevar as _protected_inplacevar
+except ImportError:  # pragma: no cover
+	_protected_inplacevar = None
+
+
+# --------------------------------------------------------------------------- #
+# Limits                                                                       #
+# --------------------------------------------------------------------------- #
+
+# Longest script accepted. A finished computation is a few dozen lines; 20,000
+# characters leaves room for long field lists while keeping the stored call (the
+# audit trail keeps the code) and the compile cost small.
+MAX_CODE_CHARS = 20_000
+
+# The description is one sentence shown in the chat step.
+MAX_DESCRIPTION_CHARS = 300
+
+# Wall-clock budget for running the script. The plugin aborts a tool call after
+# 30 s (src/frappe-client.ts); 20 s plus one statement that started just before the
+# deadline (STATEMENT_TIME_S) still answers inside that abort.
+WALL_CLOCK_S = 20
+
+# Non-script frames (Frappe's own code under a read) are interrupted only this long
+# after the deadline: a read that is nearly done returns to the script, which then
+# stops cleanly between statements instead of in the middle of a database fetch.
+GRACE_S = 2
+
+# Per-statement database limit (MariaDB max_statement_time, put back afterwards). Under
+# the agent's own 25 s read limit, and short enough that WALL_CLOCK_S + this stays
+# under the plugin's 30 s abort.
+STATEMENT_TIME_S = 8
+
+# Rows all reads of one call may return together. The point of the tool is totals
+# over every matching row; 200,000 rows covers a year of a busy site's invoices while
+# bounding memory in a web worker (about a kilobyte a row with a handful of fields).
+MAX_ROWS_TOTAL = 200_000
+
+# Rows one read may return, so one careless fields=["*"] cannot take the whole budget.
+MAX_ROWS_PER_READ = 100_000
+
+# Captured print() output returned with the result; enough to debug, never a data dump.
+MAX_PRINT_CHARS = 2_000
+
+# range() longer than this is refused: no reasonable computation here counts to a
+# million in Python, and sum(range(10**12)) would hold the worker in C code that no
+# timer can interrupt.
+MAX_RANGE = 1_000_000
+
+# A sequence repeated past this many items or characters ("x" * n, [0] * n) is
+# refused, for the same reason: one C-level allocation the timer cannot stop.
+MAX_SEQUENCE_ITEMS = 1_000_000
+
+# Largest integer exponent / shift: 2 ** 10_000 is already a 3,000-digit number.
+MAX_INT_EXPONENT = 10_000
+
+# How much the worker's resident memory may grow while the script runs. Checked every
+# MEMORY_CHECK_TICKS loop iterations (Linux /proc only): a loop that appends forever is
+# stopped long before the time limit would stop it.
+MAX_MEMORY_GROWTH_BYTES = 1024 * 1024 * 1024
+MEMORY_CHECK_TICKS = 20_000
+
+# The filename the compiled script carries: the tracer and error line numbers key on it.
+SCRIPT_FILENAME = "<jarvis-compute>"
+
+
+# --------------------------------------------------------------------------- #
+# Errors                                                                       #
+# --------------------------------------------------------------------------- #
+
+
+class _Stop(BaseException):
+	"""A limit or a refused write stopped the run. A BaseException, so the script's
+	``except Exception`` cannot swallow it; ``_Run.failure`` holds the message, so a
+	bare ``except:`` cannot hide it either."""
+
+
+class SandboxUsageError(Exception):
+	"""The script used a helper wrongly (a keyword that does not exist, an unknown
+	doctype). Becomes a fixable ComputeCodeError naming the line."""
+
+
+class _Missing:
+	pass
+
+
+_MISSING = _Missing()
+
+
+# --------------------------------------------------------------------------- #
+# One run                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def _rss_bytes() -> int | None:
+	"""Resident memory of this process, or None where /proc is not there."""
+	try:
+		with open("/proc/self/statm") as f:
+			return int(f.read().split()[1]) * _PAGE_SIZE
+	except Exception:
+		return None
+
+
+try:
+	import os as _os
+
+	_PAGE_SIZE = _os.sysconf("SC_PAGE_SIZE")
+except Exception:  # pragma: no cover
+	_PAGE_SIZE = 4096
+
+
+class _Run:
+	"""The state of one compute call: limits, counters, captured output."""
+
+	def __init__(self, *, wall_clock_s: float = WALL_CLOCK_S):
+		self.started = time.monotonic()
+		self.deadline = self.started + wall_clock_s
+		self.wall_clock_s = wall_clock_s
+		self.rows_read = 0
+		self.failure: str | None = None
+		self.failure_kind = "limit"  # "limit" (fixable) or "write" (not fixable)
+		self.printed: list[str] = []
+		self.printed_chars = 0
+		self.print_truncated = False
+		self.rss_at_start = _rss_bytes()
+		self.ticks = 0
+
+	def tick(self):
+		"""Called at the top of every loop iteration, every item a loop or
+		comprehension takes, and every function call of the script (compiled in, see
+		_ComputePolicy). A plain call, so it keeps stopping the script however often
+		the script catches it: the tick sits outside any try inside that loop."""
+		self.ticks += 1
+		if time.monotonic() > self.deadline:
+			self.check_time()
+		if self.ticks % MEMORY_CHECK_TICKS == 0:
+			self.check_memory()
+
+	def fail(self, message: str, *, kind: str = "limit"):
+		"""Record the first failure and stop the script."""
+		if self.failure is None:
+			self.failure = message
+			self.failure_kind = kind
+		raise _Stop(message)
+
+	def check_time(self, grace: float = 0):
+		if time.monotonic() > self.deadline + grace:
+			self.fail(
+				f"The code ran for more than {self.wall_clock_s:g} seconds and was stopped. Read less "
+				"(filter by date or status, ask only for the fields you need), let the database total "
+				'with group_by and {"SUM": ...} fields, and avoid loops inside loops.'
+			)
+
+	def check_memory(self):
+		if self.rss_at_start is None:
+			return
+		now = _rss_bytes()
+		if now is not None and now - self.rss_at_start > MAX_MEMORY_GROWTH_BYTES:
+			self.fail(
+				"The code used too much memory and was stopped. Keep running totals instead of "
+				"building large lists, and read only the fields you need."
+			)
+
+	def take_rows(self, n: int, what: str):
+		"""Count ``n`` rows read by ``what``; fail when the call's total budget is gone."""
+		self.rows_read += n
+		if self.rows_read > MAX_ROWS_TOTAL:
+			self.fail(
+				f"The reads in this code returned more than {MAX_ROWS_TOTAL:,} rows in total (the cap "
+				f"was crossed by {what}). Filter the reads, or let the database aggregate "
+				'(group_by with {"SUM": "field", "as": "total"} fields) so each read returns a few rows.'
+			)
+
+	def remaining_rows(self) -> int:
+		return max(0, MAX_ROWS_TOTAL - self.rows_read)
+
+	def add_print(self, text: str):
+		if self.print_truncated:
+			return
+		room = MAX_PRINT_CHARS - self.printed_chars
+		if len(text) > room:
+			text = text[: max(room, 0)]
+			self.print_truncated = True
+		self.printed.append(text)
+		self.printed_chars += len(text)
+
+	def printed_text(self) -> str:
+		text = "".join(self.printed)
+		return text + ("\n[print output cut at 2,000 characters]" if self.print_truncated else "")
+
+	def elapsed_ms(self) -> int:
+		return int((time.monotonic() - self.started) * 1000)
+
+
+# --------------------------------------------------------------------------- #
+# Compile                                                                      #
+# --------------------------------------------------------------------------- #
+
+# Generated names: only the transformer below emits them; check_name refuses any
+# name starting with "_" in the script itself.
+_AUG_ITEM = "_jv_aug_item_"
+_MUL = "_jv_mul_"
+_POW = "_jv_pow_"
+_LSHIFT = "_jv_lshift_"
+_TICK = "_jv_tick_"
+
+
+def _call(name: str, args: list, node: ast.AST) -> ast.Call:
+	call = ast.Call(func=ast.Name(name, ast.Load()), args=args, keywords=[])
+	copy_locations(call, node)
+	return ast.fix_missing_locations(call)
+
+
+class _ComputePolicy(_BasePolicy):
+	"""Frappe's RestrictedPython policy, plus the ordinary Python a computation needs.
+
+	- ``d[k] += v`` (RestrictedPython refuses augmented assignment of items) becomes
+	  ``_jv_aug_item_(_write_(d), k, "+=", v)``: d and k are evaluated once, the item is
+	  read through the item guard and written back through the write guard.
+	- ``a * b``, ``a ** b`` and ``a << b`` go through size checks (MAX_SEQUENCE_ITEMS,
+	  MAX_INT_EXPONENT): each is one C-level operation no timer can interrupt.
+	- Every ``while`` / ``for`` body and every function body starts with
+	  ``_jv_tick_()`` (``_Run.tick``), the wall-clock and memory check. (Every item a
+	  loop or comprehension takes ticks too, through ``_getiter_``.) Not a trace
+	  function: CPython drops a trace function the first time it raises, so a loop
+	  that catches that one exception would then run unchecked.
+	"""
+
+	def _ticked(self, node):
+		tick = ast.Expr(value=_call(_TICK, [], node))
+		copy_locations(tick, node)
+		node.body.insert(0, tick)
+		return node
+
+	def visit_While(self, node: ast.While):
+		return self._ticked(super().visit_While(node))
+
+	def visit_For(self, node: ast.For):
+		return self._ticked(super().visit_For(node))
+
+	def visit_FunctionDef(self, node: ast.FunctionDef):
+		return self._ticked(super().visit_FunctionDef(node))
+
+	def visit_AugAssign(self, node: ast.AugAssign):
+		if not isinstance(node.target, ast.Subscript):
+			return super().visit_AugAssign(node)
+		if isinstance(node.target.slice, ast.Slice):
+			self.error(node, "Augmented assignment of a slice is not available: assign the slice instead.")
+			return node
+		node = self.node_contents_visit(node)
+		target = node.target  # value is now _write_(<obj>)
+		new = ast.Expr(
+			value=_call(
+				_AUG_ITEM,
+				[target.value, target.slice, ast.Constant(IOPERATOR_TO_STR[type(node.op)]), node.value],
+				node,
+			)
+		)
+		copy_locations(new, node)
+		return new
+
+	def visit_Attribute(self, node: ast.Attribute):
+		# frappe._dict, as Server Scripts write it; every other "_" attribute stays refused.
+		if node.attr == "_dict" and isinstance(node.ctx, ast.Load):
+			node = self.node_contents_visit(node)
+			return _call("_getattr_", [node.value, ast.Constant("_dict")], node)
+		return super().visit_Attribute(node)
+
+	def visit_BinOp(self, node: ast.BinOp):
+		node = super().visit_BinOp(node)
+		name = {ast.Mult: _MUL, ast.Pow: _POW, ast.LShift: _LSHIFT}.get(type(node.op))
+		if name is None:
+			return node
+		return _call(name, [node.left, node.right], node)
+
+
+def compile_code(code: str):
+	"""The RestrictedPython code object for ``code``; ComputeCodeError on any error."""
+	try:
+		return compile_restricted(code, filename=SCRIPT_FILENAME, mode="exec", policy=_ComputePolicy)
+	except SyntaxError as e:
+		raise ComputeCodeError(_compile_message(e)) from None
+
+
+def _compile_message(e: SyntaxError) -> str:
+	# RestrictedPython raises SyntaxError(<tuple of "Line N: message" strings>).
+	raw = e.msg if e.msg else (e.args[0] if e.args else str(e))
+	lines = [str(x).strip() for x in raw] if isinstance(raw, list | tuple) else [str(raw).strip()]
+	body = "; ".join(line for line in lines[:10] if line)
+	if e.lineno and not body.lower().startswith("line"):
+		body = f"line {e.lineno}: {body}"
+	return f"The code does not compile: {body}"
+
+
+# --------------------------------------------------------------------------- #
+# Static checks: teach before running                                          #
+# --------------------------------------------------------------------------- #
+
+_READ_ONLY_HINT = (
+	"compute is read-only: it cannot create, change, submit or delete records. Work out the "
+	"answer here, then propose any change with the write tools."
+)
+_SQL_HINT = (
+	"is not available: use get_list with filters, and let the database total with group_by and "
+	'{"SUM": "field", "as": "total"} fields, or aggregate the rows in Python.'
+)
+
+# frappe.<name> (and frappe.db.<name>) that are NOT offered, with what to write instead.
+_FORBIDDEN_FRAPPE = {
+	"db.sql": "frappe.db.sql " + _SQL_HINT,
+	"db.sql_list": "frappe.db.sql_list " + _SQL_HINT,
+	"db.multisql": "frappe.db.multisql " + _SQL_HINT,
+	"qb": "frappe.qb (the query builder) " + _SQL_HINT,
+	"get_all": "frappe.get_all ignores permissions and is not available: use get_list, which here "
+	"returns every matching row you can read (no limit needed).",
+	"db.get_all": "frappe.db.get_all ignores permissions and is not available: use get_list, which "
+	"here returns every matching row you can read.",
+	"db.get_values": "frappe.db.get_values is not available: use get_list with filters and fields.",
+	"get_cached_doc": "frappe.get_cached_doc is not available: use get_doc(doctype, name).",
+	"get_last_doc": "frappe.get_last_doc is not available: use get_list(..., order_by='creation desc', "
+	"limit=1) and then get_doc.",
+	"get_single": "frappe.get_single is not available: use get_doc(doctype) for a single doctype.",
+	"enqueue": "compute cannot start background jobs.",
+	"enqueue_doc": "compute cannot start background jobs.",
+	"sendmail": "compute cannot send email.",
+	"call": "frappe.call is not available: compute runs only the listed read helpers (use run_report "
+	"for a saved report).",
+	"get_attr": "frappe.get_attr is not available: compute runs only the listed read helpers.",
+	"make_get_request": "compute cannot reach the network.",
+	"make_post_request": "compute cannot reach the network.",
+	"integrations": "compute cannot reach the network.",
+	"local": "frappe.local is not available: use frappe.session.user for the user's name.",
+	"flags": "frappe.flags is not available.",
+	"conf": "site configuration is not available.",
+	"cache": "the cache is not available.",
+	"form_dict": "request data is not available.",
+	"request": "request data is not available.",
+	"response": "request data is not available.",
+	"get_hooks": "frappe.get_hooks is not available.",
+}
+for _name in (
+	"db.set_value",
+	"db.set_single_value",
+	"set_value",
+	"db.delete",
+	"db.insert",
+	"db.commit",
+	"db.rollback",
+	"db.truncate",
+	"db.bulk_insert",
+	"new_doc",
+	"delete_doc",
+	"rename_doc",
+	"copy_doc",
+	"get_mapped_doc",
+	"db.add_index",
+):
+	_FORBIDDEN_FRAPPE[_name] = f"frappe.{_name}: " + _READ_ONLY_HINT
+
+# Builtins that are deliberately missing.
+_FORBIDDEN_NAMES = {
+	"open": "files are not available in compute.",
+	"eval": "eval is not available in compute.",
+	"exec": "exec is not available in compute.",
+	"compile": "compile is not available in compute.",
+	"__import__": "imports are not available: frappe, utils, json and the listed helpers are already in scope.",
+	"getattr": "getattr is not available: use row.get('field') or row['field'].",
+	"setattr": "setattr is not available: use row['field'] = value.",
+	"hasattr": "hasattr is not available: use 'field' in row.",
+	"delattr": "delattr is not available.",
+	"globals": "globals is not available.",
+	"locals": "locals is not available.",
+	"vars": "vars is not available.",
+	"dir": "dir is not available: get_meta(doctype) lists a doctype's fields.",
+	"type": "type is not available: use isinstance(value, (int, float)).",
+	"input": "input is not available.",
+	"breakpoint": "breakpoint is not available.",
+	"help": "help is not available.",
+	"memoryview": "memoryview is not available.",
+	"object": "object is not available.",
+	"super": "super is not available.",
+	"frozenset": "frozenset is not available: use set.",
+	"bytes": "bytes is not available.",
+	"bytearray": "bytearray is not available.",
+}
+
+_IMPORT_MESSAGE = (
+	"No imports: frappe, utils, json, date helpers (getdate, add_days ...), flt/cint and the "
+	"read helpers (get_list, get_doc, run_report ...) are already in scope."
+)
+
+
+def _dotted(node: ast.AST) -> str | None:
+	parts = []
+	while isinstance(node, ast.Attribute):
+		parts.append(node.attr)
+		node = node.value
+	if isinstance(node, ast.Name):
+		parts.append(node.id)
+		return ".".join(reversed(parts))
+	return None
+
+
+def _bound_names(tree: ast.AST) -> set[str]:
+	"""Every name the script binds anywhere (scoping ignored: a loose union)."""
+	names: set[str] = set()
+	for node in ast.walk(tree):
+		if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del):
+			names.add(node.id)
+		elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+			names.add(node.name)
+		elif isinstance(node, ast.arg):
+			names.add(node.arg)
+		elif isinstance(node, ast.ExceptHandler) and node.name:
+			names.add(node.name)
+		elif isinstance(node, ast.alias):
+			names.add((node.asname or node.name).split(".")[0])
+		elif isinstance(node, ast.Global | ast.Nonlocal):
+			names.update(node.names)
+		elif isinstance(node, ast.MatchAs | ast.MatchStar) and node.name:
+			names.add(node.name)
+	return names
+
+
+def static_errors(tree: ast.AST, available: set[str], frappe_names: dict[str, set[str]]) -> list[str]:
+	"""Teaching messages for what the script uses that the sandbox does not offer.
+	``frappe_names`` maps "" / "db" / "utils" to the attribute names offered there."""
+	errors: list[str] = []
+	seen: set[str] = set()
+	bound = _bound_names(tree)
+
+	def add(message: str):
+		if message not in seen:
+			seen.add(message)
+			errors.append(message)
+
+	for node in ast.walk(tree):
+		line = getattr(node, "lineno", "?")
+		if isinstance(node, ast.Import | ast.ImportFrom):
+			add(f"line {line}: {_IMPORT_MESSAGE}")
+		elif isinstance(node, ast.ClassDef):
+			add(f"line {line}: class definitions are not available: use dicts and functions.")
+		elif isinstance(node, ast.Attribute):
+			if node.attr.startswith("_") and node.attr != "_dict":
+				add(f"line {line}: attributes starting with _ are not available ({node.attr}).")
+				continue
+			if node.attr in ("format", "format_map"):
+				add(f'line {line}: .{node.attr}() is not available: use an f-string, e.g. f"{{total:,.2f}}".')
+				continue
+			dotted = _dotted(node)
+			if not dotted or not dotted.startswith("frappe."):
+				continue
+			rest = dotted.split(".")[1:]
+			for depth in (2, 1):
+				key = ".".join(rest[:depth])
+				if len(rest) >= depth and key in _FORBIDDEN_FRAPPE:
+					add(f"line {line}: {_FORBIDDEN_FRAPPE[key]}")
+					break
+			else:
+				first = rest[0]
+				if first not in frappe_names[""]:
+					add(
+						f"line {line}: frappe.{first} is not available here. On frappe: "
+						f"{', '.join(sorted(frappe_names['']))}."
+					)
+				elif first in ("db", "utils") and len(rest) > 1 and rest[1] not in frappe_names[first]:
+					add(
+						f"line {line}: frappe.{first}.{rest[1]} is not available here. On frappe.{first}: "
+						f"{', '.join(sorted(frappe_names[first]))}."
+					)
+		elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+			name = node.id
+			if name in _FORBIDDEN_NAMES and name not in bound:
+				add(f"line {line}: {_FORBIDDEN_NAMES[name]}")
+			elif name.startswith("_") and name != "_dict":
+				add(f"line {line}: names starting with _ are not available ({name}).")
+			elif name not in available and name not in bound and name not in ("printed", "print"):
+				add(
+					f"line {line}: name '{name}' is not defined here. Available: {_available_text(available)}."
+				)
+	return errors
+
+
+def _available_text(available: set[str]) -> str:
+	return ", ".join(
+		sorted(n for n in available if not n.startswith("_") and n not in _PLAIN_BUILTIN_NAMES)
+	) + (
+		", and the usual builtins (len, sum, min, max, sorted, round, abs, any, all, enumerate, zip, "
+		"range, set, dict, list, tuple, str, int, float, bool)"
+	)
+
+
+# --------------------------------------------------------------------------- #
+# Guards                                                                       #
+# --------------------------------------------------------------------------- #
+
+_UNSAFE_ATTRIBUTES = frozenset(_FRAPPE_UNSAFE_ATTRIBUTES) | {
+	"gi_frame",
+	"gi_code",
+	"gi_yieldfrom",
+	"cr_frame",
+	"cr_code",
+	"cr_origin",
+	"cr_await",
+	"ag_code",
+	"ag_frame",
+	"tb_frame",
+	"tb_next",
+	"f_back",
+	"f_builtins",
+	"f_code",
+	"f_globals",
+	"f_locals",
+	"f_trace",
+	"format",
+	"format_map",
+}
+_BLOCKED_TYPES = (types.ModuleType, types.CodeType, types.TracebackType, types.FrameType)
+
+
+def _getattr(obj, name, *default):
+	"""Attribute reads. Unlike Frappe's guard, a missing attribute RAISES instead of
+	reading as None: a misspelled field must not silently total as zero."""
+	if isinstance(obj, _Namespace) and name == "_dict":
+		return obj.lookup(name)
+	if not isinstance(name, str) or name.startswith("_"):
+		raise AttributeError(f'"{name}" is not available: attributes starting with _ are blocked.')
+	if isinstance(obj, _Namespace):
+		return obj.lookup(name)
+	if name in _UNSAFE_ATTRIBUTES:
+		if name in ("format", "format_map"):
+			raise AttributeError(f'.{name}() is not available: use an f-string, e.g. f"{{total:,.2f}}".')
+		raise AttributeError(f'"{name}" is not available.')
+	if isinstance(obj, _BLOCKED_TYPES):
+		raise AttributeError(f'"{name}" is not available.')
+	value = getattr(obj, name, *default)
+	if isinstance(value, _BLOCKED_TYPES):
+		raise AttributeError(f'"{name}" is not available.')
+	return value
+
+
+def _getitem(obj, key):
+	if isinstance(key, str) and key.startswith("_"):
+		raise KeyError(f"keys starting with _ are not available ({key})")
+	return obj[key]
+
+
+def _write(obj):
+	if isinstance(obj, _Namespace | type | types.FunctionType | types.MethodType | types.BuiltinFunctionType):
+		raise TypeError("This object cannot be changed.")
+	if isinstance(obj, _BLOCKED_TYPES):
+		raise TypeError("This object cannot be changed.")
+	return obj
+
+
+def _seq_len(value) -> int | None:
+	if isinstance(value, str | bytes | list | tuple):
+		return len(value)
+	return None
+
+
+def _mul(a, b):
+	for seq, n in ((a, b), (b, a)):
+		size = _seq_len(seq)
+		if size is not None and isinstance(n, int) and size * n > MAX_SEQUENCE_ITEMS:
+			raise SandboxUsageError(
+				f"repeating a sequence to more than {MAX_SEQUENCE_ITEMS:,} items is not available."
+			)
+	return a * b
+
+
+def _pow(a, b, mod=None):
+	if isinstance(a, int) and isinstance(b, int) and abs(a) > 1 and b > MAX_INT_EXPONENT and mod is None:
+		raise SandboxUsageError(f"integer powers above {MAX_INT_EXPONENT:,} are not available.")
+	return pow(a, b) if mod is None else pow(a, b, mod)
+
+
+def _lshift(a, b):
+	if isinstance(b, int) and b > MAX_INT_EXPONENT:
+		raise SandboxUsageError(f"shifts above {MAX_INT_EXPONENT:,} bits are not available.")
+	return a << b
+
+
+def _plain_inplace(op: str, x, y):
+	import operator
+
+	ops = {
+		"+=": operator.iadd,
+		"-=": operator.isub,
+		"*=": operator.imul,
+		"/=": operator.itruediv,
+		"//=": operator.ifloordiv,
+		"%=": operator.imod,
+		"**=": operator.ipow,
+		"<<=": operator.ilshift,
+		">>=": operator.irshift,
+		"&=": operator.iand,
+		"^=": operator.ixor,
+		"|=": operator.ior,
+	}
+	return ops[op](x, y)
+
+
+def _inplacevar(op: str, x, y):
+	if op == "*=":
+		_mul(x, y)
+	elif op == "**=":
+		_pow(x, y)
+	elif op == "<<=":
+		_lshift(x, y)
+	if _protected_inplacevar is not None:
+		return _protected_inplacevar(op, x, y)
+	return _plain_inplace(op, x, y)
+
+
+def _aug_item(obj, key, op: str, value):
+	"""``obj[key] op= value``; ``obj`` already went through the write guard."""
+	obj[key] = _inplacevar(op, _getitem(obj, key), value)
+
+
+def _range(*args):
+	try:
+		r = range(*args)
+		size = len(r)
+	except OverflowError:
+		size = MAX_RANGE + 1
+		r = None
+	if size > MAX_RANGE:
+		raise SandboxUsageError(f"range() over {MAX_RANGE:,} numbers is not available.")
+	return r
+
+
+def _safe_pow(a, b, mod=None):
+	return _pow(a, b, mod)
+
+
+def _apply(func, *args, **kwargs):
+	return func(*args, **kwargs)
+
+
+class _TickingIterator:
+	"""What ``for`` and comprehensions iterate in the script: the real iterator, with
+	``_Run.tick`` before every item."""
+
+	__slots__ = ("_it", "_tick")
+
+	def __init__(self, it, tick):
+		self._it = it
+		self._tick = tick
+
+	def __iter__(self):
+		return self
+
+	def __next__(self):
+		self._tick()
+		return next(self._it)
+
+
+def _getiter_factory(run: _Run):
+	def _getiter(obj):
+		return _TickingIterator(iter(obj), run.tick)
+
+	return _getiter
+
+
+def _print_factory(run: _Run):
+	class _Printer:
+		"""RestrictedPython's print collector, writing into the run's capped buffer."""
+
+		def __init__(self, _getattr_=None):
+			pass
+
+		def write(self, text):
+			run.add_print(str(text))
+
+		def __call__(self):
+			return run.printed_text()
+
+		def _call_print(self, *objects, **kwargs):
+			kwargs = {k: v for k, v in kwargs.items() if k in ("sep", "end")}
+			print(*objects, file=self, **kwargs)
+
+	return _Printer
+
+
+# --------------------------------------------------------------------------- #
+# Namespace objects                                                            #
+# --------------------------------------------------------------------------- #
+
+
+class _Namespace:
+	"""A read-only bag of names (``frappe``, ``frappe.db``, ``json`` ...). Unknown
+	names fail with what to write instead; nothing can be assigned to it."""
+
+	__slots__ = ("_label", "_names", "_teach")
+
+	def __init__(self, label: str, names: dict, teach: dict | None = None):
+		object.__setattr__(self, "_label", label)
+		object.__setattr__(self, "_names", dict(names))
+		object.__setattr__(self, "_teach", teach or {})
+
+	def lookup(self, name: str):
+		if name in self._names:
+			return self._names[name]
+		key = f"{self._label.removeprefix('frappe').lstrip('.')}.{name}".lstrip(".")
+		if key in self._teach:
+			raise AttributeError(self._teach[key])
+		raise AttributeError(
+			f"{self._label}.{name} is not available here. On {self._label}: {', '.join(sorted(self._names))}."
+		)
+
+	def names(self) -> set[str]:
+		return set(self._names)
+
+	def __setattr__(self, name, value):
+		raise TypeError("This object cannot be changed.")
+
+	def __repr__(self):
+		return f"<{self._label}>"
+
+
+class Row(dict):
+	"""A record as a dict whose fields also read as attributes (``row.customer``). A
+	missing field RAISES (``row.get("x")`` is the way to read an optional one): a
+	misspelled field name must fail, not total as zero."""
+
+	__slots__ = ()
+
+	def __getattr__(self, name):
+		if name.startswith("_"):
+			raise AttributeError(name)
+		try:
+			return self[name]
+		except KeyError:
+			fields = ", ".join(sorted(str(k) for k in self)[:40])
+			raise AttributeError(
+				f"this row has no field '{name}'. Ask for it in fields=[...] (an aggregate comes back "
+				f"under its 'as' name). Fields in this row: {fields}."
+			) from None
+
+	def __setattr__(self, name, value):
+		self[name] = value
+
+
+def _rows(value):
+	"""Records as ``Row`` (recursively for child tables)."""
+	if isinstance(value, dict):
+		return Row({k: _rows(v) for k, v in value.items()})
+	if isinstance(value, list):
+		return [_rows(v) for v in value]
+	return value
+
+
+# --------------------------------------------------------------------------- #
+# Permissioned reads                                                           #
+# --------------------------------------------------------------------------- #
+
+# Keyword arguments get_list accepts here.
+_LIST_KWARGS = frozenset(
+	{
+		"order_by",
+		"group_by",
+		"limit",
+		"limit_page_length",
+		"page_length",
+		"start",
+		"limit_start",
+		"offset",
+		"pluck",
+		"or_filters",
+		"parent_doctype",
+		"distinct",
+	}
+)
+# Keyword arguments that would widen or bend what a read returns: refused, never honoured.
+_ESCAPE_KWARGS = frozenset(
+	{
+		"ignore_permissions",
+		"ignore_user_permissions",
+		"user",
+		"as_list",
+		"debug",
+		"run",
+		"update",
+		"save_user_settings",
+		"save_user_settings_fields",
+		"user_settings",
+		"ignore_ddl",
+		"strict",
+		"with_comment_count",
+		"with_childnames",
+		"join",
+		"reference_doctype",
+		"ignore_ifnull",
+	}
+)
+
+_AGGREGATES = ("SUM", "COUNT", "AVG", "MAX", "MIN")
+_AGG_STRING = re.compile(
+	r"^\s*(sum|count|avg|max|min)\s*\(\s*([`\w.]+|\*)\s*\)\s*(?:as\s+[`'\"]?(\w+)[`'\"]?)?\s*$",
+	re.IGNORECASE,
+)
+_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _dict_aggregates_supported() -> bool:
+	"""Frappe 16's query engine takes ``{"SUM": "field", "as": "x"}`` fields and refuses
+	SQL function strings; Frappe 15's takes the string form and has no dict form."""
+	try:
+		from frappe.database import query
+
+		return hasattr(query, "FUNCTION_MAPPING")
+	except ImportError:  # pragma: no cover
+		return False
+
+
+_DICT_AGGREGATES = _dict_aggregates_supported()
+
+
+def _is_private_doctype(doctype: str) -> bool:
+	"""Jarvis's own records (conversations, memory, skills, settings, agent runs): never
+	read through compute, whatever the user's roles. The dedicated tools read them
+	with their own scope checks (recall, find_skills, get_skill ...)."""
+	return doctype.strip().casefold().replace("_", " ").startswith(("jarvis ", "tabjarvis "))
+
+
+def _refuse_private(doctype: str):
+	if _is_private_doctype(doctype):
+		raise PermissionDeniedError(
+			f"compute reads business records only; {doctype} is Jarvis's own data and is not available "
+			"here. Use the dedicated Jarvis tool for it."
+		)
+
+
+def _doctype(doctype) -> str:
+	if not isinstance(doctype, str) or not doctype.strip():
+		raise SandboxUsageError(
+			"the first argument must be a doctype name, e.g. get_list('Sales Invoice', ...)."
+		)
+	from jarvis.tools._doctype_name import canonical_doctype
+
+	name = canonical_doctype(doctype.strip())
+	_refuse_private(name)
+	if not frappe.db.exists("DocType", name):
+		raise SandboxUsageError(f"unknown doctype '{doctype}'. Check the name with get_schema.")
+	return name
+
+
+def _translate_field(entry):
+	"""One ``fields`` entry in the form the installed Frappe accepts. Both the dict form
+	``{"SUM": "base_grand_total", "as": "total"}`` and the string form
+	``"sum(base_grand_total) as total"`` are accepted for SUM / COUNT / AVG / MAX / MIN."""
+	if isinstance(entry, dict):
+		funcs = [k for k in entry if k != "as"]
+		if len(funcs) != 1:
+			raise SandboxUsageError(
+				f'an aggregate field takes one function and an alias, e.g. {{"SUM": "base_grand_total", '
+				f'"as": "total"}}; got {entry!r}.'
+			)
+		func = str(funcs[0]).upper()
+		if _DICT_AGGREGATES:
+			return {func: entry[funcs[0]], **({"as": entry["as"]} if "as" in entry else {})}
+		if func not in _AGGREGATES or not isinstance(entry[funcs[0]], str):
+			raise SandboxUsageError(
+				f"aggregate fields here take one of {', '.join(_AGGREGATES)} over one field."
+			)
+		arg = entry[funcs[0]]
+		arg = "*" if arg == "*" else f"`{arg.strip('`')}`"
+		alias = entry.get("as") or f"{func.lower()}_{arg.strip('`*') or 'all'}"
+		return f"{func.lower()}({arg}) as `{alias}`"
+	if isinstance(entry, str) and _DICT_AGGREGATES:
+		m = _AGG_STRING.match(entry)
+		if m:
+			func, arg, alias = m.group(1).upper(), m.group(2).strip("`"), m.group(3)
+			return {func: arg, "as": alias or f"{func.lower()}_{arg.replace('*', 'all').replace('.', '_')}"}
+	return entry
+
+
+def _field_refs(entry) -> tuple[set[str], bool]:
+	"""``(identifiers, computed)`` a fields entry reads; ``computed`` for an aggregate."""
+	if isinstance(entry, dict):
+		names: set[str] = set()
+		for key, value in entry.items():
+			if key == "as":
+				continue
+			names |= set(_IDENT.findall(json.dumps(value, default=str)))
+		return names, True
+	if isinstance(entry, str):
+		head = re.split(r"\s+as\s+", entry, maxsplit=1, flags=re.IGNORECASE)[0]
+		return set(_IDENT.findall(head.replace("`", ""))), "(" in head
+	return set(), False
+
+
+_PLAIN_FIELD = re.compile(r"^\s*`?(\w+)`?\s*(?:\s+as\s+\w+\s*)?$", re.IGNORECASE)
+
+
+def _check_known_fields(doctype: str, fields) -> None:
+	"""Refuse a plain field (or an aggregate's field) the doctype does not have. Frappe
+	16 drops an unknown SELECT field without a word, so a typo would total as nothing."""
+	columns = set(frappe.get_meta(doctype).get_valid_columns())
+	unknown = []
+	for entry in fields or []:
+		if isinstance(entry, str):
+			m = _PLAIN_FIELD.match(entry)
+			name = m.group(1) if m else None
+		elif isinstance(entry, dict):
+			values = [v for k, v in entry.items() if k != "as"]
+			name = values[0].strip("`") if len(values) == 1 and isinstance(values[0], str) else None
+			if name == "*" or (name and not re.fullmatch(r"\w+", name)):
+				name = None
+		else:
+			name = None
+		if name and name not in columns:
+			unknown.append(name)
+	if unknown:
+		raise SandboxUsageError(
+			f"{doctype} has no field(s) {', '.join(sorted(set(unknown)))}. Check the names with "
+			"get_meta(doctype) or get_schema; a child table's field is read from the child doctype "
+			"with parent_doctype."
+		)
+
+
+def _check_field_access(doctype: str, parent_doctype, fields, filters, or_filters, order_by, group_by):
+	"""Refuse a read that names a field the user cannot read (a permission level they
+	lack) or computes / filters / sorts / groups over a field masked for them.
+	Frappe drops an unreadable SELECT field silently; here it is refused, so the code
+	never totals a column that came back empty."""
+	if frappe.session.user == "Administrator":
+		return
+	from frappe.model import get_permitted_fields
+
+	from jarvis.tools.get_list import _filter_fieldnames
+
+	meta = frappe.get_meta(doctype)
+	columns = set(meta.get_valid_columns())
+	permitted = set(get_permitted_fields(doctype, parenttype=parent_doctype))
+	masked: set[str] = set()
+	try:
+		from jarvis import compat
+
+		masked = {df.fieldname for df in compat.masked_fields_of(meta, parent_doctype)}
+	except Exception:
+		masked = set()  # Frappe 15: no field masking
+
+	plain: set[str] = set()
+	computed: set[str] = set()
+	for entry in fields or []:
+		names, is_computed = _field_refs(entry)
+		(computed if is_computed else plain).update(names)
+	conditions = _filter_fieldnames(filters) | _filter_fieldnames(or_filters)
+	ordering = set(_IDENT.findall(str(order_by or "").replace("`", ""))) | set(
+		_IDENT.findall(str(group_by or "").replace("`", ""))
+	)
+	referenced = (plain | computed | conditions | ordering) & columns
+	hidden = sorted(referenced - permitted)
+	if hidden:
+		raise PermissionDeniedError(f"no read permission on {doctype} field(s) {', '.join(hidden)}")
+	leaking = sorted((computed | conditions | ordering) & masked)
+	if leaking:
+		raise PermissionDeniedError(
+			f"{doctype} field(s) {', '.join(leaking)} are masked for you, so they cannot be "
+			"aggregated, filtered, sorted or grouped on"
+		)
+
+
+def _int_arg(name: str, value) -> int | None:
+	if value is None:
+		return None
+	if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+		raise SandboxUsageError(f"{name} must be a whole number of 0 or more.")
+	return value
+
+
+def make_reads(run: _Run) -> dict:
+	"""The permissioned read helpers, bound to ``run`` in closures (never a keyword or
+	argument the script could override or read back)."""
+	from jarvis.tools.get_list import (
+		_child_table_parents,
+		assert_child_query_fields_readable,
+		assert_child_table_field_readable,
+	)
+
+	def get_list(doctype, fields=None, filters=None, **kwargs):
+		run.check_time()
+		escape = sorted(_ESCAPE_KWARGS & set(kwargs))
+		if escape:
+			raise PermissionDeniedError(
+				f"get_list does not take {', '.join(escape)} here: compute always reads with your own "
+				"permissions. Remove it."
+			)
+		unknown = sorted(set(kwargs) - _LIST_KWARGS)
+		if unknown:
+			raise SandboxUsageError(
+				f"get_list does not take {', '.join(unknown)}. It takes: doctype, fields, filters, "
+				f"{', '.join(sorted(_LIST_KWARGS))}."
+			)
+		# Frappe's own leniency: filters and fields given the other way round.
+		if isinstance(fields, dict) or (
+			isinstance(fields, list) and fields and isinstance(fields[0], list | tuple)
+		):
+			fields, filters = filters, fields
+		doctype = _doctype(doctype)
+		parent_doctype = kwargs.get("parent_doctype")
+		pluck = kwargs.get("pluck")
+		if isinstance(fields, str):
+			fields = [f.strip() for f in fields.split(",") if f.strip()]
+		if fields is not None and not isinstance(fields, list | tuple):
+			raise SandboxUsageError("fields must be a list, e.g. fields=['name', 'customer'].")
+		if pluck is not None:
+			if fields:
+				raise SandboxUsageError("pass either fields or pluck, not both.")
+			if not isinstance(pluck, str):
+				raise SandboxUsageError("pluck must be one field name.")
+			fields = [pluck]
+		fields = [_translate_field(f) for f in (fields or ["name"])]
+
+		meta = frappe.get_meta(doctype)
+		if meta.istable:
+			if not parent_doctype:
+				parents = _child_table_parents(doctype)
+				hint = f" (e.g. parent_doctype='{parents[0]}')" if parents else ""
+				raise SandboxUsageError(
+					f"'{doctype}' is a child table: pass parent_doctype{hint}. Child rows have no "
+					"posting_date / customer; read those from the parent and join in Python by row.parent."
+				)
+			parent_doctype = _doctype(parent_doctype)
+		else:
+			parent_doctype = None
+		if not frappe.has_permission(doctype, ptype="read", parent_doctype=parent_doctype):
+			raise PermissionDeniedError(f"no read permission on {doctype}")
+		if parent_doctype:
+			assert_child_table_field_readable(doctype, parent_doctype)
+		assert_child_query_fields_readable(doctype, parent_doctype, fields, filters, kwargs.get("order_by"))
+		_check_known_fields(doctype, fields)
+		_check_field_access(
+			doctype,
+			parent_doctype,
+			fields,
+			filters,
+			kwargs.get("or_filters"),
+			kwargs.get("order_by"),
+			kwargs.get("group_by"),
+		)
+
+		limit = None
+		for key in ("limit", "limit_page_length", "page_length"):
+			if kwargs.get(key) is not None:
+				limit = _int_arg(key, kwargs[key]) or None
+				break
+		offset = 0
+		for key in ("offset", "start", "limit_start"):
+			if kwargs.get(key) is not None:
+				offset = _int_arg(key, kwargs[key]) or 0
+				break
+		cap = min(MAX_ROWS_PER_READ, run.remaining_rows())
+		capped = limit is None or limit > cap
+		fetch = cap + 1 if capped else limit
+
+		call = {
+			"fields": fields,
+			"filters": filters or {},
+			"limit": fetch,
+			"ignore_permissions": False,
+		}
+		for key in ("or_filters", "order_by", "group_by", "distinct"):
+			if kwargs.get(key) is not None:
+				call[key] = kwargs[key]
+		if parent_doctype:
+			call["parent_doctype"] = parent_doctype
+		if offset:
+			call["offset" if _DICT_AGGREGATES else "limit_start"] = offset
+		try:
+			rows = frappe.get_list(doctype, **call)
+		except frappe.PermissionError:
+			raise
+		except frappe.ValidationError as e:
+			raise SandboxUsageError(f"get_list('{doctype}'): {_clean(e)}") from None
+		if capped and len(rows) > cap:
+			if cap < MAX_ROWS_PER_READ:
+				run.take_rows(len(rows), f"get_list('{doctype}')")
+			run.fail(
+				f"get_list('{doctype}') matched more than {cap:,} rows, the most one read may return "
+				"here. Filter it (a date range, a status), or let the database aggregate: "
+				'group_by="customer" with fields=["customer", {"SUM": "base_grand_total", "as": "total"}].'
+			)
+		run.take_rows(len(rows), f"get_list('{doctype}')")
+		if pluck is not None:
+			return [row.get(pluck) for row in rows]
+		return [_rows(dict(row)) for row in rows]
+
+	def get_doc(doctype, name=None):
+		run.check_time()
+		from jarvis.tools.get_doc import _get_doc_one, _get_single
+
+		doctype = _doctype(doctype)
+		try:
+			if frappe.get_meta(doctype).issingle:
+				doc = _get_single(doctype)
+			else:
+				if name is None or isinstance(name, dict | list):
+					raise SandboxUsageError(
+						"get_doc takes (doctype, name). To find a record by its fields use "
+						"get_list(doctype, filters={...}, limit=1) first."
+					)
+				doc = _get_doc_one(doctype, str(name))
+		except InvalidArgumentError as e:
+			raise SandboxUsageError(str(e)) from None
+		children = sum(len(v) for v in doc.values() if isinstance(v, list))
+		run.take_rows(1 + children, f"get_doc('{doctype}')")
+		return _rows(doc)
+
+	def get_value(doctype, filters=None, fieldname="name", as_dict=False):
+		doctype = _doctype(doctype)
+		fieldnames = list(fieldname) if isinstance(fieldname, list | tuple) else [fieldname]
+		if frappe.get_meta(doctype).issingle:
+			doc = get_doc(doctype)
+			row = Row({f: doc.get(f) for f in fieldnames})
+		else:
+			if isinstance(filters, str | int):
+				filters = {"name": filters}
+			found = get_list(doctype, fields=fieldnames, filters=filters, limit=1)
+			if not found:
+				return None
+			row = found[0]
+		if as_dict:
+			return row
+		if isinstance(fieldname, list | tuple):
+			return [row.get(f) for f in fieldnames]
+		return row.get(fieldname)
+
+	def get_single_value(doctype, fieldname):
+		return get_value(doctype, None, fieldname)
+
+	def exists(doctype, filters=None):
+		doctype = _doctype(doctype)
+		if frappe.get_meta(doctype).issingle:
+			return bool(frappe.has_permission(doctype, ptype="read"))
+		if isinstance(filters, str | int):
+			filters = {"name": filters}
+		return bool(get_list(doctype, fields=["name"], filters=filters, limit=1))
+
+	def count(doctype, filters=None):
+		rows = get_list(doctype, fields=[{"COUNT": "*", "as": "n"}], filters=filters)
+		return int(rows[0]["n"] or 0) if rows else 0
+
+	def get_meta(doctype):
+		run.check_time()
+		from frappe.model import get_permitted_fields
+
+		doctype = _doctype(doctype)
+		if not frappe.has_permission(doctype, ptype="read"):
+			raise PermissionDeniedError(f"no read permission on {doctype}")
+		meta = frappe.get_meta(doctype)
+		permitted = set(get_permitted_fields(doctype)) if frappe.session.user != "Administrator" else None
+		return Row(
+			{
+				"name": meta.name,
+				"istable": bool(meta.istable),
+				"issingle": bool(meta.issingle),
+				"is_submittable": bool(meta.is_submittable),
+				"title_field": meta.title_field,
+				"fields": [
+					Row(
+						{
+							"fieldname": df.fieldname,
+							"label": df.label,
+							"fieldtype": df.fieldtype,
+							"options": df.options,
+						}
+					)
+					for df in meta.fields
+					if df.fieldname and (permitted is None or df.fieldname in permitted)
+				],
+			}
+		)
+
+	def run_report(report_name, filters=None):
+		run.check_time()
+		from jarvis.tools._report_rows import normalise_columns
+		from jarvis.tools.run_report import _run_report
+
+		if not isinstance(report_name, str) or not report_name.strip():
+			raise SandboxUsageError(
+				"run_report takes the report's name, e.g. run_report('Accounts Receivable', {...})."
+			)
+		ref = frappe.db.get_value("Report", report_name, "ref_doctype")
+		if isinstance(ref, str):
+			_refuse_private(ref)
+		try:
+			data = _run_report(report_name, filters, ready_copy_only=True)
+		except frappe.PermissionError as e:
+			raise PermissionDeniedError(_clean(e) or f"no permission to run report {report_name}") from None
+		except InvalidArgumentError as e:
+			if isinstance(e, PermissionDeniedError):
+				raise
+			raise SandboxUsageError(f"run_report('{report_name}'): {e}") from None
+		except frappe.ValidationError as e:
+			raise SandboxUsageError(f"run_report('{report_name}'): {_clean(e)}") from None
+		columns = normalise_columns(data.get("columns") or [])
+		result = list(data.get("result") or [])
+		total_row = None
+		if data.get("add_total_row") and result:
+			total_row = result.pop()
+		rows = [_report_row(r, columns) for r in result]
+		if len(rows) > MAX_ROWS_PER_READ:
+			run.fail(
+				f"run_report('{report_name}') returned more than {MAX_ROWS_PER_READ:,} rows. Narrow its "
+				"filters (a date range, a company, a party)."
+			)
+		run.take_rows(len(rows), f"run_report('{report_name}')")
+		return Row(
+			{
+				"columns": [
+					Row({k: c[k] for k in ("fieldname", "label", "fieldtype", "options")}) for c in columns
+				],
+				"rows": rows,
+				"total_row": _report_row(total_row, columns) if total_row is not None else None,
+			}
+		)
+
+	def default_company():
+		run.check_time()
+		user_default = frappe.defaults.get_user_default("Company")
+		for company in (user_default, frappe.db.get_single_value("Global Defaults", "default_company")):
+			if company and frappe.has_permission("Company", ptype="read", doc=company):
+				return company
+		return None
+
+	def get_user_default(key):
+		if not isinstance(key, str) or key.strip().casefold() not in _DEFAULT_KEYS:
+			raise SandboxUsageError(
+				f"get_user_default takes one of: {', '.join(sorted(_DEFAULT_KEYS))}. For the company "
+				"use default_company()."
+			)
+		if key.strip().casefold() == "company":
+			return default_company()
+		return frappe.defaults.get_user_default(key)
+
+	return {
+		"get_list": get_list,
+		"get_doc": get_doc,
+		"get_value": get_value,
+		"get_single_value": get_single_value,
+		"exists": exists,
+		"count": count,
+		"get_meta": get_meta,
+		"run_report": run_report,
+		"default_company": default_company,
+		"get_user_default": get_user_default,
+	}
+
+
+# Defaults a script may read: ordinary working defaults, nothing else.
+_DEFAULT_KEYS = frozenset(
+	{
+		"company",
+		"currency",
+		"fiscal_year",
+		"country",
+		"customer_group",
+		"supplier_group",
+		"territory",
+		"selling_price_list",
+		"buying_price_list",
+		"warehouse",
+		"cost_center",
+	}
+)
+
+
+def _report_row(row, columns: list[dict]):
+	if isinstance(row, dict):
+		return _rows(dict(row))
+	if isinstance(row, list | tuple):
+		return Row({c["fieldname"]: (row[i] if i < len(row) else None) for i, c in enumerate(columns)})
+	return row
+
+
+def _clean(e: BaseException) -> str:
+	from frappe.utils import strip_html
+
+	return " ".join(strip_html(str(e)).split())[:600]
+
+
+# --------------------------------------------------------------------------- #
+# The namespace                                                                #
+# --------------------------------------------------------------------------- #
+
+_UTIL_NAMES = (
+	"getdate",
+	"get_datetime",
+	"today",
+	"nowdate",
+	"now",
+	"now_datetime",
+	"nowtime",
+	"add_days",
+	"add_months",
+	"add_years",
+	"add_to_date",
+	"date_diff",
+	"month_diff",
+	"time_diff_in_hours",
+	"get_first_day",
+	"get_last_day",
+	"get_first_day_of_week",
+	"get_last_day_of_week",
+	"get_quarter_start",
+	"get_quarter_ending",
+	"get_year_start",
+	"get_year_ending",
+	"get_timespan_date_range",
+	"formatdate",
+	"format_date",
+	"global_date_format",
+	"flt",
+	"cint",
+	"cstr",
+	"rounded",
+	"floor",
+	"ceil",
+	"fmt_money",
+	"money_in_words",
+	"comma_and",
+	"comma_or",
+)
+
+
+def _utils() -> dict:
+	import frappe.utils
+
+	return {
+		name: getattr(frappe.utils, name)
+		for name in _UTIL_NAMES
+		if callable(getattr(frappe.utils, name, None))
+	}
+
+
+def _json_dumps(obj, indent=None, sort_keys=False):
+	from frappe.utils.response import json_handler
+
+	return json.dumps(obj, indent=indent, sort_keys=sort_keys, default=json_handler)
+
+
+def _json_loads(text):
+	return json.loads(text)
+
+
+def _throw(message="", *args, **kwargs):
+	raise SandboxUsageError(f"the code stopped itself: {message}")
+
+
+_PLAIN_BUILTINS = {
+	"None": None,
+	"True": True,
+	"False": False,
+	"abs": abs,
+	"all": all,
+	"any": any,
+	"bool": bool,
+	"callable": callable,
+	"chr": chr,
+	"dict": dict,
+	"divmod": divmod,
+	"enumerate": enumerate,
+	"filter": filter,
+	"float": float,
+	"hash": hash,
+	"int": int,
+	"isinstance": isinstance,
+	"len": len,
+	"list": list,
+	"map": map,
+	"max": max,
+	"min": min,
+	"next": next,
+	"ord": ord,
+	"pow": _safe_pow,
+	"range": _range,
+	"repr": repr,
+	"reversed": reversed,
+	"round": round,
+	"set": set,
+	"slice": slice,
+	"sorted": sorted,
+	"str": str,
+	"sum": sum,
+	"tuple": tuple,
+	"zip": zip,
+	"Exception": Exception,
+	"ArithmeticError": ArithmeticError,
+	"AssertionError": AssertionError,
+	"AttributeError": AttributeError,
+	"IndexError": IndexError,
+	"KeyError": KeyError,
+	"LookupError": LookupError,
+	"NameError": NameError,
+	"RuntimeError": RuntimeError,
+	"StopIteration": StopIteration,
+	"TypeError": TypeError,
+	"ValueError": ValueError,
+	"ZeroDivisionError": ZeroDivisionError,
+}
+_PLAIN_BUILTIN_NAMES = frozenset(_PLAIN_BUILTINS)
+
+
+def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set[str]]]:
+	"""``(globals, available_names, frappe_names)`` for one run. Built fresh per call:
+	nothing the script does to its namespace outlives the call."""
+	reads = make_reads(run)
+	utils = _utils()
+	session = _Namespace("frappe.session", {"user": user})
+	db = _Namespace(
+		"frappe.db",
+		{
+			"get_list": reads["get_list"],
+			"get_value": reads["get_value"],
+			"get_single_value": reads["get_single_value"],
+			"exists": reads["exists"],
+			"count": reads["count"],
+		},
+		_FORBIDDEN_FRAPPE,
+	)
+	utils_ns = _Namespace("frappe.utils", utils)
+	defaults = _Namespace("frappe.defaults", {"get_user_default": reads["get_user_default"]})
+	frappe_ns = _Namespace(
+		"frappe",
+		{
+			"get_list": reads["get_list"],
+			"get_doc": reads["get_doc"],
+			"get_value": reads["get_value"],
+			"get_meta": reads["get_meta"],
+			"db": db,
+			"utils": utils_ns,
+			"session": session,
+			"user": user,
+			"defaults": defaults,
+			"_dict": frappe._dict,
+			"parse_json": _json_loads,
+			"as_json": _json_dumps,
+			"throw": _throw,
+			**{k: utils[k] for k in ("flt", "cint", "cstr") if k in utils},
+		},
+		_FORBIDDEN_FRAPPE,
+	)
+	json_ns = _Namespace("json", {"loads": _json_loads, "dumps": _json_dumps})
+	# Shaped like the module, so datetime.date(...) and datetime.datetime.now() both work.
+	datetime_ns = _Namespace(
+		"datetime",
+		{"date": datetime.date, "datetime": datetime.datetime, "timedelta": datetime.timedelta},
+	)
+
+	named = {
+		"frappe": frappe_ns,
+		"utils": utils_ns,
+		"json": json_ns,
+		"_dict": frappe._dict,
+		"datetime": datetime_ns,
+		"date": datetime.date,
+		"timedelta": datetime.timedelta,
+		"Decimal": decimal.Decimal,
+		**reads,
+		**utils,
+	}
+	builtins = dict(_PLAIN_BUILTINS)
+	glb = {
+		"__builtins__": builtins,
+		"__name__": "jarvis_compute",
+		**named,
+		"_getattr_": _getattr,
+		"_getitem_": _getitem,
+		"_write_": _write,
+		"_getiter_": _getiter_factory(run),
+		_TICK: run.tick,
+		"_iter_unpack_sequence_": _rp_guards.guarded_iter_unpack_sequence,
+		"_unpack_sequence_": _rp_guards.guarded_unpack_sequence,
+		"_inplacevar_": _inplacevar,
+		"_apply_": _apply,
+		"_print_": _print_factory(run),
+		_AUG_ITEM: _aug_item,
+		_MUL: _mul,
+		_POW: _pow,
+		_LSHIFT: _lshift,
+	}
+	available = set(named) | set(builtins)
+	frappe_names = {"": frappe_ns.names(), "db": db.names(), "utils": utils_ns.names()}
+	return glb, available, frappe_names
+
+
+# --------------------------------------------------------------------------- #
+# Running                                                                      #
+# --------------------------------------------------------------------------- #
+
+# The statements a read may send. Everything else is refused before it reaches the
+# database. ``set`` only for the statement time limit and user variables; ``rollback``
+# only to a savepoint (a bare one would end the transaction the sandbox lives in).
+_READ_STATEMENTS = frozenset(
+	{"select", "with", "show", "explain", "describe", "desc", "savepoint", "release"}
+)
+_COMMENT = re.compile(r"^\s*(?:/\*.*?\*/\s*|--[^\n]*\n\s*|#[^\n]*\n\s*)*", re.DOTALL)
+_SAFE_SET = re.compile(r"^set\s+(?:session\s+)?(?:max_statement_time\b|@)", re.IGNORECASE)
+_ROLLBACK_TO = re.compile(r"^rollback\s+to\s+", re.IGNORECASE)
+_OUTFILE = re.compile(r"\binto\s+(outfile|dumpfile)\b", re.IGNORECASE)
+
+
+def _statement_allowed(query) -> bool:
+	text = _COMMENT.sub("", str(query), count=1).lstrip()
+	first = text.split(None, 1)[0].lower() if text else ""
+	if first in _READ_STATEMENTS:
+		return not _OUTFILE.search(text)
+	if first == "set":
+		return bool(_SAFE_SET.match(text))
+	if first == "rollback":
+		return bool(_ROLLBACK_TO.match(text))
+	return False
+
+
+@contextmanager
+def _no_writes(run: _Run):
+	"""While the script runs, ``frappe.db.sql`` refuses every statement that is not a
+	read, before it is sent. An instance attribute on this request's connection only,
+	removed in ``finally``; every Frappe read and write path goes through ``sql``."""
+	db = frappe.db
+	had_own = "sql" in vars(db)
+	real = db.sql
+
+	def sql(query, *args, **kwargs):
+		if not _statement_allowed(query):
+			kind = (_COMMENT.sub("", str(query), count=1).split(None, 1) or ["?"])[0].upper()
+			run.fail(
+				f"Something this code ran tried to change the database ({kind}), and compute is "
+				"read-only, so the call was stopped and nothing was saved. If it was a report, it "
+				"writes when it runs: call run_report directly instead of from compute.",
+				kind="write",
+			)
+		return real(query, *args, **kwargs)
+
+	db.sql = sql
+	try:
+		yield
+	finally:
+		if had_own:
+			db.sql = real
+		else:
+			del db.sql
+
+
+@contextmanager
+def _deadline(run: _Run):
+	"""Best effort for code BENEATH the script (a report's own Python loop): a trace
+	function that stops any Python call made GRACE_S after the deadline. The script's
+	own loops are stopped by the compiled-in ticks (``_ComputePolicy``), which do not
+	depend on this: CPython drops a trace function once it raises. Per thread; the
+	previous tracer (a debugger, coverage) is put back."""
+
+	def tracer(frame, event, arg):
+		if event == "call" and frame.f_code.co_filename != SCRIPT_FILENAME:
+			run.check_time(GRACE_S)
+		return None
+
+	previous = sys.gettrace()
+	sys.settrace(tracer)
+	try:
+		yield
+	finally:
+		sys.settrace(previous)
+
+
+def script_line(error: BaseException) -> int | None:
+	"""The last line of the script on ``error``'s traceback."""
+	tb = error.__traceback__
+	line = None
+	while tb is not None:
+		if tb.tb_frame.f_code.co_filename == SCRIPT_FILENAME:
+			line = tb.tb_lineno
+		tb = tb.tb_next
+	return line
+
+
+def execute(code_obj, glb: dict, run: _Run) -> BaseException | None:
+	"""Run the compiled script in ``glb``, read-only, under the limits. Returns the
+	exception the script ended with (None when it finished); ``run.failure`` says
+	whether a limit or a refused write stopped it."""
+	from jarvis.api import statement_time_limit
+	from jarvis.tools._preview_sandbox import preview_sandbox
+
+	error = None
+	with preview_sandbox():
+		with statement_time_limit(STATEMENT_TIME_S):
+			with _no_writes(run):
+				try:
+					with _deadline(run):
+						exec(code_obj, glb)  # nosemgrep: compiled by RestrictedPython above
+				except (KeyboardInterrupt, SystemExit):
+					raise
+				except BaseException as e:
+					error = e
+	return error

@@ -355,6 +355,13 @@ def humanize_tool_call(tool, args, result) -> tuple[str, str]:
 		n = _n_rows(result)
 		if n is not None:
 			detail = plural(n, "row")
+	elif name == "compute":
+		# The model's own one-sentence description of what the code works out; the
+		# count is how many rows its reads returned, never a value from the result.
+		label = " ".join(str(args.get("description") or "").split()) or "Worked out a result"
+		rows = result.get("rows_read") if isinstance(result, dict) else None
+		if isinstance(rows, int) and not isinstance(rows, bool):
+			detail = f"Read {plural(rows, 'row')}"
 	elif name == "query":
 		doctype = _query_doctype(args)
 		internal = internal_doctype_label(doctype)

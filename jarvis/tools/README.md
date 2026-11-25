@@ -134,6 +134,47 @@ A match raises `PermissionDeniedError`. An empty field blocks nothing (fail-open
 every `run_method` call still parks for a human confirmation card regardless, so
 the blocklist is the "never even offer these" hardstop, not the only boundary.
 
+## `compute` - read-only Python for totals and cross-checks
+
+```python
+compute(code: str, description: str)
+# -> {"result": <json data>, "rows_read": int, "elapsed_ms": int, "printed": str}
+```
+
+For any total, count, ranking, comparison or cross-check over more than a handful of
+records: one call reads, groups, sums and ranks, and returns only the shaped answer.
+No imports; the answer goes in `result`. `description` is one sentence, shown in the
+chat step; the stored tool call keeps it with the code.
+
+- **Namespace** (an allowlist, `_compute_sandbox.build_namespace`): `get_list`,
+  `get_doc`, `get_value`, `get_single_value`, `count`, `exists`, `get_meta`,
+  `run_report`, `default_company`, `get_user_default` (also as `frappe.*` and
+  `frappe.db.*`), date and number helpers (`frappe.utils` subset, also bare),
+  `json.loads/dumps`, `frappe._dict`, `frappe.session.user`, `datetime` / `date` /
+  `timedelta` / `Decimal`, and plain builtins. No `frappe.db.sql`, query builder,
+  `get_all`, writes, jobs, mail, HTTP, files or `frappe.local`; each of those fails
+  with what to write instead.
+- **Permissions**: every read runs as the chat user. `get_list` refuses
+  `ignore_permissions` / `user` / `as_list` and the like, refuses a field the user
+  cannot read (permission level) and aggregating / filtering / sorting on a masked
+  one, and refuses Jarvis's own doctypes (`Jarvis *`). `run_report` goes through
+  `run_report`'s own gates; a Prepared Report answers only from a finished copy.
+- **Aggregates**: `fields=["customer", {"SUM": "base_grand_total", "as": "total"}]`
+  with `group_by`. Frappe 16 refuses SQL function strings, so `"sum(x) as y"` is
+  rewritten to the dict form there; on Frappe 15 the dict form is rewritten to the
+  string form.
+- **Read-only**: inside `preview_sandbox` (savepoint always rolled back, commit
+  neutralised, jobs dropped), and `frappe.db.sql` refuses every non-read statement
+  before it is sent. A report that writes when it runs makes the call fail
+  (`InvalidArgumentError`, not fixable): call `run_report` directly instead.
+- **Limits** (`_compute_sandbox` constants): 20 s wall clock, 8 s per statement,
+  100,000 rows per read and 200,000 per call, 20,000 characters of code, 2,000 of
+  printed output, 1 GB of memory growth, and the 35,000-character result guard.
+  A limit fails the whole call even when the code catches the error.
+- **Kill switch**: site config `jarvis_disable_compute` (truthy) refuses every call
+  with `FeatureDisabledError`. Errors the model can fix are `ComputeCodeError`
+  (wire code `InvalidArgumentError`, kind `fixable`) and name the line.
+
 ## `get_schema` - live introspection (the backbone)
 
 ```python

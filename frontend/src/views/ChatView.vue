@@ -6182,6 +6182,7 @@ const TOOL_PHRASES = {
 	run_report: "Running the {d} report",
 	get_report_filters: "Checking report filters",
 	query: "Querying the database",
+	compute: "Working out the numbers",
 	summarize_dataset: "Summarizing the data",
 	get_stock_balance: "Checking stock balance",
 	get_balance_on: "Checking account balance",
@@ -6893,6 +6894,13 @@ function toolCallLabel(t) {
 		const known = connectorOptionFor(key);
 		const label = (args && args.label) || (known && known.label) || key || "connector";
 		return action ? `${label} - ${action}` : label;
+	}
+	if (bare === "compute") {
+		// The one-sentence description the model gave for its code; the code itself
+		// stays in the row's args. Falls back to the plain name like any other tool.
+		const args = _connectorRowArgs(t);
+		const text = args && typeof args.description === "string" ? args.description.trim() : "";
+		return text ? text.slice(0, 160) : bare;
 	}
 	return bare;
 }
