@@ -53,6 +53,15 @@ permissions:
   packages: read   # to pull the base image from GHCR
 
 jobs:
+  # RUNNER SELECTION — two pools, so the self-hosted runners ADD capacity rather than
+  # replace GitHub's. lint, ws-contract, frontend-tests and frontend-build use
+  # vars.RUNNER_LABEL (linux-container: 6 ARM64 runners on the office Mac Studio) for
+  # pushes, manual runs and PRs from branches of THIS repo; tests, coverage and
+  # approval-layout always stay on GitHub-hosted ubuntu-latest (see each job for why).
+  # PRs from forks never reach the self-hosted pool: the repo is public and those
+  # runners persist between jobs. A fork PR can rewrite this file, so the real guard is
+  # the "require approval for all outside contributors" Actions setting, not this.
+  # Kill switch: delete the RUNNER_LABEL variable and every job runs on ubuntu-latest.
   runtime-branding:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
     uses: ./.github/workflows/runtime-branding.yml
@@ -72,7 +81,7 @@ jobs:
   # under a minute rather than waiting on a bench.
   lint:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -99,7 +108,7 @@ jobs:
   # cryptography (for the local TLS pair): no bench, no Frappe, no network beyond pip.
   ws-contract:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -131,7 +140,7 @@ jobs:
   # independently of the Python shards above.
   frontend-tests:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       # Full-repo checkout, not a sparse frontend/ one: frontend/package.json depends on
@@ -143,7 +152,9 @@ jobs:
           # Node 24 is this repo's canonical dev/bench version and what the suite is validated
           # against locally. (The lint job runs 20 because it only shells pre-commit hooks.)
           node-version: "24"
-          cache: npm
+          # Skip the cache on self-hosted: its post-step upload crawls over the office WAN and
+          # can hang the job for 15+ min after it has passed. The local disk is warm anyway.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend deps
@@ -204,6 +215,9 @@ jobs:
   # Real-browser Board regression gate, independent of the Python/bench shards.
   approval-layout:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
+    # Always GitHub-hosted x64, never the self-hosted pool: Google Chrome has no Linux ARM64
+    # build ("ERROR: not supported on Linux Arm64" from `playwright install chrome`), and this
+    # gate is specifically a Chrome layout check, so swapping in Chromium would change it.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -241,14 +255,16 @@ jobs:
   # path as the SPA's, which the stub step below satisfies (pwa/vite.config.js aliases it like the SPA's).
   frontend-build:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.RUNNER_LABEL || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: npm
+          # Skip the cache on self-hosted: its post-step upload crawls over the office WAN and
+          # can hang the job for 15+ min after it has passed. The local disk is warm anyway.
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
           cache-dependency-path: |
             frontend/package-lock.json
             pwa/package-lock.json
@@ -256,9 +272,13 @@ jobs:
         # src/socket.js imports sites/common_site_config.json at build time (for the socketio
         # port); a bare runner has no bench, so provide a minimal stub. Frappe Cloud builds
         # INSIDE a real bench where this file already exists — this only reproduces that for CI.
+        # The import is "frontend/../../../../sites", i.e. three levels above the workspace.
+        # That is $HOME only on GitHub-hosted (/home/runner/work/jarvis/jarvis); on the
+        # self-hosted pool it is /opt/actions-runner-N. Derive it, don't assume $HOME.
         run: |
-          mkdir -p "$HOME/sites"
-          printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$HOME/sites/common_site_config.json"
+          SITES="$(realpath -m "$GITHUB_WORKSPACE/../../../sites")"
+          mkdir -p "$SITES"
+          printf '%s' '{"socketio_port": 9000, "developer_mode": 0}' > "$SITES/common_site_config.json"
       - name: Build the SPA (Vite) — the /jarvis deploy artifact
         run: npm run install-frontend && npm run build-frontend
       - name: Holiday worn-item art stays out of the main bundle
@@ -279,6 +299,8 @@ jobs:
 
   tests:
     if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.draft && contains(fromJSON('["version-15", "version-16"]'), github.base_ref)) }}
+    # GitHub-hosted on purpose: the heavy bench shards run in an amd64 image as --user 1001
+    # (the hosted runner uid), and they are the load that tripped the Mac Studio's power.
     runs-on: ubuntu-latest
     # Shards now cover about 4,000 tests each. The first shard can exceed
     # 25 minutes on hosted runners; allow it to finish and upload coverage.
@@ -500,6 +522,7 @@ jobs:
   # Deliberately NOT in the base image: this needs python and `coverage` and nothing else
   # from the bench, so running it here skips a second 65s image pull.
   coverage:
+    # GitHub-hosted with the tests shards: it rebuilds their absolute /opt/frappe-bench paths.
     runs-on: ubuntu-latest
     needs: tests
     timeout-minutes: 10
