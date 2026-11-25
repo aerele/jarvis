@@ -104,5 +104,5 @@ class TestNativeAgentRelease(FrappeTestCase):
 		for doc in (old, current):
 			with self.assertRaises(frappe.PermissionError):
 				agent_closure.assert_scheduled(doc.agent, 1)
-		with self.assertRaises(frappe.PermissionError):
+		with self.assertRaisesRegex(frappe.PermissionError, "settings"):
 			agent_closure.validate_installation(frappe._dict({**current, "enabled": 1, "config": "{}"}))
