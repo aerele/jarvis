@@ -251,6 +251,37 @@ def _admin_chat_readiness(*, timeout_s: int = _POOL_CONVERGE_PROBE_TIMEOUT_S):
 	return (data.get("chat_readiness") or ""), (data.get("chat_readiness_reason") or "")
 
 
+#: admin's chat_readiness for a workspace whose subscription must be signed in again.
+_ADMIN_RECONNECT_REQUIRED = "ReconnectRequired"
+#: The genuine-rejection status a "blocked" pool apply already writes; account's
+#: _is_genuine_rejection_status recognises it, so the Connect step stops waiting.
+_RECONNECT_REQUIRED_STATUS = "failed: subscription needs re-authentication (blocked)"
+
+
+def _record_reconnect_required(settings) -> bool:
+	"""Turn a FIRST apply this bench left ``pending:`` into admin's terminal verdict
+	when admin reports ``ReconnectRequired``.
+
+	A first subscription connect whose admin leg outlived the bench's wait (the
+	2026.11 runtime's doctor step alone takes ~3 min) is left ``pending: admin
+	applying config``. If admin's apply then fails and it asks for a reconnect,
+	nothing ever wrote that outcome back: the success-only probes kept the
+	workspace "applying" until the Connect step's five-minute ceiling. Admin's
+	``ReconnectRequired`` is its own decided state, not a guess from silence, and
+	"only a fresh sign-in clears it" is exactly what this status means.
+
+	Callers must only use it while the leg has never applied (no synced marker), so
+	an established workspace is never sent back to setup by it. Only a ``pending:``
+	status is replaced; a terminal one is left as it is. Returns whether it wrote."""
+	status = (settings.get("last_sync_status") or "").strip()
+	if not status.startswith("pending:"):
+		return False
+	if not _write_settings_fields(settings, {"last_sync_status": _RECONNECT_REQUIRED_STATUS}):
+		return False
+	_commit_terminal_sync_status()
+	return True
+
+
 #: How many times a Jarvis Settings status write is replayed through a write
 #: conflict before the caller falls back to the reconcile-owned pending state.
 #: Three is enough for a conflict class whose window is one competing commit: each
@@ -3758,6 +3789,15 @@ def reconcile_pending_llm_sync() -> None:
 						# consistency with every other stamp-then-reconcile site.
 						_commit_terminal_sync_status()
 						llm_switch.reconcile()
+			return
+		if (
+			state == _ADMIN_RECONNECT_REQUIRED
+			and (is_unproven_pool or is_unproven_direct)
+			and not llm_switch.blocks_stamp()
+		):
+			# A first apply admin finished as "reconnect required": record it, so the
+			# Connect step asks for a new sign-in instead of waiting (see helper).
+			_record_reconnect_required(settings)
 			return
 		if not (may_be_disconnected and _admin_says_llm_gone(state, reason)):
 			return
