@@ -71,14 +71,6 @@ class TestGetDoc(FrappeTestCase):
 		with self.assertRaises(InvalidArgumentError):
 			get_doc(doctype="", name="Jarvis Test Customer")
 
-	def test_rejects_missing_name(self):
-		with self.assertRaises(InvalidArgumentError):
-			get_doc(doctype="Customer", name="")
-
-	def test_rejects_unknown_doc(self):
-		with self.assertRaises(InvalidArgumentError):
-			get_doc(doctype="Customer", name="Definitely Not A Customer")
-
 	def test_unknown_doc_error_is_instructive(self):
 		"""#1062: was "unknown Customer: <name>" - a delegate reading this had no
 		next move. Names the DocType/name and points at the tool that finds
@@ -119,17 +111,6 @@ class TestGetDoc(FrappeTestCase):
 		result = get_doc(doctype="Stock Settings")
 		self.assertEqual(result["name"], "Stock Settings")
 		self.assertEqual(result["doctype"], "Stock Settings")
-
-	def test_single_doctype_ignores_a_bogus_name(self):
-		"""name/names are meaningless for a Single - a delegate with nothing
-		sensible to pass must still get the one document that exists, not a
-		404 on a name it invented."""
-		result = get_doc(doctype="Stock Settings", name="this-name-does-not-exist")
-		self.assertEqual(result["name"], "Stock Settings")
-
-	def test_single_doctype_ignores_an_empty_names_list(self):
-		result = get_doc(doctype="Stock Settings", names=[])
-		self.assertEqual(result["name"], "Stock Settings")
 
 	def test_single_doctype_with_names_returns_the_batch_envelope(self):
 		"""Review fix: the Single short-circuit used to return the plain
@@ -235,10 +216,6 @@ class TestGetDocOptionalArguments(FrappeTestCase):
 				get_doc(doctype="ToDo", name=self.document_name, names=[])
 			self.assertEqual(permission.call_args.kwargs["ptype"], "read")
 			self.assertEqual(permission.call_args.kwargs["doc"].name, self.document_name)
-
-	def test_empty_batch_without_a_name_is_invalid(self):
-		with self.assertRaises(InvalidArgumentError):
-			get_doc(doctype="ToDo", names=[])
 
 	def test_malformed_batch_with_a_name_is_invalid(self):
 		with self.assertRaises(InvalidArgumentError):

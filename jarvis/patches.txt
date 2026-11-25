@@ -86,3 +86,4 @@ jarvis.patches.v2_32_chat_message_conv_seq_index
 jarvis.patches.v2_32_fill_trigger_doc_events
 jarvis.patches.v2_32_reload_jarvis_user_activity_report
 jarvis.patches.v2_32_seed_activity_rollup
+jarvis.patches.v2_33_openai_subscription_default_sol

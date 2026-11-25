@@ -44,6 +44,8 @@ _PROFILES = {
 			# outstanding/base_outstanding reset moves into set_term_outstanding().
 			# payment_amount and base_payment_amount are computed exactly as before.
 			"2bbc12063ff2646e3a2462e4f221e75e94ca53ea63938cfa58b7184fcaf3d713",
+			# ERPNext 15.126.0 adds flt() around both grand totals; numeric values stay the same.
+			"d69e1e0b63ad48ea04d3956561663c7f5ca56fd05b13bd7e22aca76b981abb3e",
 		),
 		("hget", "defaults"),
 	),

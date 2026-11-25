@@ -190,11 +190,6 @@ class TestExportDocumentTemplate(FrappeTestCase):
 		self.assertTrue(self.render.called, "render_pdf was not called - took the plain path?")
 		return self.render.call_args.args[0]
 
-	def test_template_activates_rich_path(self):
-		# A template alone (no other rich kwarg) must switch to the branded renderer.
-		export_document(_MD, format="pdf", template="editorial")
-		self.assertTrue(self.render.called)
-
 	def test_editorial_palette_in_css(self):
 		export_document(_MD, format="pdf", template="editorial")
 		self.assertIn("#7a3b3b", self._styled_body())

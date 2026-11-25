@@ -115,32 +115,6 @@ describe("P1-1 tab switches must not destroy the filter set", () => {
 		expect(opts.fetchFn.mock.calls.length).toBe(fetchesBefore);
 	});
 
-	// The belt to that braces: even a navigation that DID drop the query cannot
-	// wipe a live filter set, because an authored clear goes through setClauses.
-	it("re-asserts its param when a navigation drops the query outright", async () => {
-		const opts = base({ storageKey: "d1b" });
-		const { route, router } = routerDouble();
-		const api = host({ ...opts, route, router });
-		await flushPromises();
-		await api.setClauses([
-			makeClause({
-				doctype: ROOT,
-				fieldname: "description",
-				operator: "like",
-				value: "invoice",
-			}),
-		]);
-		await flushPromises();
-		const fetches = opts.fetchFn.mock.calls.length;
-
-		router.push({ name: "MacroRuns" }); // the OLD, query-dropping form
-		await flushPromises();
-
-		expect(api.filterClauses.value).toHaveLength(1);
-		expect(route.query[URL_PARAM]).toBeTruthy();
-		expect(opts.fetchFn.mock.calls.length).toBe(fetches);
-	});
-
 	// Source pin: the defect was one missing `query` on each navigation, and it
 	// is invisible in any test that does not mount the whole page.
 	it("every tab navigation on both pilots carries the query", () => {

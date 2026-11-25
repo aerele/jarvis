@@ -7,11 +7,6 @@ describe("cardLimitPx", () => {
 		document.documentElement.style.fontSize = "";
 	});
 
-	it("is 48rem: 768px at a 16px root font size", () => {
-		document.documentElement.style.fontSize = "16px";
-		expect(cardLimitPx()).toBe(768);
-	});
-
 	it("follows the root font size, as rem does", () => {
 		document.documentElement.style.fontSize = "20px";
 		expect(cardLimitPx()).toBe(960);

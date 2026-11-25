@@ -741,6 +741,7 @@ def refusal(exc, tool: str, args: dict) -> list[dict] | None:
 			doctype,
 			args["name"] if update else "",
 			(args["changes"] if update else args["values"]) or {},
+			str(exc),
 		)
 	except Exception:
 		return None

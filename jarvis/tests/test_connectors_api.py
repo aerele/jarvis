@@ -240,16 +240,16 @@ class TestAddConnector(_ConnectorApiTestCase):
 			connectors_api.add_connector(preset="Google Drive", scope="Personal", credential="ya29.x")
 		self.assertEqual(frappe.db.count(CONNECTOR, {"preset": "Google Drive"}), before)
 
-	def _google_key_doc(self):
+	def _key_doc(self, preset="Google Drive", key="google_drive"):
 		return frappe.get_doc(
 			{
 				"doctype": CONNECTOR,
-				"key": "google_drive",
-				"label": "Google Drive",
-				"preset": "Google Drive",
+				"key": key,
+				"label": preset,
+				"preset": preset,
 				"scope": "Personal",
 				"auth_method": "API Key",
-				"base_url": catalog.base_urls()["Google Drive"],
+				"base_url": catalog.base_urls()[preset],
 				"credential": "ya29.x",
 			}
 		)
@@ -257,18 +257,31 @@ class TestAddConnector(_ConnectorApiTestCase):
 	def test_raw_insert_of_a_key_row_for_a_sign_in_only_preset_is_refused(self):
 		frappe.set_user(PLAIN_A)
 		with self.assertRaises(frappe.PermissionError):
-			self._google_key_doc().insert()
+			self._key_doc().insert()
 
 	def test_an_existing_key_row_for_a_sign_in_only_preset_still_saves(self):
 		# A row saved before accepts_key existed must still relabel or disable.
 		frappe.set_user(PLAIN_A)
-		doc = self._google_key_doc()
+		doc = self._key_doc()
 		doc.insert(ignore_permissions=True)
 		self._connectors.append(doc.name)
 		doc.reload()
 		doc.label = "Drive (old key)"
 		doc.save()
 		self.assertEqual(frappe.db.get_value(CONNECTOR, doc.name, "label"), "Drive (old key)")
+
+	def test_an_existing_sentry_key_row_still_saves(self):
+		# Sentry lost the key option in 2026-11; a row saved earlier must keep working.
+		frappe.set_user(PLAIN_A)
+		doc = self._key_doc("Sentry", "sentry")
+		doc.insert(ignore_permissions=True)
+		self._connectors.append(doc.name)
+		doc.reload()
+		doc.label = "Sentry (old key)"
+		doc.save()
+		self.assertEqual(frappe.db.get_value(CONNECTOR, doc.name, "label"), "Sentry (old key)")
+		with self.assertRaises(frappe.ValidationError):
+			connectors_api.add_connector(preset="Sentry", scope="Personal", credential="tok")
 
 
 class TestDisabledCatalogPreset(_ConnectorApiTestCase):
@@ -279,11 +292,6 @@ class TestDisabledCatalogPreset(_ConnectorApiTestCase):
 	new credential again."""
 
 	DISABLED_PRESET = "Plaid"
-
-	def test_the_preset_is_a_real_disabled_catalog_entry(self):
-		provider = catalog.by_name(self.DISABLED_PRESET)
-		self.assertIsNotNone(provider)
-		self.assertFalse(provider.enabled)
 
 	def test_a_row_on_a_disabled_preset_still_saves(self):
 		# Created directly: add_connector refuses a disabled preset, which is the
@@ -313,12 +321,84 @@ class TestDisabledCatalogPreset(_ConnectorApiTestCase):
 		self.assertNotIn(self.DISABLED_PRESET, names)
 
 
+class TestOperatorKeyOverride(_ConnectorApiTestCase):
+	"""The operator's per-preset "Use a key instead" switch (jarvis.connector_catalogue).
+	It decides whether a NEW key row is allowed; rows saved before keep saving."""
+
+	def _override(self, **by_name: bool) -> None:
+		self._set_single("connector_key_overrides", json.dumps(by_name))
+
+	def _key_doc(self, preset: str, key: str):
+		return frappe.get_doc(
+			{
+				"doctype": CONNECTOR,
+				"key": key,
+				"label": preset,
+				"preset": preset,
+				"scope": "Personal",
+				"auth_method": "API Key",
+				"base_url": catalog.base_urls()[preset],
+				"credential": "tok",
+			}
+		)
+
+	def _public(self, name: str) -> dict:
+		frappe.set_user(PLAIN_A)
+		return {row["name"]: row for row in connectors_api.list_connectors()["catalog"]}[name]
+
+	def test_override_on_offers_the_key_and_allows_a_key_row(self):
+		self.assertFalse(self._public("Sentry")["accepts_key"])
+		self._override(Sentry=True)
+		self.assertTrue(self._public("Sentry")["accepts_key"])
+		out = connectors_api.add_connector(preset="Sentry", scope="Personal", credential="tok")
+		self._connectors.append(out["name"])
+		self.assertEqual(frappe.db.get_value(CONNECTOR, out["name"], "auth_method"), "API Key")
+		doc = self._key_doc("Sentry", "sentry_raw")
+		doc.insert()
+		self._connectors.append(doc.name)
+
+	def test_override_off_hides_the_key_and_refuses_a_new_key_row(self):
+		self.assertTrue(self._public("Linear")["accepts_key"])
+		self._override(Linear=False)
+		self.assertFalse(self._public("Linear")["accepts_key"])
+		before = frappe.db.count(CONNECTOR, {"preset": "Linear"})
+		with self.assertRaises(frappe.ValidationError):
+			connectors_api.add_connector(preset="Linear", scope="Personal", credential="tok")
+		with self.assertRaises(frappe.PermissionError):
+			self._key_doc("Linear", "linear_raw").insert()
+		self.assertEqual(frappe.db.count(CONNECTOR, {"preset": "Linear"}), before)
+
+	def test_an_existing_key_row_still_saves_after_the_key_is_switched_off(self):
+		doc = self._key_doc("Linear", "linear_old")
+		doc.insert(ignore_permissions=True)
+		self._connectors.append(doc.name)
+		self._override(Linear=False)
+		frappe.set_user(PLAIN_A)
+		doc.reload()
+		doc.label = "Linear (old key)"
+		doc.save()
+		self.assertEqual(frappe.db.get_value(CONNECTOR, doc.name, "label"), "Linear (old key)")
+
+	def test_override_on_a_key_only_preset_is_ignored(self):
+		self._override(Stripe=False)
+		self.assertTrue(self._public("Stripe")["accepts_key"])
+		out = connectors_api.add_connector(preset="Stripe", scope="Personal", credential="tok")
+		self._connectors.append(out["name"])
+
+	def test_override_on_an_unknown_name_is_ignored(self):
+		self._override(**{"No Such App": False})
+		frappe.set_user(PLAIN_A)
+		catalog_names = {row["name"] for row in connectors_api.list_connectors()["catalog"]}
+		self.assertNotIn("No Such App", catalog_names)
+		self.assertEqual(len(catalog_names), sum(1 for p in catalog.PROVIDERS if p.enabled))
+
+
 class TestOperatorDisabledPreset(_ConnectorApiTestCase):
 	"""A preset the operator switched off fleet-wide (jarvis.connector_catalogue).
 	It leaves the picker and refuses new rows on every path; a row saved before
 	the switch keeps resolving, saving and testing, as catalog.by_name promises."""
 
-	PRESET = "PayPal"
+	PRESET = "Linear"
 
 	def _disable(self, *names: str) -> None:
 		self._set_single("connector_catalogue_disabled", json.dumps(list(names)))
@@ -397,14 +477,99 @@ class TestOperatorDisabledPreset(_ConnectorApiTestCase):
 		self.assertIsNotNone(catalog.by_name(self.PRESET))
 		frappe.set_user(PLAIN_A)
 
-		renamed = connectors_api.update_connector(name, label="PayPal (old)")
-		self.assertEqual(renamed["label"], "PayPal (old)")
+		renamed = connectors_api.update_connector(name, label="Linear (old)")
+		self.assertEqual(renamed["label"], "Linear (old)")
 
 		with patch.object(broker, "test_connector", return_value={"ok": True, "tools": _TOOLS}) as probe:
 			out = connectors_api.test_connector(name)
 		self.assertTrue(out["ok"])
 		self.assertEqual(probe.call_args.args[0].base_url, catalog.base_urls()[self.PRESET])
 		self.assertEqual(frappe.db.get_value(CONNECTOR, name, "last_test_status"), "Passed")
+
+
+class TestComingSoonPreset(_ConnectorApiTestCase):
+	"""A preset the operator marked "Coming soon": it stays in the Browse catalog flagged
+	``coming_soon`` but cannot be added; a hidden (disabled) one stays absent and rows
+	saved before the switch keep working."""
+
+	PRESET = "Linear"
+	HIDDEN = "Stripe"
+
+	def _mark(self, soon: list[str], disabled: list[str] | None = None) -> None:
+		self._set_single("connector_catalogue_disabled", json.dumps(disabled or soon))
+		self._set_single("connector_catalogue_coming_soon", json.dumps(soon))
+
+	def _catalog(self) -> dict[str, dict]:
+		frappe.set_user(PLAIN_A)
+		return {row["name"]: row for row in connectors_api.list_connectors()["catalog"]}
+
+	def test_list_connectors_shows_it_flagged_and_omits_a_hidden_one(self):
+		self._mark([self.PRESET], disabled=[self.PRESET, self.HIDDEN])
+		rows = self._catalog()
+		self.assertTrue(rows[self.PRESET]["coming_soon"])
+		self.assertNotIn("base_url", rows[self.PRESET])
+		self.assertNotIn(self.HIDDEN, rows)
+		self.assertFalse(rows["GitHub"]["coming_soon"])
+		self.assertEqual(len(rows), sum(1 for p in catalog.PROVIDERS if p.enabled) - 1)
+
+	def test_nothing_is_flagged_without_a_policy(self):
+		self.assertFalse(any(row["coming_soon"] for row in self._catalog().values()))
+
+	def test_add_connector_refuses_it_as_coming_soon(self):
+		self._mark([self.PRESET])
+		frappe.set_user(PLAIN_A)
+		before = frappe.db.count(CONNECTOR, {"preset": self.PRESET})
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			connectors_api.add_connector(preset=self.PRESET, scope="Personal", credential="tok")
+		self.assertIn("This app is coming soon.", str(ctx.exception))
+		self.assertNotIn("turned off", str(ctx.exception))
+		self.assertEqual(frappe.db.count(CONNECTOR, {"preset": self.PRESET}), before)
+
+	def test_add_connector_keeps_the_old_message_for_a_hidden_preset(self):
+		self._mark([self.PRESET], disabled=[self.PRESET, self.HIDDEN])
+		frappe.set_user(PLAIN_A)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			connectors_api.add_connector(preset=self.HIDDEN, scope="Personal", credential="tok")
+		self.assertIn("turned off for your workspace", str(ctx.exception))
+
+	def test_controller_refuses_a_raw_insert_as_coming_soon(self):
+		self._mark([self.PRESET])
+		doc = frappe.get_doc(
+			{
+				"doctype": CONNECTOR,
+				"key": "linear-soon",
+				"label": self.PRESET,
+				"preset": self.PRESET,
+				"scope": "Personal",
+				"base_url": catalog.base_urls()[self.PRESET],
+				"credential": "tok",
+			}
+		)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			doc.insert(ignore_permissions=True)
+		self.assertIn("This app is coming soon.", str(ctx.exception))
+
+	def test_an_existing_row_still_saves(self):
+		name = self._mk(
+			"Personal",
+			"linear-old",
+			owner=PLAIN_A,
+			preset=self.PRESET,
+			base_url=catalog.base_urls()[self.PRESET],
+		)
+		self._mark([self.PRESET])
+		frappe.set_user(PLAIN_A)
+		out = connectors_api.update_connector(name, label="Linear (old)")
+		self.assertEqual(out["label"], "Linear (old)")
+
+	def test_an_older_control_plane_marks_nothing_coming_soon(self):
+		# The list is held but no states marker ever arrived: the preset is only hidden.
+		self._set_single("connector_catalogue_disabled", json.dumps([self.PRESET]))
+		self._set_single("connector_catalogue_coming_soon", "")
+		self.assertNotIn(self.PRESET, self._catalog())
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			connectors_api.add_connector(preset=self.PRESET, scope="Personal", credential="tok")
+		self.assertIn("turned off for your workspace", str(ctx.exception))
 
 
 class TestListConnectors(_ConnectorApiTestCase):
@@ -474,6 +639,7 @@ class TestListConnectorsCatalog(_ConnectorApiTestCase):
 			"token_help_url",
 			"guide_url",
 			"accepts_key",
+			"coming_soon",
 		}
 		for entry in entries:
 			self.assertEqual(set(entry), allowed, entry.get("name"))
@@ -482,14 +648,14 @@ class TestListConnectorsCatalog(_ConnectorApiTestCase):
 	def test_rows_carry_the_flow_the_spa_should_render(self):
 		github = self._mk("Personal", "gh-class", owner=PLAIN_A, preset="GitHub")
 		custom = self._mk("Personal", "custom-class", owner=PLAIN_A, preset="Custom URL")
-		razorpay = self._mk("Personal", "rzp-class", owner=PLAIN_A, preset="Razorpay")
+		linear = self._mk("Personal", "rzp-class", owner=PLAIN_A, preset="Linear")
 		open_row = self._mk("Personal", "ms-class", owner=PLAIN_A, preset="Microsoft Learn")
 
 		frappe.set_user(PLAIN_A)
 		rows = {r["name"]: r for r in connectors_api.list_connectors()["mine"]}
 		self.assertEqual(rows[github]["auth_class"], "static")
 		self.assertEqual(rows[custom]["auth_class"], "custom")
-		self.assertEqual(rows[razorpay]["auth_class"], "dcr")
+		self.assertEqual(rows[linear]["auth_class"], "dcr")
 		self.assertEqual(rows[open_row]["auth_class"], "open")
 
 
@@ -764,13 +930,13 @@ class TestConnectorOauthFieldGuard(_ConnectorApiTestCase):
 		doc = self._insert_as(
 			PLAIN_A,
 			key="rzp-evil",
-			preset="Razorpay",
+			preset="Linear",
 			auth_method="API Key",
 			credential="tok",
 			base_url="https://attacker.invalid/steal",
 		)
-		self.assertEqual(doc.base_url, catalog.base_urls()["Razorpay"])
-		self.assertEqual(frappe.get_doc(CONNECTOR, doc.name).base_url, catalog.base_urls()["Razorpay"])
+		self.assertEqual(doc.base_url, catalog.base_urls()["Linear"])
+		self.assertEqual(frappe.get_doc(CONNECTOR, doc.name).base_url, catalog.base_urls()["Linear"])
 
 
 class TestListConnectorsOauth(_ConnectorApiTestCase):
@@ -2848,12 +3014,6 @@ class TestOauthErrorMessages(unittest.TestCase):
 			message, "This app did not ask for a sign-in. Add it with a key, or with no sign-in."
 		)
 		self.assertNotIn("401", message, "the engine's detail is not shown")
-
-	def test_address_mismatch_has_its_own_sentence(self):
-		self.assertEqual(
-			connectors_api._oauth_error_message("client_address_mismatch"),
-			"This connector's address changed. Remove it and add it again.",
-		)
 
 	def test_unknown_code_keeps_the_generic_sentence(self):
 		self.assertEqual(

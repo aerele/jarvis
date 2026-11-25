@@ -1199,6 +1199,9 @@ def _skill_card(args: dict) -> dict:
 	}
 
 
+_MAX_SUMMARY = 500  # jarvis_wiki_page.MAX_SUMMARY_LEN
+
+
 def _wiki_card(args: dict) -> dict:
 	"""``replace_body_md`` is a FULL REWRITE and says so; ``append_md`` adds a
 	section. The tool rejects both together (update_wiki.py:3-4), so mode is
@@ -1242,7 +1245,8 @@ def _wiki_card(args: dict) -> dict:
 		# `summary` is PERSISTED (update_wiki.py:141-142, :164) - a call setting only
 		# summary would otherwise render as an empty "meta" card and the human would
 		# approve stored text they never saw.
-		"summary": fmt(args.get("summary") or "", limit=_MAX_VAL),
+		# The stored summary is whitespace-collapsed and up to 500 characters; show that, not the 200 cap.
+		"summary": fmt(" ".join(str(args.get("summary") or "").split()), limit=_MAX_SUMMARY),
 		"mode": mode,
 		"body": fmt(body_src, limit=_MAX_BODY),  # the body the TOOL will write
 	}

@@ -18,6 +18,11 @@ const props = defineProps({
 	// on the new-chat screen, so here it is only ever shown, locked.
 	autoMode: { type: Boolean, default: false },
 	placeholder: { type: String, default: () => `Message ${agentName}…` },
+	// Something besides text/files makes the message sendable: a skill picked in the
+	// "+" menu (ChatView folds its "/skill_name" token into the message).
+	extraSendable: { type: Boolean, default: false },
+	// The paperclip; the chat turns it off, its "+" menu has "Add files or photos".
+	showAttach: { type: Boolean, default: true },
 });
 const emit = defineEmits([
 	"update:modelValue",
@@ -43,7 +48,9 @@ const uploading = computed(() => props.attachments.some((a) => a.uploading));
 const canSend = computed(
 	() =>
 		!uploading.value &&
-		(props.modelValue.trim().length > 0 || props.attachments.some((a) => a.file_url))
+		(props.modelValue.trim().length > 0 ||
+			props.attachments.some((a) => a.file_url) ||
+			props.extraSendable)
 );
 
 function onInput(e) {
@@ -153,7 +160,11 @@ defineExpose({ reset, focusEnd });
 
 		<div class="jv-composer-row">
 			<input ref="fileEl" type="file" multiple hidden @change="pick" />
+			<!-- Host controls before the attach button (chat: the "+" menu); handed this
+			     composer's own file picker so its "Add files or photos" opens it. -->
+			<slot name="leading" :pick-files="() => fileEl.click()" />
 			<button
+				v-if="props.showAttach"
 				class="jv-icon-btn"
 				aria-label="Attach a file"
 				:disabled="props.sending || props.disabled"

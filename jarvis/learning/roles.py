@@ -205,6 +205,9 @@ _PERSONALISE_SETTINGS_DEFAULTS = {
 	# fresh install does not depend on the settings reader's own fallback for an absent row.
 	"holiday_touches_enabled": 1,
 	"birthday_greetings_enabled": 1,
+	# Suggested replies: on by default. Without a seeded row the first Jarvis Settings save
+	# writes the unset Check as an explicit 0 and turns the feature off on its own.
+	"suggest_replies_enabled": 1,
 }
 
 

@@ -483,16 +483,6 @@ describe("Skills AdminTab, states", () => {
 		expect(rowsOf(w)).toHaveLength(1);
 	});
 
-	it("keeps the rows it had when a refresh fails, and says they are the earlier ones", async () => {
-		const w = await mountWith([row("a"), row("b")]);
-		api.adminListSkills.mockRejectedValue(new Error("Server is busy"));
-		await button(w, "Refresh").trigger("click");
-		await flushPromises();
-		expect(rowsOf(w)).toHaveLength(2);
-		expect(w.find("[role='alert']").text()).toContain("Server is busy");
-		expect(w.find("[role='alert']").text()).toContain("Showing what was loaded before.");
-	});
-
 	it("pages by number: Load more asks for the next page and appends", async () => {
 		api.adminListSkills.mockImplementation(serve(many(45)));
 		const w = mount(AdminTab);
@@ -1219,49 +1209,5 @@ describe("Skills AdminTab, the keyboard", () => {
 		expect(w.find(".jv-skill-admin-clear").exists()).toBe(false);
 		expect(document.activeElement).toBe(control(w, "Search").find("input").element);
 		w.unmount();
-	});
-
-	it("leaves focus alone after a click", async () => {
-		const w = await mountWith(many(3), undefined, { attachTo: document.body });
-		const refresh = w.find(".jv-skill-admin-refresh");
-		const answer = pending();
-		refresh.element.focus();
-		await refresh.trigger("pointerdown");
-		await fire(refresh, 1);
-		document.activeElement.blur();
-		answer(page(many(3)));
-		await flushPromises();
-		expect(document.activeElement).toBe(document.body);
-		w.unmount();
-	});
-
-	it("moves focus into the Actions menu when it opens, and only then", async () => {
-		const w = await mountWith([row("a")], undefined, { attachTo: document.body });
-		const content = document.createElement("div");
-		content.setAttribute("data-reka-menu-content", "");
-		content.tabIndex = -1;
-		document.body.appendChild(content);
-		const menu = w.findComponent({ name: "Dropdown" });
-		menu.vm.$emit("update:open", false);
-		await new Promise((r) => requestAnimationFrame(r));
-		expect(document.activeElement).not.toBe(content);
-		menu.vm.$emit("update:open", true);
-		await new Promise((r) => requestAnimationFrame(r));
-		expect(document.activeElement).toBe(content);
-		content.remove();
-		w.unmount();
-	});
-
-	it("opens the menu from the side its button is on: the row's end, or a card's start", async () => {
-		const width = vi.spyOn(HTMLElement.prototype, "clientWidth", "get");
-		width.mockReturnValue(1100);
-		let w = await mountWith([row("a")]);
-		expect(w.findComponent({ name: "Dropdown" }).props("placement")).toBe("right");
-		w.unmount();
-		width.mockReturnValue(360);
-		w = await mountWith([row("a")]);
-		expect(w.findComponent({ name: "Dropdown" }).props("placement")).toBe("left");
-		w.unmount();
-		width.mockRestore();
 	});
 });

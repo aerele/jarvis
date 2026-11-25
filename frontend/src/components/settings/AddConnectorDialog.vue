@@ -833,8 +833,8 @@ function resetCustomUrlOauthState() {
 }
 
 function defaultPreset() {
-	if (props.catalog.length) return props.catalog[0].name;
-	return "Custom URL";
+	// A coming-soon preset cannot be added, so it is never the default.
+	return props.catalog.find((c) => !c.coming_soon)?.name || "Custom URL";
 }
 
 // ── the connect card this render shows ──────────────────────────────────────

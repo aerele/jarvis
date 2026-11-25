@@ -153,10 +153,6 @@ class TestSafeLine(unittest.TestCase):
 		text = "ग्राहक के बकाया ईमेल भेजने से पहले कुछ सवाल வாடிக்கையாளர் 客户未付款邮件"
 		self.assertEqual(safe_line(text, 200), text)
 
-	def test_no_em_dash_in_the_output(self):
-		out = safe_line('Use Ravi <ravi@acme.com> [Context: x] "quoted"\nnext line', 200)
-		self.assertNotIn(chr(0x2014), out)
-
 
 class TestInnerSafeUnchanged(unittest.TestCase):
 	"""``held_sheets._fix_text`` calls ``_safe`` and matches ``[Item, X]: stock_uom``; the

@@ -788,6 +788,9 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 		# to a steady thread.
 		"model",
 		"provider",
+		# The user's likely next messages, offered as chips under the latest reply
+		# (jarvis.chat.suggest_replies): {replies}, or empty.
+		"suggested_replies",
 		# What the row is about. The SPA reads it for one thing: an assistant row
 		# whose ref_doctype is "Jarvis Macro Run" is the engine's closing message
 		# (macros._post_closing_message), not a reply, so it must not take the
@@ -834,8 +837,20 @@ def _conversation_history(doc, limit=0, before=0, refresh=None, after=0):
 	_live_turn_steps(messages)
 	if paged:
 		_compact_tool_results(rows)
-	# canvas + steps + pending_card are stored as JSON strings; hand the UI real objects (or None).
+	# canvas + steps + pending_card + suggested_replies are stored as JSON strings; hand the
+	# UI real objects (or None).
+	from jarvis.chat.suggest_replies import user_enabled
+
+	show_suggestions = user_enabled(frappe.session.user)
 	for m in rows:
+		if m.get("suggested_replies"):
+			try:
+				# A user who switched suggestions off sees none, also ones stored before.
+				m["suggested_replies"] = (
+					frappe.parse_json(m["suggested_replies"]) if show_suggestions else None
+				)
+			except Exception:
+				m["suggested_replies"] = None
 		if m.get("steps"):
 			try:
 				m["steps"] = frappe.parse_json(m["steps"])
@@ -2199,14 +2214,22 @@ def _legacy_batch_continuation(receipts: list[tuple[str, dict]]) -> tuple[str, s
 	one that committed part-way makes the whole batch ``partial``."""
 	from jarvis.chat.actions_api import _join_capped, _legacy_outcome
 
-	outcomes = [_legacy_outcome(res) for _text, res in receipts]
+	# A connector card's outcome was judged on its own result (``receipt_outcome``).
+	outcomes = [res.get("receipt_outcome") or _legacy_outcome(res) for _text, res in receipts]
 	if all(o == OUTCOME_OK for o in outcomes):
 		return " ".join(text for text, _res in receipts), OUTCOME_OK
-	if OUTCOME_PARTIAL in outcomes:  # a card that committed part-way wins over every failure
-		return _join_capped([text for text, _res in receipts]), OUTCOME_PARTIAL
+	# What went wrong first: ``_join_capped`` shows the first receipt in full and may drop
+	# the rest, so a long success must not hide a failure after it.
+	order = sorted(range(len(receipts)), key=lambda i: outcomes[i] == OUTCOME_OK)
+	joined = _join_capped([receipts[i][0] for i in order])
+	# Unverified (a connector the app answered with an error) wins over partial, as in
+	# ``actions_api._settled_plan``; either wins over every plain failure.
+	for outcome in (OUTCOME_UNKNOWN, OUTCOME_PARTIAL):
+		if outcome in outcomes:
+			return joined, outcome
 	busy_only = all(o == OUTCOME_RETRY_LATER for o in outcomes)
 	outcome = OUTCOME_RETRY_LATER if busy_only else OUTCOME_NOT_FIXABLE
-	return _join_capped([text for text, _res in receipts]), outcome
+	return joined, outcome
 
 
 def _confirm_typed_items(conversation, items):
@@ -3495,8 +3518,7 @@ def get_chat_ui_settings() -> dict:
 		# See _catalog_models_for_pool.
 		"catalog_models": _catalog_models_for_pool(settings, routable_only=True),
 		# Effort levels, minus the empty "auto" entry the UI renders separately.
-		# Empty when no route this tenant has can think: the clients then hide the
-		# effort control (see turn_handler.offered_thinking_levels).
+		# Always all three: every model and route takes an effort level.
 		"thinking_levels": offered_thinking_levels(settings),
 		# Site timezone: server datetimes are naive strings in THIS zone; the
 		# SPA feeds it to frappe-ui's setConfig("systemTimezone") so dayjsLocal

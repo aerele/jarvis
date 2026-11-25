@@ -35,7 +35,8 @@ from jarvis.permissions import (
 	has_jarvis_access,
 	refuse_in_tool_dispatch,
 )
-from jarvis.tools._result_guard import enforce_result_budget
+from jarvis.tools import _report_snapshots
+from jarvis.tools._result_guard import MAX_RESULT_CHARS, enforce_result_budget, measure
 from jarvis.tools.registry import _ACCEPTED_PARAMS, _OPTIONAL_PARAMS, dispatch
 
 _REGISTERED_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
@@ -1083,10 +1084,18 @@ def _dispatch_from_session(
 					tool_call_id=tool_call_id,
 				)
 				return result
+			# The digest of what the run is allowed to see, taken before it: access that
+			# changes during a long run must not be stamped on rows of the old access.
+			snapshot_digest = _pre_run_digest(tool, parsed_args)
 			started_ms = time.monotonic()
 			try:
-				with _private_output.request(result_mode is not None), _agent_read_time_limit(tool):
+				with (
+					_private_output.request(result_mode is not None),
+					_agent_read_time_limit(tool),
+					_report_snapshots.agent_reload_scope(),
+				):
 					result = _run_tool(tool, parsed_args, conversation=conv)
+				run_ms = int((time.monotonic() - started_ms) * 1000)
 			except Exception as exc:
 				# A tool that raised past _run_tool's envelope translation is a real
 				# fault; try to leave an honest step saying the attempt happened and
@@ -1150,7 +1159,12 @@ def _dispatch_from_session(
 			# path - the dashboard builder/desk/external call_tool callers go through
 			# _dispatch_current_user and are deliberately uncapped.
 			if result_mode is None and isinstance(result, dict) and result.get("ok"):
-				guarded, event = enforce_result_budget(result["data"], tool=tool)
+				data, measured, snapshot = result["data"], None, {}
+				if tool == "run_report" and isinstance(data, dict) and not data.get("prepared_report"):
+					data, measured, snapshot = _snapshot_oversized_run_report(
+						data, parsed_args, run_ms, snapshot_digest
+					)
+				guarded, event = enforce_result_budget(data, tool=tool, measured=measured)
 				if event:
 					result["data"] = guarded
 					telemetry.record_budget_event(
@@ -1159,6 +1173,7 @@ def _dispatch_from_session(
 						original_chars=event["original_chars"],
 						shown=event["shown"],
 						total=event["total"],
+						**snapshot,
 					)
 				receipt = result
 			_persist_and_publish_tool_call(
@@ -1176,6 +1191,104 @@ def _dispatch_from_session(
 		_agent_run_ctx.take_armed_by_macro()  # belt: never leak an armed marker across dispatches
 		_agent_run_ctx.take_armed_by_skill()  # belt: same for the approved-skill-run marker
 		_agent_run_ctx.take_request_autorun_applied()  # belt: same for the request-scoped marker
+
+
+# A run this slow is not snapshotted: the create would push the call past the plugin's 30 s abort.
+CREATE_SKIP_AFTER_MS = 20_000
+
+
+def _pre_run_digest(tool: str, args) -> str | None:
+	"""The caller's permission digest for a ``run_report`` call, taken fresh before the run
+	(a per-request memo may hold an older value). None for any other tool, or when it cannot
+	be taken: the snapshot then takes its own."""
+	if tool != "run_report" or not isinstance(args, dict):
+		return None
+	try:
+		return _report_snapshots.perm_digest(frappe.session.user, args.get("report_name"), fresh=True)
+	except Exception:
+		return None
+
+
+def _snapshot_oversized_run_report(
+	data: dict, args, run_ms: int, perm_digest: str | None = None
+) -> tuple[dict, int | None, dict]:
+	"""Store an inline ``run_report`` result that is over the model-facing budget as a
+	report snapshot, so the model can read the whole report through ``query_report``.
+
+	Returns ``(data, measured, telemetry)``. ``data`` carries ``run=<rs_ id>`` and the
+	``_jarvis_snapshot`` marker for the result guard only when a snapshot was stored,
+	else it is the input. ``measured`` is the size, taken once and handed to the guard
+	(None when it could not be measured: then nothing is stored). ``telemetry`` holds
+	the ``snapshot`` (and ``snapshot_bytes``, or ``snapshot_error``: an exception class)
+	fields of the budget event, empty when the result is within budget. Never raises: a
+	snapshot is an addition to the result."""
+	measured = measure(data)
+	if measured is None or measured <= MAX_RESULT_CHARS:
+		return data, measured, {}
+	if run_ms >= CREATE_SKIP_AFTER_MS:
+		return data, measured, {"snapshot": "skipped:slow"}
+	try:
+		filters = _snapshot_filters(args, data)
+		if filters is None:
+			return data, measured, {"snapshot": "skipped:filters"}
+		if not _snapshot_passes_read_gate(args.get("report_name"), filters):
+			return data, measured, {"snapshot": "skipped:gate"}
+		began = time.monotonic()
+		created = _report_snapshots.create(
+			data,
+			report_name=args.get("report_name"),
+			filters=filters,
+			run_ms=run_ms,
+			measured=measured,
+			perm_digest=perm_digest,
+		)
+		create_ms = int((time.monotonic() - began) * 1000)
+	except Exception as exc:  # `create` never raises; this guards the filters step above
+		telemetry.record_snapshot_failure("create_failed", exc)
+		return data, measured, {"snapshot": "failed", "snapshot_error": type(exc).__name__}
+	snapshot_id, reason = created
+	if not snapshot_id:
+		fields = {"snapshot": f"skipped:{reason}", "snapshot_create_ms": create_ms}
+		if created.error:
+			fields["snapshot_error"] = created.error
+		return data, measured, fields
+	snapshot = {"snapshot": "created", "snapshot_bytes": created.size, "snapshot_create_ms": create_ms}
+	return {**data, "run": snapshot_id, "_jarvis_snapshot": True}, measured, snapshot
+
+
+def _snapshot_passes_read_gate(report_name, filters: dict) -> bool:
+	"""Run the gate that every read of the snapshot passes, once, on the effective filters.
+	An AR/AP Custom Report whose saved filters lack the company or the date would give a
+	snapshot that every read refuses: it is not stored."""
+	from jarvis.tools._report_query_source import gate_report
+
+	try:
+		gate_report(report_name, filters, frappe.session.user)
+	except (InvalidArgumentError, PermissionDeniedError):
+		return False
+	return True
+
+
+def _snapshot_filters(args, data: dict) -> dict | None:
+	"""The filters the report ran with, as a reload would need them (None: they cannot be
+	pinned, so no snapshot).
+
+	A Custom Report with saved default filters replaces the call's filters entirely
+	(``frappe.desk.query_report._run``, ``are_default_filters``) and returns them as
+	``custom_filters``: those are the effective ones, and a reload runs with
+	``are_default_filters=False`` so a later edit of the saved filters cannot move the scope.
+	Otherwise they are the call's own (``run_report`` accepts a JSON string), with the company
+	and date the scope resolved for a standard receivable or payable report."""
+	from jarvis.tools.run_report import _normalize_filters
+
+	applied = data.get("custom_filters")
+	if applied:
+		return dict(applied) if isinstance(applied, dict) else None
+	filters = dict(_normalize_filters(args.get("filters")))
+	scope = data.get("report_scope")
+	if isinstance(scope, dict):
+		filters.update({key: scope[key] for key in ("company", "report_date") if key in scope})
+	return filters
 
 
 #: Terminal server-owned evaluators narrate their own findings writeback
@@ -4098,6 +4211,31 @@ def _run_covered_write(
 	return result
 
 
+def _connector_precheck_refusal(tool: str, args) -> dict | None:
+	"""A ``call_connector`` that the broker would refuse before sending anything (an
+	action that is not allowed, bad arguments, an untested or switched-off connector)
+	is answered now, in the envelope an inline call returns, and no card is parked:
+	the person would only be asked to confirm a call that cannot run. ``None`` for
+	everything else, including a call the checks cannot judge. The gate is untouched:
+	a call that passes still parks."""
+	if tool != "call_connector" or not isinstance(args, dict):
+		return None
+	connector, action = args.get("connector"), args.get("action")
+	if not isinstance(connector, str) or not isinstance(action, str):
+		return None
+	from jarvis.connectors import broker
+	from jarvis.connectors.secret_scrub import scrub_value
+	from jarvis.tools._agent_run_ctx import get_session_key
+
+	refusal = broker.precheck(connector, action, args.get("args"), run_id=get_session_key())
+	if refusal is None:
+		return None
+	# A schema error repeats the offending argument value, which may be a credential.
+	refusal = scrub_value(refusal)
+	_record_tool_audit(tool, args, refusal)
+	return {"ok": True, "data": refusal}
+
+
 def _connector_call_is_safe_read(args) -> bool:
 	"""Action-aware carve-out for ``call_connector``'s confirm-first gate: return
 	True ONLY for a connector action the CURRENT user has explicitly ALLOWED and
@@ -4534,19 +4672,41 @@ def _stamp_file_box_draft(conv: str, data) -> bool:
 	return True
 
 
-def _single_flight_error() -> dict:
+def _single_flight_error(conversation: str | None = None, owner_user: str | None = None) -> dict:
 	"""F16: a card already waits in this conversation. Cards never expire, so the
-	model must stop until the user answers it."""
+	model must stop until the user answers it. The waiting card is named when it can
+	be found, so the model tells the user exactly which card to answer."""
 	return _error(
 		"ConfirmationPendingError",
 		"a confirmation card for a previous action is still awaiting the user in this "
-		"conversation. Only one runs at a time - do NOT retry this call; stop and end "
-		"your turn now. The card does not expire: the user confirms or discards it, and "
-		"once they confirm you'll get a follow-up turn to continue with the next step. "
-		"If the waiting card is not what the user asked for, tell them it is wrong and ask "
-		"them to discard it (Discard in the full chat, Deny on the phone); do not ask a "
-		"yes/no question in that reply.",
+		f"conversation{_waiting_card_label(conversation, owner_user)}. Only one runs at a time - do NOT "
+		"retry this call; stop and end your turn now. The card does not expire: the user "
+		"confirms or discards it, and once they confirm you'll get a follow-up turn to "
+		"continue with the next step. If the waiting card is not what the user asked for, "
+		"tell them it is wrong and ask them to discard it (Discard in the full chat, Deny "
+		"on the phone); do not ask a yes/no question in that reply.",
 	)
+
+
+def _waiting_card_label(conversation: str | None, owner_user: str | None) -> str:
+	"""`` (the waiting card: "<summary>")`` for the one Pending chat card of
+	``conversation`` that belongs to ``owner_user``, or an empty string when there is
+	none to name. A card another person of a shared chat owns is never named: its
+	title is theirs to see. The summary is the plain-text title the card shows; a read
+	error only costs the name."""
+	if not conversation or not owner_user:
+		return ""
+	try:
+		summary = frappe.db.get_value(
+			"Jarvis Pending Action",
+			{"conversation": conversation, "kind": "chat", "status": "Pending", "owner_user": owner_user},
+			"summary",
+			order_by="creation desc",
+		)
+	except Exception:
+		return ""
+	summary = " ".join(str(summary or "").split()).replace('"', "'")
+	return f' (the waiting card: "{summary}")' if summary else ""
 
 
 def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
@@ -5150,7 +5310,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				"call once; if it still fails, tell the user and stop - do not loop.",
 			)
 		if conversation_pending:
-			return _single_flight_error()
+			return _single_flight_error(conv, owner_user)
 		# send_email(recipients_from=...): the bench runs the query and writes one message
 		# per row NOW, so the card shows the real recipients and Confirm sends exactly
 		# them (send_email re-runs the query and refuses a changed list). The model never
@@ -5250,6 +5410,9 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 						refused["error"]["fields"] = fields
 				return refused
 		else:
+			refused = _connector_precheck_refusal(tool, args)
+			if refused is not None:
+				return refused
 			try:
 				preview = _pending_preview(tool, args)
 			except PreviewSandboxLost as e:
@@ -5327,7 +5490,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		except pending_confirm.ConfirmationPendingError:
 			# Park re-checks single-flight under its lock: a card that could not be
 			# superseded after all (another actor holds it) is not a storage error.
-			return _single_flight_error()
+			return _single_flight_error(conv, owner_user)
 		# mint returns None when it could not stage the park (a transient cache
 		# failure that it already rolled back, so nothing is persisted). Do NOT
 		# publish a card against a token whose record does not exist - that card is
@@ -5460,9 +5623,9 @@ def _dispatch_judging_skills(tool: str, args, is_write: bool, conversation) -> t
 	alias = f"{_JUDGE_ALIAS}{key}" if key else None
 	judged = {**args, "fields": [*(args.get("fields") or ["name"]), f"{key} as {alias}"]} if key else args
 	result = _dispatch_and_wrap(tool, judged, is_write)
-	if not result.get("ok") or not _reads_skill_rows(tool, args):
-		return _without_column(result, alias), ""
 	data = result.get("data")
+	if not result.get("ok") or not _reads_skill_rows(tool, args, data):
+		return _without_column(result, alias), ""
 	note = macros.check_skill_rows_read(conversation, lambda: _skill_rows_read(args, data, alias))
 	return _without_column(result, alias), note
 
@@ -5519,24 +5682,33 @@ _NO_STORED_ROWS = frozenset(
 )
 
 
-def _reads_skill_rows(tool: str, args) -> bool:
+def _reads_skill_rows(tool: str, args, result_data=None) -> bool:
 	"""Whether a read may return rows of a skill doctype: its arguments use one as a
 	doctype (a ``doctype``, a query's ``from`` or join, a parent, or a filter on a field
 	that holds a doctype, JSON included), or it runs a report on one. A Script or Query
-	Report's own SQL is not seen here."""
+	Report's own SQL is not seen here.
+
+	``result_data`` is the ok result's data. A ``query_report`` of a report snapshot
+	(``rs_`` id) takes its report from that result's receipt, as a prepared report's
+	report is taken from its run; a result without one is judged as a skill read."""
 	if tool in _NO_STORED_ROWS:
 		return False
 	if tool in ("run_report", "report_pdf", "query_report") and isinstance(args, dict):
 		report = args.get("report_name")
 		if tool == "query_report":
 			run = args.get("prepared_report")
-			report = (
-				frappe.db.get_value(
-					"Prepared Report", {"name": run, "owner": frappe.session.user}, "report_name"
+			if isinstance(run, str) and run.startswith("rs_"):
+				report = result_data.get("report_name") if isinstance(result_data, dict) else None
+				if not isinstance(report, str) or not report:
+					return True  # fail closed: the snapshot's report is not known
+			else:
+				report = (
+					frappe.db.get_value(
+						"Prepared Report", {"name": run, "owner": frappe.session.user}, "report_name"
+					)
+					if isinstance(run, str)
+					else None
 				)
-				if isinstance(run, str)
-				else None
-			)
 		ref = frappe.get_cached_value("Report", report, "ref_doctype") if isinstance(report, str) else None
 		if ref and _is_a_skill_doctype(ref):
 			return True

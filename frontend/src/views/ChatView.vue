@@ -2106,6 +2106,16 @@
 										</button>
 									</div>
 								</div>
+								<!-- the user's likely next messages, under the latest reply only
+								     (jarvis.chat.suggest_replies); a tap ticks one, Send sends it -->
+								<SuggestedReplies
+									v-if="suggestionsFor(m)"
+									:key="'sr-' + m.name"
+									:replies="suggestionsFor(m).replies"
+									:disabled="busy"
+									@pick="chosenSuggestion = $event"
+									@send="sendSuggestion($event, m.name)"
+								/>
 								<FeedbackBar
 									v-if="feedbackViewIsCurrent(m)"
 									@rate="onFeedbackRate($event, feedbackViewFor(m))"
@@ -2789,7 +2799,7 @@
 						v-model="input"
 						:attachments="composerAttachments"
 						:busy="busy"
-						:disabled="holdActive || booting"
+						:disabled="holdActive || booting || !!chosenSuggestion"
 						:canSend="canSend"
 						:sendTitle="voiceSendBlockReason"
 						:placeholder="composerPlaceholder"
@@ -3383,257 +3393,31 @@
 							</div>
 						</template>
 						<template #left-toolbar="{ pickFiles }">
-							<button
-								class="jv-iconbtn"
-								title="Attach file"
+							<!-- The "+" menu (Claude / ChatGPT style), the one place to add to a
+							     message: files, a skill, a connector focus, and wiki grounding as a
+							     check item. What is on shows as pills beside it (× clears). A chosen
+							     skill rides on the next message as its "/skill_name" token (see
+							     send(): withSkillToken); wiki is one-shot (groundNextTurn); the
+							     connector focus holds for the chat (setConnectorFocus). -->
+							<ComposerPlusMenu
 								:disabled="holdActive"
-								@click="pickFiles"
-								style="
-									width: 30px;
-									height: 30px;
-									display: flex;
-									align-items: center;
-									justify-content: center;
-									background: transparent;
-									border: none;
-									border-radius: 7px;
-									cursor: pointer;
-									color: var(--text-3);
-								"
-							>
-								<svg
-									width="17"
-									height="17"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.7"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path
-										d="M21.44 11.05l-9.19 9.19a5 5 0 0 1-7.07-7.07l9.19-9.19a3.5 3.5 0 0 1 4.95 4.95l-9.2 9.19a1.5 1.5 0 0 1-2.12-2.12l8.49-8.49"
-									/>
-								</svg>
-							</button>
-							<!-- Empty wiki is the one unavailable state the USER can fix (write a
-							     page, or answer the "worth remembering?" nudge), so it fades with
-							     a self-serve hint instead of "ask your administrator". Feature
-							     switched off / error stay hidden. -->
-							<button
-								v-if="wikiEmpty"
-								class="jv-iconbtn jv-unavailable"
-								aria-disabled="true"
-								title="No wiki pages yet"
-								aria-label="No wiki pages yet"
-								style="
-									width: 30px;
-									height: 30px;
-									display: flex;
-									align-items: center;
-									justify-content: center;
-									background: transparent;
-									border: none;
-									border-radius: 7px;
-									cursor: default;
-									color: var(--text-3);
-								"
-								@click="
-									notify(
-										`No wiki pages yet. I'll ask when something's worth remembering, or add one in Wiki.`,
-										{ type: 'info' }
-									)
-								"
-							>
-								<svg
-									width="16"
-									height="16"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.7"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-									<path
-										d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"
-									/>
-								</svg>
-							</button>
-							<button
-								v-if="ui.wiki_enabled"
-								class="jv-iconbtn"
-								:title="
-									groundNextTurn
-										? 'Wiki grounding armed. Your next message will be answered from the wiki (click to turn off)'
-										: 'Ground your next message on the org wiki'
-								"
-								:disabled="holdActive"
-								@click="groundNextTurn = !groundNextTurn"
-								:aria-pressed="String(groundNextTurn)"
-								:style="{
-									height: '30px',
-									display: 'flex',
-									alignItems: 'center',
-									gap: '4px',
-									padding: groundNextTurn ? '0 8px' : '0',
-									width: groundNextTurn ? 'auto' : '30px',
-									justifyContent: 'center',
-									background: 'transparent',
-									border: groundNextTurn ? '1px solid var(--cta)' : 'none',
-									borderRadius: '7px',
-									cursor: 'pointer',
-									color: groundNextTurn ? 'var(--cta)' : 'var(--text-3)',
-									fontSize: '12px',
-									fontWeight: '500',
-								}"
-							>
-								<svg
-									width="16"
-									height="16"
-									viewBox="0 0 24 24"
-									fill="none"
-									stroke="currentColor"
-									stroke-width="1.7"
-									stroke-linecap="round"
-									stroke-linejoin="round"
-								>
-									<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
-									<path
-										d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"
-									/>
-								</svg>
-								<span v-if="groundNextTurn">Wiki</span>
-							</button>
-							<!-- Connector-focus pill: scope this conversation to one connected +
-							     enabled app (the bench limits the turn's tools to it, see sendCtx.focus_connector
-							     in send()). Connectors are a default feature, so this is always
-							     shown, even before the first app is connected, so the picker's
-							     "Browse connectors" row is the way in; a focus already armed still
-							     shows the pill so it stays clearable even if that connector was
-							     since disabled. The pill's
-							     border/background live on this wrapping span (not on either
-							     button), because Composer.vue's own convention is that a remove
-							     control is a SIBLING button, never nested inside the one it sits
-							     on - the ×, below, is exactly that sibling, not a nested control.
-
-							     The picker itself is a frappe-ui Dropdown (same idiom as the
-							     header's support pill above) rather than a hand-rolled overlay:
-							     this span is its default-slot trigger, so open/close and
-							     outside-click/Escape are the component's, not ours - see
-							     connectorFocusMenuOptions and onConnectorFocusOpenChange below.
-							     side="top" because this toolbar sits at the BOTTOM of the
-							     composer, unlike the header pill which opens downward. The as-
-							     child trigger attaches its open-on-click behaviour to this span,
-							     so a click on either inner button bubbles up and opens the menu -
-							     the × must stop that bubbling (.stop) or clearing focus would
-							     reopen the picker in the same click. -->
-							<Dropdown
-								:options="connectorFocusMenuOptions"
-								side="top"
-								@update:open="onConnectorFocusOpenChange"
-							>
-								<span
-									class="jv-connfocus-pill"
-									:class="{ 'jv-connfocus-pill--on': connectorFocus }"
-									:style="{
-										display: 'flex',
-										alignItems: 'center',
-										height: '30px',
-										padding: connectorFocus ? '0 2px 0 8px' : '0',
-										borderRadius: '7px',
-										border: connectorFocus
-											? '1px solid var(--border)'
-											: 'none',
-										background: connectorFocus
-											? 'var(--surface-1)'
-											: 'transparent',
-										color: connectorFocus ? 'var(--text)' : 'var(--text-3)',
-									}"
-								>
-									<button
-										class="jv-iconbtn"
-										:title="
-											connectorFocus
-												? `Focused on ${connectorFocus.label}. Click to change.`
-												: 'Focus this chat on one connected app'
-										"
-										:aria-pressed="String(!!connectorFocus)"
-										:style="{
-											height: connectorFocus ? '26px' : '30px',
-											display: 'flex',
-											alignItems: 'center',
-											gap: '4px',
-											padding: 0,
-											width: connectorFocus ? 'auto' : '30px',
-											justifyContent: 'center',
-											background: 'transparent',
-											border: 'none',
-											borderRadius: connectorFocus ? '6px' : '7px',
-											cursor: 'pointer',
-											color: 'inherit',
-											fontSize: '12px',
-											fontWeight: '500',
-										}"
-									>
-										<ConnectorLogo
-											v-if="connectorFocus"
-											:preset="connectorFocus.preset"
-											:size="14"
-										/>
-										<svg
-											v-else
-											width="16"
-											height="16"
-											viewBox="0 0 24 24"
-											fill="none"
-											stroke="currentColor"
-											stroke-width="1.7"
-											stroke-linecap="round"
-											stroke-linejoin="round"
-										>
-											<path d="M12 22v-5" />
-											<path d="M9 8V2" />
-											<path d="M15 8V2" />
-											<path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" />
-										</svg>
-										<span
-											v-if="connectorFocus"
-											style="
-												max-width: 100px;
-												overflow: hidden;
-												text-overflow: ellipsis;
-												white-space: nowrap;
-											"
-											>{{ connectorFocus.label }}</span
-										>
-									</button>
-									<button
-										v-if="connectorFocus"
-										class="jv-iconbtn"
-										title="Clear focus"
-										aria-label="Clear connector focus"
-										style="
-											width: 20px;
-											height: 20px;
-											display: flex;
-											align-items: center;
-											justify-content: center;
-											background: transparent;
-											border: none;
-											border-radius: 50%;
-											cursor: pointer;
-											color: inherit;
-											font-size: 13px;
-											line-height: 1;
-										"
-										@click.stop="setConnectorFocus(null)"
-									>
-										×
-									</button>
-								</span>
-							</Dropdown>
+								:skills="customSkills"
+								:selected-skill="armedSkill"
+								:connectors="connectorFocusOptions"
+								:focus="connectorFocus"
+								:wiki-available="!!ui.wiki_enabled"
+								:wiki-empty="wikiEmpty"
+								:wiki-on="groundNextTurn"
+								can-manage-skills
+								can-browse-connectors
+								@open="onPlusMenuOpen"
+								@attach="pickFiles"
+								@skill="armedSkill = $event ? $event.skill_name : ''"
+								@connector="setConnectorFocus"
+								@wiki="groundNextTurn = $event"
+								@manage-skills="router.push('/skills')"
+								@browse-connectors="browseConnectors"
+							/>
 							<!-- Auto mode (#581): last in this group, after connectors. Same shape and
 							     on-state colour as the Wiki toggle; the icon is the two filled
 							     triangles Claude Code shows for its auto mode. -->
@@ -4589,6 +4373,8 @@ const CHECK_DEADLINE_MS = 15000;
 import StepsBox from "@/components/chat/StepsBox.vue";
 import Composer from "@/components/chat/Composer.vue";
 import ConnectorLogo from "@/components/settings/ConnectorLogo.vue";
+import ComposerPlusMenu from "@/components/chat/ComposerPlusMenu.vue";
+import { withSkillToken } from "@/lib/skillToken.js";
 import FilePreview from "@/components/FilePreview.vue";
 import FileBoxUseAsSource from "@/components/chat/FileBoxUseAsSource.vue";
 import DocumentBlocks from "@/components/DocumentBlocks.vue";
@@ -4596,6 +4382,8 @@ import SheetCharts from "@/components/SheetCharts.vue";
 import { chartsForSheet, tablePreviewFields } from "@/components/sheetCharts";
 import ModelEffortPicker from "@/components/chat/ModelEffortPicker.vue";
 import AskCard from "@/components/chat/AskCard.vue";
+import SuggestedReplies from "@/components/chat/SuggestedReplies.vue";
+import { suggestRepliesOn } from "@/lib/suggestRepliesPref";
 import FileBoxWaits from "@/components/chat/FileBoxWaits.vue";
 import FileBoxSheetReview from "@/components/chat/FileBoxSheetReview.vue";
 import { useFileBoxWaits } from "@/composables/useFileBoxWaits";
@@ -5598,6 +5386,9 @@ onMounted(() => {
 // context.ground_wiki flag so the backend injects relevant wiki page bodies
 // into that turn. Cleared after each send (see send()).
 const groundNextTurn = ref(false);
+// The skill picked in the composer's "+" menu (its skill_name), or "". Folded into the
+// NEXT main-composer message as "/skill_name" (send()), then cleared, like a typed one.
+const armedSkill = ref("");
 const groundSelectionVersion = ref(0);
 watch(
 	groundNextTurn,
@@ -6108,7 +5899,7 @@ const currentMsgId = ref(null); // in-flight assistant row id (from run:start) �
 const errorMeta = ref({}); // { [message_id]: { code, changed_data } } from a live run:error (not persisted; a refresh falls back to classifying the error string)
 // Pump streaming (Relay Pump) end-to-end epoch/seq fence (CDX-3 + CDX-12). The pure fence
 // logic lives in @/utils/eventFence.js (extracted so it is unit-tested by a real node test
-// — jarvis/tests/test_event_fence_client.py runs frontend/src/utils/eventFence.test.js).
+// — see frontend/src/utils/eventFence.test.js).
 // The fence is RUN-SCOPED — ONE entry per run_id — and is applied to EVERY pump event type
 // (deltas, run:start/recovering/error/end, and ALL tool events incl. jarvis__*). CDX-12:
 // the FIRST terminal at the current epoch is accepted on seq equality (it shares the delta
@@ -7210,7 +7001,7 @@ const headerSub = computed(() => {
 const canSend = computed(
 	() =>
 		!booting.value &&
-		(input.value.trim().length > 0 || pendingFiles.value.length > 0) &&
+		(input.value.trim().length > 0 || pendingFiles.value.length > 0 || !!armedSkill.value) &&
 		!sending.value &&
 		// A compaction (auto mid-turn, or one we started) must never race a turn
 		// writing the same context — Composer has no bare `disabled` prop, so this
@@ -7476,7 +7267,9 @@ const triggerMode = ref(false);
 // "Ask Jarvis" style) instead of a chip list, and a small marker sits above it.
 const TRIGGER_PLACEHOLDER = "e.g. Warn me when a Sales Invoice over 1 lakh is submitted";
 const composerPlaceholder = computed(() =>
-	booting.value
+	chosenSuggestion.value
+		? "Send the chosen follow-up, or untick it to type"
+		: booting.value
 		? "Loading conversation…"
 		: compacting.value
 		? "Compacting this chat, try again in a moment"
@@ -8004,6 +7797,26 @@ function answerConfirm(ok, label, messageId) {
 function answerAsk(answer, messageId) {
 	if (!messageActionIsCurrent(captureChatView(messageId || ""))) return;
 	send(answer);
+}
+
+// Suggested replies (jarvis.chat.suggest_replies, after Frappe Flow): the user's likely
+// next messages, stored on the reply and pushed over realtime (message:replies). Shown
+// under the LATEST finished reply only (_lastAssistant: none mid-turn), and not while
+// that reply already offers its own next step: a clarifying question (AskCard), a
+// confirmation card or an unsaved draft. A tap ticks one (never sends); its Send sends
+// it as the next message. While one is ticked the composer is locked, so exactly the
+// chosen text goes out (SuggestedReplies emits "" when it is unticked or goes away).
+const chosenSuggestion = ref("");
+function suggestionsFor(m) {
+	if (!suggestRepliesOn.value || !m || m !== _lastAssistant.value) return null;
+	const s = m.suggested_replies;
+	if (!s || !Array.isArray(s.replies) || !s.replies.length) return null;
+	if (activeAsk.value || visiblePendingActions.value.length || _liveDraft.value) return null;
+	return s;
+}
+function sendSuggestion(text, messageId) {
+	if (!text || !messageActionIsCurrent(captureChatView(messageId || ""))) return;
+	send(text);
 }
 
 // --- Field-control helpers shared by the confirm card and the record draft
@@ -10992,6 +10805,8 @@ async function loadConversation(id, { staleRetry = true } = {}) {
 	// One-shot wiki grounding is per-turn: never carry an armed pill into a
 	// different conversation (matches how modelOverride/auto-apply reload here).
 	groundNextTurn.value = false;
+	// Same for a skill picked in the "+" menu.
+	armedSkill.value = "";
 	// Trigger-build mode is per-conversation too: switching chats clears it.
 	triggerMode.value = false;
 	createMenuOpen.value = false;
@@ -12167,6 +11982,9 @@ async function send(textArg, resendAck) {
 		: fromMain
 		? pendingFiles.value.slice()
 		: [];
+	// A skill picked in the "+" menu rides in front as its "/skill_name" token (the
+	// server resolves and checks it), so the skill alone is a message too.
+	if (fromMain && armedSkill.value) text = withSkillToken(text, armedSkill.value);
 	if ((!text && !attachments.length) || sending.value) return;
 	// aerele/jarvis#2191: a Reply's quote rides in front of the typed question (only a
 	// main-composer message with words of its own; the history keeps just the question).
@@ -12203,6 +12021,7 @@ async function send(textArg, resendAck) {
 	if (fromMain) {
 		input.value = "";
 		replyQuote.value = "";
+		armedSkill.value = "";
 		pendingFiles.value = [];
 		failedUploads.value = [];
 		mention.value = { ...mention.value, open: false };
@@ -13278,6 +13097,13 @@ function onEvent(p) {
 			// in the composer): see giveUpGotoAtRunEnd. A repeat does nothing here.
 			const nothingStarted = !countdown && !gotoRepeat;
 			if (nothingStarted) giveUpGotoAtRunEnd(p, goto);
+			break;
+		}
+		case "message:replies": {
+			// The suggested replies landed for a reply in this chat (a short-queue job,
+			// seconds after run:end). Set them on the row in place: no reload.
+			const m = messages.value.find((x) => x.name === p.message_id);
+			if (m && Array.isArray(p.replies)) m.suggested_replies = { replies: p.replies };
 			break;
 		}
 		case "message:enriched": {
@@ -14475,9 +14301,7 @@ function _saveConnectorFocusFor(id, row) {
 		else localStorage.removeItem(_connectorFocusStorageKey(id));
 	} catch (e) {}
 }
-// Called from the picker (a row click) and from the pill's own × (row = null).
-// The Dropdown closes itself on either path (item select or the ×'s own
-// click), so there is no open flag to clear here.
+// Called from the "+" menu's connector list (a row) and from the focus pill's × (null).
 function setConnectorFocus(row) {
 	connectorFocus.value = row
 		? { key: row.key, label: row.label, preset: row.preset || "" }
@@ -14503,83 +14327,16 @@ async function loadConnectorFocusOptions() {
 		connectorFocusOptions.value = [];
 	}
 }
-// Same plug mark as the pill's own unfocused-state icon (see the template),
-// as a bare render function so it can go through an item's `slots.prefix`
-// below - Dropdown's `icon` field renders a component but passes it no
-// props, and a bare svg has none to pass, so this needs no wrapper.
-function _connectorFocusPlugIcon() {
-	return h(
-		"svg",
-		{
-			width: 16,
-			height: 16,
-			viewBox: "0 0 24 24",
-			fill: "none",
-			stroke: "currentColor",
-			"stroke-width": "1.7",
-			"stroke-linecap": "round",
-			"stroke-linejoin": "round",
-		},
-		[
-			h("path", { d: "M12 22v-5" }),
-			h("path", { d: "M9 8V2" }),
-			h("path", { d: "M15 8V2" }),
-			h("path", { d: "M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z" }),
-		]
-	);
-}
-// Dropdown items for the picker: "Clear focus" first (only when a focus is
-// armed), one row per usable connected app, then an always-shown "Browse
-// connectors" row in its own group so the divide-y border lands in the same
-// place its old footer border did. A logo needs a per-row `preset` prop, and
-// the plain `icon` field has no way to carry one, so both icons render
-// through the item's own `slots.prefix` (same idiom supportMenuOptions above
-// uses for its `slots.suffix` count) instead of `icon`.
-const connectorFocusMenuOptions = computed(() => {
-	const rows = [];
-	if (connectorFocus.value) {
-		rows.push({ label: "Clear focus", onClick: () => setConnectorFocus(null) });
-	}
-	if (connectorFocusOptions.value.length) {
-		for (const row of connectorFocusOptions.value) {
-			rows.push({
-				label: row.label,
-				selected: connectorFocus.value?.key === row.key,
-				onClick: () => setConnectorFocus(row),
-				slots: { prefix: () => h(ConnectorLogo, { preset: row.preset, size: 16 }) },
-			});
-		}
-	} else {
-		rows.push({ label: "No connected apps yet.", disabled: true });
-	}
-	return [
-		{ group: "", hideLabel: true, items: rows },
-		{
-			group: "",
-			hideLabel: true,
-			items: [
-				{
-					label: "Browse connectors",
-					onClick: browseConnectors,
-					slots: { prefix: () => h(_connectorFocusPlugIcon) },
-				},
-			],
-		},
-	];
-});
-// Refetch on every open: an app connected in Settings a moment ago must show
-// up here without a page reload (the mount-time prefetch only decides the
-// pill's first paint). Hooked to the Dropdown's own update:open - fired by
-// reka-ui however the menu opened (click, keyboard) or closed (selection,
-// outside click, Escape) - rather than a manual toggle, so there is no open
-// flag here to keep in sync with the component's own state.
-function onConnectorFocusOpenChange(open) {
-	if (!open) return;
+// The "+" menu opened: fresh skills and connected apps on every open, so one added a
+// moment ago in Settings shows without a reload (the mount-time prefetch only decides
+// the first paint).
+function onPlusMenuOpen() {
 	mention.value = { ...mention.value, open: false };
+	loadCustomSkills();
 	connectorFocusLoaded.value = false;
 	loadConnectorFocusOptions();
 }
-// Footer row of the picker (both the populated and empty states). Uses
+// The connector list's "Browse connectors" row (both the populated and empty states). Uses
 // store.openSettings, not the local settingsTab ref: settingsTab only
 // drives ChatView's own macroruns-poll gate, it is not wired to the
 // hoisted SettingsDialog (which reads store.settingsSection, written by
@@ -15193,20 +14950,6 @@ onUnmounted(() => {
 }
 .jv-iconbtn:hover svg {
 	stroke: var(--surface) !important;
-}
-/* The FOCUSED connector pill (--on) is a labeled chip, not a bare icon. The
-   default .jv-iconbtn:hover bold-inverts to a solid var(--text) fill, which
-   painted the whole pill black on the light theme. Give its inner buttons a
-   subtle, theme-aware surface hover instead, keeping the accent border and
-   label readable. Unfocused, the pill is a bare icon and falls through to the
-   shared .jv-iconbtn hover like Wiki and Auto. (Dark has a matching override
-   below.) */
-.jv-connfocus-pill--on .jv-iconbtn:hover {
-	background: var(--surface-2) !important;
-	color: var(--cta) !important;
-}
-.jv-connfocus-pill--on .jv-iconbtn:hover svg {
-	stroke: var(--cta) !important;
 }
 .jv-ctxbtn:hover {
 	background: var(--surface-2);
@@ -18297,16 +18040,6 @@ onUnmounted(() => {
 .jv-dark .jv-modelpill:hover span {
 	color: var(--text) !important;
 }
-/* Focused connector chip hover in dark: subtle surface, accent kept (matches
-   the light-theme override above rather than the bold neutral iconbtn hover).
-   The bare unfocused icon uses the shared .jv-dark .jv-iconbtn hover. */
-.jv-dark .jv-connfocus-pill--on .jv-iconbtn:hover {
-	background: var(--surface-3) !important;
-	color: var(--cta) !important;
-}
-.jv-dark .jv-connfocus-pill--on .jv-iconbtn:hover svg {
-	stroke: var(--cta) !important;
-}
 .jv-dark .jv-confirm-yes:hover,
 .jv-dark .jv-action-primary:hover {
 	background: var(--cta) !important;
@@ -18431,6 +18164,15 @@ onUnmounted(() => {
 /* The two lines that already carry a 14px left margin keep it on top of the indent. */
 .jv-thread-inner > :is(.jv-stack-hint, .jv-pending-older-note) {
 	margin-left: calc(var(--jv-reply-indent) + 14px);
+}
+/* A card or note right after a reply belongs to that reply: it sits 8px under the reply's hover
+   row (time, copy), not a full thread gap (26px) below it. The hover row keeps its place. Only the
+   first one after a reply moves; the next items keep the thread gap. A reply with no hover row
+   (still streaming) is left alone: there the row's own height is not there to keep the distance. */
+.jv-thread-inner
+	> .jv-amsg:has(.jv-metabar:not(:empty))
+	+ :is(.jv-receipt, .jv-toolfail, .jv-action, .jv-tool-draft, .jv-fbw, .jv-rrc) {
+	margin-top: -18px;
 }
 .jv-tool-draft :deep(.dc) {
 	margin: 0;

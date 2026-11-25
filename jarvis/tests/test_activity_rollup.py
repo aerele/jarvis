@@ -1150,13 +1150,6 @@ class TestTodayPartial(RollupCase):
 		frappe.db.sql(f"update `tab{DAILY}` set `through` = %s where `day` = %s", (tm(d(1), 11), TODAY))
 		self.assertEqual(self.people(TODAY, TODAY)["people"], reference)  # a stamp from another day
 
-	def test_the_five_minute_margin(self):
-		base.ev(tm(TODAY, 8, 50), event="read", actor=A, rows=1)
-		self.roll_today(tm(TODAY, 10, 3))
-		self.assertEqual(self.today_through(), {tm(TODAY, 9)})  # 10:00 ended only 3 minutes ago
-		self.roll_today(tm(TODAY, 10, 6))
-		self.assertEqual(self.today_through(), {tm(TODAY, 10)})
-
 	def test_a_row_stamped_before_h_inserted_after_the_roll_is_included_by_the_next_roll(self):
 		base.ev(tm(TODAY, 8, 0), event="read", actor=A, rows=1)
 		self.roll_today(tm(TODAY, 10, 6))

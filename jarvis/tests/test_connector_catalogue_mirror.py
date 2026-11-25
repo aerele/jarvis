@@ -124,3 +124,272 @@ class TestConnectorCatalogueMirror(FrappeTestCase):
 		with patch("frappe.log_error") as log:
 			self.assertEqual(connector_catalogue.disabled_names(), set())
 		log.assert_called_once()
+
+
+KEY_FIELD = "connector_key_overrides"
+KEY_SYNCED_AT = "connector_key_overrides_synced_at"
+KEY_MARKER = "connector_key_policy_supported"
+SIGN_IN_ONLY = "Sentry"  # dcr, ships accepts_key=False
+KEY_OK = "Linear"  # dcr, ships accepts_key=True
+KEY_ONLY = "Stripe"  # token class: always takes a key
+
+
+def _key_conn(**extra) -> dict:
+	return {KEY_MARKER: True, **extra}
+
+
+def _stored_overrides() -> dict | None:
+	raw = frappe.db.get_single_value(SETTINGS, KEY_FIELD, cache=False)
+	return json.loads(raw) if raw else None
+
+
+class TestConnectorKeyOverridesMirror(FrappeTestCase):
+	def setUp(self):
+		fields = (KEY_FIELD, KEY_SYNCED_AT)
+		self._saved = {f: frappe.db.get_single_value(SETTINGS, f, cache=False) for f in fields}
+		frappe.db.set_single_value(SETTINGS, {KEY_FIELD: "", KEY_SYNCED_AT: None}, update_modified=False)
+
+	def tearDown(self):
+		frappe.db.set_single_value(SETTINGS, self._saved, update_modified=False)
+
+	def _seed(self, overrides: dict) -> None:
+		connector_catalogue.persist_key_overrides_from_connection(
+			_key_conn(connector_key_overrides=overrides)
+		)
+		self.assertEqual(_stored_overrides(), overrides)
+
+	def test_the_presets_used_here_ship_as_described(self):
+		self.assertFalse(catalog.accepts_key_of(SIGN_IN_ONLY))
+		self.assertTrue(catalog.accepts_key_of(KEY_OK))
+		self.assertEqual(catalog.auth_of(SIGN_IN_ONLY), catalog.AUTH_DCR)
+		self.assertEqual(catalog.auth_of(KEY_ONLY), catalog.AUTH_TOKEN)
+
+	def test_well_formed_map_is_authoritative(self):
+		self._seed({SIGN_IN_ONLY: True, KEY_OK: False})
+		self.assertEqual(connector_catalogue.key_overrides(), {SIGN_IN_ONLY: True, KEY_OK: False})
+		self.assertTrue(frappe.db.get_single_value(SETTINGS, KEY_SYNCED_AT, cache=False))
+
+	def test_empty_map_is_authoritative_and_clears(self):
+		self._seed({SIGN_IN_ONLY: True})
+		connector_catalogue.persist_key_overrides_from_connection(_key_conn(connector_key_overrides={}))
+		self.assertEqual(_stored_overrides(), {})
+		self.assertEqual(connector_catalogue.key_overrides(), {})
+
+	def test_names_are_stripped(self):
+		connector_catalogue.persist_key_overrides_from_connection(
+			_key_conn(connector_key_overrides={f" {KEY_OK} ": False})
+		)
+		self.assertEqual(_stored_overrides(), {KEY_OK: False})
+
+	def test_marker_absent_keeps_last_applied(self):
+		self._seed({SIGN_IN_ONLY: True})
+		connector_catalogue.persist_key_overrides_from_connection({KEY_FIELD: {}})
+		self.assertEqual(_stored_overrides(), {SIGN_IN_ONLY: True})
+
+	def test_key_absent_keeps_last_applied(self):
+		self._seed({SIGN_IN_ONLY: True})
+		connector_catalogue.persist_key_overrides_from_connection(_key_conn())
+		self.assertEqual(_stored_overrides(), {SIGN_IN_ONLY: True})
+
+	def test_malformed_payload_keeps_last_applied_and_logs(self):
+		self._seed({SIGN_IN_ONLY: True})
+		bad_payloads = (
+			[SIGN_IN_ONLY],
+			"Sentry",
+			None,
+			{SIGN_IN_ONLY: "true"},
+			{SIGN_IN_ONLY: 1},
+			{SIGN_IN_ONLY: None},
+			{"": True},
+			{"  ": True},
+			{SIGN_IN_ONLY: True, f" {SIGN_IN_ONLY}": False},
+		)
+		for bad in bad_payloads:
+			with self.subTest(payload=bad), patch("frappe.log_error") as log:
+				connector_catalogue.persist_key_overrides_from_connection(
+					_key_conn(connector_key_overrides=bad)
+				)
+				self.assertEqual(_stored_overrides(), {SIGN_IN_ONLY: True})
+				log.assert_called_once()
+				self.assertIn("malformed", log.call_args.kwargs["title"])
+
+	def test_never_raises(self):
+		with (
+			patch("frappe.db.set_single_value", side_effect=RuntimeError("db down")),
+			patch("frappe.log_error") as log,
+		):
+			connector_catalogue.persist_key_overrides_from_connection(
+				_key_conn(connector_key_overrides={KEY_OK: False})
+			)
+		log.assert_called_once()
+
+	def test_never_pulled_means_the_code_defaults(self):
+		self.assertEqual(connector_catalogue.key_overrides(), {})
+		self.assertFalse(connector_catalogue.accepts_key(SIGN_IN_ONLY))
+		self.assertTrue(connector_catalogue.accepts_key(KEY_OK))
+
+	def test_corrupt_stored_value_falls_back_and_logs(self):
+		frappe.db.set_single_value(SETTINGS, KEY_FIELD, "{not json", update_modified=False)
+		with patch("frappe.log_error") as log:
+			self.assertEqual(connector_catalogue.key_overrides(), {})
+		log.assert_called_once()
+
+	def test_override_turns_a_key_on_and_off_for_a_switchable_preset(self):
+		self._seed({SIGN_IN_ONLY: True, KEY_OK: False})
+		self.assertTrue(connector_catalogue.accepts_key(SIGN_IN_ONLY))
+		self.assertFalse(connector_catalogue.accepts_key(KEY_OK))
+
+	def test_override_is_ignored_off_a_switchable_preset(self):
+		self._seed({KEY_ONLY: False, catalog.CUSTOM_URL: False, "No Such App": False})
+		self.assertTrue(connector_catalogue.accepts_key(KEY_ONLY), "token class always takes a key")
+		self.assertTrue(connector_catalogue.accepts_key(catalog.CUSTOM_URL))
+		self.assertTrue(connector_catalogue.accepts_key("No Such App"))
+
+	def test_public_catalog_shows_the_effective_value(self):
+		self._seed({SIGN_IN_ONLY: True, KEY_OK: False, KEY_ONLY: False})
+		by_name = {row["name"]: row for row in connector_catalogue.public_catalog()}
+		self.assertTrue(by_name[SIGN_IN_ONLY]["accepts_key"])
+		self.assertFalse(by_name[KEY_OK]["accepts_key"])
+		self.assertTrue(by_name[KEY_ONLY]["accepts_key"])
+
+	def test_public_catalog_without_overrides_matches_the_shipped_one(self):
+		shipped = [{**row, "coming_soon": False} for row in catalog.to_public()]
+		self.assertEqual(connector_catalogue.public_catalog(), shipped)
+
+
+SOON_FIELD = "connector_catalogue_coming_soon"
+SOON_MARKER = "connector_catalogue_states_supported"
+CODE_DISABLED = "Plaid"  # ships enabled=False in code
+
+
+def _soon_conn(**extra) -> dict:
+	return {SOON_MARKER: True, **extra}
+
+
+def _stored_soon() -> list | None:
+	raw = frappe.db.get_single_value(SETTINGS, SOON_FIELD, cache=False)
+	return json.loads(raw) if raw else None
+
+
+class TestConnectorComingSoonMirror(FrappeTestCase):
+	def setUp(self):
+		fields = (FIELD, SOON_FIELD)
+		self._saved = {f: frappe.db.get_single_value(SETTINGS, f, cache=False) for f in fields}
+		frappe.db.set_single_value(SETTINGS, {f: "" for f in fields}, update_modified=False)
+
+	def tearDown(self):
+		frappe.db.set_single_value(SETTINGS, self._saved, update_modified=False)
+
+	def _seed(self, soon: list, disabled: list | None = None) -> None:
+		connector_catalogue.persist_from_connection(
+			_conn(connector_catalogue_disabled=soon if disabled is None else disabled)
+		)
+		connector_catalogue.persist_coming_soon_from_connection(
+			_soon_conn(connector_catalogue_coming_soon=soon)
+		)
+
+	def test_well_formed_list_is_authoritative(self):
+		self._seed([PRESET])
+		self.assertEqual(_stored_soon(), [PRESET])
+		self.assertEqual(connector_catalogue.coming_soon_names(), {PRESET})
+		self.assertTrue(connector_catalogue.is_coming_soon(PRESET))
+
+	def test_empty_list_is_authoritative_and_clears(self):
+		self._seed([PRESET])
+		connector_catalogue.persist_coming_soon_from_connection(
+			_soon_conn(connector_catalogue_coming_soon=[])
+		)
+		self.assertEqual(_stored_soon(), [])
+		self.assertEqual(connector_catalogue.coming_soon_names(), set())
+
+	def test_names_are_stripped_deduped_and_sorted(self):
+		connector_catalogue.persist_coming_soon_from_connection(
+			_soon_conn(connector_catalogue_coming_soon=[f" {PRESET} ", OTHER, PRESET])
+		)
+		self.assertEqual(_stored_soon(), sorted([PRESET, OTHER]))
+
+	def test_marker_absent_keeps_last_applied(self):
+		self._seed([PRESET])
+		connector_catalogue.persist_coming_soon_from_connection({SOON_FIELD: []})
+		self.assertEqual(_stored_soon(), [PRESET])
+
+	def test_key_absent_keeps_last_applied(self):
+		self._seed([PRESET])
+		connector_catalogue.persist_coming_soon_from_connection(_soon_conn())
+		self.assertEqual(_stored_soon(), [PRESET])
+
+	def test_malformed_payload_keeps_last_applied_and_logs_once(self):
+		self._seed([PRESET])
+		for bad in ({"PayPal": True}, "PayPal", [PRESET, ""], [PRESET, 3], [None], None):
+			with self.subTest(payload=bad), patch("frappe.log_error") as log:
+				connector_catalogue.persist_coming_soon_from_connection(
+					_soon_conn(connector_catalogue_coming_soon=bad)
+				)
+				self.assertEqual(_stored_soon(), [PRESET])
+				log.assert_called_once()
+				self.assertIn("malformed", log.call_args.kwargs["title"])
+
+	def test_never_raises(self):
+		with (
+			patch("frappe.db.set_single_value", side_effect=RuntimeError("db down")),
+			patch("frappe.log_error") as log,
+		):
+			connector_catalogue.persist_coming_soon_from_connection(
+				_soon_conn(connector_catalogue_coming_soon=[PRESET])
+			)
+		log.assert_called_once()
+
+	def test_the_write_does_not_touch_modified(self):
+		with patch("frappe.db.set_single_value") as write:
+			connector_catalogue.persist_coming_soon_from_connection(
+				_soon_conn(connector_catalogue_coming_soon=[PRESET])
+			)
+		self.assertEqual(write.call_args.kwargs, {"update_modified": False})
+
+	def test_a_name_must_also_be_disabled(self):
+		self._seed([PRESET, OTHER], disabled=[PRESET])
+		self.assertEqual(connector_catalogue.coming_soon_names(), {PRESET})
+
+	def test_unknown_and_code_disabled_names_are_ignored(self):
+		self._seed(["No Such App", catalog.CUSTOM_URL, CODE_DISABLED, PRESET])
+		self.assertEqual(connector_catalogue.coming_soon_names(), {PRESET})
+		self.assertFalse(catalog.by_name(CODE_DISABLED).enabled)
+		names = {row["name"] for row in connector_catalogue.public_catalog()}
+		self.assertNotIn(CODE_DISABLED, names)
+
+	def test_old_control_plane_marks_nothing_coming_soon(self):
+		connector_catalogue.persist_from_connection(_conn(connector_catalogue_disabled=[PRESET]))
+		connector_catalogue.persist_coming_soon_from_connection(
+			{MARKER: True, "connector_catalogue_coming_soon": [PRESET]}
+		)
+		self.assertEqual(connector_catalogue.coming_soon_names(), set())
+		self.assertNotIn(PRESET, {r["name"] for r in connector_catalogue.public_catalog()})
+
+	def test_public_catalog_keeps_a_coming_soon_preset_flagged_and_drops_a_hidden_one(self):
+		connector_catalogue.persist_from_connection(_conn(connector_catalogue_disabled=[PRESET, OTHER]))
+		connector_catalogue.persist_coming_soon_from_connection(
+			_soon_conn(connector_catalogue_coming_soon=[PRESET])
+		)
+		by_name = {row["name"]: row for row in connector_catalogue.public_catalog()}
+		self.assertTrue(by_name[PRESET]["coming_soon"])
+		self.assertNotIn(OTHER, by_name)
+		self.assertFalse(by_name["Linear"]["coming_soon"])
+		self.assertNotIn("base_url", by_name[PRESET])
+		shipped_order = [row["name"] for row in catalog.to_public() if row["name"] != OTHER]
+		self.assertEqual(list(by_name), shipped_order, "catalog order is kept")
+
+	def test_refusal_message_follows_the_state(self):
+		connector_catalogue.persist_from_connection(_conn(connector_catalogue_disabled=[PRESET, OTHER]))
+		connector_catalogue.persist_coming_soon_from_connection(
+			_soon_conn(connector_catalogue_coming_soon=[PRESET])
+		)
+		self.assertEqual(connector_catalogue.refusal_message(PRESET), "This app is coming soon.")
+		self.assertEqual(
+			connector_catalogue.refusal_message(OTHER), "This app is turned off for your workspace."
+		)
+
+	def test_corrupt_stored_value_fails_open_and_logs(self):
+		frappe.db.set_single_value(SETTINGS, SOON_FIELD, "{not json", update_modified=False)
+		with patch("frappe.log_error") as log:
+			self.assertEqual(connector_catalogue.coming_soon_names(), set())
+		log.assert_called_once()
