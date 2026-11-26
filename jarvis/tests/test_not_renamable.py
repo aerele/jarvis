@@ -22,6 +22,9 @@ NOT_RENAMABLE = (
 	"Jarvis Chat Send Request",
 	"Jarvis User Settings",
 	"Jarvis Payment Calendar Settings",
+	"Jarvis Payment Calendar Cache Head",
+	"Jarvis Payment Calendar Cache Generation",
+	"Jarvis Payment Calendar Cache Row",
 	"Jarvis Chat Message",
 	"Jarvis Connector",
 	"Jarvis Agent Installation",
@@ -123,6 +126,9 @@ def _seed(doctype: str) -> str:
 	refusal must not depend on what a valid record of each doctype looks like."""
 	meta = frappe.get_meta(doctype)
 	name = f"nr-{frappe.generate_hash(length=10)}"
+	if meta.autoname == "autoincrement":
+		# The name column is a number (a sequence names the rows), so a text name cannot be stored.
+		name = str(int(frappe.generate_hash(length=8), 16))
 	doc = frappe.new_doc(doctype)
 	doc.name = name
 	for df in meta.fields:
@@ -139,6 +145,8 @@ def _new_name(doctype: str) -> str:
 	field = meta.get_field((meta.autoname or "").removeprefix("field:"))
 	if field and field.fieldtype == "Date":
 		return str(frappe.utils.add_days("1900-01-01", int(frappe.generate_hash(length=4), 16)))
+	if meta.autoname == "autoincrement":
+		return str(int(frappe.generate_hash(length=8), 16))
 	return f"nr-moved-{frappe.generate_hash(length=8)}"
 
 

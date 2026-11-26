@@ -1354,3 +1354,230 @@ Rollback removes the calendar UI/APIs/jobs and expires feature caches, leaving
 existing reports/chat and accounting data untouched. Keep company floor
 configuration unless a separately reviewed removal is needed. Native UI/browser
 journeys and deployment-specific worker capacity remain subsequent pilot gates.
+
+## Per-company cache, shadow only (S4b)
+
+S4b keeps a copy of the open receivables, the open payables and the bank balances of a company in three Jarvis
+tables. A background job refreshes the copy. **Nobody sees a cached figure in S4:** no request reads the rows, and
+every reply stays byte-equal to the reply without the cache. The copy exists so that S5 can serve large companies,
+and so that a nightly proof can show that the copy equals today's read before S5 does.
+
+### What it stores
+
+| Table (DocType) | Holds |
+| --- | --- |
+| Jarvis Payment Calendar Cache Head | One row per (company, side). The side is Receivable, Payable or Bank. It holds the current generation, the durable claim, the purge epoch, the hop counter, the backoff and failure state, and the last open, success, duration and size. |
+| Jarvis Payment Calendar Cache Generation | One row per refresh result: state (`building`, `ready`, `current`, `retired`, `failed`, `purged`), anchor, `as_of`, counts, bytes, checksum, payload, timing, failure class, and the night oracle record (`shadow`). Metadata stays 30 days. |
+| Jarvis Payment Calendar Cache Row | The rows of one generation. Money is stored as text. A row carries the permission data it needs and the residue flags. |
+
+A generation holds every open row of a side (remaining not zero), the zero-balance residue rows that the reader's
+overlay would show, the excluded foreign-currency rows, and the facts S5 needs (DocType sets, currency, precision).
+It is built with the constant open-set window, so one copy serves every month. The bank generation holds every
+enabled bank and cash account with its balance, and the company book flag. Settled figures are not stored (S6).
+
+All three tables deny every user except Administrator (permission hooks in `hooks.py`), and no code except
+`cache_store` and `cache_shadow` reads the Row table. The tables are derived data: dropping them loses nothing.
+
+### The switch: `off` and `shadow` (and `on`)
+
+Three hidden fields of Jarvis Settings, changed only by `save()` as Administrator (the same way as the reader
+switch above): `payment_calendar_cache` (`off`, `shadow`, `on`), `payment_calendar_cache_companies` (one company
+per line) and `payment_calendar_cache_full_cadence` (0 or 1).
+
+- `off` (the default): the request path costs one Settings read. No Redis write, no job, no new query. The tick
+  only purges what is left from an earlier `shadow`. Only a switch that was **read** as `off`, or a company that a
+  read list leaves out, purges. A switch that cannot be read (a read error, a missing field during a migrate, a
+  value that is not a mode) is `UNKNOWN`: it acts as `off` for serving and queueing, and the tick does nothing
+  else, so one failed read never deletes the cache.
+- `shadow`: the cache refreshes the listed companies and the nightly oracle compares each generation with
+  today's read. Nobody is served.
+- `on`: **accepted, and treated as `shadow` until S5** (erratum E1; S5 serves in `on`). Every S4 path, the status
+  and the gate read the effective mode (`cache_state.effective_mode`), never the raw value.
+- `payment_calendar_cache_full_cadence`: with 0 (customer hosts) a day refresh is an hourly sample. With 1 the
+  refresh runs continuously for a company that is in use (playground and measurement bench).
+
+```
+# bench --site <site> console
+frappe.set_user("Administrator")
+settings = frappe.get_single("Jarvis Settings")
+settings.payment_calendar_cache = "shadow"            # off | shadow | on
+settings.payment_calendar_cache_companies = "<company>"
+settings.payment_calendar_cache_full_cadence = 0      # 1 on the playground and the measurement bench
+settings.save()
+frappe.db.commit()
+from jarvis.payment_calendar import cache_state
+print(cache_state.cache_settings())                   # the mode and list as the cache reads them
+```
+
+Deploy: migrate first (tables and settings fields), then restart the workers and the scheduler (the cron entry is
+new). Without the dedicated lane (below) a site gets only the night pre-warm, on its standard `long` worker: no
+extra worker is needed.
+
+### The refresh chain
+
+1. **Trigger.** `cache.note_opened(company)` runs at the end of `request_snapshot`, wrapped so that it never
+   changes a reply. It marks the heads as opened (at most one write per head in 5 minutes) and queues a stale
+   side. `cache.tick` (cron every 5 minutes) queues the sides of companies opened in the last 30 minutes.
+   A side starts when its age reaches `14 min - 2 x duration - 5 min` (never below 0). At 0 the chain is
+   continuous. The request path remembers the lane probe for 30 seconds in each process.
+2. **Admission.** (A job that skips for a lasting reason, `no_slot` for 1 minute, `no_disk`, `deletion_running`
+   and `scheduler_inactive` for 10 minutes, `unsupported_major` for 1 hour, leaves a short Redis memo per side:
+   the tick and the requests queue no job for that side until it ends. The night pre-warm queues no more units
+   in one tick than the bench has night slots (the `long` workers minus one, and one for a single `long` worker),
+   and none when it has no `long` worker.) A job id `pcal-cache:<digest>:<side>:<hop_seq>` (digest only, never a name), deduplicated, and a
+   bench-wide Redis slot. Redis only admits work. The durable claim on the head row is the fence.
+3. **Preflight.** A skip has a counted reason and makes no generation: `off`, `not_listed`, `no_slot`,
+   `unsupported_major`, `no_encryption_key`, `company_gone`, `scheduler_inactive`, **`deletion_running`**,
+   `no_disk`, `memo`, `generation_bound`, `not_buildable:query_hook` and others. A query hook or Server Script
+   query that could shrink an Administrator read refuses the build.
+4. **Claim, read, write, read back, swap.** The read runs as Administrator in one consistent view: statement cap
+   60 s, no statement starts with less than 60 s of the view left, view cap 240 s by day (720 s at night), and
+   an address-space cap above the job's baseline. The write goes in chunks of 2,000 rows, each checked against the
+   purge epoch. The stored rows are read back and their checksum must equal the build's. The swap checks the
+   claim, the epoch, the hooks and a compare-and-set on the current generation. A refresh with identical rows,
+   payload, anchor and build only advances `as_of` and writes no rows.
+5. **Loop and hop.** A job loops while it holds the claim and has `D_MAX + 120 s` left. Then it releases the
+   claim, increments `hop_seq` and queues one job under the new id.
+6. **Failure.** A failed generation keeps its class and the frames of the error (`failure_trace`: class and frames,
+   no message, no name, at most 2,000 characters). The classes:
+   - `history_too_large`: a statement that ran past the 60 s cap (MariaDB error 1969), the read deadline, too many
+     lines, or a memory error. It backs off 6 h, then 12 h, then 24 h.
+   - `write_deadline`: the write, read-back and swap took over 120 s (a slow database, not a big history).
+   - `worker_lost`: a job that left a `building` generation past its deadline and no trace (a kill, a reboot). Only
+     counted when nothing newer decides the head (no later generation, no success since).
+   - any other class, a lock wait included (`error:QueryTimeoutError`), any error outside the reader's own failure
+     path, and `reader_fallback:<reason>`.
+   Three failures of these other classes in a row set a 1 h memo, and every one is counted for the day
+   (`failed:<class>` in the skip counters). `fenced` and `lease_lost` are not counted. A failed refresh never
+   changes the current generation. A memo holds for the build that failed: a new `cache_build` lifts it at once.
+   `cache.reset(company, side)` (below) clears a memo and the counters by hand.
+
+The day refresh runs only on the dedicated RQ queue `jarvis_pcal` (a worker whose queue list is exactly
+that queue; the generic workers must take every configured queue except it). The lane is optional. A site that
+wants a refresh every few minutes by day adds one `workers.jarvis_pcal` block in `common_site_config.json`, then
+`bench setup supervisor` and `supervisorctl update`.
+
+**A bench without a lane (the standard bench).** A standard bench has one generic worker (`bench worker`: `default`,
+`short`, `long`) and no lane. No daytime refresh runs (a job that is asked for one skips with `no_lane` or
+`no_slot`, with no failure, no memo and no alert). The night pre-warm builds the cache once per night: one unit
+per company and side between 00:15 and 01:15 (jittered by the digest) on the `long` queue. The night slots are
+the `long` workers minus one, and one slot when the bench has one `long` worker, so the units run one at a time
+on that worker. With no `long` worker there is no slot and nothing is queued. By day the generation ages up to
+about 24 hours; the status shows `day_lane: absent` and `refresh: night-only` and the age of each generation,
+and S5 must show that age. A night unit holds the worker for at most 960 s (the night claim life), so a user's
+snapshot job on a one-worker bench can wait behind one unit; the window caps the start times. A unit that does
+not start before 01:15 waits for the next night (`outside_window`), so many listed companies may not all fit
+one night: T0 measures the time of one unit. The `stale_risk` alert needs `payment_calendar_cache_full_cadence`,
+a configured lane and a company in use, and the `lane not live` alert needs a configured lane, so a bench without
+a lane block raises no daily alert, whatever the full cadence. Do not add a worker for the cache.
+
+**Operator build.** `cache_refresh.rebuild(company, side)` refreshes one side now in the calling process under
+the day rule, so a bench without a lane returns `skipped:no_slot`. `rebuild(company, side, use_night_slot=True)`
+admits the build at any time under the night slot rule: it takes the night slot (one `long` worker is enough),
+uses the night caps (720 s view) and runs the oracle, and ignores the 00:15-01:15 window and the night marker.
+The oracle record of an operator build is marked `"source": "operator"`: `cache_status()` shows it as the last
+outcome but counts it in neither `on_build` nor `nights`, so an operator build is no night evidence for the S5
+gate (a diff in it still raises the diff alert).
+The switch must be on and the company listed. It holds one generic worker's slot for the run, so run it
+on purpose. Run it with
+`bench --site <site> execute jarvis.payment_calendar.cache_refresh.rebuild --kwargs "{'company': '<company>', 'side': 'Receivable', 'use_night_slot': True}"`.
+
+### Purge and janitor
+
+- A Company delete, a Company rename (the old name), and a Transaction Deletion Record (submit, and a change to
+  Queued, Running or Completed) purge the company inside the caller's transaction: the hook bumps the purge epoch
+  and marks the generations `purged`, and the delete job is queued after the commit. A running build sees the new
+  epoch and stops (`fenced`). A database error in the hook fails the whole delete.
+- ERPNext sets the status of a Transaction Deletion Record with `db_set`, and `db_set` runs `on_change`, so the
+  doc event above purges on Queued, Running and Completed. Two rules close the edges. The refresh preflight
+  refuses (`deletion_running`, no failure counted) while any record of the site is Queued or Running. The tick
+  runs `cache.purge_after_deletion` as a BACKSTOP: it purges a company once when a submitted Completed record is
+  newer than its current generation (a lost purge job, a record that completed while the hooks were not
+  installed or the cache was off, or a build that finished after the event).
+- The janitor runs in the tick (20,000 rows and 20 s per run) and before each claim of its own side. It deletes
+  retired generations after 15 minutes, dead `building` and `failed` generations, orphan rows, metadata after
+  30 days, generations of a company off the list, and finishes any `purged` generation.
+- Uninstall deletes this site's `jarvis:pcal:cache:*` keys and drops the tables with the app.
+
+### The oracle
+
+Each night unit builds the generation and, in the same view, compares it with today's read (guards lifted):
+the full legacy window when the ledger has at most 100,000 lines, else a sample of parties drawn from the
+ledger (20 random, the 5 largest, every name shared by two party types). The bank unit compares each stored
+balance with `get_balance_on`. The record (`compared`, `compared_sample`, `open_equal_window_refusal`, `diff`,
+`not_compared:<reason>`, with counts and at most 20 HMAC digests, no name) is stored in `Generation.shadow`.
+The gate for S5 counts, per company and side, the nights on the deployed `cache_build` with `compared` or
+`compared_sample`, and no diff.
+
+### Status and alerts
+
+`cache_status()` (System Manager; also `bench --site <site> execute jarvis.payment_calendar.cache_status.cache_status`)
+returns, per company digest and side: the state (`fresh`, `due`, `running`, `memo`, `backoff`), age, rows, bytes,
+last outcome and failure class, failure count, backoff level, generation counts, the duration p95, the
+next due time, `max_age_s_today`, and the last oracle outcome with the nights counted on this build. At the top it
+shows the switch, the build, the lane (`day_lane` is `live` or `absent`; `refresh` is `day+night` or
+`night-only`), and the skip counters of today and yesterday (`cache.count_skip`, one
+Redis counter per reason, no names). A company name appears only when the caller can read that Company; the sides of a Company that the caller cannot
+read are left out, and a Company that no longer exists (still listed, or its head waits for the janitor) shows as
+`missing`, by digest only. The status also shows `tick` (the age of the last 5-minute tick and whether it is late),
+`janitor` (generations waiting for the janitor: `purged`, `retired_with_rows`, the oldest in seconds) and, per
+side, the `failure_trace` of the newest failed generation. S5 adds
+sections through the hook `pcal_cache_status_sections`. The p95 and the oracle records are read from the newest
+20,000 generations of the last 30 days across ALL companies, not 30 days per company: with many companies at
+full cadence (about 288 generations a day per side) a quiet company can show no p95 or oracle record. The
+durable gate summary is not limited this way.
+
+The tick writes at most one Error Log row per company, class and day. Titles are fixed and name-free; a message
+holds the digest, the sides and numbers. `cache_status()` maps a digest to its company (the name shows when
+the caller can read that Company). A row is committed before the once-a-day Redis key is set, so a failed write
+does not hide the alert; a Redis restart can write one more row. An alert that fired and no longer does gives
+one INFO line, `cache_alert recovered class=<class> company=<digest>`, from the next tick that sees it clear.
+
+A title starts with `jarvis.`: the rule of `api_errors.is_jarvis_error`, which decides what the site forwards to
+the Jarvis error feed. A person reads that feed; a row with another title stays in the site's Error Log.
+
+| Error Log title | Meaning | What to do |
+| --- | --- | --- |
+| jarvis.payment_calendar.cache: shadow diff | The night oracle found a difference. | Set the mode `off`, find the cause from the digest and build, fix, restart the nights. |
+| jarvis.payment_calendar.cache: history too large | Two refreshes in a row were too big for the caps (backoff 12 h or more). | Read the T0 numbers; the side needs buckets or higher caps. After a change, `cache.reset` (below), or ship the new build: it lifts the backoff. |
+| jarvis.payment_calendar.cache: read-back mismatch | The stored rows differ from the build. | Treat as a bug. Mode `off`; keep the generation metadata. |
+| jarvis.payment_calendar.cache: repeated refresh failures | Three failures in a row (class in the message; the frames of the last one are in `cache_status()` as `failure_trace`). | Fix the class, then wait out the 1 h memo or clear it with `cache.reset` (below). |
+| jarvis.payment_calendar.cache: stale generation risk | At full cadence, on a bench with a configured lane, a company in use has a generation older than 14 minutes. | Check the lane (next row), the slot count and the refresh duration. |
+| jarvis.payment_calendar.cache: lane not live | The lane is configured (`workers.jarvis_pcal`), a company is in use, and no worker serves it. A site with no lane configured (night pre-warm only) writes no row. | Start the lane workers (`supervisorctl update`), or remove the lane block. |
+| jarvis.payment_calendar.cache: deletion record blocks refresh | A Transaction Deletion Record was created more than an hour ago and is still Queued or Running (its `creation`, not `modified`: ERPNext bumps `modified` at every step). | Finish or cancel the record; refreshes resume by themselves. |
+| jarvis.payment_calendar.cache: query hook blocks build | A query hook or Server Script query is on a stored DocType and is not audited. ERPNext's own Company Restriction hook on Customer and Supplier is audited and passes (errata E6; it is part of the hook fingerprint). | Audit the hook (OD7) or leave the company on the night shadow only. |
+| jarvis.payment_calendar.cache: tick is late (scheduler or worker down) | The 5-minute tick has not run for 15 minutes. A web request raises it (a stopped scheduler cannot). With no tick ever seen, the 15 minutes count from the first request. | Check the scheduler (`bench doctor`, `is_scheduler_inactive`) and the default queue workers. |
+| jarvis.payment_calendar.cache: janitor is behind | 200 or more generations wait for the janitor, or the oldest waits over an hour. | Check disk and the 20 s / 20,000-row budget; run `cache_store.janitor` from the bench; the status `janitor` section shows the backlog. |
+| jarvis.payment_calendar.cache: reader pin drift | The installed source of a pinned ERPNext or Frappe function no longer matches an accepted hash (after an upgrade). | Audit the changed definitions, add the new hashes, restart the workers (a pin bump restarts the S2 and cache nights). |
+
+### Operations
+
+- **Turn it on:** migrate, set `shadow` and the company list as above, restart the workers, add the lane, then read
+  `cache_status()` after the first open of the calendar.
+- **Turn it off:** set the mode `off` (or remove the company). The next tick bumps the epoch and deletes the
+  rows. Check `cache_status()` shows no generations.
+- **Rebuild one side now:** `bench --site <site> execute jarvis.payment_calendar.cache_refresh.rebuild --kwargs "{'company': '<company>', 'side': 'Receivable'}"`.
+  It prints `{"outcome": ..., "iterations": ...}`: `swapped`, `unchanged`, `fenced`, `failed:<class>` or
+  `skipped:<reason>`. `skipped:off` means the switch is off; `skipped:not_listed` means the company is not on
+  the list. It does not clear a memo or a backoff.
+- **Clear a memo, a backoff and the failure counters:** `bench --site <site> execute jarvis.payment_calendar.cache.reset --kwargs "{'company': '<company>'}"`
+  (add `'side': 'Receivable'` for one side). System Manager or Administrator; also a whitelisted POST. It keeps the
+  claim and the current generation. A new build (a deploy) lifts a memo by itself.
+- **Rollback order:** set the mode `off` first and wait one tick (5 minutes), until `cache_status()` shows no
+  generations: the janitor that deletes the rows is the code you are about to revert. Then remove the
+  `workers.jarvis_pcal` block, run `bench setup supervisor` and `supervisorctl update`, revert the release, and run
+  `bench migrate` after the revert: the scheduler keeps queueing `cache.tick` until the migrate drops its
+  Scheduled Job Type. The migrate also removes the three DocType records but not their tables; the tables stay,
+  unmanaged, and a later deploy finds them (the index hooks do nothing twice). A job left in the lane queue is
+  harmless: the claim fences it. Dropping leftover tables needs the owner's approval.
+- **Stack note (S4a, S4b):** both release branches edit the tuples of `routing.py`. S4a moves `banks` from
+  `OTHER_MODULES` to `FIGURE_MODULES`; S4b adds `cache`, `cache_alerts`, `cache_state`, `cache_status`, `guard`,
+  `reader_contract` and `redis_slots` to `OTHER_MODULES` and a `CACHE_MODULES` tuple. A merge has one conflict
+  hunk, at the `banks` line. Resolve it with `banks` in `FIGURE_MODULES` only and the new names in `OTHER_MODULES`
+  (keeping both sides puts `banks` in two lists), then run `jarvis.tests.test_payment_calendar_routing`.
+- **Real-queue check (AC-E3):** `bench --site test_jarvis run-tests --module jarvis.tests.test_payment_calendar_cache_e2e`
+  runs one day and one night refresh through a private RQ queue in-process. The bench rehearsal on the
+  measurement site measures the 8-hour day (`max_age_s_today` of every head must stay at or under 840).
+- **T0-dependent numbers** (plan defaults until the T0 report sets them): `RSS_CAP_MB`, the line caps, `LINES_PER_INVOICE`,
+  the view, write and statement caps, `D_MAX`, `CHUNK_ROWS`, `GRACE_S`, the janitor budget, the backoff ladder, and the
+  oracle sample sizes.
