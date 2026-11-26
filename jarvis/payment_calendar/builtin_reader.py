@@ -71,7 +71,7 @@ from jarvis.payment_calendar import batch_permission, compatibility, sources
 from jarvis.payment_calendar.books import validate_obligation_books
 from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.eligibility import reader_ineligibility
-from jarvis.payment_calendar.errors import TIMEOUTS, CalendarSourceUnavailable, ReaderFallback
+from jarvis.payment_calendar.errors import MISSING_KEY, TIMEOUTS, CalendarSourceUnavailable, ReaderFallback
 from jarvis.permission_hooks import effective_hooks
 
 # Names per `IN` list, the same size as the other batched reads of the calendar.
@@ -171,7 +171,6 @@ def _reader_errors():
 		raise ReaderFallback("reader_error") from exc
 
 
-MISSING_KEY = 1176  # MariaDB: Key '...' doesn't exist in table '...' (a FORCE INDEX hint on a missing index)
 _INDEXES: dict[tuple, bool] = {}
 _COLLATIONS: dict[tuple, str | None] = {}
 

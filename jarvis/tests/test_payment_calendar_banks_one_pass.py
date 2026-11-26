@@ -747,10 +747,11 @@ class TestSharedPieces(BankOnePassCase):
 		self.assertEqual(banks.validate_bank_accounts(self.fx.company, names), [self.fx.bank])
 
 	def test_one_missing_index_constant(self):
-		from jarvis.payment_calendar import builtin_reader
+		from jarvis.payment_calendar import builtin_reader, errors
 
-		self.assertEqual(banks.MISSING_INDEX_ERROR, 1176)
-		self.assertIs(banks.MISSING_INDEX_ERROR, builtin_reader.MISSING_KEY)
+		self.assertEqual(errors.MISSING_KEY, 1176)
+		self.assertIs(banks.MISSING_INDEX_ERROR, errors.MISSING_KEY)
+		self.assertIs(builtin_reader.MISSING_KEY, errors.MISSING_KEY)
 
 	def test_allowed_books_is_the_blank_null_default_rule(self):
 		self.assertEqual(books.allowed_books("Any Co", None), {None, ""})

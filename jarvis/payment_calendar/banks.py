@@ -8,13 +8,13 @@ from frappe.utils import flt, getdate
 
 from jarvis.payment_calendar import books, read_log
 from jarvis.payment_calendar.books import validate_finance_books
-from jarvis.payment_calendar.builtin_reader import MISSING_KEY as MISSING_INDEX_ERROR
 from jarvis.payment_calendar.compatibility import (
 	bank_balance_arguments,
 	bank_one_pass_blocker,
 	helper_source_hash,
 	source_profile,
 )
+from jarvis.payment_calendar.errors import MISSING_KEY as MISSING_INDEX_ERROR
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.payment_calendar.permissions import require_company
 from jarvis.payment_calendar.sources import money
