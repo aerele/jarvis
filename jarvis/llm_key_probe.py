@@ -247,6 +247,24 @@ def _build_request(kind: str, base_url: str, model: str, api_key: str) -> dict:
 	}
 
 
+def _asks_for_max_completion_tokens(body: bytes) -> bool:
+	"""True when a 400 body says the model wants ``max_completion_tokens``
+	instead of ``max_tokens``. Never raises."""
+	try:
+		return "max_completion_tokens" in _extract_provider_message(body)
+	except Exception:
+		return False
+
+
+def _with_max_completion_tokens(json_body: dict) -> dict:
+	"""``json_body`` with its ``max_tokens`` cap renamed to
+	``max_completion_tokens``. The cap is 16, not 1: a reasoning model spends
+	part of it on reasoning, and some endpoints set a floor on it."""
+	body = {k: v for k, v in json_body.items() if k != "max_tokens"}
+	body["max_completion_tokens"] = 16
+	return body
+
+
 def probe_api_key(provider: str, model: str, api_key: str, base_url: str = "") -> dict:
 	"""Live, side-effect-free check of one provider/base_url/model/api_key
 	combination. NEVER raises - every failure mode (missing input, an
@@ -291,15 +309,25 @@ def probe_api_key(provider: str, model: str, api_key: str, base_url: str = "") -
 	kind = _provider_kind(provider_id)
 	req = _build_request(kind, base, model, api_key)
 
-	try:
+	def _post(json_body: dict) -> tuple[int, bytes]:
 		status, _headers, body = link_fetch.request_pinned(
 			req["url"],
 			method="POST",
 			headers=req["headers"],
-			json_body=req["json_body"],
+			json_body=json_body,
 			timeout=_TIMEOUT_S,
 			max_bytes=_MAX_BODY_BYTES,
 		)
+		return status, body
+
+	try:
+		status, body = _post(req["json_body"])
+		# OpenAI reasoning models (gpt-5.x, o-series) reject `max_tokens` with a
+		# 400 that names `max_completion_tokens`. Older OpenAI-compatible servers
+		# (vLLM, Ollama, many proxies) do not know the new name, so we cannot just
+		# switch. Retry once with the name the provider asked for.
+		if kind == "openai" and status == 400 and _asks_for_max_completion_tokens(body):
+			status, body = _post(_with_max_completion_tokens(req["json_body"]))
 	except link_fetch.LinkFetchError as exc:
 		reason = _scrub(str(exc), api_key)
 		kind = getattr(exc, "kind", link_fetch.ERR_RESPONSE)
