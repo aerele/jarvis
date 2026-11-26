@@ -30,6 +30,7 @@ PENDING_ACTION_FENCE_FIELD = "agent_close_fences"
 _UNAVAILABLE = "This agent is not available yet. It cannot be installed, enabled, scheduled, or run."
 _LISTING_UNAVAILABLE = "This agent is not available yet. Its status must stay Coming Soon."
 _LEGACY_UNAVAILABLE = "This agent is not available yet. Disable its old installation before you edit it."
+_CONFIGURE_FIRST = "Complete this agent's settings before you enable it."
 _RUN_UNAVAILABLE = "This agent is not available yet. The old run was stopped. No ERP record was changed."
 CONFIRMATION_REVOKED = (
 	"This confirmation was cancelled during an agent safety update. "
@@ -263,7 +264,9 @@ def validate_installation(doc) -> None:
 			refuse()
 		if frappe.utils.cint(doc.get("enabled")):
 			if frappe.get_attr(release.configuration_validator)(doc.get("config")):
-				refuse()
+				# The agent IS available; its settings are what is missing. Same refusal
+				# type as ``refuse``, with the step the owner can actually take.
+				frappe.throw(_(_CONFIGURE_FIRST), frappe.PermissionError)
 		doc.next_run_at = None
 		return
 	if doc.is_new():

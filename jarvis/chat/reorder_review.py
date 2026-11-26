@@ -275,7 +275,7 @@ def native_stock_guard(data, scope):
 			refuse()
 		positions[key] = balance, value
 	bin_keys = set()
-	from erpnext.stock.doctype.bin.bin import PROJECTED_QTY_ADDITIONS, PROJECTED_QTY_DEDUCTIONS
+	PROJECTED_QTY_ADDITIONS, PROJECTED_QTY_DEDUCTIONS = bin_projected_qty_fields()
 
 	for row in data["bins"]:
 		key = row.item_code, row.warehouse
@@ -306,6 +306,38 @@ def native_stock_guard(data, scope):
 	if any(abs(stock_totals[a] - gl_totals[a]) > MONEY_EPS for a in accounts):
 		refuse()
 	return leaf
+
+
+# ERPNext's own Bin field lists, for an ERPNext that predates them (the October 2026 Bin
+# backport added the constants). Without this the import failed and every Reorder review
+# was refused as incomplete stock evidence. The older Bin computes projected_qty from
+# exactly these fields, so the guard's arithmetic is unchanged.
+_PROJECTED_QTY_ADDITIONS_FALLBACK = ("actual_qty", "ordered_qty", "indented_qty", "planned_qty")
+_PROJECTED_QTY_DEDUCTIONS_FALLBACK = (
+	"reserved_qty",
+	"reserved_qty_for_production",
+	"reserved_qty_for_sub_contract",
+	"reserved_qty_for_production_plan",
+)
+
+
+def bin_projected_qty_fields() -> tuple[tuple, tuple]:
+	"""``(additions, deductions)`` that make up a Bin's projected_qty."""
+	try:
+		from erpnext.stock.doctype.bin.bin import PROJECTED_QTY_ADDITIONS, PROJECTED_QTY_DEDUCTIONS
+	except ImportError:
+		return _PROJECTED_QTY_ADDITIONS_FALLBACK, _PROJECTED_QTY_DEDUCTIONS_FALLBACK
+	return tuple(PROJECTED_QTY_ADDITIONS), tuple(PROJECTED_QTY_DEDUCTIONS)
+
+
+def bin_recalculated_fields() -> tuple:
+	"""The Bin fields ERPNext recalculates (``RECALCULATED_FIELDS``)."""
+	try:
+		from erpnext.stock.doctype.bin.bin import RECALCULATED_FIELDS
+	except ImportError:
+		additions, deductions = bin_projected_qty_fields()
+		return ("valuation_rate", "stock_value", *additions, *deductions)
+	return tuple(RECALCULATED_FIELDS)
 
 
 def collect(run, config, *, review_execution_user=None):
@@ -389,14 +421,12 @@ def collect(run, config, *, review_execution_user=None):
 		}
 		if len(data["company"]) != 1:
 			refuse()
-		from erpnext.stock.doctype.bin.bin import RECALCULATED_FIELDS
-
 		# native_stock_guard reads stock_value and valuation_rate off every Bin row, so ask for
 		# them by name. ERPNext 16 lists both in RECALCULATED_FIELDS and ERPNext 15 does not:
 		# there they came back empty and the guard refused every company that holds stock.
 		bin_fields = dict.fromkeys(
 			("name", "item_code", "warehouse", "projected_qty", "stock_value", "valuation_rate")
-			+ tuple(RECALCULATED_FIELDS)
+			+ bin_recalculated_fields()
 		)
 		data["bins"] = readable_rows(
 			"Bin",
