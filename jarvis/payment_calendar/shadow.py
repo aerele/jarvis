@@ -1,7 +1,12 @@
 """Nightly shadow: the built-in reader against today's read with its size guards lifted.
 
+A company's last unit is the bank unit: today's `get_balance_on` read of its bank and cash accounts against
+the one-pass bank read (`banks.py`), both in one view. The one pass never serves in `shadow` mode, and the
+unit never serves either: it compares and records.
+
 `dispatch` runs from one cron entry every 15 minutes between 02:00 and 05:59 site time. It starts the night's
-chain or resumes it. A unit is one (company, side, scope); one RQ job runs one unit, then enqueues the next.
+chain or resumes it. A unit is one (company, side, scope), or the company's `Bank:all` unit; one RQ job runs one unit, then enqueues
+the next.
 Both reads of a unit run in ONE `consistent_read()` view as Administrator, so the comparison proves data
 exactness only; the per-user proof is the reply-level matrix and the visitor flow. Nothing is written inside
 the view. Records hold counts and HMAC digests, never a company, party or voucher name.
@@ -16,20 +21,25 @@ import os
 from collections import Counter
 from contextlib import contextmanager
 from datetime import date as Date
+from functools import partial
 from time import monotonic, time
 
 import frappe
 from frappe.utils import add_days, add_months, get_first_day
 
-from jarvis.payment_calendar import builtin_reader, read_log, routing, shadow_state
+from jarvis.payment_calendar import banks, books, builtin_reader, read_log, routing, shadow_state
 from jarvis.payment_calendar import sources as today_sources
-from jarvis.payment_calendar.compatibility import source_profile
+from jarvis.payment_calendar.compatibility import bank_one_pass_blocker, source_profile
 from jarvis.payment_calendar.errors import TIMEOUTS, CalendarSourceUnavailable, ReaderFallback
 from jarvis.payment_calendar.scope import normalize_scope
 from jarvis.payment_calendar.snapshot import consistent_read
 
 SIDES = ("Payable", "Receivable")
 SCOPES = ("previous", "current", "next", "window")
+# The bank unit of a company: one per night, after the eight side units.
+BANK_UNIT = ("Bank", "all")
+BANK_FIELD = ":".join(BANK_UNIT)
+COMPANY_UNITS = (*((side, scope) for side in SIDES for scope in SCOPES), BANK_UNIT)
 # The size guards of today's read, lifted for the oracle: no real ledger reaches this.
 LIFTED = 10**12
 # The oracle (today's read, guards lifted) holds the whole ledger in memory and runs on the one `long` worker,
@@ -49,7 +59,7 @@ INCOMPLETE_TITLE = "Payment Calendar reader shadow incomplete"
 DAILY_TITLE = "Payment Calendar reader daily"
 JOB = "jarvis.payment_calendar.shadow.run_unit"
 # Reasons of a skipped unit that need an operator: a row once per company, night and reason.
-_FALLBACK_REASONS = ("ineligible", "shadow_too_large", "rss_cap")
+_FALLBACK_REASONS = ("ineligible", "shadow_too_large", "rss_cap", "unpinned", "one_pass_unavailable")
 TRANSIENT = "error_transient"
 # Fallbacks that say the company is too slow or too big for the reader: they fail the gate on their own.
 _SLOW_REASONS = ("fallback:deadline", "fallback:assemble_budget")
@@ -94,7 +104,7 @@ def _runnable_units(current: routing.ReaderSettings, night: str | None = None) -
 
 
 def units_for(current: routing.ReaderSettings, night: str | None = None) -> list[tuple[str, str, str]]:
-	"""Every (company, side, scope) of the night; a company's eight units stay together.
+	"""Every (company, side, scope) of the night; a company's nine units (the bank unit last) stay together.
 
 	With a `night` the companies start at an offset that moves by one each night, so the last company of one
 	night is never the last of every night (the night budget would starve it). Without one the order is plain.
@@ -103,7 +113,7 @@ def units_for(current: routing.ReaderSettings, night: str | None = None) -> list
 	if night and companies:
 		offset = Date.fromisoformat(night).toordinal() % len(companies)
 		companies = companies[offset:] + companies[:offset]
-	return [(company, side, scope) for company in companies for side in SIDES for scope in SCOPES]
+	return [(company, side, scope) for company in companies for side, scope in COMPANY_UNITS]
 
 
 def month_keys(today: str) -> tuple[str, str, str]:
@@ -302,7 +312,7 @@ def _finish(digest: str, night: str, field: str, record: dict) -> None:
 def _write_unit_row(digest: str, night: str, field: str, record: dict) -> None:
 	reason = str(record.get("reason") or "")
 	if record["outcome"] == "diff" or reason.startswith("error:"):
-		_unit_row(DIFF_TITLE, f"shadow-diff:{digest}:{night}", "shadow", field, record, digest)
+		_unit_row(DIFF_TITLE, f"shadow-diff:{digest}:{field}:{night}", "shadow", field, record, digest)
 	elif reason.startswith("fallback:") or reason in _FALLBACK_REASONS:
 		_unit_row(FALLBACK_TITLE, f"shadow-fallback:{digest}:{night}", reason, field, record, digest)
 
@@ -311,6 +321,7 @@ def _unit_row(title: str, operation: str, klass: str, field: str, record: dict, 
 	read_log.error_log_once(
 		title,
 		f"unit={field} outcome={record['outcome']} reason={record.get('reason')} "
+		f"counts={json.dumps(record.get('counts'), sort_keys=True)} digests={record.get('digests') or []} "
 		f"company={digest} build={record['reader_build']}",
 		operation,
 		klass,
@@ -324,9 +335,11 @@ def _measure(company: str, side: str, scope_key: str) -> dict:
 	original_user = frappe.session.user
 	frappe.set_user("Administrator")  # nosemgrep: frappe-setuser -- the audited impersonation seam
 	try:
+		if (side, scope_key) == BANK_UNIT:
+			return _in_view(partial(_read_bank, company), _compare_bank_paths)
 		scope = _scope(company, scope_key)
 		args = (company, side, scope["anchor"], scope["window_start"], scope["window_end"])
-		return _read_both(args)
+		return _in_view(partial(_read_sides, args), _compare_sides)
 	finally:
 		frappe.set_user(original_user)  # nosemgrep: frappe-setuser -- restores the caller
 
@@ -337,26 +350,15 @@ def _scope(company: str, scope_key: str) -> dict:
 	return normalize_scope(company, [], month=month, check_accounts=False)
 
 
-def _read_both(args: tuple) -> dict:
-	today = reader = None
-	stats: dict = {}
-	timing = {"today_ms": 0, "reader_ms": 0}
+def _in_view(read, compare) -> dict:
+	"""`read()` inside one `consistent_read()` view, then `compare(*reads)` once the view is closed.
+
+	`read` returns the reads as a tuple, or a finished record (a dict) when the unit ends inside the view.
+	A view that was lost is `source_changed`, whatever the reads showed.
+	"""
 	try:
 		with consistent_read():
-			if today_sources._ledger_rows_exceed(args[0], args[1], args[2], SHADOW_LEDGER_CAP):
-				return _not_compared("shadow_too_large")
-			rss = _rss_mb()
-			if rss > RSS_CAP_MB:
-				return _not_compared("rss_cap", rss_mb=round(rss))
-			started = monotonic()
-			today = _attempt(today_unguarded, args)
-			timing["today_ms"] = routing._ms(started)
-			rss = _rss_mb()
-			if rss > RSS_CAP_MB:
-				return _not_compared("rss_cap", rss_mb=round(rss))
-			started = monotonic()
-			reader = _attempt(_read_reader, args, stats=stats)
-			timing["reader_ms"] = routing._ms(started)
+			reads = read()
 	except CalendarSourceUnavailable as exc:
 		if exc.code == "source_changed":
 			return _not_compared("source_changed")
@@ -365,15 +367,142 @@ def _read_both(args: tuple) -> dict:
 		raise
 	except Exception as exc:
 		return _error_record(exc)
+	return reads if isinstance(reads, dict) else compare(*reads)
+
+
+def _read_sides(args: tuple) -> dict | tuple:
+	"""Today's lifted read and the reader of one side and scope, inside the view."""
+	stats: dict = {}
+	timing = {"today_ms": 0, "reader_ms": 0}
+	if today_sources._ledger_rows_exceed(args[0], args[1], args[2], SHADOW_LEDGER_CAP):
+		return _not_compared("shadow_too_large")
+	rss = _rss_mb()
+	if rss > RSS_CAP_MB:
+		return _not_compared("rss_cap", rss_mb=round(rss))
+	started = monotonic()
+	today = _attempt(today_unguarded, args)
+	timing["today_ms"] = routing._ms(started)
+	rss = _rss_mb()
+	if rss > RSS_CAP_MB:
+		return _not_compared("rss_cap", rss_mb=round(rss))
+	started = monotonic()
+	reader = _attempt(_read_reader, args, stats=stats)
+	timing["reader_ms"] = routing._ms(started)
+	return today, reader, timing, rss
+
+
+def _compare_sides(today: tuple, reader: tuple, timing: dict, rss: float) -> dict:
 	outcome = compare_unit(today, reader, digest=read_log.ops_digest)
 	return {
-		**outcome,
-		"state": "retry" if outcome.get("reason") == TRANSIENT else "done",
-		"reader_build": _build(),
+		**_finished(outcome),
 		"would_deadline": timing["reader_ms"] > WOULD_DEADLINE_S * 1000,
 		"rss_mb": round(rss),
 		**timing,
 	}
+
+
+def _finished(outcome: dict) -> dict:
+	"""The record of a compared unit: a transient error is tried again, anything else is done."""
+	return {
+		**outcome,
+		"state": "retry" if outcome.get("reason") == TRANSIENT else "done",
+		"reader_build": _build(),
+	}
+
+
+# ---------------------------------------------------------------------------------------- bank unit
+
+
+def _read_bank(company: str) -> dict | tuple:
+	"""Today's `get_balance_on` read and the one-pass read of the bank and cash accounts, inside the view.
+
+	`banks.today_amounts` and `banks.one_pass_amounts` are the two paths themselves, called whatever the
+	switch says: the unit proves the one pass in `shadow` mode, and it serves nothing. At most
+	`banks.MAX_BANK_ACCOUNTS` accounts are read: that is one request's worth, so the book checks run once
+	per path. There is no `would_deadline`: the bank read has no deadline of its own, and `reader_ms` is the
+	one pass.
+	"""
+	from erpnext.accounts.utils import get_balance_on
+
+	as_of = _today()
+	try:
+		inputs = banks.bank_read_inputs(company, as_of)
+	except CalendarSourceUnavailable as exc:
+		if exc.code == "fiscal_year_unavailable":
+			return _not_compared("fiscal_year_unavailable")
+		raise
+	blocker = bank_one_pass_blocker(get_balance_on)
+	if blocker:
+		return _not_compared(blocker)
+	names = _bank_accounts(company)
+	if len(names) > banks.MAX_BANK_ACCOUNTS:
+		return _not_compared("shadow_too_large")
+	if not names:
+		# Nothing to read: both paths agree on no account (an empty `IN ()` is not valid SQL).
+		return ({}, None), ({}, None), inputs.money_precision, {"today_ms": 0, "reader_ms": 0}, None
+	timing = {"today_ms": 0, "reader_ms": 0}
+	started = monotonic()
+	today = _attempt(banks.today_amounts, (company, names, as_of, get_balance_on))
+	timing["today_ms"] = routing._ms(started)
+	started = monotonic()
+	one_pass = _attempt(
+		banks.one_pass_amounts, (company, names, as_of, inputs.row_precision, inputs.default_book)
+	)
+	timing["reader_ms"] = routing._ms(started)
+	return (
+		today,
+		one_pass,
+		inputs.money_precision,
+		timing,
+		_book_decisions(company, as_of, inputs.default_book),
+	)
+
+
+def _book_decisions(company: str, as_of: str, default_book: str | None) -> tuple[bool, bool] | None:
+	"""(the memo's refusal, the direct query's refusal) of the Payment Ledger book check; None off the memo.
+
+	The view memo answers the book check for a served company in mode `on`, and both bank paths share that
+	answer, so only a direct query can prove it: it is read in the same view and must refuse alike.
+	"""
+	settings = books.view_settings()
+	if settings.mode != "on" or company not in settings.served:
+		return None
+	try:
+		books.validate_bank_ple_books(company, as_of)
+		memo_refuses = False
+	except CalendarSourceUnavailable as exc:
+		if exc.code != "multibook_unsupported":
+			raise
+		memo_refuses = True
+	allowed = books.allowed_books(company, default_book)
+	direct_refuses = any(book not in allowed for _kind, book in books.ple_book_groups_direct(company, as_of))
+	return memo_refuses, direct_refuses
+
+
+def _compare_bank_paths(today: tuple, one_pass: tuple, precision: int, timing: dict, decisions) -> dict:
+	"""The bank unit's record: the two paths compared, and the memo's book decision against the direct one."""
+	outcome = compare_bank(today, one_pass, precision=precision, digest=read_log.ops_digest)
+	if decisions is not None and decisions[0] != decisions[1] and outcome["outcome"] != "not_compared":
+		outcome = _outcome(
+			"diff", counts={"memo_refuses": int(decisions[0]), "direct_refuses": int(decisions[1])}
+		)
+	return {**_finished(outcome), **timing}
+
+
+def _bank_accounts(company: str) -> list[str]:
+	"""The enabled bank and cash ledger accounts of the company, one more than a request may select."""
+	return frappe.get_all(
+		"Account",
+		filters={
+			"company": company,
+			"is_group": 0,
+			"disabled": 0,
+			"account_type": ["in", ["Bank", "Cash"]],
+		},
+		pluck="name",
+		order_by="name",
+		limit_page_length=banks.MAX_BANK_ACCOUNTS + 1,
+	)
 
 
 def _read_reader(*args, stats):
@@ -496,6 +625,35 @@ def compare_unit(today: tuple, reader: tuple, *, digest=None) -> dict:
 	return _compare_results(today_result, reader_result, digest)
 
 
+def compare_bank(today: tuple, one_pass: tuple, *, precision: int, digest=None) -> dict:
+	"""The outcome of a bank unit from `(amounts, error)` pairs of today's read and the one pass. Pure.
+
+	Amounts are compared as the reply shows them (`money` at the reply's precision), account by account.
+	`one_pass` amounts of None mean the database lacks the index of the query hint (`banks`): not compared,
+	whatever today's read did, because the one pass never ran.
+	`digest` maps an account name to a short HMAC; without it a diff carries counts only.
+	"""
+	(today_amounts, today_error), (pass_amounts, pass_error) = today, one_pass
+	if pass_amounts is None and pass_error is None:
+		return _outcome("not_compared", reason="one_pass_unavailable")
+	for error in (pass_error, today_error):
+		if error is not None and not isinstance(error, CalendarSourceUnavailable):
+			return _outcome("not_compared", reason=_error_reason(error))
+	if today_error is not None or pass_error is not None:
+		return _compare_refusals(today_error, pass_error)
+	shown = [
+		{name: str(today_sources.money(value, precision)) for name, value in amounts.items()}
+		for amounts in (today_amounts, pass_amounts)
+	]
+	counts = {"accounts": len(shown[0])}
+	if shown[0] == shown[1]:
+		return _outcome("compared", counts=counts)
+	differing = sorted(name for name in {*shown[0], *shown[1]} if shown[0].get(name) != shown[1].get(name))
+	counts["differing"] = len(differing)
+	digests = [digest(name) for name in differing[:MAX_DIGESTS]] if digest else []
+	return _outcome("diff", counts=counts, digests=digests)
+
+
 def _outcome(outcome: str, **fields) -> dict:
 	return {"outcome": outcome, **fields}
 
@@ -569,7 +727,7 @@ def summary(days: int = 7, nights: int | None = None) -> dict:
 	`days` complete nights are the ones before it. Tonight's records count when they are there and are checked
 	for diffs, but a missing tonight never fails the gate.
 
-	A company passes when, for every side and scope, at least `nights` (default `days`) nights hold a
+	A company passes when, for every side and scope and for the `Bank:all` unit, at least `nights` (default `days`) nights hold a
 	`compared` record on the deployed reader build, and the period has no diff or error row (Error Log or
 	record), no `would_deadline`, and no `deadline` or `assemble_budget` fallback. `missing` lists the side and scope that lack
 	nights, with the count found; `reasons` counts, per side and scope, why the units that were not compared
@@ -599,8 +757,7 @@ def _gate(company: str, period: list[str], nights: int, build: str) -> dict:
 				reasons.setdefault(field, Counter())[str(record.get("reason"))] += 1
 	missing = [
 		f"{side}:{scope} {compared[f'{side}:{scope}']}/{nights}"
-		for side in SIDES
-		for scope in SCOPES
+		for side, scope in COMPANY_UNITS
 		if compared[f"{side}:{scope}"] < nights
 	]
 	diff_rows = _diff_error_rows(digest, period[-1])
@@ -633,8 +790,10 @@ def status(days: int = 7) -> dict:
 	"""Print and return the shadow's state for an operator: `bench --site <site> execute jarvis.payment_calendar.shadow.status`.
 
 	Names appear here, on the console only (never in a log, key or row): the mode, both lists, the digest
-	that the Error Log rows carry for each company, today's and yesterday's counters, and the gate per side
-	and scope with the reasons of the nights that were not compared.
+	that the Error Log rows carry for each company, today's and yesterday's counters, the gate per side
+	and scope (the bank unit included) with the reasons of the nights that were not compared, and the
+	newest record of the bank unit with its counts and digests. A digest of an account name is
+	`read_log.ops_digest(name)`: compute it in the console for each selected account to find the one.
 	"""
 	current, build, today = routing.reader_settings(), _build(), _today()
 	result = {"mode": current.mode, "build": build, "companies": {}}
@@ -650,7 +809,8 @@ def status(days: int = 7) -> dict:
 		digest = read_log.company_digest(company)
 		counters = {date: read_log.day_counts(digest, date) for date in (today, add_days(today, -1))}
 		gate = _gate(company, period, nights, build)
-		result["companies"][company] = {"digest": digest, "counters": counters, "gate": gate}
+		bank = _latest_bank_record(digest, period)
+		result["companies"][company] = {"digest": digest, "counters": counters, "gate": gate, "bank": bank}
 		print(f"\n{digest} = {company}")
 		for date, counts in counters.items():
 			print(f"  counters {date}: " + (" ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "-"))
@@ -659,7 +819,26 @@ def status(days: int = 7) -> dict:
 		)
 		for line in _gate_lines(gate, nights):
 			print(f"    {line}")
+		print(f"  bank unit: {_bank_line(bank)}")
 	return result
+
+
+def _latest_bank_record(digest: str, period: list[str]) -> dict | None:
+	"""The newest night's record of the bank unit within `period` (a list of dates, newest first), or None."""
+	for night in period:
+		record = shadow_state.records(digest, night).get(BANK_FIELD)
+		if record:
+			return {**record, "night": night}
+	return None
+
+
+def _bank_line(bank: dict | None) -> str:
+	if bank is None:
+		return "no record"
+	return (
+		f"{bank['night']} outcome={bank.get('outcome')} reason={bank.get('reason')} "
+		f"counts={json.dumps(bank.get('counts'), sort_keys=True)} digests={bank.get('digests') or []}"
+	)
 
 
 def _gate_lines(gate: dict, nights: int) -> list[str]:

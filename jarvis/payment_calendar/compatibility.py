@@ -89,13 +89,58 @@ def require_obligation_scope(account_type: str) -> None:
 		raise CalendarSourceUnavailable("restricted_obligations")
 
 
+# `get_balance_on` revisions (ERPNext 16.52 3cd2183d and 495380b5) whose default call counts NULL, blank and
+# company-default books. `bank_balance_arguments` picks today's call arguments from them, and the one-pass
+# bank read (banks.py) copies the body, so both use this one list. A bump adds the new hash here and keeps its
+# differential tests (docs: "Pin bump").
+_BANK_HELPER_HASHES = (
+	"a365a6e531b6e95b0c37ec6768b5c3982122384f580aefa5e7712ce555228e2d",
+	"827c90fc28a78da7f27de9257f5bc09b5538e7e1165d96dd339c0a5abad5364f",
+)
+_BANK_HELPER_MODULE = "erpnext.accounts.utils"
+
+
+def helper_source_hash(helper) -> str | None:
+	"""sha256 of the source of `helper`, or None when it cannot be read."""
+	try:
+		return sha256(getsource(helper).encode()).hexdigest()
+	except (OSError, TypeError):
+		return None
+
+
+def bank_one_pass_blocker(helper) -> str | None:
+	"""Why the one-pass bank read may not run for `helper` (``get_balance_on``): ``v15``, ``unpinned``, or None.
+
+	The one pass copies the audited body of `get_balance_on` (erpnext/accounts/utils.py), so it needs a v16
+	source with one of the two audited hashes. The hash covers that body only: the callee `get_currency_precision`
+	and the fiscal-year check are not covered, and a change there is caught by the nightly bank shadow unit.
+	A wrapper that copies the source text (`functools.wraps` makes `getsource` follow `__wrapped__`) or a
+	function from another module is not the audited function.
+	"""
+	try:
+		if source_profile().major != "16":
+			return "v15"
+	except CalendarSourceUnavailable:
+		return "v15"
+	audited = (
+		getattr(helper, "__module__", None) == _BANK_HELPER_MODULE
+		and not hasattr(helper, "__wrapped__")
+		and helper_source_hash(helper) in _BANK_HELPER_HASHES
+	)
+	return None if audited else "unpinned"
+
+
+def bank_one_pass_pinned(helper) -> bool:
+	"""True when the one-pass bank read may copy `helper`; see `bank_one_pass_blocker`."""
+	return bank_one_pass_blocker(helper) is None
+
+
 def bank_balance_arguments(helper) -> dict:
 	"""Preserve NULL/blank/default-book union across audited helper revisions."""
 	profile = source_profile()
-	try:
-		actual = sha256(getsource(helper).encode()).hexdigest()
-	except (OSError, TypeError) as exc:
-		raise CalendarSourceUnavailable() from exc
+	actual = helper_source_hash(helper)
+	if actual is None:
+		raise CalendarSourceUnavailable()
 	if profile.major == "15" and actual == "a1c0ba915be2a8555108b840f791f99bcae62636b5df47eb87eacb7e31f3aae2":
 		return {}
 	if profile.major == "16":
@@ -106,10 +151,7 @@ def bank_balance_arguments(helper) -> dict:
 		# 495380b5 (2026-11-06) is the same body plus an opt-in
 		# ``apply_gl_entry_permissions=False`` that only appends GL Entry match conditions;
 		# we never pass it, so the default call is identical to 16.52.
-		if actual in (
-			"a365a6e531b6e95b0c37ec6768b5c3982122384f580aefa5e7712ce555228e2d",
-			"827c90fc28a78da7f27de9257f5bc09b5538e7e1165d96dd339c0a5abad5364f",
-		):
+		if actual in _BANK_HELPER_HASHES:
 			return {"finance_book": None, "include_default_fb_balances": True}
 	raise CalendarSourceUnavailable()
 

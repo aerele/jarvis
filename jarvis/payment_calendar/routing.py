@@ -105,8 +105,9 @@ _ROLLBACK_ERRNOS = frozenset({1213, 1205, 2006, 2013, 2055, 1927, 4031})
 _RELEASE = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
 
 # The modules whose code decides a figure the reader returns (the reader, the rules it applies, the source it
-# must equal, and today's reconciliation). A change to any of them is a new build for the shadow gate.
+# must equal, today's reconciliation, and the bank read). A change to any of them is a new build for the shadow gate.
 FIGURE_MODULES = (
+	"banks",
 	"batch_permission",
 	"batch_permission_eval",
 	"batch_permission_plan",
@@ -128,7 +129,6 @@ OTHER_MODULES = (
 	"api",
 	"balances",
 	"bank_labels",
-	"banks",
 	"catalog",
 	"detail",
 	"jobs",

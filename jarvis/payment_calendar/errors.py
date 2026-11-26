@@ -6,6 +6,10 @@ from rq.timeouts import JobTimeoutException
 # A job deadline must reach the job runner untouched: broad `except` blocks re-raise these first.
 TIMEOUTS = (TimeoutError, JobTimeoutException)
 
+# MariaDB error 1176: Key '...' doesn't exist in table '...' (a FORCE INDEX hint on a missing index). The one
+# written code, shared by the built-in reader and the bank read; neither module names the other.
+MISSING_KEY = 1176
+
 # The only failure codes a stored status, a reply or a log may carry; anything else becomes a default.
 SAFE_CODES = frozenset(
 	{
