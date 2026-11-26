@@ -220,12 +220,15 @@ def _dict_parts(node):
 def _is_flat(node) -> bool:
 	"""Whether a container holds no container, checked in C (stops at the first one)."""
 	if isinstance(node, dict):
+		# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 		return _SCALARS.issuperset(map(type, node.values())) and _SCALARS.issuperset(map(type, node))
+	# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 	return _SCALARS.issuperset(map(type, node))
 
 
 def _of_type(values: list, t: type) -> list:
 	"""The items of ``values`` whose type is exactly ``t``, selected in C."""
+	# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 	return list(compress(values, map(is_, map(type, values), repeat(t))))
 
 
@@ -235,10 +238,12 @@ def _scalar_extra(values: list, types: set) -> int:
 	extra = 0
 	if int in types:
 		ints = values if types <= {int, bool} else _of_type(values, int)
+		# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 		extra += sum(map(int.bit_length, ints)) // 64
 	for t in (str, bytes):
 		if t in types:
 			texts = values if len(types) == 1 else _of_type(values, t)
+			# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 			extra += sum(map(len, texts)) // TEXT_COST_CHARS
 	return extra
 
@@ -254,6 +259,7 @@ def _quick_cost(node) -> int | None:
 		values = node
 	else:
 		values = list(node)
+	# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 	types = set(map(type, values))
 	if _SCALARS.issuperset(types):
 		return len(values) + _scalar_extra(values, types)
@@ -261,11 +267,13 @@ def _quick_cost(node) -> int | None:
 		return None
 	tuples = values if len(types) == 1 else _of_type(values, tuple)
 	inner = list(chain.from_iterable(tuples))
+	# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 	inner_types = set(map(type, inner))
 	if not _SCALARS.issuperset(inner_types):
 		return None
 	cost = len(values) + len(inner) + _scalar_extra(inner, inner_types)
 	if len(types) > 1:
+		# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 		rest = list(compress(values, map(is_not, map(type, values), repeat(tuple))))
 		cost += _scalar_extra(rest, types - {tuple})
 	return cost
@@ -429,13 +437,16 @@ def check_hash_keys(keys, what: str):
 	skipped in C; the rest are counted: distinct keys minus distinct hashes. Call after
 	the keys' comparison cost was checked (a tuple key is walked here)."""
 	keys = keys if isinstance(keys, list | tuple) else list(keys)
+	# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 	types = set(map(type, keys))
 	if not types & {int, tuple}:
 		return
 	if types <= {int, bool}:
+		# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 		heavy = list(compress(keys, map(HASH_SAFE_INT.__le__, map(abs, keys))))
 		if len(heavy) <= MAX_HASH_COLLISIONS:
 			return
+		# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 		collisions = len(set(map(hex, heavy))) - len(set(map(hash, heavy)))
 	else:
 		memo: dict = {}
@@ -443,6 +454,7 @@ def check_hash_keys(keys, what: str):
 		if len(heavy) <= MAX_HASH_COLLISIONS:
 			return
 		memo = {}
+		# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 		collisions = len({_canonical(k, memo) for k in heavy}) - len(set(map(hash, heavy)))
 	if collisions > MAX_HASH_COLLISIONS:
 		_refuse(
@@ -684,6 +696,7 @@ class Guards:
 		first, then hash collisions. ``into``: the keys already in the table they join
 		(collisions add up across calls, so they are counted together)."""
 		self.check_cost(keys, what)
+		# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 		if into and set(map(type, keys)) & {int, tuple}:
 			check_hash_keys([*into, *keys], what)
 		else:
@@ -908,6 +921,7 @@ class Guards:
 		return divmod(a, b)
 
 	def _keys(self, items: list, key, what: str) -> list:
+		# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 		keys = items if key is None else list(map(key, items))
 		self.check_cost(keys, what)
 		return keys
@@ -1218,6 +1232,7 @@ def _pair_keys(pairs: list) -> list:
 	"""The keys dict(pairs) would hash: each pair's first item (in C for the usual
 	tuples and lists)."""
 	try:
+		# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
 		return list(map(itemgetter(0), pairs))
 	except (TypeError, IndexError, KeyError):
 		return [next(iter(p), None) for p in pairs if isinstance(p, _TEXT + _SEQ) or hasattr(p, "__iter__")]
