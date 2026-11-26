@@ -292,7 +292,14 @@ def _probe_direct_subscription(settings) -> dict:
 			"detail": "A live check is already running.",
 			"source": "live_probe",
 		}
-	cache.set_value(inflight_key, "1", expires_in_sec=int(_PROBE_BUDGET_S) + 10)
+	# The claim must outlive the WHOLE in-flight window: the throwaway sessions.create (its own budget,
+	# up to SESSION_CREATE_TIMEOUT_SECONDS on a just-restarted 2026.10 gateway) runs before the probe's
+	# own budget even starts.
+	from jarvis.chat.agent_client import SESSION_CREATE_TIMEOUT_SECONDS
+
+	cache.set_value(
+		inflight_key, "1", expires_in_sec=int(_PROBE_BUDGET_S) + int(SESSION_CREATE_TIMEOUT_SECONDS) + 10
+	)
 	model, provider = _resolve_model_and_provider(frappe._dict(model_override=""))
 	verdict = {"state": "unknown", "detail": ""}
 	sess = None
@@ -301,7 +308,9 @@ def _probe_direct_subscription(settings) -> dict:
 	stream_finished = False
 	try:
 		sess = AgentSession.connect(gateway_url)
-		throwaway = sess.create_session(label=f"jarvis-preflight-{uuid.uuid4().hex[:8]}")
+		throwaway = sess.create_session(
+			label=f"jarvis-preflight-{uuid.uuid4().hex[:8]}", wait_unavailable=False
+		)
 		fired_at = time.time()
 		out = _drain_probe_stream(
 			sess,

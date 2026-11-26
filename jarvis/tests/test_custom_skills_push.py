@@ -338,6 +338,25 @@ class TestUnattendedPushGraceful(FrappeTestCase):
 		self.assertEqual(post.call_count, 2)
 		self.assertTrue(self._status().startswith("failed: admin unreachable"), self._status())
 
+	def test_worker_confirms_a_timed_out_send_with_one_resend(self):
+		from jarvis import admin_client
+
+		_mk("confirm-a")
+
+		def _times_out_first(skills=None):
+			if post.call_count == 1:
+				raise admin_client.AdminUnreachableError(
+					"admin returned a 502 error: fleet agent unreachable: Read timed out.", status_code=502
+				)
+
+		with (
+			patch("jarvis.admin_client.post_push_custom_skills", side_effect=_times_out_first) as post,
+			patch("jarvis.chat.push_confirm.wait_for_agent", return_value=True),
+		):
+			custom_skills_api._enqueued_push_custom_skills()
+		self.assertEqual(post.call_count, 2)
+		self.assertTrue(self._status().startswith("ok ("), self._status())
+
 	def test_restart_resync_swallows_enqueue_failure(self):
 		_mk("resync-seed")  # non-empty so the resync reaches the enqueue
 		settings = frappe.get_single(SETTINGS)

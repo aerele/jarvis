@@ -1057,12 +1057,19 @@ def _confirm_apply_via_admin(settings, *, is_pool: bool) -> bool:
 		if cache.get_value(_APPLY_CONFIRM_MISS_KEY, expires=True):
 			return False
 		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			_ADMIN_RECONNECT_REQUIRED,
 			_admin_chat_readiness,
+			_record_reconnect_required,
 			_stamp_converged_ok,
 		)
 
 		state, _reason = _admin_chat_readiness()
 		if state != "Ready":
+			if state == _ADMIN_RECONNECT_REQUIRED:
+				# Only reached for a leg with no synced marker (both callers gate on
+				# it), i.e. a first apply: admin's own terminal verdict is recorded so
+				# _rejected_sync_verdict answers llm_rejected in this same call.
+				_record_reconnect_required(settings)
 			cache.set_value(_APPLY_CONFIRM_MISS_KEY, 1, expires_in_sec=_APPLY_CONFIRM_MISS_TTL_S)
 			return False
 		# Stamps the marker for this leg AND clears last_sync_status to a

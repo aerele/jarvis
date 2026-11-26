@@ -3373,14 +3373,21 @@ def _rate_limit_apply() -> None:
 	frappe.cache().set_value(key, "1", expires_in_sec=5)
 
 
-def _enqueued_push_agent_skills() -> None:
+def _enqueued_push_agent_skills(confirm: int = 0) -> None:
 	"""Background worker: push the enabled agent bundles via admin -> fleet ->
 	container. Re-builds the payload fresh (never trust a payload across the
 	queue boundary) and mirrors ``_enqueued_push_custom_skills``'s
-	try/except/finally so the status never stays ``pending:`` forever."""
+	try/except/finally so the status never stays ``pending:`` forever.
+
+	A push whose answer timed out may have landed: it is re-sent once (``confirm``)
+	after the assistant answers again, see ``push_confirm``."""
 	from jarvis import admin_client
 	from jarvis._redis_lock import redis_lock
+	from jarvis.chat import push_confirm
 
+	if confirm:
+		push_confirm.wait_for_agent()
+	confirm_next = False
 	with redis_lock(_LOCK_NAME, timeout_s=180, blocking_timeout_s=60.0) as acquired:
 		if not acquired:
 			frappe.db.set_single_value(
@@ -3443,9 +3450,15 @@ def _enqueued_push_agent_skills() -> None:
 			terminal_written = True
 			frappe.log_error(title="Jarvis: agent-skills admin auth failed", message=frappe.get_traceback())
 		except admin_client.AdminUnreachableError as e:
-			_fail(f"failed: admin unreachable: {e}")
 			terminal_written = True
-			frappe.log_error(title="Jarvis: agent-skills admin unreachable", message=frappe.get_traceback())
+			if not confirm and push_confirm.is_unconfirmed(e):
+				frappe.db.set_single_value(_SETTINGS, "agent_skills_sync_status", push_confirm.CONFIRMING)
+				confirm_next = True
+			else:
+				_fail(f"failed: admin unreachable: {e}")
+				frappe.log_error(
+					title="Jarvis: agent-skills admin unreachable", message=frappe.get_traceback()
+				)
 		except admin_client.AdminRateLimitedError as e:
 			retry = getattr(e, "retry_after_seconds", 0) or 0
 			retry_str = f"retry_after={retry}s" if retry > 0 else "retry shortly"
@@ -3472,6 +3485,8 @@ def _enqueued_push_agent_skills() -> None:
 				except Exception:
 					pass
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- persist job result
+	if confirm_next:
+		push_confirm.enqueue_confirm("jarvis.chat.agents_api._enqueued_push_agent_skills", _PUSH_JOB_ID)
 
 
 def _model_push_scope(payload: list[dict]) -> dict | None:

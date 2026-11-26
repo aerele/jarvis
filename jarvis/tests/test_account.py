@@ -1234,6 +1234,25 @@ class TestConfirmApplyViaAdminSwitchGuard(FrappeTestCase):
 		self.assertTrue(settings.llm_pool_synced_at)
 		self.assertTrue((settings.last_sync_status or "").startswith("ok"))
 
+	def test_a_first_apply_admin_wants_reconnected_is_rejected_at_once(self):
+		# The first connect outlived the bench's wait and admin then finished it as
+		# "reconnect required": the Connect step must ask for a sign-in, not keep waiting.
+		with patch.object(
+			admin_client, "get_connection", return_value={"chat_readiness": "ReconnectRequired"}
+		):
+			out = account.is_ready_for_chat()
+		self.assertEqual(out["reason"], "llm_rejected")
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(settings.last_sync_status, "failed: subscription needs re-authentication (blocked)")
+		self.assertFalse(settings.llm_pool_synced_at)
+
+	def test_any_other_not_ready_state_keeps_waiting(self):
+		with patch.object(admin_client, "get_connection", return_value={"chat_readiness": "Provisioning"}):
+			out = account.is_ready_for_chat()
+		self.assertEqual(out["reason"], "llm_pool_provisioning")
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(settings.last_sync_status, "pending: provisioning container (pool)")
+
 
 class TestEstablishedWorkspaceStaysInAppMidApply(FrappeTestCase):
 	"""jarvis C2: a fully-onboarded, chatting customer who adds a model in

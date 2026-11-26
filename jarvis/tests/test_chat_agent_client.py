@@ -275,6 +275,52 @@ class TestCreateSession(FrappeTestCase):
 		key = sess.create_session()
 		self.assertEqual(key, "session-abc")
 
+	def test_uses_the_session_create_budget_not_the_connect_one(self):
+		# The 2026.10.x agent runtime took 18 s for a cold sessions.create after a restart (1 CPU tenant);
+		# the shared 10 s connect budget failed the first new conversation. Both attempts (the
+		# plain one and the no-explicit-owner retry) must use the longer budget.
+		from jarvis.chat import agent_client
+
+		self.assertGreater(agent_client.SESSION_CREATE_TIMEOUT_SECONDS, agent_client.CONNECT_TIMEOUT_SECONDS)
+		self.assertLess(agent_client.SESSION_CREATE_TIMEOUT_SECONDS, _prepare_deadline())
+		sess, _ws = _build_session()
+		seen = []
+
+		def fake_request(method, params, timeout_s=None):
+			seen.append((method, timeout_s))
+			if len(seen) == 1:
+				raise AgentUnreachableError(
+					'Multiple agents are configured, but session key "main" has no explicit owner. '
+					"Pass agentId or use an agent-prefixed session key.",
+					code="INVALID_REQUEST",
+				)
+			return {"payload": {"key": "k"}}
+
+		with patch.object(sess, "_request", side_effect=fake_request):
+			self.assertEqual(sess.create_session(), "k")
+		self.assertEqual(
+			seen,
+			[("sessions.create", agent_client.SESSION_CREATE_TIMEOUT_SECONDS)] * 2,
+		)
+
+	def test_session_model_patch_uses_its_own_budget(self):
+		# A loaded 2026.11 gateway answered sessions.patch in 6-16 s: the 10 s connect budget
+		# failed builder turns before they started.
+		from jarvis.chat import agent_client
+
+		self.assertGreater(agent_client.SESSION_PATCH_TIMEOUT_SECONDS, 16)
+		self.assertLess(agent_client.SESSION_PATCH_TIMEOUT_SECONDS, _prepare_deadline())
+		sess, _ws = _build_session()
+		seen = []
+
+		def fake_request(method, params, timeout_s=None):
+			seen.append((method, timeout_s))
+			return {}
+
+		with patch.object(sess, "_request", side_effect=fake_request):
+			sess.set_session_model("k", "openai/gpt-x")
+		self.assertEqual(seen, [("sessions.patch", agent_client.SESSION_PATCH_TIMEOUT_SECONDS)])
+
 	def test_rejection_raises(self):
 		sess, ws = _build_session()
 
@@ -351,8 +397,10 @@ class TestCreateSession(FrappeTestCase):
 
 	def test_non_invalid_request_code_raises_without_retry(self):
 		# Even if the phrase appeared under a different code, the code gate blocks the retry.
+		# (Not UNAVAILABLE: that code is a still-starting gateway and IS waited out - see
+		# TestSessionRpcsWaitOutGatewayStartup.)
 		sess, ws = _build_session()
-		ws._frames.append(self._reject(ws, "UNAVAILABLE", self._NO_OWNER_MSG))
+		ws._frames.append(self._reject(ws, "FORBIDDEN", self._NO_OWNER_MSG))
 
 		with self.assertRaises(AgentUnreachableError):
 			sess.create_session()
@@ -1736,3 +1784,78 @@ class TestUncutErrorMessage(FrappeTestCase):
 	def test_the_direct_relay_keeps_a_whole_chat_message(self):
 		out = self._relay_error(self.FULL, "rate limited")
 		self.assertEqual(out["error"], "rate limited")
+
+
+def _prepare_deadline():
+	from jarvis.chat import turn_state
+
+	return turn_state.PREPARE_DEADLINE_S
+
+
+class TestSessionRpcsWaitOutGatewayStartup(FrappeTestCase):
+	"""sessions.create / sessions.patch retry while the agent runtime answers UNAVAILABLE (2026.10.x, ~40 s after a
+	restart); every other error is raised at once."""
+
+	def _unavailable(self):
+		return AgentUnreachableError(
+			"sessions.create rejected: UNAVAILABLE: Agent main has not completed startup inspection",
+			code="UNAVAILABLE",
+		)
+
+	def test_create_session_retries_unavailable(self):
+		sess, _ws = _build_session()
+		replies = [self._unavailable(), self._unavailable(), {"payload": {"key": "k"}}]
+
+		def fake(method, params, timeout_s=None):
+			r = replies.pop(0)
+			if isinstance(r, Exception):
+				raise r
+			return r
+
+		with (
+			patch.object(sess, "_request", side_effect=fake),
+			patch("jarvis.chat.agent_client.time.sleep") as sl,
+		):
+			self.assertEqual(sess.create_session(), "k")
+		self.assertEqual(sl.call_count, 2)
+
+	def test_create_session_without_waiting_fails_fast(self):
+		sess, _ws = _build_session()
+		with (
+			patch.object(sess, "_request", side_effect=self._unavailable()),
+			patch("jarvis.chat.agent_client.time.sleep") as sl,
+			self.assertRaises(AgentUnreachableError),
+		):
+			sess.create_session(wait_unavailable=False)
+		sl.assert_not_called()
+
+	def test_other_errors_are_not_retried(self):
+		sess, _ws = _build_session()
+		with (
+			patch.object(
+				sess, "_request", side_effect=AgentUnreachableError("bad", code="INVALID_REQUEST")
+			) as req,
+			patch("jarvis.chat.agent_client.time.sleep") as sl,
+			self.assertRaises(AgentUnreachableError),
+		):
+			sess.set_session_model("k", "openai/m")
+		self.assertEqual(req.call_count, 1)
+		sl.assert_not_called()
+
+	def test_gives_up_after_the_budget(self):
+		from jarvis.chat import agent_client
+
+		sess, _ws = _build_session()
+		clock = {"t": 0.0}
+		with (
+			patch.object(sess, "_request", side_effect=self._unavailable()) as req,
+			patch("jarvis.chat.agent_client.time.monotonic", side_effect=lambda: clock["t"]),
+			patch(
+				"jarvis.chat.agent_client.time.sleep",
+				side_effect=lambda d: clock.__setitem__("t", clock["t"] + d),
+			),
+			self.assertRaises(AgentUnreachableError),
+		):
+			sess.set_session_model("k", None)
+		self.assertLessEqual(clock["t"], agent_client.UNAVAILABLE_RETRY_BUDGET_SECONDS)
+		self.assertGreater(req.call_count, 3)

@@ -743,6 +743,46 @@ class TestAgentCatalogPushTOCTOU(FrappeTestCase):
 		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 1)
 		self.assertTrue(str(_single("agent_skills_sync_status")).startswith("failed: admin unreachable"))
 
+	def test_timed_out_push_is_confirmed_by_one_resend(self):
+		"""The push landed but admin's read of the fleet timed out: one re-send after the
+		assistant answers settles it as applied instead of failed."""
+		from jarvis import admin_client
+
+		calls = []
+
+		def _push(agent_skills):
+			calls.append(1)
+			if len(calls) == 1:
+				raise admin_client.AdminUnreachableError(
+					"admin returned a 502 error: fleet agent unreachable: Read timed out.", status_code=502
+				)
+			return {"ok": True}
+
+		with (
+			patch.object(admin_client, "post_push_agent_skills", side_effect=_push),
+			patch("jarvis.chat.push_confirm.wait_for_agent", return_value=True),
+		):
+			agents_api._enqueued_push_agent_skills()
+		self.assertEqual(len(calls), 2)
+		self.assertTrue(str(_single("agent_skills_sync_status")).startswith("ok ("))
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 0)
+
+	def test_a_second_timeout_is_reported_failed(self):
+		from jarvis import admin_client
+
+		err = admin_client.AdminUnreachableError(
+			"admin returned a 504 error: Read timed out", status_code=504
+		)
+		with (
+			patch.object(admin_client, "post_push_agent_skills", side_effect=err) as post,
+			patch("jarvis.chat.push_confirm.wait_for_agent", return_value=True),
+			patch.object(frappe, "log_error"),
+		):
+			agents_api._enqueued_push_agent_skills()
+		self.assertEqual(post.call_count, 2)
+		self.assertTrue(str(_single("agent_skills_sync_status")).startswith("failed: admin unreachable"))
+		self.assertEqual(frappe.utils.cint(_single("agent_catalog_dirty")), 1)
+
 	def test_version_bump_does_not_depend_on_a_previously_read_value(self):
 		"""#458 lost update: the bump is one statement, so it increments whatever
 		the row currently holds. The old read-modify-write took the value from

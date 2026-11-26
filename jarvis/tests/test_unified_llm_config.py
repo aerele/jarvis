@@ -4859,6 +4859,43 @@ class TestConvergenceReconcile(_RT3SettingsTestCase):
 		)
 		self.assertTrue((settings.last_sync_status or "").startswith("ok"))
 
+	def test_reconcile_records_admins_reconnect_verdict_on_a_first_apply(self):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			reconcile_pending_llm_sync,
+		)
+
+		self._seed_pool()
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("llm_pool_synced_at", None, update_modified=False)
+		settings.db_set("last_sync_status", "pending: admin applying config", update_modified=False)
+		frappe.db.commit()
+		self._seed_admin_creds()
+		with patch(
+			"jarvis.admin_client.get_connection", return_value={"chat_readiness": "ReconnectRequired"}
+		):
+			reconcile_pending_llm_sync()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(settings.last_sync_status, "failed: subscription needs re-authentication (blocked)")
+		self.assertFalse(settings.llm_pool_synced_at)
+
+	def test_reconcile_leaves_an_established_workspace_alone_on_reconnect(self):
+		from jarvis.jarvis.doctype.jarvis_settings.jarvis_settings import (
+			reconcile_pending_llm_sync,
+		)
+
+		self._seed_pool()
+		settings = frappe.get_single("Jarvis Settings")
+		settings.db_set("llm_pool_synced_at", frappe.utils.now(), update_modified=False)
+		settings.db_set("last_sync_status", "pending: admin applying config", update_modified=False)
+		frappe.db.commit()
+		self._seed_admin_creds()
+		with patch(
+			"jarvis.admin_client.get_connection", return_value={"chat_readiness": "ReconnectRequired"}
+		):
+			reconcile_pending_llm_sync()
+		settings = frappe.get_single("Jarvis Settings")
+		self.assertEqual(settings.last_sync_status, "pending: admin applying config")
+
 	def test_reconcile_does_not_stamp_while_a_switch_is_held(self):
 		"""jarvis#1425 review (live e2e2, 2026-09-27): admin's "Ready" while a
 		switch is held describes the PRE-switch config, not the held one -

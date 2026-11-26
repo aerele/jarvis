@@ -462,7 +462,9 @@ def _media_url_id(url: str) -> str:
 	return m.group(1) if m else url
 
 
-def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | None = None) -> bytes | None:
+def fetch_media_url(
+	agent_url: str, token: str, url: str, *, mime_type: str | None = None, ticketed: bool = False
+) -> bytes | None:
 	"""GET one gateway-attached media block from the tenant's own gateway
 	(binary-safe, redirect-disabled, size-bounded). ``url`` is the RELATIVE
 	path the runtime put on the content block - validated by the caller
@@ -475,12 +477,12 @@ def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | No
 	from jarvis.chat.canvas import _http_base
 
 	base = _http_base(agent_url)
-	if not base or not token:
+	if not base or not (token or ticketed):
 		return None
 	try:
 		with requests.get(
 			f"{base}{url}",
-			headers={"Authorization": f"Bearer {token}"},
+			headers={"Authorization": f"Bearer {token}"} if token else {},
 			timeout=15,
 			stream=True,
 			allow_redirects=False,
@@ -498,6 +500,36 @@ def fetch_media_url(agent_url: str, token: str, url: str, *, mime_type: str | No
 	except Exception:
 		return None
 	return bytes(buf) or None
+
+
+def fetch_media_by_ticket(
+	agent_url: str, session_key: str, artifact_id: str, *, mime_type: str | None = None
+) -> bytes | None:
+	"""Download a managed media artifact with a one-time ticket. From 2026.11 the agent
+	runtime's media route refuses the paired device's bearer; it serves a ``mediaTicket``
+	that ``artifacts.download`` issues to a connected client instead (read scope, no owner
+	token). The ticket is bound to the issuing connection, so the download happens while the
+	pooled session is still checked out. Best-effort: None on any failure."""
+	from jarvis.chat import agent_session_pool
+	from jarvis.chat.agent_client import _valid_media_url
+
+	if not (agent_url and session_key and artifact_id):
+		return None
+	ws_url = agent_url.replace("http://", "ws://").replace("https://", "wss://")
+	try:
+		with agent_session_pool.checkout(ws_url) as sess:
+			res = sess._request(
+				"artifacts.download",
+				{"sessionKey": session_key, "artifactId": artifact_id, "transport": "http"},
+				timeout_s=20,
+			)
+			url = ((res or {}).get("payload") or {}).get("url") or ""
+			path, _, query = url.partition("?")
+			if not _valid_media_url(path) or not query.startswith("mediaTicket="):
+				return None
+			return fetch_media_url(agent_url, "", url, mime_type=mime_type, ticketed=True)
+	except Exception:
+		return None
 
 
 def _media_url_filename(url: str, mime_type: str | None) -> str:
@@ -519,7 +551,9 @@ def _canvas_type_for_mime(mime_type: str | None) -> str:
 	return "file"
 
 
-def seed_media_urls(assistant_msg_name: str, agent_url: str, token: str, items: list[dict]) -> list[dict]:
+def seed_media_urls(
+	assistant_msg_name: str, agent_url: str, token: str, items: list[dict], session_key: str = ""
+) -> list[dict]:
 	"""Fetch each gateway-attached media block (``items`` = ``[{"url", "mime_type"},
 	...]``, from ``agent_client._chat_final_media_urls``), save it as a private
 	File on the assistant message, append to its ``canvas`` JSON, and return the
@@ -543,6 +577,8 @@ def seed_media_urls(assistant_msg_name: str, agent_url: str, token: str, items: 
 		if key in seen:
 			continue
 		content = fetch_media_url(agent_url, token, url, mime_type=mime_type)
+		if not content and item.get("artifact_id") and session_key:
+			content = fetch_media_by_ticket(agent_url, session_key, item["artifact_id"], mime_type=mime_type)
 		if not content:
 			failures += 1
 			continue

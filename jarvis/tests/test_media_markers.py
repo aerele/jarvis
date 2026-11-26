@@ -5,7 +5,7 @@ transports is covered by the worker / pump / recovery tests.
 """
 
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from jarvis.chat import generated_media as gm
 from jarvis.tests._gateway_fixtures import install_synthetic_runtime_profile
@@ -723,6 +723,22 @@ class TestSeedBlockWiring(unittest.TestCase):
 				turn_handler.persist_rich_outputs("MSG-1", "C1", "u@x", "run1", 0)
 		harvest.assert_not_called()
 
+	def test_harvest_history_reads_the_transcript_once(self):
+		# A final that beat the lifecycle end frame (the only carrier of a stripped MEDIA: line)
+		# asks for ONE transcript read: no polling, unlike a yield continuation.
+		from jarvis.chat import turn_handler
+
+		with patch.object(turn_handler, "_harvest_post_yield_media", return_value=([], [])) as harvest:
+			with (
+				patch("frappe.get_single", return_value=Mock(agent_url="ws://h:1")),
+				patch("frappe.db.get_value", side_effect=self._ordinary_message_value()),
+				patch("frappe.get_all", return_value=[]),
+				patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
+				patch("jarvis.chat.turn_handler._publish_to_user"),
+			):
+				turn_handler.persist_rich_outputs("MSG-1", "C1", "u@x", "run1", 0, harvest_history=True)
+		harvest.assert_called_once_with("C1", 0, poll=False)
+
 	def test_yield_continuation_with_media_already_present_skips_harvest(self):
 		from jarvis.chat import turn_handler
 
@@ -755,7 +771,7 @@ class TestSeedBlockWiring(unittest.TestCase):
 				patch("jarvis.chat.turn_handler._publish_to_user"),
 			):
 				turn_handler.persist_rich_outputs("MSG-1", "C1", "u@x", "run1", 123, yield_continuation=True)
-		harvest.assert_called_once_with("C1", 123)
+		harvest.assert_called_once_with("C1", 123, poll=True)
 		sm.assert_called_once_with("MSG-1", "ws://h:1", "tok", [_IMG])
 
 
@@ -934,3 +950,155 @@ class TestHarvestPostYieldMediaPolling(unittest.TestCase):
 
 if __name__ == "__main__":
 	unittest.main()
+
+
+class TestDetachedMediaWatch(unittest.TestCase):
+	"""A turn whose media-generation tool ran as a detached task (it returns at once and the
+	media lands in the transcript later) gets a background watch instead of losing the media."""
+
+	def _persist(self, *, detached, media_urls=None, yield_continuation=False):
+		from jarvis.chat import turn_handler
+
+		with (
+			patch.object(turn_handler, "_turn_started_detached_media", return_value=detached),
+			patch.object(turn_handler, "_harvest_post_yield_media", return_value=([], [])),
+			patch("frappe.enqueue") as enqueue,
+			patch("frappe.get_single", return_value=Mock(agent_url="ws://h:1")),
+			patch("frappe.db.get_value", side_effect=TestSeedBlockWiring._ordinary_message_value()),
+			patch("frappe.get_all", return_value=[]),
+			patch("jarvis.chat.canvas.persist_canvases", return_value=[]),
+			patch("jarvis.chat.generated_media.seed_media", return_value=[]),
+			patch("jarvis.chat.generated_media.seed_media_urls", return_value=[]),
+			patch("jarvis.chat.turn_handler._publish_to_user"),
+		):
+			turn_handler.persist_rich_outputs(
+				"MSG-1", "C1", "u@x", "run1", 0, media_urls=media_urls, yield_continuation=yield_continuation
+			)
+		return [c for c in enqueue.call_args_list if c.args and c.args[0].endswith("harvest_detached_media")]
+
+	def test_a_detached_media_turn_without_media_is_watched(self):
+		calls = self._persist(detached=True)
+		self.assertEqual(len(calls), 1)
+		self.assertEqual(calls[0].kwargs["job_id"], "jarvis-detached-media:MSG-1")
+
+	def test_no_watch_when_the_media_already_came_back_or_no_media_tool_ran(self):
+		self.assertEqual(self._persist(detached=True, media_urls=[{"url": "/x", "mime_type": None}]), [])
+		self.assertEqual(self._persist(detached=False), [])
+
+	def test_the_yield_path_keeps_its_inline_harvest(self):
+		self.assertEqual(self._persist(detached=True, yield_continuation=True), [])
+
+	def test_the_watch_attaches_what_it_finds_with_the_long_timeout(self):
+		from jarvis.chat import turn_handler
+
+		found = [{"url": "/api/chat/media/outgoing/s/x/full", "mime_type": "image/png"}]
+		with (
+			patch.object(turn_handler, "_harvest_post_yield_media", return_value=([], found)) as harvest,
+			patch.object(turn_handler, "persist_rich_outputs") as persist,
+		):
+			turn_handler.harvest_detached_media("MSG-1", "C1", "u@x", "run1", 5)
+		self.assertEqual(harvest.call_args.kwargs["timeout_s"], turn_handler._DETACHED_MEDIA_POLL_TIMEOUT_S)
+		persist.assert_called_once_with("MSG-1", "C1", "u@x", "run1", 5, media_rels=[], media_urls=found)
+
+	def test_the_watch_gives_up_quietly(self):
+		from jarvis.chat import turn_handler
+
+		with (
+			patch.object(turn_handler, "_harvest_post_yield_media", return_value=([], [])),
+			patch.object(turn_handler, "persist_rich_outputs") as persist,
+		):
+			turn_handler.harvest_detached_media("MSG-1", "C1", "u@x", "run1", 5)
+		persist.assert_not_called()
+
+	def test_detection_looks_only_at_this_turns_tool_rows(self):
+		from jarvis.chat import turn_handler
+
+		with (
+			patch("frappe.db.get_value", return_value=7),
+			patch("frappe.get_all", return_value=["ROW"]) as get_all,
+		):
+			self.assertTrue(turn_handler._turn_started_detached_media("C1", "MSG-1"))
+		filters = get_all.call_args.kwargs["filters"]
+		self.assertEqual(filters["seq"], [">", 7])
+		self.assertEqual(filters["role"], "tool")
+		self.assertIn("image_generate", filters["tool_name"][1])
+
+
+class TestTicketedMediaDownload(unittest.TestCase):
+	"""From 2026.11 the media route refuses the device bearer; a one-time ticket from
+	``artifacts.download`` (issued over the device's own session) is the download path."""
+
+	_ITEM = {**_URL_ITEM, "artifact_id": "artifact_managed_image_12345678-1234-1234-1234-123456789012"}
+
+	def test_the_scanner_keeps_the_artifact_id(self):
+		from jarvis.chat.agent_client import _chat_final_media_urls
+
+		block = {
+			"type": "image",
+			"url": _URL_ITEM["url"],
+			"mimeType": "image/png",
+			"artifactId": self._ITEM["artifact_id"],
+		}
+		self.assertEqual(
+			_chat_final_media_urls({"message": {"content": [block]}}),
+			[{"url": _URL_ITEM["url"], "mime_type": "image/png", "artifact_id": self._ITEM["artifact_id"]}],
+		)
+
+	def _seed(self, item, session_key, *, bearer=None, ticket=b"PNG"):
+		ps = TestSeedMediaUrls._patch_db(Mock(), existing_canvas=None)
+		with (
+			ps[0],
+			ps[1],
+			ps[2],
+			ps[3],
+			patch.object(gm, "fetch_media_url", return_value=bearer),
+			patch.object(gm, "fetch_media_by_ticket", return_value=ticket) as tk,
+			patch("frappe.log_error"),
+		):
+			items = gm.seed_media_urls("MSG-1", "ws://h:1", "tok", [item], session_key=session_key)
+		return items, tk
+
+	def test_a_refused_bearer_falls_back_to_a_ticket(self):
+		items, tk = self._seed(self._ITEM, "agent:main:dashboard:x")
+		tk.assert_called_once_with(
+			"ws://h:1", "agent:main:dashboard:x", self._ITEM["artifact_id"], mime_type="image/png"
+		)
+		self.assertEqual(len(items), 1)
+
+	def test_no_ticket_without_an_artifact_id_or_session_key(self):
+		for item, sk in ((_URL_ITEM, "agent:main:dashboard:x"), (self._ITEM, "")):
+			items, tk = self._seed(item, sk)
+			tk.assert_not_called()
+			self.assertEqual(items, [])
+
+	def test_a_working_bearer_needs_no_ticket(self):
+		items, tk = self._seed(self._ITEM, "agent:main:dashboard:x", bearer=b"PNG")
+		tk.assert_not_called()
+		self.assertEqual(len(items), 1)
+
+	def _ticket(self, returned_url):
+		sess = Mock()
+		sess._request.return_value = {"ok": True, "payload": {"url": returned_url}}
+		pool = MagicMock()
+		pool.checkout.return_value.__enter__.return_value = sess
+		with (
+			patch("jarvis.chat.agent_session_pool.checkout", pool.checkout),
+			patch.object(gm, "fetch_media_url", return_value=b"PNG") as fm,
+		):
+			out = gm.fetch_media_by_ticket(
+				"http://h:1", "agent:main:dashboard:x", "artifact_x", mime_type="image/png"
+			)
+		return out, sess, fm
+
+	def test_the_ticket_is_downloaded_without_a_bearer_on_the_same_session(self):
+		url = _URL_ITEM["url"].replace(".png", "") + "?mediaTicket=abc"
+		out, sess, fm = self._ticket(url)
+		self.assertEqual(out, b"PNG")
+		self.assertEqual(sess._request.call_args.args[0], "artifacts.download")
+		fm.assert_called_once_with("http://h:1", "", url, mime_type="image/png", ticketed=True)
+
+	def test_an_untrusted_or_ticketless_url_is_refused(self):
+		for bad in ("https://evil.example/x?mediaTicket=1", _URL_ITEM["url"], "/api/other?mediaTicket=1"):
+			out, _, fm = self._ticket(bad)
+			self.assertIsNone(out)
+			fm.assert_not_called()
