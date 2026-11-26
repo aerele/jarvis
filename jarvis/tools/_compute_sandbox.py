@@ -192,6 +192,7 @@ _MISSING = _Missing()
 def _rss_bytes() -> int | None:
 	"""Resident memory of this process, or None where /proc is not there."""
 	try:
+		# nosemgrep: frappe-security-file-traversal -- fixed kernel path, no caller input
 		with open("/proc/self/statm") as f:
 			return int(f.read().split()[1]) * _PAGE_SIZE
 	except Exception:
@@ -1929,7 +1930,10 @@ def execute(code_obj, glb: dict, run: _Run) -> BaseException | None:
 			with _no_writes(run):
 				try:
 					with _deadline(run):
-						exec(code_obj, glb)  # nosemgrep: compiled by RestrictedPython above
+						# The tool's purpose: code compiled by RestrictedPython above, run in the
+						# allowlisted read-only namespace `glb`, as the chat user.
+						# nosemgrep: frappe-codeinjection-eval
+						exec(code_obj, glb)
 				except (KeyboardInterrupt, SystemExit):
 					raise
 				except BaseException as e:
