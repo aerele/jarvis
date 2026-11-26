@@ -1464,8 +1464,9 @@ per company and side between 00:15 and 01:15 (jittered by the digest) on the `lo
 the `long` workers minus one, and one slot when the bench has one `long` worker, so the units run one at a time
 on that worker. With no `long` worker there is no slot and nothing is queued. By day the generation ages up to
 about 24 hours; the status shows `day_lane: absent` and `refresh: night-only` and the age of each generation,
-and S5 must show that age. A night unit holds the worker for at most 960 s (the night claim life), so a user's
-snapshot job on a one-worker bench can wait behind one unit; the window caps the start times. A unit that does
+and S5 must show that age. A night unit can hold the only worker up to the RQ job timeout (1800 s; the 960 s
+night claim life is not the job limit), so a user's snapshot job on a one-worker bench can wait behind one unit;
+the window caps the start times. A unit that does
 not start before 01:15 waits for the next night (`outside_window`), so many listed companies may not all fit
 one night: T0 measures the time of one unit. The `stale_risk` alert needs `payment_calendar_cache_full_cadence`,
 a configured lane and a company in use, and the `lane not live` alert needs a configured lane, so a bench without
@@ -1578,6 +1579,26 @@ the Jarvis error feed. A person reads that feed; a row with another title stays 
 - **Real-queue check (AC-E3):** `bench --site test_jarvis run-tests --module jarvis.tests.test_payment_calendar_cache_e2e`
   runs one day and one night refresh through a private RQ queue in-process. The bench rehearsal on the
   measurement site measures the 8-hour day (`max_age_s_today` of every head must stay at or under 840).
-- **T0-dependent numbers** (plan defaults until the T0 report sets them): `RSS_CAP_MB`, the line caps, `LINES_PER_INVOICE`,
-  the view, write and statement caps, `D_MAX`, `CHUNK_ROWS`, `GRACE_S`, the janitor budget, the backoff ladder, and the
-  oracle sample sizes.
+- **T0-dependent numbers.** The partial T0 (playground data, 2026-11-26) set four constants. The others stay at their
+  plan defaults until the large-company measurement is done.
+
+  | Constant | Value | Reason (T0, partial) |
+  |---|---|---|
+  | `BYTES_PER_LINE` | 3072 | The traced peak is 2.55-2.6 KB per ledger line. 2048 was 16 % too low. |
+  | `LINES_PER_INVOICE` | 10 | Measured 5.7 (Receivable) and 8.8 (Payable) lines per invoice. 8 was too low. |
+  | `REFRESH_GENERIC_LINE_CAP` | 349,525 | Derived: `RSS_CAP_MB` x 1 MiB / `BYTES_PER_LINE`. It follows `BYTES_PER_LINE`. |
+  | `REFRESH_MAX_ROWS` | 150,000 | The rows list takes 3.1-4.6 KB per row, so memory binds near 150k rows (was 2,000,000). |
+  | `JANITOR_TIME_BUDGET_S` | 40 | 400k rows at 20k rows per s take 20 s. 40 s allows a factor 2 for load (was 20). |
+
+  Not yet set by measurement: `RSS_CAP_MB` (owner decision OD5), the view, write and statement caps, `D_MAX`,
+  `CHUNK_ROWS`, `GRACE_S`, the janitor row budget, the backoff ladder and the oracle sample sizes.
+
+  **Measured (partial T0).** The measured company has 2,962 Receivable, 192 Payable and 2 Bank stored rows. One night
+  unit takes 6.8 s (Receivable), 2.4 s (Payable) and 6.7 s (Bank), with the oracle. The peak growth of a build is
+  137 MB at most (+137, +74 and +64 MB). The write volume per day for the measured company
+  (3,156 stored rows over the three sides, 1.32 KB of redo per stored row and generation) is 4.2 MB at night only (1 generation per day),
+  33 MB at the hourly sample (8 per day) and 0.33 GB at the full cadence (80 per day). **The large-company size
+  (about 2.5M ledger lines per side, 50k to 200k open invoices) is not measured.** All numbers for that size are
+  linear extrapolations. The memory limits suggest that one pass may not hold 50k open invoices per side within
+  `RSS_CAP_MB`, so the bucket rule or OD5 may be needed. That measurement is owed before S5 serves a company larger
+  than the measured one.

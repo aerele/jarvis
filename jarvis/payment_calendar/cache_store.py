@@ -80,7 +80,8 @@ METADATA_DAYS = 30
 JANITOR_BUDGET_ROWS = 20_000
 JANITOR_CHUNK_ROWS = 2_000
 # One janitor run stops after this many seconds, so it cannot hold a job past its deadline (T0: delete speed).
-JANITOR_TIME_BUDGET_S = 20
+# T0 (partial, playground data, 2026-11-26): 400k rows at 20k rows per s take 20 s; 40 s allows a factor 2 for load.
+JANITOR_TIME_BUDGET_S = 40
 # Purged generations that one query of the janitor reads (the next page follows until the budget is spent).
 PURGED_PAGE = 100
 # The most retired generations that `janitor_backlog` counts.

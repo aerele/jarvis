@@ -147,6 +147,19 @@ class TestRefreshCaps(TestCase):
 			self.assertGreater(builtin_reader.TOTAL_LINE_CAP, before["TOTAL_LINE_CAP"])
 		self.assertEqual(before, {name: getattr(builtin_reader, name) for name in before})
 
+	def test_a_build_above_150000_rows_is_refused_and_150000_is_not(self):
+		def engine(rows):
+			return SimpleNamespace(
+				data=[object()] * rows, excluded=[], terms={}, reader_stats={"counts": {}, "timings_ms": {}}
+			)
+
+		with cache_refresh.refresh_caps(cache_refresh.ViewClock(240, None, "t", False)):
+			self.assertEqual(builtin_reader.READER_MAX_ROWS, 150_000)
+			builtin_reader._check_row_cap(engine(150_000))
+			with self.assertRaises(ReaderFallback) as raised:
+				builtin_reader._check_row_cap(engine(150_001))
+		self.assertEqual(raised.exception.reason, "assemble_budget")
+
 	def test_the_caps_are_restored_after_an_error(self):
 		before = builtin_reader.TOTAL_LINE_CAP
 		with (
@@ -183,6 +196,17 @@ class TestRefreshCaps(TestCase):
 
 
 class TestEstimate(TestCase):
+	def test_the_t0_constants_are_pinned(self):
+		self.assertEqual(cache_refresh.BYTES_PER_LINE, 3072)
+		self.assertEqual(cache_refresh.LINES_PER_INVOICE, 10)
+		self.assertEqual(cache_refresh.REFRESH_MAX_ROWS, 150_000)
+		self.assertEqual(cache_refresh.REFRESH_GENERIC_LINE_CAP, 349_525)
+
+	def test_the_estimate_is_3072_bytes_per_line_and_10_lines_per_invoice(self):
+		self.assertEqual(cache_refresh.estimate_bytes(100, 10), 200 * 3072)
+		self.assertEqual(cache_refresh.estimate_bytes(0, 1), 10 * 3072)
+		self.assertEqual(cache_refresh.estimate_bytes(1, 0), 3072)
+
 	def test_the_estimate_counts_generic_lines_and_invoice_lines(self):
 		expected = (100 + 10 * cache_refresh.LINES_PER_INVOICE) * cache_refresh.BYTES_PER_LINE
 		self.assertEqual(cache_refresh.estimate_bytes(100, 10), expected)

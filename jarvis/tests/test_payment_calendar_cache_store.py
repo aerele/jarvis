@@ -10,6 +10,7 @@ Run ONLY on the test site:
 """
 
 import contextlib
+import inspect
 import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -1384,6 +1385,10 @@ class TestJanitorSizedToTheData(JanitorCase):
 		):
 			cache_store.janitor()
 		self.assertEqual(self.row_count(old), 7)
+
+	def test_a_run_has_a_time_budget_of_40_seconds_by_default(self):
+		self.assertEqual(cache_store.JANITOR_TIME_BUDGET_S, 40)
+		self.assertEqual(inspect.signature(cache_store.janitor).parameters["time_budget_s"].default, 40)
 
 	def test_the_time_budget_stops_a_run(self):
 		old = self.make_gen("retired", age_s=cache_store.GRACE_S + 60, row_count=10)

@@ -76,16 +76,19 @@ SIDES = cache_store.SIDES
 # --- Numbers T0 must confirm. Each is a default (or a bound) until the measurement sets it. ---
 # Extra address space a refresh may use above the job's baseline.
 RSS_CAP_MB = 1024
-# Bytes of one ledger line held in Python (builtin_reader: about 2 KB).
-BYTES_PER_LINE = 2048
+# Bytes of one ledger line held in Python.
+# T0 (partial, playground data, 2026-11-26): the traced peak is 2.55-2.6 KB per line; 2048 was 16 % too low.
+BYTES_PER_LINE = 3072
 # Ledger lines per discovered invoice, for the estimate before the fetch (T0: estimate accuracy).
-LINES_PER_INVOICE = 8
+# T0 (partial, playground data, 2026-11-26): 5.7 (Receivable) and 8.8 (Payable) lines per invoice; 8 was too low.
+LINES_PER_INVOICE = 10
 # The reader's caps for a refresh. The line caps count the whole side's history; memory is bounded by the
 # estimate and RLIMIT_AS, not by them (T0 sets them, and decides whether buckets are needed).
 REFRESH_TOTAL_LINE_CAP = 20_000_000
 REFRESH_GENERIC_LINE_CAP = RSS_CAP_MB * 1024 * 1024 // BYTES_PER_LINE
 REFRESH_RANK_PARTY_CAP = 2_000_000
-REFRESH_MAX_ROWS = 2_000_000
+# T0 (partial, playground data, 2026-11-26): the rows list takes 3.1-4.6 KB per row; memory binds near 150k rows.
+REFRESH_MAX_ROWS = 150_000
 # Free disk needed before a refresh: the larger of the floor and 3 x the last generation's bytes.
 FREE_DISK_FLOOR_BYTES = 5 * 1024**3
 FREE_DISK_FACTOR = 3
