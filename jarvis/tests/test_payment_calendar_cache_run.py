@@ -9,7 +9,7 @@ Run ONLY on the test site:
 """
 
 import json
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
@@ -43,7 +43,18 @@ from jarvis.tests.test_payment_calendar_cache_store import (
 REAL_TAKE_SLOT = cache_state.take_slot
 REAL_RELEASE_SLOT = cache_state.release_slot
 REAL_RENEW_SLOT = cache_state.renew_slot
+REAL_CHECKED_DOCTYPES = cache_refresh._checked_doctypes
+REAL_QUERY_HOOK_OFFENDERS = cache_refresh.query_hook_offenders
+STANDARD_PARTY_TYPES = frozenset({"Customer", "Supplier"})
+AUDITED_QUERY_HOOK = (
+	"erpnext.stock.doctype.company_restriction.company_restriction.get_permission_query_conditions"
+)
 CONTROL_LINES = 4_321
+
+
+def checked_doctypes(side):
+	"""The real checked set, with the Party Type rows of a standard ERPNext site (CI's site has none)."""
+	return REAL_CHECKED_DOCTYPES(side) | (set() if side == "Bank" else STANDARD_PARTY_TYPES)
 
 
 def canned(*rows, doctypes=("Sales Invoice", "Customer"), **payload):
@@ -74,6 +85,7 @@ class RunCase(SideCase):
 			"_control": lambda company, side: cache_refresh.Control(
 				frozenset({"Sales Invoice"}), CONTROL_LINES
 			),
+			"_checked_doctypes": checked_doctypes,
 			"query_hook_offenders": lambda doctypes: [],
 			"hook_fingerprint": lambda doctypes: "fp",
 		}
@@ -408,6 +420,27 @@ class TestSkips(RunCase):
 
 	def test_a_hooked_query_makes_no_generation(self):
 		with patch.object(cache_refresh, "query_hook_offenders", lambda doctypes: ["Expense Claim"]):
+			self.skipped("not_buildable:query_hook")
+
+	def audited_company_restriction(self, pins_match):
+		"""The real hook rule on the real preflight, with ERPNext's audited hook on Customer and the pin state set."""
+		return (
+			patch.object(cache_refresh, "query_hook_offenders", REAL_QUERY_HOOK_OFFENDERS),
+			patch.object(cache_refresh, "effective_hooks", return_value={"Customer": [AUDITED_QUERY_HOOK]}),
+			patch.object(cache_refresh, "get_server_script_map", return_value={}),
+			patch.object(cache_refresh.cache_eligibility, "audited_sources_ok", return_value=pins_match),
+		)
+
+	def test_the_audited_hook_with_matching_pins_does_not_stop_the_build(self):
+		with ExitStack() as stack:
+			for patcher in self.audited_company_restriction(True):
+				stack.enter_context(patcher)
+			self.assertEqual(self.go().outcome, "swapped")
+
+	def test_the_audited_hook_with_drifted_pins_makes_no_generation(self):
+		with ExitStack() as stack:
+			for patcher in self.audited_company_restriction(False):
+				stack.enter_context(patcher)
 			self.skipped("not_buildable:query_hook")
 
 	def test_a_memo_skips_after_a_too_large_failure(self):
