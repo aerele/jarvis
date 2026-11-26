@@ -64,10 +64,12 @@ second makes other threads' allocations fail. A subprocess cannot share this req
 database connection, transaction and permission context, which every read here relies
 on. Size pre-checks plus checks between steps are the boundary instead.
 
-Not covered (bounded only by the worker): a C call on data the script already holds
-that does a lot of work without growing anything (a set of ints chosen to collide in
-one hash bucket is quadratic), and what a report's own Python does outside the database
-(HTTP, email sent directly, a realtime event).
+Lambdas tick at every call and the tracer stops any call into the script at the
+deadline, so a callable driven from C (map, sorted, max with a key) cannot outrun it.
+
+Not covered (bounded only by the worker): what a report's own Python does outside the
+database (HTTP, email sent directly, a realtime event), and C work that none of the
+guards in ``_compute_guards`` sizes (the module docstring lists what they cover).
 """
 
 from __future__ import annotations
@@ -236,6 +238,22 @@ class _Run:
 		self.warnings: list[str] = []
 		self._warned: set = set()
 		self.last_receipt: dict = {}
+		# Currencies of the amounts read record by record (get_doc / get_value), per doctype.
+		self.record_units: dict[str, set] = {}
+
+	def note_record_units(self, doctype: str, units: set):
+		"""Warn once when amounts read record by record from ``doctype`` are in more than one
+		currency: adding them up would mix units."""
+		seen = self.record_units.setdefault(doctype, set())
+		seen |= units
+		if len(seen) > 1:
+			names = sorted(seen)
+			listed = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+			self.warn(
+				("records", doctype),
+				f"This code read amounts from {doctype} records in {listed} (get_doc / get_value). "
+				"Amounts in different currencies cannot be added: use the base_ fields or total per currency.",
+			)
 
 	def record_read(self, receipt: dict) -> dict:
 		"""Keep a read's receipt (the first MAX_READ_RECEIPTS; later ones are counted)."""
@@ -344,7 +362,20 @@ _AUG_ITEM = "_jv_aug_item_"
 _BINOP = "_jv_binop_"
 _FORMAT = "_jv_format_"
 _TICK = "_jv_tick_"
-_GUARDED_BINOPS = {ast.Add: "+", ast.Mult: "*", ast.Pow: "**", ast.LShift: "<<", ast.Mod: "%"}
+_COMPARE = "_jv_cmp_"
+_KEY = "_jv_key_"
+_GUARDED_BINOPS = {
+	ast.Add: "+",
+	ast.Mult: "*",
+	ast.Pow: "**",
+	ast.LShift: "<<",
+	ast.Mod: "%",
+	ast.FloorDiv: "//",
+	ast.BitOr: "|",
+	ast.BitAnd: "&",
+	ast.Sub: "-",
+	ast.BitXor: "^",
+}
 # Statement lists a tick is put in front of.
 _BODY_FIELDS = ("body", "orelse", "finalbody")
 
@@ -383,7 +414,50 @@ class _ComputePolicy(_BasePolicy):
 		if isinstance(node.ctx, ast.Store) and isinstance(node.slice, ast.Slice):
 			self.error(node, "Slice assignment is not available: build a new list instead.")
 			return node
-		return super().visit_Subscript(node)
+		node = super().visit_Subscript(node)
+		# A stored or deleted key is hashed and compared in C: its cost is checked first
+		# (a read goes through _getitem_, which checks it there).
+		if isinstance(node, ast.Subscript) and not isinstance(node.slice, ast.Slice):
+			node.slice = _call(_KEY, [node.slice], node)
+		return node
+
+	def visit_Lambda(self, node: ast.Lambda):
+		# A lambda body is an expression: (tick, body)[1] checks time and memory on
+		# every call, so map / sorted / max over a lambda cannot outrun the deadline.
+		node = super().visit_Lambda(node)
+		body = ast.Subscript(
+			value=ast.Tuple(elts=[_call(_TICK, [], node), node.body], ctx=ast.Load()),
+			slice=ast.Constant(1),
+			ctx=ast.Load(),
+		)
+		copy_locations(body, node.body)
+		node.body = ast.fix_missing_locations(body)
+		return node
+
+	def visit_Compare(self, node: ast.Compare):
+		# Every operand is cost-checked before C compares it (deep shared structures,
+		# long lists of long text). The right side of ``in`` is a lookup when it is a
+		# dict or set; ``is`` compares nothing.
+		node = super().visit_Compare(node)
+		node.left = _call(_COMPARE, [node.left, ast.Constant(0)], node)
+		node.comparators = [
+			_call(
+				_COMPARE,
+				[
+					c,
+					ast.Constant(
+						1
+						if isinstance(op, ast.In | ast.NotIn)
+						else 2
+						if isinstance(op, ast.Is | ast.IsNot)
+						else 0
+					),
+				],
+				node,
+			)
+			for op, c in zip(node.ops, node.comparators, strict=True)
+		]
+		return node
 
 	def visit_FormattedValue(self, node: ast.FormattedValue):
 		node = super().visit_FormattedValue(node)
@@ -727,12 +801,29 @@ def _getitem(obj, key):
 	return obj[key]
 
 
+def _getitem_factory(guards: Guards):
+	def _getitem_(obj, key):
+		guards.key(key)
+		return _getitem(obj, key)
+
+	return _getitem_
+
+
 def _write(obj):
 	if isinstance(obj, _Namespace | type | types.FunctionType | types.MethodType | types.BuiltinFunctionType):
 		raise TypeError("This object cannot be changed.")
 	if isinstance(obj, _BLOCKED_TYPES):
 		raise TypeError("This object cannot be changed.")
 	return obj
+
+
+def _write_factory(guards: Guards):
+	def _write_(obj):
+		_write(obj)
+		guards.invalidate(obj)  # its cached comparison cost no longer holds
+		return obj
+
+	return _write_
 
 
 def _plain_inplace(op: str, x, y):
@@ -983,8 +1074,8 @@ def _dict_aggregates_supported() -> bool:
 _DICT_AGGREGATES = _dict_aggregates_supported()
 
 
-# Core doctypes that hold sign-in tokens and keys. (Doctypes with a Password field and
-# every doctype of the jarvis app are refused by rule, see _is_private_doctype.)
+# Core doctypes that hold sign-in tokens and keys. (Every doctype of the jarvis app is
+# refused by rule, see _is_private_doctype.)
 _SECRET_DOCTYPES = frozenset(
 	{
 		"OAuth Bearer Token",
@@ -1008,9 +1099,10 @@ _SECRET_DOCTYPES = frozenset(
 def _is_private_doctype(doctype: str) -> bool:
 	"""Never read through compute, whatever the user's roles: every doctype of the
 	jarvis app (conversations, memory, skills, settings, MCP OAuth clients and tokens,
-	connectors ...), core sign-in token and key doctypes, and any doctype with a Password
-	field. ``doctype`` is the canonical name. The dedicated tools read Jarvis's own
-	records with their own scope checks (recall, find_skills, get_skill ...)."""
+	connectors ...) and the core sign-in token and key doctypes. ``doctype`` is the
+	canonical name. A Password field alone does not make a doctype private: its value is
+	stored outside the row and never comes back from a read. The dedicated tools read
+	Jarvis's own records with their own scope checks (recall, find_skills, get_skill ...)."""
 	if doctype in _SECRET_DOCTYPES or doctype.casefold().startswith("jarvis "):
 		return True
 	try:
@@ -1020,19 +1112,34 @@ def _is_private_doctype(doctype: str) -> bool:
 	from frappe.modules.utils import get_module_app
 
 	try:
-		if meta.module and get_module_app(meta.module) == "jarvis":
-			return True
+		return bool(meta.module) and get_module_app(meta.module) == "jarvis"
 	except Exception:
-		pass
-	return any(df.fieldtype == "Password" for df in meta.fields)
+		return False
 
 
 def _refuse_private(doctype: str):
 	if _is_private_doctype(doctype):
 		raise PermissionDeniedError(
-			f"compute reads business records only; {doctype} is not available here (Jarvis's own data, "
-			"sign-in tokens or passwords). Use the dedicated Jarvis tool for Jarvis's own records."
+			f"compute reads business records only; {doctype} is not available here (Jarvis's own data "
+			"or sign-in tokens and keys). Use the dedicated Jarvis tool for Jarvis's own records."
 		)
+
+
+def _json_arg(name: str, value):
+	"""``filters`` / ``or_filters`` / ``fields`` given as JSON text, read as Frappe's API reads
+	them; any other text is refused (it would silently match nothing)."""
+	if not isinstance(value, str):
+		return value
+	try:
+		parsed = json.loads(value)
+	except ValueError:
+		parsed = None
+	if not isinstance(parsed, dict | list):
+		raise SandboxUsageError(
+			f"{name} must be a dict or a list (or JSON text of one), e.g. {{'docstatus': 1}} or "
+			"[['posting_date', '>=', '2026-10-01']]."
+		)
+	return parsed
 
 
 def _canonical_name(doctype: str) -> str:
@@ -1259,6 +1366,11 @@ def make_reads(run: _Run) -> dict:
 			isinstance(fields, list) and fields and isinstance(fields[0], list | tuple)
 		):
 			fields, filters = filters, fields
+		filters = _json_arg("filters", filters)
+		if kwargs.get("or_filters") is not None:
+			kwargs = {**kwargs, "or_filters": _json_arg("or_filters", kwargs["or_filters"])}
+		if isinstance(fields, str) and fields.lstrip().startswith("["):
+			fields = _json_arg("fields", fields)
 		doctype = _doctype(doctype)
 		parent_doctype = kwargs.get("parent_doctype")
 		pluck = kwargs.get("pluck")
@@ -1276,6 +1388,11 @@ def make_reads(run: _Run) -> dict:
 		fields = [_translate_field(f) for f in as_given]
 
 		meta = frappe.get_meta(doctype)
+		if meta.issingle:
+			raise SandboxUsageError(
+				f"{doctype} is a single doctype (one record, no list): use get_single_value('{doctype}', "
+				f"field) or get_doc('{doctype}')."
+			)
 		if meta.istable:
 			if not parent_doctype:
 				parents = _child_table_parents(doctype)
@@ -1388,9 +1505,16 @@ def make_reads(run: _Run) -> dict:
 		children = sum(len(v) for v in doc.values() if isinstance(v, list))
 		run.take_rows(1 + children, f"get_doc('{doctype}')")
 		receipt = {"doctype": doctype, "rows": 1 + children}
-		if doc.get("currency"):
-			receipt["currency"] = doc["currency"]
+		from jarvis.tools import _compute_amounts
+
+		meta = frappe.get_meta(doctype)
+		units = _compute_amounts.record_units(doctype, meta, doc, [df.fieldname for df in meta.fields])
+		if len(units) == 1:
+			receipt["currency"] = next(iter(units))
+		elif units:
+			receipt["currencies"] = sorted(units)
 		run.record_read(receipt)
+		run.note_record_units(doctype, units)
 		return _rows(doc)
 
 	def get_value(doctype, filters=None, fieldname="name", as_dict=False):
@@ -1402,10 +1526,24 @@ def make_reads(run: _Run) -> dict:
 		else:
 			if isinstance(filters, str | int):
 				filters = {"name": filters}
-			found = _read_list(doctype, fieldnames, filters, {"limit": 1}, source="get_value")
+			from jarvis.tools import _compute_amounts
+
+			meta = frappe.get_meta(doctype)
+			extra = [
+				c for c in _compute_amounts.unit_columns(doctype, meta, fieldnames) if c not in fieldnames
+			]
+			if extra and frappe.session.user != "Administrator":
+				from frappe.model import get_permitted_fields
+
+				extra = [c for c in extra if c in set(get_permitted_fields(doctype))]
+			found = _read_list(doctype, [*fieldnames, *extra], filters, {"limit": 1}, source="get_value")
 			if not found:
 				return None
-			row = found[0]
+			units = _compute_amounts.record_units(doctype, meta, found[0], fieldnames)
+			if len(units) == 1:
+				run.last_receipt["currency"] = next(iter(units))
+			run.note_record_units(doctype, units)
+			row = Row({f: found[0].get(f) for f in fieldnames})
 		if as_dict:
 			return row
 		if isinstance(fieldname, list | tuple):
@@ -1482,7 +1620,15 @@ def make_reads(run: _Run) -> dict:
 				raise
 			raise SandboxUsageError(f"run_report('{report_name}'): {e}") from None
 		except frappe.ValidationError as e:
-			raise SandboxUsageError(f"run_report('{report_name}'): {_clean(e)}") from None
+			raise SandboxUsageError(f"run_report('{report_name}') failed: {_clean(e)}{_REPORT_FIX}") from None
+		except Exception as e:
+			if _failure_kind_too_slow(e):
+				raise
+			# The report's own error (a bad column, a missing filter), not a write attempt:
+			# Frappe's Error Log insert for it is dropped by the write guard.
+			raise SandboxUsageError(
+				f"run_report('{report_name}') failed: {type(e).__name__}: {_clean(e)}{_REPORT_FIX}"
+			) from None
 		finally:
 			run.activity = None
 		columns = normalise_columns(data.get("columns") or [])
@@ -1568,6 +1714,18 @@ _DEFAULT_KEYS = frozenset(
 		"cost_center",
 	}
 )
+
+
+_REPORT_FIX = (
+	" Check the report's filters (get_report_filters lists them and which are required) and run "
+	"it again; if the report itself is broken, read the records with get_list instead."
+)
+
+
+def _failure_kind_too_slow(e: BaseException) -> bool:
+	from jarvis import _failure_kind
+
+	return _failure_kind.too_slow(e)
 
 
 def _report_row(row, columns: list[dict]):
@@ -1747,14 +1905,14 @@ _PLAIN_BUILTINS = {
 	"ValueError": ValueError,
 	"ZeroDivisionError": ZeroDivisionError,
 }
-_PLAIN_BUILTIN_NAMES = frozenset(_PLAIN_BUILTINS) | {"pow", "round", "sum", "repr", "str"}
+_PLAIN_BUILTIN_NAMES = frozenset(_PLAIN_BUILTINS) | {"pow", "round", "sum", "repr", "str", "divmod"}
 
 
 def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set[str]]]:
 	"""``(globals, available_names, frappe_names)`` for one run. Built fresh per call:
 	nothing the script does to its namespace outlives the call."""
 	reads = make_reads(run)
-	guards = Guards(run.check_memory)
+	guards = Guards(run.check_memory, run.tick)
 	inplacevar, aug_item = _inplace_factory(guards)
 	utils = _utils()
 	session = _Namespace("frappe.session", {"user": user})
@@ -1811,11 +1969,15 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 	}
 	builtins = {
 		**_PLAIN_BUILTINS,
+		**guards.types(),  # str, int, list, tuple, set, dict: size- and hash-checked
 		"pow": guards.pow,
 		"round": guards.round,
 		"sum": guards.sum,
+		"divmod": guards.divmod,
+		"sorted": guards.sorted,
+		"min": guards.min,
+		"max": guards.max,
 		"repr": guards.repr,
-		"str": guards.str_type(),
 		# Unreachable from the script (names starting with "_" never compile); C code
 		# such as datetime.strftime imports ``time`` through it.
 		"__import__": internal_import,
@@ -1825,8 +1987,8 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 		"__name__": "jarvis_compute",
 		**named,
 		"_getattr_": _getattr_factory(guards),
-		"_getitem_": _getitem,
-		"_write_": _write,
+		"_getitem_": _getitem_factory(guards),
+		"_write_": _write_factory(guards),
 		"_getiter_": _getiter_factory(run),
 		_TICK: run.tick,
 		"_iter_unpack_sequence_": _rp_guards.guarded_iter_unpack_sequence,
@@ -1837,6 +1999,8 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 		_AUG_ITEM: aug_item,
 		_BINOP: guards.binop,
 		_FORMAT: guards.format_value,
+		_COMPARE: guards.compare,
+		_KEY: guards.key,
 	}
 	available = set(named) | set(builtins)
 	frappe_names = {"": frappe_ns.names(), "db": db.names(), "utils": utils_ns.names()}
@@ -1857,6 +2021,10 @@ _COMMENT = re.compile(r"^\s*(?:/\*.*?\*/\s*|--[^\n]*\n\s*|#[^\n]*\n\s*)*", re.DO
 _SAFE_SET = re.compile(r"^set\s+(?:session\s+)?(?:max_statement_time\b|@)", re.IGNORECASE)
 _ROLLBACK_TO = re.compile(r"^rollback\s+to\s+", re.IGNORECASE)
 _OUTFILE = re.compile(r"\binto\s+(outfile|dumpfile)\b", re.IGNORECASE)
+# Frappe's own error logging (log_error) inserts one Error Log row when a report or
+# read fails. Inside compute that insert is dropped, so the failure itself reaches the
+# script, instead of being reported as a write attempt. Only this exact statement shape.
+_ERROR_LOG_INSERT = re.compile(r"^insert\s+into\s+`tabError Log`\s*\(", re.IGNORECASE)
 
 
 def _statement_allowed(query) -> bool:
@@ -1882,6 +2050,8 @@ def _no_writes(run: _Run):
 
 	def sql(query, *args, **kwargs):
 		if not _statement_allowed(query):
+			if _ERROR_LOG_INSERT.match(_COMMENT.sub("", str(query), count=1).lstrip()):
+				return ()
 			kind = (_COMMENT.sub("", str(query), count=1).split(None, 1) or ["?"])[0].upper()
 			run.fail(
 				f"Something this code ran tried to change the database ({kind}), and compute is "
@@ -1903,15 +2073,22 @@ def _no_writes(run: _Run):
 
 @contextmanager
 def _deadline(run: _Run):
-	"""Best effort for code BENEATH the script (a report's own Python loop): a trace
-	function that stops any Python call made GRACE_S after the deadline. The script's
-	own loops are stopped by the compiled-in ticks (``_ComputePolicy``), which do not
-	depend on this: CPython drops a trace function once it raises. Per thread; the
-	previous tracer (a debugger, coverage) is put back."""
+	"""A second line behind the compiled-in ticks: a trace function that stops any call
+	into the script's own code at the deadline, and any call beneath it (a report's own
+	Python loop) GRACE_S after. The ticks do not depend on this: CPython drops a trace
+	function once it raises. Per thread; the previous tracer (a debugger, coverage) is
+	put back."""
+
+	from jarvis.tools import _compute_guards
+
+	own = {SCRIPT_FILENAME, _compute_guards.__file__}
 
 	def tracer(frame, event, arg):
-		if event == "call" and frame.f_code.co_filename != SCRIPT_FILENAME:
-			run.check_time(GRACE_S)
+		if event == "call":
+			# The script's own functions and lambdas, and the guards it calls (sum, sorted,
+			# list ... run from a C map): at the deadline. Code beneath it: GRACE_S later,
+			# so a read that is nearly done can return.
+			run.check_time(0 if frame.f_code.co_filename in own else GRACE_S)
 		return None
 
 	previous = sys.gettrace()

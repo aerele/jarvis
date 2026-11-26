@@ -218,10 +218,12 @@ def _kind_of_ref(tables: Tables, text) -> Kind | None:
 
 
 def filters_name_docstatus(filters, or_filters) -> bool:
-	"""Whether the read says which docstatus it wants (any condition on it)."""
+	"""Whether every row the read admits has its docstatus chosen: a condition on it in
+	``filters`` (ANDed). One in ``or_filters`` does not count: the OR can still admit
+	drafts through its other branches, so the probe decides."""
 	from jarvis.tools.get_list import _filter_fieldnames
 
-	return "docstatus" in (_filter_fieldnames(filters) | _filter_fieldnames(or_filters))
+	return "docstatus" in _filter_fieldnames(filters)
 
 
 def _as_child_filters(filters, child: str, parent: str) -> list | None:
@@ -383,6 +385,34 @@ def _probe(run, tables: Tables, main: str, dims, want_docstatus: bool, filters, 
 			out.values.setdefault((main, column), set()).add(row.get(column))
 		if want_docstatus and row.get("docstatus") != 1:
 			out.not_submitted += int(row.get(_COUNT_ALIAS) or 0)
+	return out
+
+
+def record_units(doctype: str, meta, values: dict, fields) -> set:
+	"""The currencies of the amounts among ``fields`` of one record (``values`` holds the
+	record's columns): each per-row amount's currency column, each ``base_*`` amount's
+	company currency. For a get_doc / get_value read."""
+	tables = Tables(doctype, meta, None)
+	units = set()
+	for field in fields:
+		kind = amount_kind(tables, doctype, field) if isinstance(field, str) else None
+		if kind is None or kind.owner != doctype:
+			continue
+		value = values.get(kind.column)
+		unit = _company_currency(value) if kind.unit == "company" else value
+		if unit:
+			units.add(unit)
+	return units
+
+
+def unit_columns(doctype: str, meta, fields) -> list[str]:
+	"""The currency / company columns the amounts among ``fields`` are in."""
+	tables = Tables(doctype, meta, None)
+	out = []
+	for field in fields:
+		kind = amount_kind(tables, doctype, field) if isinstance(field, str) else None
+		if kind is not None and kind.owner == doctype and kind.column not in out:
+			out.append(kind.column)
 	return out
 
 

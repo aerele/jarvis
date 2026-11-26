@@ -7,6 +7,7 @@ and USD. Everything is rolled back with the test class.
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from contextlib import contextmanager
@@ -742,7 +743,7 @@ class TestLimits(ComputeTestCase):
 				"x = 0\nwhile True:\n    try:\n        x += 1\n    except:\n        continue",
 				"while True:\n    try:\n        while True:\n            pass\n    except:\n        pass",
 				"try:\n    while True:\n        pass\nexcept:\n    pass\nresult = 'swallowed'",
-				"def forever():\n    while True:\n        yield 1\nresult = max(forever())",
+				"def forever():\n    while True:\n        yield 1\nresult = sum(forever())",
 				"def forever():\n    while True:\n        yield 1\nresult = [x for x in forever()]",
 			):
 				with self.subTest(code=code), self.assertRaisesRegex(ComputeCodeError, "more than 1 seconds"):
@@ -1100,11 +1101,19 @@ class TestReceiptsAndPartials(ComputeTestCase):
 			[
 				{"doctype": "Sales Invoice", "rows": 2, "filters": INR_CO, "currency": "INR"},
 				{"doctype": "Customer", "rows": 3, "filters": {"name": ["like", "CT Cust%"]}},
-				{"doctype": "Sales Invoice", "rows": 2, "currency": "USD"},
-				{"doctype": "Sales Invoice", "rows": 1, "filters": {"name": "CT-SINV-0001"}},
+				# CT-SINV-0003: amounts in USD, base_* amounts in its company's INR.
+				{"doctype": "Sales Invoice", "rows": 2, "currencies": ["INR", "USD"]},
+				{
+					"doctype": "Sales Invoice",
+					"rows": 1,
+					"filters": {"name": "CT-SINV-0001"},
+					"currency": "INR",
+				},
 			],
 		)
-		self.assertEqual(list(out), ["result", "reads", "rows_read", "elapsed_ms"])
+		# get_doc read a USD invoice and get_value an INR one: told before the numbers.
+		self.assertEqual(list(out), ["warnings", "result", "reads", "rows_read", "elapsed_ms"])
+		self.assertIn("Sales Invoice records in INR and USD", out["warnings"][0])
 
 	def test_receipts_are_capped(self):
 		out = _run("for i in range(40):\n    count('Customer')\nresult = 1")
@@ -1197,9 +1206,9 @@ class TestSingleOperations(ComputeTestCase):
 			("x = 2**60000\nresult = (x * x) > 0", "This * would make an integer"),
 			("result = 1 << (10**9)", "This shift would make an integer"),
 			("l = [0]\n" + "l = l + l\n" * 21 + "result = len(l)", "This + would make a list"),
-			("t = (0,) * 600000\nresult = len(t + t)", "This + would make a list"),
+			("t = (0,) * 150000\nresult = len(t + t)", "This + would make a list"),
 			("s = 'x'\n" + "s += s\n" * 21 + "result = 1", "This + would make text"),
-			("b = b'x' * 600000\nresult = len(b + b)", "This + would make text"),
+			("b = b'x' * 60000\nresult = len(b + b)", "This + would make text"),
 			("result = [0] * 10**9", "Repeating a sequence"),
 		):
 			with self.subTest(code=code):
@@ -1212,7 +1221,7 @@ class TestSingleOperations(ComputeTestCase):
 		self.assertFast("result = round(1, -10**9)", "round() to more than")
 		self.assertFast("result = sum([[0]] * 1000, [])", "use a comprehension")
 		self.assertEqual(_run("result = sum([1, 2], 0.5)")["result"], 3.5)
-		self.assertFast("r = list(range(10**6))\nresult = len(list(zip(*[r] * 20000)))", "through *")
+		self.assertFast("r = list(range(100000))\nresult = len(list(zip(*[r] * 20000)))", "through *")
 
 	def test_formatting_widths(self):
 		for code in (
@@ -1225,7 +1234,7 @@ class TestSingleOperations(ComputeTestCase):
 		):
 			with self.subTest(code=code):
 				self.assertFast(code, "not available")
-		self.assertFast("s = 'x' * 600000\nresult = '%s%s' % (s, s)", "This % format would make text")
+		self.assertFast("s = 'x' * 60000\nresult = '%s%s' % (s, s)", "This % format would make text")
 		self.assertEqual(_run("result = f'{1234.5:,.2f}|{7:>5}|{0.25:.0%}'")["result"], "1,234.50|    7|25%")
 
 	def test_methods_that_grow_text_or_lists(self):
@@ -1235,10 +1244,10 @@ class TestSingleOperations(ComputeTestCase):
 			("result = 'x'.center(10**9)", "This center"),
 			("result = '1'.zfill(10**9)", "This zfill"),
 			("result = ('\\t' * 1000).expandtabs(10**7)", "This expandtabs"),
-			("result = ('a' * 1000).replace('a', 'b' * 10**6)", "This replace"),
-			("result = ''.join(['x' * 10**6] * 1000)", "This join"),
-			("result = str.join('', ['x' * 10**6] * 1000)", "This join"),
-			("result = ('a' * 1000).translate({97: 'x' * 10**6})", "This translate"),
+			("result = ('a' * 1000).replace('a', 'b' * 99000)", "This replace"),
+			("result = ''.join(['x' * 99000] * 1000)", "This join"),
+			("result = str.join('', ['x' * 99000] * 1000)", "This join"),
+			("result = ('a' * 1000).translate({97: 'x' * 99000})", "This translate"),
 			("result = (1).to_bytes(10**9, 'big')", "This to_bytes"),
 			("l = [0]\n" + "l.extend(l)\n" * 21 + "result = len(l)", "This extend"),
 		):
@@ -1274,7 +1283,8 @@ class TestSingleOperations(ComputeTestCase):
 	def test_int_to_text_stays_limited(self):
 		# Python's own 4,300-digit limit for int <-> str is never lifted.
 		self.assertFast("result = str(10**5000)", "Exceeds the limit")
-		self.assertFast("result = int('9' * 100000)", "Exceeds the limit")
+		self.assertFast("result = int('9' * 4400)", "Exceeds the limit")
+		self.assertFast("result = int('9' * 90000)", "This int() would make an integer")
 
 	def test_dates_format_and_parse(self):
 		out = _run(
@@ -1304,7 +1314,7 @@ class TestSingleOperations(ComputeTestCase):
 			patch.object(sandbox, "MEMORY_CHECK_INTERVAL_S", 3600),
 		):
 			with self.assertRaisesRegex(ComputeCodeError, "too much memory"):
-				_run("s = 'x' * 900000\nresult = len(s)")
+				_run("l = [0] * 150000\nresult = len(l)")
 
 
 class TestQualifiedNames(ComputeTestCase):
@@ -1554,7 +1564,6 @@ class TestReviewSmallItems(ComputeTestCase):
 				"Jarvis Connector",
 				"OAuth Bearer Token",
 				"Token Cache",
-				"User",  # has a Password field
 			):
 				for code in (f"result = get_meta('{doctype}')", f"result = count('{doctype}')"):
 					with (
@@ -1599,3 +1608,278 @@ class TestReviewSmallItems(ComputeTestCase):
 		from jarvis.tools.compute import _json_safe
 
 		self.assertEqual(_json_safe({"d": decimal.Decimal("1.25")}), {"d": 1.25})
+
+
+class TestIteration2Lambdas(ComputeTestCase):
+	"""Review 2 (high): lambdas and generators driven from C must stop at the deadline."""
+
+	def assertStops(self, code: str):
+		started = time.monotonic()
+		with patch.object(sandbox, "WALL_CLOCK_S", 1), self.assertRaises(ComputeCodeError):
+			_run(code)
+		self.assertLess(time.monotonic() - started, 3.0, code)
+
+	def test_the_reviewers_repros(self):
+		self.assertStops("r = range(1000000)\nresult = max(map(lambda a: max(map(abs, r)), r))")
+		self.assertStops("r = list(range(100000))\nresult = len(sorted(r, key=lambda a: max(r)))")
+
+	def test_callables_called_from_c(self):
+		r = "r = list(range(100000))\n"
+		for code in (
+			r + "result = len(list(map(lambda a: sum(r), r)))",
+			r + "result = len(list(filter(lambda a: sum(r) < 0, r)))",
+			r + "result = min(r, key=lambda a: sum(r))",
+			r + "result = any(map(lambda a: sum(r) < 0, r))",
+			r + "result = sum(sum(r) for a in r)",
+			r + "def slow(a):\n    return sum(r)\nresult = len(list(map(slow, r)))",
+			r + "result = sum(map(sum, [r] * 100000))",
+			"f = lambda n: f(n - 1) + f(n - 1) if n else 1\nresult = f(40)",
+		):
+			with self.subTest(code=code):
+				self.assertStops(code)
+
+
+class TestIteration2Reports(ComputeTestCase):
+	"""Review 2: a failing report gives its own error, never a write refusal."""
+
+	def test_a_report_with_a_bad_column(self):
+		name = "CT Compute Broken Report"
+		if not frappe.db.exists("Report", name):
+			frappe.get_doc(
+				{
+					"doctype": "Report",
+					"report_name": name,
+					"ref_doctype": "Sales Invoice",
+					"report_type": "Query Report",
+					"is_standard": "No",
+					"query": "select no_such_column from `tabSales Invoice`",
+				}
+			).insert(ignore_permissions=True)
+		before = frappe.db.count("Error Log")
+		with self.assertRaises(ComputeCodeError) as ctx:
+			_run(f"result = len(run_report('{name}').rows)")
+		message = str(ctx.exception)
+		self.assertIn(f"run_report('{name}') failed", message)
+		self.assertIn("no_such_column", message)
+		self.assertNotIn("change the database", message)
+		self.assertEqual(frappe.db.count("Error Log"), before)
+
+	def test_a_report_that_throws_after_logging(self):
+		name = "CT Compute Probe Report"
+		if not frappe.db.exists("Report", name):
+			frappe.get_doc(
+				{
+					"doctype": "Report",
+					"report_name": name,
+					"ref_doctype": "Sales Invoice",
+					"report_type": "Query Report",
+					"is_standard": "No",
+					"query": "select name from `tabSales Invoice`",
+				}
+			).insert(ignore_permissions=True)
+
+		def run(report_name, filters=None, **kwargs):
+			frappe.log_error(title="report failed", message="details")
+			frappe.throw("Please set the Company filter")
+
+		before = frappe.db.count("Error Log")
+		with (
+			patch("jarvis.tools.run_report.frappe_run_report", run),
+			self.assertRaises(ComputeCodeError) as ctx,
+		):
+			_run(f"result = len(run_report('{name}').rows)")
+		self.assertIn("Please set the Company filter", str(ctx.exception))
+		self.assertIn("get_report_filters", str(ctx.exception))
+		self.assertEqual(frappe.db.count("Error Log"), before)
+
+	def test_other_writes_are_still_refused(self):
+		def run(report_name, filters=None, **kwargs):
+			frappe.db.sql("insert into `tabError Log Copy` (name) values ('x')")
+
+		with (
+			patch("jarvis.tools.run_report.frappe_run_report", run),
+			self.assertRaisesRegex(InvalidArgumentError, "read-only"),
+		):
+			_run("result = len(run_report('CT Compute Probe Report').rows)")
+
+
+class TestIteration2SingleOperations(ComputeTestCase):
+	"""Review 2 (medium): comparisons, hashing and big ints in one C call."""
+
+	DEEP = "a = [1]\nb = [1]\nfor i in range(60):\n    a = [a, a]\n    b = [b, b]\n"
+	DEEP_T = "a = (1,)\nb = (1,)\nfor i in range(60):\n    a = (a, a)\n    b = (b, b)\n"
+	COLLIDE = "M = 2**61 - 1\nkeys = [M * i for i in range(1, 60001)]\n"
+	LONG = "s = 'x' * 100000\nt = 'x' * 99999 + 'y'\nl = [s] * 200000\n"
+
+	def assertFast(self, code: str, fragment: str):
+		started = time.monotonic()
+		with self.assertRaises(ComputeCodeError) as ctx:
+			_run(code)
+		self.assertLess(time.monotonic() - started, 1.0, code)
+		self.assertIn(fragment, str(ctx.exception))
+
+	def test_deep_shared_structures(self):
+		for tail in (
+			"result = a == b",
+			"result = a < b",
+			"result = len(sorted([a, b]))",
+			"result = len(max([a, b]))",
+			"result = len(min(a, b))",
+			"result = [a].count(b)",
+			"result = [a, b].index(b)",
+			"result = b in [a]",
+			"l = [a, b]\nl.sort()\nresult = 1",
+		):
+			with self.subTest(tail=tail):
+				self.assertFast(self.DEEP + tail, "could take a very long time")
+		for tail in ("d = {a: 1}\nresult = d.get(b)", "d = {}\nd[a] = 1\nresult = 1", "result = {a: 1}[b]"):
+			with self.subTest(tail=tail):
+				self.assertFast(self.DEEP_T + tail, "could take a very long time")
+
+	def test_keys_that_all_hash_alike(self):
+		for tail in (
+			"result = len(set(keys))",
+			"result = len(dict.fromkeys(keys))",
+			"result = len(dict(zip(keys, keys)))",
+			"s = set()\ns.update(keys)\nresult = len(s)",
+			"result = len({1} | set(keys))",
+			"result = len(set([(k,) for k in keys]))",
+		):
+			with self.subTest(tail=tail):
+				self.assertFast(self.COLLIDE + tail, "hash alike")
+
+	def test_long_text_repeated(self):
+		for tail in (
+			"result = l.count(t)",
+			"result = t in l",
+			"result = l == [t] * 200000",
+			"l.sort()\nresult = 1",
+		):
+			with self.subTest(tail=tail):
+				self.assertFast(self.LONG + tail, "could take a very long time")
+
+	def test_big_ints(self):
+		self.assertFast("result = int('f' * 1000000, 16) % 3", "Repeating a sequence")
+		self.assertFast("result = int('f' * 90000, 16) > 0", "This int() would make an integer")
+		self.assertFast("result = int.from_bytes(b'x' * 10000, 'big') > 0", "This from_bytes")
+		out = _run(
+			"a = int('f' * 16000, 16)\nb = int('e' * 8000, 16)\n"
+			"result = [a % b > 0, a // b > 0, divmod(a, b)[1] > 0]"
+		)
+		self.assertEqual(out["result"], [True, True, True])  # no "No imports: _pylong"
+
+	def test_ordinary_work_stays_fast(self):
+		out = _run(
+			"names = [f'C{i}' for i in range(100000)]\n"
+			"seen = set(names)\n"
+			"hits = sum(1 for n in names[:2000] if n in names[:2000])\n"
+			"rows = [{'c': n, 't': i} for i, n in enumerate(names)]\n"
+			"top = sorted(rows, key=lambda r: -r['t'])[:3]\n"
+			"result = [len(seen), hits, top[0]['c'], max(r['t'] for r in rows), min(names)]"
+		)
+		self.assertEqual(out["result"], [100000, 2000, "C99999", 99999, "C0"])
+
+
+class TestIteration2Totals(ComputeTestCase):
+	"""Review 2 (low): silent wrong totals."""
+
+	PAIR = "[['name', 'in', ['CT-SINV-0001', 'CT-DRAFT-0007']]]"
+
+	def test_or_filters_on_docstatus_still_probe(self):
+		with self.assertRaisesRegex(ComputeCodeError, "draft or cancelled"):
+			_run(
+				f"rows = get_list('Sales Invoice', filters={self.PAIR}, "
+				"or_filters=[['docstatus', '=', 1], ['customer', '=', 'CT Cust A']], "
+				"fields=[{'SUM': 'grand_total', 'as': 't'}])\nresult = rows[0].t"
+			)
+
+	def test_record_by_record_amounts_in_several_currencies_warn(self):
+		out = _run(
+			"a = get_doc('Sales Invoice', 'CT-SINV-0001')\n"
+			"b = get_value('Sales Invoice', 'CT-SINV-0003', 'grand_total')\n"
+			"result = a.grand_total + b"
+		)
+		self.assertEqual(next(iter(out)), "warnings")
+		self.assertIn("Sales Invoice records in INR and USD", out["warnings"][0])
+		self.assertEqual(out["reads"][1]["currency"], "USD")
+		clean = _run(
+			"result = get_value('Sales Invoice', 'CT-SINV-0001', 'grand_total') + "
+			"get_value('Sales Invoice', 'CT-SINV-0002', 'grand_total')"
+		)
+		self.assertNotIn("warnings", clean)
+
+	def test_json_text_filters(self):
+		self.assertEqual(
+			_run(
+				f"result = count('Sales Invoice', {json.dumps(json.dumps({'name': ['like', 'CT-SINV-%']}))})"
+			)["result"],
+			5,
+		)
+		self.assertEqual(
+			_run(
+				'result = len(get_list(\'Sales Invoice\', filters=\'[["name", "like", "CT-SINV-%"]]\', '
+				"fields='[\"name\"]'))"
+			)["result"],
+			5,
+		)
+		with self.assertRaisesRegex(ComputeCodeError, "filters must be a dict or a list"):
+			_run("result = count('Sales Invoice', 'CT-SINV-0001')")
+
+
+class TestIteration2Access(ComputeTestCase):
+	"""Review 2: Password fields do not make a doctype private; their values never come back."""
+
+	SECRET = "Ct-compute-Secr3t-value!"
+
+	def test_password_values_never_come_back(self):
+		from frappe.utils.password import update_password
+
+		update_password(ACC_USER, self.SECRET)
+		name = "CT Compute User Report"
+		if not frappe.db.exists("Report", name):
+			frappe.get_doc(
+				{
+					"doctype": "Report",
+					"report_name": name,
+					"ref_doctype": "User",
+					"report_type": "Query Report",
+					"is_standard": "No",
+					"query": "select name, new_password from `tabUser`",
+				}
+			).insert(ignore_permissions=True)
+		out = _run(
+			f"a = get_list('User', filters={{'name': '{ACC_USER}'}}, fields=['name', 'new_password'])\n"
+			f"b = get_doc('User', '{ACC_USER}')\n"
+			f"c = get_value('User', '{ACC_USER}', 'new_password')\n"
+			f"d = run_report('{name}').rows\n"
+			"result = [a, b, c, d]"
+		)
+		self.assertNotIn(self.SECRET, json.dumps(out, default=str))
+		self.assertEqual(_run("result = count('User') > 0")["result"], True)
+
+	def test_get_list_on_a_single_doctype_teaches(self):
+		with self.assertRaisesRegex(ComputeCodeError, "single doctype .* get_single_value"):
+			_run("result = get_list('System Settings')")
+
+
+class TestIteration2Floats(ComputeTestCase):
+	def test_noise_goes_digits_stay(self):
+		from jarvis.tools.compute import _tidy_float
+
+		for value, expected in (
+			(12345.670000000002, 12345.67),
+			(0.1 + 0.2, 0.3),
+			(66987822.72000001, 66987822.72),
+			(2.9999999999999996, 3.0),
+			(12345678901234.56, 12345678901234.56),
+			(123456789012345.67, 123456789012345.67),
+			(999999999999999.9, 999999999999999.9),
+			(0.012345678, 0.012345678),
+			(83.123456789, 83.123456789),
+			(100.00001, 100.00001),
+			(1e-20, 1e-20),
+		):
+			with self.subTest(value=value):
+				self.assertEqual(repr(_tidy_float(value)), repr(expected))
+		out = _run("result = [0.1 + 0.2, 12345678901234.56, 0.012345678]")
+		self.assertEqual(out["result"], [0.3, 12345678901234.56, 0.012345678])

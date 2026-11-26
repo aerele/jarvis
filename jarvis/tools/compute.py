@@ -19,6 +19,8 @@ import ast
 import datetime
 import decimal
 import json
+import math
+import re
 
 import frappe
 
@@ -229,11 +231,34 @@ def _plain(obj):
 	raise TypeError(f"a {type(obj).__name__} value is not data")
 
 
+# Float noise: a run of zeros or nines right before the last one or two digits of a
+# float printed at full precision (15+ significant digits), e.g. 12345.670000000002,
+# 0.30000000000000004, 66987822.72000001, 2.9999999999999996. Only such a run is cut;
+# every digit a double really carries is kept (12345678901234.56, 0.012345678).
+_NOISE = re.compile(r"(?:0{3,}|9{3,})\d{1,2}$")
+_NOISE_SIG_DIGITS = 15
+_NOISE_ULPS = 8
+
+
+def _tidy_float(value: float) -> float:
+	text = repr(value)
+	if "e" in text or "n" in text or "." not in text:
+		return value
+	whole, fraction = text.lstrip("-").split(".")
+	significant = len((whole + fraction).lstrip("0"))
+	if significant < _NOISE_SIG_DIGITS:
+		return value
+	m = _NOISE.search(fraction)
+	if not m:
+		return value
+	tidy = round(value, m.start())
+	return tidy if abs(tidy - value) <= _NOISE_ULPS * math.ulp(value) else value
+
+
 def _tidy_floats(value):
-	"""Floats at 15 significant digits: ``12345.670000000002`` (binary sums of money)
-	becomes ``12345.67``; a rate or quantity with real digits keeps them."""
+	"""Floats without binary noise (see _NOISE); everything else as it is."""
 	if isinstance(value, float):
-		return float(format(value, ".15g"))
+		return _tidy_float(value)
 	if isinstance(value, list):
 		return [_tidy_floats(v) for v in value]
 	if isinstance(value, dict):

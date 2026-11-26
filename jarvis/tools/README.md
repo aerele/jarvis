@@ -161,9 +161,11 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
   cannot read (permission level) and aggregating / filtering / sorting on a masked
   one. Never readable, by any spelling (case, spaces, underscores): every doctype of
   the jarvis app (conversations, memory, skills, settings, MCP OAuth clients and
-  tokens, connectors), core sign-in token and key doctypes (OAuth, Token Cache,
-  Connected App, Social Login Key, LDAP Settings ...) and any doctype with a Password
-  field (User included).
+  tokens, connectors) and core sign-in token and key doctypes (OAuth, Token Cache,
+  Connected App, Social Login Key, LDAP Settings ...). A Password field's value is
+  stored outside the row and never comes back from a read. `filters` / `or_filters` /
+  `fields` may be JSON text, as in Frappe's API; other text is refused. `get_list` on a
+  single doctype points at `get_single_value` / `get_doc`.
 - **Aggregates**: `fields=["customer", {"SUM": "base_grand_total", "as": "total"}]`
   with `group_by`. Frappe 16 refuses SQL function strings, so `"sum(x) as y"` is
   rewritten to the dict form there; on Frappe 15 the dict form is rewritten to the
@@ -179,9 +181,12 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
     `[child, field, op, value]`);
   - companies: a `base_*` field (`Company:company:default_currency`) over companies
     with different default currencies;
-  - drafts: a submittable doctype read whose filters do not name `docstatus` and
-    whose matching rows include drafts or cancelled documents.
-  One currency: the receipt names it. Read from the meta, nothing hard-coded.
+  - drafts: a submittable doctype read whose `filters` do not name `docstatus` (a
+    condition in `or_filters` does not count) and whose matching rows include drafts
+    or cancelled documents.
+  One currency: the receipt names it. Read from the meta, nothing hard-coded. Amounts
+  read record by record (`get_doc` / `get_value`) carry their currency on the receipt,
+  and a warning says when one call read them in more than one currency.
 - **`reads`**: one compact receipt per read: `doctype` (or `report`), `rows`,
   `currency` / `currencies` when known, `limited` / `limit` when the code set a
   limit, `prepared` / `as_of` for a report's finished copy, `filters` cut at 100
@@ -191,28 +196,37 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
   limit with no `order_by` adds a warning (with an `order_by` it is a top-N).
 - **Reports**: `run_report` goes through `run_report`'s own gates. A Prepared Report
   answers from its finished copy (`prepared`, `as_of`), else runs inline as the user
-  within the call's deadline; nothing starts in the background.
+  within the call's deadline; nothing starts in the background. A report that fails
+  gives its own error (Frappe's Error Log insert for it is dropped at the write guard;
+  every other write is still refused).
 - **Read-only**: inside `preview_sandbox` (savepoint always rolled back, commit
   neutralised, jobs dropped), and `frappe.db.sql` refuses every non-read statement
   before it is sent. A report that writes when it runs makes the call fail
   (`InvalidArgumentError`, not fixable): call `run_report` directly instead.
 - **Limits** (`_compute_sandbox` and `_compute_guards` constants): 20 s wall clock,
   8 s per statement, 100,000 rows per read and 200,000 per call, 20,000 characters of
-  code, 2,000 of printed output, 512 MB of memory growth, and the 35,000-character
-  result guard. Time and memory are checked before every statement, for every loop
-  item, after every read and after every big operation; a single operation that could
-  grow a value in one C call (arithmetic, %-formatting, f-string specs, `pow`, `round`,
-  `sum`, `str.join` and the padding / replace methods, `list.extend`, writing out a
-  structure with shared references) has its result size checked first. A limit fails
-  the whole call even when the code catches the error. No process rlimit or
-  subprocess: see the `_compute_sandbox` docstring.
+  code, 2,000 of printed output, 512 MB of memory growth, 100,000 characters per text
+  and 200,000 items per list built in one step, and the 35,000-character result guard.
+  Time and memory are checked before every statement, at every lambda call, for every
+  loop item, after every read and after every big operation. A single operation that
+  could grow a value or do a lot of work in one C call is checked first: arithmetic
+  (int size, `//` and `%` included), %-formatting and f-string specs, `pow`, `round`,
+  `sum`, `divmod`, `str.join` and the padding / replace methods, `list` / `tuple` /
+  `set` / `dict` / `int` built from anything, `list.extend` / `sort` / `count` /
+  `index`, `sorted` / `min` / `max` and every comparison and dict key (by the cost of
+  comparing deep or shared structures and long texts), sets and dict keys of ints
+  that can all hash alike, and writing out a structure with shared references. A
+  limit fails the whole call even when the code catches the error. No process rlimit
+  or subprocess: see the `_compute_sandbox` docstring.
 - **Kill switch**: site config `jarvis_disable_compute`. `true` / `1` / `yes` / `on`
   switch compute off; `false` / `0` / `no` / `off` / empty (or no key) leave it on;
   any other value switches it off (fail closed). Refused calls get
   `FeatureDisabledError`. Errors the model can fix are `ComputeCodeError` (wire code
   `InvalidArgumentError`, kind `fixable`) and name the line.
-- **Floats** in the result are written at 15 significant digits
-  (`12345.670000000002` becomes `12345.67`).
+- **Floats** in the result lose binary noise only: a run of zeros or nines right
+  before the last digits of a full-precision float (`12345.670000000002` becomes
+  `12345.67`, `66987822.72000001` becomes `66987822.72`); every digit a double really
+  carries is kept (`12345678901234.56`, `0.012345678`).
 
 ## `get_schema` - live introspection (the backbone)
 
