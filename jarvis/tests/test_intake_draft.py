@@ -285,6 +285,20 @@ class TestIntakeDraft(FrappeTestCase):
 		self.assertEqual([r["supplier"] for r in values["items"]], ["ACME", None, None])
 		self.assertEqual([(u["row"], u["candidates"]) for u in unresolved], [(2, []), (3, [])])
 
+	def test_unreadable_doctype_fallback_respects_user_permission_and_deny_list(self):
+		rows = [{"item_name": "a", "qty": 1, "supplier": "ACME"}]
+		perm = frappe.get_doc(
+			{"doctype": "User Permission", "user": MAKER_NO_READ, "allow": CUSTOMER, "for_value": "BRK-2290"}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "User Permission", perm.name, force=True, ignore_permissions=True)
+		values, _unresolved = self._resolve(MAKER_NO_READ, {"items": rows})
+		self.assertIsNone(values["items"][0]["supplier"])
+		frappe.set_user("Administrator")
+		frappe.delete_doc("User Permission", perm.name, force=True, ignore_permissions=True)
+		with mock.patch.object(guards, "refused_by_name", return_value=True):
+			values, _unresolved = self._resolve(MAKER_NO_READ, {"items": rows})
+		self.assertIsNone(values["items"][0]["supplier"])
+
 	def test_exact_link_hidden_by_user_permission_stays_unresolved(self):
 		perm = frappe.get_doc(
 			{"doctype": "User Permission", "user": MAKER, "allow": CUSTOMER, "for_value": "BRK-2290"}

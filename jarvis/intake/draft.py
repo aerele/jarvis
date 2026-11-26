@@ -17,6 +17,7 @@ from datetime import datetime
 
 import frappe
 from frappe import _
+from frappe.permissions import get_user_permissions
 from frappe.utils import (
 	cint,
 	escape_html,
@@ -110,11 +111,19 @@ def _find_exact(doctype: str, value: str, *, unreadable_ok: bool = False) -> str
 def _exists_exactly(doctype: str, value: str) -> str | None:
 	"""``value`` when a record has exactly that name, read WITHOUT permissions on purpose.
 	The value came from the uploader's own document, and the insert (run as them) checks the
-	same existence without permissions (``get_invalid_links``) while still applying their
-	create right and User Permissions. Exact names only: never a guess or a candidate list,
-	so no other record's name leaks."""
+	same existence without permissions (``get_invalid_links``). Exact names only: never a
+	guess or a candidate list, so no other record's name leaks. Never for a sensitive
+	doctype (the intake deny-list), a virtual or single one, or a name outside the
+	uploader's User Permissions on that doctype."""
+	meta = frappe.get_meta(doctype)
+	if guards.refused_by_name(doctype) or meta.issingle or meta.get("is_virtual"):
+		return None
+	allowed = get_user_permissions(frappe.session.user).get(doctype)
+	if allowed and value not in {p.get("doc") for p in allowed}:
+		return None
 	name = frappe.db.get_value(doctype, value, "name")
-	return value if name == value else None
+	# str(): an autoincrement doctype returns an int name.
+	return value if name is not None and str(name) == value else None
 
 
 def _find_close_match(doctype: str, value: str) -> str | None:
