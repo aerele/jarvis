@@ -177,15 +177,31 @@ class TestProbeApiKey(FrappeTestCase):
 		"""THE motivating case: a valid key against a zero-balance z.ai account
 		must surface z.ai's own message, not a bare "failed"."""
 		body = b'{"error":{"code":"1113","message":"Insufficient balance or no resource package. Please recharge."}}'
-		with mock.patch.object(link_fetch, "request_pinned", return_value=(400, {}, body)):
+		with mock.patch.object(link_fetch, "request_pinned", return_value=(400, {}, body)) as rp:
 			result = llm_key_probe.probe_api_key(
 				"GLM / Z.ai", "glm-4.6", "sk-real-but-unpaid", "https://api.z.ai/api/paas/v4"
 			)
 		self.assertFalse(result["ok"])
+		self.assertEqual(rp.call_count, 1)  # a 400 that is not about max_tokens is never retried
 		detail = result["checks"][-1]["detail"]
 		self.assertIn("Insufficient balance", detail)
 		self.assertIn("recharge", detail)
 		self.assertNotIn("sk-real-but-unpaid", detail)
+
+	def test_reasoning_model_400_on_max_tokens_retries_with_max_completion_tokens(self):
+		"""gpt-5.x rejects max_tokens; the Test button showed that 400 for a good key."""
+		rejected = (
+			b'{"error":{"message":"Unsupported parameter: \'max_tokens\' is not supported with this model.'
+			b" Use 'max_completion_tokens' instead.\"}}"
+		)
+		with mock.patch.object(
+			link_fetch, "request_pinned", side_effect=[(400, {}, rejected), (200, {}, b"{}")]
+		) as rp:
+			result = llm_key_probe.probe_api_key("OpenAI", "gpt-5.6", "sk-x", "https://api.openai.com/v1")
+		self.assertTrue(result["ok"])
+		retry_body = rp.call_args_list[1].kwargs["json_body"]
+		self.assertNotIn("max_tokens", retry_body)
+		self.assertIn("max_completion_tokens", retry_body)
 
 	def test_provider_error_body_never_leaks_the_api_key(self):
 		# A provider that (badly) echoes the credential back in its error body.
