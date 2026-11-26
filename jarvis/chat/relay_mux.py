@@ -95,6 +95,7 @@ from jarvis.chat.agent_client import (
 )
 from jarvis.chat.events import parse_event
 from jarvis.chat.generated_media import detect_media_paths, has_embedded_media_path, has_media_marker
+from jarvis.chat.runtime_notices import is_runtime_notice
 from jarvis.chat.steps import (
 	display_line,
 	is_preamble_step,
@@ -1003,6 +1004,11 @@ class RelayMux:
 			elif failed:
 				raw = {"kind_hint": "failed_final", "failure_detail": lane.failure_detail}
 			else:
+				if is_runtime_notice(text):
+					# The runtime's model-switch notice rode the final frame in place of the reply:
+					# never the answer. What streamed is; else nothing, and finalize fills the reply
+					# from the transcript (usage.run_answer_text).
+					text = lane.stream_text or None
 				# Not a failed-final. The pump will detect the MEDIA marker,
 				# step-strip the reply, then redact it once, then may need to
 				# re-show text the live view had hidden - BEFORE the terminal -

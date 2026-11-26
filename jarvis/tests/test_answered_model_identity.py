@@ -111,3 +111,86 @@ class TestAnsweredFromTheTranscript(unittest.TestCase):
 			"answeredModelProvider": "openai",
 		}
 		self.assertEqual(usage.resolved_model_identity(row), ("gpt-5.6-terra", "openai"))
+
+
+NOTICE = "Model switched from anthropic/claude-opus-5 to deepseek-0/deepseek-flash (unknown)."
+
+
+def _text_msg(seq, model, provider, text, *, mirror=False):
+	m = _msg(seq, model, provider, mirror=mirror)
+	m["content"] = [{"type": "text", "text": text}]
+	return m
+
+
+class TestRuntimeModelSwitchNotice(unittest.TestCase):
+	def setUp(self):
+		from unittest.mock import patch
+
+		import frappe
+
+		p = patch(
+			"jarvis.chat.runtime_profile.get_profile",
+			return_value=frappe._dict(message_metadata_key="__openclaw"),
+		)
+		p.start()
+		self.addCleanup(p.stop)
+
+	def test_the_notice_text_is_recognised_exactly_and_a_real_answer_is_not(self):
+		from jarvis.chat.runtime_notices import is_runtime_notice
+
+		self.assertTrue(is_runtime_notice(NOTICE))
+		self.assertFalse(is_runtime_notice("pong"))
+		self.assertFalse(is_runtime_notice("I read: " + NOTICE))
+		self.assertFalse(is_runtime_notice(None))
+
+	def test_fallback_with_a_notice_entry_after_the_real_answer(self):
+		# The captured shape: the answer at seq 2 (deepseek), the notice mirrored at seq 3.
+		msgs = [
+			_text_msg(2, "deepseek-flash", "deepseek-0", "pong"),
+			_text_msg(3, "delivery-mirror", "openclaw", NOTICE, mirror=True),
+		]
+		ident = usage.run_answering_identity(msgs, 0, None)
+		self.assertEqual(
+			ident,
+			{"answeredModel": "deepseek-flash", "answeredModelProvider": "deepseek-0", "answerText": "pong"},
+		)
+
+	def test_a_notice_entry_is_never_the_answerer_even_without_the_mirror_flag(self):
+		msgs = [_text_msg(2, "deepseek-flash", "deepseek-0", "pong"), _text_msg(3, "x", "y", NOTICE)]
+		self.assertEqual(usage.run_answering_identity(msgs, 0, None)["answeredModel"], "deepseek-flash")
+
+	def test_notice_only_leaves_no_identity_so_nothing_is_invented(self):
+		self.assertIsNone(
+			usage.run_answering_identity([_text_msg(3, "x", "openclaw", NOTICE, mirror=True)], 0)
+		)
+
+	def test_no_fallback_keeps_the_answer_text_of_the_asked_model(self):
+		ident = usage.run_answering_identity([_text_msg(2, "claude-opus-5", "anthropic", "pong")], 0, None)
+		self.assertEqual(ident["answerText"], "pong")
+
+	def test_the_relay_drops_a_notice_final_for_what_streamed(self):
+		from unittest.mock import MagicMock
+
+		from jarvis.chat import relay_mux
+
+		lane = MagicMock(stream_text="pong", saw_media_tool_start=False, steps=[], preamble_steps=set())
+		lane.loose_preambles = []
+		lane.segment_tails = []
+		lane.next_seq.return_value = 1
+		mux = relay_mux.RelayMux.__new__(relay_mux.RelayMux)
+		captured = {}
+		mux._offer = lambda ln, ev: captured.update(ev.data)
+		mux._bump = lambda *a, **k: None
+		payload = {
+			"state": "final",
+			"message": {
+				"role": "assistant",
+				"content": [{"type": "text", "text": NOTICE}],
+				"stopReason": "stop",
+			},
+		}
+		mux._route_terminal(lane, payload)
+		self.assertEqual(captured.get("text"), "pong")
+		lane.stream_text = ""
+		mux._route_terminal(lane, payload)
+		self.assertFalse(captured.get("text"))

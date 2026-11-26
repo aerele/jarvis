@@ -32,6 +32,7 @@ from frappe.query_builder.functions import Coalesce
 
 from jarvis.chat import txn
 from jarvis.chat.gateway_ids import provider_from_gateway
+from jarvis.chat.runtime_notices import is_runtime_notice
 
 # The pool-mode "Auto" sentinel model id. turn_handler._session_model_for
 # patches an unpinned BIFROST-fronted pool conversation's agent SESSION to
@@ -539,6 +540,20 @@ def sum_run_cache(messages: list, min_seq: int, max_seq: int | None = None) -> d
 	return totals if reported else None
 
 
+def _message_text(message: dict) -> str:
+	"""The joined text blocks of one transcript message ("" when it has none)."""
+	c = message.get("content")
+	if isinstance(c, str):
+		return c
+	if isinstance(c, list):
+		return "\n".join(
+			b["text"]
+			for b in c
+			if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+		)
+	return ""
+
+
 def _is_delivery_mirror(message: dict) -> bool:
 	"""The runtime's own transcript copy of a delivered reply (provider ``openclaw``, model
 	``delivery-mirror``): not a model answer."""
@@ -546,6 +561,7 @@ def _is_delivery_mirror(message: dict) -> bool:
 		message.get("openclawDeliveryMirror")
 		or (message.get("model") or "") == "delivery-mirror"
 		or (message.get("provider") or "") == "openclaw"
+		or is_runtime_notice(_message_text(message))
 	)
 
 
@@ -569,6 +585,9 @@ def run_answering_identity(messages: list, min_seq: int, max_seq: int | None = N
 		model, provider = m.get("model"), m.get("provider")
 		if isinstance(model, str) and model.strip() and isinstance(provider, str) and provider.strip():
 			found = {"answeredModel": model.strip(), "answeredModelProvider": provider.strip()}
+			text = _message_text(m).strip()
+			if text:
+				found["answerText"] = text  # the real reply, for a final frame that carried a notice
 	return found
 
 

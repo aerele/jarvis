@@ -467,6 +467,7 @@ def _effect_usage(ctx: _Ctx) -> None:
 	# Reply length for the claude-cli output estimate: read once, BEFORE the fresh snapshot (a
 	# read after it would open a new snapshot right before the guard CAS on the same Turn row),
 	# outside the replayed unit, and only for a row that can use it. None on any lookup failure.
+	_repair_notice_reply(ctx, identity)
 	row = _usage.with_run_identity(row, identity)
 	reply_chars = _usage.reply_char_count(ctx.run_id) if _usage.is_claude_cli_row(row) else None
 	# The poll held the job's transaction open for up to ~4.5 s; drop that snapshot so
@@ -501,6 +502,29 @@ def _effect_usage(ctx: _Ctx) -> None:
 	from jarvis import subscription_health
 
 	subscription_health.note_session_row(row)
+
+
+def _repair_notice_reply(ctx: _Ctx, identity: dict | None) -> None:
+	"""A reply stored as a runtime notice ("Model switched from ... to ...") is replaced by the real
+	answer from the run's transcript entry, or emptied when that answer is not there (yet): the
+	notice is never the assistant's reply. Reads and writes one message; never raises."""
+	try:
+		am = ctx.turn.get("assistant_message")
+		if not am:
+			return
+		from jarvis.chat.runtime_notices import is_runtime_notice
+
+		current = frappe.db.get_value(MSG, am, "content")
+		if not is_runtime_notice(current):
+			return
+		answer = ((identity or {}).get("answerText") or "").strip()
+		from jarvis.chat import egress_rules
+
+		frappe.db.set_value(
+			MSG, am, "content", egress_rules.redact(answer) if answer else "", update_modified=False
+		)
+	except Exception:
+		frappe.logger("jarvis.chat").warning("notice reply repair failed", exc_info=True)
 
 
 def _stamp_reply_model(ctx: _Ctx, row: dict | None) -> None:
