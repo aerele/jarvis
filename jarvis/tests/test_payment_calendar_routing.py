@@ -511,6 +511,7 @@ class TestReaderBuild(FrappeTestCase):
 			"permissions",
 			"compatibility",
 			"books",
+			"banks",
 			"scope",
 			"errors",
 		):
