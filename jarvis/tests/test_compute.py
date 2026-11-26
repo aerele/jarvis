@@ -1256,7 +1256,7 @@ class TestSingleOperations(ComputeTestCase):
 		self.assertEqual(_run("result = '-'.join(['a', 'b']) + 'x'.ljust(3, '.')")["result"], "a-bx..")
 
 	def test_writing_out_a_shared_structure(self):
-		grow = "x = [1]\nfor i in range(40):\n    x = [x, x]\n"
+		grow = "x = [1]\nfor i in range(5):\n    x = [x] * 40\n"
 		for tail in (
 			"result = len(str(x))",
 			"result = len(repr(x))",
@@ -1706,8 +1706,8 @@ class TestIteration2Reports(ComputeTestCase):
 class TestIteration2SingleOperations(ComputeTestCase):
 	"""Review 2 (medium): comparisons, hashing and big ints in one C call."""
 
-	DEEP = "a = [1]\nb = [1]\nfor i in range(60):\n    a = [a, a]\n    b = [b, b]\n"
-	DEEP_T = "a = (1,)\nb = (1,)\nfor i in range(60):\n    a = (a, a)\n    b = (b, b)\n"
+	DEEP = "a = [1]\nb = [1]\nfor i in range(5):\n    a = [a] * 40\n    b = [b] * 40\n"
+	DEEP_T = "a = (1,)\nb = (1,)\nfor i in range(5):\n    a = (a,) * 40\n    b = (b,) * 40\n"
 	COLLIDE = "M = 2**61 - 1\nkeys = [M * i for i in range(1, 60001)]\n"
 	LONG = "s = 'x' * 100000\nt = 'x' * 99999 + 'y'\nl = [s] * 200000\n"
 
@@ -1719,6 +1719,8 @@ class TestIteration2SingleOperations(ComputeTestCase):
 		self.assertIn(fragment, str(ctx.exception))
 
 	def test_deep_shared_structures(self):
+		# Review 3: 60 doubling levels are refused when built (TestIteration3); a wide
+		# structure under the nesting cap still reaches the cost checks.
 		for tail in (
 			"result = a == b",
 			"result = a < b",
@@ -1848,13 +1850,20 @@ class TestIteration2Access(ComputeTestCase):
 				}
 			).insert(ignore_permissions=True)
 		out = _run(
-			f"a = get_list('User', filters={{'name': '{ACC_USER}'}}, fields=['name', 'new_password'])\n"
+			f"a = get_list('User', filters={{'name': '{ACC_USER}'}}, fields=['*'])\n"
 			f"b = get_doc('User', '{ACC_USER}')\n"
-			f"c = get_value('User', '{ACC_USER}', 'new_password')\n"
-			f"d = run_report('{name}').rows\n"
-			"result = [a, b, c, d]"
+			f"d = run_report('{name}')\n"
+			"result = [a, b, d.rows, [c.fieldname for c in d.columns]]"
 		)
 		self.assertNotIn(self.SECRET, json.dumps(out, default=str))
+		self.assertNotIn("new_password", json.dumps(out, default=str))
+		# Naming a Password field is refused outright (review 3).
+		for code in (
+			f"result = get_list('User', filters={{'name': '{ACC_USER}'}}, fields=['name', 'new_password'])",
+			f"result = get_value('User', '{ACC_USER}', 'new_password')",
+		):
+			with self.subTest(code=code), self.assertRaisesRegex(PermissionDeniedError, "hold credentials"):
+				_run(code)
 		self.assertEqual(_run("result = count('User') > 0")["result"], True)
 
 	def test_get_list_on_a_single_doctype_teaches(self):
@@ -1883,3 +1892,234 @@ class TestIteration2Floats(ComputeTestCase):
 				self.assertEqual(repr(_tidy_float(value)), repr(expected))
 		out = _run("result = [0.1 + 0.2, 12345678901234.56, 0.012345678]")
 		self.assertEqual(out["result"], [0.3, 12345678901234.56, 0.012345678])
+
+
+class TestIteration3(ComputeTestCase):
+	"""Review 3: stale comparison costs, starred unpacking, nesting, credential fields."""
+
+	# Under the nesting cap, but comparing two copies visits 40**5 (about 10**8) values.
+	WIDE = "a = [0]\nb = [0]\nfor i in range(5):\n    a = [a] * 40\n    b = [b] * 40\n"
+	WIDE_T = "a = (0,)\nb = (0,)\nfor i in range(5):\n    a = (a,) * 40\n    b = (b,) * 40\n"
+	DEEP = "a = [1]\nfor i in range(60):\n    a = [a, a]\n"
+	COLLIDE = "M = 2**61 - 1\nkeys = [1 + M * i for i in range(5000)]\n"
+
+	def assertFast(self, code: str, fragment: str):
+		started = time.monotonic()
+		with self.assertRaises(ComputeCodeError) as ctx:
+			_run(code)
+		self.assertLess(time.monotonic() - started, 1.0, code)
+		self.assertIn(fragment, str(ctx.exception))
+
+	# N1 -----------------------------------------------------------------------
+
+	def test_a_mutated_list_is_measured_again(self):
+		base = "l = [1, 2, 3]\nm = [1, 2, 3]\nfirst = l == m\n" + self.WIDE
+		for mutate in (
+			"l.pop()\nl.append(a)\nm.pop()\nm.append(b)\n",
+			"l.insert(0, a)\nl.pop()\nm.insert(0, b)\nm.pop()\n",
+			"l.remove(3)\nl.append(a)\nm.remove(3)\nm.append(b)\n",
+			"l.reverse()\nl[0] = a\nm.reverse()\nm[0] = b\n",
+			"del l[0]\nl.append(a)\ndel m[0]\nm.append(b)\n",
+			"l.clear()\nl.extend([a, 1, 2])\nm.clear()\nm.extend([b, 1, 2])\n",
+		):
+			with self.subTest(mutate=mutate):
+				self.assertFast(base + mutate + "result = l == m", "could take a very long time")
+
+	def test_a_mutated_dict_or_set_is_measured_again(self):
+		dicts = "d = {1: 1}\ne = {1: 1}\nfirst = d == e\n" + self.WIDE
+		for mutate in (
+			"d.popitem()\nd.setdefault(1, a)\ne.popitem()\ne.setdefault(1, b)\n",
+			"d.update({1: a})\ne.update({1: b})\n",
+			"d.pop(1)\nd[1] = a\ne.pop(1)\ne[1] = b\n",
+		):
+			with self.subTest(mutate=mutate):
+				self.assertFast(dicts + mutate + "result = d == e", "could take a very long time")
+		sets = "s = {1}\nt = {1}\nfirst = s == t\n" + self.WIDE_T
+		for mutate in (
+			"s.discard(1)\ns.add(a)\nt.discard(1)\nt.add(b)\n",
+			"s.clear()\ns.update([a])\nt.clear()\nt.update([b])\n",
+		):
+			with self.subTest(mutate=mutate):
+				self.assertFast(sets + mutate + "result = s == t", "could take a very long time")
+
+	def test_a_parent_is_measured_again_when_a_child_changes(self):
+		code = (
+			"x = [1, 2]\ny = [1, 2]\np = [x]\nq = [y]\nfirst = p == q\n"
+			+ self.WIDE
+			+ "x.append(a)\ny.append(b)\nresult = p == q"
+		)
+		self.assertFast(code, "could take a very long time")
+
+	# N2 -----------------------------------------------------------------------
+
+	def test_starred_displays_are_capped_before_they_are_built(self):
+		for code in (
+			"r = range(1000000)\nresult = len([*r, *r])",
+			"r = range(150000)\nresult = len([*r, *r])",
+			"r = range(150000)\nresult = len((*r, *r))",
+			"r = range(150000)\nresult = len({*r, *r, -1, *range(150000, 300000)})",
+			"r = list(range(150000))\nresult = len([0, *r, *r])",
+		):
+			with self.subTest(code=code):
+				self.assertFast(code, "the limit is 200,000")
+		self.assertFast(self.COLLIDE + "result = len({*keys})", "hash alike")
+
+	def test_starred_calls_are_capped_before_the_call(self):
+		for code in (
+			"r = range(1000000)\nresult = max(*r)",
+			"r = range(20000)\nprint(*r)\nresult = 1",
+			"x = [(i, i) for i in range(20000)]\nresult = len(list(zip(*x)))",
+			"d = {f'k{i}': i for i in range(20000)}\nresult = dict(**d)",
+		):
+			with self.subTest(code=code):
+				self.assertFast(code, "arguments")
+
+	def test_dict_unpacking_is_capped(self):
+		self.assertFast(
+			"d = dict.fromkeys(range(150000))\ne = dict.fromkeys(range(150000, 300000))\nresult = len({**d, **e})",
+			"the limit is 200,000",
+		)
+		self.assertFast(
+			self.COLLIDE
+			+ "d = dict.fromkeys(keys[:900])\ne = dict.fromkeys(keys[900:1800])\nf = dict.fromkeys(keys[1800:2700])\n"
+			"result = len({**d, **e, **f})",
+			"This ** unpacking would put",
+		)
+
+	def test_collisions_add_up_across_calls(self):
+		halves = "a = keys[:900]\nb = keys[900:1800]\n"
+		for tail in (
+			"d = dict.fromkeys(a)\nd.update(dict.fromkeys(b))\nresult = len(d)",
+			"s = set(a)\ns.update(b)\nresult = len(s)",
+			"result = len(set(a).union(b))",
+			"result = len(set(a) | set(b))",
+			"result = len(set(a) ^ set(b))",
+		):
+			with self.subTest(tail=tail):
+				self.assertFast(self.COLLIDE + halves + tail, "hash alike")
+
+	def test_starred_still_works(self):
+		out = _run(
+			"a = [1, 2]\nb = (3,)\nd = {'x': 1}\n"
+			"def f(*args, **kwargs):\n    return [len(args), sorted(kwargs)]\n"
+			"result = [[*a, *b], (*a, 0), sorted({*a, *b}), {**d, 'y': 2}, f(*a, 9, *b, k=1, **d),"
+			" max(*a), list(zip(*[(1, 2), (3, 4)]))]"
+		)
+		self.assertEqual(
+			out["result"],
+			[[1, 2, 3], [1, 2, 0], [1, 2, 3], {"x": 1, "y": 2}, [4, ["k", "x"]], 2, [[1, 3], [2, 4]]],
+		)
+
+	# N3 -----------------------------------------------------------------------
+
+	def test_deep_containers_cannot_be_built(self):
+		for code in (
+			self.DEEP + "result = 1",
+			"a = (1,)\nfor i in range(60):\n    a = (a, a)\nresult = 1",
+			"a = {}\nfor i in range(60):\n    a = {'k': a}\nresult = 1",
+			"a = [1]\nfor i in range(60):\n    a = [a for _ in range(2)]\nresult = 1",
+			"a = [1]\nfor i in range(60):\n    b = []\n    b.append(a)\n    a = b\nresult = 1",
+			"a = [1]\nfor i in range(60):\n    b = [0]\n    b[0] = a\n    a = b\nresult = 1",
+			"a = [1]\nfor i in range(60):\n    a = list([a])\nresult = 1",
+			"a = [1]\nfor i in range(60):\n    a = sorted([a])\nresult = 1",
+			"a = {}\nfor i in range(60):\n    b = {}\n    b.setdefault('k', a)\n    a = b\nresult = 1",
+			"a = {}\nfor i in range(60):\n    b = {}\n    b.update(k=a)\n    a = b\nresult = 1",
+			"a = 1\nfor i in range(60):\n    a = frappe._dict(k=a)\nresult = 1",
+			"result = json.loads('[' * 50 + ']' * 50)",
+		):
+			with self.subTest(code=code):
+				self.assertFast(code, "levels deep")
+
+	def test_comparisons_through_methods_and_views(self):
+		for tail in (
+			"l = [a]\nl.remove(b)\nresult = 1",
+			"result = (a, 1).count(b)",
+			"result = (a, 1).index(b)",
+			"result = {1: a}.items() == {1: b}.items()",
+			"result = {1: a}.items() <= {1: b}.items()",
+			"result = [a] == [b]",
+		):
+			with self.subTest(tail=tail):
+				self.assertFast(self.WIDE_T + tail, "could take a very long time")
+		for tail in (
+			"result = {a}.issubset({b})",
+			"result = len({a} - {b})",
+			"result = len({a: 1}.keys() & {b: 1}.keys())",
+			"result = len(set([a, b]))",
+		):
+			with self.subTest(tail=tail):
+				self.assertFast(self.WIDE_T + tail, "could take a very long time")
+
+	def test_keys_nesting_a_colliding_int_deeply(self):
+		code = (
+			"M = 2**61 - 1\nkeys = []\nfor i in range(2500):\n    k = 1 + M * i\n"
+			"    for j in range(7):\n        k = (k,)\n    keys.append(k)\nresult = len(set(keys))"
+		)
+		self.assertFast(code, "alike")
+
+	def test_large_distinct_ints_are_fine(self):
+		out = _run("s = set(range(2**62, 2**62 + 3000))\nd = dict.fromkeys(s)\nresult = [len(s), len(d)]")
+		self.assertEqual(out["result"], [3000, 3000])
+
+	def test_loop_targets_cannot_store_into_containers(self):
+		for code in (
+			"d = {}\nfor d['k'] in [1]:\n    pass",
+			"d = {}\nresult = [0 for d['k'] in [1]]",
+			"l = [0, 0]\nl[0], l[1] = 1, 2",
+		):
+			with self.subTest(code=code), self.assertRaisesRegex(ComputeCodeError, "cannot store into"):
+				_run(code)
+
+	def test_ordinary_nested_results_still_work(self):
+		out = _run(
+			"top = [{'customer': f'C{i}', 'aging': {'0-30': i, '31-60': [i, {'n': i}]}} for i in range(5)]\n"
+			"rows = get_list('Sales Invoice', filters=" + repr(OURS) + ", fields=['name', 'customer'])\n"
+			"by = {}\nfor r in rows:\n    by.setdefault(r.customer, []).append(r)\n"
+			"again = json.loads(json.dumps({'top5': top}))\n"
+			"t = {}\nt[('a', 1)] = [1, 2]\nt[('a', 1)].append({'x': [1]})\n"
+			"result = {'top5': top[:2], 'groups': len(by), 'same': again == {'top5': top}, 't': t[('a', 1)]}"
+		)
+		self.assertEqual(out["result"]["groups"], 3)
+		self.assertTrue(out["result"]["same"])
+		self.assertEqual(
+			out["result"]["top5"][1], {"customer": "C1", "aging": {"0-30": 1, "31-60": [1, {"n": 1}]}}
+		)
+		self.assertEqual(out["result"]["t"], [1, 2, {"x": [1]}])
+
+	# N4 -----------------------------------------------------------------------
+
+	def test_credential_fields_are_never_read(self):
+		frappe.db.set_value(
+			"User", ACC_USER, "reset_password_key", "ct-secret-reset-key", update_modified=False
+		)
+		for user in (SYS_USER, "Administrator"):
+			with _as(user):
+				doc = _run(f"result = get_doc('User', '{ACC_USER}')")["result"]
+				self.assertNotIn("reset_password_key", doc)
+				self.assertNotIn("api_key", doc)
+				self.assertEqual(doc["name"], ACC_USER)
+				star = _run(f"result = get_list('User', filters={{'name': '{ACC_USER}'}}, fields=['*'])")[
+					"result"
+				]
+				self.assertNotIn("reset_password_key", star[0])
+				for code in (
+					f"result = get_value('User', '{ACC_USER}', 'reset_password_key')",
+					f"result = frappe.db.get_value('User', '{ACC_USER}', ['name', 'api_key'])",
+					"result = get_list('User', filters={'reset_password_key': ['like', 'ct-%']})",
+					"result = get_list('User', or_filters=[['reset_password_key', 'like', 'ct-%']])",
+					"result = get_list('User', fields=['name', 'reset_password_key'])",
+					"result = get_list('User', fields=['name'], order_by='reset_password_key desc')",
+					"result = get_list('User', fields=['api_key', {'COUNT': '*', 'as': 'n'}], group_by='api_key')",
+					"result = count('User', {'api_secret': ['is', 'set']})",
+					"result = exists('User', {'reset_password_key': 'ct-secret-reset-key'})",
+				):
+					with self.subTest(user=user, code=code):
+						with self.assertRaisesRegex(PermissionDeniedError, "hold credentials"):
+							_run(code)
+
+	def test_secret_named_fields_on_any_doctype(self):
+		self.assertIn("plaid_access_token", sandbox._secret_fields("Bank"))
+		self.assertIn("client_secret", sandbox._secret_fields("Google Settings"))
+		self.assertNotIn("otp_issuer_name", sandbox._secret_fields("System Settings"))
+		with self.assertRaisesRegex(PermissionDeniedError, "plaid_access_token"):
+			_run("result = get_list('Bank', filters={'plaid_access_token': ['is', 'set']})")

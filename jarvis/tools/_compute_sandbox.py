@@ -64,8 +64,8 @@ second makes other threads' allocations fail. A subprocess cannot share this req
 database connection, transaction and permission context, which every read here relies
 on. Size pre-checks plus checks between steps are the boundary instead.
 
-Lambdas tick at every call and the tracer stops any call into the script at the
-deadline, so a callable driven from C (map, sorted, max with a key) cannot outrun it.
+Lambdas tick at every call and the deadline watch (``_Watch``) stops any call into the
+script at the deadline, so a callable driven from C (map, sorted, max with a key) cannot outrun it.
 
 Not covered (bounded only by the worker): what a report's own Python does outside the
 database (HTTP, email sent directly, a realtime event), and C work that none of the
@@ -79,6 +79,7 @@ import datetime
 import json
 import re
 import sys
+import threading
 import time
 import types
 from contextlib import contextmanager
@@ -89,7 +90,14 @@ from RestrictedPython import compile_restricted
 from RestrictedPython.transformer import IOPERATOR_TO_STR, RestrictingNodeTransformer, copy_locations
 
 from jarvis.exceptions import ComputeCodeError, InvalidArgumentError, PermissionDeniedError
-from jarvis.tools._compute_guards import GuardRefused, Guards, check_written_size, internal_import
+from jarvis.tools._compute_guards import (
+	GuardRefused,
+	Guards,
+	check_nesting,
+	check_written_size,
+	guarded_type,
+	internal_import,
+)
 
 try:  # Frappe 15 and 16: the policy safe_exec compiles with (allows the name ``_dict``)
 	from frappe.utils.safe_exec import FrappeTransformer as _BasePolicy
@@ -164,7 +172,7 @@ MEMORY_CHECK_INTERVAL_S = 0.005
 MAX_READ_RECEIPTS = 15
 RECEIPT_TEXT_CHARS = 100
 
-# The filename the compiled script carries: the tracer and error line numbers key on it.
+# The filename the compiled script carries: the deadline watch and error line numbers key on it.
 SCRIPT_FILENAME = "<jarvis-compute>"
 
 
@@ -364,6 +372,10 @@ _FORMAT = "_jv_format_"
 _TICK = "_jv_tick_"
 _COMPARE = "_jv_cmp_"
 _KEY = "_jv_key_"
+_NEST = "_jv_nest_"
+_BUILD = "_jv_build_"
+_BUILD_DICT = "_jv_build_dict_"
+_CALL = "_jv_call_"
 _GUARDED_BINOPS = {
 	ast.Add: "+",
 	ast.Mult: "*",
@@ -386,6 +398,42 @@ def _call(name: str, args: list, node: ast.AST) -> ast.Call:
 	return ast.fix_missing_locations(call)
 
 
+def _tuple(elts: list, node: ast.AST) -> ast.Tuple:
+	t = ast.Tuple(elts=elts, ctx=ast.Load())
+	copy_locations(t, node)
+	return ast.fix_missing_locations(t)
+
+
+def _is_scalar_constant(node: ast.AST) -> bool:
+	"""A literal that is no container (a number, text, None, True / False, an f-string)."""
+	if isinstance(node, ast.Constant | ast.JoinedStr):
+		return True
+	return isinstance(node, ast.UnaryOp) and isinstance(node.operand, ast.Constant)
+
+
+def _is_constant(node: ast.AST) -> bool:
+	"""A scalar literal, or a list / tuple / set display of scalar literals: comparing
+	anything with one costs at most its length."""
+	if _is_scalar_constant(node):
+		return True
+	return isinstance(node, ast.List | ast.Tuple | ast.Set) and all(_is_scalar_constant(e) for e in node.elts)
+
+
+def _checked(node: ast.AST) -> bool:
+	"""An expression the policy already routed through a nesting check."""
+	return (
+		isinstance(node, ast.Call)
+		and isinstance(node.func, ast.Name)
+		and node.func.id in (_NEST, _BUILD, _BUILD_DICT)
+	)
+
+
+def _stores_into_object(target: ast.AST) -> bool:
+	"""Whether an assignment target writes into a container or object (``d[k]``,
+	``row.x``), also inside an unpacking target."""
+	return any(isinstance(n, ast.Subscript | ast.Attribute) for n in ast.walk(target))
+
+
 class _ComputePolicy(_BasePolicy):
 	"""Frappe's RestrictedPython policy, plus the ordinary Python a computation needs.
 
@@ -403,7 +451,137 @@ class _ComputePolicy(_BasePolicy):
 	  the first time it raises, so a loop that catches that one exception would then run
 	  unchecked.
 	- Slice assignment (``l[n:] = l`` doubles a list in one step) is refused.
+	- Starred parts are read through the item cap before anything is allocated:
+	  ``[*a, *b]`` / ``(*a,)`` / ``{*a}`` become ``_jv_build_(kind, (starred, value), ...)``,
+	  ``{**d, k: v}`` becomes ``_jv_build_dict_(...)`` and a call with ``*args`` or
+	  ``**kwargs`` becomes ``_jv_call_(func, ...)`` (instead of RestrictedPython's
+	  ``_apply_``, which only sees the arguments after Python has unpacked them).
+	- Nesting is bounded where a container is built: every list / tuple / dict display and
+	  every comprehension result goes through ``_jv_nest_``, and so does every value stored
+	  into a container or object (``d[k] = v``, ``row.x = v``). A loop, comprehension,
+	  ``with`` or unpacking target cannot store into one (``for d[k] in ...``).
+	- Set display items, set comprehension items and dict display / comprehension keys
+	  are cost-checked as keys before C hashes and compares them.
 	"""
+
+	def _nest(self, node: ast.AST) -> ast.AST:
+		return node if _is_constant(node) else _call(_NEST, [node], node)
+
+	def _key(self, node: ast.AST) -> ast.AST:
+		return node if _is_scalar_constant(node) else _call(_KEY, [node], node)
+
+	def _refuse_object_target(self, target: ast.AST, what: str):
+		if _stores_into_object(target):
+			self.error(
+				target,
+				f"{what} cannot store into an item or attribute: assign to a name, then store it "
+				"in the body (d[k] = value).",
+			)
+
+	def visit_List(self, node: ast.List):
+		node = super().visit_List(node)
+		if not isinstance(node.ctx, ast.Load):
+			return node
+		if any(isinstance(e, ast.Starred) for e in node.elts):
+			return self._build("list", node)
+		return self._nest(node)
+
+	def visit_Tuple(self, node: ast.Tuple):
+		node = super().visit_Tuple(node)
+		if not isinstance(node.ctx, ast.Load) or any(isinstance(e, ast.Slice) for e in node.elts):
+			return node
+		if any(isinstance(e, ast.Starred) for e in node.elts):
+			return self._build("tuple", node)
+		return self._nest(node)
+
+	def visit_Set(self, node: ast.Set):
+		node = super().visit_Set(node)
+		if _is_constant(node):
+			return node
+		return self._build("set", node)
+
+	def _build(self, kind: str, node):
+		parts = [
+			_tuple([ast.Constant(1), e.value], e)
+			if isinstance(e, ast.Starred)
+			else _tuple([ast.Constant(0), e], e)
+			for e in node.elts
+		]
+		return _call(_BUILD, [ast.Constant(kind), *parts], node)
+
+	def visit_Dict(self, node: ast.Dict):
+		node = super().visit_Dict(node)
+		if any(k is None for k in node.keys):
+			parts = [
+				_tuple([ast.Constant(1), v], v) if k is None else _tuple([ast.Constant(0), k, v], k)
+				for k, v in zip(node.keys, node.values, strict=True)
+			]
+			return _call(_BUILD_DICT, parts, node)
+		node.keys = [self._key(k) for k in node.keys]
+		if all(_is_constant(v) for v in node.values):
+			return node
+		return _call(_NEST, [node], node)
+
+	def visit_ListComp(self, node: ast.ListComp):
+		node = super().visit_ListComp(node)
+		return node if _is_constant(node.elt) else _call(_NEST, [node], node)
+
+	def visit_SetComp(self, node: ast.SetComp):
+		node = super().visit_SetComp(node)
+		if _is_constant(node.elt):
+			return node
+		node.elt = _call(_KEY, [node.elt], node.elt)
+		return _call(_NEST, [node], node)
+
+	def visit_DictComp(self, node: ast.DictComp):
+		node = super().visit_DictComp(node)
+		node.key = self._key(node.key)
+		return node if _is_constant(node.value) else _call(_NEST, [node], node)
+
+	def visit_comprehension(self, node: ast.comprehension):
+		self._refuse_object_target(node.target, "A comprehension's loop variable")
+		return super().visit_comprehension(node)
+
+	def visit_For(self, node: ast.For):
+		self._refuse_object_target(node.target, "A for loop's variable")
+		return super().visit_For(node)
+
+	def visit_withitem(self, node: ast.withitem):
+		if node.optional_vars is not None:
+			self._refuse_object_target(node.optional_vars, "with ... as")
+		return super().visit_withitem(node)
+
+	def visit_Assign(self, node: ast.Assign):
+		for target in node.targets:
+			if isinstance(target, ast.Tuple | ast.List):
+				self._refuse_object_target(target, "Unpacking")
+		stores = any(_stores_into_object(t) for t in node.targets)
+		result = super().visit_Assign(node)
+		if stores:
+			for new in result if isinstance(result, list) else [result]:
+				if isinstance(new, ast.Assign) and not _is_constant(new.value) and not _checked(new.value):
+					new.value = _call(_NEST, [new.value], new.value)
+		return result
+
+	def visit_Call(self, node: ast.Call):
+		node = super().visit_Call(node)
+		if not (isinstance(node.func, ast.Name) and node.func.id == "_apply_"):
+			return node
+		# RestrictedPython made this _apply_(func, *args, **kwargs): Python would unpack
+		# every starred part before _apply_ runs. Pass the parts instead.
+		func, *args = node.args
+		parts = [
+			_tuple([ast.Constant(1), a.value], a)
+			if isinstance(a, ast.Starred)
+			else _tuple([ast.Constant(0), a], a)
+			for a in args
+		]
+		for kw in node.keywords:
+			if kw.arg is None:
+				parts.append(_tuple([ast.Constant(3), kw.value], kw.value))
+			else:
+				parts.append(_tuple([ast.Constant(2), ast.Constant(kw.arg), kw.value], kw.value))
+		return _call(_CALL, [func, *parts], node)
 
 	def visit_Module(self, node: ast.Module):
 		node = super().visit_Module(node)
@@ -438,25 +616,26 @@ class _ComputePolicy(_BasePolicy):
 		# Every operand is cost-checked before C compares it (deep shared structures,
 		# long lists of long text). The right side of ``in`` is a lookup when it is a
 		# dict or set; ``is`` compares nothing.
+		# A comparison with a literal (``r.status == "Paid"``, ``x in ("a", "b")``) costs
+		# at most the literal's length whatever the other side is, so it is left alone.
 		node = super().visit_Compare(node)
-		node.left = _call(_COMPARE, [node.left, ast.Constant(0)], node)
-		node.comparators = [
-			_call(
-				_COMPARE,
-				[
-					c,
-					ast.Constant(
-						1
-						if isinstance(op, ast.In | ast.NotIn)
-						else 2
-						if isinstance(op, ast.Is | ast.IsNot)
-						else 0
-					),
-				],
-				node,
-			)
-			for op, c in zip(node.ops, node.comparators, strict=True)
+		operands = [node.left, *node.comparators]
+		need = [False] * len(operands)
+		membership = [True] * len(operands)
+		for i, op in enumerate(node.ops):
+			if isinstance(op, ast.Is | ast.IsNot):
+				continue
+			if _is_constant(operands[i]) or _is_constant(operands[i + 1]):
+				continue
+			need[i] = need[i + 1] = True
+			membership[i] = False
+			if not isinstance(op, ast.In | ast.NotIn):
+				membership[i + 1] = False
+		wrapped = [
+			_call(_COMPARE, [o, ast.Constant(1 if membership[i] else 0)], node) if need[i] else o
+			for i, o in enumerate(operands)
 		]
+		node.left, node.comparators = wrapped[0], wrapped[1:]
 		return node
 
 	def visit_FormattedValue(self, node: ast.FormattedValue):
@@ -1125,6 +1304,73 @@ def _refuse_private(doctype: str):
 		)
 
 
+# Fields that hold credentials or one-time keys, on doctypes compute otherwise reads: a
+# System Manager reads User, but its password-reset key is a login. Never selected,
+# filtered, sorted or grouped on, and stripped from records and report rows. Besides
+# these, every Password field and every text field named like a secret (_SECRET_NAME).
+_SECRET_FIELDS = {
+	"User": frozenset({"reset_password_key", "api_key", "api_secret"}),
+	"Document Share Key": frozenset({"key"}),
+	"User Invitation": frozenset({"key"}),
+	"Web Form Request": frozenset({"key"}),
+	"Webhook Header": frozenset({"value"}),
+}
+_SECRET_NAME = re.compile(
+	r"secret|password|passwd|passcode|private_key|(?:^|_)(?:token|api_key|access_key|otp|nonce|session_id)$",
+	re.IGNORECASE,
+)
+# Field types that can hold a secret (a Check or a Date named "password_..." cannot).
+_TEXT_FIELDTYPES = frozenset(
+	{"Data", "Small Text", "Text", "Long Text", "Code", "Password", "Read Only", "JSON", "Text Editor"}
+)
+
+
+def _secret_fields(doctype: str) -> frozenset:
+	"""The fields of ``doctype`` that hold credentials or one-time keys."""
+	names = set(_SECRET_FIELDS.get(doctype, ()))
+	for df in frappe.get_meta(doctype).fields:
+		if df.fieldtype == "Password" or (
+			df.fieldtype in _TEXT_FIELDTYPES and df.fieldname and _SECRET_NAME.search(df.fieldname)
+		):
+			names.add(df.fieldname)
+	return frozenset(names)
+
+
+def _secret_fields_reachable(doctype: str) -> frozenset:
+	"""Secret fields of ``doctype`` and of its child tables (a filter can name a child
+	table's field)."""
+	names = set(_secret_fields(doctype))
+	for df in frappe.get_meta(doctype).get_table_fields():
+		names |= _secret_fields(df.options)
+	return frozenset(names)
+
+
+def _refuse_secret_fields(doctype: str, names) -> None:
+	secret = sorted(set(names) & _secret_fields_reachable(doctype))
+	if secret:
+		raise PermissionDeniedError(
+			f"{doctype} field(s) {', '.join(secret)} hold credentials or one-time keys; compute never "
+			"reads, filters, sorts or groups on them."
+		)
+
+
+def _strip_secret_fields(doctype: str, record: dict) -> dict:
+	"""``record`` (a document or a row) without its secret fields, child rows included."""
+	for name in _secret_fields(doctype):
+		record.pop(name, None)
+	for df in frappe.get_meta(doctype).get_table_fields():
+		for child in record.get(df.fieldname) or ():
+			if isinstance(child, dict):
+				_strip_secret_fields(df.options, child)
+	return record
+
+
+def _secret_column(column: dict) -> bool:
+	name = column.get("fieldname") or ""
+	fieldtype = column.get("fieldtype") or "Data"
+	return bool(_SECRET_NAME.search(name)) and fieldtype in _TEXT_FIELDTYPES
+
+
 def _json_arg(name: str, value):
 	"""``filters`` / ``or_filters`` / ``fields`` given as JSON text, read as Frappe's API reads
 	them; any other text is refused (it would silently match nothing)."""
@@ -1267,11 +1513,22 @@ def _check_field_access(doctype: str, parent_doctype, fields, filters, or_filter
 	lack) or computes / filters / sorts / groups over a field masked for them.
 	Frappe drops an unreadable SELECT field silently; here it is refused, so the code
 	never totals a column that came back empty."""
+	from jarvis.tools.get_list import _filter_fieldnames
+
+	plain: set[str] = set()
+	computed: set[str] = set()
+	for entry in fields or []:
+		names, is_computed = _field_refs(entry)
+		(computed if is_computed else plain).update(names)
+	conditions = _filter_fieldnames(filters) | _filter_fieldnames(or_filters)
+	ordering = set(_IDENT.findall(str(order_by or "").replace("`", ""))) | set(
+		_IDENT.findall(str(group_by or "").replace("`", ""))
+	)
+	# Credentials: refused for everyone, Administrator included.
+	_refuse_secret_fields(doctype, plain | computed | conditions | ordering)
 	if frappe.session.user == "Administrator":
 		return
 	from frappe.model import get_permitted_fields
-
-	from jarvis.tools.get_list import _filter_fieldnames
 
 	meta = frappe.get_meta(doctype)
 	columns = set(meta.get_valid_columns())
@@ -1284,15 +1541,6 @@ def _check_field_access(doctype: str, parent_doctype, fields, filters, or_filter
 	except Exception:
 		masked = set()  # Frappe 15: no field masking
 
-	plain: set[str] = set()
-	computed: set[str] = set()
-	for entry in fields or []:
-		names, is_computed = _field_refs(entry)
-		(computed if is_computed else plain).update(names)
-	conditions = _filter_fieldnames(filters) | _filter_fieldnames(or_filters)
-	ordering = set(_IDENT.findall(str(order_by or "").replace("`", ""))) | set(
-		_IDENT.findall(str(group_by or "").replace("`", ""))
-	)
 	referenced = (plain | computed | conditions | ordering) & columns
 	hidden = sorted(referenced - permitted)
 	if hidden:
@@ -1462,6 +1710,9 @@ def make_reads(run: _Run) -> dict:
 				'group_by="customer" with fields=["customer", {"SUM": "base_grand_total", "as": "total"}].'
 			)
 		run.take_rows(len(rows), f"get_list('{doctype}')")
+		if any(isinstance(f, str) and "*" in f and "(" not in f for f in fields):
+			for row in rows:
+				_strip_secret_fields(doctype, row)
 
 		receipt = {"doctype": doctype, "rows": len(rows)}
 		if filters:
@@ -1502,6 +1753,7 @@ def make_reads(run: _Run) -> dict:
 				doc = _get_doc_one(doctype, str(name))
 		except InvalidArgumentError as e:
 			raise SandboxUsageError(str(e)) from None
+		_strip_secret_fields(doctype, doc)
 		children = sum(len(v) for v in doc.values() if isinstance(v, list))
 		run.take_rows(1 + children, f"get_doc('{doctype}')")
 		receipt = {"doctype": doctype, "rows": 1 + children}
@@ -1520,6 +1772,7 @@ def make_reads(run: _Run) -> dict:
 	def get_value(doctype, filters=None, fieldname="name", as_dict=False):
 		doctype = _doctype(doctype)
 		fieldnames = list(fieldname) if isinstance(fieldname, list | tuple) else [fieldname]
+		_refuse_secret_fields(doctype, [f for f in fieldnames if isinstance(f, str)])
 		if frappe.get_meta(doctype).issingle:
 			doc = get_doc(doctype)
 			row = Row({f: doc.get(f) for f in fieldnames})
@@ -1637,6 +1890,14 @@ def make_reads(run: _Run) -> dict:
 		if data.get("add_total_row") and result:
 			total_row = result.pop()
 		rows = [_report_row(r, columns) for r in result]
+		total = _report_row(total_row, columns) if total_row is not None else None
+		secret = {c["fieldname"] for c in columns if _secret_column(c)}
+		if secret:
+			columns = [c for c in columns if c["fieldname"] not in secret]
+			for row in [*rows, total]:
+				if isinstance(row, dict):
+					for name in secret:
+						row.pop(name, None)
 		if len(rows) > MAX_ROWS_PER_READ:
 			run.fail(
 				f"run_report('{report_name}') returned more than {MAX_ROWS_PER_READ:,} rows. Narrow its "
@@ -1660,7 +1921,7 @@ def make_reads(run: _Run) -> dict:
 					Row({k: c[k] for k in ("fieldname", "label", "fieldtype", "options")}) for c in columns
 				],
 				"rows": rows,
-				"total_row": _report_row(total_row, columns) if total_row is not None else None,
+				"total_row": total,
 				"prepared": prepared,
 				"as_of": as_of,
 			}
@@ -1850,7 +2111,7 @@ def _json_dumps(obj, indent=None, sort_keys=False):
 
 
 def _json_loads(text):
-	return json.loads(text)
+	return check_nesting(json.loads(text), "json.loads()")
 
 
 def _throw(message="", *args, **kwargs):
@@ -1914,6 +2175,11 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 	reads = make_reads(run)
 	guards = Guards(run.check_memory, run.tick)
 	inplacevar, aug_item = _inplace_factory(guards)
+	types_ = guards.types()
+	make_dict = types_["dict"]
+	guarded_dict = guarded_type(
+		"_dict", frappe._dict, lambda *args, **kwargs: frappe._dict(make_dict(*args, **kwargs)), {}
+	)
 	utils = _utils()
 	session = _Namespace("frappe.session", {"user": user})
 	db = _Namespace(
@@ -1941,7 +2207,7 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 			"session": session,
 			"user": user,
 			"defaults": defaults,
-			"_dict": frappe._dict,
+			"_dict": guarded_dict,
 			"parse_json": _json_loads,
 			"as_json": _json_dumps,
 			"throw": _throw,
@@ -1960,7 +2226,7 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 		"frappe": frappe_ns,
 		"utils": utils_ns,
 		"json": json_ns,
-		"_dict": frappe._dict,
+		"_dict": guarded_dict,
 		"datetime": datetime_ns,
 		"date": datetime.date,
 		"timedelta": datetime.timedelta,
@@ -1969,7 +2235,7 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 	}
 	builtins = {
 		**_PLAIN_BUILTINS,
-		**guards.types(),  # str, int, list, tuple, set, dict: size- and hash-checked
+		**types_,  # str, int, list, tuple, set, dict: size-, hash- and nesting-checked
 		"pow": guards.pow,
 		"round": guards.round,
 		"sum": guards.sum,
@@ -1978,6 +2244,7 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 		"min": guards.min,
 		"max": guards.max,
 		"repr": guards.repr,
+		"hash": guards.hash,
 		# Unreachable from the script (names starting with "_" never compile); C code
 		# such as datetime.strftime imports ``time`` through it.
 		"__import__": internal_import,
@@ -2001,6 +2268,10 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 		_FORMAT: guards.format_value,
 		_COMPARE: guards.compare,
 		_KEY: guards.key,
+		_NEST: guards.nest,
+		_BUILD: guards.build,
+		_BUILD_DICT: guards.build_dict,
+		_CALL: guards.call,
 	}
 	available = set(named) | set(builtins)
 	frappe_names = {"": frappe_ns.names(), "db": db.names(), "utils": utils_ns.names()}
@@ -2071,32 +2342,125 @@ def _no_writes(run: _Run):
 			del db.sql
 
 
-@contextmanager
-def _deadline(run: _Run):
-	"""A second line behind the compiled-in ticks: a trace function that stops any call
-	into the script's own code at the deadline, and any call beneath it (a report's own
-	Python loop) GRACE_S after. The ticks do not depend on this: CPython drops a trace
-	function once it raises. Per thread; the previous tracer (a debugger, coverage) is
-	put back."""
+class _Watch:
+	"""Deadline enforcement beneath the compiled-in ticks, through ``sys.monitoring``.
+
+	One callback on every Python function start and generator resume, shared by every
+	compute run of the process (each thread runs at most one). Before a run's deadline
+	the callback disables itself for each code location it sees, so a run pays one
+	callback per distinct function, not one per call (a trace function cost every guard
+	call a frame object and a Python call: twice the run time of a loop). At the
+	deadline a timer thread re-enables the events, and keeps re-enabling them every
+	WATCH_REARM_S while the run lasts: from then on any call into the script or the
+	guards stops the run, and any call beneath (a report's own Python) GRACE_S later.
+	Unlike a trace function, a monitoring callback is not dropped when it raises."""
+
+	lock = threading.Lock()
+	runs: dict[int, tuple] = {}
+	tool: int | None = None
+
+	@classmethod
+	def _on_start(cls, code, offset):
+		entry = cls.runs.get(threading.get_ident())
+		if entry is None:
+			return sys.monitoring.DISABLE
+		run, own = entry
+		now = time.monotonic()
+		if now <= run.deadline:
+			return sys.monitoring.DISABLE
+		grace = 0 if code.co_filename in own else GRACE_S
+		if now > run.deadline + grace:
+			run.check_time(grace)
+		return None
+
+	@classmethod
+	def start(cls, run: _Run, own: frozenset) -> bool:
+		monitoring = getattr(sys, "monitoring", None)
+		if monitoring is None:
+			return False
+		with cls.lock:
+			if cls.tool is None:
+				tool = next((t for t in _WATCH_TOOL_IDS if monitoring.get_tool(t) is None), None)
+				if tool is None:
+					return False
+				monitoring.use_tool_id(tool, "jarvis-compute")
+				events = monitoring.events.PY_START | monitoring.events.PY_RESUME
+				monitoring.register_callback(tool, monitoring.events.PY_START, cls._on_start)
+				monitoring.register_callback(tool, monitoring.events.PY_RESUME, cls._on_start)
+				monitoring.set_events(tool, events)
+				cls.tool = tool
+			cls.runs[threading.get_ident()] = (run, own)
+		return True
+
+	@classmethod
+	def stop(cls):
+		monitoring = sys.monitoring
+		with cls.lock:
+			cls.runs.pop(threading.get_ident(), None)
+			if cls.runs or cls.tool is None:
+				return
+			tool, cls.tool = cls.tool, None
+			monitoring.set_events(tool, 0)
+			monitoring.register_callback(tool, monitoring.events.PY_START, None)
+			monitoring.register_callback(tool, monitoring.events.PY_RESUME, None)
+			monitoring.free_tool_id(tool)
+
+
+# sys.monitoring tool ids the watch may take: 0-2 and 5 are named for debuggers,
+# coverage, profilers and optimisers.
+_WATCH_TOOL_IDS = (4, 3)
+
+# How often, past the deadline, the watch re-enables events another thread disabled.
+WATCH_REARM_S = 0.05
+
+
+def _rearm_at_deadline(run: _Run, done: threading.Event):
+	if done.wait(max(run.deadline - time.monotonic(), 0)):
+		return
+	while True:
+		sys.monitoring.restart_events()
+		if done.wait(WATCH_REARM_S):
+			return
+
+
+def _start_deadline(run: _Run):
+	"""Start the second line behind the compiled-in ticks: any call into the script's own
+	code or the guards stops the run at the deadline (a function the script passes to a C
+	builtin, a guard called from map), and any call beneath it (a report's own Python
+	loop) GRACE_S after. See ``_Watch``. Without ``sys.monitoring`` or a free tool id it
+	falls back to a trace function (slower, same effect).
+
+	Returns the function that ends it. The caller first drops the run from
+	``_Watch.runs`` with C calls only (``_Watch.runs.pop(threading.get_ident(), None)``):
+	until then any Python call past the deadline raises, including the clean-up's own."""
 
 	from jarvis.tools import _compute_guards
 
-	own = {SCRIPT_FILENAME, _compute_guards.__file__}
+	own = frozenset({SCRIPT_FILENAME, _compute_guards.__file__})
+	if _Watch.start(run, own):
+		done = threading.Event()
+		threading.Thread(target=_rearm_at_deadline, args=(run, done), daemon=True).start()
+
+		def end():
+			done.set()
+			_Watch.stop()
+
+		return end
 
 	def tracer(frame, event, arg):
-		if event == "call":
-			# The script's own functions and lambdas, and the guards it calls (sum, sorted,
-			# list ... run from a C map): at the deadline. Code beneath it: GRACE_S later,
-			# so a read that is nearly done can return.
+		if event == "call" and threading.get_ident() in _Watch.runs:
 			run.check_time(0 if frame.f_code.co_filename in own else GRACE_S)
 		return None
 
+	with _Watch.lock:
+		_Watch.runs[threading.get_ident()] = (run, own)
 	previous = sys.gettrace()
 	sys.settrace(tracer)
-	try:
-		yield
-	finally:
+
+	def end_trace():
 		sys.settrace(previous)
+
+	return end_trace
 
 
 def script_line(error: BaseException) -> int | None:
@@ -2122,11 +2486,16 @@ def execute(code_obj, glb: dict, run: _Run) -> BaseException | None:
 		with statement_time_limit(STATEMENT_TIME_S):
 			with _no_writes(run):
 				try:
-					with _deadline(run):
+					end_deadline = _start_deadline(run)
+					try:
 						# The tool's purpose: code compiled by RestrictedPython above, run in the
 						# allowlisted read-only namespace `glb`, as the chat user.
 						# nosemgrep: frappe-codeinjection-eval
 						exec(code_obj, glb)
+					finally:
+						# C calls only, before any Python call: see _start_deadline.
+						_Watch.runs.pop(threading.get_ident(), None)
+						end_deadline()
 				except (KeyboardInterrupt, SystemExit):
 					raise
 				except BaseException as e:

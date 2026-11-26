@@ -1,45 +1,57 @@
 """Size and cost guards for the compute sandbox: no single operation may run long or allocate much.
 
-The sandbox's time and memory checks run between statements, loop items and lambda
-calls (``_compute_sandbox._Run.tick``). One C-level operation runs to its end without
-returning to Python, so a check can only come before it: every operation that can
-build a huge value, or do a huge amount of work, in one C call has its result size or
-its cost worked out from its operands first and is refused above a cap.
+The sandbox checks time and memory between statements, at every lambda call and for
+every loop item (``_compute_sandbox._Run.tick``). One C-level operation runs to its end
+without returning to Python, so a check can only come before it: every operation that
+can build a huge value, or do a huge amount of work, in one C call has its result size
+or its cost worked out from its operands first and is refused above a cap.
 
-Covered (each rewritten by the compile policy or wrapped in the namespace):
+Two structural bounds make the rest tractable:
 
-- ``a + b``, ``a * b``, ``a ** b``, ``a << b``, ``a % b``, ``a // b`` and the set
-  operators (and the augmented forms, through the in-place guard): int results by bit
-  length (``a*b`` as bits(a)+bits(b), ``a**b`` as b*log2(a), ``a<<n`` as bits(a)+n),
-  str/bytes by length, list/tuple by item count, ``str % args`` by its widths and an
-  estimate of its length, int division by operand size.
-- builtins: ``pow`` (modular pow with bounded operands), ``round``, ``sum`` with a
-  non-number start (quadratic), ``divmod``, ``sorted`` / ``min`` / ``max`` (by the cost
-  of comparing what they order), ``repr`` / ``str`` (writing out), and the types
-  ``int`` (from text or bytes), ``list`` / ``tuple`` (item count), ``set`` / ``dict``
-  (item count and hash collisions); ``isinstance`` with them still works.
-- comparisons: every operand of ``==``, ``<``, ``in`` ... and every key used to index
-  or store into a dict is checked for the cost of comparing or hashing it.
-- f-string replacement fields (widths, precisions, each piece's length).
-- methods: str/bytes ``ljust rjust center zfill expandtabs replace join translate``,
-  ``int.to_bytes`` / ``int.from_bytes``, ``list.extend sort count index``, the set
-  methods that take iterables or keys, ``dict.update get pop setdefault fromkeys``,
-  ``strftime``; also when reached through the class (``str.join(sep, items)``).
+- **Nesting depth.** No container the script builds may be nested more than
+  MAX_NESTING levels deep: every construction point checks it (displays, comprehension
+  items, item and attribute assignment, append / insert / extend / setdefault / update /
+  add, list() / tuple() / set() / dict() of nested input, json.loads). A deep shared
+  structure (``a = [a, a]`` sixty times) cannot be built at all.
+- **Cost of comparing or hashing.** Every comparison operand, dict or set key, hash(),
+  sort, min / max and every comparing method (list.count / index / remove, tuple.count /
+  index, the set methods and dict views) is checked first: the values it may visit,
+  shared references counted each time, text in TEXT_COST_CHARS chunks. A container that
+  holds no container is measured in C (the set of its item types) and that result is
+  cached until the container is mutated in any way (every mutator method, item / attribute
+  assignment, del, an in-place operator invalidates it); anything nested is always walked,
+  with an id-memoised walk, never cached, so a mutated child can never leave a stale parent.
 
-The cost of a comparison is the number of values it may visit, shared references
-counted each time they appear, text counted in TEXT_COST_CHARS chunks. It is measured
-with an id-memoised walk (each distinct container once), cached per run for flat
-containers (no container inside) until they are written to.
+Covered besides (each rewritten by the compile policy or wrapped in the namespace):
 
-The caps are module constants, each with its reason. A result over BIG_RESULT_BYTES is
-followed at once by a memory check.
+- ``+ * ** << % //`` and the set operators, and their augmented forms: int results by
+  bit length, str/bytes by length, list/tuple by item count, ``str % args`` by widths and
+  an estimate of its length, int division by operand size.
+- starred displays, starred calls and ``**`` unpacking (``[*r, *r]``, ``f(*r)``,
+  ``{**d}``): each part read with the item cap, a running total across the parts, before
+  anything is allocated.
+- builtins ``pow round sum divmod sorted min max repr hash`` and the types ``str int list
+  tuple set dict`` (``isinstance`` with them still works).
+- f-string fields, %-format widths, writing out (str / repr / print / json / the result).
+- methods that grow text or lists (``ljust rjust center zfill expandtabs replace join
+  translate``, ``int.to_bytes`` / ``from_bytes``, ``list.extend``, ``strftime``), also when
+  reached through the class (``str.join(sep, items)``).
+- sets and dict keys: distinct integer keys that share a hash value (they can be chosen to
+  fall into one bucket, which is quadratic in C) are counted; more than
+  MAX_HASH_COLLISIONS is refused. Distinct large ints with distinct hashes (snowflake ids)
+  are fine.
+
+The caps are module constants, each with its reason.
 """
 
 from __future__ import annotations
 
 import datetime
+import decimal
 import math
 import re
+from itertools import chain, compress, islice, repeat
+from operator import is_, is_not, itemgetter
 
 # Largest int an operation may produce: 2**16 bits is about 19,700 decimal digits, far
 # beyond any amount; one multiply, power or division of that size takes well under a
@@ -54,17 +66,23 @@ MAX_TEXT_CHARS = 100_000
 # (200,000), at most 1.6 MB of references.
 MAX_SEQUENCE_ITEMS = 200_000
 
+# Deepest nesting a container the script builds may have. Results like
+# {"top5": [{"customer": ..., "aging": {"0-30": ...}}]} are 4 levels; report rows 2;
+# a document with child tables 3. Deep shared structures (each level doubling) need far
+# more, and are what makes one comparison or hash exponential.
+MAX_NESTING = 10
+
 # Most values one comparison, sort, min / max, count / index or hash may visit (shared
 # references counted each time, text in TEXT_COST_CHARS chunks). Comparing two
-# 200,000-row lists of scalars stays inside; a deep shared structure does not.
+# 200,000-row lists of scalars stays inside; a large shared structure does not.
 MAX_COMPARE_COST = 2_000_000
 TEXT_COST_CHARS = 64
 
-# Python hashes an int as int % (2**61 - 1): ints at or above that can be chosen to fall
-# in one bucket, which makes building a set or dict of them quadratic in C. Business
-# numbers never get there; more than this many such keys in one set or dict is refused.
+# Python hashes an int as int % (2**61 - 1): distinct ints at or above that can share one
+# hash value and fall into one bucket, which makes building a set or dict of them
+# quadratic in C. Distinct keys with a shared hash are counted; more than this is refused.
 HASH_SAFE_INT = 2**61 - 1
-MAX_HEAVY_HASH_KEYS = 1_000
+MAX_HASH_COLLISIONS = 1_000
 
 # Widest field and longest precision in a %-format or an f-string format spec. A table
 # column needs tens of characters; "%1000000000d" would allocate a gigabyte.
@@ -81,12 +99,19 @@ MAX_ROUND_DIGITS = 300
 BIG_RESULT_BYTES = 1_000_000
 
 # Most values str() / repr() / print / json.dumps / an f-string may walk, counting
-# shared references as often as they appear. [big] * n or x = [x, x] in a loop is small
-# in memory but enormous once written out, and writing it out is one C call.
+# shared references as often as they appear: writing it out is one C call.
 MAX_WRITTEN_VALUES = 1_000_000
 
-# Most arguments a call may receive through *args (zip(*[r] * 10**6) builds tuples of
-# a million items in one C call). Unzipping a few thousand pairs stays well inside.
+# Items an unsized iterable is read in, between time and memory checks: each chunk is
+# one C call (a few hundred microseconds), a running total keeps it under the cap.
+MATERIALIZE_CHUNK = 4_096
+
+# Containers shorter than this are measured on every comparison (a few microseconds in
+# C) rather than cached: the cache holds what it measures alive until the run ends.
+CACHE_MIN_ITEMS = 256
+
+# Most arguments one call may receive (positional, *args and keywords together): zip(*x)
+# of a few thousand pairs stays well inside.
 MAX_STAR_ARGS = 10_000
 
 # Longest strftime pattern: a date format is a few dozen characters.
@@ -100,8 +125,25 @@ _INTERNAL_IMPORTS = frozenset({"time", "_strptime", "_pylong"})
 _TEXT = (str, bytes)
 _SEQ = (list, tuple)
 _NUMBER = (int, float)
-_CONTAINERS = (list, tuple, dict, set, frozenset)
-_SCALARS = frozenset({int, float, str, bool, type(None), datetime.date, datetime.datetime})
+_VIEWS = (type({}.keys()), type({}.values()), type({}.items()))
+_CONTAINERS = (list, tuple, dict, set, frozenset, *_VIEWS)
+# Right-hand sides of ``in`` that are a hash lookup, comparing only the left side.
+_LOOKUPS = (dict, set, frozenset, type({}.keys()), type({}.items()))
+_SCALARS = frozenset(
+	{
+		int,
+		float,
+		str,
+		bytes,
+		bool,
+		type(None),
+		datetime.date,
+		datetime.datetime,
+		datetime.time,
+		datetime.timedelta,
+		decimal.Decimal,
+	}
+)
 _MISSING = object()
 
 
@@ -154,20 +196,89 @@ def _size_bytes(value) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# Expanded size of a structure                                                 #
+# Structure: flatness, nesting, expanded size                                  #
 # --------------------------------------------------------------------------- #
 
 
-def _unit_one(value) -> int:
-	return 1
+def _values(node):
+	"""The items of a container as one iterable (a dict's keys and values)."""
+	if isinstance(node, dict):
+		return [*node.keys(), *node.values()] if len(node) < 64 else _dict_parts(node)
+	return node
+
+
+def _dict_parts(node):
+	yield from node.keys()
+	yield from node.values()
+
+
+def _is_flat(node) -> bool:
+	"""Whether a container holds no container, checked in C (stops at the first one)."""
+	if isinstance(node, dict):
+		return _SCALARS.issuperset(map(type, node.values())) and _SCALARS.issuperset(map(type, node))
+	return _SCALARS.issuperset(map(type, node))
+
+
+def _of_type(values: list, t: type) -> list:
+	"""The items of ``values`` whose type is exactly ``t``, selected in C."""
+	return list(compress(values, map(is_, map(type, values), repeat(t))))
+
+
+def _scalar_extra(values: list, types: set) -> int:
+	"""The cost of ``values`` (all scalars) beyond one per value: ints by size, text by
+	length, worked out in C."""
+	extra = 0
+	if int in types:
+		ints = values if types <= {int, bool} else _of_type(values, int)
+		extra += sum(map(int.bit_length, ints)) // 64
+	for t in (str, bytes):
+		if t in types:
+			texts = values if len(types) == 1 else _of_type(values, t)
+			extra += sum(map(len, texts)) // TEXT_COST_CHARS
+	return extra
+
+
+def _quick_cost(node) -> int | None:
+	"""Cost of comparing a container of scalars, or of scalars and tuples of scalars (sort
+	keys, grouping keys), worked out in C. None for anything nested deeper. The cost of
+	such a container changes only when the container itself is mutated (tuples and
+	scalars are immutable), so it may be cached until then."""
+	if isinstance(node, dict):
+		values = [*node.keys(), *node.values()]
+	elif isinstance(node, list | tuple | set | frozenset):
+		values = node
+	else:
+		values = list(node)
+	types = set(map(type, values))
+	if _SCALARS.issuperset(types):
+		return len(values) + _scalar_extra(values, types)
+	if types - _SCALARS != {tuple}:
+		return None
+	tuples = values if len(types) == 1 else _of_type(values, tuple)
+	inner = list(chain.from_iterable(tuples))
+	inner_types = set(map(type, inner))
+	if not _SCALARS.issuperset(inner_types):
+		return None
+	cost = len(values) + len(inner) + _scalar_extra(inner, inner_types)
+	if len(types) > 1:
+		rest = list(compress(values, map(is_not, map(type, values), repeat(tuple))))
+		cost += _scalar_extra(rest, types - {tuple})
+	return cost
+
+
+def _extra_cost(value) -> int:
+	if isinstance(value, _TEXT):
+		return len(value) // TEXT_COST_CHARS
+	if isinstance(value, int) and not isinstance(value, bool):
+		return value.bit_length() // 64
+	return 0
 
 
 def _unit_cost(value) -> int:
-	"""Cost of comparing or hashing one scalar: text by length, ints by size."""
-	if isinstance(value, _TEXT):
-		return len(value) // TEXT_COST_CHARS + 1
-	if isinstance(value, int) and not isinstance(value, bool):
-		return value.bit_length() // 64 + 1
+	return 1 + _extra_cost(value)
+
+
+def _unit_one(value) -> int:
 	return 1
 
 
@@ -186,7 +297,7 @@ def expanded_size(value, unit, budget: int) -> int | None:
 		key = id(node)
 		if done:
 			total = 1
-			for part in _parts(node):
+			for part in _values(node):
 				total += weights.get(id(part), 1) if isinstance(part, _CONTAINERS) else unit(part)
 				if total > budget:
 					return None
@@ -198,19 +309,62 @@ def expanded_size(value, unit, budget: int) -> int | None:
 			return None
 		weights[key] = 1  # in progress: a cycle counts once
 		stack.append((node, True))
-		for part in _parts(node):
+		for part in _values(node):
 			if isinstance(part, _CONTAINERS) and id(part) not in weights:
 				stack.append((part, False))
 	return weights[id(value)]
 
 
-def _parts(node):
-	if isinstance(node, dict):
-		for k, v in node.items():
-			yield k
-			yield v
-	else:
-		yield from node
+def nesting_depth(value, limit: int) -> int:
+	"""How deeply ``value`` nests containers (1 for a container of scalars), stopping as
+	soon as it passes ``limit``. Each distinct container is visited once; a container of
+	scalars is recognised in C without walking its items. ``open_`` counts the
+	containers entered and not yet finished, which in this walk are exactly the path
+	from ``value`` down to the current one."""
+	if not isinstance(value, _CONTAINERS):
+		return 0
+	depths: dict[int, int] = {}
+	stack = [(value, False)]
+	open_ = 0
+	while stack:
+		node, done = stack.pop()
+		key = id(node)
+		if done:
+			open_ -= 1
+			deepest = 0
+			for part in _values(node):
+				if isinstance(part, _CONTAINERS):
+					deepest = max(deepest, depths.get(id(part), 1))
+			depths[key] = deepest + 1
+			if depths[key] > limit:
+				return depths[key]
+			continue
+		if key in depths:
+			continue
+		if _is_flat(node):
+			depths[key] = 1
+			continue
+		depths[key] = 1  # in progress: a cycle counts once
+		open_ += 1
+		if open_ >= limit:  # this path, plus the container inside the current node
+			return limit + 1
+		stack.append((node, True))
+		for part in _values(node):
+			if isinstance(part, _CONTAINERS) and id(part) not in depths:
+				stack.append((part, False))
+	return depths[id(value)]
+
+
+def check_nesting(value, what: str = "This value"):
+	"""Refuse a container nested more than MAX_NESTING levels deep."""
+	if type(value) in _SCALARS or not isinstance(value, _CONTAINERS):
+		return value
+	if nesting_depth(value, MAX_NESTING) > MAX_NESTING:
+		_refuse(
+			f"{what} would nest containers more than {MAX_NESTING} levels deep. Keep results "
+			"shallow: a list of dicts, or a dict of lists."
+		)
+	return value
 
 
 def check_written_size(value, what: str = "Writing this value out"):
@@ -223,25 +377,73 @@ def check_written_size(value, what: str = "Writing this value out"):
 		)
 
 
-def _heavy_key(value, depth: int = 0) -> bool:
-	"""Whether ``value`` hashes like an int that can be steered into one bucket."""
+# --------------------------------------------------------------------------- #
+# Hash collisions                                                              #
+# --------------------------------------------------------------------------- #
+
+
+def _heavy_key(value, memo: dict, depth: int = 0) -> bool:
+	"""Whether ``value`` hashes through an int that can share its hash with others. A
+	tuple nested past MAX_NESTING counts as one (it can only come from a path the nesting
+	checks do not see, so it is treated as the worst case). ``memo`` holds each tuple
+	visited, so a shared structure costs its distinct tuples."""
 	if isinstance(value, int) and not isinstance(value, bool):
 		return abs(value) >= HASH_SAFE_INT
-	if isinstance(value, tuple) and depth < 4:
-		return any(_heavy_key(v, depth + 1) for v in value)
-	return False
+	if not isinstance(value, tuple):
+		return False
+	if depth > MAX_NESTING:
+		return True
+	hit = memo.get(id(value))
+	if hit is None:
+		memo[id(value)] = False  # in progress
+		hit = any(_heavy_key(v, memo, depth + 1) for v in value)
+		memo[id(value)] = hit
+	return hit
+
+
+def _canonical(value, memo: dict, depth: int = 0):
+	"""A stand-in for a key whose hash never collides by accident: ints by their hex
+	digits, tuples item by item (one stand-in per distinct tuple), anything nested past
+	MAX_NESTING by its identity (counted as distinct, so it can only add to the count)."""
+	if isinstance(value, int) and not isinstance(value, bool):
+		return hex(value)
+	if not isinstance(value, tuple):
+		return value
+	if depth > MAX_NESTING:
+		return ("deep", id(value))
+	hit = memo.get(id(value))
+	if hit is None:
+		hit = tuple(_canonical(v, memo, depth + 1) for v in value)
+		memo[id(value)] = hit
+	return hit
 
 
 def check_hash_keys(keys, what: str):
-	heavy = 0
-	for key in keys:
-		if _heavy_key(key):
-			heavy += 1
-			if heavy > MAX_HEAVY_HASH_KEYS:
-				_refuse(
-					f"{what} with more than {MAX_HEAVY_HASH_KEYS:,} integers of 2**61 or more as keys is not "
-					"available (they can all hash alike). Use smaller numbers or text as keys."
-				)
+	"""Refuse to hash many distinct keys that share hash values (int keys of 2**61 or more
+	can be chosen so). Strings, floats and small ints cannot collide this way and are
+	skipped in C; the rest are counted: distinct keys minus distinct hashes. Call after
+	the keys' comparison cost was checked (a tuple key is walked here)."""
+	keys = keys if isinstance(keys, list | tuple) else list(keys)
+	types = set(map(type, keys))
+	if not types & {int, tuple}:
+		return
+	if types <= {int, bool}:
+		heavy = list(compress(keys, map(HASH_SAFE_INT.__le__, map(abs, keys))))
+		if len(heavy) <= MAX_HASH_COLLISIONS:
+			return
+		collisions = len(set(map(hex, heavy))) - len(set(map(hash, heavy)))
+	else:
+		memo: dict = {}
+		heavy = [k for k in keys if _heavy_key(k, memo)]
+		if len(heavy) <= MAX_HASH_COLLISIONS:
+			return
+		memo = {}
+		collisions = len({_canonical(k, memo) for k in heavy}) - len(set(map(hash, heavy)))
+	if collisions > MAX_HASH_COLLISIONS:
+		_refuse(
+			f"{what} would put {collisions:,} distinct keys that hash alike in one table (large "
+			"integers chosen to collide), which is very slow. Use text or smaller numbers as keys."
+		)
 
 
 def internal_import(name, globals=None, locals=None, fromlist=(), level=0):
@@ -329,7 +531,7 @@ def check_format_spec(spec: str):
 # --------------------------------------------------------------------------- #
 
 
-def _guarded_type(name: str, real: type, call, attrs: dict):
+def guarded_type(name: str, real: type, call, attrs: dict):
 	"""A stand-in for ``real`` the script calls and tests against: calling it runs
 	``call``; ``isinstance`` / ``issubclass`` answer for ``real``; ``name.attr`` comes from
 	``attrs`` (guarded) or ``real``."""
@@ -358,13 +560,29 @@ def _guarded_type(name: str, real: type, call, attrs: dict):
 
 
 # --------------------------------------------------------------------------- #
-# The guards, bound to one run                                                 #
+# Methods, by type                                                             #
 # --------------------------------------------------------------------------- #
 
 _TEXT_METHOD_NAMES = frozenset(
 	{"ljust", "rjust", "center", "zfill", "expandtabs", "replace", "join", "translate"}
 )
-_LIST_METHODS = frozenset({"extend", "sort", "count", "index"})
+# Every method that changes a list / dict / set in place: calling one drops the cached
+# comparison cost of that container.
+_LIST_MUTATORS = frozenset({"append", "insert", "extend", "pop", "remove", "clear", "sort", "reverse"})
+_DICT_MUTATORS = frozenset({"setdefault", "update", "pop", "popitem", "clear"})
+_SET_MUTATORS = frozenset(
+	{
+		"add",
+		"discard",
+		"remove",
+		"pop",
+		"clear",
+		"update",
+		"intersection_update",
+		"difference_update",
+		"symmetric_difference_update",
+	}
+)
 _SET_ITER_METHODS = frozenset(
 	{
 		"update",
@@ -380,8 +598,16 @@ _SET_ITER_METHODS = frozenset(
 		"isdisjoint",
 	}
 )
-_SET_KEY_METHODS = frozenset({"add", "discard", "remove"})
-_DICT_KEY_METHODS = frozenset({"get", "pop", "setdefault"})
+# Set methods whose result (or the set itself) takes the other side's keys in.
+_SET_GROWING = frozenset({"update", "union", "symmetric_difference", "symmetric_difference_update"})
+_GUARDED_LIST_METHODS = _LIST_MUTATORS | {"count", "index"}
+_GUARDED_DICT_METHODS = _DICT_MUTATORS | {"get"}
+_GUARDED_SET_METHODS = _SET_MUTATORS | _SET_ITER_METHODS
+
+
+# --------------------------------------------------------------------------- #
+# The guards, bound to one run                                                 #
+# --------------------------------------------------------------------------- #
 
 
 class Guards:
@@ -390,8 +616,8 @@ class Guards:
 	def __init__(self, check_memory, tick=None):
 		self._check_memory = check_memory
 		self._tick = tick or (lambda: None)
-		# id -> (object, len, cost) for flat containers; the object is held so the id
-		# cannot be reused. Dropped when the container is written to (``invalidate``).
+		# id -> (object, len, cost) for flat containers (no container inside); the object
+		# is held so its id cannot be reused. Dropped on any mutation (``invalidate``).
 		self._costs: dict[int, tuple] = {}
 
 	def _after(self, result):
@@ -399,7 +625,7 @@ class Guards:
 			self._check_memory()
 		return result
 
-	# Cost of comparing / hashing ------------------------------------------------
+	# Cost of comparing / hashing, and nesting -------------------------------------
 
 	def invalidate(self, obj):
 		self._costs.pop(id(obj), None)
@@ -411,29 +637,54 @@ class Guards:
 		hit = self._costs.get(id(value))
 		if hit is not None and hit[0] is value and hit[1] == len(value):
 			return
-		cost = expanded_size(value, _unit_cost, MAX_COMPARE_COST)
-		if cost is None:
+		cost = _quick_cost(value)
+		flat = cost is not None
+		if not flat:
+			cost = expanded_size(value, _unit_cost, MAX_COMPARE_COST)
+		if cost is None or cost > MAX_COMPARE_COST:
 			_refuse(
 				f"{what} could take a very long time: the values involved are too large or nested "
 				"too deeply (shared references count each time). Compare totals or keys instead."
 			)
-		if not any(isinstance(p, _CONTAINERS) for p in _parts(value)):
+		if flat and len(value) >= CACHE_MIN_ITEMS and not isinstance(value, _VIEWS):
 			self._costs[id(value)] = (value, len(value), cost)
 
 	def compare(self, value, membership: int = 0):
 		"""One operand of a comparison. ``membership`` 1: the right side of ``in``, where a
-		dict or set is a hash lookup and only the left side is compared."""
-		if membership == 1 and isinstance(value, dict | set | frozenset):
+		dict or set is a hash lookup and only the left side is compared; 2: ``is``."""
+		if type(value) in _SCALARS or membership == 2:
 			return value
-		if membership == 2:  # ``is``: identity, nothing is compared
+		if membership == 1 and isinstance(value, _LOOKUPS):
 			return value
 		self.check_cost(value, "This comparison")
 		return value
 
 	def key(self, value):
-		"""A key used to index or store into a dict (it is hashed and compared)."""
-		self.check_cost(value, "Using this as a key")
+		"""A key used to index, store into or look up in a dict or set (hashed and compared)."""
+		if type(value) not in _SCALARS:
+			self.check_cost(value, "Using this as a key")
 		return value
+
+	def check_keys(self, keys: list, what: str, into=()):
+		"""Keys about to be hashed into a set or dict in one C call: their comparison cost
+		first, then hash collisions. ``into``: the keys already in the table they join
+		(collisions add up across calls, so they are counted together)."""
+		self.check_cost(keys, what)
+		if into and set(map(type, keys)) & {int, tuple}:
+			check_hash_keys([*into, *keys], what)
+		else:
+			check_hash_keys(keys, what)
+
+	def nest(self, value):
+		"""A value about to be put inside a container, or a container just built: refused
+		if it nests too deeply. A container of scalars is recognised in C."""
+		if type(value) in _SCALARS or not isinstance(value, _CONTAINERS) or _is_flat(value):
+			return value
+		return check_nesting(value, "Putting this value in a container")
+
+	def hash(self, value):
+		self.key(value)
+		return hash(value)
 
 	# Binary operators --------------------------------------------------------
 
@@ -462,11 +713,11 @@ class Guards:
 			elif isinstance(a, int) and isinstance(b, int):
 				_check_int_bits(max(_bits(a), _bits(b)), "This division")
 		elif op in ("|", "&", "-", "^"):
-			if isinstance(a, set | frozenset | dict) or isinstance(b, set | frozenset | dict):
-				for side in (a, b):
-					if isinstance(side, set | frozenset | dict):
-						_check_items(len(a) + len(b) if op == "|" else len(side), "This set operation")
-						check_hash_keys(side, "This set operation")
+			setlike = (set, frozenset, dict, *_VIEWS)
+			if isinstance(a, setlike) and isinstance(b, setlike):
+				_check_items(len(a) + len(b), "This set operation")
+				self.check_cost(a, "This set operation")
+				self.check_keys(list(b), "This set operation", into=list(a))
 
 	def binop(self, op: str, a, b):
 		self.precheck(op, a, b)
@@ -498,35 +749,123 @@ class Guards:
 		if base in ("+", "*", "**", "<<", "%", "//", "|", "&", "-", "^"):
 			self.precheck(base, x, y)
 		self.invalidate(x)
-		return self._after(apply(op, x, y))
+		result = apply(op, x, y)
+		if isinstance(result, _CONTAINERS):
+			check_nesting(result, "This in-place operation")
+		return self._after(result)
 
 	# Materialising iterables ----------------------------------------------------
 
 	def materialize(self, iterable, what: str, cap: int = MAX_SEQUENCE_ITEMS) -> list:
 		"""``iterable`` as a list, refused past ``cap`` items without building more. A sized
-		iterable is checked by its length first; anything else is read in Python, with the
-		run's time and memory checks between chunks."""
+		iterable is checked by its length first; anything else is read in chunks of
+		MATERIALIZE_CHUNK items (each read in C), with the run's time and memory checks
+		between chunks."""
 		if hasattr(iterable, "__len__") and not isinstance(iterable, dict):
 			n = len(iterable)
 			if n > cap:
 				_refuse(f"{what} would make a list of {n:,} items; the limit is {cap:,}.")
-			if isinstance(iterable, list | tuple | range | str | bytes | set | frozenset):
+			if isinstance(iterable, (list, tuple, range, str, bytes, set, frozenset, *_VIEWS)):
 				return list(iterable)
-		out = []
-		append = out.append
-		for i, item in enumerate(iterable):
-			if i >= cap:
+		it = iter(iterable)
+		out: list = []
+		while True:
+			self._tick()
+			chunk = list(islice(it, MATERIALIZE_CHUNK))
+			out += chunk
+			if len(out) > cap:
 				_refuse(f"{what} would make a list of more than {cap:,} items; the limit is {cap:,}.")
-			if not i & 1023:
-				self._tick()
-				if i:
-					self._check_memory()
-			append(item)
-		return out
+			if len(chunk) < MATERIALIZE_CHUNK:
+				return out
+			self._check_memory()
+
+	# Starred displays and calls -------------------------------------------------
+
+	def build(self, kind: str, *parts):
+		"""A list / tuple / set display with starred parts: each part is ``(starred,
+		value)``; every starred part is read with the item cap, a running total across the
+		display, before the result is built."""
+		self._tick()
+		items: list = []
+		for starred, value in parts:
+			if starred:
+				items.extend(self._starred(value, len(items)))
+			else:
+				items.append(value)
+				_check_items(len(items), "This display")
+		check_nesting(items, "This display")
+		if kind == "set":
+			self.check_keys(items, "This set")
+			return self._after(set(items))
+		return self._after(tuple(items) if kind == "tuple" else items)
+
+	def _starred(self, value, so_far: int) -> list:
+		try:
+			return self.materialize(value, "This starred display", MAX_SEQUENCE_ITEMS - so_far)
+		except GuardRefused:
+			_refuse(
+				f"This starred display would make a list of more than {MAX_SEQUENCE_ITEMS:,} items; "
+				f"the limit is {MAX_SEQUENCE_ITEMS:,}."
+			)
+
+	def build_dict(self, *parts):
+		"""A dict display with ``**`` parts: each part is ``(0, key, value)``, or
+		``(1, mapping)`` for ``**mapping``. The ``**`` keys are counted and checked before
+		they are merged."""
+		self._tick()
+		out: dict = {}
+		for part in parts:
+			if part[0]:
+				value = part[1]
+				pairs = (
+					list(value.items())
+					if isinstance(value, dict)
+					else self.materialize(value, "This ** unpacking")
+				)
+				_check_items(len(out) + len(pairs), "This ** unpacking")
+				self.check_keys(_pair_keys(pairs), "This ** unpacking", into=out)
+				out.update(pairs)
+			else:
+				out[self.key(part[1])] = part[2]
+		check_nesting(out, "This dict")
+		return self._after(out)
+
+	def call(self, func, *parts):
+		"""A call with ``*args`` / ``**kwargs``: each part is ``(0, value)`` positional,
+		``(1, iterable)`` starred, ``(2, name, value)`` keyword or ``(3, mapping)`` ``**``.
+		Arguments are read with a running total, before the call."""
+		args: list = []
+		kwargs: dict = {}
+		for part in parts:
+			flag = part[0]
+			if flag == 0:
+				args.append(part[1])
+			elif flag == 1:
+				args.extend(
+					self.materialize(part[1], "The arguments of a call through *", MAX_STAR_ARGS - len(args))
+				)
+			elif flag == 2:
+				_add_keyword(kwargs, part[1], part[2])
+			else:
+				mapping = part[1]
+				if len(mapping) + len(args) + len(kwargs) > MAX_STAR_ARGS:
+					_refuse(f"a call with more than {MAX_STAR_ARGS:,} arguments is not available.")
+				for name in mapping:
+					_add_keyword(kwargs, name, mapping[name])
+			if len(args) + len(kwargs) > MAX_STAR_ARGS:
+				_refuse(f"a call with more than {MAX_STAR_ARGS:,} arguments is not available.")
+		return func(*args, **kwargs)
+
+	def apply(self, func, *args, **kwargs):
+		"""RestrictedPython's ``_apply_`` (kept for any call the policy did not rewrite)."""
+		if len(args) + len(kwargs) > MAX_STAR_ARGS:
+			_refuse(f"a call with more than {MAX_STAR_ARGS:,} arguments through * is not available.")
+		return func(*args, **kwargs)
 
 	# Builtins and types -----------------------------------------------------------
 
 	def pow(self, base, exp, mod=None):
+		self._tick()
 		if mod is None:
 			return self.binop("**", base, exp)
 		if isinstance(exp, int) and isinstance(mod, int):
@@ -542,6 +881,7 @@ class Guards:
 		return round(number) if ndigits is None else round(number, ndigits)
 
 	def sum(self, iterable, /, start=0):
+		self._tick()
 		if not isinstance(start, _NUMBER):
 			_refuse(
 				"sum() with a list or text start is not available (it is quadratic): use a "
@@ -554,12 +894,14 @@ class Guards:
 		return divmod(a, b)
 
 	def _keys(self, items: list, key, what: str) -> list:
-		keys = items if key is None else [key(item) for item in items]
+		keys = items if key is None else list(map(key, items))
 		self.check_cost(keys, what)
 		return keys
 
 	def sorted(self, iterable, /, *, key=None, reverse=False):
+		self._tick()
 		items = self.materialize(iterable, "sorted()")
+		check_nesting(items, "sorted()")
 		keys = self._keys(items, key, "This sort")
 		if key is None:
 			return sorted(items, reverse=reverse)
@@ -567,6 +909,7 @@ class Guards:
 		return [items[i] for i in order]
 
 	def _extreme(self, pick, name: str, args, key, default):
+		self._tick()
 		if len(args) == 1:
 			items = self.materialize(args[0], f"{name}()")
 		else:
@@ -576,6 +919,8 @@ class Guards:
 				raise ValueError(f"{name}() arg is an empty sequence")
 			return default
 		keys = self._keys(items, key, f"This {name}()")
+		if key is None:
+			return pick(items)
 		return items[pick(range(len(items)), key=keys.__getitem__)]
 
 	def min(self, *args, key=None, default=_MISSING):
@@ -585,14 +930,9 @@ class Guards:
 		return self._extreme(max, "max", args, key, default)
 
 	def repr(self, value):
+		self._tick()
 		check_written_size(value, "repr()")
 		return self._after(repr(value))
-
-	def apply(self, func, *args, **kwargs):
-		"""A call with ``*args`` / ``**kwargs`` (RestrictedPython's ``_apply_``)."""
-		if len(args) + len(kwargs) > MAX_STAR_ARGS:
-			_refuse(f"a call with more than {MAX_STAR_ARGS:,} arguments through * is not available.")
-		return func(*args, **kwargs)
 
 	def _class_methods(self, real: type, names) -> dict:
 		"""``real.name(obj, ...)`` reached through the class, guarded like ``obj.name(...)``."""
@@ -615,6 +955,7 @@ class Guards:
 		script's builtins."""
 
 		def make_str(*args, **kwargs):
+			self._tick()
 			if args:
 				check_written_size(args[0], "str()")
 			return self._after(str(*args, **kwargs))
@@ -631,47 +972,60 @@ class Guards:
 			return int.from_bytes(data, *args, **kwargs)
 
 		def make_list(iterable=()):
-			return self._after(self.materialize(iterable, "list()"))
+			self._tick()
+			items = self.materialize(iterable, "list()")
+			check_nesting(items, "list()")
+			return self._after(items)
 
 		def make_tuple(iterable=()):
-			return self._after(tuple(self.materialize(iterable, "tuple()")))
+			self._tick()
+			items = self.materialize(iterable, "tuple()")
+			check_nesting(items, "tuple()")
+			return self._after(tuple(items))
 
 		def make_set(iterable=()):
+			self._tick()
 			items = self.materialize(iterable, "set()")
-			check_hash_keys(items, "set()")
+			check_nesting(items, "set()")
+			self.check_keys(items, "set()")
 			return self._after(set(items))
 
 		def make_dict(*args, **kwargs):
+			self._tick()
 			if args:
 				source = args[0]
 				pairs = (
 					list(source.items()) if isinstance(source, dict) else self.materialize(source, "dict()")
 				)
-				check_hash_keys((p[0] for p in pairs if isinstance(p, _SEQ) and p), "dict()")
+				keys = _pair_keys(pairs)
+				self.check_keys(keys, "dict()")
 				_check_items(len(pairs) + len(kwargs), "dict()")
-				return self._after(dict(pairs, **kwargs))
-			return dict(**kwargs)
+				out = dict(pairs, **kwargs)
+			else:
+				out = dict(**kwargs)
+			check_nesting(out, "dict()")
+			return self._after(out)
 
 		def fromkeys(iterable, value=None):
+			self._tick()
 			items = self.materialize(iterable, "dict.fromkeys()")
-			check_hash_keys(items, "dict.fromkeys()")
+			self.check_keys(items, "dict.fromkeys()")
+			check_nesting(value, "dict.fromkeys()")
 			return self._after(dict.fromkeys(items, value))
 
 		return {
-			"str": _guarded_type("str", str, make_str, self._class_methods(str, _TEXT_METHOD_NAMES)),
-			"int": _guarded_type(
+			"str": guarded_type("str", str, make_str, self._class_methods(str, _TEXT_METHOD_NAMES)),
+			"int": guarded_type(
 				"int", int, make_int, {"from_bytes": from_bytes, **self._class_methods(int, ("to_bytes",))}
 			),
-			"list": _guarded_type("list", list, make_list, self._class_methods(list, _LIST_METHODS)),
-			"tuple": _guarded_type("tuple", tuple, make_tuple, {}),
-			"set": _guarded_type(
-				"set", set, make_set, self._class_methods(set, _SET_ITER_METHODS | _SET_KEY_METHODS)
-			),
-			"dict": _guarded_type(
+			"list": guarded_type("list", list, make_list, self._class_methods(list, _GUARDED_LIST_METHODS)),
+			"tuple": guarded_type("tuple", tuple, make_tuple, self._class_methods(tuple, ("count", "index"))),
+			"set": guarded_type("set", set, make_set, self._class_methods(set, _GUARDED_SET_METHODS)),
+			"dict": guarded_type(
 				"dict",
 				dict,
 				make_dict,
-				{"fromkeys": fromkeys, **self._class_methods(dict, _DICT_KEY_METHODS | {"update"})},
+				{"fromkeys": fromkeys, **self._class_methods(dict, _GUARDED_DICT_METHODS)},
 			),
 		}
 
@@ -679,7 +1033,8 @@ class Guards:
 
 	def format_value(self, value, conversion: int, spec):
 		"""One f-string replacement field: conversion, spec check, then the piece's size."""
-		check_written_size(value, "This f-string field")
+		if type(value) not in _SCALARS:
+			check_written_size(value, "This f-string field")
 		if conversion == 115:
 			value = str(value)
 		elif conversion == 114:
@@ -701,27 +1056,92 @@ class Guards:
 			if guard is not None:
 				return lambda *args, **kwargs: self._after(guard(self, obj, name, args, kwargs))
 		elif isinstance(obj, list):
-			if name == "extend":
-				return lambda iterable: self._extend(obj, iterable)
-			if name == "sort":
-				return lambda *, key=None, reverse=False: self._sort(obj, key, reverse)
+			if name in _GUARDED_LIST_METHODS:
+				return self._list_method(obj, name)
+		elif isinstance(obj, tuple):
 			if name in ("count", "index"):
 				return lambda value, *args: self._search(obj, name, value, args)
 		elif isinstance(obj, set | frozenset):
-			if name in _SET_ITER_METHODS:
-				return lambda *others: self._set_op(obj, name, others)
-			if name in _SET_KEY_METHODS:
-				return lambda value: getattr(obj, name)(self.key(value))
+			if name in _GUARDED_SET_METHODS:
+				return self._set_method(obj, name)
 		elif isinstance(obj, dict):
-			if name in _DICT_KEY_METHODS:
-				return lambda k, *args: getattr(obj, name)(self.key(k), *args)
-			if name == "update":
-				return lambda *args, **kwargs: self._dict_update(obj, args, kwargs)
+			if name in _GUARDED_DICT_METHODS:
+				return self._dict_method(obj, name)
+		elif isinstance(obj, _VIEWS):
+			if name == "isdisjoint":
+				return lambda other: self._view_isdisjoint(obj, other)
 		elif isinstance(obj, int) and name == "to_bytes":
 			return lambda *args, **kwargs: self._to_bytes(obj, args, kwargs)
 		elif isinstance(obj, datetime.date | datetime.time) and name == "strftime":
 			return lambda fmt: self._strftime(obj, fmt)
 		return None
+
+	def _list_method(self, lst: list, name: str):
+		real = getattr(lst, name)
+		if name == "extend":
+			return lambda iterable: self._extend(lst, iterable)
+		if name == "sort":
+			return lambda *, key=None, reverse=False: self._sort(lst, key, reverse)
+		if name in ("count", "index"):
+			return lambda value, *args: self._search(lst, name, value, args)
+
+		def call(*args, **kwargs):
+			self.invalidate(lst)
+			if name == "append":
+				_check_items(len(lst) + 1, "This append")
+				self.nest(args[0] if args else None)
+			elif name == "insert":
+				_check_items(len(lst) + 1, "This insert")
+				self.nest(args[1] if len(args) > 1 else None)
+			elif name == "remove":
+				self.check_cost(lst, "This remove()")
+				self.check_cost(args[0] if args else None, "This remove()")
+			return real(*args, **kwargs)
+
+		return call
+
+	def _dict_method(self, d: dict, name: str):
+		real = getattr(d, name)
+		if name == "update":
+			return lambda *args, **kwargs: self._dict_update(d, args, kwargs)
+
+		def call(*args, **kwargs):
+			if name in ("get", "pop", "setdefault") and args:
+				self.key(args[0])
+			if name == "setdefault" and len(args) > 1:
+				self.nest(args[1])
+			if name != "get":
+				self.invalidate(d)
+			return real(*args, **kwargs)
+
+		return call
+
+	def _set_method(self, s, name: str):
+		real = getattr(s, name)
+
+		def call(*args, **kwargs):
+			if name in _SET_MUTATORS:
+				self.invalidate(s)
+			if name in _SET_ITER_METHODS:
+				lists = [self.materialize(o, f"set.{name}()") for o in args]
+				self.check_cost(s, f"set.{name}()")
+				for items in lists:
+					_check_items(len(s) + len(items), f"set.{name}()")
+					self.check_keys(items, f"set.{name}()", into=s if name in _SET_GROWING else ())
+					check_nesting(items, f"set.{name}()")
+				return real(*lists)
+			if name in ("add", "discard", "remove") and args:
+				self.key(args[0])
+				self.nest(args[0])
+			return real(*args, **kwargs)
+
+		return call
+
+	def _view_isdisjoint(self, view, other):
+		items = self.materialize(other, "isdisjoint()")
+		self.check_cost(view, "isdisjoint()")
+		self.check_cost(items, "isdisjoint()")
+		return view.isdisjoint(items)
 
 	def _strftime(self, value, fmt):
 		if isinstance(fmt, str) and len(fmt) > MAX_STRFTIME_CHARS:
@@ -731,29 +1151,24 @@ class Guards:
 	def _extend(self, lst: list, iterable):
 		items = self.materialize(iterable, "This extend")
 		_check_items(len(lst) + len(items), "This extend")
-		lst.extend(items)
+		check_nesting(items, "This extend")
 		self.invalidate(lst)
+		lst.extend(items)
 		self._after(lst)
 
 	def _sort(self, lst: list, key, reverse: bool):
 		ordered = self.sorted(lst, key=key, reverse=reverse)
+		self.invalidate(lst)
 		lst.clear()
 		lst.extend(ordered)
 
-	def _search(self, lst: list, name: str, value, args):
-		self.check_cost(lst, f"This {name}()")
+	def _search(self, seq, name: str, value, args):
+		self.check_cost(seq, f"This {name}()")
 		self.check_cost(value, f"This {name}()")
-		return getattr(lst, name)(value, *args)
-
-	def _set_op(self, obj, name: str, others):
-		lists = [self.materialize(o, f"set.{name}()") for o in others]
-		for items in lists:
-			check_hash_keys(items, f"set.{name}()")
-			_check_items(len(obj) + len(items), f"set.{name}()")
-		self.invalidate(obj)
-		return getattr(obj, name)(*lists)
+		return getattr(seq, name)(value, *args)
 
 	def _dict_update(self, obj: dict, args, kwargs):
+		self.invalidate(obj)
 		if args:
 			source = args[0]
 			pairs = (
@@ -761,18 +1176,37 @@ class Guards:
 				if isinstance(source, dict)
 				else self.materialize(source, "dict.update()")
 			)
-			check_hash_keys((p[0] for p in pairs if isinstance(p, _SEQ) and p), "dict.update()")
+			keys = _pair_keys(pairs)
+			self.check_keys(keys, "dict.update()", into=obj)
+			check_nesting(pairs, "dict.update()")
 			_check_items(len(obj) + len(pairs), "dict.update()")
 			obj.update(pairs, **kwargs)
 		else:
+			check_nesting(kwargs, "dict.update()")
 			obj.update(**kwargs)
-		self.invalidate(obj)
 
 	def _to_bytes(self, n: int, args, kwargs):
 		length = args[0] if args else kwargs.get("length", 1)
 		if isinstance(length, int) and length > MAX_TEXT_CHARS:
 			_check_text(length, "This to_bytes")
 		return n.to_bytes(*args, **kwargs)
+
+
+def _add_keyword(kwargs: dict, name, value):
+	if not isinstance(name, str):
+		raise TypeError("keywords must be strings")
+	if name in kwargs:
+		raise TypeError(f"got multiple values for keyword argument '{name}'")
+	kwargs[name] = value
+
+
+def _pair_keys(pairs: list) -> list:
+	"""The keys dict(pairs) would hash: each pair's first item (in C for the usual
+	tuples and lists)."""
+	try:
+		return list(map(itemgetter(0), pairs))
+	except (TypeError, IndexError, KeyError):
+		return [next(iter(p), None) for p in pairs if isinstance(p, _TEXT + _SEQ) or hasattr(p, "__iter__")]
 
 
 def _arg(args, kwargs, index: int, name: str, default=None):

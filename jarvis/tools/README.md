@@ -162,8 +162,11 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
   one. Never readable, by any spelling (case, spaces, underscores): every doctype of
   the jarvis app (conversations, memory, skills, settings, MCP OAuth clients and
   tokens, connectors) and core sign-in token and key doctypes (OAuth, Token Cache,
-  Connected App, Social Login Key, LDAP Settings ...). A Password field's value is
-  stored outside the row and never comes back from a read. `filters` / `or_filters` /
+  Connected App, Social Login Key, LDAP Settings ...). Fields that hold credentials
+  or one-time keys (`User.reset_password_key` / `api_key` / `api_secret`, every
+  Password field, text fields named like a secret, token, OTP or API key) are refused
+  in `fields`, filters, `order_by` and `group_by` for everyone, Administrator
+  included, and stripped from `get_doc`, `fields=["*"]` and report rows. `filters` / `or_filters` /
   `fields` may be JSON text, as in Frappe's API; other text is refused. `get_list` on a
   single doctype points at `get_single_value` / `get_doc`.
 - **Aggregates**: `fields=["customer", {"SUM": "base_grand_total", "as": "total"}]`
@@ -206,16 +209,22 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
 - **Limits** (`_compute_sandbox` and `_compute_guards` constants): 20 s wall clock,
   8 s per statement, 100,000 rows per read and 200,000 per call, 20,000 characters of
   code, 2,000 of printed output, 512 MB of memory growth, 100,000 characters per text
-  and 200,000 items per list built in one step, and the 35,000-character result guard.
-  Time and memory are checked before every statement, at every lambda call, for every
-  loop item, after every read and after every big operation. A single operation that
+  and 200,000 items per list built in one step (starred parts `[*a, *b]`, `f(*args)`
+  and `{**d}` count before anything is allocated), containers nested at most 10 deep
+  (checked wherever one is built or stored into), and the 35,000-character result
+  guard. Time and memory are checked before every statement, at every lambda call, for
+  every loop item, after every read and after every big operation; a `sys.monitoring`
+  watch also stops any call into the code or the guards at the deadline (and code
+  beneath, such as a report's own Python, 2 s later). A single operation that
   could grow a value or do a lot of work in one C call is checked first: arithmetic
   (int size, `//` and `%` included), %-formatting and f-string specs, `pow`, `round`,
   `sum`, `divmod`, `str.join` and the padding / replace methods, `list` / `tuple` /
   `set` / `dict` / `int` built from anything, `list.extend` / `sort` / `count` /
   `index`, `sorted` / `min` / `max` and every comparison and dict key (by the cost of
-  comparing deep or shared structures and long texts), sets and dict keys of ints
-  that can all hash alike, and writing out a structure with shared references. A
+  comparing nested or shared structures and long texts; measured again after any
+  mutation), sets and dict keys that hash alike (distinct large ints with distinct
+  hashes, like snowflake ids, are fine), and writing out a structure with shared
+  references. A
   limit fails the whole call even when the code catches the error. No process rlimit
   or subprocess: see the `_compute_sandbox` docstring.
 - **Kill switch**: site config `jarvis_disable_compute`. `true` / `1` / `yes` / `on`
