@@ -46,7 +46,12 @@ _PRINT_IN_ERROR = 500
 
 def compute(code: str, description: str) -> dict:
 	"""Run ``code`` (read-only Python, no imports) and return the value it assigns to
-	``result``: ``{"result", "rows_read", "elapsed_ms", "printed"}``.
+	``result``: ``{"warnings"?, "result", "reads", "rows_read", "elapsed_ms", "printed"}``.
+
+	``warnings`` (first, only when there are any) are caveats the model must act on:
+	amounts in several currencies returned row by row, a read that stopped at the limit
+	the code gave it. ``reads`` is one receipt per read (source, doctype or report,
+	filters, fields, group_by, rows, and the currency of the amounts when known).
 
 	``description`` is one plain sentence saying what the code works out; it is shown
 	in the chat step and kept, with the code, in the stored tool call."""
@@ -85,12 +90,22 @@ def compute(code: str, description: str) -> dict:
 			"The code finished without assigning a variable named result. Put the answer in result, "
 			"e.g. result = {'total': total, 'rows': n}."
 		)
-	out = {
-		"result": _json_safe(result),
-		"rows_read": run.rows_read,
-		"elapsed_ms": run.elapsed_ms(),
-		"printed": run.printed_text(),
-	}
+	if result is None:
+		raise ComputeCodeError(
+			"result is None, so there is no answer to give. Assign the answer itself; when nothing "
+			"matched, say so with a value, e.g. result = {'total': 0, 'rows': 0}."
+		)
+	# warnings first: the model reads the caveats before the numbers.
+	out = {"warnings": list(run.warnings)} if run.warnings else {}
+	out.update(
+		{
+			"result": _json_safe(result),
+			"reads": run.receipts(),
+			"rows_read": run.rows_read,
+			"elapsed_ms": run.elapsed_ms(),
+			"printed": run.printed_text(),
+		}
+	)
 	_check_size(out)
 	return out
 
@@ -219,6 +234,18 @@ def _check_size(out: dict) -> None:
 	from jarvis.tools._result_guard import MAX_RESULT_CHARS, measure
 
 	size = measure(out)
+	# The receipts give way first: they are the audit trail, the result is the answer.
+	reads = out.get("reads") or []
+	while (
+		size is not None
+		and size > MAX_RESULT_CHARS
+		and reads
+		and not (len(reads) == 1 and "more" in reads[0])
+	):
+		kept = [r for r in reads if "more" not in r]
+		hidden = sum(r.get("more", 0) for r in reads) + len(kept) - len(kept) // 2
+		out["reads"] = reads = kept[: len(kept) // 2] + [{"more": hidden}]
+		size = measure(out)
 	if size is not None and size > MAX_RESULT_CHARS:
 		raise ComputeCodeError(
 			f"result is {size:,} characters, over the {MAX_RESULT_CHARS:,} a tool result may carry. "

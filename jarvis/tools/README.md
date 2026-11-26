@@ -138,8 +138,31 @@ the blocklist is the "never even offer these" hardstop, not the only boundary.
 
 ```python
 compute(code: str, description: str)
-# -> {"result": <json data>, "rows_read": int, "elapsed_ms": int, "printed": str}
+# -> {"warnings": [str] (only when there are any, always the first key),
+#     "result": <json data>, "reads": [receipt, ...], "rows_read": int,
+#     "elapsed_ms": int, "printed": str}
 ```
+
+- **`reads`**: one receipt per read, in order: `source` (get_list, get_value, exists,
+  count, get_doc, run_report), `doctype` or `report`, `filters` and `fields` as given
+  (cut at 300 characters), `group_by`, `rows`, and for a list read `limited` / `limit`
+  when the code passed a limit and `currency` / `currencies` of the amounts it read.
+  At most 30, then `{"more": n}`; cut further only when the result needs the room.
+- **Currency guard** (`_compute_sandbox._guard_currency`): a Currency field whose
+  `options` names another column of the same doctype (`currency`,
+  `party_account_currency` ...) is in a per-row currency; `Company:...` options (the
+  `base_*` fields) are company currency. Read from the meta, nothing hard-coded. When
+  a `get_list` selects or aggregates such a field, the currencies of the matching rows
+  come from the rows (the currency field selected) or one extra permissioned grouped
+  read over the same filters. A database SUM / AVG / MIN / MAX of it over two or more
+  currencies, not grouped by the currency field, fails the call (fixable, names the
+  currencies and the `base_` field or `conversion_rate`). The same amounts returned
+  row by row get a warning instead, once per doctype and field. One currency: the
+  receipt names it. Child-table amounts (currency on the parent) and reports are not
+  checked.
+- **No partial reads**: a read over the row caps raises; only a limit the code passes
+  itself stops a read early, and then the receipt says `limited` and a read that
+  returns exactly that many rows adds a warning.
 
 For any total, count, ranking, comparison or cross-check over more than a handful of
 records: one call reads, groups, sums and ranks, and returns only the shaped answer.

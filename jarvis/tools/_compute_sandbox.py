@@ -147,6 +147,16 @@ MAX_INT_EXPONENT = 10_000
 MAX_MEMORY_GROWTH_BYTES = 1024 * 1024 * 1024
 MEMORY_CHECK_TICKS = 20_000
 
+# Read receipts returned with the result. Each is small (filters and fields are cut at
+# RECEIPT_TEXT_CHARS); 30 covers any sensible script, and a loop of reads is summarised
+# as {"more": n} instead of eating the result budget.
+MAX_READ_RECEIPTS = 30
+RECEIPT_TEXT_CHARS = 300
+
+# Distinct currencies the currency probe asks for. Two already decide; the rest only
+# make the message complete.
+MAX_PROBED_CURRENCIES = 20
+
 # The filename the compiled script carries: the tracer and error line numbers key on it.
 SCRIPT_FILENAME = "<jarvis-compute>"
 
@@ -211,6 +221,31 @@ class _Run:
 		self.print_truncated = False
 		self.rss_at_start = _rss_bytes()
 		self.ticks = 0
+		# What the script read (receipts, capped) and the caveats it must act on.
+		self.reads: list[dict] = []
+		self.reads_more = 0
+		self.warnings: list[str] = []
+		self._warned: set = set()
+		self.last_receipt: dict = {}
+
+	def record_read(self, receipt: dict) -> dict:
+		"""Keep a read's receipt (the first MAX_READ_RECEIPTS; later ones are counted)."""
+		self.last_receipt = receipt
+		if len(self.reads) < MAX_READ_RECEIPTS:
+			self.reads.append(receipt)
+		else:
+			self.reads_more += 1
+		return receipt
+
+	def receipts(self) -> list[dict]:
+		return self.reads + ([{"more": self.reads_more}] if self.reads_more else [])
+
+	def warn(self, key, message: str):
+		"""Add a warning once per ``key`` (e.g. doctype + field) for the whole call."""
+		if key in self._warned:
+			return
+		self._warned.add(key)
+		self.warnings.append(message)
 
 	def tick(self):
 		"""Called at the top of every loop iteration, every item a loop or
@@ -1058,6 +1093,106 @@ def _int_arg(name: str, value) -> int | None:
 	return value
 
 
+# --------------------------------------------------------------------------- #
+# Read receipts and the currency guard                                         #
+# --------------------------------------------------------------------------- #
+
+
+def _receipt_value(value):
+	"""``value`` as JSON data for a receipt; its JSON text cut at RECEIPT_TEXT_CHARS."""
+	try:
+		text = json.dumps(value, default=str, ensure_ascii=False, separators=(",", ":"))
+	except Exception:
+		text = str(value)
+	if len(text) <= RECEIPT_TEXT_CHARS:
+		try:
+			return json.loads(text)
+		except Exception:
+			return text
+	return text[:RECEIPT_TEXT_CHARS] + "...(cut)"
+
+
+def _and_list(items) -> str:
+	items = list(items)
+	return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def _money_fields(meta) -> dict[str, str]:
+	"""``{fieldname: currency field}`` for this doctype's Currency fields whose amount is
+	in a per-row currency: the field's ``options`` names another column of the same
+	doctype (``currency``, ``party_account_currency``, ``account_currency`` ...).
+	``Company:company:default_currency`` (the ``base_*`` fields) and blank options are
+	one currency for the company and are left out, as is a child table's field whose
+	currency lives on its parent. Read from the meta, never from a list of names."""
+	columns = set(meta.get_valid_columns())
+	out = {}
+	for df in meta.fields:
+		if df.fieldtype != "Currency" or not df.fieldname or df.fieldname not in columns:
+			continue
+		options = (df.options or "").strip()
+		if options and ":" not in options and options in columns:
+			out[df.fieldname] = options
+	return out
+
+
+def _money_use(fields, money: dict[str, str]) -> tuple[set[str], set[str], set[str]]:
+	"""``(selected, aggregated, plain)`` for a read's (translated) fields: the money
+	fields it returns row by row, the ones it SUM / AVG / MIN / MAX-es in the database,
+	and every plain field it selects."""
+	selected: set[str] = set()
+	aggregated: set[str] = set()
+	plain: set[str] = set()
+	for entry in fields or []:
+		if isinstance(entry, dict):
+			funcs = [k for k in entry if k != "as"]
+			arg = entry[funcs[0]] if len(funcs) == 1 else None
+			name = arg.strip("`") if isinstance(arg, str) else None
+			if name in money and str(funcs[0]).upper() in ("SUM", "AVG", "MIN", "MAX"):
+				aggregated.add(name)
+			elif name is None:  # an expression over fields, per row
+				selected |= set(_IDENT.findall(json.dumps(entry, default=str))) & set(money)
+			continue
+		if not isinstance(entry, str):
+			continue
+		if entry.strip() == "*":
+			selected |= set(money)
+			continue
+		agg = _AGG_STRING.match(entry)
+		if agg:
+			name = agg.group(2).strip("`")
+			if name in money and agg.group(1).upper() in ("SUM", "AVG", "MIN", "MAX"):
+				aggregated.add(name)
+			continue
+		m = _PLAIN_FIELD.match(entry)
+		if m:
+			plain.add(m.group(1))
+			if m.group(1) in money:
+				selected.add(m.group(1))
+	return selected, aggregated, plain
+
+
+def _currency_message(doctype: str, currencies: list[str], field: str, governing: str, meta, *, summed: bool):
+	"""The explanation shared by the error (a database SUM) and the warning (rows)."""
+	base = f"base_{field}"
+	base_df = meta.get_field(base)
+	has_base = bool(base_df and base_df.fieldtype == "Currency" and ":" in (base_df.options or ""))
+	head = f"{doctype} rows here are in {_and_list(currencies)}. {field} is in each row's {governing}, so "
+	if summed:
+		head += "one SUM mixes currencies. "
+		fix = f"Group by {governing}"
+		fix += f", or sum the company-currency field {base} instead." if has_base else ""
+	else:
+		head += "adding it across rows mixes currencies. "
+		fix = f"Total it per {governing}"
+		fix += f", or use the company-currency field {base}." if has_base else ""
+	if not has_base:
+		has_rate = bool(meta.get_field("conversion_rate"))
+		fix += (
+			", or convert each row with conversion_rate first." if has_rate else " and report each currency."
+		)
+	return head + fix
+
+
 def make_reads(run: _Run) -> dict:
 	"""The permissioned read helpers, bound to ``run`` in closures (never a keyword or
 	argument the script could override or read back)."""
@@ -1068,6 +1203,12 @@ def make_reads(run: _Run) -> dict:
 	)
 
 	def get_list(doctype, fields=None, filters=None, **kwargs):
+		return _read_list(doctype, fields, filters, kwargs, source="get_list")
+
+	def _read_list(doctype, fields, filters, kwargs: dict, *, source: str):
+		"""One permissioned list read. ``source`` names the helper the script called;
+		only a script's own ``get_list`` gets the explicit-limit warning and the
+		currency guard (get_value / exists read one row, count no amounts)."""
 		run.check_time()
 		escape = sorted(_ESCAPE_KWARGS & set(kwargs))
 		if escape:
@@ -1099,7 +1240,8 @@ def make_reads(run: _Run) -> dict:
 			if not isinstance(pluck, str):
 				raise SandboxUsageError("pluck must be one field name.")
 			fields = [pluck]
-		fields = [_translate_field(f) for f in (fields or ["name"])]
+		as_given = list(fields or ["name"])
+		fields = [_translate_field(f) for f in as_given]
 
 		meta = frappe.get_meta(doctype)
 		if meta.istable:
@@ -1171,9 +1313,96 @@ def make_reads(run: _Run) -> dict:
 				'group_by="customer" with fields=["customer", {"SUM": "base_grand_total", "as": "total"}].'
 			)
 		run.take_rows(len(rows), f"get_list('{doctype}')")
+
+		receipt = {"source": source, "doctype": doctype, "filters": _receipt_value(filters or {})}
+		if kwargs.get("or_filters"):
+			receipt["or_filters"] = _receipt_value(kwargs["or_filters"])
+		receipt["fields"] = _receipt_value(as_given)
+		if kwargs.get("group_by"):
+			receipt["group_by"] = _receipt_value(kwargs["group_by"])
+		receipt["rows"] = len(rows)
+		if source == "get_list" and limit is not None:
+			receipt["limited"] = True
+			receipt["limit"] = limit
+			if len(rows) == limit:
+				run.warn(
+					("limit", doctype),
+					f"get_list('{doctype}') stopped at its limit of {limit} rows; totals from it are "
+					"partial. Drop the limit to read every matching row (or keep it for a top-N on purpose).",
+				)
+		run.record_read(receipt)
+		if source == "get_list":
+			_guard_currency(doctype, meta, fields, rows, filters, kwargs, parent_doctype, receipt)
 		if pluck is not None:
 			return [row.get(pluck) for row in rows]
 		return [_rows(dict(row)) for row in rows]
+
+	def _guard_currency(doctype, meta, fields, rows, filters, kwargs, parent_doctype, receipt):
+		"""Catch amounts in several currencies being added together.
+
+		For each per-row-currency money field the read selects or aggregates
+		(``_money_fields``, from the meta), find which currencies the matching rows are
+		in: from the rows when the read returns its currency field row by row, else with
+		ONE extra permissioned grouped read over the same filters. A database SUM / AVG /
+		MIN / MAX over several currencies that is not grouped by the currency field fails
+		the call; amounts merely returned in several currencies get a warning (the script
+		may total them per currency). One currency: the receipt names it."""
+		money = _money_fields(meta)
+		if not money:
+			return
+		selected, aggregated, plain = _money_use(fields, money)
+		if not (selected or aggregated):
+			return
+		grouped = set(_IDENT.findall(str(kwargs.get("group_by") or "").replace("`", "")))
+		found: set[str] = set()
+		for governing in sorted({money[f] for f in selected | aggregated}):
+			if governing in plain and (not grouped or governing in grouped):
+				currencies = {r.get(governing) for r in rows}
+			else:
+				currencies = _probe_currencies(doctype, governing, filters, kwargs, parent_doctype)
+				if currencies is None:
+					continue  # the currency field is not readable to this user
+			currencies = sorted(c for c in currencies if c)
+			found.update(currencies)
+			if len(currencies) < 2:
+				continue
+			for field in sorted(f for f in aggregated if money[f] == governing):
+				if governing not in grouped:
+					run.fail(_currency_message(doctype, currencies, field, governing, meta, summed=True))
+			for field in sorted(f for f in selected if money[f] == governing):
+				if governing in grouped:
+					continue
+				run.warn(
+					("currency", doctype, field),
+					_currency_message(doctype, currencies, field, governing, meta, summed=False),
+				)
+		if len(found) == 1:
+			receipt["currency"] = next(iter(found))
+		elif found:
+			receipt["currencies"] = sorted(found)
+
+	def _probe_currencies(doctype, governing, filters, kwargs, parent_doctype) -> set | None:
+		"""The distinct values of ``governing`` over the read's own filters, read with
+		the user's permissions (one grouped query). None when the user cannot read that
+		field (then nothing is claimed either way)."""
+		if frappe.session.user != "Administrator":
+			from frappe.model import get_permitted_fields
+
+			if governing not in get_permitted_fields(doctype, parenttype=parent_doctype):
+				return None
+		call = {
+			"fields": [governing],
+			"filters": filters or {},
+			"group_by": governing,
+			"order_by": f"{governing} asc",
+			"limit": MAX_PROBED_CURRENCIES,
+			"ignore_permissions": False,
+		}
+		if kwargs.get("or_filters"):
+			call["or_filters"] = kwargs["or_filters"]
+		if parent_doctype:
+			call["parent_doctype"] = parent_doctype
+		return {r.get(governing) for r in frappe.get_list(doctype, **call)}
 
 	def get_doc(doctype, name=None):
 		run.check_time()
@@ -1194,6 +1423,18 @@ def make_reads(run: _Run) -> dict:
 			raise SandboxUsageError(str(e)) from None
 		children = sum(len(v) for v in doc.values() if isinstance(v, list))
 		run.take_rows(1 + children, f"get_doc('{doctype}')")
+		receipt = {
+			"source": "get_doc",
+			"doctype": doctype,
+			"name": _receipt_value(doc.get("name")),
+			"rows": 1,
+		}
+		if children:
+			receipt["child_rows"] = children
+		for field in ("currency", "party_account_currency"):
+			if doc.get(field):
+				receipt[field] = doc[field]
+		run.record_read(receipt)
 		return _rows(doc)
 
 	def get_value(doctype, filters=None, fieldname="name", as_dict=False):
@@ -1205,7 +1446,7 @@ def make_reads(run: _Run) -> dict:
 		else:
 			if isinstance(filters, str | int):
 				filters = {"name": filters}
-			found = get_list(doctype, fields=fieldnames, filters=filters, limit=1)
+			found = _read_list(doctype, fieldnames, filters, {"limit": 1}, source="get_value")
 			if not found:
 				return None
 			row = found[0]
@@ -1224,11 +1465,13 @@ def make_reads(run: _Run) -> dict:
 			return bool(frappe.has_permission(doctype, ptype="read"))
 		if isinstance(filters, str | int):
 			filters = {"name": filters}
-		return bool(get_list(doctype, fields=["name"], filters=filters, limit=1))
+		return bool(_read_list(doctype, ["name"], filters, {"limit": 1}, source="exists"))
 
 	def count(doctype, filters=None):
-		rows = get_list(doctype, fields=[{"COUNT": "*", "as": "n"}], filters=filters)
-		return int(rows[0]["n"] or 0) if rows else 0
+		rows = _read_list(doctype, [{"COUNT": "*", "as": "n"}], filters, {}, source="count")
+		n = int(rows[0]["n"] or 0) if rows else 0
+		run.last_receipt["count"] = n
+		return n
 
 	def get_meta(doctype):
 		run.check_time()
@@ -1295,6 +1538,15 @@ def make_reads(run: _Run) -> dict:
 				"filters (a date range, a company, a party)."
 			)
 		run.take_rows(len(rows), f"run_report('{report_name}')")
+		run.record_read(
+			{
+				"source": "run_report",
+				"report": report_name,
+				"filters": _receipt_value(filters or {}),
+				"rows": len(rows),
+				**({"total_row": True} if total_row is not None else {}),
+			}
+		)
 		return Row(
 			{
 				"columns": [

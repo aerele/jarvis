@@ -31,7 +31,11 @@ CUST_A, CUST_B, CUST_C = "CT Cust A", "CT Cust B", "CT Cust C"
 ACC_USER = "ct-compute-acc@example.com"
 LIMITED_USER = "ct-compute-limited@example.com"
 NO_ROLE_USER = "ct-compute-none@example.com"
+# A user who sees only CT Cust A, whose invoices are all in INR.
+INR_ONLY_USER = "ct-compute-inr-only@example.com"
 OURS = [["name", "like", "CT-SINV-%"]]
+# OURS plus one AED invoice (outside OURS, so the totals above stay as they are).
+ALL = [["name", "like", "CT-%INV-%"]]
 
 # (name, customer, company, currency, rate, grand_total, posting_date, outstanding)
 INVOICES = (
@@ -40,6 +44,7 @@ INVOICES = (
 	("CT-SINV-0003", CUST_B, CO_INR, "USD", 83, 100, "2026-10-11", 100),
 	("CT-SINV-0004", CUST_B, CO_USD, "USD", 1, 300, "2026-11-02", 300),
 	("CT-SINV-0005", CUST_C, CO_USD, "USD", 1, 50, "2026-11-15", 0),
+	("CT-XINV-0006", CUST_C, CO_INR, "AED", 22.6, 200, "2026-11-20", 200),
 )
 
 
@@ -121,6 +126,17 @@ class ComputeTestCase(FrappeTestCase):
 		_user(ACC_USER, ["Accounts User"])
 		_user(LIMITED_USER, ["Accounts User"])
 		_user(NO_ROLE_USER, [])
+		_user(INR_ONLY_USER, ["Accounts User"])
+		frappe.get_doc(
+			{
+				"doctype": "User Permission",
+				"user": INR_ONLY_USER,
+				"allow": "Customer",
+				"for_value": CUST_A,
+				"apply_to_all_doctypes": 1,
+			}
+		).insert(ignore_permissions=True)
+		frappe.clear_cache(user=INR_ONLY_USER)
 		frappe.get_doc(
 			{
 				"doctype": "User Permission",
@@ -262,8 +278,9 @@ class TestHappyPaths(ComputeTestCase):
 		self.assertEqual(out["result"], [ACC_USER, 1, 2])
 
 	def test_default_company_is_a_permitted_company_or_none(self):
-		out = _run("result = default_company()")
-		self.assertTrue(out["result"] is None or frappe.db.exists("Company", out["result"]))
+		out = _run("result = {'company': default_company()}")
+		company = out["result"]["company"]
+		self.assertTrue(company is None or frappe.db.exists("Company", company))
 
 	def test_registry_dispatch_runs_it(self):
 		out = registry.dispatch(
@@ -597,7 +614,9 @@ class TestPermissions(ComputeTestCase):
 			self.assertEqual(_run(f"result = count('Sales Invoice', {OURS!r})")["result"], 3)
 			self.assertFalse(_run("result = exists('Sales Invoice', 'CT-SINV-0004')")["result"])
 			self.assertIsNone(
-				_run("result = get_value('Sales Invoice', 'CT-SINV-0004', 'grand_total')")["result"]
+				_run("result = {'v': get_value('Sales Invoice', 'CT-SINV-0004', 'grand_total')}")["result"][
+					"v"
+				]
 			)
 			with self.assertRaises(PermissionDeniedError):
 				_run("result = get_doc('Sales Invoice', 'CT-SINV-0004')")
@@ -884,3 +903,247 @@ class TestRegistration(FrappeTestCase):
 		self.assertEqual(label, "Totals invoices by customer.")
 		self.assertEqual(detail, "Read 12 rows")
 		self.assertEqual(humanize_tool_call("compute", {}, None), ("Worked out a result", ""))
+
+
+@contextmanager
+def _count_list_calls(doctype: str = "Sales Invoice"):
+	"""Count frappe.get_list calls on ``doctype`` (the script's reads plus any currency
+	probe). Other doctypes are left out: Frappe loads a cold meta through get_list."""
+	calls = []
+	real = frappe.get_list
+
+	def spy(*args, **kwargs):
+		if (args[0] if args else kwargs.get("doctype")) == doctype:
+			calls.append((args, kwargs))
+		return real(*args, **kwargs)
+
+	with patch("frappe.get_list", spy):
+		yield calls
+
+
+class TestCurrencyGuard(ComputeTestCase):
+	def test_db_sum_of_party_currency_amount_across_currencies_is_refused(self):
+		with self.assertRaises(ComputeCodeError) as ctx:
+			_run(
+				f"rows = get_list('Sales Invoice', filters={ALL!r}, "
+				"fields=[{'SUM': 'outstanding_amount', 'as': 'due'}])\nresult = rows[0].due"
+			)
+		message = str(ctx.exception)
+		self.assertIn("Sales Invoice rows here are in AED, INR and USD.", message)
+		self.assertIn("outstanding_amount is in each row's party_account_currency, so one SUM mixes", message)
+		self.assertIn("Group by party_account_currency", message)
+		self.assertIn("conversion_rate", message)
+		self.assertNotIn("base_outstanding_amount", message)
+		self.assertEqual(_failure_kind.kind_of(ctx.exception), _failure_kind.FIXABLE)
+
+	def test_db_sum_of_document_currency_amount_names_the_base_field(self):
+		with self.assertRaises(ComputeCodeError) as ctx:
+			_run(
+				f"rows = get_list('Sales Invoice', filters={ALL!r}, "
+				"fields=['customer', {'SUM': 'grand_total', 'as': 't'}], group_by='customer')\nresult = len(rows)"
+			)
+		message = str(ctx.exception)
+		self.assertIn("AED, INR and USD", message)
+		self.assertIn("grand_total is in each row's currency", message)
+		self.assertIn(
+			"Group by currency, or sum the company-currency field base_grand_total instead.", message
+		)
+
+	def test_the_sql_string_aggregate_form_is_caught_too(self):
+		with self.assertRaisesRegex(ComputeCodeError, "one SUM mixes currencies"):
+			_run(
+				f"result = get_list('Sales Invoice', filters={ALL!r}, fields=['sum(grand_total) as t'])[0].t"
+			)
+
+	def test_catching_the_refusal_does_not_help(self):
+		with self.assertRaisesRegex(ComputeCodeError, "one SUM mixes currencies"):
+			_run(
+				"try:\n"
+				f"    rows = get_list('Sales Invoice', filters={ALL!r}, fields=[{{'SUM': 'grand_total', 'as': 't'}}])\n"
+				"except:\n    rows = []\nresult = 0"
+			)
+
+	def test_grouped_by_the_currency_field_passes_clean(self):
+		out = _run(
+			f"rows = get_list('Sales Invoice', filters={ALL!r}, "
+			"fields=['party_account_currency', {'SUM': 'outstanding_amount', 'as': 'due'}], "
+			"group_by='party_account_currency')\n"
+			"result = {r.party_account_currency: r.due for r in rows}"
+		)
+		self.assertNotIn("warnings", out)
+		self.assertEqual(out["result"], {"AED": 200.0, "INR": 1000.0, "USD": 400.0})
+		self.assertEqual(out["reads"][0]["currencies"], ["AED", "INR", "USD"])
+
+	def test_rows_in_several_currencies_warn_first_and_once(self):
+		code = (
+			f"a = get_list('Sales Invoice', filters={ALL!r}, fields=['name', 'grand_total'])\n"
+			f"b = get_list('Sales Invoice', filters={ALL!r}, fields=['grand_total'])\n"
+			"result = sum(r.grand_total for r in a)"
+		)
+		with _count_list_calls() as calls:
+			out = _run(code)
+		self.assertEqual(next(iter(out)), "warnings")
+		self.assertEqual(len(out["warnings"]), 1)
+		warning = out["warnings"][0]
+		self.assertIn("Sales Invoice rows here are in AED, INR and USD.", warning)
+		self.assertIn(
+			"grand_total is in each row's currency, so adding it across rows mixes currencies.", warning
+		)
+		self.assertIn("Total it per currency, or use the company-currency field base_grand_total.", warning)
+		self.assertEqual(out["result"], 2150.0)
+		# Two reads, each with one grouped currency probe (currency was not selected).
+		self.assertEqual(len(calls), 4)
+
+	def test_currency_read_from_the_rows_needs_no_probe(self):
+		with _count_list_calls() as calls:
+			out = _run(
+				f"rows = get_list('Sales Invoice', filters={ALL!r}, fields=['currency', 'grand_total'])\n"
+				"by = {}\nfor r in rows:\n    by[r.currency] = by.get(r.currency, 0) + r.grand_total\nresult = by"
+			)
+		self.assertEqual(len(calls), 1)
+		self.assertIn("warnings", out)  # still told: the amounts are in several currencies
+		self.assertEqual(out["result"], {"AED": 200.0, "INR": 1500.0, "USD": 450.0})
+
+	def test_single_currency_is_clean_and_named_on_the_receipt(self):
+		out = _run(
+			f"rows = get_list('Sales Invoice', filters={OURS!r} + [['currency', '=', 'INR']], "
+			"fields=[{'SUM': 'grand_total', 'as': 't'}])\nresult = rows[0].t"
+		)
+		self.assertNotIn("warnings", out)
+		self.assertEqual(out["result"], 1500.0)
+		self.assertEqual(out["reads"][0]["currency"], "INR")
+
+	def test_company_currency_sum_across_currencies_is_clean(self):
+		with _count_list_calls() as calls:
+			out = _run(
+				f"rows = get_list('Sales Invoice', filters={ALL!r}, "
+				"fields=[{'SUM': 'base_grand_total', 'as': 't'}, {'COUNT': '*', 'as': 'n'}])\n"
+				"result = [rows[0].t, rows[0].n]"
+			)
+		self.assertNotIn("warnings", out)
+		self.assertEqual(out["result"], [14670.0, 6])
+		self.assertEqual(len(calls), 1)
+		self.assertNotIn("currency", out["reads"][0])
+
+	def test_a_doctype_without_money_fields_costs_no_extra_query(self):
+		with _count_list_calls("ToDo") as calls:
+			_run("result = len(get_list('ToDo', fields=['*']))")
+		self.assertEqual(len(calls), 1)
+
+	def test_the_probe_reads_with_the_users_permissions(self):
+		code = (
+			f"rows = get_list('Sales Invoice', filters={ALL!r}, fields=[{{'SUM': 'grand_total', 'as': 't'}}])\n"
+			"result = rows[0].t"
+		)
+		with _as(INR_ONLY_USER):
+			out = _run(code)
+		self.assertNotIn("warnings", out)
+		self.assertEqual(out["result"], 1500.0)
+		self.assertEqual(out["reads"][0]["currency"], "INR")
+		with self.assertRaisesRegex(ComputeCodeError, "AED, INR and USD"):
+			_run(code)
+
+
+class TestReceiptsAndPartials(ComputeTestCase):
+	def test_receipts_describe_each_read(self):
+		out = _run(
+			f"rows = get_list('Sales Invoice', filters={OURS!r}, fields=['customer', "
+			"{'SUM': 'base_grand_total', 'as': 't'}], group_by='customer')\n"
+			"n = count('Customer', {'name': ['like', 'CT Cust%']})\n"
+			"d = get_doc('Sales Invoice', 'CT-SINV-0003')\n"
+			"v = get_value('Sales Invoice', 'CT-SINV-0001', 'grand_total')\n"
+			"result = [len(rows), n]"
+		)
+		first, second, third, fourth = out["reads"]
+		self.assertEqual(
+			first,
+			{
+				"source": "get_list",
+				"doctype": "Sales Invoice",
+				"filters": OURS,
+				"fields": ["customer", {"SUM": "base_grand_total", "as": "t"}],
+				"group_by": "customer",
+				"rows": 3,
+			},
+		)
+		self.assertEqual(
+			(second["source"], second["doctype"], second["rows"], second["count"]),
+			("count", "Customer", 1, 3),
+		)
+		self.assertEqual(
+			(third["source"], third["name"], third["currency"]), ("get_doc", "CT-SINV-0003", "USD")
+		)
+		self.assertEqual(
+			(fourth["source"], fourth["fields"], fourth["rows"]), ("get_value", ["grand_total"], 1)
+		)
+
+	def test_receipts_are_capped(self):
+		out = _run("for i in range(40):\n    count('Customer')\nresult = 1")
+		self.assertEqual(len(out["reads"]), sandbox.MAX_READ_RECEIPTS + 1)
+		self.assertEqual(out["reads"][-1], {"more": 10})
+
+	def test_long_filters_are_cut_on_the_receipt(self):
+		names = [f"CT-NOPE-{i:04d}" for i in range(80)]
+		out = _run(f"result = len(get_list('Customer', filters={{'name': ['in', {names!r}]}}))")
+		self.assertIsInstance(out["reads"][0]["filters"], str)
+		self.assertTrue(out["reads"][0]["filters"].endswith("...(cut)"))
+
+	def test_an_explicit_limit_that_is_reached_warns(self):
+		out = _run(f"result = len(get_list('Sales Invoice', filters={OURS!r}, fields=['name'], limit=2))")
+		self.assertEqual(out["result"], 2)
+		self.assertEqual(
+			out["warnings"],
+			[
+				"get_list('Sales Invoice') stopped at its limit of 2 rows; totals from it are partial. Drop "
+				"the limit to read every matching row (or keep it for a top-N on purpose)."
+			],
+		)
+		self.assertEqual((out["reads"][0]["limited"], out["reads"][0]["limit"]), (True, 2))
+		roomy = _run(
+			f"result = len(get_list('Sales Invoice', filters={OURS!r}, fields=['name'], limit_page_length=50))"
+		)
+		self.assertNotIn("warnings", roomy)
+		self.assertEqual((roomy["reads"][0]["limited"], roomy["reads"][0]["limit"]), (True, 50))
+
+	def test_no_read_returns_fewer_rows_than_match_without_raising(self):
+		with patch.object(sandbox, "MAX_ROWS_PER_READ", 4):
+			for code in (
+				f"result = len(get_list('Sales Invoice', filters={OURS!r}))",
+				f"result = len(get_list('Sales Invoice', filters={OURS!r}, limit=100))",
+				f"result = len(get_list('Sales Invoice', filters={OURS!r}, pluck='name'))",
+			):
+				with self.subTest(code=code), self.assertRaisesRegex(ComputeCodeError, "more than 4 rows"):
+					_run(code)
+			# Exactly at the cap is complete, not cut.
+			self.assertEqual(
+				_run(
+					f"result = len(get_list('Sales Invoice', filters={OURS!r}[:1] + [['name', '!=', 'CT-SINV-0005']]))"
+				)["result"],
+				4,
+			)
+
+	def test_a_report_over_the_read_cap_raises(self):
+		name = "CT Compute Cap Report"
+		if not frappe.db.exists("Report", name):
+			frappe.get_doc(
+				{
+					"doctype": "Report",
+					"report_name": name,
+					"ref_doctype": "Sales Invoice",
+					"report_type": "Query Report",
+					"is_standard": "No",
+					"query": "select name from `tabSales Invoice` where name like 'CT-SINV-%%'",
+				}
+			).insert(ignore_permissions=True)
+		with patch.object(sandbox, "MAX_ROWS_PER_READ", 2):
+			with self.assertRaisesRegex(ComputeCodeError, "returned more than 2 rows"):
+				_run(f"result = len(run_report('{name}').rows)")
+		out = _run(f"result = len(run_report('{name}').rows)")
+		self.assertEqual(out["result"], 5)
+		self.assertEqual(out["reads"], [{"source": "run_report", "report": name, "filters": {}, "rows": 5}])
+
+	def test_none_result_is_refused(self):
+		with self.assertRaisesRegex(ComputeCodeError, "result is None"):
+			_run("result = None")
+		with self.assertRaisesRegex(ComputeCodeError, "NaN or Infinity"):
+			_run("result = {'ratio': float('inf')}")
