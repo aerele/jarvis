@@ -1314,6 +1314,15 @@ _SECRET_FIELDS = {
 	"User Invitation": frozenset({"key"}),
 	"Web Form Request": frozenset({"key"}),
 	"Webhook Header": frozenset({"value"}),
+	"Website Settings": frozenset({"indexing_authorization_code"}),
+	# Query parameters sent to the exchange-rate service: the API key is one of them.
+	"Currency Exchange Settings Details": frozenset({"value"}),
+	# Payloads and headers of calls to outside services carry tokens and keys.
+	"Integration Request": frozenset(
+		{"data", "output", "error", "url", "request_headers", "response_headers"}
+	),
+	# India Compliance: GST portal sign-in (password and api_secret are Password fields).
+	"GST Credential": frozenset({"username", "session_key", "auth_token", "app_key", "session_ip"}),
 }
 _SECRET_NAME = re.compile(
 	r"secret|password|passwd|passcode|private_key|(?:^|_)(?:token|api_key|access_key|otp|nonce|session_id)$",

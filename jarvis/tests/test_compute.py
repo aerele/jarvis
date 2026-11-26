@@ -2123,3 +2123,59 @@ class TestIteration3(ComputeTestCase):
 		self.assertNotIn("otp_issuer_name", sandbox._secret_fields("System Settings"))
 		with self.assertRaisesRegex(PermissionDeniedError, "plaid_access_token"):
 			_run("result = get_list('Bank', filters={'plaid_access_token': ['is', 'set']})")
+
+
+class TestIteration4(ComputeTestCase):
+	"""Review 4 (low): the cost cache's memory, credential fields the patterns miss."""
+
+	def test_repeated_builtins_over_one_list_keep_memory_flat(self):
+		for code in (
+			"l = list(range(100000))\nt = 0\nfor i in range(900):\n    t += max(l)\nresult = t",
+			"l = list(range(100000))\nt = 0\nfor i in range(300):\n    t += max(x for x in l)\nresult = t",
+			"l = list(range(100000))\nt = 0\nfor i in range(300):\n    t += sorted(l)[-1]\nresult = t",
+		):
+			with self.subTest(code=code):
+				self.assertGreater(_run(code)["result"], 0)
+
+	def test_max_with_a_key_many_times(self):
+		out = _run(
+			"rows = [{'a': i % 997, 'b': i} for i in range(10000)]\nt = 0\nfor i in range(300):\n"
+			"    t += max(rows, key=lambda r: r['a'])['b']\nresult = t"
+		)
+		self.assertEqual(out["result"], 300 * 996)
+
+	def test_the_cost_cache_is_bounded(self):
+		from jarvis.tools import _compute_guards
+
+		guards = _compute_guards.Guards(lambda: None)
+		for _ in range(200):
+			guards.compare(list(range(1000)))
+		self.assertLessEqual(len(guards._costs), _compute_guards.CACHE_MAX_ENTRIES)
+		guards._keys(list(range(1000)), None, "x")  # a copy the guards made: never cached
+		self.assertLessEqual(guards._cached_cost, _compute_guards.CACHE_MAX_COST)
+
+	def test_more_credential_fields(self):
+		for doctype, field in (
+			("Website Settings", "indexing_authorization_code"),
+			("Currency Exchange Settings Details", "value"),
+			("Integration Request", "data"),
+			("Integration Request", "output"),
+			("Integration Request", "error"),
+			("Integration Request", "request_headers"),
+		):
+			with self.subTest(field=field):
+				self.assertIn(field, sandbox._secret_fields(doctype))
+		self.assertIn("value", sandbox._secret_fields_reachable("Currency Exchange Settings"))
+		with _as(SYS_USER):
+			for code in (
+				"result = get_list('Integration Request', fields=['name', 'output'])",
+				"result = get_list('Integration Request', filters={'data': ['like', '%key%']})",
+				"result = get_list('Currency Exchange Settings Details', parent_doctype='Currency Exchange Settings',"
+				" fields=['key', 'value'])",
+				"result = get_value('Website Settings', None, 'indexing_authorization_code')",
+			):
+				with (
+					self.subTest(code=code),
+					self.assertRaisesRegex(PermissionDeniedError, "hold credentials"),
+				):
+					_run(code)

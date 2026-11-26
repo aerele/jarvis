@@ -110,6 +110,11 @@ MATERIALIZE_CHUNK = 4_096
 # C) rather than cached: the cache holds what it measures alive until the run ends.
 CACHE_MIN_ITEMS = 256
 
+# The cache is emptied when it would pass this many entries or this total cost (values
+# visited), so even script objects the code has dropped stay alive only within a bound.
+CACHE_MAX_ENTRIES = 32
+CACHE_MAX_COST = 1_000_000
+
 # Most arguments one call may receive (positional, *args and keywords together): zip(*x)
 # of a few thousand pairs stays well inside.
 MAX_STAR_ARGS = 10_000
@@ -619,6 +624,7 @@ class Guards:
 		# id -> (object, len, cost) for flat containers (no container inside); the object
 		# is held so its id cannot be reused. Dropped on any mutation (``invalidate``).
 		self._costs: dict[int, tuple] = {}
+		self._cached_cost = 0  # sum of the cached costs: bounds what the cache keeps alive
 
 	def _after(self, result):
 		if _size_bytes(result) > BIG_RESULT_BYTES:
@@ -630,8 +636,12 @@ class Guards:
 	def invalidate(self, obj):
 		self._costs.pop(id(obj), None)
 
-	def check_cost(self, value, what: str):
-		"""Refuse when comparing or hashing ``value`` could visit more than MAX_COMPARE_COST."""
+	def check_cost(self, value, what: str, cache: bool = False):
+		"""Refuse when comparing or hashing ``value`` could visit more than MAX_COMPARE_COST.
+		``cache``: ``value`` is the script's own object (an operand, a key, the list a
+		method is called on), so its measured cost may be remembered until it changes. A
+		copy the guards made (a materialised iterable, sort keys) is never cached: the
+		cache holds what it stores alive until the run ends."""
 		if type(value) in _SCALARS or not isinstance(value, _CONTAINERS):
 			return
 		hit = self._costs.get(id(value))
@@ -646,8 +656,12 @@ class Guards:
 				f"{what} could take a very long time: the values involved are too large or nested "
 				"too deeply (shared references count each time). Compare totals or keys instead."
 			)
-		if flat and len(value) >= CACHE_MIN_ITEMS and not isinstance(value, _VIEWS):
+		if cache and flat and len(value) >= CACHE_MIN_ITEMS and not isinstance(value, _VIEWS):
+			if len(self._costs) >= CACHE_MAX_ENTRIES or self._cached_cost + cost > CACHE_MAX_COST:
+				self._costs.clear()
+				self._cached_cost = 0
 			self._costs[id(value)] = (value, len(value), cost)
+			self._cached_cost += cost
 
 	def compare(self, value, membership: int = 0):
 		"""One operand of a comparison. ``membership`` 1: the right side of ``in``, where a
@@ -656,13 +670,13 @@ class Guards:
 			return value
 		if membership == 1 and isinstance(value, _LOOKUPS):
 			return value
-		self.check_cost(value, "This comparison")
+		self.check_cost(value, "This comparison", cache=True)
 		return value
 
 	def key(self, value):
 		"""A key used to index, store into or look up in a dict or set (hashed and compared)."""
 		if type(value) not in _SCALARS:
-			self.check_cost(value, "Using this as a key")
+			self.check_cost(value, "Using this as a key", cache=True)
 		return value
 
 	def check_keys(self, keys: list, what: str, into=()):
@@ -716,7 +730,7 @@ class Guards:
 			setlike = (set, frozenset, dict, *_VIEWS)
 			if isinstance(a, setlike) and isinstance(b, setlike):
 				_check_items(len(a) + len(b), "This set operation")
-				self.check_cost(a, "This set operation")
+				self.check_cost(a, "This set operation", cache=True)
 				self.check_keys(list(b), "This set operation", into=list(a))
 
 	def binop(self, op: str, a, b):
@@ -1094,7 +1108,7 @@ class Guards:
 				_check_items(len(lst) + 1, "This insert")
 				self.nest(args[1] if len(args) > 1 else None)
 			elif name == "remove":
-				self.check_cost(lst, "This remove()")
+				self.check_cost(lst, "This remove()", cache=True)
 				self.check_cost(args[0] if args else None, "This remove()")
 			return real(*args, **kwargs)
 
@@ -1124,7 +1138,7 @@ class Guards:
 				self.invalidate(s)
 			if name in _SET_ITER_METHODS:
 				lists = [self.materialize(o, f"set.{name}()") for o in args]
-				self.check_cost(s, f"set.{name}()")
+				self.check_cost(s, f"set.{name}()", cache=True)
 				for items in lists:
 					_check_items(len(s) + len(items), f"set.{name}()")
 					self.check_keys(items, f"set.{name}()", into=s if name in _SET_GROWING else ())
@@ -1163,7 +1177,7 @@ class Guards:
 		lst.extend(ordered)
 
 	def _search(self, seq, name: str, value, args):
-		self.check_cost(seq, f"This {name}()")
+		self.check_cost(seq, f"This {name}()", cache=True)
 		self.check_cost(value, f"This {name}()")
 		return getattr(seq, name)(value, *args)
 

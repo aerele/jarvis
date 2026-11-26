@@ -163,7 +163,8 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
   the jarvis app (conversations, memory, skills, settings, MCP OAuth clients and
   tokens, connectors) and core sign-in token and key doctypes (OAuth, Token Cache,
   Connected App, Social Login Key, LDAP Settings ...). Fields that hold credentials
-  or one-time keys (`User.reset_password_key` / `api_key` / `api_secret`, every
+  or one-time keys (`User.reset_password_key` / `api_key` / `api_secret`, Integration
+  Request payloads and headers, exchange-rate API parameters, GST portal sign-in, every
   Password field, text fields named like a secret, token, OTP or API key) are refused
   in `fields`, filters, `order_by` and `group_by` for everyone, Administrator
   included, and stripped from `get_doc`, `fields=["*"]` and report rows. `filters` / `or_filters` /
