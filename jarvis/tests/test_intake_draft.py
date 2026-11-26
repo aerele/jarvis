@@ -19,6 +19,8 @@ READER_ROLE = "Intake Test Reader"
 MAKER = "intake-maker@example.com"
 READER_ONLY = "intake-reader@example.com"
 NO_PERM = "intake-noperm@example.com"
+# May create orders but not read customers: an exact-only link to a customer still resolves.
+MAKER_NO_READ = "intake-maker-noread@example.com"
 RECORD = "Intake Test Sheet"
 
 
@@ -115,6 +117,7 @@ class TestIntakeDraft(FrappeTestCase):
 		_user(MAKER, [MAKER_ROLE, READER_ROLE])
 		_user(READER_ONLY, [READER_ROLE])
 		_user(NO_PERM, [])
+		_user(MAKER_NO_READ, [MAKER_ROLE])
 		frappe.db.commit()
 
 	@classmethod
@@ -123,7 +126,7 @@ class TestIntakeDraft(FrappeTestCase):
 		for dt in (PARENT, CHILD, CUSTOMER, RECORD):
 			frappe.db.delete(dt)
 			frappe.delete_doc("DocType", dt, force=True, ignore_permissions=True)
-		for u in (MAKER, READER_ONLY, NO_PERM):
+		for u in (MAKER, READER_ONLY, NO_PERM, MAKER_NO_READ):
 			frappe.delete_doc("User", u, force=True, ignore_permissions=True)
 		for role in (MAKER_ROLE, READER_ROLE):
 			frappe.delete_doc("Role", role, force=True, ignore_permissions=True)
@@ -271,6 +274,27 @@ class TestIntakeDraft(FrappeTestCase):
 		self.assertEqual(values["items"][0]["supplier"], "ACME")
 		self.assertIsNone(values["items"][1]["supplier"])
 		self.assertEqual((unresolved[0]["field"], unresolved[0]["row"]), ("supplier", 2))
+
+	def test_exact_link_resolves_in_a_doctype_the_uploader_cannot_read(self):
+		rows = [
+			{"item_name": "a", "qty": 1, "supplier": "ACME"},
+			{"item_name": "b", "qty": 1, "supplier": "acme"},
+			{"item_name": "c", "qty": 1, "supplier": "NOPE"},
+		]
+		values, unresolved = self._resolve(MAKER_NO_READ, {"items": rows})
+		self.assertEqual([r["supplier"] for r in values["items"]], ["ACME", None, None])
+		self.assertEqual([(u["row"], u["candidates"]) for u in unresolved], [(2, []), (3, [])])
+
+	def test_exact_link_hidden_by_user_permission_stays_unresolved(self):
+		perm = frappe.get_doc(
+			{"doctype": "User Permission", "user": MAKER, "allow": CUSTOMER, "for_value": "BRK-2290"}
+		).insert(ignore_permissions=True)
+		# The class shares one transaction: other MAKER tests must not see this restriction.
+		self.addCleanup(frappe.delete_doc, "User Permission", perm.name, force=True, ignore_permissions=True)
+		rows = [{"item_name": "a", "qty": 1, "supplier": "ACME"}]
+		values, unresolved = self._resolve(MAKER, {"items": rows})
+		self.assertIsNone(values["items"][0]["supplier"])
+		self.assertEqual(unresolved[0]["row"], 1)
 
 	# ---- finish ---------------------------------------------------------------
 	def test_strict_missing_raises_review_no_draft(self):

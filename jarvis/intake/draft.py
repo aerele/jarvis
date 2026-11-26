@@ -75,9 +75,12 @@ def merge_values(s, reading: dict) -> dict:
 	return values
 
 
-def _readable_names(doctype: str, filters=None, or_filters=None, fields=None, limit=None) -> list[dict]:
+def _readable_names(
+	doctype: str, filters=None, or_filters=None, fields=None, limit=None, raise_denied: bool = False
+) -> list[dict]:
 	"""``frappe.get_list`` as the current (uploader) session. No read permission on the
-	doctype counts as no records: the value stays unresolved and nothing leaks."""
+	doctype counts as no records (the value stays unresolved and nothing leaks), unless
+	``raise_denied`` asks for the ``PermissionError`` itself."""
 	try:
 		return frappe.get_list(
 			doctype,
@@ -87,12 +90,31 @@ def _readable_names(doctype: str, filters=None, or_filters=None, fields=None, li
 			limit_page_length=limit or 0,
 		)
 	except frappe.PermissionError:
+		if raise_denied:
+			raise
 		return []
 
 
-def _find_exact(doctype: str, value: str) -> str | None:
-	rows = _readable_names(doctype, filters={"name": value}, limit=1)
+def _find_exact(doctype: str, value: str, *, unreadable_ok: bool = False) -> str | None:
+	"""The record named ``value`` that the uploader can read. With ``unreadable_ok``, a
+	doctype the uploader may not read at all (a Purchase User and UOM) falls back to
+	``_exists_exactly``; a readable doctype whose record their User Permissions hide
+	stays unresolved."""
+	try:
+		rows = _readable_names(doctype, filters={"name": value}, limit=1, raise_denied=unreadable_ok)
+	except frappe.PermissionError:
+		return _exists_exactly(doctype, value)
 	return rows[0]["name"] if rows else None
+
+
+def _exists_exactly(doctype: str, value: str) -> str | None:
+	"""``value`` when a record has exactly that name, read WITHOUT permissions on purpose.
+	The value came from the uploader's own document, and the insert (run as them) checks the
+	same existence without permissions (``get_invalid_links``) while still applying their
+	create right and User Permissions. Exact names only: never a guess or a candidate list,
+	so no other record's name leaks."""
+	name = frappe.db.get_value(doctype, value, "name")
+	return value if name == value else None
 
 
 def _find_close_match(doctype: str, value: str) -> str | None:
@@ -120,7 +142,8 @@ def _candidates(doctype: str, value: str) -> list[str]:
 
 
 def _resolve_one(doctype: str, value, *, fuzzy: bool, memo: dict) -> tuple[str | None, list[str]]:
-	"""(resolved name or None, candidates). Always as the current session user. ``memo``
+	"""(resolved name or None, candidates). As the current session user, except an exact
+	name in a doctype they cannot read (``_find_exact``). ``memo``
 	lives for one ``resolve_links`` call: a sheet repeating the same value queries once."""
 	if _blank(value):
 		return None, []
@@ -132,7 +155,9 @@ def _resolve_one(doctype: str, value, *, fuzzy: bool, memo: dict) -> tuple[str |
 
 
 def _lookup(doctype: str, text: str, fuzzy: bool) -> tuple[str | None, list[str]]:
-	name = _find_exact(doctype, text)
+	# Match fields (a supplier, a customer) never fall back: a counterparty the uploader
+	# cannot read stays unresolved.
+	name = _find_exact(doctype, text, unreadable_ok=not fuzzy)
 	# The database compares names case-insensitively; a field that is not a match field
 	# keeps only a value that is the record's name exactly, never a re-cased guess.
 	if name and not fuzzy and name != text:
