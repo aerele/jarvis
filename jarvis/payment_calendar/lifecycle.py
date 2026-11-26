@@ -130,6 +130,7 @@ def _purge_when_active(company: str) -> None:
 
 
 def _notify_all_companies() -> None:
+	# nosemgrep: frappe-sql-format-injection -- constant table name; no value
 	for (company,) in frappe.db.sql(f"SELECT DISTINCT company FROM `tab{cache_store.HEAD}`"):
 		cache_store.notify_purged(read_log.company_digest_or(company, read_log.SITE_DIGEST))
 

@@ -239,6 +239,7 @@ def claim(
 	token = token or secrets.token_hex(16)
 	try:
 		head = _lock_head_for_claim(company, side, creation, cache_build)
+		# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 		frappe.db.sql(
 			f"UPDATE `tab{HEAD}` SET claim_token=%s, claim_expires=NOW(6) + INTERVAL %s SECOND WHERE name=%s",
 			(token, cache_state.claim_ttl_s(night=night), head_name(company, side)),
@@ -385,7 +386,7 @@ def fail(claim_: Claim, klass: str, trace: str | None = None) -> None:
 	changed = frappe.db.sql("SELECT ROW_COUNT()")[0][0]
 	if changed and head and head[1] == claim_.token and head[0] == claim_.epoch:
 		_record_failure(claim_.company, claim_.side, klass, level=head[2], failures=head[3])
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- refresh job closes the failed generation in its own transaction
 	_delete_rows(claim_.generation, _Budget(JANITOR_BUDGET_ROWS))
 
 
@@ -420,7 +421,7 @@ def fail_orphan(company: str, side: str, generation: int, klass: str) -> bool:
 		changed = frappe.db.sql("SELECT ROW_COUNT()")[0][0]
 	if changed and head and not stale:
 		_record_failure(company, side, klass, level=head[0], failures=head[1])
-	frappe.db.commit()
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit -- scheduler tick closes an orphan generation
 	if changed:
 		_delete_rows(generation, _Budget(JANITOR_BUDGET_ROWS))
 	return bool(changed)
@@ -523,6 +524,7 @@ def bump_epoch(company: str) -> bool:
 		"WHERE company=%s",
 		(company,),
 	)
+	# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 	frappe.db.sql(
 		f"UPDATE `tab{GENERATION}` SET state='purged', modified=NOW(6) WHERE company=%s AND state != 'purged'",
 		(company,),
@@ -894,6 +896,7 @@ def _read_back(claim_, expected: str, deadline_at) -> None:
 	names = ", ".join(f"`{name}`" for name in ("row_id", *ROW_FIELDS))
 	while True:
 		_check_deadline(deadline_at)
+		# nosemgrep: frappe-sql-format-injection -- column names are the ROW_FIELDS constants; the batch size is int(); values bound
 		batch = frappe.db.sql(
 			f"SELECT name, {names} FROM `tab{ROW}` WHERE generation=%s AND name > %s ORDER BY name LIMIT {int(READBACK_BATCH_ROWS)}",
 			(claim_.generation, last),
@@ -969,6 +972,7 @@ def _swap_in_txn(claim_, meta, as_of, stats, verify, keep_claim, slowest, unchan
 
 
 def _stored_rows(generation: int) -> int:
+	# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 	return frappe.db.sql(f"SELECT COUNT(*) FROM `tab{ROW}` WHERE generation=%s", (generation,))[0][0]
 
 
@@ -988,9 +992,11 @@ def _check_world(claim_, head) -> None:
 
 def _skip_swap(claim_, as_of) -> None:
 	"""No rows: the current generation lives on with the new `as_of`; the new row is evidence only."""
+	# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 	frappe.db.sql(
 		f"UPDATE `tab{GENERATION}` SET as_of=%s WHERE name=%s AND state='current'", (as_of, claim_.prev)
 	)
+	# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 	frappe.db.sql(
 		f"UPDATE `tab{GENERATION}` SET state='retired', outcome='unchanged', modified=NOW(6) WHERE name=%s",
 		(claim_.generation,),
@@ -1004,6 +1010,7 @@ def _replace_current(claim_, slowest: int) -> None:
 		(slowest, claim_.generation),
 	)
 	if claim_.prev is not None:
+		# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 		frappe.db.sql(
 			f"UPDATE `tab{GENERATION}` SET state='retired', modified=NOW(6) WHERE name=%s AND state='current'",
 			(claim_.prev,),
@@ -1038,6 +1045,7 @@ def _finish_head(claim_, meta, stats, age: int, keep_claim: bool) -> int | None:
 	)
 	if keep_claim:
 		return None
+	# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 	return frappe.db.sql(
 		f"SELECT hop_seq FROM `tab{HEAD}` WHERE name=%s", (head_name(claim_.company, claim_.side),)
 	)[0][0]
@@ -1081,6 +1089,7 @@ def _fence(claim_: Claim) -> dict:
 
 
 def _renew_in_txn(claim_: Claim) -> None:
+	# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 	frappe.db.sql(
 		f"UPDATE `tab{HEAD}` SET claim_expires=NOW(6) + INTERVAL %s SECOND WHERE name=%s",
 		(cache_state.claim_ttl_s(night=claim_.night), head_name(claim_.company, claim_.side)),
@@ -1100,6 +1109,7 @@ def _lock_head_for_claim(company: str, side: str, creation: datetime, cache_buil
 	if reset:
 		_reset_head(company, side, name)
 	if head["creation"] != creation:
+		# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 		frappe.db.sql(f"UPDATE `tab{HEAD}` SET company_creation=%s WHERE name=%s", (creation, name))
 	head = _read_head_for_claim(name)
 	if head["live"]:
@@ -1107,6 +1117,7 @@ def _lock_head_for_claim(company: str, side: str, creation: datetime, cache_buil
 	if head["memo"]:
 		if _memo_build_matches(company, side, cache_build):
 			raise NotClaimed("memo")
+		# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 		frappe.db.sql(
 			f"UPDATE `tab{HEAD}` SET memo_until=NULL, backoff_level=0, failures=0, last_failure=NULL WHERE name=%s",
 			(name,),
@@ -1139,6 +1150,7 @@ def _reset_head(company: str, side: str, name: str) -> None:
 		"current_generation=NULL, memo_until=NULL, backoff_level=0, failures=0, last_failure=NULL WHERE name=%s",
 		(name,),
 	)
+	# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 	frappe.db.sql(
 		f"UPDATE `tab{GENERATION}` SET state='purged', modified=NOW(6) WHERE company=%s AND side=%s AND state != 'purged'",
 		(company, side),
@@ -1191,6 +1203,7 @@ def _record_failure(company: str, side: str, klass: str, *, level: int, failures
 	count = failures + 1
 	memo = "NOW(6) + INTERVAL %s SECOND" if count >= FAILURES_BEFORE_MEMO else "memo_until"
 	values = [count, klass] + ([FAILURE_MEMO_S] if count >= FAILURES_BEFORE_MEMO else []) + [name]
+	# nosemgrep: frappe-sql-format-injection -- `memo` is one of two literal fragments; every value is bound
 	frappe.db.sql(
 		f"UPDATE `tab{HEAD}` SET failures=%s, last_failure=%s, memo_until={memo} WHERE name=%s", values
 	)
@@ -1226,6 +1239,7 @@ class _Scope:
 
 
 def _purge_unlisted(listed: set[str]) -> None:
+	# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 	for (company,) in frappe.db.sql(f"SELECT DISTINCT company FROM `tab{HEAD}`"):
 		if company not in listed:
 			_bump_if_live(company)
@@ -1234,6 +1248,7 @@ def _purge_unlisted(listed: set[str]) -> None:
 def _purge_gone_companies(scope: _Scope) -> None:
 	"""A company that is gone, or that a reused name now means another one: purge it like a delete."""
 	where, values = scope.sql()
+	# nosemgrep: frappe-sql-format-injection -- `where` is built from the fixed columns company and side; values bound
 	for company, creation in frappe.db.sql(
 		f"SELECT company, MAX(company_creation) FROM `tab{HEAD}` WHERE 1=1{where} GROUP BY company", values
 	):
@@ -1266,6 +1281,7 @@ def _resume_purged(scope: _Scope, budget: _Budget) -> None:
 	"""Finish the `purged` generations, a page at a time, until the budget is spent or none is left."""
 	where, values = scope.sql()
 	while True:
+		# nosemgrep: frappe-sql-format-injection -- `where` is built from the fixed columns company and side; values bound; page size is a constant
 		page = frappe.db.sql(
 			f"SELECT name FROM `tab{GENERATION}` WHERE state='purged'{where} ORDER BY name LIMIT {PURGED_PAGE}",
 			values,
@@ -1273,8 +1289,9 @@ def _resume_purged(scope: _Scope, budget: _Budget) -> None:
 		for (generation,) in page:
 			if not _delete_rows(generation, budget):
 				return
+			# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 			frappe.db.sql(f"DELETE FROM `tab{GENERATION}` WHERE name=%s AND state='purged'", (generation,))
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- janitor chunk; runs in the scheduler tick or the refresh job, never a request
 		if len(page) < PURGED_PAGE:
 			break
 	_delete_gone_heads(scope)
@@ -1283,6 +1300,7 @@ def _resume_purged(scope: _Scope, budget: _Budget) -> None:
 def _delete_gone_heads(scope: _Scope) -> None:
 	"""Heads of a company that no longer exists (or has another `creation`), once no generation is left."""
 	where, values = scope.sql()
+	# nosemgrep: frappe-sql-format-injection -- `where` is built from the fixed columns company and side; values bound
 	for name, company, side, creation in frappe.db.sql(
 		f"SELECT name, company, side, company_creation FROM `tab{HEAD}` WHERE 1=1{where}", values
 	):
@@ -1291,8 +1309,9 @@ def _delete_gone_heads(scope: _Scope) -> None:
 			continue
 		if _first(f"SELECT 1 FROM `tab{GENERATION}` WHERE company=%s AND side=%s LIMIT 1", (company, side)):
 			continue
+		# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 		frappe.db.sql(f"DELETE FROM `tab{HEAD}` WHERE name=%s", (name,))
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- janitor chunk; runs in the scheduler tick or the refresh job, never a request
 
 
 def _delete_retired_rows(scope: _Scope, budget: _Budget) -> None:
@@ -1323,7 +1342,7 @@ def _delete_dead(scope: _Scope, budget: _Budget) -> None:
 			"modified=NOW(6) WHERE name=%s AND state='building'",
 			(generation,),
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- janitor chunk; runs in the scheduler tick or the refresh job, never a request
 
 
 def _is_live_claimants_generation(generation: int, company: str, side: str) -> bool:
@@ -1346,6 +1365,7 @@ def _delete_orphan_rows(budget: _Budget) -> None:
 	while budget.left > 0:
 		ids = [
 			row[0]
+			# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 			for row in frappe.db.sql(
 				f"SELECT DISTINCT generation FROM `tab{ROW}` WHERE generation > %s ORDER BY generation LIMIT 200",
 				(last,),
@@ -1356,6 +1376,7 @@ def _delete_orphan_rows(budget: _Budget) -> None:
 		marks = ", ".join(["%s"] * len(ids))
 		known = {
 			row[0]
+			# nosemgrep: frappe-sql-format-injection -- `marks` is only %s placeholders; ids are bound
 			for row in frappe.db.sql(f"SELECT name FROM `tab{GENERATION}` WHERE name IN ({marks})", ids)
 		}
 		for generation in ids:
@@ -1383,19 +1404,21 @@ def _delete_old_metadata(scope: _Scope, budget: _Budget, cache_build: str | None
 	for (generation,) in (*old, *rebuilt):
 		if not _delete_rows(generation, budget):
 			return
+		# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 		frappe.db.sql(
 			f"DELETE FROM `tab{GENERATION}` WHERE name=%s AND state IN ('retired', 'failed')", (generation,)
 		)
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- janitor chunk; runs in the scheduler tick or the refresh job, never a request
 
 
 def _delete_rows(generation: int, budget: _Budget) -> bool:
 	"""Delete a generation's rows in chunks, committing each; False when the budget ran out first."""
 	while budget.left > 0 and not budget.timed_out():
 		size = min(JANITOR_CHUNK_ROWS, budget.left)
+		# nosemgrep: frappe-sql-format-injection -- constant table name; chunk size is int(); generation bound
 		frappe.db.sql(f"DELETE FROM `tab{ROW}` WHERE generation=%s LIMIT {int(size)}", (generation,))
 		done = frappe.db.sql("SELECT ROW_COUNT()")[0][0]
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- janitor chunk; runs in the scheduler tick or the refresh job, never a request
 		budget.left -= done
 		if done < size:
 			return True

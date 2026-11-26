@@ -218,7 +218,7 @@ def _write_one(alert: Alert, today: str, commit: bool) -> None:
 		return
 	frappe.log_error(title=alert.title, message=alert.message)
 	if commit:
-		frappe.db.commit()
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit -- the scheduler tick only; a request passes commit=False
 	read_log.close_window(operation, WINDOW_CLASS, read_log.OUTCOME_ROW_WINDOW)
 
 

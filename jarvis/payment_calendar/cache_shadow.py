@@ -544,10 +544,12 @@ def persist(generation: int, record: dict | None) -> bool:
 	if not record:
 		return False
 	text = json.dumps(record, sort_keys=True, separators=(",", ":"), default=str)
+	# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 	frappe.db.sql(
 		f"UPDATE `tab{cache_store.GENERATION}` SET shadow=%s WHERE name=%s",
 		(text, generation),
 	)
+	# nosemgrep: frappe-sql-format-injection -- constant table name; every value is bound
 	if frappe.db.sql(f"SELECT 1 FROM `tab{cache_store.GENERATION}` WHERE name=%s", (generation,)):
 		return True
 	frappe.logger("payment_calendar").info("cache_shadow persist_generation_gone")

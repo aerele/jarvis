@@ -183,6 +183,7 @@ def run(
 	if side not in SIDES:
 		return RunResult("skipped:bad_side")
 	previous = frappe.session.user
+	# nosemgrep: frappe-setuser -- the refresh job, not whitelisted; restored in finally
 	frappe.set_user("Administrator")
 	try:
 		return _Chain(digest, side, night, opened, any_time).run()
@@ -192,7 +193,7 @@ def run(
 		_log("failed", digest, side, error=type(exc).__name__)
 		return RunResult(f"failed:error:{type(exc).__name__}")
 	finally:
-		frappe.set_user(previous)
+		frappe.set_user(previous)  # nosemgrep: frappe-setuser -- restores the caller
 
 
 def rebuild(company: str, side: str, night: bool = False, use_night_slot: bool = False) -> dict:
@@ -309,7 +310,7 @@ class _Chain:
 			return "night_done"
 		if self.opened:
 			cache.mark_opened(self.company, self.side)
-			frappe.db.commit()
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit -- refresh job, outside any request
 		return None
 
 	def _loop(self) -> str:
@@ -769,12 +770,12 @@ def address_space_cap(extra_mb: int):
 
 
 def _address_space_bytes() -> int:
-	with open("/proc/self/statm") as statm:
+	with open("/proc/self/statm") as statm:  # nosemgrep: frappe-security-file-traversal -- constant path
 		return int(statm.read().split()[0]) * os.sysconf("SC_PAGE_SIZE")
 
 
 def _rss_mb() -> float:
-	with open("/proc/self/statm") as statm:
+	with open("/proc/self/statm") as statm:  # nosemgrep: frappe-security-file-traversal -- constant path
 		return int(statm.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024)
 
 

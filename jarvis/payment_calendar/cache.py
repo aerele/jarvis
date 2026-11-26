@@ -497,7 +497,9 @@ def reset(company: str, side: str | None = None) -> dict:
 	if side is not None and side not in SIDES:
 		raise ValueError("Unknown cache side.")
 	where, values = ("company=%s AND side=%s", (company, side)) if side else ("company=%s", (company,))
+	# nosemgrep: frappe-sql-format-injection -- `where` is one of two literal clauses; company and side are bound
 	heads = frappe.db.sql(f"SELECT COUNT(*) FROM `tab{HEAD}` WHERE {where} FOR UPDATE", values)[0][0]
+	# nosemgrep: frappe-sql-format-injection -- `where` is one of two literal clauses; company and side are bound
 	frappe.db.sql(
 		f"UPDATE `tab{HEAD}` SET memo_until=NULL, backoff_level=0, failures=0, last_failure=NULL WHERE {where}",
 		values,
@@ -509,6 +511,7 @@ def reset(company: str, side: str | None = None) -> dict:
 
 
 def _any_head() -> bool:
+	# nosemgrep: frappe-sql-format-injection -- constant table name; no value
 	return bool(frappe.db.sql(f"SELECT 1 FROM `tab{HEAD}` LIMIT 1"))
 
 

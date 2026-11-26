@@ -228,6 +228,7 @@ def latest_generations() -> dict:
 def generation_counts() -> dict:
 	"""`{(company, side): {state: count}}` over every generation row that is still kept."""
 	counts: dict = defaultdict(dict)
+	# nosemgrep: frappe-sql-format-injection -- constant table name; no value
 	for company, side, state, total in frappe.db.sql(
 		f"SELECT company, side, state, COUNT(*) FROM `tab{GENERATION}` GROUP BY company, side, state"
 	):
