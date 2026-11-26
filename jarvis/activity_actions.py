@@ -536,6 +536,8 @@ CLASSIFICATION = {
 	"jarvis.payment_calendar.api.request_account_balances": ("LOGGED", None, "read", None, 0),
 	"jarvis.payment_calendar.api.request_snapshot": ("LOGGED", None, "read", None, 0),
 	"jarvis.payment_calendar.api.set_preferences": ("LOGGED", None, "action", None, 0),
+	"jarvis.payment_calendar.cache.reset": ("LOGGED", "company", "action", "Company", 0),
+	"jarvis.payment_calendar.cache_status.cache_status": ("SKIPPED", "read"),
 	"jarvis.pdf_templates.delete_pdf_template": ("LOGGED", None, "action", None, 0),
 	"jarvis.pdf_templates.get_default_pdf_template": ("SKIPPED", "read"),
 	"jarvis.pdf_templates.get_pdf_template": ("SKIPPED", "read"),

@@ -18,7 +18,6 @@ Run ONLY on the test site, alone (the tests clear the three cache tables):
 """
 
 import secrets
-import unittest
 from unittest.mock import patch
 
 import frappe
@@ -28,24 +27,53 @@ from rq import Queue, SimpleWorker
 from rq.job import Job
 
 from jarvis.payment_calendar import cache, cache_refresh, cache_shadow, cache_state, read_log, routing
-from jarvis.tests.test_payment_calendar_cache_store import GENERATION, HEAD, ROW
+from jarvis.tests.test_payment_calendar_cache_store import GENERATION, HEAD, ROW, ensure_cache_company
 
 SIDE = "Receivable"
 REAL_BENCH_SLOTS = cache_state.bench_slots
 
 
-def buildable_company() -> str:
-	"""The newest Company that has a Receivable account: the real reader needs one to build the side.
+def buildable_company(test_class) -> str:
+	"""A committed Company with the one ledger account that the real reader needs to build the Receivable side.
 
-	The site is shared and its companies are made by other tests, so no name is fixed here.
+	The test makes everything it reads (the company, its Receivable account, the two Party Type rows of a
+	fresh ERPNext install) and removes what it made, so it runs on a site with no company at all, like CI.
+	The worker commits through its own connection, so the rows are committed here.
 	"""
-	found = frappe.db.sql(
-		"SELECT c.name FROM tabCompany c WHERE EXISTS (SELECT 1 FROM tabAccount a WHERE a.company=c.name "
-		"AND a.account_type='Receivable') ORDER BY c.creation DESC LIMIT 1"
-	)
-	if not found:
-		raise unittest.SkipTest("no Company with a Receivable account on this site")
-	return found[0][0]
+	company = ensure_cache_company(test_class)
+	for party_type, account_type in (("Customer", "Receivable"), ("Supplier", "Payable")):
+		if not frappe.db.exists("Party Type", party_type):
+			frappe.get_doc(
+				{"doctype": "Party Type", "party_type": party_type, "account_type": account_type}
+			).db_insert()
+			test_class.addClassCleanup(_delete_committed, "Party Type", party_type)
+	if not frappe.db.exists("Account", {"company": company, "account_type": "Receivable"}):
+		name = f"Debtors - {company}"
+		frappe.get_doc(
+			{
+				"doctype": "Account",
+				"name": name,
+				"account_name": "Debtors",
+				"company": company,
+				"account_type": "Receivable",
+				"account_currency": "INR",
+				"root_type": "Asset",
+				"report_type": "Balance Sheet",
+				"is_group": 0,
+				"disabled": 0,
+				"lft": 1,
+				"rgt": 2,
+			}
+		).db_insert()
+		test_class.addClassCleanup(_delete_committed, "Account", name)
+	frappe.db.commit()
+	return company
+
+
+def _delete_committed(doctype: str, name: str) -> None:
+	frappe.db.rollback()
+	frappe.db.delete(doctype, {"name": name})
+	frappe.db.commit()
 
 
 class TestRealRqRefresh(FrappeTestCase):
@@ -54,7 +82,7 @@ class TestRealRqRefresh(FrappeTestCase):
 		super().setUpClass()
 		for doctype in (HEAD, GENERATION, ROW):
 			frappe.reload_doc("jarvis", "doctype", frappe.scrub(doctype))
-		cls.company = buildable_company()
+		cls.company = buildable_company(cls)
 		cls.site = frappe.local.site
 
 	def setUp(self):

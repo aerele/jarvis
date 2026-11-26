@@ -190,6 +190,42 @@ class TestPayloadContract(TestCase):
 		self.assertEqual(json.loads(text)["permission_columns"], [])
 
 
+CACHE_COMPANY = "_PCAL Cache Test Co"
+CACHE_COMPANY_ABBR = "PCCTC"
+
+
+def ensure_cache_company(test_class, name: str = CACHE_COMPANY, abbr: str = CACHE_COMPANY_ABBR) -> str:
+	"""A committed Company row for the cache tests, which never read a company the site happens to have.
+
+	The cache keeps its own transactions (the store commits, and `_purge_everything` rolls back), so a company
+	made in the test's transaction would be gone at the first rollback. The row is therefore committed, and
+	the class removes it again when this call made it. A raw insert is enough: the cache reads the row's
+	`creation` and its existence, and a fresh CI site has no company at all.
+	"""
+	if frappe.db.exists("Company", name):
+		return name
+	frappe.get_doc(
+		{
+			"doctype": "Company",
+			"name": name,
+			"company_name": name,
+			"abbr": abbr,
+			"default_currency": "INR",
+			"country": "India",
+		}
+	).db_insert()
+	frappe.db.commit()
+	test_class.addClassCleanup(_drop_cache_company, name)
+	return name
+
+
+def _drop_cache_company(name: str) -> None:
+	frappe.db.rollback()
+	frappe.db.delete("User Permission", {"allow": "Company", "for_value": name})
+	frappe.db.delete("Company", {"name": name})
+	frappe.db.commit()
+
+
 class StoreCase(FrappeTestCase):
 	"""Base for the tests that write: one real company, cleanup of everything the cache tables hold."""
 
@@ -198,7 +234,7 @@ class StoreCase(FrappeTestCase):
 		super().setUpClass()
 		for doctype in (HEAD, GENERATION, ROW):
 			frappe.reload_doc("jarvis", "doctype", frappe.scrub(doctype))
-		cls.company = frappe.get_all("Company", pluck="name", order_by="creation desc", limit=1)[0]
+		cls.company = ensure_cache_company(cls)
 
 	def setUp(self):
 		frappe.set_user("Administrator")

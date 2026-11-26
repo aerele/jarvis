@@ -18,7 +18,13 @@ import frappe
 
 from jarvis.payment_calendar import cache, cache_state, cache_status, cache_store, read_log, routing
 from jarvis.tests import test_payment_calendar_cache_tick as tick_tests
-from jarvis.tests.test_payment_calendar_cache_store import GENERATION, HEAD, _row, _sql
+from jarvis.tests.test_payment_calendar_cache_store import (
+	GENERATION,
+	HEAD,
+	_row,
+	_sql,
+	ensure_cache_company,
+)
 from jarvis.tests.test_payment_calendar_routing import _as, _ensure_system_manager
 
 FAR_DAY = "2099-01-01"
@@ -46,18 +52,7 @@ def with_hooks(*paths):
 
 
 class StableCase(tick_tests.CacheCase):
-	"""The company is the oldest real one: other test runs create and delete `_JPC_` companies on this site."""
-
-	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		cls.company = stable_company()
-
-
-def stable_company() -> str:
-	return frappe.get_all(
-		"Company", filters={"name": ["not like", "_JPC_%"]}, order_by="creation asc", pluck="name", limit=1
-	)[0]
+	"""The company is the cache tests' own committed one (`ensure_cache_company`), never one of the site's."""
 
 
 class TestNearestRank(TestCase):
@@ -156,12 +151,7 @@ class TestStatusForASystemManager(StableCase):
 		frappe.db.commit()
 
 	def restrict_to_another_company(self):
-		other = next(
-			iter(frappe.get_all("Company", filters={"name": ["!=", self.company]}, pluck="name", limit=1)),
-			None,
-		)
-		if other is None:
-			self.skipTest("the site has one company only")
+		other = ensure_cache_company(type(self), "_PCAL Cache Other Co", "PCCOC")
 		frappe.get_doc(
 			{"doctype": "User Permission", "user": self.USER, "allow": "Company", "for_value": other}
 		).insert(ignore_permissions=True)
@@ -672,12 +662,20 @@ class TestPermission(StableCase):
 			cache_status.cache_status()
 
 	def test_a_user_without_system_manager_is_refused(self):
-		users = frappe.get_all(
-			"User", filters={"enabled": 1, "name": ["not in", ["Administrator", "Guest"]]}, pluck="name"
-		)
-		plain = next((name for name in users if "System Manager" not in frappe.get_roles(name)), None)
-		if plain is None:
-			self.skipTest("the site has no user without System Manager")
+		plain = "pcal-cache-status-plain@example.com"
+		if not frappe.db.exists("User", plain):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": plain,
+					"first_name": "plain",
+					"send_welcome_email": 0,
+					"enabled": 1,
+					"user_type": "System User",
+				}
+			).insert(ignore_permissions=True)
+			frappe.db.commit()
+		self.assertNotIn("System Manager", frappe.get_roles(plain))
 		frappe.set_user(plain)
 		with self.assertRaises(frappe.PermissionError):
 			cache_status.cache_status()
