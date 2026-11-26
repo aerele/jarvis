@@ -98,6 +98,16 @@ class TestRuntimeFacts(unittest.TestCase):
 		self.assertFalse(native_runtime.is_native_pool(object()))
 		self.assertIsNone(native_runtime.agent_runtime_version(frappe._dict()))
 
+	def test_2026_11_10_is_newer_than_2026_11_7_by_number_not_by_string(self):
+		v10 = native_runtime.agent_runtime_version(frappe._dict(agent_runtime_version="2026.11.10"))
+		v7 = native_runtime.agent_runtime_version(frappe._dict(agent_runtime_version="2026.11.7"))
+		self.assertEqual(v10, (2026, 11, 10))
+		self.assertGreater(v10, v7)
+		self.assertLess("2026.11.10", "2026.11.7")  # the string order this must never use
+		self.assertTrue(native_runtime.gateway_is_v11(frappe._dict(agent_runtime_version="2026.11.10")))
+		# admin's heartbeat value is stored as sent
+		self.assertTrue(native_runtime._VERSION.match("2026.11.10"))
+
 	def test_version_parsing_and_the_2026_11_boundary(self):
 		for raw, expected in (("2026.11.5", True), ("2026.11.0", True), ("2027.1.0", True)):
 			self.assertEqual(
