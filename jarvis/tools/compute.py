@@ -32,8 +32,11 @@ from jarvis.exceptions import (
 )
 from jarvis.tools import _compute_sandbox as sandbox
 
-# Site config switch: truthy turns the tool off (no DocType field, no migration).
+# Site config switch (no DocType field, no migration). Read explicitly and failing
+# closed: true / 1 / yes / on switch compute off; false / 0 / no / off / empty (or the
+# key absent) leave it on; any other value switches it off.
 DISABLE_KEY = "jarvis_disable_compute"
+_ENABLED_VALUES = frozenset({"false", "0", "no", "off", ""})
 
 _DISABLED_MESSAGE = (
 	"The compute tool is switched off on this site. Do not retry it; answer with get_list, "
@@ -49,9 +52,13 @@ def compute(code: str, description: str) -> dict:
 	``result``: ``{"warnings"?, "result", "reads", "rows_read", "elapsed_ms", "printed"}``.
 
 	``warnings`` (first, only when there are any) are caveats the model must act on:
-	amounts in several currencies returned row by row, a read that stopped at the limit
-	the code gave it. ``reads`` is one receipt per read (source, doctype or report,
-	filters, fields, group_by, rows, and the currency of the amounts when known).
+	amounts in several currencies, companies or including drafts returned row by row, a
+	read that stopped at the limit the code gave it. ``reads`` is one compact receipt per
+	read: doctype (or report), rows, currency when known, limit when set, a prepared
+	report's ``as_of``, and the filters cut short. ``printed`` only when something was.
+
+	Site config ``jarvis_disable_compute``: true / 1 / yes / on (or any value other than
+	false / 0 / no / off / empty) switches the tool off.
 
 	``description`` is one plain sentence saying what the code works out; it is shown
 	in the chat step and kept, with the code, in the stored tool call."""
@@ -103,18 +110,23 @@ def compute(code: str, description: str) -> dict:
 			"reads": run.receipts(),
 			"rows_read": run.rows_read,
 			"elapsed_ms": run.elapsed_ms(),
-			"printed": run.printed_text(),
 		}
 	)
+	printed = run.printed_text()
+	if printed:
+		out["printed"] = printed
 	_check_size(out)
 	return out
 
 
 def _disabled() -> bool:
+	"""Whether site config switches compute off. See DISABLE_KEY: fails closed."""
 	value = frappe.conf.get(DISABLE_KEY)
-	if isinstance(value, str):
-		return value.strip().casefold() in ("1", "true", "yes", "on")
-	return bool(value)
+	if value is None or value is False:
+		return False
+	if value is True:
+		return True
+	return str(value).strip().casefold() not in _ENABLED_VALUES
 
 
 def _check_code(code) -> str:
@@ -176,7 +188,9 @@ def _translate(error: BaseException, run) -> Exception:
 			f"{where}one database read ran past {sandbox.STATEMENT_TIME_S} seconds and was stopped. "
 			"Add filters (a date range, a status) or let the database aggregate with group_by."
 		)
-	if isinstance(error, JarvisError | sandbox.SandboxUsageError):
+	from jarvis.tools._compute_guards import GuardRefused
+
+	if isinstance(error, JarvisError | sandbox.SandboxUsageError | GuardRefused):
 		message = str(error)
 	else:
 		message = f"{type(error).__name__}: {sandbox._clean(error) or type(error).__name__}"
@@ -215,11 +229,29 @@ def _plain(obj):
 	raise TypeError(f"a {type(obj).__name__} value is not data")
 
 
+def _tidy_floats(value):
+	"""Floats at 15 significant digits: ``12345.670000000002`` (binary sums of money)
+	becomes ``12345.67``; a rate or quantity with real digits keeps them."""
+	if isinstance(value, float):
+		return float(format(value, ".15g"))
+	if isinstance(value, list):
+		return [_tidy_floats(v) for v in value]
+	if isinstance(value, dict):
+		return {k: _tidy_floats(v) for k, v in value.items()}
+	return value
+
+
 def _json_safe(value):
 	"""``value`` as plain JSON data: dates and datetimes as text (``2026-10-05``,
-	``2026-10-05 10:30:00``), Decimals as numbers, sets as lists."""
+	``2026-10-05 10:30:00``), Decimals as numbers, sets as lists, floats tidied."""
+	from jarvis.tools._compute_guards import GuardRefused, check_written_size
+
 	try:
-		return json.loads(json.dumps(value, default=_plain, allow_nan=False))
+		check_written_size(value, "result")
+	except GuardRefused as e:
+		raise ComputeCodeError(str(e)) from None
+	try:
+		return _tidy_floats(json.loads(json.dumps(value, default=_plain, allow_nan=False)))
 	except ValueError:
 		raise ComputeCodeError(
 			"result holds NaN or Infinity (a division by zero?). Return a number or None instead."

@@ -138,65 +138,81 @@ the blocklist is the "never even offer these" hardstop, not the only boundary.
 
 ```python
 compute(code: str, description: str)
-# -> {"warnings": [str] (only when there are any, always the first key),
+# -> {"warnings": [str],  # only when there are any, always the first key
 #     "result": <json data>, "reads": [receipt, ...], "rows_read": int,
-#     "elapsed_ms": int, "printed": str}
+#     "elapsed_ms": int, "printed": str}  # printed only when something was
 ```
-
-- **`reads`**: one receipt per read, in order: `source` (get_list, get_value, exists,
-  count, get_doc, run_report), `doctype` or `report`, `filters` and `fields` as given
-  (cut at 300 characters), `group_by`, `rows`, and for a list read `limited` / `limit`
-  when the code passed a limit and `currency` / `currencies` of the amounts it read.
-  At most 30, then `{"more": n}`; cut further only when the result needs the room.
-- **Currency guard** (`_compute_sandbox._guard_currency`): a Currency field whose
-  `options` names another column of the same doctype (`currency`,
-  `party_account_currency` ...) is in a per-row currency; `Company:...` options (the
-  `base_*` fields) are company currency. Read from the meta, nothing hard-coded. When
-  a `get_list` selects or aggregates such a field, the currencies of the matching rows
-  come from the rows (the currency field selected) or one extra permissioned grouped
-  read over the same filters. A database SUM / AVG / MIN / MAX of it over two or more
-  currencies, not grouped by the currency field, fails the call (fixable, names the
-  currencies and the `base_` field or `conversion_rate`). The same amounts returned
-  row by row get a warning instead, once per doctype and field. One currency: the
-  receipt names it. Child-table amounts (currency on the parent) and reports are not
-  checked.
-- **No partial reads**: a read over the row caps raises; only a limit the code passes
-  itself stops a read early, and then the receipt says `limited` and a read that
-  returns exactly that many rows adds a warning.
 
 For any total, count, ranking, comparison or cross-check over more than a handful of
 records: one call reads, groups, sums and ranks, and returns only the shaped answer.
-No imports; the answer goes in `result`. `description` is one sentence, shown in the
-chat step; the stored tool call keeps it with the code.
+No imports; the answer goes in `result` (None is refused). `description` is one
+sentence, shown in the chat step; the stored tool call keeps it with the code.
 
 - **Namespace** (an allowlist, `_compute_sandbox.build_namespace`): `get_list`,
   `get_doc`, `get_value`, `get_single_value`, `count`, `exists`, `get_meta`,
   `run_report`, `default_company`, `get_user_default` (also as `frappe.*` and
   `frappe.db.*`), date and number helpers (`frappe.utils` subset, also bare),
   `json.loads/dumps`, `frappe._dict`, `frappe.session.user`, `datetime` / `date` /
-  `timedelta` / `Decimal`, and plain builtins. No `frappe.db.sql`, query builder,
-  `get_all`, writes, jobs, mail, HTTP, files or `frappe.local`; each of those fails
-  with what to write instead.
+  `timedelta`, and plain builtins. No `frappe.db.sql`, query builder, `get_all`,
+  writes, jobs, mail, HTTP, files or `frappe.local`; each of those fails with what to
+  write instead. An unknown field or doctype says "Did you mean ...".
 - **Permissions**: every read runs as the chat user. `get_list` refuses
   `ignore_permissions` / `user` / `as_list` and the like, refuses a field the user
   cannot read (permission level) and aggregating / filtering / sorting on a masked
-  one, and refuses Jarvis's own doctypes (`Jarvis *`). `run_report` goes through
-  `run_report`'s own gates; a Prepared Report answers only from a finished copy.
+  one. Never readable, by any spelling (case, spaces, underscores): every doctype of
+  the jarvis app (conversations, memory, skills, settings, MCP OAuth clients and
+  tokens, connectors), core sign-in token and key doctypes (OAuth, Token Cache,
+  Connected App, Social Login Key, LDAP Settings ...) and any doctype with a Password
+  field (User included).
 - **Aggregates**: `fields=["customer", {"SUM": "base_grand_total", "as": "total"}]`
   with `group_by`. Frappe 16 refuses SQL function strings, so `"sum(x) as y"` is
   rewritten to the dict form there; on Frappe 15 the dict form is rewritten to the
   string form.
+- **Amount checks** (`_compute_amounts`, at most one extra permissioned query per
+  `get_list`). Every field reference is resolved to its table and field first (`f`,
+  `f as x`, `X.f`, `` `tabX`.f ``, inside an aggregate). Refused when a database SUM /
+  AVG / MIN / MAX mixes, warned (once per doctype and field) when the same amounts
+  come back row by row:
+  - currencies: a Currency field whose `options` names a currency column (`currency`,
+    `party_account_currency` ...), on its own doctype or, for a child table, on the
+    parent (a child-table read is probed on its parent with its filters as
+    `[child, field, op, value]`);
+  - companies: a `base_*` field (`Company:company:default_currency`) over companies
+    with different default currencies;
+  - drafts: a submittable doctype read whose filters do not name `docstatus` and
+    whose matching rows include drafts or cancelled documents.
+  One currency: the receipt names it. Read from the meta, nothing hard-coded.
+- **`reads`**: one compact receipt per read: `doctype` (or `report`), `rows`,
+  `currency` / `currencies` when known, `limited` / `limit` when the code set a
+  limit, `prepared` / `as_of` for a report's finished copy, `filters` cut at 100
+  characters. At most 15, then `{"more": n}`.
+- **No partial reads**: a read over the row caps raises; only a limit the code passes
+  itself stops a read early (the receipt says so). A read that returns exactly its
+  limit with no `order_by` adds a warning (with an `order_by` it is a top-N).
+- **Reports**: `run_report` goes through `run_report`'s own gates. A Prepared Report
+  answers from its finished copy (`prepared`, `as_of`), else runs inline as the user
+  within the call's deadline; nothing starts in the background.
 - **Read-only**: inside `preview_sandbox` (savepoint always rolled back, commit
   neutralised, jobs dropped), and `frappe.db.sql` refuses every non-read statement
   before it is sent. A report that writes when it runs makes the call fail
   (`InvalidArgumentError`, not fixable): call `run_report` directly instead.
-- **Limits** (`_compute_sandbox` constants): 20 s wall clock, 8 s per statement,
-  100,000 rows per read and 200,000 per call, 20,000 characters of code, 2,000 of
-  printed output, 1 GB of memory growth, and the 35,000-character result guard.
-  A limit fails the whole call even when the code catches the error.
-- **Kill switch**: site config `jarvis_disable_compute` (truthy) refuses every call
-  with `FeatureDisabledError`. Errors the model can fix are `ComputeCodeError`
-  (wire code `InvalidArgumentError`, kind `fixable`) and name the line.
+- **Limits** (`_compute_sandbox` and `_compute_guards` constants): 20 s wall clock,
+  8 s per statement, 100,000 rows per read and 200,000 per call, 20,000 characters of
+  code, 2,000 of printed output, 512 MB of memory growth, and the 35,000-character
+  result guard. Time and memory are checked before every statement, for every loop
+  item, after every read and after every big operation; a single operation that could
+  grow a value in one C call (arithmetic, %-formatting, f-string specs, `pow`, `round`,
+  `sum`, `str.join` and the padding / replace methods, `list.extend`, writing out a
+  structure with shared references) has its result size checked first. A limit fails
+  the whole call even when the code catches the error. No process rlimit or
+  subprocess: see the `_compute_sandbox` docstring.
+- **Kill switch**: site config `jarvis_disable_compute`. `true` / `1` / `yes` / `on`
+  switch compute off; `false` / `0` / `no` / `off` / empty (or no key) leave it on;
+  any other value switches it off (fail closed). Refused calls get
+  `FeatureDisabledError`. Errors the model can fix are `ComputeCodeError` (wire code
+  `InvalidArgumentError`, kind `fixable`) and name the line.
+- **Floats** in the result are written at 15 significant digits
+  (`12345.670000000002` becomes `12345.67`).
 
 ## `get_schema` - live introspection (the backbone)
 

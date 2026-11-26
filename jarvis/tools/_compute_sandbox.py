@@ -51,16 +51,29 @@ when the script catches the error (``_Run.fail`` raises a ``BaseException``, and
 failure is recorded on the run), so a partial total can never come back as a
 complete one.
 
-Not covered (bounded only by the worker): a single C-level operation that runs long
-or allocates a lot (``"x".ljust(10**9)``), and what a report's own Python does
-outside the database (HTTP, email sent directly, a realtime event).
+Time and memory are checked between steps: before every statement, for every item a
+loop takes, after every read and after every big guarded operation. A single C-level
+operation cannot be interrupted, so every operation that can grow a value in one step
+has its result size worked out beforehand and is refused above a cap
+(``_compute_guards``: arithmetic, %-formatting, f-string specs, ``pow``, ``round``,
+``sum``, text and list methods); slice assignment is refused.
+
+Why no hard process limit: ``RLIMIT_CPU`` and ``RLIMIT_AS`` apply to the whole worker
+process, which serves other requests on other threads; the first kills the process, the
+second makes other threads' allocations fail. A subprocess cannot share this request's
+database connection, transaction and permission context, which every read here relies
+on. Size pre-checks plus checks between steps are the boundary instead.
+
+Not covered (bounded only by the worker): a C call on data the script already holds
+that does a lot of work without growing anything (a set of ints chosen to collide in
+one hash bucket is quadratic), and what a report's own Python does outside the database
+(HTTP, email sent directly, a realtime event).
 """
 
 from __future__ import annotations
 
 import ast
 import datetime
-import decimal
 import json
 import re
 import sys
@@ -74,6 +87,7 @@ from RestrictedPython import compile_restricted
 from RestrictedPython.transformer import IOPERATOR_TO_STR, RestrictingNodeTransformer, copy_locations
 
 from jarvis.exceptions import ComputeCodeError, InvalidArgumentError, PermissionDeniedError
+from jarvis.tools._compute_guards import GuardRefused, Guards, check_written_size, internal_import
 
 try:  # Frappe 15 and 16: the policy safe_exec compiles with (allows the name ``_dict``)
 	from frappe.utils.safe_exec import FrappeTransformer as _BasePolicy
@@ -134,28 +148,19 @@ MAX_PRINT_CHARS = 2_000
 # timer can interrupt.
 MAX_RANGE = 1_000_000
 
-# A sequence repeated past this many items or characters ("x" * n, [0] * n) is
-# refused, for the same reason: one C-level allocation the timer cannot stop.
-MAX_SEQUENCE_ITEMS = 1_000_000
+# How much the worker's resident memory may grow while the script runs (Linux /proc
+# only). Read before statements and loop items (at most every MEMORY_CHECK_INTERVAL_S),
+# after every read and after every guarded operation whose result passes a megabyte.
+# Every single step is bounded (one read: MAX_ROWS_PER_READ rows; one operation: the
+# caps in _compute_guards), so the overshoot past this is at most one such step.
+MAX_MEMORY_GROWTH_BYTES = 512 * 1024 * 1024
+MEMORY_CHECK_INTERVAL_S = 0.005
 
-# Largest integer exponent / shift: 2 ** 10_000 is already a 3,000-digit number.
-MAX_INT_EXPONENT = 10_000
-
-# How much the worker's resident memory may grow while the script runs. Checked every
-# MEMORY_CHECK_TICKS loop iterations (Linux /proc only): a loop that appends forever is
-# stopped long before the time limit would stop it.
-MAX_MEMORY_GROWTH_BYTES = 1024 * 1024 * 1024
-MEMORY_CHECK_TICKS = 20_000
-
-# Read receipts returned with the result. Each is small (filters and fields are cut at
-# RECEIPT_TEXT_CHARS); 30 covers any sensible script, and a loop of reads is summarised
-# as {"more": n} instead of eating the result budget.
-MAX_READ_RECEIPTS = 30
-RECEIPT_TEXT_CHARS = 300
-
-# Distinct currencies the currency probe asks for. Two already decide; the rest only
-# make the message complete.
-MAX_PROBED_CURRENCIES = 20
+# Read receipts returned with the result: the doctype, row count and currency of each
+# read, and its filters cut at RECEIPT_TEXT_CHARS. 15 covers a sensible script; a loop
+# of reads is summarised as {"more": n} instead of costing the model tokens.
+MAX_READ_RECEIPTS = 15
+RECEIPT_TEXT_CHARS = 100
 
 # The filename the compiled script carries: the tracer and error line numbers key on it.
 SCRIPT_FILENAME = "<jarvis-compute>"
@@ -221,7 +226,10 @@ class _Run:
 		self.printed_chars = 0
 		self.print_truncated = False
 		self.rss_at_start = _rss_bytes()
-		self.ticks = 0
+		self.last_memory_check = self.started
+		# What the script is doing outside its own lines (a report run), for the
+		# deadline message.
+		self.activity: str | None = None
 		# What the script read (receipts, capped) and the caveats it must act on.
 		self.reads: list[dict] = []
 		self.reads_more = 0
@@ -249,14 +257,16 @@ class _Run:
 		self.warnings.append(message)
 
 	def tick(self):
-		"""Called at the top of every loop iteration, every item a loop or
-		comprehension takes, and every function call of the script (compiled in, see
-		_ComputePolicy). A plain call, so it keeps stopping the script however often
-		the script catches it: the tick sits outside any try inside that loop."""
-		self.ticks += 1
-		if time.monotonic() > self.deadline:
+		"""Called before every statement of the script and for every item a loop or
+		comprehension takes (compiled in, see _ComputePolicy). A plain call, so it keeps
+		stopping the script however often the script catches it: in a loop, the tick
+		before the first statement of the body sits outside any try in that body.
+		Memory is read at most every MEMORY_CHECK_INTERVAL_S."""
+		now = time.monotonic()
+		if now > self.deadline:
 			self.check_time()
-		if self.ticks % MEMORY_CHECK_TICKS == 0:
+		if now - self.last_memory_check >= MEMORY_CHECK_INTERVAL_S:
+			self.last_memory_check = now
 			self.check_memory()
 
 	def fail(self, message: str, *, kind: str = "limit"):
@@ -267,12 +277,19 @@ class _Run:
 		raise _Stop(message)
 
 	def check_time(self, grace: float = 0):
-		if time.monotonic() > self.deadline + grace:
+		if time.monotonic() <= self.deadline + grace:
+			return
+		if self.activity:
 			self.fail(
-				f"The code ran for more than {self.wall_clock_s:g} seconds and was stopped. Read less "
-				"(filter by date or status, ask only for the fields you need), let the database total "
-				'with group_by and {"SUM": ...} fields, and avoid loops inside loops.'
+				f"{self.activity} did not finish within the {self.wall_clock_s:g} seconds compute has "
+				"and was stopped. Narrow its filters (a shorter date range, one company or party) and "
+				"run it again."
 			)
+		self.fail(
+			f"The code ran for more than {self.wall_clock_s:g} seconds and was stopped. Read less "
+			"(filter by date or status, ask only for the fields you need), let the database total "
+			'with group_by and {"SUM": ...} fields, and avoid loops inside loops.'
+		)
 
 	def check_memory(self):
 		if self.rss_at_start is None:
@@ -285,7 +302,9 @@ class _Run:
 			)
 
 	def take_rows(self, n: int, what: str):
-		"""Count ``n`` rows read by ``what``; fail when the call's total budget is gone."""
+		"""Count ``n`` rows read by ``what``; fail when the call's total budget is gone.
+		A read is the biggest single step a script takes, so memory is checked after it."""
+		self.check_memory()
 		self.rows_read += n
 		if self.rows_read > MAX_ROWS_TOTAL:
 			self.fail(
@@ -322,10 +341,12 @@ class _Run:
 # Generated names: only the transformer below emits them; check_name refuses any
 # name starting with "_" in the script itself.
 _AUG_ITEM = "_jv_aug_item_"
-_MUL = "_jv_mul_"
-_POW = "_jv_pow_"
-_LSHIFT = "_jv_lshift_"
+_BINOP = "_jv_binop_"
+_FORMAT = "_jv_format_"
 _TICK = "_jv_tick_"
+_GUARDED_BINOPS = {ast.Add: "+", ast.Mult: "*", ast.Pow: "**", ast.LShift: "<<", ast.Mod: "%"}
+# Statement lists a tick is put in front of.
+_BODY_FIELDS = ("body", "orelse", "finalbody")
 
 
 def _call(name: str, args: list, node: ast.AST) -> ast.Call:
@@ -340,29 +361,40 @@ class _ComputePolicy(_BasePolicy):
 	- ``d[k] += v`` (RestrictedPython refuses augmented assignment of items) becomes
 	  ``_jv_aug_item_(_write_(d), k, "+=", v)``: d and k are evaluated once, the item is
 	  read through the item guard and written back through the write guard.
-	- ``a * b``, ``a ** b`` and ``a << b`` go through size checks (MAX_SEQUENCE_ITEMS,
-	  MAX_INT_EXPONENT): each is one C-level operation no timer can interrupt.
-	- Every ``while`` / ``for`` body and every function body starts with
-	  ``_jv_tick_()`` (``_Run.tick``), the wall-clock and memory check. (Every item a
-	  loop or comprehension takes ticks too, through ``_getiter_``.) Not a trace
-	  function: CPython drops a trace function the first time it raises, so a loop
-	  that catches that one exception would then run unchecked.
+	- ``a + b``, ``a * b``, ``a ** b``, ``a << b`` and ``a % b`` become
+	  ``_jv_binop_(op, a, b)``, and every f-string replacement field becomes
+	  ``_jv_format_(value, conversion, spec)``: the result size is worked out before the
+	  operation and refused above the caps in ``_compute_guards``. Each is one C-level
+	  operation no timer can interrupt.
+	- Every statement, in every block, is preceded by ``_jv_tick_()`` (``_Run.tick``),
+	  the wall-clock and memory check. (Every item a loop or comprehension takes ticks
+	  too, through ``_getiter_``.) Not a trace function: CPython drops a trace function
+	  the first time it raises, so a loop that catches that one exception would then run
+	  unchecked.
+	- Slice assignment (``l[n:] = l`` doubles a list in one step) is refused.
 	"""
 
-	def _ticked(self, node):
-		tick = ast.Expr(value=_call(_TICK, [], node))
-		copy_locations(tick, node)
-		node.body.insert(0, tick)
+	def visit_Module(self, node: ast.Module):
+		node = super().visit_Module(node)
+		_add_ticks(node)
 		return node
 
-	def visit_While(self, node: ast.While):
-		return self._ticked(super().visit_While(node))
+	def visit_Subscript(self, node: ast.Subscript):
+		if isinstance(node.ctx, ast.Store) and isinstance(node.slice, ast.Slice):
+			self.error(node, "Slice assignment is not available: build a new list instead.")
+			return node
+		return super().visit_Subscript(node)
 
-	def visit_For(self, node: ast.For):
-		return self._ticked(super().visit_For(node))
-
-	def visit_FunctionDef(self, node: ast.FunctionDef):
-		return self._ticked(super().visit_FunctionDef(node))
+	def visit_FormattedValue(self, node: ast.FormattedValue):
+		node = super().visit_FormattedValue(node)
+		spec = node.format_spec if node.format_spec is not None else ast.Constant(None)
+		new = ast.FormattedValue(
+			value=_call(_FORMAT, [node.value, ast.Constant(node.conversion), spec], node),
+			conversion=-1,
+			format_spec=None,
+		)
+		copy_locations(new, node)
+		return new
 
 	def visit_AugAssign(self, node: ast.AugAssign):
 		if not isinstance(node.target, ast.Subscript):
@@ -391,10 +423,30 @@ class _ComputePolicy(_BasePolicy):
 
 	def visit_BinOp(self, node: ast.BinOp):
 		node = super().visit_BinOp(node)
-		name = {ast.Mult: _MUL, ast.Pow: _POW, ast.LShift: _LSHIFT}.get(type(node.op))
-		if name is None:
+		op = _GUARDED_BINOPS.get(type(node.op))
+		if op is None:
 			return node
-		return _call(name, [node.left, node.right], node)
+		return _call(_BINOP, [ast.Constant(op), node.left, node.right], node)
+
+
+def _add_ticks(tree: ast.AST) -> None:
+	"""Put ``_jv_tick_()`` in front of every statement of every block of ``tree``.
+	Runs on RestrictedPython's output: the generated name is never name-checked."""
+	for node in ast.walk(tree):
+		blocks = [getattr(node, name, None) for name in _BODY_FIELDS]
+		if isinstance(node, ast.Try | getattr(ast, "TryStar", ast.Try)):
+			blocks += [handler.body for handler in node.handlers]
+		if isinstance(node, ast.Match):
+			blocks += [case.body for case in node.cases]
+		for body in blocks:
+			if not isinstance(body, list) or not body or not isinstance(body[0], ast.stmt):
+				continue
+			ticked = []
+			for stmt in body:
+				tick = ast.Expr(value=_call(_TICK, [], stmt))
+				copy_locations(tick, stmt)
+				ticked += [tick, stmt]
+			body[:] = ticked
 
 
 def compile_code(code: str):
@@ -641,25 +693,32 @@ _UNSAFE_ATTRIBUTES = frozenset(_FRAPPE_UNSAFE_ATTRIBUTES) | {
 _BLOCKED_TYPES = (types.ModuleType, types.CodeType, types.TracebackType, types.FrameType)
 
 
-def _getattr(obj, name, *default):
-	"""Attribute reads. Unlike Frappe's guard, a missing attribute RAISES instead of
-	reading as None: a misspelled field must not silently total as zero."""
-	if isinstance(obj, _Namespace) and name == "_dict":
-		return obj.lookup(name)
-	if not isinstance(name, str) or name.startswith("_"):
-		raise AttributeError(f'"{name}" is not available: attributes starting with _ are blocked.')
-	if isinstance(obj, _Namespace):
-		return obj.lookup(name)
-	if name in _UNSAFE_ATTRIBUTES:
-		if name in ("format", "format_map"):
-			raise AttributeError(f'.{name}() is not available: use an f-string, e.g. f"{{total:,.2f}}".')
-		raise AttributeError(f'"{name}" is not available.')
-	if isinstance(obj, _BLOCKED_TYPES):
-		raise AttributeError(f'"{name}" is not available.')
-	value = getattr(obj, name, *default)
-	if isinstance(value, _BLOCKED_TYPES):
-		raise AttributeError(f'"{name}" is not available.')
-	return value
+def _getattr_factory(guards: Guards):
+	def _getattr(obj, name, *default):
+		"""Attribute reads. Unlike Frappe's guard, a missing attribute RAISES instead of
+		reading as None: a misspelled field must not silently total as zero. Methods that
+		grow their object (str.ljust, list.extend ...) come back size-guarded."""
+		if isinstance(obj, _Namespace) and name == "_dict":
+			return obj.lookup(name)
+		if not isinstance(name, str) or name.startswith("_"):
+			raise AttributeError(f'"{name}" is not available: attributes starting with _ are blocked.')
+		if isinstance(obj, _Namespace):
+			return obj.lookup(name)
+		if name in _UNSAFE_ATTRIBUTES:
+			if name in ("format", "format_map"):
+				raise AttributeError(f'.{name}() is not available: use an f-string, e.g. f"{{total:,.2f}}".')
+			raise AttributeError(f'"{name}" is not available.')
+		if isinstance(obj, _BLOCKED_TYPES):
+			raise AttributeError(f'"{name}" is not available.')
+		guarded = guards.method(obj, name)
+		if guarded is not None:
+			return guarded
+		value = getattr(obj, name, *default)
+		if isinstance(value, _BLOCKED_TYPES):
+			raise AttributeError(f'"{name}" is not available.')
+		return value
+
+	return _getattr
 
 
 def _getitem(obj, key):
@@ -674,34 +733,6 @@ def _write(obj):
 	if isinstance(obj, _BLOCKED_TYPES):
 		raise TypeError("This object cannot be changed.")
 	return obj
-
-
-def _seq_len(value) -> int | None:
-	if isinstance(value, str | bytes | list | tuple):
-		return len(value)
-	return None
-
-
-def _mul(a, b):
-	for seq, n in ((a, b), (b, a)):
-		size = _seq_len(seq)
-		if size is not None and isinstance(n, int) and size * n > MAX_SEQUENCE_ITEMS:
-			raise SandboxUsageError(
-				f"repeating a sequence to more than {MAX_SEQUENCE_ITEMS:,} items is not available."
-			)
-	return a * b
-
-
-def _pow(a, b, mod=None):
-	if isinstance(a, int) and isinstance(b, int) and abs(a) > 1 and b > MAX_INT_EXPONENT and mod is None:
-		raise SandboxUsageError(f"integer powers above {MAX_INT_EXPONENT:,} are not available.")
-	return pow(a, b) if mod is None else pow(a, b, mod)
-
-
-def _lshift(a, b):
-	if isinstance(b, int) and b > MAX_INT_EXPONENT:
-		raise SandboxUsageError(f"shifts above {MAX_INT_EXPONENT:,} bits are not available.")
-	return a << b
 
 
 def _plain_inplace(op: str, x, y):
@@ -724,21 +755,21 @@ def _plain_inplace(op: str, x, y):
 	return ops[op](x, y)
 
 
-def _inplacevar(op: str, x, y):
-	if op == "*=":
-		_mul(x, y)
-	elif op == "**=":
-		_pow(x, y)
-	elif op == "<<=":
-		_lshift(x, y)
+def _raw_inplace(op: str, x, y):
 	if _protected_inplacevar is not None:
 		return _protected_inplacevar(op, x, y)
 	return _plain_inplace(op, x, y)
 
 
-def _aug_item(obj, key, op: str, value):
-	"""``obj[key] op= value``; ``obj`` already went through the write guard."""
-	obj[key] = _inplacevar(op, _getitem(obj, key), value)
+def _inplace_factory(guards: Guards):
+	def _inplacevar(op: str, x, y):
+		return guards.inplace(op, x, y, _raw_inplace)
+
+	def _aug_item(obj, key, op: str, value):
+		"""``obj[key] op= value``; ``obj`` already went through the write guard."""
+		obj[key] = _inplacevar(op, _getitem(obj, key), value)
+
+	return _inplacevar, _aug_item
 
 
 def _range(*args):
@@ -751,14 +782,6 @@ def _range(*args):
 	if size > MAX_RANGE:
 		raise SandboxUsageError(f"range() over {MAX_RANGE:,} numbers is not available.")
 	return r
-
-
-def _safe_pow(a, b, mod=None):
-	return _pow(a, b, mod)
-
-
-def _apply(func, *args, **kwargs):
-	return func(*args, **kwargs)
 
 
 class _TickingIterator:
@@ -800,6 +823,8 @@ def _print_factory(run: _Run):
 			return run.printed_text()
 
 		def _call_print(self, *objects, **kwargs):
+			for value in objects:
+				check_written_size(value, "print()")
 			kwargs = {k: v for k, v in kwargs.items() if k in ("sep", "end")}
 			print(*objects, file=self, **kwargs)
 
@@ -845,7 +870,10 @@ class _Namespace:
 class Row(dict):
 	"""A record as a dict whose fields also read as attributes (``row.customer``). A
 	missing field RAISES (``row.get("x")`` is the way to read an optional one): a
-	misspelled field name must fail, not total as zero."""
+	misspelled field name must fail, not total as zero.
+
+	``__slots__ = ()`` like Frappe 16's ``frappe._dict``: the same layout, so a read's
+	rows become Rows in place (``_rows_in_place``) instead of being copied."""
 
 	__slots__ = ()
 
@@ -863,6 +891,21 @@ class Row(dict):
 
 	def __setattr__(self, name, value):
 		self[name] = value
+
+
+def _rows_in_place(rows: list) -> list:
+	"""A read's flat rows as Rows without copying them: each ``frappe._dict`` changes
+	class in place (same layout). Anything else is copied."""
+	for i, row in enumerate(rows):
+		if type(row) is frappe._dict:
+			try:
+				# Not ``row.__class__ = Row``: frappe._dict's __setattr__ stores a key.
+				object.__setattr__(row, "__class__", Row)
+				continue
+			except TypeError:
+				pass
+		rows[i] = _rows(dict(row))
+	return rows
 
 
 def _rows(value):
@@ -920,7 +963,7 @@ _ESCAPE_KWARGS = frozenset(
 
 _AGGREGATES = ("SUM", "COUNT", "AVG", "MAX", "MIN")
 _AGG_STRING = re.compile(
-	r"^\s*(sum|count|avg|max|min)\s*\(\s*([`\w.]+|\*)\s*\)\s*(?:as\s+[`'\"]?(\w+)[`'\"]?)?\s*$",
+	r"^\s*(sum|count|avg|max|min)\s*\(\s*([^()]+?)\s*\)\s*(?:as\s+[`'\"]?(\w+)[`'\"]?)?\s*$",
 	re.IGNORECASE,
 )
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -940,19 +983,81 @@ def _dict_aggregates_supported() -> bool:
 _DICT_AGGREGATES = _dict_aggregates_supported()
 
 
+# Core doctypes that hold sign-in tokens and keys. (Doctypes with a Password field and
+# every doctype of the jarvis app are refused by rule, see _is_private_doctype.)
+_SECRET_DOCTYPES = frozenset(
+	{
+		"OAuth Bearer Token",
+		"OAuth Authorization Code",
+		"OAuth Client",
+		"OAuth Client Role",
+		"OAuth Scope",
+		"OAuth Settings",
+		"OAuth Provider Settings",
+		"Token Cache",
+		"Connected App",
+		"Social Login Key",
+		"Social Login Keys",
+		"User Social Login",
+		"LDAP Settings",
+		"LDAP Group Mapping",
+	}
+)
+
+
 def _is_private_doctype(doctype: str) -> bool:
-	"""Jarvis's own records (conversations, memory, skills, settings, agent runs): never
-	read through compute, whatever the user's roles. The dedicated tools read them
-	with their own scope checks (recall, find_skills, get_skill ...)."""
-	return doctype.strip().casefold().replace("_", " ").startswith(("jarvis ", "tabjarvis "))
+	"""Never read through compute, whatever the user's roles: every doctype of the
+	jarvis app (conversations, memory, skills, settings, MCP OAuth clients and tokens,
+	connectors ...), core sign-in token and key doctypes, and any doctype with a Password
+	field. ``doctype`` is the canonical name. The dedicated tools read Jarvis's own
+	records with their own scope checks (recall, find_skills, get_skill ...)."""
+	if doctype in _SECRET_DOCTYPES or doctype.casefold().startswith("jarvis "):
+		return True
+	try:
+		meta = frappe.get_meta(doctype)
+	except Exception:
+		return False
+	from frappe.modules.utils import get_module_app
+
+	try:
+		if meta.module and get_module_app(meta.module) == "jarvis":
+			return True
+	except Exception:
+		pass
+	return any(df.fieldtype == "Password" for df in meta.fields)
 
 
 def _refuse_private(doctype: str):
 	if _is_private_doctype(doctype):
 		raise PermissionDeniedError(
-			f"compute reads business records only; {doctype} is Jarvis's own data and is not available "
-			"here. Use the dedicated Jarvis tool for it."
+			f"compute reads business records only; {doctype} is not available here (Jarvis's own data, "
+			"sign-in tokens or passwords). Use the dedicated Jarvis tool for Jarvis's own records."
 		)
+
+
+def _canonical_name(doctype: str) -> str:
+	"""A doctype name as Frappe names it: case, surrounding and repeated whitespace and
+	underscores (``jarvis_conversation``) do not matter."""
+	from jarvis.tools._doctype_name import canonical_doctype
+
+	return canonical_doctype(" ".join(doctype.replace("_", " ").split()))
+
+
+def _did_you_mean(word: str, candidates) -> str:
+	import difflib
+
+	matches = difflib.get_close_matches(word, list(candidates), n=3, cutoff=0.6)
+	return f" Did you mean {', '.join(matches)}?" if matches else ""
+
+
+def _readable_doctype_matches(name: str) -> str:
+	"""Up to three doctypes close to ``name`` that the user can read."""
+	import difflib
+
+	names = frappe.get_all("DocType", filters={"istable": 0}, pluck="name")
+	close = difflib.get_close_matches(name, names, n=10, cutoff=0.6)
+	readable = [d for d in close if not _is_private_doctype(d) and frappe.has_permission(d, ptype="read")]
+	return f" Did you mean {', '.join(readable[:3])}?" if readable else ""
 
 
 def _doctype(doctype) -> str:
@@ -960,12 +1065,12 @@ def _doctype(doctype) -> str:
 		raise SandboxUsageError(
 			"the first argument must be a doctype name, e.g. get_list('Sales Invoice', ...)."
 		)
-	from jarvis.tools._doctype_name import canonical_doctype
-
-	name = canonical_doctype(doctype.strip())
-	_refuse_private(name)
+	name = _canonical_name(doctype)
 	if not frappe.db.exists("DocType", name):
-		raise SandboxUsageError(f"unknown doctype '{doctype}'. Check the name with get_schema.")
+		raise SandboxUsageError(
+			f"unknown doctype '{doctype}'.{_readable_doctype_matches(name)} Check the name with get_schema."
+		)
+	_refuse_private(name)
 	return name
 
 
@@ -994,8 +1099,9 @@ def _translate_field(entry):
 	if isinstance(entry, str) and _DICT_AGGREGATES:
 		m = _AGG_STRING.match(entry)
 		if m:
-			func, arg, alias = m.group(1).upper(), m.group(2).strip("`"), m.group(3)
-			return {func: arg, "as": alias or f"{func.lower()}_{arg.replace('*', 'all').replace('.', '_')}"}
+			func, arg, alias = m.group(1).upper(), m.group(2).strip(), m.group(3)
+			bare = re.sub(r"\W+", "_", arg.replace("`", "").split(".")[-1]).strip("_") or "all"
+			return {func: arg, "as": alias or f"{func.lower()}_{bare}"}
 	return entry
 
 
@@ -1036,8 +1142,14 @@ def _check_known_fields(doctype: str, fields) -> None:
 		if name and name not in columns:
 			unknown.append(name)
 	if unknown:
+		readable = columns
+		if frappe.session.user != "Administrator":
+			from frappe.model import get_permitted_fields
+
+			readable = columns & set(get_permitted_fields(doctype))
+		hints = "".join(_did_you_mean(name, readable) for name in sorted(set(unknown)))
 		raise SandboxUsageError(
-			f"{doctype} has no field(s) {', '.join(sorted(set(unknown)))}. Check the names with "
+			f"{doctype} has no field(s) {', '.join(sorted(set(unknown)))}.{hints} Check the names with "
 			"get_meta(doctype) or get_schema; a child table's field is read from the child doctype "
 			"with parent_doctype."
 		)
@@ -1095,7 +1207,7 @@ def _int_arg(name: str, value) -> int | None:
 
 
 # --------------------------------------------------------------------------- #
-# Read receipts and the currency guard                                         #
+# Read receipts                                                                #
 # --------------------------------------------------------------------------- #
 
 
@@ -1111,87 +1223,6 @@ def _receipt_value(value):
 		except Exception:
 			return text
 	return text[:RECEIPT_TEXT_CHARS] + "...(cut)"
-
-
-def _and_list(items) -> str:
-	items = list(items)
-	return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
-
-
-def _money_fields(meta) -> dict[str, str]:
-	"""``{fieldname: currency field}`` for this doctype's Currency fields whose amount is
-	in a per-row currency: the field's ``options`` names another column of the same
-	doctype (``currency``, ``party_account_currency``, ``account_currency`` ...).
-	``Company:company:default_currency`` (the ``base_*`` fields) and blank options are
-	one currency for the company and are left out, as is a child table's field whose
-	currency lives on its parent. Read from the meta, never from a list of names."""
-	columns = set(meta.get_valid_columns())
-	out = {}
-	for df in meta.fields:
-		if df.fieldtype != "Currency" or not df.fieldname or df.fieldname not in columns:
-			continue
-		options = (df.options or "").strip()
-		if options and ":" not in options and options in columns:
-			out[df.fieldname] = options
-	return out
-
-
-def _money_use(fields, money: dict[str, str]) -> tuple[set[str], set[str], set[str]]:
-	"""``(selected, aggregated, plain)`` for a read's (translated) fields: the money
-	fields it returns row by row, the ones it SUM / AVG / MIN / MAX-es in the database,
-	and every plain field it selects."""
-	selected: set[str] = set()
-	aggregated: set[str] = set()
-	plain: set[str] = set()
-	for entry in fields or []:
-		if isinstance(entry, dict):
-			funcs = [k for k in entry if k != "as"]
-			arg = entry[funcs[0]] if len(funcs) == 1 else None
-			name = arg.strip("`") if isinstance(arg, str) else None
-			if name in money and str(funcs[0]).upper() in ("SUM", "AVG", "MIN", "MAX"):
-				aggregated.add(name)
-			elif name is None:  # an expression over fields, per row
-				selected |= set(_IDENT.findall(json.dumps(entry, default=str))) & set(money)
-			continue
-		if not isinstance(entry, str):
-			continue
-		if entry.strip() == "*":
-			selected |= set(money)
-			continue
-		agg = _AGG_STRING.match(entry)
-		if agg:
-			name = agg.group(2).strip("`")
-			if name in money and agg.group(1).upper() in ("SUM", "AVG", "MIN", "MAX"):
-				aggregated.add(name)
-			continue
-		m = _PLAIN_FIELD.match(entry)
-		if m:
-			plain.add(m.group(1))
-			if m.group(1) in money:
-				selected.add(m.group(1))
-	return selected, aggregated, plain
-
-
-def _currency_message(doctype: str, currencies: list[str], field: str, governing: str, meta, *, summed: bool):
-	"""The explanation shared by the error (a database SUM) and the warning (rows)."""
-	base = f"base_{field}"
-	base_df = meta.get_field(base)
-	has_base = bool(base_df and base_df.fieldtype == "Currency" and ":" in (base_df.options or ""))
-	head = f"{doctype} rows here are in {_and_list(currencies)}. {field} is in each row's {governing}, so "
-	if summed:
-		head += "one SUM mixes currencies. "
-		fix = f"Group by {governing}"
-		fix += f", or sum the company-currency field {base} instead." if has_base else ""
-	else:
-		head += "adding it across rows mixes currencies. "
-		fix = f"Total it per {governing}"
-		fix += f", or use the company-currency field {base}." if has_base else ""
-	if not has_base:
-		has_rate = bool(meta.get_field("conversion_rate"))
-		fix += (
-			", or convert each row with conversion_rate first." if has_rate else " and report each currency."
-		)
-	return head + fix
 
 
 def make_reads(run: _Run) -> dict:
@@ -1315,95 +1346,27 @@ def make_reads(run: _Run) -> dict:
 			)
 		run.take_rows(len(rows), f"get_list('{doctype}')")
 
-		receipt = {"source": source, "doctype": doctype, "filters": _receipt_value(filters or {})}
-		if kwargs.get("or_filters"):
-			receipt["or_filters"] = _receipt_value(kwargs["or_filters"])
-		receipt["fields"] = _receipt_value(as_given)
-		if kwargs.get("group_by"):
-			receipt["group_by"] = _receipt_value(kwargs["group_by"])
-		receipt["rows"] = len(rows)
+		receipt = {"doctype": doctype, "rows": len(rows)}
+		if filters:
+			receipt["filters"] = _receipt_value(filters)
 		if source == "get_list" and limit is not None:
 			receipt["limited"] = True
 			receipt["limit"] = limit
-			if len(rows) == limit:
+			# A limit with an order_by is a deliberate top-N; without one it cuts a total.
+			if len(rows) == limit and not kwargs.get("order_by"):
 				run.warn(
 					("limit", doctype),
 					f"get_list('{doctype}') stopped at its limit of {limit} rows; totals from it are "
-					"partial. Drop the limit to read every matching row (or keep it for a top-N on purpose).",
+					"partial. Drop the limit to read every matching row (or add an order_by for a top-N).",
 				)
 		run.record_read(receipt)
 		if source == "get_list":
-			_guard_currency(doctype, meta, fields, rows, filters, kwargs, parent_doctype, receipt)
+			from jarvis.tools import _compute_amounts
+
+			_compute_amounts.check(run, doctype, meta, parent_doctype, fields, rows, filters, kwargs, receipt)
 		if pluck is not None:
 			return [row.get(pluck) for row in rows]
-		return [_rows(dict(row)) for row in rows]
-
-	def _guard_currency(doctype, meta, fields, rows, filters, kwargs, parent_doctype, receipt):
-		"""Catch amounts in several currencies being added together.
-
-		For each per-row-currency money field the read selects or aggregates
-		(``_money_fields``, from the meta), find which currencies the matching rows are
-		in: from the rows when the read returns its currency field row by row, else with
-		ONE extra permissioned grouped read over the same filters. A database SUM / AVG /
-		MIN / MAX over several currencies that is not grouped by the currency field fails
-		the call; amounts merely returned in several currencies get a warning (the script
-		may total them per currency). One currency: the receipt names it."""
-		money = _money_fields(meta)
-		if not money:
-			return
-		selected, aggregated, plain = _money_use(fields, money)
-		if not (selected or aggregated):
-			return
-		grouped = set(_IDENT.findall(str(kwargs.get("group_by") or "").replace("`", "")))
-		found: set[str] = set()
-		for governing in sorted({money[f] for f in selected | aggregated}):
-			if governing in plain and (not grouped or governing in grouped):
-				currencies = {r.get(governing) for r in rows}
-			else:
-				currencies = _probe_currencies(doctype, governing, filters, kwargs, parent_doctype)
-				if currencies is None:
-					continue  # the currency field is not readable to this user
-			currencies = sorted(c for c in currencies if c)
-			found.update(currencies)
-			if len(currencies) < 2:
-				continue
-			for field in sorted(f for f in aggregated if money[f] == governing):
-				if governing not in grouped:
-					run.fail(_currency_message(doctype, currencies, field, governing, meta, summed=True))
-			for field in sorted(f for f in selected if money[f] == governing):
-				if governing in grouped:
-					continue
-				run.warn(
-					("currency", doctype, field),
-					_currency_message(doctype, currencies, field, governing, meta, summed=False),
-				)
-		if len(found) == 1:
-			receipt["currency"] = next(iter(found))
-		elif found:
-			receipt["currencies"] = sorted(found)
-
-	def _probe_currencies(doctype, governing, filters, kwargs, parent_doctype) -> set | None:
-		"""The distinct values of ``governing`` over the read's own filters, read with
-		the user's permissions (one grouped query). None when the user cannot read that
-		field (then nothing is claimed either way)."""
-		if frappe.session.user != "Administrator":
-			from frappe.model import get_permitted_fields
-
-			if governing not in get_permitted_fields(doctype, parenttype=parent_doctype):
-				return None
-		call = {
-			"fields": [governing],
-			"filters": filters or {},
-			"group_by": governing,
-			"order_by": f"{governing} asc",
-			"limit": MAX_PROBED_CURRENCIES,
-			"ignore_permissions": False,
-		}
-		if kwargs.get("or_filters"):
-			call["or_filters"] = kwargs["or_filters"]
-		if parent_doctype:
-			call["parent_doctype"] = parent_doctype
-		return {r.get(governing) for r in frappe.get_list(doctype, **call)}
+		return _rows_in_place(rows)
 
 	def get_doc(doctype, name=None):
 		run.check_time()
@@ -1424,17 +1387,9 @@ def make_reads(run: _Run) -> dict:
 			raise SandboxUsageError(str(e)) from None
 		children = sum(len(v) for v in doc.values() if isinstance(v, list))
 		run.take_rows(1 + children, f"get_doc('{doctype}')")
-		receipt = {
-			"source": "get_doc",
-			"doctype": doctype,
-			"name": _receipt_value(doc.get("name")),
-			"rows": 1,
-		}
-		if children:
-			receipt["child_rows"] = children
-		for field in ("currency", "party_account_currency"):
-			if doc.get(field):
-				receipt[field] = doc[field]
+		receipt = {"doctype": doctype, "rows": 1 + children}
+		if doc.get("currency"):
+			receipt["currency"] = doc["currency"]
 		run.record_read(receipt)
 		return _rows(doc)
 
@@ -1471,7 +1426,7 @@ def make_reads(run: _Run) -> dict:
 	def count(doctype, filters=None):
 		rows = _read_list(doctype, [{"COUNT": "*", "as": "n"}], filters, {}, source="count")
 		n = int(rows[0]["n"] or 0) if rows else 0
-		run.last_receipt["count"] = n
+		run.last_receipt["rows"] = n  # the rows counted, not the one row the count came in
 		return n
 
 	def get_meta(doctype):
@@ -1517,8 +1472,9 @@ def make_reads(run: _Run) -> dict:
 		ref = frappe.db.get_value("Report", report_name, "ref_doctype")
 		if isinstance(ref, str):
 			_refuse_private(ref)
+		run.activity = f"run_report('{report_name}')"
 		try:
-			data = _run_report(report_name, filters, ready_copy_only=True)
+			data = _run_report(report_name, filters, no_background=True)
 		except frappe.PermissionError as e:
 			raise PermissionDeniedError(_clean(e) or f"no permission to run report {report_name}") from None
 		except InvalidArgumentError as e:
@@ -1527,6 +1483,8 @@ def make_reads(run: _Run) -> dict:
 			raise SandboxUsageError(f"run_report('{report_name}'): {e}") from None
 		except frappe.ValidationError as e:
 			raise SandboxUsageError(f"run_report('{report_name}'): {_clean(e)}") from None
+		finally:
+			run.activity = None
 		columns = normalise_columns(data.get("columns") or [])
 		result = list(data.get("result") or [])
 		total_row = None
@@ -1539,15 +1497,17 @@ def make_reads(run: _Run) -> dict:
 				"filters (a date range, a company, a party)."
 			)
 		run.take_rows(len(rows), f"run_report('{report_name}')")
-		run.record_read(
-			{
-				"source": "run_report",
-				"report": report_name,
-				"filters": _receipt_value(filters or {}),
-				"rows": len(rows),
-				**({"total_row": True} if total_row is not None else {}),
-			}
-		)
+		# A Prepared Report's finished copy says when it was made; a stale copy must not
+		# look current.
+		prepared = bool(data.get("prepared"))
+		as_of = str(data["as_of"]) if prepared and data.get("as_of") else None
+		receipt = {"report": report_name, "rows": len(rows)}
+		if filters:
+			receipt["filters"] = _receipt_value(filters)
+		if prepared:
+			receipt["prepared"] = True
+			receipt["as_of"] = as_of
+		run.record_read(receipt)
 		return Row(
 			{
 				"columns": [
@@ -1555,6 +1515,8 @@ def make_reads(run: _Run) -> dict:
 				],
 				"rows": rows,
 				"total_row": _report_row(total_row, columns) if total_row is not None else None,
+				"prepared": prepared,
+				"as_of": as_of,
 			}
 		)
 
@@ -1666,19 +1628,66 @@ _UTIL_NAMES = (
 )
 
 
+# Decimal places a number helper may be asked for: flt / rounded / fmt_money compute
+# 10**precision, so flt(x, 10**9) would hold the worker in C. Money needs a few.
+MAX_PRECISION = 30
+# money_in_words spells the number out: beyond a quadrillion it is no amount.
+MAX_WORDS_AMOUNT = 10**15
+# Positional index of the precision argument of each helper that takes one.
+_PRECISION_ARG = {"flt": 1, "rounded": 1, "fmt_money": 1}
+
+
+def _precision_guard(name: str, func):
+	index = _PRECISION_ARG[name]
+
+	def guarded(*args, **kwargs):
+		precision = args[index] if len(args) > index else kwargs.get("precision")
+		if isinstance(precision, int) and not isinstance(precision, bool) and abs(precision) > MAX_PRECISION:
+			raise SandboxUsageError(f"{name}() with precision above {MAX_PRECISION} is not available.")
+		return func(*args, **kwargs)
+
+	return guarded
+
+
+def _money_in_words_guard(func):
+	def guarded(number, *args, **kwargs):
+		try:
+			too_big = abs(float(number)) >= MAX_WORDS_AMOUNT
+		except (TypeError, ValueError, OverflowError):
+			too_big = False
+		if too_big:
+			raise SandboxUsageError("money_in_words() takes amounts below a quadrillion.")
+		return func(number, *args, **kwargs)
+
+	return guarded
+
+
 def _utils() -> dict:
 	import frappe.utils
 
-	return {
-		name: getattr(frappe.utils, name)
-		for name in _UTIL_NAMES
-		if callable(getattr(frappe.utils, name, None))
-	}
+	out = {}
+	for name in _UTIL_NAMES:
+		func = getattr(frappe.utils, name, None)
+		if not callable(func):
+			continue
+		if name in _PRECISION_ARG:
+			func = _precision_guard(name, func)
+		elif name == "money_in_words":
+			func = _money_in_words_guard(func)
+		out[name] = func
+	return out
+
+
+# json.dumps(indent=10**8) multiplies the output by the indent: pretty-printing needs a few.
+MAX_JSON_INDENT = 8
 
 
 def _json_dumps(obj, indent=None, sort_keys=False):
 	from frappe.utils.response import json_handler
 
+	if indent is not None and (not isinstance(indent, int) or not 0 <= indent <= MAX_JSON_INDENT):
+		raise SandboxUsageError(f"json.dumps indent must be a whole number from 0 to {MAX_JSON_INDENT}.")
+	check_written_size(obj, "json.dumps()")
 	return json.dumps(obj, indent=indent, sort_keys=sort_keys, default=json_handler)
 
 
@@ -1715,16 +1724,13 @@ _PLAIN_BUILTINS = {
 	"min": min,
 	"next": next,
 	"ord": ord,
-	"pow": _safe_pow,
 	"range": _range,
 	"repr": repr,
 	"reversed": reversed,
-	"round": round,
 	"set": set,
 	"slice": slice,
 	"sorted": sorted,
 	"str": str,
-	"sum": sum,
 	"tuple": tuple,
 	"zip": zip,
 	"Exception": Exception,
@@ -1741,13 +1747,15 @@ _PLAIN_BUILTINS = {
 	"ValueError": ValueError,
 	"ZeroDivisionError": ZeroDivisionError,
 }
-_PLAIN_BUILTIN_NAMES = frozenset(_PLAIN_BUILTINS)
+_PLAIN_BUILTIN_NAMES = frozenset(_PLAIN_BUILTINS) | {"pow", "round", "sum", "repr", "str"}
 
 
 def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set[str]]]:
 	"""``(globals, available_names, frappe_names)`` for one run. Built fresh per call:
 	nothing the script does to its namespace outlives the call."""
 	reads = make_reads(run)
+	guards = Guards(run.check_memory)
+	inplacevar, aug_item = _inplace_factory(guards)
 	utils = _utils()
 	session = _Namespace("frappe.session", {"user": user})
 	db = _Namespace(
@@ -1798,29 +1806,37 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 		"datetime": datetime_ns,
 		"date": datetime.date,
 		"timedelta": datetime.timedelta,
-		"Decimal": decimal.Decimal,
 		**reads,
 		**utils,
 	}
-	builtins = dict(_PLAIN_BUILTINS)
+	builtins = {
+		**_PLAIN_BUILTINS,
+		"pow": guards.pow,
+		"round": guards.round,
+		"sum": guards.sum,
+		"repr": guards.repr,
+		"str": guards.str_type(),
+		# Unreachable from the script (names starting with "_" never compile); C code
+		# such as datetime.strftime imports ``time`` through it.
+		"__import__": internal_import,
+	}
 	glb = {
 		"__builtins__": builtins,
 		"__name__": "jarvis_compute",
 		**named,
-		"_getattr_": _getattr,
+		"_getattr_": _getattr_factory(guards),
 		"_getitem_": _getitem,
 		"_write_": _write,
 		"_getiter_": _getiter_factory(run),
 		_TICK: run.tick,
 		"_iter_unpack_sequence_": _rp_guards.guarded_iter_unpack_sequence,
 		"_unpack_sequence_": _rp_guards.guarded_unpack_sequence,
-		"_inplacevar_": _inplacevar,
-		"_apply_": _apply,
+		"_inplacevar_": inplacevar,
+		"_apply_": guards.apply,
 		"_print_": _print_factory(run),
-		_AUG_ITEM: _aug_item,
-		_MUL: _mul,
-		_POW: _pow,
-		_LSHIFT: _lshift,
+		_AUG_ITEM: aug_item,
+		_BINOP: guards.binop,
+		_FORMAT: guards.format_value,
 	}
 	available = set(named) | set(builtins)
 	frappe_names = {"": frappe_ns.names(), "db": db.names(), "utils": utils_ns.names()}
