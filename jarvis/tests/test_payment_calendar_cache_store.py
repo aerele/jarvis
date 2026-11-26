@@ -456,6 +456,16 @@ class TestPublish(SideCase):
 		self.assertEqual(gen.as_of, AS_OF)
 		self.assertEqual(len(gen.checksum), 64)
 
+	def test_the_ledger_lines_of_the_build_are_stored_on_the_generation(self):
+		held = self.claim()
+		self.publish(held, stats=cache_store.BuildStats(ledger_lines=33_621))
+		self.assertEqual(self.gen(held.generation).ledger_lines, 33_621)
+
+	def test_a_build_that_counted_no_ledger_lines_stores_zero(self):
+		held = self.claim()
+		self.publish(held)
+		self.assertEqual(self.gen(held.generation).ledger_lines, 0)
+
 	def test_rows_are_stored_exact_with_the_documented_names(self):
 		held = self.claim()
 		self.publish(held, [_row(voucher_no="SI-1"), _row(voucher_no="SI-2", remaining=Decimal("12.3400"))])
@@ -575,6 +585,12 @@ class TestNoChangeSkip(SideCase):
 		evidence = self.gen(second.generation)
 		self.assertEqual((evidence.state, evidence.outcome, evidence.row_count), ("retired", "unchanged", 1))
 		self.assertEqual(self.row_count(second.generation), 0)
+
+	def test_the_evidence_of_a_skip_keeps_the_ledger_lines_of_its_own_build(self):
+		first = self._current()
+		second = cache_store.next_generation(first)
+		self.publish(second, as_of=AS_OF.replace(hour=9), stats=cache_store.BuildStats(ledger_lines=77))
+		self.assertEqual(self.gen(second.generation).ledger_lines, 77)
 
 	def test_a_skip_leaves_the_stored_rows_untouched(self):
 		first = self._current()

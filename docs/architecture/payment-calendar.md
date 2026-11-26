@@ -1367,7 +1367,7 @@ and so that a nightly proof can show that the copy equals today's read before S5
 | Table (DocType) | Holds |
 | --- | --- |
 | Jarvis Payment Calendar Cache Head | One row per (company, side). The side is Receivable, Payable or Bank. It holds the current generation, the durable claim, the purge epoch, the hop counter, the backoff and failure state, and the last open, success, duration and size. |
-| Jarvis Payment Calendar Cache Generation | One row per refresh result: state (`building`, `ready`, `current`, `retired`, `failed`, `purged`), anchor, `as_of`, counts, bytes, checksum, payload, timing, failure class, and the night oracle record (`shadow`). Metadata stays 30 days. |
+| Jarvis Payment Calendar Cache Generation | One row per refresh result: state (`building`, `ready`, `current`, `retired`, `failed`, `purged`), anchor, `as_of`, counts, `ledger_lines` (the size gate's measure, below), bytes, checksum, payload, timing, failure class, and the night oracle record (`shadow`). Metadata stays 30 days. |
 | Jarvis Payment Calendar Cache Row | The rows of one generation. Money is stored as text. A row carries the permission data it needs and the residue flags. |
 
 A generation holds every open row of a side (remaining not zero), the zero-balance residue rows that the reader's
@@ -1510,12 +1510,33 @@ balance with `get_balance_on`. The record (`compared`, `compared_sample`, `open_
 The gate for S5 counts, per company and side, the nights on the deployed `cache_build` with `compared` or
 `compared_sample`, and no diff.
 
+### The size gate
+
+No measurement exists for a company larger than the measured playground company (owner decision OD-B4 = D: no
+large-data measurement). So no night of a larger generation may count as evidence. Each generation stores
+`ledger_lines`, the size it was built from: for Receivable and Payable the line total of the preflight's control
+pairs (the ledger aggregate that runs before the read), for Bank the GL rows of the bank and cash accounts (not
+cancelled, up to the anchor). `cache_state.within_measured_size(side, ledger_lines, rows)` is the one rule:
+
+| Side | Within when |
+| --- | --- |
+| Receivable and Payable | at most 33,621 ledger lines (`MEASURED_LEDGER_LINES`) and at most 2,962 stored rows (`MEASURED_STORED_ROWS`) |
+| Bank | at most 20,416 GL rows (`MEASURED_BANK_GL_ROWS`) |
+
+A limit itself is within. The numbers are the measured size (partial T0, 2026-11-26); raise them only with a new
+T0. The cache still builds and compares a larger side, and its record still shows as `last` in `cache_status()`,
+but the night earns no credit: `oracle_by_side` leaves such a generation out of `on_build` and `nights`, as it does an
+operator record, and the side shows `size_gate: "above_measured"` (from its current generation; else `"within"`).
+Any gate in S5 must use the same helper. The S5 card rule (only a company above 100,000 ledger rows) and this gate
+exclude each other, so **S5 serves no company until a large-company measurement exists.** A generation built before
+the column existed has `ledger_lines` 0 and counts as within.
+
 ### Status and alerts
 
 `cache_status()` (System Manager; also `bench --site <site> execute jarvis.payment_calendar.cache_status.cache_status`)
 returns, per company digest and side: the state (`fresh`, `due`, `running`, `memo`, `backoff`), age, rows, bytes,
 last outcome and failure class, failure count, backoff level, generation counts, the duration p95, the
-next due time, `max_age_s_today`, and the last oracle outcome with the nights counted on this build. At the top it
+next due time, `max_age_s_today`, the last oracle outcome with the nights counted on this build, and the `size_gate`. At the top it
 shows the switch, the build, the lane (`day_lane` is `live` or `absent`; `refresh` is `day+night` or
 `night-only`), and the skip counters of today and yesterday (`cache.count_skip`, one
 Redis counter per reason, no names). A company name appears only when the caller can read that Company; the sides of a Company that the caller cannot

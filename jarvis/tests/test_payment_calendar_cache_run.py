@@ -43,6 +43,7 @@ from jarvis.tests.test_payment_calendar_cache_store import (
 REAL_TAKE_SLOT = cache_state.take_slot
 REAL_RELEASE_SLOT = cache_state.release_slot
 REAL_RENEW_SLOT = cache_state.renew_slot
+CONTROL_LINES = 4_321
 
 
 def canned(*rows, doctypes=("Sales Invoice", "Customer"), **payload):
@@ -70,7 +71,9 @@ class RunCase(SideCase):
 			"_scheduler_inactive": lambda: False,
 			"_tdr_running": lambda: False,
 			"_free_disk_bytes": lambda: 10**15,
-			"_control_types": lambda company, side: frozenset({"Sales Invoice"}),
+			"_control": lambda company, side: cache_refresh.Control(
+				frozenset({"Sales Invoice"}), CONTROL_LINES
+			),
 			"query_hook_offenders": lambda doctypes: [],
 			"hook_fingerprint": lambda doctypes: "fp",
 		}
@@ -485,7 +488,7 @@ class TestSkipMemo(RunCase):
 
 class TestPreflightAggregate(RunCase):
 	def test_a_statement_timeout_in_the_control_aggregate_is_recorded_as_too_large(self):
-		with patch.object(cache_refresh, "_control_types", side_effect=real_statement_timeout()):
+		with patch.object(cache_refresh, "_control", side_effect=real_statement_timeout()):
 			result = self.go()
 		self.assertEqual(result.outcome, "skipped:history_too_large")
 		head = self.head()
@@ -497,7 +500,7 @@ class TestPreflightAggregate(RunCase):
 
 	def test_a_second_statement_timeout_walks_the_ladder_and_each_is_counted(self):
 		with (
-			patch.object(cache_refresh, "_control_types", side_effect=real_statement_timeout()),
+			patch.object(cache_refresh, "_control", side_effect=real_statement_timeout()),
 			patch.object(cache, "count_skip") as counted,
 		):
 			self.go()
@@ -508,7 +511,7 @@ class TestPreflightAggregate(RunCase):
 		self.assertEqual([call.args for call in counted.call_args_list], [("history_too_large",)] * 2)
 
 	def test_a_lock_wait_in_the_aggregate_is_not_a_too_large_history(self):
-		with patch.object(cache_refresh, "_control_types", side_effect=frappe.QueryTimeoutError()):
+		with patch.object(cache_refresh, "_control", side_effect=frappe.QueryTimeoutError()):
 			result = self.go()
 		self.assertEqual(result.outcome, "failed:error:QueryTimeoutError")
 		self.assertEqual(self.generations(), [])
@@ -521,7 +524,9 @@ class TestPreflightAggregate(RunCase):
 				cache_state, "renew_slot", side_effect=lambda *a, **k: order.append("renew") or True
 			),
 			patch.object(
-				cache_refresh, "_control_types", side_effect=lambda *a: order.append("control") or frozenset()
+				cache_refresh,
+				"_control",
+				side_effect=lambda *a: order.append("control") or cache_refresh.Control(),
 			),
 		):
 			self.go()
@@ -707,6 +712,15 @@ class TestChain(RunCase):
 		self.assertEqual(self.hop.call_count, 2)
 		self.assertNotEqual(self.hop.call_args_list[0].args[2], self.hop.call_args_list[1].args[2])
 
+	def test_every_pass_of_a_chain_writes_the_ledger_lines_of_its_preflight(self):
+		self.go()
+		frappe.db.rollback()
+		stored = frappe.db.sql(
+			f"select ledger_lines from `tab{GENERATION}` where company=%s and side=%s",
+			(self.company, self.side),
+		)
+		self.assertEqual(stored, ((CONTROL_LINES,),) * 3)
+
 	def test_a_company_not_opened_does_not_loop_and_is_not_handed_over(self):
 		result = self.go(opened=False)
 		self.assertEqual(result.iterations, 1)
@@ -867,6 +881,46 @@ class TestNightOnOneLongWorker(RunCase):
 	def test_a_second_unit_waits_while_the_only_night_slot_is_held(self):
 		self.assertIsNotNone(cache_state.take_slot("other", night=True))
 		self.assertEqual(self.go(night=True).outcome, "skipped:no_slot")
+
+
+class TestLedgerLinesWritten(RunCase):
+	"""E10-3: every build writes the ledger lines its preflight counted (Bank: the GL rows its read counted)."""
+
+	def stored(self):
+		frappe.db.rollback()
+		return [
+			row[0]
+			for row in frappe.db.sql(
+				f"select ledger_lines from `tab{GENERATION}` where company=%s and side=%s and state='current'",
+				(self.company, self.side),
+			)
+		]
+
+	def test_a_day_build_writes_the_control_pair_line_total(self):
+		self.assertEqual(self.go().outcome, "swapped")
+		self.assertEqual(self.stored(), [CONTROL_LINES])
+
+	def test_a_night_build_writes_the_control_pair_line_total(self):
+		with patch.object(cache, "in_prewarm_window", return_value=True):
+			self.assertEqual(self.go(night=True).outcome, "swapped")
+		self.assertEqual(self.stored(), [CONTROL_LINES])
+
+	def test_an_operator_build_writes_the_control_pair_line_total(self):
+		self.assertEqual(self.go(night=True, any_time=True).outcome, "swapped")
+		self.assertEqual(self.stored(), [CONTROL_LINES])
+
+	def test_the_operator_rebuild_writes_the_control_pair_line_total(self):
+		with patch.object(cache, "in_prewarm_window", return_value=False):
+			cache_refresh.rebuild(self.company, self.side, use_night_slot=True)
+		self.assertEqual(self.stored(), [CONTROL_LINES])
+
+	def test_the_bank_side_keeps_the_gl_rows_its_read_counted(self):
+		self.side = "Bank"
+		build = canned(doctypes=("Account", "GL Entry"))
+		build.stats.ledger_lines = 20_416
+		self.script = [build]
+		self.assertEqual(self.go().outcome, "swapped")
+		self.assertEqual(self.stored(), [20_416])
 
 
 class TestOracle(RunCase):

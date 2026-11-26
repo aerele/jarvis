@@ -56,6 +56,12 @@ LOOP_MIN_LEFT_S = D_MAX_S + CLAIM_MARGIN_S
 JOB_TIMEOUT_DAY_S = 1200
 JOB_TIMEOUT_NIGHT_S = 1800
 
+# The size gate: the measured playground company (partial T0, 2026-11-26). Raise only with a new T0.
+# A generation above a limit earns no night evidence (`within_measured_size`).
+MEASURED_LEDGER_LINES = 33_621  # Receivable and Payable: ledger lines of the side's control pairs
+MEASURED_STORED_ROWS = 2_962  # Receivable and Payable: rows stored in the generation
+MEASURED_BANK_GL_ROWS = 20_416  # Bank: GL rows of the bank and cash accounts
+
 
 @dataclass(frozen=True)
 class CacheSettings:
@@ -77,6 +83,17 @@ class CacheSettings:
 _OFF = CacheSettings("off", (), False)
 # The switch could not be read. It acts as `off` for serving and queueing, but nothing may be purged on it.
 UNKNOWN = CacheSettings("off", (), False, known=False)
+
+
+def within_measured_size(side: str, ledger_lines: int, rows: int) -> bool:
+	"""True when a generation is no larger than the measured size (partial T0, 2026-11-26); raise only with a new T0.
+
+	Receivable and Payable are limited by ledger lines and stored rows, Bank by its GL rows (`ledger_lines`).
+	A limit itself is within. No measurement exists above it, so S5 serves nothing above it.
+	"""
+	if side == "Bank":
+		return ledger_lines <= MEASURED_BANK_GL_ROWS
+	return ledger_lines <= MEASURED_LEDGER_LINES and rows <= MEASURED_STORED_ROWS
 
 
 def cache_settings(*, lists_when_off: bool = True) -> CacheSettings:

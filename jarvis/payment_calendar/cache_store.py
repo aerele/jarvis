@@ -201,6 +201,8 @@ class BuildStats:
 	peak_rss_mb: int = 0
 	read_view_ms: int = 0
 	hook_fingerprint: str = ""
+	# The size gate's measure: the preflight's control-pair line total (Bank: the GL rows its read counted).
+	ledger_lines: int = 0
 
 
 @dataclass(frozen=True)
@@ -813,7 +815,7 @@ def _set_meta(claim_, meta, as_of, stats, **extra) -> None:
 	frappe.db.sql(
 		f"UPDATE `tab{GENERATION}` SET as_of=%s, row_count=%s, residue_count=%s, excluded_count=%s, bytes=%s, "
 		"checksum=%s, payload=%s, hook_fingerprint=%s, duration_ms=%s, peak_rss_mb=%s, read_view_ms=%s, "
-		"max_write_txn_ms=%s WHERE name=%s",
+		"ledger_lines=%s, max_write_txn_ms=%s WHERE name=%s",
 		(
 			as_of,
 			meta["rows"],
@@ -826,6 +828,7 @@ def _set_meta(claim_, meta, as_of, stats, **extra) -> None:
 			stats.duration_ms,
 			stats.peak_rss_mb,
 			stats.read_view_ms,
+			stats.ledger_lines,
 			extra.get("max_write_txn_ms", 0),
 			claim_.generation,
 		),

@@ -10,6 +10,7 @@ Run ONLY on the test site:
 
 import json
 import time
+from decimal import Decimal
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
@@ -17,7 +18,7 @@ import frappe
 
 from jarvis.payment_calendar import cache, cache_state, cache_status, cache_store, read_log, routing
 from jarvis.tests import test_payment_calendar_cache_tick as tick_tests
-from jarvis.tests.test_payment_calendar_cache_store import GENERATION, HEAD, _sql
+from jarvis.tests.test_payment_calendar_cache_store import GENERATION, HEAD, _row, _sql
 from jarvis.tests.test_payment_calendar_routing import _as, _ensure_system_manager
 
 FAR_DAY = "2099-01-01"
@@ -425,6 +426,126 @@ class TestOracleInStatus(StableCase):
 		_sql(f"update `tab{GENERATION}` set shadow='[1]' where state='current'")
 		frappe.db.commit()
 		self.assertEqual(self.oracle()["last"], "unreadable")
+
+
+class TestWithinMeasuredSize(TestCase):
+	"""E10: the one rule of the size gate, at its limits (the measured playground company)."""
+
+	def test_the_measured_limits_are_the_playground_values(self):
+		self.assertEqual(cache_state.MEASURED_LEDGER_LINES, 33_621)
+		self.assertEqual(cache_state.MEASURED_STORED_ROWS, 2_962)
+		self.assertEqual(cache_state.MEASURED_BANK_GL_ROWS, 20_416)
+
+	def test_a_receivable_or_payable_side_exactly_at_both_limits_is_within(self):
+		for side in ("Receivable", "Payable"):
+			with self.subTest(side):
+				self.assertTrue(cache_state.within_measured_size(side, 33_621, 2_962))
+
+	def test_one_ledger_line_above_the_limit_is_above_on_receivable_and_payable(self):
+		for side in ("Receivable", "Payable"):
+			with self.subTest(side):
+				self.assertFalse(cache_state.within_measured_size(side, 33_622, 0))
+
+	def test_one_stored_row_above_the_limit_is_above_on_receivable_and_payable(self):
+		for side in ("Receivable", "Payable"):
+			with self.subTest(side):
+				self.assertFalse(cache_state.within_measured_size(side, 0, 2_963))
+
+	def test_the_bank_side_is_limited_by_its_gl_rows_alone(self):
+		self.assertTrue(cache_state.within_measured_size("Bank", 20_416, 10**6))
+		self.assertFalse(cache_state.within_measured_size("Bank", 20_417, 2))
+
+	def test_a_side_with_nothing_counted_is_within(self):
+		for side in cache_store.SIDES:
+			self.assertTrue(cache_state.within_measured_size(side, 0, 0))
+
+
+class TestSizeGateInStatus(StableCase):
+	"""E10-1, E10-2: a generation above a limit earns no night evidence and the side shows the gate."""
+
+	def set_size(self, ledger_lines, rows):
+		_sql(
+			f"update `tab{GENERATION}` set ledger_lines=%s, row_count=%s where state='current'",
+			(ledger_lines, rows),
+		)
+		self.record("compared")
+
+	def record(self, outcome):
+		_sql(
+			f"update `tab{GENERATION}` set shadow=%s, cache_build=%s where state='current'",
+			(json.dumps({"outcome": outcome, "counts": {}}), routing.cache_build()),
+		)
+		frappe.db.commit()
+
+	def side_status(self):
+		found = cache_status.build_status()
+		entry = next(item for item in found["companies"] if item["digest"] == self.digest)
+		return entry["sides"][self.side]
+
+	def assert_counted(self):
+		side = self.side_status()
+		self.assertEqual((side["oracle"]["on_build"], side["oracle"]["nights"]), (1, {"compared": 1}))
+		self.assertEqual(side["size_gate"], "within")
+
+	def assert_withheld(self):
+		side = self.side_status()
+		self.assertEqual((side["oracle"]["on_build"], side["oracle"]["nights"]), (0, {}))
+		self.assertEqual(side["oracle"]["last"], "compared")
+		self.assertEqual(side["size_gate"], "above_measured")
+
+	def test_a_generation_within_the_limits_counts_as_a_night(self):
+		self.make_head()
+		self.set_size(1_000, 100)
+		self.assert_counted()
+
+	def test_a_generation_exactly_at_the_limits_counts(self):
+		self.make_head()
+		self.set_size(33_621, 2_962)
+		self.assert_counted()
+
+	def test_a_generation_one_ledger_line_above_the_limit_is_withheld_but_still_the_last(self):
+		self.make_head()
+		self.set_size(33_622, 100)
+		self.assert_withheld()
+
+	def test_a_generation_one_stored_row_above_the_limit_is_withheld_but_still_the_last(self):
+		self.make_head()
+		self.set_size(1_000, 2_963)
+		self.assert_withheld()
+
+	def test_a_bank_generation_exactly_at_its_limit_counts(self):
+		self.side = "Bank"
+		self.make_head()
+		self.set_size(20_416, 2)
+		self.assert_counted()
+
+	def test_a_bank_generation_one_gl_row_above_its_limit_is_withheld_but_still_the_last(self):
+		self.side = "Bank"
+		self.make_head()
+		self.set_size(20_417, 2)
+		self.assert_withheld()
+
+	def test_a_payable_generation_above_the_limit_is_withheld(self):
+		self.side = "Payable"
+		self.make_head()
+		self.set_size(33_622, 100)
+		self.assert_withheld()
+
+	def test_a_side_with_no_generation_shows_within(self):
+		self.make_head()
+		_sql(f"update `tab{HEAD}` set current_generation=NULL")
+		frappe.db.commit()
+		self.assertEqual(self.side_status()["size_gate"], "within")
+
+	def test_the_gate_reads_the_current_generation_not_an_older_one(self):
+		self.make_head()
+		self.set_size(40_000, 100)
+		held = self.claim()
+		self.publish(held, [_row(remaining=Decimal("5.00"))])
+		side = self.side_status()
+		self.assertEqual(side["size_gate"], "within")
+		self.assertEqual(side["oracle"]["on_build"], 0)
+		self.assertEqual(side["oracle"]["last"], "compared")
 
 
 class TestStatusSections(StableCase):

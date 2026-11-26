@@ -20,6 +20,7 @@
   "row_count",
   "residue_count",
   "excluded_count",
+  "ledger_lines",
   "bytes",
   "checksum",
   "hook_fingerprint",
@@ -101,6 +102,12 @@
    "label": "Excluded Count"
   },
   {
+   "description": "The size gate's measure: the preflight's control-pair line total (Bank: the GL rows its read counted).",
+   "fieldname": "ledger_lines",
+   "fieldtype": "Int",
+   "label": "Ledger Lines"
+  },
+  {
    "fieldname": "bytes",
    "fieldtype": "Long Int",
    "label": "Bytes"
@@ -165,7 +172,7 @@
  "issingle": 0,
  "istable": 0,
  "links": [],
- "modified": "2026-11-25 10:00:00.000000",
+ "modified": "2026-11-26 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Jarvis",
  "name": "Jarvis Payment Calendar Cache Generation",

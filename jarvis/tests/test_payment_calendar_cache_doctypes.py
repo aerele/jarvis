@@ -220,6 +220,10 @@ class TestCacheDocTypeMeta(CacheDocTypeCase):
 		):
 			self.assertTrue(meta.has_field(field), field)
 
+	def test_generation_keeps_the_ledger_lines_of_its_build_as_an_int(self):
+		field = frappe.get_meta(GENERATION).get_field("ledger_lines")
+		self.assertEqual(field.fieldtype, "Int")
+
 	def test_row_holds_every_d2_field_with_amounts_as_text(self):
 		meta = frappe.get_meta(ROW)
 		for field in ("original", "paid", "credit", "discount", "remaining", "account_remaining"):
@@ -407,3 +411,65 @@ class TestDefaultSystemManagerRowStaysDenied(CacheDocTypeCase):
 			frappe.set_user(MANAGER)
 			self.assertEqual(frappe.get_list(HEAD, pluck="name"), [])
 			self.assertFalse(frappe.has_permission(HEAD, "read", doc=frappe.get_doc(HEAD, self.head)))
+
+
+class TestLedgerLinesMigration(FrappeTestCase):
+	"""E10-3: the migrate adds `ledger_lines` to a generation table that already holds rows.
+
+	A migrate reloads a DocType whose JSON hash differs from the stored `migration_hash` (and, without a hash,
+	whose JSON `modified` is newer). The test drops the column, puts back the hash and `modified` of the release
+	before the column, and reloads the way the migrate does. It commits (a DDL statement does) and removes its
+	own rows at the end.
+	"""
+
+	COMPANY = "Cache Ledger Lines Test Co"
+	BEFORE_THE_COLUMN = "2026-11-25 10:00:00.000000"
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.addCleanup(self.restore)
+		self.restore()
+
+	def restore(self):
+		frappe.db.rollback()
+		frappe.db.sql(f"delete from `tab{GENERATION}` where company = %s", (self.COMPANY,))
+		frappe.db.commit()
+		self.reload(force=True)
+
+	def reload(self, *, force=False):
+		frappe.reload_doc("jarvis", "doctype", "jarvis_payment_calendar_cache_generation", force=force)
+		frappe.clear_cache(doctype=GENERATION)
+
+	def has_column(self) -> bool:
+		return bool(frappe.db.sql(f"show columns from `tab{GENERATION}` like 'ledger_lines'"))
+
+	def test_the_json_is_newer_than_the_release_before_the_column(self):
+		path = Path(frappe.get_app_path("jarvis", "jarvis", "doctype", frappe.scrub(GENERATION)))
+		modified = json.loads((path / f"{path.name}.json").read_text())["modified"]
+		self.assertGreater(modified, self.BEFORE_THE_COLUMN)
+
+	def test_a_reload_adds_the_column_to_a_populated_table_and_keeps_its_rows(self):
+		frappe.get_doc(
+			{"doctype": GENERATION, "company": self.COMPANY, "side": "Bank", "state": "retired"}
+		).insert(ignore_permissions=True)
+		frappe.db.commit()
+		frappe.db.sql_ddl(f"alter table `tab{GENERATION}` drop column ledger_lines")
+		frappe.db.set_value(
+			"DocType",
+			GENERATION,
+			{"modified": self.BEFORE_THE_COLUMN, "migration_hash": "release-before-the-column"},
+			update_modified=False,
+		)
+		frappe.db.commit()
+		self.assertFalse(self.has_column())
+		self.reload()
+		self.assertTrue(self.has_column())
+		self.assertEqual(
+			frappe.db.sql(f"select ledger_lines from `tab{GENERATION}` where company = %s", (self.COMPANY,)),
+			((0,),),
+		)
+
+	def test_a_second_reload_changes_nothing(self):
+		self.reload(force=True)
+		self.reload(force=True)
+		self.assertEqual(len(frappe.db.sql(f"show columns from `tab{GENERATION}` like 'ledger_lines'")), 1)

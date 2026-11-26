@@ -133,11 +133,20 @@ class RunResult:
 
 
 @dataclass(frozen=True)
+class Control:
+	"""The side's ledger aggregate: the voucher and against-voucher types, and the line total over its pairs."""
+
+	types: frozenset = frozenset()
+	lines: int = 0
+
+
+@dataclass(frozen=True)
 class Preflight:
 	skip: str | None = None
 	fingerprint: str = ""
 	checked: frozenset = frozenset()
 	pairs: frozenset = frozenset()
+	lines: int = 0
 
 
 @dataclass
@@ -354,6 +363,8 @@ class _Chain:
 		if self.any_time and build.oracle:
 			build.oracle = {**build.oracle, "source": cache_store.OPERATOR_SOURCE}
 		self.oracle = build.oracle
+		if self.side != "Bank":  # the Bank read counts its own GL rows
+			build.stats.ledger_lines = self.pre.lines
 		return self._publish(held, build, as_of, began)
 
 	def _build(self) -> Build:
@@ -531,17 +542,17 @@ def preflight(
 	if _free_disk_bytes() < _needed_disk_bytes(company, side):
 		return Preflight("no_disk")
 	if known:
-		pairs = known.pairs
+		control = Control(known.pairs, known.lines)
 	else:
 		if renew and not renew():
 			return Preflight("lease_lost")
-		pairs = _control_types(company, side)
+		control = _control(company, side)
 		if renew and not renew():
 			return Preflight("lease_lost")
-	checked = frozenset(_checked_doctypes(side) | pairs)
+	checked = frozenset(_checked_doctypes(side) | control.types)
 	if query_hook_offenders(checked):
 		return Preflight("not_buildable:query_hook")
-	return Preflight(None, hook_fingerprint(checked), checked, pairs)
+	return Preflight(None, hook_fingerprint(checked), checked, control.types, control.lines)
 
 
 def _static_skip(company: str) -> str | None:
@@ -596,16 +607,18 @@ def _checked_doctypes(side: str) -> set[str]:
 	return {*HOOKED_DOCTYPES, *frappe.get_all("Party Type", pluck="name")}
 
 
-def _control_types(company: str, side: str) -> frozenset[str]:
-	"""Every voucher and against-voucher type in the side's ledger aggregate, one read before the view."""
+def _control(company: str, side: str) -> Control:
+	"""The side's ledger aggregate, one read before the view: every voucher and against-voucher type, and the
+	line total (the size gate's measure). Bank has no ledger aggregate: its lines are counted by its read."""
 	if side == "Bank":
-		return frozenset()
+		return Control()
 	accounts = frappe.get_all("Account", filters={"account_type": side, "company": company}, pluck="name")
 	if not accounts:
-		return frozenset()
+		return Control()
 	with frappe.db.execution_timeout(cache_state.STATEMENT_CAP_S):
 		control = builtin_reader.ledger_control(company, side, getdate(nowdate()), accounts)
-	return frozenset(name for pair in control.pairs for name in pair if name)
+	types = frozenset(name for pair in control.pairs for name in pair if name)
+	return Control(types, sum(control.pairs.values()))
 
 
 def query_hook_offenders(doctypes: Iterable[str]) -> list[str]:
@@ -1072,7 +1085,18 @@ def _read_bank(company: str, anchor: date, hits) -> Build:
 		cache_store.row_tuple({"kind": cache_store.KIND_BANK, "account": name, "remaining": balances[name]})
 		for name in names
 	]
-	return Build(rows, payload, cache_store.BuildStats(), frozenset(_BANK_DOCTYPES))
+	stats = cache_store.BuildStats(ledger_lines=_bank_gl_rows(company, anchor, names))
+	return Build(rows, payload, stats, frozenset(_BANK_DOCTYPES))
+
+
+def _bank_gl_rows(company: str, anchor: date, accounts: list[str]) -> int:
+	"""The GL rows `get_balance_on` sums for these accounts (not cancelled, up to the anchor): the size gate's measure."""
+	if not accounts:
+		return 0
+	return frappe.db.count(
+		"GL Entry",
+		{"company": company, "account": ["in", accounts], "is_cancelled": 0, "posting_date": ["<=", anchor]},
+	)
 
 
 def _foreign_books(doctype: str, company: str, anchor: date, values, filters: dict) -> list:

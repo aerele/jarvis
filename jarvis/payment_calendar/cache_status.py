@@ -7,9 +7,10 @@ that Company. No row, party or voucher name is ever returned.
 The status shows, per company and side: the state (`fresh`, `due`, `running`, `memo`, `backoff`), the age of the
 current generation, the last outcome and failure class, the failure count and backoff level, the generation counts
 by state, the duration p95 of the last `P95_DAYS` days, and the last oracle outcome with the nights counted on the
-deployed build. At the top: the switch, the build, the lane (`day_lane` is `live` or `absent`; `refresh` is
-`day+night` or `night-only`, the bench with no day lane whose generation ages by day), and the skip counters of
-today and yesterday (`cache.count_skip`).
+deployed build. A generation above the measured size (`cache_state.within_measured_size`) is no night: the side
+shows `size_gate` (`within` or `above_measured`, by its current generation). At the top: the switch, the build,
+the lane (`day_lane` is `live` or `absent`; `refresh` is `day+night` or `night-only`, the bench with no day lane
+whose generation ages by day), and the skip counters of today and yesterday (`cache.count_skip`).
 
 Other modules add sections through the Frappe hook `pcal_cache_status_sections` (card counters of a later release). Each path is
 called with no argument and returns a dict that is merged under `sections`. A failing path is logged by class and
@@ -35,6 +36,9 @@ SKIP_CLASS = "cache_skip:"
 # The duration p95 and the oracle nights look back this far (generation metadata is kept 30 days).
 P95_DAYS = 30
 ORACLE_DAYS = 30
+# `size_gate` of a side: its current generation is within the measured size, or above it.
+WITHIN = "within"
+ABOVE_MEASURED = "above_measured"
 # Generations read for the p95 and oracle records per call; the newest first.
 MAX_GENERATIONS = 20_000
 
@@ -52,7 +56,7 @@ def build_status() -> dict:
 	settings = cache_state.cache_settings()
 	heads, metrics = cache.heads_of(), head_metrics()
 	latest, counts = latest_generations(), generation_counts()
-	oracle, p95 = oracle_by_side(), duration_p95()
+	oracle, p95, gates = oracle_by_side(), duration_p95(), size_gates()
 	companies = sorted({*settings.companies, *(company for company, _ in heads)})
 	today = routing.today()
 	workers = cache_state.lane_workers()
@@ -69,7 +73,8 @@ def build_status() -> dict:
 		"tick": _tick(),
 		"janitor": cache_store.janitor_backlog(),
 		"companies": [
-			_company(company, settings, heads, metrics, latest, counts, oracle, p95) for company in companies
+			_company(company, settings, heads, metrics, latest, counts, oracle, p95, gates)
+			for company in companies
 		],
 		"skips": {date: skip_counts(date) for date in (today, add_days(today, -1))},
 		"sections": _sections(),
@@ -85,7 +90,7 @@ def _tick() -> dict:
 	return {"last_age_s": age, "late": age is not None and age > cache.TICK_LATE_S}
 
 
-def _company(company, settings, heads, metrics, latest, counts, oracle, p95) -> dict:
+def _company(company, settings, heads, metrics, latest, counts, oracle, p95, gates) -> dict:
 	"""One company of the status: its identity, and its sides only when the caller may read the Company."""
 	found = _identity(company)
 	found["listed"] = company in settings.companies
@@ -101,6 +106,7 @@ def _company(company, settings, heads, metrics, latest, counts, oracle, p95) -> 
 				counts.get((company, side), {}),
 				oracle.get((company, side), {"last": None, "reason": None, "on_build": 0, "nights": {}}),
 				p95.get((company, side)),
+				gates.get((company, side), WITHIN),
 			)
 			for side in SIDES
 		}
@@ -127,7 +133,7 @@ def _identity(company: str) -> dict:
 	return found
 
 
-def _side(company, side, settings, head, metric, latest, counts, oracle, p95) -> dict:
+def _side(company, side, settings, head, metric, latest, counts, oracle, p95, gate) -> dict:
 	return {
 		"state": _state(head, settings),
 		"has_generation": bool(head and head.current_generation is not None),
@@ -153,6 +159,7 @@ def _side(company, side, settings, head, metric, latest, counts, oracle, p95) ->
 		"bytes": latest.get("bytes"),
 		"generations": counts,
 		"oracle": oracle,
+		"size_gate": gate,
 	}
 
 
@@ -253,8 +260,8 @@ def nearest_rank(values: list, share: float):
 def oracle_records(days: int = ORACLE_DAYS) -> list[dict]:
 	"""The stored night records of the last `days` days, newest first. Name-free: fixed words and counts only."""
 	records = []
-	for company, side, generation, build, age, text in frappe.db.sql(
-		f"SELECT company, side, name, cache_build, TIMESTAMPDIFF(SECOND, as_of, NOW(6)), shadow "
+	for company, side, generation, build, age, text, lines, rows in frappe.db.sql(
+		f"SELECT company, side, name, cache_build, TIMESTAMPDIFF(SECOND, as_of, NOW(6)), shadow, ledger_lines, row_count "
 		f"FROM `tab{GENERATION}` FORCE INDEX (as_of) WHERE shadow IS NOT NULL AND shadow != '' AND state != 'purged' "
 		"AND as_of >= NOW(6) - INTERVAL %s DAY ORDER BY name DESC LIMIT %s",
 		(days, MAX_GENERATIONS),
@@ -266,6 +273,7 @@ def oracle_records(days: int = ORACLE_DAYS) -> list[dict]:
 				"generation": generation,
 				"cache_build": build,
 				"age_s": age,
+				"within_size": cache_state.within_measured_size(side, lines or 0, rows or 0),
 				**_record(text),
 			}
 		)
@@ -290,7 +298,7 @@ def oracle_by_side() -> dict:
 	"""Per side: the last outcome and reason, and the nights by outcome counted on the deployed build.
 
 	A record of an operator build (`source: operator`) shows as the last outcome but is no night: it counts in
-	neither `on_build` nor `nights`.
+	neither `on_build` nor `nights`. A record of a generation above the measured size is the same (E10).
 	"""
 	build = routing.cache_build()
 	found: dict = {}
@@ -299,10 +307,22 @@ def oracle_by_side() -> dict:
 		entry = found.setdefault(
 			key, {"last": record["outcome"], "reason": record["reason"], "on_build": 0, "nights": Counter()}
 		)
-		if record["cache_build"] == build and not record["operator"]:
+		if record["cache_build"] == build and not record["operator"] and record["within_size"]:
 			entry["on_build"] += 1
 			entry["nights"][record["outcome"]] += 1
 	return {key: {**entry, "nights": dict(entry["nights"])} for key, entry in found.items()}
+
+
+def size_gates() -> dict:
+	"""`{(company, side): "within" | "above_measured"}` by the current generation of each head."""
+	gates = {}
+	for company, side, lines, rows in frappe.db.sql(
+		"SELECT g.company, g.side, g.ledger_lines, g.row_count "
+		f"FROM `tab{GENERATION}` g JOIN `tab{HEAD}` h ON g.name = h.current_generation"
+	):
+		within = cache_state.within_measured_size(side, lines or 0, rows or 0)
+		gates[(company, side)] = WITHIN if within else ABOVE_MEASURED
+	return gates
 
 
 def skip_counts(date: str) -> dict:

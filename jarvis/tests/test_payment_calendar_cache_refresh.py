@@ -353,14 +353,16 @@ class TestPreflight(TestCase):
 
 	def setUp(self):
 		self.company = "PCAL-B4-Company"
-		self.real_control = cache_refresh._control_types
+		self.real_control = cache_refresh._control
 		self.patches = {
 			"_scheduler_inactive": patch.object(cache_refresh, "_scheduler_inactive", return_value=False),
 			"_tdr_running": patch.object(cache_refresh, "_tdr_running", return_value=False),
 			"_free_disk_bytes": patch.object(cache_refresh, "_free_disk_bytes", return_value=10**15),
 			"_needed_disk_bytes": patch.object(cache_refresh, "_needed_disk_bytes", return_value=5 * 1024**3),
-			"_control_types": patch.object(
-				cache_refresh, "_control_types", return_value=frozenset({"Sales Invoice", "Credit"})
+			"_control": patch.object(
+				cache_refresh,
+				"_control",
+				return_value=cache_refresh.Control(frozenset({"Sales Invoice", "Credit"}), 1234),
 			),
 			"query_hook_offenders": patch.object(cache_refresh, "query_hook_offenders", return_value=[]),
 			"company_creation": patch.object(cache_store, "company_creation", return_value="created"),
@@ -387,9 +389,20 @@ class TestPreflight(TestCase):
 		self.assertIn("Customer", found.checked)
 
 	def test_the_bank_side_checks_account_and_gl_entry_only(self):
-		self.mocks["_control_types"].side_effect = self.real_control
+		self.mocks["_control"].side_effect = self.real_control
 		found = cache_refresh.preflight(self.company, "Bank")
 		self.assertEqual(found.checked, frozenset({"Account", "GL Entry"}))
+
+	def test_the_preflight_carries_the_ledger_line_total_of_the_control_pairs(self):
+		self.assertEqual(cache_refresh.preflight(self.company, "Receivable").lines, 1234)
+
+	def test_the_bank_side_has_no_control_lines(self):
+		self.mocks["_control"].side_effect = self.real_control
+		self.assertEqual(cache_refresh.preflight(self.company, "Bank").lines, 0)
+
+	def test_a_known_result_keeps_its_ledger_lines(self):
+		first = cache_refresh.preflight(self.company, "Receivable")
+		self.assertEqual(cache_refresh.preflight(self.company, "Receivable", known=first).lines, 1234)
 
 	def test_a_scheduler_that_is_not_running_skips(self):
 		self.flags(_scheduler_inactive=True)
@@ -434,14 +447,14 @@ class TestPreflight(TestCase):
 
 	def test_a_known_result_reuses_its_control_pairs(self):
 		first = cache_refresh.preflight(self.company, "Receivable")
-		self.mocks["_control_types"].reset_mock()
+		self.mocks["_control"].reset_mock()
 		again = cache_refresh.preflight(self.company, "Receivable", known=first)
-		self.mocks["_control_types"].assert_not_called()
+		self.mocks["_control"].assert_not_called()
 		self.assertEqual(again.checked, first.checked)
 
 	def test_the_slot_is_renewed_before_and_after_the_aggregate(self):
 		order = []
-		self.mocks["_control_types"].side_effect = lambda *a: order.append("control") or frozenset()
+		self.mocks["_control"].side_effect = lambda *a: order.append("control") or cache_refresh.Control()
 		found = cache_refresh.preflight(
 			self.company, "Receivable", renew=lambda: order.append("renew") or True
 		)
@@ -676,6 +689,26 @@ class TestReadBank(ReaderCase):
 		self.assertEqual(build.payload["currency"], "INR")
 		self.assertEqual(build.payload["precision"], 2)
 		self.assertEqual(build.doctypes, frozenset({"Account", "GL Entry"}))
+
+	def test_the_bank_gl_rows_read_are_counted_for_the_size_gate(self):
+		second = self.fx.account("Bank2", "Bank", "Asset")
+		self.fx.gl(500)
+		self.fx.gl(100)
+		self.fx.gl(-125, account=second)
+		self.assertEqual(self.read_bank().stats.ledger_lines, 3)
+
+	def test_a_cancelled_gl_row_a_later_one_and_another_account_are_not_counted(self):
+		self.fx.gl(500)
+		cancelled = self.fx.gl(100)
+		later = self.fx.gl(10)
+		frappe.db.set_value("GL Entry", cancelled, "is_cancelled", 1)
+		frappe.db.set_value("GL Entry", later, "posting_date", add_days(self.fx.today, 3))
+		self.fx.gl(10, account=self.fx.receivable)
+		self.assertEqual(self.read_bank().stats.ledger_lines, 1)
+
+	def test_a_company_with_no_bank_account_counts_no_gl_rows(self):
+		frappe.db.set_value("Account", self.fx.bank, "disabled", 1)
+		self.assertEqual(self.read_bank().stats.ledger_lines, 0)
 
 	def test_a_disabled_or_group_account_is_not_listed(self):
 		frappe.db.set_value("Account", self.fx.bank, "disabled", 1)
@@ -951,13 +984,25 @@ class TestControlAggregate(TestCase):
 
 		def control(*args):
 			events.append("control")
-			return SimpleNamespace(pairs={("Sales Invoice", None): 3})
+			return SimpleNamespace(pairs={("Sales Invoice", None): 3, ("Payment Entry", "Sales Invoice"): 4})
 
 		with (
 			patch.object(frappe, "get_all", return_value=["Debtors"]),
 			patch.object(frappe.db, "execution_timeout", cap),
 			patch.object(builtin_reader, "ledger_control", side_effect=control),
 		):
-			found = cache_refresh._control_types("Acme", "Receivable")
+			found = cache_refresh._control("Acme", "Receivable")
 		self.assertEqual(events, [("cap_on", cache_state.STATEMENT_CAP_S), "control", "cap_off"])
-		self.assertEqual(found, frozenset({"Sales Invoice"}))
+		self.assertEqual(found.types, frozenset({"Sales Invoice", "Payment Entry"}))
+
+	def test_the_ledger_lines_are_the_sum_of_the_pair_counts(self):
+		control = SimpleNamespace(pairs={("Sales Invoice", None): 3, ("Payment Entry", "Sales Invoice"): 4})
+		with (
+			patch.object(frappe, "get_all", return_value=["Debtors"]),
+			patch.object(builtin_reader, "ledger_control", return_value=control),
+		):
+			self.assertEqual(cache_refresh._control("Acme", "Receivable").lines, 7)
+
+	def test_a_company_with_no_account_of_the_side_has_no_lines(self):
+		with patch.object(frappe, "get_all", return_value=[]):
+			self.assertEqual(cache_refresh._control("Acme", "Receivable"), cache_refresh.Control())
