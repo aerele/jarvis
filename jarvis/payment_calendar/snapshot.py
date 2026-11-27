@@ -11,7 +11,13 @@ import frappe
 from jarvis.payment_calendar import read_log, routing
 from jarvis.payment_calendar import sources as obligation_sources
 from jarvis.payment_calendar.access import authorize_scope
-from jarvis.payment_calendar.banks import read_bank_balances
+from jarvis.payment_calendar.banks import (
+	BANK_FALLBACK_KEY,
+	BANK_PATH_KEY,
+	FALLBACK_CAUSES,
+	read_bank_balances,
+)
+from jarvis.payment_calendar.books import book_memo
 from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.errors import TIMEOUTS, CalendarSourceUnavailable
 from jarvis.payment_calendar.projection import horizon_summary, project_snapshot
@@ -175,6 +181,7 @@ def consistent_read():
 				("begin", refuse),
 			):
 				stack.enter_context(_replace(db, name, replacement))
+			stack.enter_context(book_memo())
 			hits = stack.enter_context(_source_caches())
 			yield hits
 			if (
@@ -290,12 +297,14 @@ def _collect(scope: dict, fingerprint: str, started: float, outcomes: list[dict]
 	with consistent_read() as hits:
 		cutoff = datetime.now(timezone.utc).isoformat()
 		proof = authorize_scope(scope, expected_fingerprint=fingerprint)
-		bank, bank_code = None, None
+		bank, bank_code, bank_log = None, None, None
 		if scope["accounts"]:
+			bank_started = monotonic()
 			try:
 				bank = read_bank_balances(scope["company"], scope["accounts"], scope["anchor"])
 			except CalendarSourceUnavailable as exc:
 				bank_code = exc.code
+			bank_log = _bank_log(bank_started)
 		sources, unavailable = {}, {}
 		for side in ("Payable", "Receivable"):
 			sources[side] = None
@@ -342,7 +351,8 @@ def _collect(scope: dict, fingerprint: str, started: float, outcomes: list[dict]
 		projections_ms = elapsed_ms(projecting)
 	# Ends the source view before looking for revocations/settings changes.
 	authorize_scope(scope, expected_fingerprint=fingerprint, result=result)
-	_log_collected(started, projections_ms, sources)
+	_log_collected(started, projections_ms, sources, bank_log)
+	_count_bank_fallback(bank_log)
 	return result
 
 
@@ -374,11 +384,52 @@ def elapsed_ms(started):
 	return int((monotonic() - started) * 1000)
 
 
-def _log_collected(started, projections_ms, sources):
-	"""Timing, row counts and the speed-path flag only: no company, party or voucher text (B11)."""
+# The bank read (`banks.BANK_PATH_KEY`) leaves "one_pass" or "today" in the request only when the switch is on and
+# the company served; with the switch off nothing is set and the collect line stays as it was.
+_BANK_PATHS = ("one_pass", "today")
+
+
+def _bank_log(started) -> dict | None:
+	"""The bank path, time and fallback cause for the collect line, or None when the bank read left no known path.
+
+	Only a fixed word is ever taken from the request: a path from `_BANK_PATHS`, a cause from `FALLBACK_CAUSES`,
+	and a cause only with the `today` path.
+	"""
+	path = getattr(frappe.local, BANK_PATH_KEY, None)
+	if path not in _BANK_PATHS:
+		return None
+	log = {"path": path, "ms": elapsed_ms(started)}
+	cause = getattr(frappe.local, BANK_FALLBACK_KEY, None)
+	if path == "today" and cause in FALLBACK_CAUSES:
+		log["fallback"] = cause
+	return log
+
+
+def _count_bank_fallback(bank) -> None:
+	"""A site day counter per cause when a served company read today's path: the production signal (INFO is off).
+
+	Best effort and name-free; `jarvis:pcal:site:day:<date>:bank_today:<cause>`. A job timeout still propagates.
+	"""
+	if not bank or not bank.get("fallback"):
+		return
+	try:
+		read_log.site_count(f"bank_today:{bank['fallback']}", routing._today())
+	except TIMEOUTS:
+		raise
+	except Exception:
+		frappe.logger("payment_calendar").warning("bank_counter_unavailable")
+
+
+def _log_collected(started, projections_ms, sources, bank=None):
+	"""Timing, row counts and the speed-path flags only: no company, party, account or voucher text (B11)."""
 	counts = {side: len(source["rows"]) if source else 0 for side, source in sources.items()}
-	frappe.logger("payment_calendar").info(
+	line = (
 		f"collect complete duration_ms={elapsed_ms(started)} projections_ms={projections_ms} "
 		f"payable_rows={counts['Payable']} receivable_rows={counts['Receivable']} "
 		f"fast_path={obligation_sources.FAST_PATH}"
 	)
+	if bank:
+		line += f" bank_path={bank['path']} bank_ms={bank['ms']}"
+		if bank.get("fallback"):
+			line += f" bank_fallback={bank['fallback']}"
+	frappe.logger("payment_calendar").info(line)
