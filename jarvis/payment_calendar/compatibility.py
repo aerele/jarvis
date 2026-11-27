@@ -1,4 +1,4 @@
-"""Audited ERPNext/Frappe source boundaries; unknown framework pairs fail closed."""
+"""Audited ERPNext/Frappe source boundaries: classification pins fail closed; speed pins fall back to upstream."""
 
 from dataclasses import dataclass
 from hashlib import sha256
@@ -97,3 +97,48 @@ def bank_balance_arguments(helper) -> dict:
 		):
 			return {"finance_book": None, "include_default_fb_balances": True}
 	raise CalendarSourceUnavailable()
+
+
+# Speed overrides copy the body of an ERPNext method, so each one is pinned by the hash of the
+# upstream source it was audited against. Unlike the classification pins above, an unknown hash
+# never refuses a read: the caller falls back to upstream. Bump procedure: docs/architecture/payment-calendar.md.
+# get_payment_terms: ERPNext 16.55.0 (8e10a348), same source as version-16 head on 2026-11-17.
+# Party details are pre-seeded from the ledger, not copied, so they need no pin.
+_SPEED_PINS = {
+	"16": {
+		"get_payment_terms": ("4ccd3880aedf87b29d7e4ce3eea6b57e84e5e5cefe96741d877e686e9c10b763",),
+	},
+}
+
+
+def upstream_matches(name: str) -> bool:
+	"""True when the installed ERPNext method `name` is a source audited for its speed override."""
+	import erpnext
+
+	major = erpnext.__version__.split(".")[0]
+	pins = _SPEED_PINS.get(major, {}).get(name, ())
+	return bool(pins) and _upstream_hash(name, major) in pins
+
+
+# (name, major) -> hash. `major` is only a key; the hash is read from whatever ERPNext is installed.
+# Only a successful read is kept: an unreadable source is retried, not remembered as unknown.
+_hashes: dict[tuple[str, str], str] = {}
+
+
+def _upstream_hash(name: str, major: str) -> str | None:
+	if (name, major) not in _hashes:
+		found = installed_hash(name)
+		if found is None:
+			return None
+		_hashes[(name, major)] = found
+	return _hashes[(name, major)]
+
+
+def installed_hash(name: str) -> str | None:
+	"""Uncached sha256 of the installed upstream method source, or None when it cannot be read."""
+	from erpnext.accounts.report.accounts_receivable.accounts_receivable import ReceivablePayableReport
+
+	try:
+		return sha256(getsource(getattr(ReceivablePayableReport, name, None)).encode()).hexdigest()
+	except (OSError, TypeError):
+		return None
