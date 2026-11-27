@@ -117,6 +117,30 @@ class TestBalancesJob(TestCase):
 		self.assertEqual({call.args[2] for call in read.call_args_list}, {nowdate()})
 		self.assertEqual(store.load_result(ACTOR, job_id)["total"], "1500.00")
 
+	def test_more_than_fifty_accounts_with_the_switch_on_take_the_one_pass_in_two_chunks(self):
+		from jarvis.payment_calendar import routing
+
+		for index in range(51):
+			self.fx.account(f"Cash{index}", "Cash", "Asset")
+		frappe.db.commit()
+		on = routing.ReaderSettings("on", (self.fx.company,), ())
+		grouped, original = [], frappe.db.sql
+
+		def spy(query, *args, **kwargs):
+			if "GROUP BY account, finance_book" in str(query):
+				grouped.append(query)
+			return original(query, *args, **kwargs)
+
+		with (
+			patch.object(routing, "reader_settings", return_value=on),
+			patch.object(frappe.db, "sql", spy),
+			patch.object(balances, "read_bank_balances", wraps=balances.read_bank_balances) as read,
+		):
+			job_id = self.run_job()
+		self.assertEqual([len(call.args[1]) for call in read.call_args_list], [50, 3])
+		self.assertEqual(len(grouped), 2)
+		self.assertEqual(store.load_result(ACTOR, job_id)["total"], "1500.00")
+
 	def test_balances_are_read_at_the_scope_anchor_not_at_the_worker_clock(self):
 		status = store.load_status(ACTOR, self.request())
 		anchor = add_days(nowdate(), -1)

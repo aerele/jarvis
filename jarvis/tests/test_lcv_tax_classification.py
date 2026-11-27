@@ -23,6 +23,13 @@ class Doc(SimpleNamespace):
 
 
 class TestTaxClassificationWithoutIC(unittest.TestCase):
+	def setUp(self):
+		# `flt(x, 2)` reads System Settings, and frappe turns any error into 0.0. An earlier test's
+		# `frappe.clear_cache()` drops the cached copy. `fixture()` then lists `india_compliance` as an
+		# installed app, so the reload imports `india_compliance.hooks`, which a CI site does not have.
+		# Load the copy here, before that patch.
+		frappe.get_system_settings("rounding_method")
+
 	def invoice(self):
 		meta = SimpleNamespace(has_field=lambda field: True)
 		item = Doc(

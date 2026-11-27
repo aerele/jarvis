@@ -1,0 +1,154 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "Prompt",
+ "creation": "2026-11-24 00:00:00.000000",
+ "custom": 0,
+ "description": "Durable per-(company, side) state of the Payment Calendar cache: current generation, claim, purge epoch, hop counter, backoff and metrics. Derived data written only by jarvis.payment_calendar cache code; no user but Administrator may read it.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "side",
+  "company_creation",
+  "current_generation",
+  "claim_token",
+  "claim_expires",
+  "purge_epoch",
+  "hop_seq",
+  "memo_until",
+  "backoff_level",
+  "failures",
+  "last_failure",
+  "last_opened",
+  "last_success",
+  "last_duration_ms",
+  "last_rows",
+  "peak_rss_mb",
+  "max_age_s_today",
+  "max_age_date"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Data",
+   "label": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "side",
+   "fieldtype": "Select",
+   "label": "Side",
+   "options": "Receivable\nPayable\nBank",
+   "reqd": 1
+  },
+  {
+   "fieldname": "company_creation",
+   "fieldtype": "Datetime",
+   "label": "Company Creation"
+  },
+  {
+   "fieldname": "current_generation",
+   "fieldtype": "Long Int",
+   "label": "Current Generation"
+  },
+  {
+   "fieldname": "claim_token",
+   "fieldtype": "Data",
+   "label": "Claim Token",
+   "length": 64
+  },
+  {
+   "fieldname": "claim_expires",
+   "fieldtype": "Datetime",
+   "label": "Claim Expires"
+  },
+  {
+   "default": "0",
+   "fieldname": "purge_epoch",
+   "fieldtype": "Int",
+   "label": "Purge Epoch"
+  },
+  {
+   "default": "0",
+   "fieldname": "hop_seq",
+   "fieldtype": "Int",
+   "label": "Hop Seq"
+  },
+  {
+   "fieldname": "memo_until",
+   "fieldtype": "Datetime",
+   "label": "Memo Until"
+  },
+  {
+   "default": "0",
+   "fieldname": "backoff_level",
+   "fieldtype": "Int",
+   "label": "Backoff Level"
+  },
+  {
+   "default": "0",
+   "fieldname": "failures",
+   "fieldtype": "Int",
+   "label": "Failures"
+  },
+  {
+   "fieldname": "last_failure",
+   "fieldtype": "Data",
+   "label": "Last Failure",
+   "length": 64
+  },
+  {
+   "fieldname": "last_opened",
+   "fieldtype": "Datetime",
+   "label": "Last Opened"
+  },
+  {
+   "fieldname": "last_success",
+   "fieldtype": "Datetime",
+   "label": "Last Success"
+  },
+  {
+   "fieldname": "last_duration_ms",
+   "fieldtype": "Int",
+   "label": "Last Duration Ms"
+  },
+  {
+   "fieldname": "last_rows",
+   "fieldtype": "Int",
+   "label": "Last Rows"
+  },
+  {
+   "fieldname": "peak_rss_mb",
+   "fieldtype": "Int",
+   "label": "Peak Rss Mb"
+  },
+  {
+   "fieldname": "max_age_s_today",
+   "fieldtype": "Int",
+   "label": "Max Age S Today"
+  },
+  {
+   "fieldname": "max_age_date",
+   "fieldtype": "Date",
+   "label": "Max Age Day"
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "issingle": 0,
+ "istable": 0,
+ "links": [],
+ "modified": "2026-11-24 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Payment Calendar Cache Head",
+ "naming_rule": "Set by user",
+ "owner": "Administrator",
+ "permissions": [],
+ "read_only": 1,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

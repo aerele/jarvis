@@ -1,6 +1,7 @@
 """Bounded RQ work; framework retries never borrow a different actor."""
 
 import json
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from hashlib import sha256
 from time import monotonic
@@ -10,15 +11,20 @@ from frappe.utils import nowdate
 from frappe.utils.background_jobs import get_job
 
 from jarvis.exceptions import PermissionDeniedError
-from jarvis.payment_calendar import balances, catalog, store
+from jarvis.payment_calendar import balances, batch_permission, cache, catalog, store
 from jarvis.payment_calendar.access import ScopeChanged, authorize_scope
-from jarvis.payment_calendar.errors import CalendarSourceUnavailable, safe_code, safe_detail
+from jarvis.payment_calendar.errors import TIMEOUTS, CalendarSourceUnavailable, safe_code, safe_detail
 from jarvis.payment_calendar.projection import ProjectionError
 from jarvis.payment_calendar.snapshot import collect, elapsed_ms
 
 ACTIVE_RQ = {"queued", "started", "deferred", "scheduled"}
 # The RQ timeout is 300 s; a balances job past half of it is on its way to a timeout.
 SLOW_JOB_MS = 150_000
+# With the batch permission switch on, the permission work of a snapshot job stops here (seconds after the job
+# started) with a `TimeoutError`, which `_cause` maps to `timeout`. It lies past the reader's own limits
+# (`JOB_BUDGET_S + READER_DEADLINE_S + ASSEMBLE_GRACE_S`, a test pins that) and before the RQ timeout of 300 s,
+# so the worker is free at once and the RQ kill never fires.
+JOB_PERMISSION_STOP_S = 280
 
 
 def request_snapshot(scope: dict) -> dict:
@@ -33,6 +39,8 @@ def request_snapshot(scope: dict) -> dict:
 		method="jarvis.payment_calendar.jobs.run_snapshot",
 		id_argument="snapshot_id",
 	)
+	# Never changes the reply: `note_opened` swallows every error but a job deadline.
+	cache.note_opened(scope["company"])
 	return store.public_status(status)
 
 
@@ -134,15 +142,90 @@ def run_snapshot(actor: str, snapshot_id: str) -> None:
 			return
 		if not store.mark_running(actor, snapshot_id):
 			return
-		stage = "sources"
-		result = collect(status["scope"], status["fingerprint"])
-		stage = "publish"
-		authorize_scope(status["scope"], expected_fingerprint=status["fingerprint"], result=result)
+		with _permission_stop(started):
+			stage = "sources"
+			result = collect(status["scope"], status["fingerprint"])
+			stage = "publish"
+			authorize_scope(status["scope"], expected_fingerprint=status["fingerprint"], result=result)
 		# The split is strict: an incomplete result fails here, before anything is stored.
 		if not store.publish_snapshot(actor, snapshot_id, store.split_result(result, status["scope"])):
 			frappe.logger().info("Payment Calendar job: result_discarded")
 	except Exception as exc:
 		_fail_safely(actor, snapshot_id, _cause(exc), exc, stage, started, "snapshot")
+	finally:
+		_log_permission_stats()
+		try:
+			_write_permission_events()
+		finally:
+			_write_pending_permission_config()
+
+
+def _permission_stop(started: float):
+	"""The job's permission stop (switch on at job start), or nothing (switch off: today)."""
+	if not batch_permission.switch_enabled():
+		return nullcontext()
+	batch_permission.begin_mode_freeze()
+	return batch_permission.permission_stop(started + JOB_PERMISSION_STOP_S, TimeoutError)
+
+
+def _log_permission_stats() -> None:
+	"""One INFO line of the job's name-free permission counts (`permission_mode_*`, `permission_reason_*`...).
+
+	With the switch off no call was recorded, so no line is written. Never raises.
+	"""
+	try:
+		line = batch_permission.stats_line()
+		if line:
+			frappe.logger("payment_calendar").info(line)
+	except TIMEOUTS:
+		raise
+	except Exception:
+		frappe.logger("payment_calendar").warning("permission_stats_unavailable")
+
+
+def _write_pending_permission_config() -> None:
+	"""The site-config write that a trip near the job stop deferred, now that the view and the stop are over."""
+	try:
+		batch_permission.write_pending_config()
+	except TIMEOUTS:
+		raise
+	except Exception as error:
+		frappe.logger("payment_calendar").error(
+			f"permission_config_write_unavailable error={type(error).__name__}"
+		)
+
+
+def _write_permission_events() -> None:
+	"""Write the events that `batch_permission` queued, after the snapshot view and after any failure record.
+
+	An insert inside the view would break it, so the batch only queues name-free events on `frappe.local`.
+	Every event is tried. A write error is logged and skipped; a timeout is kept, and re-raised after the last
+	event. The queue is always emptied.
+	"""
+	events = getattr(frappe.local, batch_permission.EVENTS, None)
+	if not events:
+		return
+	timeout = None
+	for event in events:
+		try:
+			_write_permission_event(event)
+		except TIMEOUTS as exc:
+			timeout = timeout or exc
+	events.clear()
+	if timeout:
+		raise timeout
+
+
+def _write_permission_event(event: dict) -> None:
+	"""One Error Log row per distinct event; an event that `queue_event` wrote at once is not written again."""
+	if event.get("written"):
+		return
+	try:
+		batch_permission.write_event(event)
+	except TIMEOUTS:
+		raise
+	except Exception as error:
+		batch_permission.log_event_failure(event, error)
 
 
 def run_account_balances(actor: str, balances_id: str) -> None:
@@ -206,6 +289,15 @@ def _fail_safely(actor, job_id, code, exc, stage, started, kind):
 		detail = safe_detail(exc)
 		if detail:
 			body["detail"] = detail
+		# A job that the batch permission refused says so with a fixed word (never a name).
+		refusal = getattr(exc, "permission_detail", None) or getattr(
+			frappe.local, batch_permission.REFUSAL, None
+		)
+		if code == "source_changed" and refusal in (
+			batch_permission.DETAIL_MISMATCH,
+			batch_permission.DETAIL_MODE_CHANGED,
+		):
+			body["permission_detail"] = refusal
 		frappe.log_error(title=f"Payment Calendar {kind}", message=json.dumps(body))
 	except Exception:
 		frappe.logger().warning("Payment Calendar job: safe_failure_unavailable")
