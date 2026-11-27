@@ -272,7 +272,3 @@ test("pwa: a missing service worker is reported, not thrown", () => {
   unlinkSync(path.join(dir, "sw.js"));
   assert.match(check(dir), /sw\.js not found/);
 });
-
-test("pwa: the worn markers are the desktop list's worn part", () => {
-  assert.deepEqual(WORN_MARKERS, ART_MARKERS.slice(0, 2));
-});

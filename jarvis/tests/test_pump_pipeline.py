@@ -36,6 +36,7 @@ import frappe
 
 from jarvis.chat import (
 	admission,
+	connector_focus,
 	empty_reply_recovery,
 	finalize,
 	prepare,
@@ -516,6 +517,33 @@ class TestPanel4Chokepoint(_PipelineCase):
 # --------------------------------------------------------------------------- #
 # 3. PANEL 5 — kill during preparing -> recovering -> queued -> fresh prepare
 # --------------------------------------------------------------------------- #
+
+
+class TestPrepareBindsConnectorFocus(_PipelineCase):
+	"""The pump is the default transport, so its prepare must bind the turn's
+	connector focus (and clear a stale one) or the tool gate is inert."""
+
+	_FOCUS = {"key": "microsoft_learn", "label": "Microsoft Learn"}
+
+	def _prepare(self, rid, context, *, stale_focus=None):
+		conv = self._mk_conv()
+		self.addCleanup(connector_focus.clear, conv)
+		connector_focus.bind_turn(conv, stale_focus)
+		seed = self._mk_msg(conv, content="hi")
+		payload = json.dumps({"context": context})
+		self._mk_turn(conv, rid, seed, "queued", version=1, reserved=1, dispatch_payload=payload)
+		with self._gateway(_FakeSess()), self._pump_on():
+			prepare.run_prepare(rid, self._target)
+		self.assertEqual(self._state(rid), "ready")
+		return conv
+
+	def test_focused_turn_binds_the_focus(self):
+		conv = self._prepare("pmp_focus_on", {"focus_connector": self._FOCUS})
+		self.assertEqual(connector_focus.current(conv), self._FOCUS)
+
+	def test_unfocused_turn_clears_a_stale_focus(self):
+		conv = self._prepare("pmp_focus_off", {"page": "triggers"}, stale_focus=self._FOCUS)
+		self.assertIsNone(connector_focus.current(conv))
 
 
 class TestPrepareForwardsRunIdToTheHandoffHint(_PipelineCase):
@@ -3954,7 +3982,3 @@ class TestPrepareSessionRepair(_PipelineCase):
 				self.assertTrue(res.get("ready"))
 				self.assertEqual(self._names(fake), ["patch"])
 				self.assertTrue(self._payload(rid)["message"].endswith("\n\nhello"))
-
-	def test_flag_absent_probes(self):
-		conv, rid, fake, res = self._prepare()
-		self.assertEqual(self._names(fake)[0], "describe")

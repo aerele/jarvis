@@ -129,7 +129,7 @@
 
 			<!-- effort → side flyout (wrapper keeps the flyout a SIBLING of the row
 			     button, never nested inside it — interactive-in-button is invalid).
-			     No levels = the workspace's model cannot think, so no choice. -->
+			     The server always lists the levels; an empty list just hides the row. -->
 			<div
 				v-if="thinkingLevels.length"
 				class="mep-sub"

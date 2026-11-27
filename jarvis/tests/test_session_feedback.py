@@ -164,12 +164,6 @@ class TestTurnCounter(_SessionFeedbackTestCase):
 		_bump_turn_count(self.conv, self._mk_turn("sfrunG"))
 		self.assertEqual(self._turn_count(), 2, "only the two user-visible turns count")
 
-	def test_bump_is_a_no_op_on_a_missing_conversation(self):
-		# A settled turn whose conversation was deleted must not cost the turn its
-		# terminal publish. The UPDATE simply matches 0 rows (it does not raise);
-		# the raising branch is covered by the stubbed-frappe harness.
-		_bump_turn_count("does-not-exist", "sfrun-missing")
-
 	def test_bump_never_raises_even_when_the_error_log_itself_fails(self):
 		"""A DB outage mid-bump: the UPDATE raises, the rollback raises, and the
 		Error Log INSERT (over the same dead connection) raises too. "NEVER

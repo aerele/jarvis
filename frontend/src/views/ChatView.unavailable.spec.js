@@ -73,7 +73,7 @@ function harness(initial = "A") {
 		_olderArmed: true,
 		_restoreTop: null,
 		_restoreUntil: 0,
-		draftLinkGeneration: 0,
+		resetDraftLink: noop,
 		recentPrompts: [],
 		__: (text) => "Translated: " + text,
 		notify: vi.fn(),

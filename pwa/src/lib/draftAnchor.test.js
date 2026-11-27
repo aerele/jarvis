@@ -142,3 +142,12 @@ test("an own block in an older message does not hide the kept draft at the tail"
 	assert.equal(r.own, false);
 	assert.equal(r.draftKey, "a1");
 });
+
+// Break: the phone ignores the parked-draft signal, so a typed ActionCard and a server DraftCard
+// show together (two cards for one change). Without the signal nothing changes.
+test("a pending server draft card means no typed draft card is live", () => {
+	const rows = [user("u1"), asst("a1", GOOD)];
+	assert.equal(draftAnchor(rows, itemsOf(rows), { parkedDraft: true }), null);
+	assert.equal(draftAnchor(rows, itemsOf(rows), { parkedDraft: false }).draftKey, "a1");
+	assert.equal(draftAnchor(rows, itemsOf(rows), {}).draftKey, "a1");
+});

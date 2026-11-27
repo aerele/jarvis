@@ -1131,6 +1131,7 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 			else:
 				with (
 					patch.object(api, "_run_tool", return_value=run_result),
+					patch("jarvis.chat.connector_focus.refusal", return_value=None),
 				):
 					result = api._dispatch_from_session(
 						"owner@example.test", "private-session", tool, args, result_mode=result_mode
@@ -1378,6 +1379,7 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 						patch("jarvis.chat.collaboration_turn.current_turn", return_value=None),
 						patch.object(frappe, "logger", return_value=Logger()),
 						patch.object(api, "_run_tool", return_value=raw_result),
+						patch("jarvis.chat.connector_focus.refusal", return_value=None),
 					):
 						result = api._dispatch_from_session(
 							"owner@example.test", "private-session", tool, args

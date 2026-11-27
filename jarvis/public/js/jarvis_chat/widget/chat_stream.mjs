@@ -5,6 +5,7 @@
 // Reference implementation: pwa/src/views/ChatView.vue (onEvent).
 
 import { admitEvent } from "../../shared/pump_fence.mjs";
+import { draftTitleOfItem } from "../../shared/draft_pending.mjs";
 
 // `fence` is the Relay-Pump epoch/seq watermark, carried IN the reducer state so
 // this stays a pure function of (state, frame) — Panel.vue holds one state object
@@ -55,26 +56,42 @@ export function visibleMessages(messages) {
   );
 }
 
+// A server DRAFT card (flag jarvis_draft_cards) is not confirmed from this panel: it cannot show
+// what the draft holds. Every builder of a pending item (pending_items.mjs, and the realtime
+// push below) runs its item through this: a draft gets its human title as `draft_title` (and as
+// `summary`, so a tool name is never what it says); any other item is returned as it was, with
+// no new key. `source` carries the card: `preview.card` (list item, realtime push) or
+// `pending_card` (a tool row).
+export function withDraftTitle(item, source) {
+  const title = draftTitleOfItem(source);
+  return title ? { ...item, summary: title, draft_title: title } : item;
+}
+
 // A pending frame is untrusted until the server attaches this positive proof.
 // Do not infer safety from a token, preview, or a still-pending transcript row:
 // all three can be delayed after a close migration has cancelled the action.
 export function appendAttestedPending(s, item) {
   if (!item?.token || item.pending_card_safe !== true) return s;
   if (s.pending.some((x) => x.token === item.token)) return s;
-  s.pending.push({
-    token: item.token,
-    tool: item.tool || "",
-    summary: item.summary || "",
-    // created_at (P0c) is the primary sort key for numbered typed approval
-    // ("confirm 2"); expires_at is kept as the fallback for a pre-P0c record.
-    created_at: item.created_at ?? null,
-    expires_at: item.expires_at ?? null,
-    // Text-only signal (see pendingApproveRun) - never the preview/plan itself.
-    approve_run: pendingApproveRun(item.preview),
-    // Parked since the user's latest message (decision 6); false = "Earlier".
-    recent: item.recent !== false,
-    pending_card_safe: true,
-  });
+  s.pending.push(
+    withDraftTitle(
+      {
+        token: item.token,
+        tool: item.tool || "",
+        summary: item.summary || "",
+        // created_at (P0c) is the primary sort key for numbered typed approval
+        // ("confirm 2"); expires_at is kept as the fallback for a pre-P0c record.
+        created_at: item.created_at ?? null,
+        expires_at: item.expires_at ?? null,
+        // Text-only signal (see pendingApproveRun) - never the preview/plan itself.
+        approve_run: pendingApproveRun(item.preview),
+        // Parked since the user's latest message (decision 6); false = "Earlier".
+        recent: item.recent !== false,
+        pending_card_safe: true,
+      },
+      item
+    )
+  );
   return s;
 }
 

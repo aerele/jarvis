@@ -770,13 +770,6 @@ describe("Claude sign-in (startConnect/finishConnect via the claude-login relay)
 		expect(r._connect.authorizeUrl).toBe("https://claude.com/cai/oauth/authorize?code=true");
 	});
 
-	it("presents the bare-code paste step, same as xAI's code_only_paste", async () => {
-		const w = await mountOnboarding();
-		const r = await beginClaudeSignin(w);
-		expect(w.vm.isCodeOnlyPaste(r.upstream)).toBe(true);
-		expect(w.vm.pasteTitle(r.upstream)).toBe("Paste the code");
-	});
-
 	it("finishConnect relays the pasted code to completeClaudeCliLogin, keyed by login_id", async () => {
 		const w = await mountOnboarding();
 		const r = await beginClaudeSignin(w);

@@ -323,3 +323,19 @@ describe("a long 'was' value is clamped, with the full text in title", () => {
 		expect(w.get(".dp-fields .dp-old").text()).toBe("short");
 	});
 });
+
+describe("the confirm button's words", () => {
+	const confirmText = (props) =>
+		mount(DraftPreview, { props, global: { stubs: { transition: false } } })
+			.find(".dp-btn-primary")
+			.text();
+	// Break: a server draft card's Preview says "Confirm create" instead of the card's own word, or
+	// the typed preview (no label given) loses its words.
+	it("says the host's label when it gives one, else Confirm create / Confirm update", () => {
+		expect(confirmText({ model: model([], { verb: "create" }) })).toBe("Confirm create");
+		expect(confirmText({ model: model([]) })).toBe("Confirm update");
+		expect(confirmText({ model: model([]), confirmLabel: "Save changes" })).toBe(
+			"Save changes"
+		);
+	});
+});

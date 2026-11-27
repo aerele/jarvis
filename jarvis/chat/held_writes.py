@@ -155,8 +155,8 @@ def waiting_on(conversation: str) -> str | None:
 # --------------------------------------------------------------------------- #
 def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 	"""The File Box verdict for ``tool(args)``: a response envelope, or None to let
-	``_run_tool`` carry on (not a File Box write, ``update_wiki``, or a single ungated
-	write)."""
+	``_run_tool`` carry on (not a File Box write, ``update_wiki``, a single ungated
+	write, or a connector safe read)."""
 	from jarvis import api
 
 	if not conversation or tool not in api._WRITE_TOOLS:
@@ -165,6 +165,8 @@ def apply(tool: str, args: dict, conversation: str | None) -> dict | None:
 		return None
 	if not isinstance(args, dict):  # fail closed: the policy can't read the call
 		return _refuse("InvalidArgumentError", "args must be a JSON object; nothing was written.")
+	if tool == "call_connector" and api._connector_call_is_safe_read(args):
+		return None
 	if tool == "remember":  # the user's durable memory: a person writes it, in chat
 		from jarvis.tools.remember import UNATTENDED_MESSAGE
 

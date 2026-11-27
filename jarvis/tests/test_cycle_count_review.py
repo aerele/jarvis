@@ -2383,6 +2383,34 @@ class TestNativePhysicalCountEntry(FrappeTestCase):
 			frappe.set_user("Administrator")
 		self.assertEqual(events, ["t2-pre-gate-read", "t1-commit-then-t2-current-fact-lock"])
 
+	def test_stored_copy_is_permitted_only_for_a_controlled_write(self):
+		"""Newer Frappe checks submit/cancel on the stored copy; an unmarked write stays denied."""
+		from jarvis.chat import cycle_count_entry
+
+		approved = self._plan()
+		frappe.set_user(self.counter)
+		try:
+			name = cycle_count_entry.record_counts(
+				approved.name,
+				frappe.utils.now(),
+				[{"item_code": self.item, "counted_qty": "1"}],
+				"cyclecount" + frappe.generate_hash(length=24),
+			)["saved"][0]["name"]
+			unmarked = frappe.get_doc("Jarvis Physical Count", name)
+			unmarked.load_doc_before_save()
+			marked = frappe.get_doc("Jarvis Physical Count", name)
+			cycle_count_entry._mark_controlled_count_mutation(marked)
+			marked.load_doc_before_save()
+			for ptype in ("submit", "cancel"):
+				self.assertFalse(
+					frappe.has_permission("Jarvis Physical Count", ptype, unmarked._doc_before_save)
+				)
+				self.assertTrue(
+					frappe.has_permission("Jarvis Physical Count", ptype, marked._doc_before_save)
+				)
+		finally:
+			frappe.set_user("Administrator")
+
 	def test_counter_and_reviewer_can_correct_only_the_current_count_fact(self):
 		from jarvis.chat import cycle_count_entry
 

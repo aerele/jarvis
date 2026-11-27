@@ -258,6 +258,25 @@ _unrelated(
 )
 
 _unrelated(
+	"jarvis.chat.connectors_api",
+	"Connector ownership/admin gates and current-user OAuth state, not chat sharing.",
+	"""
+    add_connector
+    connect_oauth
+    delete_connector
+    disconnect_oauth
+    list_connectors
+    mcp_oauth_callback
+    oauth_signin_status
+    probe_connector_auth
+    set_allowed_actions
+    set_oauth_client_credentials
+    test_connector
+    update_connector
+    """,
+)
+
+_unrelated(
 	"jarvis.chat.custom_skills_api",
 	"Custom skill owner/reviewer/sharing model is separate from conversation grants.",
 	"""
@@ -828,6 +847,14 @@ ENDPOINTS.update(
 				"doctype": "Jarvis Conversation",
 				"kind": "update",
 				"name": "$conversation",
+			},
+			"scope": "chat_scoped",
+		},
+		"jarvis.chat.actions_api.save_draft_card": {
+			"arguments": {
+				"conversation": "$conversation",
+				"token": "$token",
+				"values": {"title": "recipient edit"},
 			},
 			"scope": "chat_scoped",
 		},

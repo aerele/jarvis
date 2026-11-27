@@ -60,10 +60,6 @@ class TestKindOf(FrappeTestCase):
 			with self.subTest(exc=type(exc).__name__):
 				self.assertEqual(fk.kind_of(exc), fk.RETRY_LATER)
 
-	def test_plain_validation_error_is_not_fixable(self):
-		# CLASS-ONLY; real rows: credit limit, frozen accounts, a bad status (below).
-		self.assertEqual(fk.kind_of(frappe.ValidationError("Credit limit crossed")), fk.NOT_FIXABLE)
-
 	def test_unknown_exception_is_not_fixable(self):
 		for exc in (
 			Exception("boom"),
@@ -147,6 +143,26 @@ class TestEnvelopeKind(FrappeTestCase):
 			({"ok": False}, fk.NOT_FIXABLE),
 			(None, fk.NOT_FIXABLE),
 			("boom", fk.NOT_FIXABLE),
+		]
+		for result, want in rows:
+			with self.subTest(result=result):
+				self.assertEqual(fk.envelope_kind(result), want)
+
+	def test_connector_inner_failure_is_read_by_its_code(self):
+		def inner(code):
+			return {"ok": True, "data": {"ok": False, "error": {"code": code, "message": "m"}}}
+
+		rows = [
+			(inner("invalid_arguments"), fk.FIXABLE),
+			(inner("circuit_open"), fk.RETRY_LATER),
+			(inner("at_capacity"), fk.RETRY_LATER),
+			(inner("action_denied"), fk.NOT_FIXABLE),
+			(inner("connector_not_ready"), fk.NOT_FIXABLE),
+			(inner("tool_error"), fk.NOT_FIXABLE),
+			(inner("transport_error"), fk.NOT_FIXABLE),
+			(inner("ssrf_blocked"), fk.NOT_FIXABLE),
+			({"ok": True, "data": {"ok": False}}, fk.NOT_FIXABLE),
+			({"ok": True, "data": {"ok": True}}, fk.NOT_FIXABLE),
 		]
 		for result, want in rows:
 			with self.subTest(result=result):

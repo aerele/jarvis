@@ -117,6 +117,9 @@
   "run_query_doctype_allowlist",
   "run_method_blocklist",
   "core_apps_override",
+  "connectors_section",
+  "connectors_col",
+  "connector_egress_rules",
   "sync_tab",
   "last_sync_section",
   "last_sync_at",
@@ -174,6 +177,7 @@
   "announcement_link_label",
   "system_tab",
   "chat_sharing_enabled",
+  "suggest_replies_enabled",
   "deployment_section",
   "deployment_mode",
   "admin_connection_section",
@@ -195,6 +199,12 @@
   "catalogue_visibility_section",
   "catalogue_visibility_governed",
   "catalogue_visibility_synced_at",
+  "connector_catalogue_section",
+  "connector_catalogue_disabled",
+  "connector_catalogue_coming_soon",
+  "connector_catalogue_synced_at",
+  "connector_key_overrides",
+  "connector_key_overrides_synced_at",
   "holiday_policy_section",
   "holiday_policy_disabled",
   "holiday_policy_disabled_designs",
@@ -923,6 +933,22 @@
    "description": "Customization discovery treats every installed app outside the known core stack (frappe, erpnext, hrms, india_compliance, payments, webshop, insights, wiki, jarvis) as the customer's own. Comma- or newline-separated app names listed here EXTEND that core set, so their doctypes stop being reported as customizations. Leave empty (default) on most sites."
   },
   {
+   "fieldname": "connectors_section",
+   "fieldtype": "Section Break",
+   "label": "Connectors",
+   "description": "MCP connectors let the agent call external services (GitHub, Atlassian, Linear, Stripe and custom gateways) on a user's behalf."
+  },
+  {
+   "fieldname": "connectors_col",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "connector_egress_rules",
+   "fieldtype": "Small Text",
+   "label": "Connector Egress Rules",
+   "description": "Optional allow/deny list of hosts or patterns connector calls may reach, one per line. Empty allows any host (subject to the built-in SSRF guard)."
+  },
+  {
    "fieldname": "sync_tab",
    "fieldtype": "Tab Break",
    "label": "Sync & Status"
@@ -1291,6 +1317,13 @@
    "default": "1"
   },
   {
+   "fieldname": "suggest_replies_enabled",
+   "fieldtype": "Check",
+   "label": "Suggest follow-up replies",
+   "default": "1",
+   "description": "After a reply, offer the user one to three likely next messages as chips they can tap to send. Costs one short extra model call per reply, on the Claude plan too (a short turn on the user's subscription)."
+  },
+  {
    "fieldname": "deployment_section",
    "fieldtype": "Section Break",
    "label": "Deployment Mode",
@@ -1437,6 +1470,51 @@
    "read_only": 1
   },
   {
+   "fieldname": "connector_catalogue_section",
+   "fieldtype": "Section Break",
+   "label": "Operator Connector Catalogue",
+   "collapsible": 1,
+   "description": "Mirror of the operator's fleet-global connector catalogue policy, pulled from the control plane via get_connection (jarvis.connector_catalogue). Read-only here; the pull is the only writer. A disabled preset leaves the Connectors picker and refuses new connectors; saved ones keep working."
+  },
+  {
+   "fieldname": "connector_catalogue_disabled",
+   "fieldtype": "Small Text",
+   "label": "Disabled Connector Presets",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Canonical JSON list of the preset names the operator switched off, as last applied. Names this release does not ship are kept but ignored. Empty [] = nothing disabled; empty string = never pulled (or every pull kept last-known)."
+  },
+  {
+   "fieldname": "connector_catalogue_coming_soon",
+   "fieldtype": "Small Text",
+   "label": "Coming Soon Connector Presets",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Canonical JSON list of the preset names the operator marked Coming soon, as last applied: a subset of the disabled list that stays visible in Browse but cannot be added yet. Empty [] = none; empty string = never pulled (or every pull kept last-known)."
+  },
+  {
+   "fieldname": "connector_catalogue_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Connector Catalogue Synced At",
+   "hidden": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "connector_key_overrides",
+   "fieldtype": "Small Text",
+   "label": "Connector Key Overrides",
+   "hidden": 1,
+   "read_only": 1,
+   "description": "Canonical JSON object {preset name: true|false}: whether the operator offers \"Use a key instead\" for that preset, as last applied. Absent = the code default. Empty {} = no overrides; empty string = never pulled (or every pull kept last-known)."
+  },
+  {
+   "fieldname": "connector_key_overrides_synced_at",
+   "fieldtype": "Datetime",
+   "label": "Connector Key Overrides Synced At",
+   "hidden": 1,
+   "read_only": 1
+  },
+  {
    "fieldname": "holiday_policy_section",
    "fieldtype": "Section Break",
    "label": "Holiday policy (from Jarvis Cloud)",
@@ -1511,5 +1589,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-13 19:00:00.000000"
+ "modified": "2026-11-24 14:00:00.000000"
 }

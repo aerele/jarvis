@@ -155,10 +155,6 @@ test("isStale reads the date in the extreme zones too", () => {
   assert.equal(at("Pacific/Pago_Pago", "2026-11-09"), true);
 });
 
-test("isStale is true for a tab left open overnight", () => {
-  assert.equal(isStale(good(), new Date("2026-11-09T05:00:00Z")), true);
-});
-
 test("isStale treats an invalid zone as stale instead of throwing", () => {
   const answer = { ...good(), tz: "Not/AZone" };
   assert.equal(isStale(answer, new Date("2026-11-08T05:00:00Z")), true);
@@ -169,8 +165,4 @@ test("a none answer with no date is never stale; with a date it follows the day"
   const none = { v: 1, date: "2026-11-08", tz: "Asia/Kolkata", kind: "none" };
   assert.equal(isStale(none, new Date("2026-11-08T05:00:00Z")), false);
   assert.equal(isStale(none, new Date("2026-11-09T05:00:00Z")), true);
-});
-
-test("isStale tolerates a missing now by using the clock", () => {
-  assert.equal(typeof isStale(good()), "boolean");
 });

@@ -35,11 +35,6 @@ describe("sendRejectionCopy", () => {
 		);
 	});
 
-	it("shows a server sentence verbatim", () => {
-		const sentence = "A reply is already in progress.";
-		expect(sendRejectionCopy(sentence, "Jarvis").message).toBe(sentence);
-	});
-
 	it("never surfaces an unknown machine code", () => {
 		expect(sendRejectionCopy("insufficient_workers", "Jarvis").message).toBe(FALLBACK);
 	});

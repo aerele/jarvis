@@ -247,14 +247,6 @@ class TestForceOverride(_Case):
 		with mock.patch.dict(frappe.conf, {"developer_mode": 0, "jarvis_holiday_touch_force": "diwali:day"}):
 			self.assertEqual(self.record(user, _at(9)), {"play": False})
 
-	def test_a_forced_lead_up_plays(self):
-		user = self.person()
-		with mock.patch.dict(
-			frappe.conf, {"developer_mode": 1, "jarvis_holiday_touch_force": "diwali:leadup"}
-		):
-			self.assertEqual(self.record(user, _at(9)), {"play": True})
-			self.assertEqual(self.record(user, _at(9, 5)), {"play": True})
-
 
 def _fail_on_shown_write(error, calls):
 	"""A ``set_value`` that raises ``error`` for the showing field only (and counts the

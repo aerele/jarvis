@@ -35,8 +35,9 @@ from jarvis.permissions import (
 	has_jarvis_access,
 	refuse_in_tool_dispatch,
 )
-from jarvis.tools._result_guard import enforce_result_budget
-from jarvis.tools.registry import _ACCEPTED_PARAMS, dispatch
+from jarvis.tools import _report_snapshots
+from jarvis.tools._result_guard import MAX_RESULT_CHARS, enforce_result_budget, measure
+from jarvis.tools.registry import _ACCEPTED_PARAMS, _OPTIONAL_PARAMS, dispatch
 
 _REGISTERED_TOOL_NAME = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
 _PRIVATE_INPUT_RECOVERY_BODY = b"{}"
@@ -801,7 +802,7 @@ def _dispatch_from_session(
 	"""
 	# impersonate is session-safe: a bare frappe.set_user in this HTTP path
 	# would gut the caller's cookie session sid + data and log them out.
-	from jarvis.chat import agent_run_steps, macro_report_wait
+	from jarvis.chat import agent_run_steps, connector_focus, macro_report_wait
 	from jarvis.chat.collaboration import require_legacy_session
 	from jarvis.tools import _agent_run_ctx, _delegate_capability, _private_output
 
@@ -1033,6 +1034,19 @@ def _dispatch_from_session(
 			# Resolve the conversation for this session up front so the
 			# confirmation gate can bind a parked write to it.
 			conv = frappe.db.get_value("Jarvis Conversation", {"session_key": session_key}, "name")
+			# Connector focus (the composer pill): while the running turn is focused,
+			# only that connector's two tools run. Here, not in _run_tool, because
+			# _run_tool also executes a person's card confirm, which focus must not block.
+			focus_refusal = connector_focus.refusal(conv, tool, parsed_args)
+			if focus_refusal:
+				_persist_and_publish_tool_call(
+					session_key=session_key,
+					tool=tool,
+					args=parsed_args,
+					result=focus_refusal,
+					tool_call_id=tool_call_id,
+				)
+				return focus_refusal
 			# A macro step that was told to wait for a background report (or whose report
 			# failed) changes nothing until Jarvis continues it. Here too, and not in
 			# _run_tool, for the same reason as focus: a card confirm must still run.
@@ -1070,10 +1084,18 @@ def _dispatch_from_session(
 					tool_call_id=tool_call_id,
 				)
 				return result
+			# The digest of what the run is allowed to see, taken before it: access that
+			# changes during a long run must not be stamped on rows of the old access.
+			snapshot_digest = _pre_run_digest(tool, parsed_args)
 			started_ms = time.monotonic()
 			try:
-				with _private_output.request(result_mode is not None), _agent_read_time_limit(tool):
+				with (
+					_private_output.request(result_mode is not None),
+					_agent_read_time_limit(tool),
+					_report_snapshots.agent_reload_scope(),
+				):
 					result = _run_tool(tool, parsed_args, conversation=conv)
+				run_ms = int((time.monotonic() - started_ms) * 1000)
 			except Exception as exc:
 				# A tool that raised past _run_tool's envelope translation is a real
 				# fault; try to leave an honest step saying the attempt happened and
@@ -1137,7 +1159,12 @@ def _dispatch_from_session(
 			# path - the dashboard builder/desk/external call_tool callers go through
 			# _dispatch_current_user and are deliberately uncapped.
 			if result_mode is None and isinstance(result, dict) and result.get("ok"):
-				guarded, event = enforce_result_budget(result["data"], tool=tool)
+				data, measured, snapshot = result["data"], None, {}
+				if tool == "run_report" and isinstance(data, dict) and not data.get("prepared_report"):
+					data, measured, snapshot = _snapshot_oversized_run_report(
+						data, parsed_args, run_ms, snapshot_digest
+					)
+				guarded, event = enforce_result_budget(data, tool=tool, measured=measured)
 				if event:
 					result["data"] = guarded
 					telemetry.record_budget_event(
@@ -1146,6 +1173,7 @@ def _dispatch_from_session(
 						original_chars=event["original_chars"],
 						shown=event["shown"],
 						total=event["total"],
+						**snapshot,
 					)
 				receipt = result
 			_persist_and_publish_tool_call(
@@ -1163,6 +1191,104 @@ def _dispatch_from_session(
 		_agent_run_ctx.take_armed_by_macro()  # belt: never leak an armed marker across dispatches
 		_agent_run_ctx.take_armed_by_skill()  # belt: same for the approved-skill-run marker
 		_agent_run_ctx.take_request_autorun_applied()  # belt: same for the request-scoped marker
+
+
+# A run this slow is not snapshotted: the create would push the call past the plugin's 30 s abort.
+CREATE_SKIP_AFTER_MS = 20_000
+
+
+def _pre_run_digest(tool: str, args) -> str | None:
+	"""The caller's permission digest for a ``run_report`` call, taken fresh before the run
+	(a per-request memo may hold an older value). None for any other tool, or when it cannot
+	be taken: the snapshot then takes its own."""
+	if tool != "run_report" or not isinstance(args, dict):
+		return None
+	try:
+		return _report_snapshots.perm_digest(frappe.session.user, args.get("report_name"), fresh=True)
+	except Exception:
+		return None
+
+
+def _snapshot_oversized_run_report(
+	data: dict, args, run_ms: int, perm_digest: str | None = None
+) -> tuple[dict, int | None, dict]:
+	"""Store an inline ``run_report`` result that is over the model-facing budget as a
+	report snapshot, so the model can read the whole report through ``query_report``.
+
+	Returns ``(data, measured, telemetry)``. ``data`` carries ``run=<rs_ id>`` and the
+	``_jarvis_snapshot`` marker for the result guard only when a snapshot was stored,
+	else it is the input. ``measured`` is the size, taken once and handed to the guard
+	(None when it could not be measured: then nothing is stored). ``telemetry`` holds
+	the ``snapshot`` (and ``snapshot_bytes``, or ``snapshot_error``: an exception class)
+	fields of the budget event, empty when the result is within budget. Never raises: a
+	snapshot is an addition to the result."""
+	measured = measure(data)
+	if measured is None or measured <= MAX_RESULT_CHARS:
+		return data, measured, {}
+	if run_ms >= CREATE_SKIP_AFTER_MS:
+		return data, measured, {"snapshot": "skipped:slow"}
+	try:
+		filters = _snapshot_filters(args, data)
+		if filters is None:
+			return data, measured, {"snapshot": "skipped:filters"}
+		if not _snapshot_passes_read_gate(args.get("report_name"), filters):
+			return data, measured, {"snapshot": "skipped:gate"}
+		began = time.monotonic()
+		created = _report_snapshots.create(
+			data,
+			report_name=args.get("report_name"),
+			filters=filters,
+			run_ms=run_ms,
+			measured=measured,
+			perm_digest=perm_digest,
+		)
+		create_ms = int((time.monotonic() - began) * 1000)
+	except Exception as exc:  # `create` never raises; this guards the filters step above
+		telemetry.record_snapshot_failure("create_failed", exc)
+		return data, measured, {"snapshot": "failed", "snapshot_error": type(exc).__name__}
+	snapshot_id, reason = created
+	if not snapshot_id:
+		fields = {"snapshot": f"skipped:{reason}", "snapshot_create_ms": create_ms}
+		if created.error:
+			fields["snapshot_error"] = created.error
+		return data, measured, fields
+	snapshot = {"snapshot": "created", "snapshot_bytes": created.size, "snapshot_create_ms": create_ms}
+	return {**data, "run": snapshot_id, "_jarvis_snapshot": True}, measured, snapshot
+
+
+def _snapshot_passes_read_gate(report_name, filters: dict) -> bool:
+	"""Run the gate that every read of the snapshot passes, once, on the effective filters.
+	An AR/AP Custom Report whose saved filters lack the company or the date would give a
+	snapshot that every read refuses: it is not stored."""
+	from jarvis.tools._report_query_source import gate_report
+
+	try:
+		gate_report(report_name, filters, frappe.session.user)
+	except (InvalidArgumentError, PermissionDeniedError):
+		return False
+	return True
+
+
+def _snapshot_filters(args, data: dict) -> dict | None:
+	"""The filters the report ran with, as a reload would need them (None: they cannot be
+	pinned, so no snapshot).
+
+	A Custom Report with saved default filters replaces the call's filters entirely
+	(``frappe.desk.query_report._run``, ``are_default_filters``) and returns them as
+	``custom_filters``: those are the effective ones, and a reload runs with
+	``are_default_filters=False`` so a later edit of the saved filters cannot move the scope.
+	Otherwise they are the call's own (``run_report`` accepts a JSON string), with the company
+	and date the scope resolved for a standard receivable or payable report."""
+	from jarvis.tools.run_report import _normalize_filters
+
+	applied = data.get("custom_filters")
+	if applied:
+		return dict(applied) if isinstance(applied, dict) else None
+	filters = dict(_normalize_filters(args.get("filters")))
+	scope = data.get("report_scope")
+	if isinstance(scope, dict):
+		filters.update({key: scope[key] for key in ("company", "report_date") if key in scope})
+	return filters
 
 
 #: Terminal server-owned evaluators narrate their own findings writeback
@@ -1525,6 +1651,10 @@ def persist_tool_receipt(
 	or flipped, False when nothing was (a duplicate, a failed ``only_if``, a lost flip)."""
 	from jarvis.tools import _private_output
 
+	if flip_token and not action_outcome:
+		# A card's own row always ends saying how it ended: flipped (or inserted) with no
+		# outcome it would clear the card and leave a bare activity row in its place.
+		action_outcome = "failed"
 	# Preserve the execution name only long enough to classify a source result.
 	# Deposit metadata uses a fixed label at every durable/realtime boundary, but
 	# source_receipt must see the original name or a future permissive contract
@@ -1574,7 +1704,10 @@ def persist_tool_receipt(
 	if no_write:
 		status = ""
 	else:
-		status = "completed" if result.get("ok") else "error"
+		# envelope_ok unwraps a connector tool's inner {ok:false} (a blocked/denied/
+		# failed connector call), so its chip reads "error" not a false "completed";
+		# every other tool keeps the outer envelope's ok verbatim.
+		status = "completed" if envelope_ok(tool, result) else "error"
 
 	# Entity stamping (org wiki): which doc this call touched, so wiki nudges
 	# can read a turn's entities off the receipt rows. Lazy + guarded: a
@@ -2061,9 +2194,38 @@ _DUAL_FORM_TOOLS = frozenset(
 )
 
 
+def _is_blank(value) -> bool:
+	"""An empty string (whitespace included), list or dict. ``0``, ``False`` and
+	``"0"`` are real values and are not blank."""
+	if isinstance(value, str):
+		return not value.strip()
+	return isinstance(value, list | dict) and not value
+
+
+# A strict-schema model (gpt-5.6-terra in the 2026-11 transcript) sends EVERY
+# argument and fills the ones it does not use with "", [] or {}. Most tools read
+# ``x is not None`` as "the caller chose x", so a blank raised (export_query,
+# run_method, export_excel, preview_landed_cost_voucher), took the wrong branch
+# (send_email's recipients_from) or overwrote data (update_wiki's replace_body_md
+# wiped the page body). So ``_parse_args`` drops a blank value of every OPTIONAL
+# parameter (one with a default in the tool's signature, ``_OPTIONAL_PARAMS``)
+# for every tool: one rule, so a new tool or parameter cannot miss it. Required
+# parameters keep their blank and get the tool's own error. Only top-level values
+# are checked: a blank inside a value can mean "is empty" (``filters={"status": ""}``).
+#
+# Exceptions, where a blank optional value is a real answer:
+# - record_agent_run: the payroll-deposit writeback grammar is exact. ``findings=[]``
+#   means "zero findings" (None fails as malformed), and an explicit value of a
+#   ``_MISSING``-sentinel parameter must fail closed, not read as omitted.
+# - get_my_access: ``docs=[]`` / ``doctypes=[]`` is a "nothing to check" query that
+#   answers ``can_doc: []`` (the P0d exemption, test_empty_batch_normalization).
+_BLANK_IS_A_VALUE: frozenset[str] = frozenset({"get_my_access", "record_agent_run"})
+
+
 def _parse_args(args: dict | str | None, tool: str | None = None) -> dict:
 	"""Decode the args input into a dict + strip legacy identity markers +
-	normalise an empty batch array for a dual-form tool (P0d).
+	normalise an empty batch array for a dual-form tool (P0d) + drop a blank
+	value of any optional parameter of the tool (see ``_BLANK_IS_A_VALUE``).
 
 	Raises ``InvalidArgumentError`` (a JarvisError subclass) on JSON
 	parse failure - that mirrors what tools raise for malformed input
@@ -2102,7 +2264,11 @@ def _parse_args(args: dict | str | None, tool: str | None = None) -> dict:
 				# Only a key THIS tool actually declares - never touch one it
 				# doesn't accept (dispatch's own param filter would drop it
 				# anyway, but this keeps the persisted/audited args honest).
-				if key in tool_params and args.get(key) in ([], ""):
+				if key in tool_params and _is_blank(args.get(key)):
+					del args[key]
+		if tool not in _BLANK_IS_A_VALUE:
+			for key in _OPTIONAL_PARAMS.get(tool, ()) & args.keys():
+				if _is_blank(args[key]):
 					del args[key]
 	return args
 
@@ -2186,6 +2352,15 @@ _WRITE_TOOLS = frozenset(
 		"record_app_wiki",
 		"finish_app_learning_run",
 		"save_agent_dashboard",
+		# call_connector fires a real outbound call to an external service under
+		# the caller's connector credential - AUDITED like every other write here
+		# (this set is what drives is_write -> the audit + savepoint), and never
+		# previewable, so a parked call falls through to _pending_preview's
+		# described-intent default. It stays in _GATED_WRITES too, but its confirm
+		# gate is ACTION-AWARE (see _connector_call_is_safe_read): a user-allowed
+		# read-only, non-destructive action skips the card and runs as an ordinary
+		# read - still audited through THIS set. Writes/destructive/unknown park.
+		"call_connector",
 	}
 )
 # Writes whose park preview is a sandboxed trial run (``_run_preview``). Only the
@@ -2903,6 +3078,7 @@ def _describe_call(tool: str, args: dict) -> str:
 		"target_doctype",
 		"target_name",
 		"method",
+		"connector",
 		"action",
 		"recipients",
 		"to",
@@ -3257,9 +3433,47 @@ def _translate_write_error(
 	return envelope
 
 
+# Tools that never raise and return their OWN {ok: false} envelope as the tool's
+# data - so the outer {ok: true, data} envelope (the tool DISPATCHED) hides the
+# real outcome. The audit trail and the receipt chip must reflect the INNER
+# outcome for these, or an ssrf_blocked / action_denied / transport_error attempt
+# is filed as a success. Kept deliberately narrow so every other tool is untouched.
+_ENVELOPE_TOOLS = frozenset({"call_connector"})
+
+
+def envelope_ok(tool: str, result) -> bool:
+	"""Effective success of a completed tool call, for the audit line and the
+	receipt chip. Normally the OUTER envelope's ``ok`` (did the tool dispatch); for
+	an :data:`_ENVELOPE_TOOLS` tool it is the INNER ``data.ok`` (did the connector
+	call itself succeed), so a blocked/denied/failed attempt is not shown as a
+	success. Non-envelope tools are unchanged. ``result`` is the outer
+	``{ok, data}`` envelope."""
+	outer = bool(isinstance(result, dict) and result.get("ok"))
+	if not outer or tool not in _ENVELOPE_TOOLS:
+		return outer
+	data = result.get("data")
+	if isinstance(data, dict) and "ok" in data:
+		return bool(data.get("ok"))
+	return outer
+
+
 def _record_tool_audit(tool: str, args: dict, data) -> None:
-	"""Keep private app-learning material out of the existing audit sink."""
+	"""Audit a completed (non-raising) tool. ``data`` is the tool's OWN return. For
+	an :data:`_ENVELOPE_TOOLS` tool whose data is itself an ``{ok: false}`` envelope,
+	record the connector's own failure (code + message) instead of a false success;
+	every other tool records ok=True with its result exactly as before. Private
+	app-learning material stays out of the audit sink either way."""
 	safe_args, safe_data = _app_learning_audit_payload(tool, args, data)
+	if tool in _ENVELOPE_TOOLS and isinstance(data, dict) and data.get("ok") is False:
+		err = data.get("error") if isinstance(data.get("error"), dict) else {}
+		audit.record(
+			tool=tool,
+			args=safe_args,
+			ok=False,
+			error_code=err.get("code") or "connector_error",
+			error_message=err.get("message") or "",
+		)
+		return
 	audit.record(tool=tool, args=safe_args, ok=True, result=safe_data)
 
 
@@ -3344,10 +3558,9 @@ def _activity_target(tool: str, args) -> tuple[str, str]:
 def _record_tool_activity(tool: str, args, data, *, is_write: bool) -> None:
 	"""One ``read`` event per completed non-write tool call, and one ``export`` event
 	per delivered export (an export tool is a write, so it also keeps its Agent Write
-	row). Introspection tools are not logged (plan E4). This branch has no
-	envelope_ok / _ENVELOPE_TOOLS machinery (the connector-envelope feature is not on
-	the hotfix branches), so a dispatched call is ``ok``, consistent with the
-	Agent Write row recorded "applied" above. Never raises, never commits."""
+	row). Introspection tools are not logged (plan E4). A tool that dispatched but
+	answered ``{ok: false}`` in its OWN envelope (``_ENVELOPE_TOOLS``) is a `failed`
+	read, not an `ok` one. Never raises, never commits."""
 	from jarvis import activity_log
 
 	if is_write:
@@ -3365,7 +3578,7 @@ def _record_tool_activity(tool: str, args, data, *, is_write: bool) -> None:
 		method=method,
 		ref_doctype=ref_doctype,
 		row_count=activity_log.row_count_of(tool, data),
-		outcome="ok",
+		outcome="ok" if envelope_ok(tool, {"ok": True, "data": data}) else "failed",
 	)
 
 
@@ -3568,28 +3781,39 @@ def _dispatch_and_wrap(
 	if is_write:
 		# Both audit sinks get the projected pair: a private App Learning write
 		# must never reach either one with its raw args or result.
-		audit_args, audit_data = _app_learning_audit_payload(tool, args, data)
-		audit.record(tool=tool, args=audit_args, ok=True, result=audit_data)
+		_record_tool_audit(tool, args, data)
 		# Manager audit: a dispatched write (one metadata-only row; bulk collapses
-		# to one row + bulk_count). Own savepoint, never commits. This branch
-		# (version-15-hotfix) has no envelope_ok / _ENVELOPE_TOOLS machinery, so a
-		# dispatched write is recorded "applied" — consistent with the audit.record
-		# ok=True above; the call_connector inner-failure nuance is part of the
-		# connector-envelope feature that is not on this branch.
+		# to one row + bulk_count). Own savepoint, never commits. Use envelope_ok
+		# so an _ENVELOPE_TOOLS call (call_connector) that dispatched but returned
+		# its OWN {ok:false} is filed as failed, not a false success - mirroring
+		# _record_tool_audit and the receipt chip.
 		from jarvis import agent_audit
 
+		outcome = "applied" if envelope_ok(tool, {"ok": True, "data": data}) else "failed"
+		audit_args, audit_data = _app_learning_audit_payload(tool, args, data)
 		agent_audit.record_write(
 			actor=frappe.session.user,
 			tool=tool,
 			args=audit_args,
 			result=audit_data,
-			outcome="applied",
+			outcome=outcome,
 			provenance=provenance,
 			provenance_name=provenance_name,
 		)
 	# Activity events (plan 4.3(1)): after the savepoint release, so they ride the
 	# envelope's commit like the Agent Write row above.
 	_record_tool_activity(tool, args, data, is_write=is_write)
+	if not envelope_ok(tool, {"ok": True, "data": data}):
+		# A connector call that dispatched but answered {ok: false} inside its own
+		# envelope: the agent got a failure under an outer ok:true, so no failure
+		# branch above saw it.
+		from jarvis import api_errors
+
+		api_errors.record_tool_failure(
+			tool,
+			_app_learning_safe_error(tool, data.get("error") if isinstance(data, dict) else None),
+		)
+		frappe.local.jarvis_tool_failure_recorded = True
 	return {"ok": True, "data": data}
 
 
@@ -3748,7 +3972,13 @@ def _refuse_risky_write(
 
 
 def _build_park_card(
-	tool: str, args: dict, preview: dict, *, sensitive: bool, structural: list | None = None
+	tool: str,
+	args: dict,
+	preview: dict,
+	*,
+	sensitive: bool,
+	structural: list | None = None,
+	draft: bool = False,
 ) -> tuple[dict | None, dict | None]:
 	"""``(card, refusal)`` for a park: the chat gate and the File Box hold share it.
 
@@ -3773,7 +4003,7 @@ def _build_park_card(
 	from jarvis.tools import _write_risk
 
 	if not sensitive and structural is None:
-		return confirm_card.build_card(tool, args, preview), None
+		return confirm_card.build_card(tool, args, preview, draft), None
 	if confirm_card.too_large(None, args):
 		return None, _refuse_unshowable_card(tool, args, too_large=True)
 	if structural is not None:
@@ -4081,6 +4311,107 @@ def _file_box_wiki_write(
 	return result
 
 
+def _connector_precheck_refusal(tool: str, args) -> dict | None:
+	"""A ``call_connector`` that the broker would refuse before sending anything (an
+	action that is not allowed, bad arguments, an untested or switched-off connector)
+	is answered now, in the envelope an inline call returns, and no card is parked:
+	the person would only be asked to confirm a call that cannot run. ``None`` for
+	everything else, including a call the checks cannot judge. The gate is untouched:
+	a call that passes still parks."""
+	if tool != "call_connector" or not isinstance(args, dict):
+		return None
+	connector, action = args.get("connector"), args.get("action")
+	if not isinstance(connector, str) or not isinstance(action, str):
+		return None
+	from jarvis.connectors import broker
+	from jarvis.connectors.secret_scrub import scrub_value
+	from jarvis.tools._agent_run_ctx import get_session_key
+
+	refusal = broker.precheck(connector, action, args.get("args"), run_id=get_session_key())
+	if refusal is None:
+		return None
+	# A schema error repeats the offending argument value, which may be a credential.
+	refusal = scrub_value(refusal)
+	_record_tool_audit(tool, args, refusal)
+	return {"ok": True, "data": refusal}
+
+
+def _connector_call_is_safe_read(args) -> bool:
+	"""Action-aware carve-out for ``call_connector``'s confirm-first gate: return
+	True ONLY for a connector action the CURRENT user has explicitly ALLOWED and
+	that is marked read-only and non-destructive - such a call skips the
+	confirmation card and runs like an ordinary read. Everything else returns
+	False and PARKS exactly as before. FAIL SAFE: any uncertainty -> False.
+
+	SAFE_READ (all four required, read off the resolved ``Jarvis Connector Action``
+	child row): the child row for ``action`` EXISTS, ``allowed`` == 1,
+	``read_only`` == 1, and ``destructive`` == 0. This is intentionally STRICTER
+	than ``policy.action_decision``'s allow rule (``allowed`` alone): skipping the
+	human card also requires the action to be a non-destructive read.
+
+	SECURITY (owner-approved tradeoff). SAFE_READ trusts the STORED
+	``read_only``/``destructive`` flags. Those are NOT client-settable: the SPA's
+	test path (``jarvis.chat.connectors_api``) stamps them server-side from the
+	remote server's ``readOnlyHint``/``destructiveHint`` MCP annotations captured
+	at Test time, PRESERVES the stored values on every re-test (a relabel by a
+	compromised server cannot flip a known write to read-only), and lets the
+	client set only the ``allowed`` bit - which the user reviews in the
+	allowed-actions picker (a newly-seen read-only action is pre-checked there and
+	the user can uncheck it; writes default off). Hard invariants preserved:
+	  * a ``destructive`` action ALWAYS confirms (destructive != 0 -> False);
+	  * an action the user did NOT allow ALWAYS confirms (allowed != 1 -> False)
+	    AND is still denied at execution by ``broker``/``policy.action_decision``
+	    - skipping the card is defense-in-depth, never a bypass of the broker's own
+	    allow gate;
+	  * the not-ready guard in ``call_connector.py`` is unchanged and still runs
+	    at execution.
+
+	Runs at the gate point inside ``_run_tool``, which is itself inside
+	``impersonate(end_user)`` (see ``_dispatch_from_session``), so
+	``frappe.session.user`` IS that user and ``broker.resolve_for_status`` below
+	resolves the SAME row the call will use (Personal wins over Shared)."""
+	try:
+		if not isinstance(args, dict):
+			return False
+		# preview=True on a gated write is a category error the park block below
+		# answers with a legible "preview is not needed" error; keep that behaviour
+		# by declining the carve-out so the call falls into the block, not silently
+		# running with the flag stripped.
+		if _as_bool(args.get("preview")):
+			return False
+		connector = args.get("connector")
+		action = args.get("action")
+		if not connector or not action or not isinstance(connector, str) or not isinstance(action, str):
+			return False
+		from jarvis.connectors import broker
+
+		# resolve_for_status never raises: it returns the resolved row (Personal
+		# wins over Shared) or None for an unknown/invisible key. It does NOT check
+		# ``enabled``, so we do (a disabled connector must still confirm/deny).
+		row = broker.resolve_for_status(connector)
+		if row is None or not row.get("enabled"):
+			return False
+		for child in row.get("allowed_actions") or []:
+			if child.get("action") != action:
+				continue
+			return (
+				bool(child.get("allowed")) and bool(child.get("read_only")) and not child.get("destructive")
+			)
+		# No child row for this action -> unknown -> confirm (and the broker denies it).
+		return False
+	except Exception:
+		# Any error resolving the row / reading the flags fails SAFE: park the call.
+		# The log itself is best-effort - a logging failure must never turn the
+		# fail-safe into a raise (that would escape the gate entirely).
+		try:
+			frappe.logger("jarvis.connectors").warning(
+				"call_connector safe-read gate lookup failed", exc_info=True
+			)
+		except Exception:
+			pass
+		return False
+
+
 def _same_file_wiki_proposal(conv: str, slug: str, owner: str) -> str | None:
 	"""A Pending or Approved File Box wiki note for ``slug`` that another upload of the
 	same file bytes, by the same dropper, already proposed (#663), or None."""
@@ -4338,19 +4669,41 @@ def _stamp_file_box_draft(conv: str, data) -> bool:
 	return True
 
 
-def _single_flight_error() -> dict:
+def _single_flight_error(conversation: str | None = None, owner_user: str | None = None) -> dict:
 	"""F16: a card already waits in this conversation. Cards never expire, so the
-	model must stop until the user answers it."""
+	model must stop until the user answers it. The waiting card is named when it can
+	be found, so the model tells the user exactly which card to answer."""
 	return _error(
 		"ConfirmationPendingError",
 		"a confirmation card for a previous action is still awaiting the user in this "
-		"conversation. Only one runs at a time - do NOT retry this call; stop and end "
-		"your turn now. The card does not expire: the user confirms or discards it, and "
-		"once they confirm you'll get a follow-up turn to continue with the next step. "
-		"If the waiting card is not what the user asked for, tell them it is wrong and ask "
-		"them to discard it (Discard in the full chat, Deny on the phone); do not ask a "
-		"yes/no question in that reply.",
+		f"conversation{_waiting_card_label(conversation, owner_user)}. Only one runs at a time - do NOT "
+		"retry this call; stop and end your turn now. The card does not expire: the user "
+		"confirms or discards it, and once they confirm you'll get a follow-up turn to "
+		"continue with the next step. If the waiting card is not what the user asked for, "
+		"tell them it is wrong and ask them to discard it (Discard in the full chat, Deny "
+		"on the phone); do not ask a yes/no question in that reply.",
 	)
+
+
+def _waiting_card_label(conversation: str | None, owner_user: str | None) -> str:
+	"""`` (the waiting card: "<summary>")`` for the one Pending chat card of
+	``conversation`` that belongs to ``owner_user``, or an empty string when there is
+	none to name. A card another person of a shared chat owns is never named: its
+	title is theirs to see. The summary is the plain-text title the card shows; a read
+	error only costs the name."""
+	if not conversation or not owner_user:
+		return ""
+	try:
+		summary = frappe.db.get_value(
+			"Jarvis Pending Action",
+			{"conversation": conversation, "kind": "chat", "status": "Pending", "owner_user": owner_user},
+			"summary",
+			order_by="creation desc",
+		)
+	except Exception:
+		return ""
+	summary = " ".join(str(summary or "").split()).replace('"', "'")
+	return f' (the waiting card: "{summary}")' if summary else ""
 
 
 def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | None = None) -> dict:
@@ -4546,11 +4899,28 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 	# batch the human should confirm, and the plugin/persona promise exactly one
 	# card for it. Non-_PREVIEWABLE bulk writes get a described-intent card via
 	# _pending_preview (no sandbox); single calls to these tools are unchanged.
+	#
+	# ACTION-AWARE call_connector carve-out (owner-approved UX): a connector action
+	# the user has explicitly allowed AND that is marked read-only + non-destructive
+	# does NOT park - it falls through to the normal dispatch at the bottom of
+	# _run_tool and runs like any ordinary read (still AUDITED: call_connector is a
+	# _WRITE_TOOL, so _dispatch_and_wrap audits it via _record_tool_audit with the
+	# _ENVELOPE_TOOLS unwrap, and telemetry records it). This sits ABOVE the whole
+	# gate block, so a safe read ALSO bypasses the armed-macro (_ARMED_SKIP_NEVER)
+	# force-stop and the skill-autorun (_SKILL_AUTORUN_NEVER) pause - a read should
+	# never halt an automation. A write/destructive/not-allowed/unknown/unresolved
+	# connector action is NOT a safe read, so it stays in call_connector's static
+	# never-skip/never-autorun classification and parks exactly as before. The
+	# ``tool == "call_connector"`` guard short-circuits so no other tool pays the
+	# row lookup. call_connector stays in _GATED_WRITES / _ARMED_SKIP_NEVER /
+	# _SKILL_AUTORUN_NEVER unchanged (writes still park; the partition invariants
+	# hold); only a proven safe read is exempted here.
+	_connector_safe_read = tool == "call_connector" and _connector_call_is_safe_read(args)
 	if (
 		tool in _GATED_WRITES
 		or (is_write and _is_bulk_call(args))
 		or (shared_permit and tool_kind(tool) == "write")
-	):
+	) and not _connector_safe_read:
 		from jarvis.chat import events, pending_confirm
 		from jarvis.tools._bulk import _MAX_BATCH
 
@@ -4937,7 +5307,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				"call once; if it still fails, tell the user and stop - do not loop.",
 			)
 		if conversation_pending:
-			return _single_flight_error()
+			return _single_flight_error(conv, owner_user)
 		# send_email(recipients_from=...): the bench runs the query and writes one message
 		# per row NOW, so the card shows the real recipients and Confirm sends exactly
 		# them (send_email re-runs the query and refuses a changed list). The model never
@@ -4974,6 +5344,29 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# preview_doc). Every other gated write (submit/cancel/delete/amend since
 		# R2-2, send_email/run_method/create_custom_skill/update_wiki) parks a
 		# described-intent card via _pending_preview: nothing runs until Confirm.
+		#
+		# Resolved HERE, before the trial run, because a write that offers "Approve & run" is
+		# not a draft card (``draft_card.wanted`` below and in the refusal path).
+		# "Approve & run" offer (skill "Approve & run the plan", design §3.3): if the
+		# turn was triggered by a message invoking exactly one live-armed custom skill
+		# - resolved forgery-proof under the MESSAGE OWNER via the turn->message
+		# binding - stamp that skill's docname on the token so a later approve_and_run
+		# can authorize off it, and flag the card so the frontend can show the
+		# affordance (P0 = just the flag; the plan outline is a later task). Best-effort
+		# + fail-safe: no offer on any doubt, and it NEVER sets the run flag or
+		# auto-runs (that is a later task) - it only decorates this park.
+		#
+		# Offer ONLY on a _SKILL_AUTORUN_COVERED first write (I4): a destructive /
+		# create_custom_skill park is a _SKILL_AUTORUN_NEVER tool that approve_and_run
+		# refuses to run as step 1, so stamping it would dangle an unusable offer and
+		# invite an approve-a-NEVER-tool click. A NEVER first write parks as an ordinary
+		# card with no run offer.
+		# Never on a structure card: confirming it must not also open an approved run.
+		skill_docname, skill_slug = (
+			_resolve_approve_run_offer(conv)
+			if tool in _SKILL_AUTORUN_COVERED and not _guarded and not shared_permit
+			else (None, None)
+		)
 		_structure_lines = None
 		if tool == "run_import":
 			# run_import cannot be sandbox-run (staging + a background job), so it has its
@@ -5004,8 +5397,19 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 				frappe.DuplicateEntryError,
 			) as e:
 				frappe.clear_messages()
-				return _preview_error(e)
+				refused = _preview_error(e)
+				from jarvis.chat import draft_card
+
+				if draft_card.wanted(tool, args, must_card=_must_card, offers_run=bool(skill_docname)):
+					# A draft the trial refused for a missing value names the fields.
+					fields = draft_card.refusal(e, tool, args)
+					if fields and isinstance(refused.get("error"), dict):
+						refused["error"]["fields"] = fields
+				return refused
 		else:
+			refused = _connector_precheck_refusal(tool, args)
+			if refused is not None:
+				return refused
 			try:
 				preview = _pending_preview(tool, args)
 			except PreviewSandboxLost as e:
@@ -5020,42 +5424,32 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		# it for ALL of _run_tool and break the read path's perf_counter.
 		from jarvis.chat import confirm_card
 
-		# "Approve & run" offer (skill "Approve & run the plan", design §3.3): if the
-		# turn was triggered by a message invoking exactly one live-armed custom skill
-		# - resolved forgery-proof under the MESSAGE OWNER via the turn->message
-		# binding - stamp that skill's docname on the token so a later approve_and_run
-		# can authorize off it, and flag the card so the frontend can show the
-		# affordance (P0 = just the flag; the plan outline is a later task). Best-effort
-		# + fail-safe: no offer on any doubt, and it NEVER sets the run flag or
-		# auto-runs (that is a later task) - it only decorates this park.
-		#
-		# Offer ONLY on a _SKILL_AUTORUN_COVERED first write (I4): a destructive /
-		# create_custom_skill park is a _SKILL_AUTORUN_NEVER tool that approve_and_run
-		# refuses to run as step 1, so stamping it would dangle an unusable offer and
-		# invite an approve-a-NEVER-tool click. A NEVER first write parks as an ordinary
-		# card with no run offer.
-		# Never on a structure card: confirming it must not also open an approved run.
-		skill_docname, skill_slug = (
-			_resolve_approve_run_offer(conv)
-			if tool in _SKILL_AUTORUN_COVERED and not _guarded and not shared_permit
-			else (None, None)
-		)
+		draft_for_model = None
 		if isinstance(preview, dict):
 			# A draft-panel write turned into this card (actions_api._park_sensitive):
 			# the clients read it to keep that draft "waiting" across a reload.
 			from_draft = frappe.flags.get("jarvis_park_from_draft")
 			if from_draft:
 				preview["from_draft"] = from_draft
+			# Dark behind the site flag: a single create / update parks as a draft card.
+			from jarvis.chat import draft_card
+
+			as_draft = draft_card.wanted(tool, args, must_card=_must_card, offers_run=bool(skill_docname))
 			card, refusal = _build_park_card(
 				tool,
 				args,
 				preview,
 				sensitive=_risk == "sensitive",
 				structural=_structure_lines,
+				draft=as_draft,
 			)
 			if refusal is not None:
 				frappe.clear_messages()
 				return refusal
+			if as_draft and isinstance(card, dict):
+				# On the card BEFORE it is parked, so the seal's card hash covers it.
+				if draft_card.attach(card, tool, args, preview.get("would")):
+					draft_for_model = card["draft"]
 			preview["card"] = card
 			if _merge_note and isinstance(card, dict):
 				# What the merge left out (rows with no valid address, repeated addresses,
@@ -5093,7 +5487,7 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		except pending_confirm.ConfirmationPendingError:
 			# Park re-checks single-flight under its lock: a card that could not be
 			# superseded after all (another actor holds it) is not a storage error.
-			return _single_flight_error()
+			return _single_flight_error(conv, owner_user)
 		# mint returns None when it could not stage the park (a transient cache
 		# failure that it already rolled back, so nothing is persisted). Do NOT
 		# publish a card against a token whose record does not exist - that card is
@@ -5169,6 +5563,9 @@ def _run_tool(tool: str, raw_args: dict | str | None, *, conversation: str | Non
 		model_preview = (
 			{k: v for k, v in preview.items() if k != "card"} if isinstance(preview, dict) else preview
 		)
+		if draft_for_model is not None:
+			# A parked draft: the person reads the card, the model gets a short result.
+			return draft_card.short_result(tool, draft_for_model, preview)
 		return {
 			"ok": True,
 			"data": {
@@ -5223,9 +5620,9 @@ def _dispatch_judging_skills(tool: str, args, is_write: bool, conversation) -> t
 	alias = f"{_JUDGE_ALIAS}{key}" if key else None
 	judged = {**args, "fields": [*(args.get("fields") or ["name"]), f"{key} as {alias}"]} if key else args
 	result = _dispatch_and_wrap(tool, judged, is_write)
-	if not result.get("ok") or not _reads_skill_rows(tool, args):
-		return _without_column(result, alias), ""
 	data = result.get("data")
+	if not result.get("ok") or not _reads_skill_rows(tool, args, data):
+		return _without_column(result, alias), ""
 	note = macros.check_skill_rows_read(conversation, lambda: _skill_rows_read(args, data, alias))
 	return _without_column(result, alias), note
 
@@ -5282,24 +5679,33 @@ _NO_STORED_ROWS = frozenset(
 )
 
 
-def _reads_skill_rows(tool: str, args) -> bool:
+def _reads_skill_rows(tool: str, args, result_data=None) -> bool:
 	"""Whether a read may return rows of a skill doctype: its arguments use one as a
 	doctype (a ``doctype``, a query's ``from`` or join, a parent, or a filter on a field
 	that holds a doctype, JSON included), or it runs a report on one. A Script or Query
-	Report's own SQL is not seen here."""
+	Report's own SQL is not seen here.
+
+	``result_data`` is the ok result's data. A ``query_report`` of a report snapshot
+	(``rs_`` id) takes its report from that result's receipt, as a prepared report's
+	report is taken from its run; a result without one is judged as a skill read."""
 	if tool in _NO_STORED_ROWS:
 		return False
 	if tool in ("run_report", "report_pdf", "query_report") and isinstance(args, dict):
 		report = args.get("report_name")
 		if tool == "query_report":
 			run = args.get("prepared_report")
-			report = (
-				frappe.db.get_value(
-					"Prepared Report", {"name": run, "owner": frappe.session.user}, "report_name"
+			if isinstance(run, str) and run.startswith("rs_"):
+				report = result_data.get("report_name") if isinstance(result_data, dict) else None
+				if not isinstance(report, str) or not report:
+					return True  # fail closed: the snapshot's report is not known
+			else:
+				report = (
+					frappe.db.get_value(
+						"Prepared Report", {"name": run, "owner": frappe.session.user}, "report_name"
+					)
+					if isinstance(run, str)
+					else None
 				)
-				if isinstance(run, str)
-				else None
-			)
 		ref = frappe.get_cached_value("Report", report, "ref_doctype") if isinstance(report, str) else None
 		if ref and _is_a_skill_doctype(ref):
 			return True

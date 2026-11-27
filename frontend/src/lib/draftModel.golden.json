@@ -1,0 +1,7335 @@
+{
+ "typed create, fields by label, fieldname and fuzzy": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "ACME",
+      "delivery_date": "2026-12-01",
+      "is_internal": "Yes",
+      "remarks": "line one\nline two",
+      "status": "Shipped"
+     },
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "ACME",
+       "orig": "ACME",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "delivery_date",
+       "label": "Delivery Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-12-01",
+       "orig": "2026-12-01",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "status",
+       "label": "Status",
+       "control": "select",
+       "options": [
+        "Shipped",
+        "Draft",
+        "Open",
+        "Closed"
+       ],
+       "fieldtype": "Select",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "Shipped",
+       "orig": "Shipped",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "is_internal",
+       "label": "Is Internal",
+       "control": "check",
+       "options": "",
+       "fieldtype": "Check",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "Yes",
+       "orig": "Yes",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "remarks",
+       "label": "Remarks",
+       "control": "text",
+       "options": "",
+       "fieldtype": "Small Text",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "line one\nline two",
+       "orig": "line one\nline two",
+       "proposed": true,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "__key": "key#1",
+         "item_code": "",
+         "qty": "",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__rule": {
+          "is_fixed_asset": "0"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ]
+  ]
+ },
+ "typed create with a table, rule values answered, an extra column key": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "ACME"
+     },
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "ACME",
+       "orig": "ACME",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "item_code": "A",
+         "qty": "2",
+         "rate": "5",
+         "amount": "",
+         "brand": "Zed",
+         "description": "",
+         "warehouse": "",
+         "__key": "key#1",
+         "__rule": {
+          "is_fixed_asset": 1
+         },
+         "__ruleSrc": {
+          "item_code": "A"
+         }
+        },
+        {
+         "item_code": "B",
+         "qty": "1",
+         "rate": "",
+         "amount": "",
+         "brand": "",
+         "description": "Second",
+         "warehouse": "",
+         "__key": "key#2",
+         "__rule": {
+          "is_fixed_asset": 0
+         },
+         "__ruleSrc": {
+          "item_code": "B"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ],
+   [
+    "ruleValues",
+    "Sales Order",
+    "items",
+    {
+     "item_code": [
+      "A",
+      "B"
+     ]
+    }
+   ]
+  ]
+ },
+ "typed update with a stored record and a proposed table": {
+  "builds": [
+   {
+    "model": {
+     "verb": "update",
+     "doctype": "Sales Order",
+     "docName": "SO-1",
+     "title": "Change SO-1",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "ACME",
+      "customer_name": "ACME Ltd",
+      "transaction_date": "2026-11-01",
+      "status": "Open",
+      "is_internal": "No",
+      "remarks": "second"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "ACME",
+       "orig": "ACME",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-11-01",
+       "orig": "2026-11-01",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "status",
+       "label": "Status",
+       "control": "select",
+       "options": [
+        "Draft",
+        "Open",
+        "Closed"
+       ],
+       "fieldtype": "Select",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "Open",
+       "orig": "Draft",
+       "proposed": true,
+       "changed": true
+      },
+      {
+       "fieldname": "is_internal",
+       "label": "Is Internal",
+       "control": "check",
+       "options": "",
+       "fieldtype": "Check",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "No",
+       "orig": "Yes",
+       "proposed": true,
+       "changed": true
+      },
+      {
+       "fieldname": "remarks",
+       "label": "Remarks",
+       "control": "text",
+       "options": "",
+       "fieldtype": "Small Text",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "second",
+       "orig": "first",
+       "proposed": true,
+       "changed": true
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "__name": "soi-1",
+         "item_code": "A",
+         "qty": "5",
+         "rate": "10",
+         "amount": "10",
+         "description": "Item A",
+         "brand": "",
+         "warehouse": "W1",
+         "__key": "key#1",
+         "__rule": {
+          "is_fixed_asset": 1
+         },
+         "__ruleSrc": {
+          "item_code": "A"
+         }
+        },
+        {
+         "item_code": "C",
+         "qty": "1",
+         "rate": "3",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__key": "key#2",
+         "__rule": {
+          "is_fixed_asset": "0"
+         },
+         "__ruleSrc": {
+          "item_code": "C"
+         }
+        }
+       ],
+       "origJson": "[{\"name\":\"soi-1\",\"idx\":1,\"item_code\":\"A\",\"qty\":1,\"rate\":10,\"amount\":10,\"description\":\"Item A\",\"warehouse\":\"W1\",\"is_fixed_asset\":1},{\"name\":\"soi-2\",\"idx\":2,\"item_code\":\"B\",\"qty\":2,\"rate\":4,\"amount\":8,\"is_fixed_asset\":0}]"
+      },
+      {
+       "fieldname": "taxes",
+       "label": "Taxes",
+       "child": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "gridFields": [
+        "charge_type",
+        "rate"
+       ],
+       "formFields": [],
+       "ruleFields": [],
+       "rows": [
+        {
+         "__name": "tax-1",
+         "charge_type": "On Net Total",
+         "rate": "18",
+         "__key": "key#3"
+        }
+       ],
+       "origJson": "[{\"name\":\"tax-1\",\"idx\":1,\"charge_type\":\"On Net Total\",\"rate\":18}]"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ],
+   [
+    "loadDocForEdit",
+    "Sales Order",
+    "SO-1"
+   ],
+   [
+    "ruleValues",
+    "Sales Order",
+    "items",
+    {
+     "item_code": [
+      "C"
+     ]
+    }
+   ]
+  ]
+ },
+ "typed update with no proposed table shows the stored tables": {
+  "builds": [
+   {
+    "model": {
+     "verb": "update",
+     "doctype": "Sales Order",
+     "docName": "SO-1",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "ACME",
+      "customer_name": "ACME Ltd",
+      "transaction_date": "2026-11-01",
+      "status": "Draft",
+      "is_internal": 1,
+      "remarks": "only"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "ACME",
+       "orig": "ACME",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-11-01",
+       "orig": "2026-11-01",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "remarks",
+       "label": "Remarks",
+       "control": "text",
+       "options": "",
+       "fieldtype": "Small Text",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "only",
+       "orig": "first",
+       "proposed": true,
+       "changed": true
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "__name": "soi-1",
+         "item_code": "A",
+         "qty": "1",
+         "rate": "10",
+         "amount": "10",
+         "description": "Item A",
+         "brand": "",
+         "warehouse": "W1",
+         "__key": "key#1",
+         "__rule": {
+          "is_fixed_asset": 1
+         },
+         "__ruleSrc": {
+          "item_code": "A"
+         }
+        },
+        {
+         "__name": "soi-2",
+         "item_code": "B",
+         "qty": "2",
+         "rate": "4",
+         "amount": "8",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__key": "key#2",
+         "__rule": {
+          "is_fixed_asset": 0
+         },
+         "__ruleSrc": {
+          "item_code": "B"
+         }
+        }
+       ],
+       "origJson": "[{\"name\":\"soi-1\",\"idx\":1,\"item_code\":\"A\",\"qty\":1,\"rate\":10,\"amount\":10,\"description\":\"Item A\",\"warehouse\":\"W1\",\"is_fixed_asset\":1},{\"name\":\"soi-2\",\"idx\":2,\"item_code\":\"B\",\"qty\":2,\"rate\":4,\"amount\":8,\"is_fixed_asset\":0}]"
+      },
+      {
+       "fieldname": "taxes",
+       "label": "Taxes",
+       "child": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "gridFields": [
+        "charge_type",
+        "rate"
+       ],
+       "formFields": [],
+       "ruleFields": [],
+       "rows": [
+        {
+         "__name": "tax-1",
+         "charge_type": "On Net Total",
+         "rate": "18",
+         "__key": "key#3"
+        }
+       ],
+       "origJson": "[{\"name\":\"tax-1\",\"idx\":1,\"charge_type\":\"On Net Total\",\"rate\":18}]"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ],
+   [
+    "loadDocForEdit",
+    "Sales Order",
+    "SO-1"
+   ]
+  ]
+ },
+ "typed update, a Check field on a stored record": {
+  "builds": [
+   {
+    "model": {
+     "verb": "update",
+     "doctype": "Task",
+     "docName": "TASK-1",
+     "title": "",
+     "titleField": "subject",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "subject": "Old",
+      "is_milestone": "No",
+      "priority": "High",
+      "status": "Open"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "Old",
+       "orig": "Old",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "is_milestone",
+       "label": "Is Milestone",
+       "control": "check",
+       "options": "",
+       "fieldtype": "Check",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "No",
+       "orig": "Yes",
+       "proposed": true,
+       "changed": true
+      },
+      {
+       "fieldname": "priority",
+       "label": "Priority",
+       "control": "select",
+       "options": [
+        "Low",
+        "Medium",
+        "High"
+       ],
+       "fieldtype": "Select",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "High",
+       "orig": "Low",
+       "proposed": true,
+       "changed": true
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Task"
+   ],
+   [
+    "loadDocForEdit",
+    "Task",
+    "TASK-1"
+   ]
+  ]
+ },
+ "typed update with no field changes": {
+  "builds": [
+   {
+    "model": {
+     "verb": "update",
+     "doctype": "Task",
+     "docName": "TASK-1",
+     "title": "",
+     "titleField": "subject",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "subject": "Old",
+      "is_milestone": 1,
+      "priority": "Low",
+      "status": "Open"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "Old",
+       "orig": "Old",
+       "proposed": false,
+       "changed": false
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Task"
+   ],
+   [
+    "loadDocForEdit",
+    "Task",
+    "TASK-1"
+   ]
+  ]
+ },
+ "typed action whose field has an extra fieldname key still resolves by label": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Task",
+     "docName": "",
+     "title": "",
+     "titleField": "subject",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "subject": "Hi"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "Hi",
+       "orig": "Hi",
+       "proposed": true,
+       "changed": false
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Task"
+   ]
+  ]
+ },
+ "label resolution: unique containment": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "delivery_date": "2026-12-24",
+      "company": "Acme Co"
+     },
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "delivery_date",
+       "label": "Delivery Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-12-24",
+       "orig": "2026-12-24",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "company",
+       "label": "Company",
+       "control": "link",
+       "options": "Company",
+       "fieldtype": "Link",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "Acme Co",
+       "orig": "Acme Co",
+       "proposed": true,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "__key": "key#1",
+         "item_code": "",
+         "qty": "",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__rule": {
+          "is_fixed_asset": "0"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ]
+  ]
+ },
+ "label resolution: ambiguous with no required hit is dropped": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "C"
+     },
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "C",
+       "orig": "C",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "__key": "key#1",
+         "item_code": "",
+         "qty": "",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__rule": {
+          "is_fixed_asset": "0"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ]
+  ]
+ },
+ "label resolution: ambiguous with exactly one required hit": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "ACME"
+     },
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "ACME",
+       "orig": "ACME",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "__key": "key#1",
+         "item_code": "",
+         "qty": "",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__rule": {
+          "is_fixed_asset": "0"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ]
+  ]
+ },
+ "label resolution: no match, a table field and an empty label are left out": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "ACME"
+     },
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "ACME",
+       "orig": "ACME",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "__key": "key#1",
+         "item_code": "",
+         "qty": "",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__rule": {
+          "is_fixed_asset": "0"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ]
+  ]
+ },
+ "label resolution: a label that is another field's fieldname": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Memo",
+     "docName": "",
+     "title": "",
+     "titleField": "",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "posting_date": "2026-01-01",
+      "date": "2026-02-02",
+      "subject": "S"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "posting_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-01-01",
+       "orig": "2026-01-01",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "date",
+       "label": "Posting Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-02-02",
+       "orig": "2026-02-02",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "S",
+       "orig": "S",
+       "proposed": true,
+       "changed": false
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   },
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Memo",
+     "docName": "",
+     "title": "",
+     "titleField": "",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "date": "2026-03-03",
+      "posting_date": "2026-04-04"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "posting_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-04-04",
+       "orig": "2026-04-04",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "date",
+       "label": "Posting Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-03-03",
+       "orig": "2026-03-03",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Memo"
+   ]
+  ]
+ },
+ "typed create of a prompt-named record carries its name and the plan flag": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Memo",
+     "docName": "MEMO-1",
+     "title": "Memo draft",
+     "titleField": "",
+     "submittable": false,
+     "cont": 1,
+     "linkContext": {
+      "subject": "S"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "S",
+       "orig": "S",
+       "proposed": true,
+       "changed": false
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Memo"
+   ]
+  ]
+ },
+ "typed update, stored record unloadable, no tables: a create-style view": {
+  "builds": [
+   {
+    "model": {
+     "verb": "update",
+     "doctype": "Task",
+     "docName": "TASK-1",
+     "title": "",
+     "titleField": "subject",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "subject": "New"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "New",
+       "orig": "",
+       "proposed": true,
+       "changed": true
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Task"
+   ],
+   [
+    "loadDocForEdit",
+    "Task",
+    "TASK-1"
+   ]
+  ]
+ },
+ "typed update, stored record unloadable, with tables: refused": {
+  "builds": [
+   {
+    "error": {
+     "message": "Could not load this record's saved rows, so I can't show what would change. Tell me to try again.",
+     "jvUserMessage": "Could not load this record's saved rows, so I can't show what would change. Tell me to try again."
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ],
+   [
+    "loadDocForEdit",
+    "Sales Order",
+    "SO-1"
+   ]
+  ]
+ },
+ "refusals: a docs batch, an empty create, and a non-doc action make no call": {
+  "builds": [
+   {
+    "error": {
+     "message": "This draft carries a `docs` batch, which is a create_doc payload rather than a card. Ask me to apply them as a batch.",
+     "jvUserMessage": "This draft carries a `docs` batch, which is a create_doc payload rather than a card. Ask me to apply them as a batch."
+    }
+   },
+   {
+    "error": {
+     "message": "This draft carries a `docs` batch, which is a create_doc payload rather than a card. Ask me to apply them as a batch.",
+     "jvUserMessage": "This draft carries a `docs` batch, which is a create_doc payload rather than a card. Ask me to apply them as a batch."
+    }
+   },
+   {
+    "error": {
+     "message": "This draft has no fields to show.",
+     "jvUserMessage": "This draft has no fields to show."
+    }
+   },
+   {
+    "undefined": true
+   },
+   {
+    "undefined": true
+   },
+   {
+    "undefined": true
+   }
+  ],
+  "calls": []
+ },
+ "a create with only a table is legal": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {},
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "item_code": "A",
+         "qty": "",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__key": "key#1",
+         "__rule": {
+          "is_fixed_asset": "0"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ],
+   [
+    "ruleValues",
+    "Sales Order",
+    "items",
+    {
+     "item_code": [
+      "A"
+     ]
+    }
+   ]
+  ]
+ },
+ "form meta that is not ok, or that throws, builds nothing and is asked again": {
+  "builds": [
+   {
+    "undefined": true
+   },
+   {
+    "undefined": true
+   },
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Task",
+     "docName": "",
+     "title": "",
+     "titleField": "subject",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "subject": "c"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "c",
+       "orig": "c",
+       "proposed": true,
+       "changed": false
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Task"
+   ],
+   [
+    "getDoctypeFormMeta",
+    "Task"
+   ],
+   [
+    "getDoctypeFormMeta",
+    "Task"
+   ]
+  ]
+ },
+ "the form meta is read once per doctype, the saved record every time": {
+  "builds": [
+   {
+    "model": {
+     "verb": "update",
+     "doctype": "Task",
+     "docName": "TASK-1",
+     "title": "",
+     "titleField": "subject",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "subject": "a",
+      "is_milestone": 1,
+      "priority": "Low",
+      "status": "Open"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "a",
+       "orig": "Old",
+       "proposed": true,
+       "changed": true
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   },
+   {
+    "model": {
+     "verb": "update",
+     "doctype": "Task",
+     "docName": "TASK-1",
+     "title": "",
+     "titleField": "subject",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "subject": "b",
+      "is_milestone": 1,
+      "priority": "Low",
+      "status": "Open"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "b",
+       "orig": "Old",
+       "proposed": true,
+       "changed": true
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   },
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Memo",
+     "docName": "",
+     "title": "",
+     "titleField": "",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "subject": "c"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "c",
+       "orig": "c",
+       "proposed": true,
+       "changed": false
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Task"
+   ],
+   [
+    "loadDocForEdit",
+    "Task",
+    "TASK-1"
+   ],
+   [
+    "loadDocForEdit",
+    "Task",
+    "TASK-1"
+   ],
+   [
+    "getDoctypeFormMeta",
+    "Memo"
+   ]
+  ]
+ },
+ "rule values that throw leave the defaults": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "ACME"
+     },
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "ACME",
+       "orig": "ACME",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "item_code": "A",
+         "qty": "",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__key": "key#1",
+         "__rule": {
+          "is_fixed_asset": "0"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ],
+   [
+    "ruleValues",
+    "Sales Order",
+    "items",
+    {
+     "item_code": [
+      "A"
+     ]
+    }
+   ]
+  ]
+ },
+ "rule values slower than the wait: the card is built without them and the late answer still writes __rule": {
+  "builds": [
+   {
+    "built": {
+     "model": {
+      "verb": "create",
+      "doctype": "Sales Order",
+      "docName": "",
+      "title": "",
+      "titleField": "customer_name",
+      "submittable": true,
+      "cont": 0,
+      "linkContext": {
+       "customer": "ACME"
+      },
+      "parentDefaults": {
+       "transaction_date": "Today",
+       "status": "Draft",
+       "is_internal": 0
+      },
+      "docstatus": 0,
+      "fields": [
+       {
+        "fieldname": "customer",
+        "label": "Customer",
+        "control": "link",
+        "options": "Customer",
+        "fieldtype": "Link",
+        "reqd": 1,
+        "read_only": 0,
+        "link_filters": "$undefined",
+        "link_query_filters": "$undefined",
+        "value": "ACME",
+        "orig": "ACME",
+        "proposed": true,
+        "changed": false
+       },
+       {
+        "fieldname": "transaction_date",
+        "label": "Date",
+        "control": "date",
+        "options": "",
+        "fieldtype": "Date",
+        "reqd": 1,
+        "read_only": 0,
+        "link_filters": "$undefined",
+        "link_query_filters": "$undefined",
+        "value": "",
+        "orig": "",
+        "proposed": false,
+        "changed": false
+       }
+      ],
+      "tables": [
+       {
+        "fieldname": "items",
+        "label": "Items",
+        "child": "Sales Order Item",
+        "columns": [
+         {
+          "fieldname": "item_code",
+          "label": "Item Code",
+          "fieldtype": "Link",
+          "options": "Item",
+          "reqd": 1,
+          "read_only": 0
+         },
+         {
+          "fieldname": "qty",
+          "label": "Qty",
+          "fieldtype": "Float",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "rate",
+          "label": "Rate",
+          "fieldtype": "Currency",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "amount",
+          "label": "Amount",
+          "fieldtype": "Currency",
+          "options": "",
+          "reqd": 0,
+          "read_only": 1
+         }
+        ],
+        "gridFields": [
+         "item_code",
+         "qty",
+         "rate",
+         "amount"
+        ],
+        "formFields": [
+         {
+          "fieldname": "item_code",
+          "label": "Item Code",
+          "fieldtype": "Link",
+          "options": "Item",
+          "reqd": 1,
+          "read_only": 0
+         },
+         {
+          "fieldname": "qty",
+          "label": "Qty",
+          "fieldtype": "Float",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "rate",
+          "label": "Rate",
+          "fieldtype": "Currency",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "amount",
+          "label": "Amount",
+          "fieldtype": "Currency",
+          "options": "",
+          "reqd": 0,
+          "read_only": 1
+         },
+         {
+          "fieldname": "description",
+          "label": "Description",
+          "fieldtype": "Small Text",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "brand",
+          "label": "Brand",
+          "fieldtype": "Data",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "warehouse",
+          "label": "Warehouse",
+          "fieldtype": "Link",
+          "options": "Warehouse",
+          "reqd": 0,
+          "read_only": 0
+         }
+        ],
+        "ruleFields": [
+         {
+          "fieldname": "is_fixed_asset",
+          "fieldtype": "Check",
+          "default": "0",
+          "fetch_from": "item_code.is_fixed_asset"
+         }
+        ],
+        "rows": [
+         {
+          "item_code": "A",
+          "qty": "",
+          "rate": "",
+          "amount": "",
+          "description": "",
+          "brand": "",
+          "warehouse": "",
+          "__key": "key#1",
+          "__rule": {
+           "is_fixed_asset": "0"
+          }
+         },
+         {
+          "item_code": "B",
+          "qty": "",
+          "rate": "",
+          "amount": "",
+          "description": "",
+          "brand": "",
+          "warehouse": "",
+          "__key": "key#2",
+          "__rule": {
+           "is_fixed_asset": "0"
+          }
+         }
+        ],
+        "origJson": "null"
+       }
+      ],
+      "tableMeta": {
+       "items": {
+        "label": "Items",
+        "child_doctype": "Sales Order Item",
+        "columns": [
+         {
+          "fieldname": "item_code",
+          "label": "Item Code",
+          "fieldtype": "Link",
+          "options": "Item",
+          "reqd": 1,
+          "read_only": 0
+         },
+         {
+          "fieldname": "qty",
+          "label": "Qty",
+          "fieldtype": "Float",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "rate",
+          "label": "Rate",
+          "fieldtype": "Currency",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "amount",
+          "label": "Amount",
+          "fieldtype": "Currency",
+          "options": "",
+          "reqd": 0,
+          "read_only": 1
+         }
+        ],
+        "extra_columns": [
+         {
+          "fieldname": "description",
+          "label": "Description",
+          "fieldtype": "Small Text",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "brand",
+          "label": "Brand",
+          "fieldtype": "Data",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         }
+        ],
+        "form_fields": [
+         {
+          "fieldname": "item_code",
+          "label": "Item Code",
+          "fieldtype": "Link",
+          "options": "Item",
+          "reqd": 1,
+          "read_only": 0
+         },
+         {
+          "fieldname": "qty",
+          "label": "Qty",
+          "fieldtype": "Float",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "rate",
+          "label": "Rate",
+          "fieldtype": "Currency",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "amount",
+          "label": "Amount",
+          "fieldtype": "Currency",
+          "options": "",
+          "reqd": 0,
+          "read_only": 1
+         },
+         {
+          "fieldname": "description",
+          "label": "Description",
+          "fieldtype": "Small Text",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "brand",
+          "label": "Brand",
+          "fieldtype": "Data",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "warehouse",
+          "label": "Warehouse",
+          "fieldtype": "Link",
+          "options": "Warehouse",
+          "reqd": 0,
+          "read_only": 0
+         }
+        ],
+        "rule_fields": [
+         {
+          "fieldname": "is_fixed_asset",
+          "fieldtype": "Check",
+          "default": "0",
+          "fetch_from": "item_code.is_fixed_asset"
+         }
+        ]
+       },
+       "taxes": {
+        "label": "Taxes",
+        "child_doctype": "Sales Taxes",
+        "columns": [
+         {
+          "fieldname": "charge_type",
+          "label": "Type",
+          "fieldtype": "Select",
+          "options": "On Net Total\nActual",
+          "reqd": 0,
+          "read_only": 0
+         },
+         {
+          "fieldname": "rate",
+          "label": "Rate",
+          "fieldtype": "Percent",
+          "options": "",
+          "reqd": 0,
+          "read_only": 0
+         }
+        ],
+        "extra_columns": [],
+        "form_fields": []
+       }
+      },
+      "applying": false,
+      "error": "",
+      "updatedToast": false
+     }
+    },
+    "afterLateAnswer": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "ACME"
+     },
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "ACME",
+       "orig": "ACME",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "item_code": "A",
+         "qty": "",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__key": "key#1",
+         "__rule": {
+          "is_fixed_asset": 1
+         },
+         "__ruleSrc": {
+          "item_code": "A"
+         }
+        },
+        {
+         "item_code": "B",
+         "qty": "",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__key": "key#2",
+         "__rule": {
+          "is_fixed_asset": 0
+         },
+         "__ruleSrc": {
+          "item_code": "B"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ],
+   [
+    "ruleValues",
+    "Sales Order",
+    "items",
+    {
+     "item_code": [
+      "A",
+      "B"
+     ]
+    }
+   ]
+  ]
+ },
+ "card create, simple": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "ACME",
+      "remarks": "hello",
+      "is_internal": 1,
+      "status": "Open"
+     },
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "ACME",
+       "orig": "ACME",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "status",
+       "label": "Status",
+       "control": "select",
+       "options": [
+        "Draft",
+        "Open",
+        "Closed"
+       ],
+       "fieldtype": "Select",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "Open",
+       "orig": "Open",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "is_internal",
+       "label": "Is Internal",
+       "control": "check",
+       "options": "",
+       "fieldtype": "Check",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "Yes",
+       "orig": "Yes",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "remarks",
+       "label": "Remarks",
+       "control": "text",
+       "options": "",
+       "fieldtype": "Small Text",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "hello",
+       "orig": "hello",
+       "proposed": true,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "__key": "key#1",
+         "item_code": "",
+         "qty": "",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__rule": {
+          "is_fixed_asset": "0"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ]
+  ]
+ },
+ "card create with a table": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "ACME",
+      "transaction_date": "2026-12-08"
+     },
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "ACME",
+       "orig": "ACME",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-12-08",
+       "orig": "2026-12-08",
+       "proposed": true,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "item_code": "A",
+         "qty": "3",
+         "rate": "2",
+         "amount": "",
+         "brand": "Zed",
+         "description": "",
+         "warehouse": "",
+         "__key": "key#1",
+         "__rule": {
+          "is_fixed_asset": 1
+         },
+         "__ruleSrc": {
+          "item_code": "A"
+         }
+        },
+        {
+         "item_code": "B",
+         "qty": "1.5",
+         "rate": "",
+         "amount": "",
+         "brand": "",
+         "description": "",
+         "warehouse": "",
+         "__key": "key#2",
+         "__rule": {
+          "is_fixed_asset": 0
+         },
+         "__ruleSrc": {
+          "item_code": "B"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ],
+   [
+    "ruleValues",
+    "Sales Order",
+    "items",
+    {
+     "item_code": [
+      "A",
+      "B"
+     ]
+    }
+   ]
+  ]
+ },
+ "card update with the stored record overlaid": {
+  "builds": [
+   {
+    "model": {
+     "verb": "update",
+     "doctype": "Sales Order",
+     "docName": "SO-1",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "ACME",
+      "customer_name": "ACME Ltd",
+      "transaction_date": "2026-11-01",
+      "status": "Open",
+      "is_internal": 1,
+      "remarks": "changed"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "ACME",
+       "orig": "ACME",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-11-01",
+       "orig": "2026-11-01",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "status",
+       "label": "Status",
+       "control": "select",
+       "options": [
+        "Draft",
+        "Open",
+        "Closed"
+       ],
+       "fieldtype": "Select",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "Open",
+       "orig": "Draft",
+       "proposed": true,
+       "changed": true
+      },
+      {
+       "fieldname": "remarks",
+       "label": "Remarks",
+       "control": "text",
+       "options": "",
+       "fieldtype": "Small Text",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "changed",
+       "orig": "first",
+       "proposed": true,
+       "changed": true
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "__name": "soi-1",
+         "item_code": "A",
+         "qty": "9",
+         "rate": "10",
+         "amount": "10",
+         "description": "Item A",
+         "brand": "",
+         "warehouse": "W1",
+         "__key": "key#1",
+         "__rule": {
+          "is_fixed_asset": 1
+         },
+         "__ruleSrc": {
+          "item_code": "A"
+         }
+        },
+        {
+         "item_code": "D",
+         "qty": "2",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__key": "key#2",
+         "__rule": {
+          "is_fixed_asset": "0"
+         },
+         "__ruleSrc": {
+          "item_code": "D"
+         }
+        }
+       ],
+       "origJson": "[{\"name\":\"soi-1\",\"idx\":1,\"item_code\":\"A\",\"qty\":1,\"rate\":10,\"amount\":10,\"description\":\"Item A\",\"warehouse\":\"W1\",\"is_fixed_asset\":1},{\"name\":\"soi-2\",\"idx\":2,\"item_code\":\"B\",\"qty\":2,\"rate\":4,\"amount\":8,\"is_fixed_asset\":0}]"
+      },
+      {
+       "fieldname": "taxes",
+       "label": "Taxes",
+       "child": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "gridFields": [
+        "charge_type",
+        "rate"
+       ],
+       "formFields": [],
+       "ruleFields": [],
+       "rows": [
+        {
+         "__name": "tax-1",
+         "charge_type": "On Net Total",
+         "rate": "18",
+         "__key": "key#3"
+        }
+       ],
+       "origJson": "[{\"name\":\"tax-1\",\"idx\":1,\"charge_type\":\"On Net Total\",\"rate\":18}]"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ],
+   [
+    "loadDocForEdit",
+    "Sales Order",
+    "SO-1"
+   ],
+   [
+    "ruleValues",
+    "Sales Order",
+    "items",
+    {
+     "item_code": [
+      "D"
+     ]
+    }
+   ]
+  ]
+ },
+ "card: two keys that look alike each keep their own field; an unknown and a table key are left out": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Memo",
+     "docName": "",
+     "title": "",
+     "titleField": "",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "date": "2026-12-09",
+      "posting_date": "2026-12-08",
+      "subject": "S",
+      "body": "text"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "posting_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-12-08",
+       "orig": "2026-12-08",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "date",
+       "label": "Posting Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "2026-12-09",
+       "orig": "2026-12-09",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "S",
+       "orig": "S",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "body",
+       "label": "Body",
+       "control": "text",
+       "options": "",
+       "fieldtype": "Text Editor",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "text",
+       "orig": "text",
+       "proposed": true,
+       "changed": false
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   },
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Sales Order",
+     "docName": "",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "customer": "C"
+     },
+     "parentDefaults": {
+      "transaction_date": "Today",
+      "status": "Draft",
+      "is_internal": 0
+     },
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "C",
+       "orig": "C",
+       "proposed": true,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "__key": "key#1",
+         "item_code": "",
+         "qty": "",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__rule": {
+          "is_fixed_asset": "0"
+         }
+        }
+       ],
+       "origJson": "null"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Memo"
+   ],
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ]
+  ]
+ },
+ "card: a prompt-named create keeps its name": {
+  "builds": [
+   {
+    "model": {
+     "verb": "create",
+     "doctype": "Memo",
+     "docName": "MEMO-9",
+     "title": "",
+     "titleField": "",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "subject": "S"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "S",
+       "orig": "S",
+       "proposed": true,
+       "changed": false
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Memo"
+   ]
+  ]
+ },
+ "card update, stored record unloadable: shown without it and marked, tables or not": {
+  "builds": [
+   {
+    "model": {
+     "verb": "update",
+     "doctype": "Task",
+     "docName": "TASK-1",
+     "title": "",
+     "titleField": "subject",
+     "submittable": false,
+     "cont": 0,
+     "linkContext": {
+      "subject": "New"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "subject",
+       "label": "Subject",
+       "control": "data",
+       "options": "",
+       "fieldtype": "Data",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "New",
+       "orig": "",
+       "proposed": true,
+       "changed": true
+      }
+     ],
+     "tables": [],
+     "tableMeta": {},
+     "applying": false,
+     "error": "",
+     "updatedToast": false,
+     "storedUnavailable": true
+    }
+   },
+   {
+    "model": {
+     "verb": "update",
+     "doctype": "Sales Order",
+     "docName": "SO-1",
+     "title": "",
+     "titleField": "customer_name",
+     "submittable": true,
+     "cont": 0,
+     "linkContext": {
+      "status": "Open"
+     },
+     "parentDefaults": {},
+     "docstatus": 0,
+     "fields": [
+      {
+       "fieldname": "customer",
+       "label": "Customer",
+       "control": "link",
+       "options": "Customer",
+       "fieldtype": "Link",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "transaction_date",
+       "label": "Date",
+       "control": "date",
+       "options": "",
+       "fieldtype": "Date",
+       "reqd": 1,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "",
+       "orig": "",
+       "proposed": false,
+       "changed": false
+      },
+      {
+       "fieldname": "status",
+       "label": "Status",
+       "control": "select",
+       "options": [
+        "Draft",
+        "Open",
+        "Closed"
+       ],
+       "fieldtype": "Select",
+       "reqd": 0,
+       "read_only": 0,
+       "link_filters": "$undefined",
+       "link_query_filters": "$undefined",
+       "value": "Open",
+       "orig": "",
+       "proposed": true,
+       "changed": true
+      }
+     ],
+     "tables": [
+      {
+       "fieldname": "items",
+       "label": "Items",
+       "child": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "gridFields": [
+        "item_code",
+        "qty",
+        "rate",
+        "amount"
+       ],
+       "formFields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "ruleFields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ],
+       "rows": [
+        {
+         "item_code": "A",
+         "qty": "1",
+         "rate": "",
+         "amount": "",
+         "description": "",
+         "brand": "",
+         "warehouse": "",
+         "__key": "key#1",
+         "__rule": {
+          "is_fixed_asset": "0"
+         }
+        }
+       ],
+       "origJson": "[]"
+      }
+     ],
+     "tableMeta": {
+      "items": {
+       "label": "Items",
+       "child_doctype": "Sales Order Item",
+       "columns": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        }
+       ],
+       "extra_columns": [
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "form_fields": [
+        {
+         "fieldname": "item_code",
+         "label": "Item Code",
+         "fieldtype": "Link",
+         "options": "Item",
+         "reqd": 1,
+         "read_only": 0
+        },
+        {
+         "fieldname": "qty",
+         "label": "Qty",
+         "fieldtype": "Float",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "amount",
+         "label": "Amount",
+         "fieldtype": "Currency",
+         "options": "",
+         "reqd": 0,
+         "read_only": 1
+        },
+        {
+         "fieldname": "description",
+         "label": "Description",
+         "fieldtype": "Small Text",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "brand",
+         "label": "Brand",
+         "fieldtype": "Data",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "warehouse",
+         "label": "Warehouse",
+         "fieldtype": "Link",
+         "options": "Warehouse",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "rule_fields": [
+        {
+         "fieldname": "is_fixed_asset",
+         "fieldtype": "Check",
+         "default": "0",
+         "fetch_from": "item_code.is_fixed_asset"
+        }
+       ]
+      },
+      "taxes": {
+       "label": "Taxes",
+       "child_doctype": "Sales Taxes",
+       "columns": [
+        {
+         "fieldname": "charge_type",
+         "label": "Type",
+         "fieldtype": "Select",
+         "options": "On Net Total\nActual",
+         "reqd": 0,
+         "read_only": 0
+        },
+        {
+         "fieldname": "rate",
+         "label": "Rate",
+         "fieldtype": "Percent",
+         "options": "",
+         "reqd": 0,
+         "read_only": 0
+        }
+       ],
+       "extra_columns": [],
+       "form_fields": []
+      }
+     },
+     "applying": false,
+     "error": "",
+     "updatedToast": false,
+     "storedUnavailable": true
+    }
+   }
+  ],
+  "calls": [
+   [
+    "getDoctypeFormMeta",
+    "Task"
+   ],
+   [
+    "loadDocForEdit",
+    "Task",
+    "TASK-1"
+   ],
+   [
+    "getDoctypeFormMeta",
+    "Sales Order"
+   ],
+   [
+    "loadDocForEdit",
+    "Sales Order",
+    "SO-1"
+   ],
+   [
+    "ruleValues",
+    "Sales Order",
+    "items",
+    {
+     "item_code": [
+      "A"
+     ]
+    }
+   ]
+  ]
+ }
+}

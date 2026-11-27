@@ -8,7 +8,9 @@ rows. A draft row is an assistant row whose FIRST closed ``jarvis-action`` fence
 parses to a non-email action whose verb is missing, ``create`` or ``update``. The live draft
 is the last draft row, unless a later tool row is a decided write (a non-empty
 ``action_outcome``, or an old receipt: a ``create_doc`` / ``update_doc`` row whose
-``tool_status`` is ``completed`` and whose ``tool_call_id`` is empty), more than
+``tool_status`` is ``completed`` and whose ``tool_call_id`` is empty), a later tool row that is
+a parked tool draft (``draft_card`` true: the agent's own ``create_doc`` / ``update_doc`` card,
+Pending), more than
 ``MAX_USER_ROWS_AFTER_DRAFT`` user rows come after it, or more than ``MAX_ROWS_AFTER_DRAFT``
 rows of any role come after it. The tool rows DIRECTLY after the draft row (up to the first
 later row that is not a tool row) are the draft's own turn: the reply row takes its ``seq``
@@ -29,6 +31,8 @@ MAX_USER_ROWS_AFTER_DRAFT = 5
 # (its own turn's tool rows aside) is never live: its card is not missing from a loaded page
 # while the server calls it live.
 MAX_ROWS_AFTER_DRAFT = 60
+# Pending cards read before the strict parse (a draft parks one card; a few more cover a batch).
+PARKED_CARDS_READ = 20
 # A receipt written before 2026-07-17 (``actions_api._append_receipt``) has no action_outcome
 # and no tool_call_id: its completed create / update row is the write.
 _WRITE_TOOLS = ("create_doc", "update_doc")
@@ -76,6 +80,12 @@ def real_doctype(value) -> str:
 	import frappe
 
 	return known_doctype(value, lambda name: frappe.db.exists("DocType", name, cache=True))
+
+
+def prompt_named(autoname) -> bool:
+	"""Whether a DocType's ``autoname`` makes the person type the name (``Prompt``,
+	whatever the case or suffix). The one rule for the card's payload and the edit form."""
+	return isinstance(autoname, str) and autoname.lower().startswith("prompt")
 
 
 def _trim(value: str) -> str:
@@ -167,14 +177,18 @@ def _shown(row) -> bool:
 
 
 def retires_draft(row: dict) -> bool:
-	"""A decided write after a draft retires it: a receipt (a non-empty ``action_outcome``),
-	or an old receipt. A draft saved before 2026-07-17 left a completed ``create_doc`` /
+	"""A parked tool draft (``draft_card`` true) or a decided write after a typed draft retires
+	it: the tool card is then the one card, and once it is decided its row has an
+	``action_outcome`` and no ``draft_card``, so the old typed draft never comes back. A
+	decided write is a receipt (a non-empty ``action_outcome``), or an old receipt. A draft saved before 2026-07-17 left a completed ``create_doc`` /
 	``update_doc`` row with no outcome AND no ``tool_call_id``. An agent's tool call always
 	carries its call id, and a call that only staged a gated card is still ``completed``
 	(``api._call_tool`` records it): it never retires a draft this way, only through an
 	outcome once the card is decided."""
 	if row.get("role") != "tool":
 		return False
+	if row.get("draft_card") is True:
+		return True
 	outcome = row.get("action_outcome")
 	if isinstance(outcome, str) and _trim(outcome) != "":
 		return True
@@ -185,14 +199,20 @@ def retires_draft(row: dict) -> bool:
 	)
 
 
-def pick(rows: list[dict]) -> dict | None:
+def pick(rows: list[dict], parked_draft: bool = False) -> dict | None:
 	"""The live draft among ``rows`` (messages in ``seq`` order), or None.
+
+	``parked_draft`` means the conversation has a Pending draft card (read from the Pending
+	Actions, whether or not its tool row is among ``rows``): exactly one card is shown, so no
+	typed draft is live then, wherever it sits in the row order.
 
 	Returns ``{"message": name, "verb": "create"|"update", "doctype": str, "bad": bool}``.
 	The newest draft row is chosen first and only then tested for retirement: an older
 	draft never comes back. ``counted`` holds the rows that count toward
 	``MAX_ROWS_AFTER_DRAFT``; ``tool_run`` the tool rows walked since the last row that was
 	not one, which are the draft's own turn if the draft comes next."""
+	if parked_draft:
+		return None
 	user_rows = counted = tool_run = 0
 	for row in reversed(rows or []):
 		if not _shown(row):
@@ -252,7 +272,8 @@ def load_rows(conversation: str) -> list[dict]:
 
 	``get_all`` is used because every caller (``apply_action`` and the dismiss endpoint after
 	their owner checks, the turn's own prompt assembly) acts on a conversation it already owns.
-	Plain reads only: no lock is taken (prompt assembly calls this)."""
+	The tool rows then get ``draft_card`` from one more read (``_stamp_draft_cards``), made only
+	when one of them is Pending. Plain reads only: no lock is taken (prompt assembly calls this)."""
 	import frappe
 
 	shown = [["conversation", "=", conversation], ["hidden", "=", 0], ["streaming", "=", 0]]
@@ -311,9 +332,142 @@ def load_rows(conversation: str) -> list[dict]:
 	)
 	for row in tools:
 		row["content"] = None
+	_stamp_draft_cards(conversation, tools)
 	return sorted(rows + tools, key=lambda r: r["seq"])
 
 
+def _stamp_draft_cards(conversation: str, tools: list[dict]) -> None:
+	"""``draft_card`` on each tool row, as ``api._stamp_draft_cards`` gives it to the apps: true
+	only for a row still Pending whose Pending Action card carries a ``draft``. The card lives on
+	the ``Jarvis Pending Action`` row (``api._pending_action_cards`` hands it to the app), so one
+	read of this chat's Pending chat cards among the rows' call ids supplies it: no query per row,
+	none at all when no row is Pending. Plain read, no lock."""
+	import frappe
+
+	from jarvis.chat import draft_card
+
+	tokens = [t["tool_call_id"] for t in tools if t.get("tool_status") == "pending" and t.get("tool_call_id")]
+	cards = {}
+	if tokens:
+		cards = {
+			r["name"]: r["card"]
+			for r in frappe.get_all(  # same ownership argument as above; the card is read-only here
+				"Jarvis Pending Action",
+				filters={
+					"name": ["in", tokens],
+					"kind": "chat",
+					"conversation": conversation,
+					"status": "Pending",
+				},
+				fields=["name", "card"],
+			)
+		}
+	for row in tools:
+		row["pending_card"] = _card_of(cards.get(row.get("tool_call_id")))
+		row["draft_card"] = draft_card.is_pending_draft_row(row)
+
+
+def pending_draft_cards(*, conversations=None, owner: str | None = None, limit: int = 20) -> list[dict]:
+	"""The Pending draft cards (the agent's own ``create_doc`` / ``update_doc`` call parked as a
+	draft) of chat conversations, newest first: ``[{"token", "conversation", "created", "verb",
+	"doctype", "title"}]``. ``conversations`` (a list) and ``owner`` narrow the read; give at least one.
+
+	``verb`` is ``create`` or ``update``, ``doctype`` has passed ``real_doctype`` ("" when the
+	agent named no real DocType) and ``title`` is built from those by ``draft_card.title_of``,
+	never taken from the stored text. One plain read, no lock: prompt assembly, the board and the
+	export all call this.
+
+	The server's view can differ from the app's for one fenced-off card: the apps redact a card
+	``pending_action_is_safe_to_render`` refuses, and that check locks, so it is not made here
+	(accepted: such a card is already dead and settles on its own).
+
+	``get_all``: every caller acts for the owner of these conversations (the turn's own prompt, a
+	board or export of the caller's own chats, a macro run for its owner), and the Pending Action
+	DocType grants no user read at all."""
+	import frappe
+
+	from jarvis.chat import draft_card
+
+	# The ``like`` keeps the limit counting draft cards only (a newer plain pending card must not
+	# hide one). It matches the canonical text of a top-level dict value (``_seal.json_text`` writes
+	# the column: sorted keys, no spaces), so the string value "Draft" (LIKE ignores case) does not
+	# match; the parse below is the real test, the text match only narrows the read.
+	filters = {"kind": "chat", "status": "Pending", "card": ["like", '%"draft":{%']}
+	if conversations is not None:
+		if not conversations:
+			return []
+		filters["conversation"] = ["in", list(conversations)]
+	if owner:
+		filters["owner_user"] = owner
+	rows = frappe.get_all(
+		"Jarvis Pending Action",
+		filters=filters,
+		fields=["name", "conversation", "card", "creation"],
+		order_by="creation desc",
+		limit=limit,
+	)
+	parsed = []
+	for row in rows:
+		card = _card_of(row.get("card"))
+		draft = card.get("draft") if card else None
+		if not isinstance(draft, dict) or draft.get("verb") not in ("create", "update"):
+			continue
+		parsed.append((row, draft, safe_doctype(draft.get("doctype"))))
+	known = _existing_doctypes({name for _row, _draft, name in parsed if name})
+	out = []
+	for row, draft, safe in parsed:
+		doctype = known.get(safe, "")
+		name = draft.get("name")
+		out.append(
+			{
+				"token": row["name"],
+				"conversation": row["conversation"],
+				"created": str(row.get("creation") or ""),
+				"verb": draft["verb"],
+				"doctype": doctype,
+				"title": draft_card.title_of(
+					draft["verb"], doctype, name[:80] if isinstance(name, str) else ""
+				)
+				if doctype
+				else "",
+			}
+		)
+	return out
+
+
+def _existing_doctypes(names: set) -> dict:
+	"""``{asked name: the site's own spelling}`` for the names that are real DocTypes, from ONE
+	read (``real_doctype`` is one lookup per name: wrong inside a loop). The lookup is
+	case-insensitive like ``frappe.db.exists``, so the key stays the asked name."""
+	import frappe
+
+	if not names:
+		return {}
+	# System context: the DocType catalogue is read to learn which names exist, not to show
+	# any user a record, so no permission applies (``real_doctype`` is the same lookup).
+	found = frappe.get_all("DocType", filters={"name": ["in", sorted(names)]}, pluck="name")
+	by_lower = {safe_doctype(n).lower(): safe_doctype(n) for n in found}
+	return {n: by_lower[n.lower()] for n in names if n.lower() in by_lower}
+
+
+def _card_of(raw) -> dict | None:
+	"""A stored card (JSON text, or already a dict) as a dict, or None."""
+	if isinstance(raw, str):
+		try:
+			raw = json.loads(raw)
+		except ValueError:
+			return None
+	return raw if isinstance(raw, dict) else None
+
+
 def find(conversation: str) -> dict | None:
-	"""The live draft of ``conversation``, or None: ``pick`` over ``load_rows``."""
-	return pick(load_rows(conversation))
+	"""The live draft of ``conversation``, or None: ``pick`` over ``load_rows``, and None
+	whenever a Pending draft card waits (one more plain read, whatever rows were loaded)."""
+	return pick(load_rows(conversation), parked_draft=has_pending_draft(conversation))
+
+
+def has_pending_draft(conversation: str) -> bool:
+	"""Whether ``conversation`` has a Pending draft card: ``pending_draft_cards`` for it alone. It
+	reads up to ``PARKED_CARDS_READ`` rows and any one that passes the strict parse counts: a row
+	the text filter let through but the parse refused must not hide a real draft card."""
+	return bool(pending_draft_cards(conversations=[conversation], limit=PARKED_CARDS_READ))

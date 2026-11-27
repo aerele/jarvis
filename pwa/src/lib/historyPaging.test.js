@@ -22,8 +22,11 @@ test("a reload re-reads only the newest page and keeps the older pages on screen
 	assert.match(load, /api\.getConversation\(cid, \{ refresh, after \}\)/);
 	assert.match(load, /const after = heldNewestSeq\(messages\.value, historyPaging\.value\);/);
 	assert.match(load, /if \(page\.stale\.length && staleRetry\) load\(false, false\);/);
-	assert.match(load, /mergeNewestPage\(messages\.value, historyPaging\.value, d, refresh\)/);
-	assert.match(load, /olderPending\.value = d\?\.older_pending \|\| \[\];/);
+	// the merge of the page into the rows on screen is takeThreadPage, shared with the quiet read
+	assert.match(load, /takeThreadPage\(d, refresh\)/);
+	const take = fnBody("function takeThreadPage(");
+	assert.match(take, /mergeNewestPage\(messages\.value, historyPaging\.value, d, refresh\)/);
+	assert.match(take, /olderPending\.value = d\?\.older_pending \|\| \[\];/);
 	const held = [
 		{ name: "a", seq: 1 },
 		{ name: "b", seq: 2 },
