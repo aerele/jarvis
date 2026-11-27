@@ -114,9 +114,10 @@ CONNECT_TIMEOUT_SECONDS = 10
 SESSION_CREATE_TIMEOUT_SECONDS = 45
 # sessions.patch (the per-conversation model pin, and the reset of a builder chat's session)
 # answered in 6-16 s on a loaded 2026.11 gateway with delegates installed, so the shared 10 s
-# budget failed the turn with "sessions.patch timed out" before it started. Same reasoning as
-# SESSION_CREATE_TIMEOUT_SECONDS, and still well inside the prepare deadline.
-SESSION_PATCH_TIMEOUT_SECONDS = 30
+# budget failed the turn with "sessions.patch timed out" before it started; on 2026.11.10 at one
+# core it peaked at 26 s (a model-catalog rebuild during builder chats). Same reasoning as
+# SESSION_CREATE_TIMEOUT_SECONDS; create + patch (105 s) stay inside the prepare job's limit.
+SESSION_PATCH_TIMEOUT_SECONDS = 60
 
 # The 2026.10.x agent runtime answers ``UNAVAILABLE`` ("Agent main has not completed startup inspection and
 # preparation", "The model catalog is still loading") for ~40 s after a restart, even after

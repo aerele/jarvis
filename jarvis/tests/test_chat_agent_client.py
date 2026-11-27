@@ -304,11 +304,11 @@ class TestCreateSession(FrappeTestCase):
 		)
 
 	def test_session_model_patch_uses_its_own_budget(self):
-		# A loaded 2026.11 gateway answered sessions.patch in 6-16 s: the 10 s connect budget
-		# failed builder turns before they started.
+		# A loaded 2026.11 gateway answered sessions.patch in 6-16 s (26 s at peak on 2026.11.10):
+		# the 10 s connect budget failed builder turns before they started.
 		from jarvis.chat import agent_client
 
-		self.assertGreater(agent_client.SESSION_PATCH_TIMEOUT_SECONDS, 16)
+		self.assertGreater(agent_client.SESSION_PATCH_TIMEOUT_SECONDS, 26)
 		self.assertLess(agent_client.SESSION_PATCH_TIMEOUT_SECONDS, _prepare_deadline())
 		sess, _ws = _build_session()
 		seen = []
