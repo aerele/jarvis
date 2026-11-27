@@ -848,6 +848,62 @@ class TestVoucherBalanceGate(EngineCase):
 				)
 
 
+class TestReadHooks(EngineCase):
+	"""The two guard hooks a subclass can override; the base class keeps today's guards."""
+
+	def run_read(self, engine_class):
+		anchor = getdate(self.fx.today)
+		return sources._run_engine(
+			engine_class,
+			sources._engine_filters(self.fx.company, anchor),
+			"Payable",
+			anchor,
+			getdate(add_days(self.fx.today, 40)),
+		)
+
+	def two_account_invoice(self):
+		invoice = self.fx.invoice((100,))
+		other = self.fx.account("Payable2", "Payable", "Liability")
+		self.fx.ple("InvoicePLE2", "Purchase Invoice", invoice, 50, account=other)
+		return invoice
+
+	def refusal_code(self, engine_class):
+		with self.assertRaises(CalendarSourceUnavailable) as raised:
+			self.run_read(engine_class)
+		return raised.exception.code
+
+	def test_voucher_limit_none_disables_only_the_voucher_guard(self):
+		self.fx.invoice((100,))
+		self.fx.invoice((100,))
+
+		class Unlimited(sources._report_class()):
+			def voucher_limit(self):
+				return None
+
+		with patch.object(sources, "MAX_VOUCHERS", 0):
+			self.assertEqual(self.refusal_code(sources._report_class()), "too_large")
+			self.assertEqual(len(self.run_read(Unlimited).data), 2)
+		# The default limit is exactly MAX_VOUCHERS: one invoice over refuses, a count equal to it does not.
+		with patch.object(sources, "MAX_VOUCHERS", 1):
+			self.assertEqual(self.refusal_code(sources._report_class()), "too_large")
+		with patch.object(sources, "MAX_VOUCHERS", 2):
+			self.assertEqual(len(self.run_read(sources._report_class()).data), 2)
+
+	def test_multiple_invoice_accounts_hook_can_only_widen_the_refusal(self):
+		self.fx.invoice((100,))
+
+		class Widened(sources._report_class()):
+			def has_multiple_invoice_accounts(self, counts):
+				return True
+
+		self.assertEqual(self.refusal_code(Widened), "multiple_invoice_accounts")
+		self.assertTrue(self.run_read(sources._report_class()).data)
+
+	def test_default_hook_keeps_the_two_account_refusal(self):
+		self.two_account_invoice()
+		self.assertEqual(self.refusal_code(sources._report_class()), "multiple_invoice_accounts")
+
+
 class TestLedgerOrder(EngineCase):
 	def tied_lines(self):
 		"""Two self-referencing lines of one journal, same day and party; the greater name goes in first."""
@@ -891,6 +947,23 @@ class TestLedgerOrder(EngineCase):
 		with patch.object(sources, "source_profile", return_value=SimpleNamespace(major="15")):
 			engine = self.run_engine()
 		self.assertNotIn("name", self.order_keys(engine))
+
+
+class TestSettledOverlayOrder(TestCase):
+	"""The settled overlay's order sets its rows' positions, so their ids: it must not be a set's hash order."""
+
+	def test_settled_in_window_keeps_the_order_of_the_candidates(self):
+		keys = [("Account", "Sales Invoice", f"SINV-{number:04d}", "Party") for number in range(300, 0, -1)]
+		candidates = {key: SimpleNamespace(voucher_type="Sales Invoice") for key in keys}
+		window = {key[2]: {"due_date": "2026-01-15"} for key in keys[::2]}
+		window.update({key[2]: {"due_date": "2030-01-15"} for key in keys[1::2]})
+		engine = SimpleNamespace(
+			metadata=window, window_start=getdate("2026-01-01"), window_end=getdate("2026-12-31")
+		)
+		with patch.object(frappe, "get_all", return_value=[]):
+			selected = sources._report_class()._settled_in_window(engine, candidates)
+		self.assertIsInstance(selected, list)
+		self.assertEqual(selected, keys[::2])
 
 
 class TestBatchedPartyDetails(EngineCase):

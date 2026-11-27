@@ -113,6 +113,9 @@
   "enable_role_profiles",
   "file_box_sheets",
   "payment_calendar_chat_handoff",
+  "payment_calendar_reader",
+  "payment_calendar_reader_companies",
+  "payment_calendar_reader_shadow_companies",
   "agent_tools_col",
   "run_query_doctype_allowlist",
   "run_method_blocklist",
@@ -907,6 +910,32 @@
    "hidden": 1,
    "permlevel": 2,
    "description": "On: a chat turn from a user who can open the Payment Calendar tells the agent the page exists, so a per-day cash request can be handed to it. Off (default): no hint is sent and the agent behaves as before. Turned on per site by Jarvis support after a check; only an Administrator can change it."
+  },
+  {
+   "fieldname": "payment_calendar_reader",
+   "fieldtype": "Select",
+   "label": "Payment Calendar: built-in reader",
+   "options": "off\nshadow\non",
+   "default": "off",
+   "hidden": 1,
+   "permlevel": 2,
+   "description": "off (default): the snapshot job reads as before. shadow: a nightly job compares the built-in reader with today's read and serves nothing. on: companies in the served list are read by the built-in reader where today's read refuses. Changed only by an Administrator, through save()."
+  },
+  {
+   "fieldname": "payment_calendar_reader_companies",
+   "fieldtype": "Small Text",
+   "label": "Payment Calendar: reader served companies",
+   "hidden": 1,
+   "permlevel": 2,
+   "description": "Companies served by the built-in reader when the mode is on. One exact company name per line."
+  },
+  {
+   "fieldname": "payment_calendar_reader_shadow_companies",
+   "fieldtype": "Small Text",
+   "label": "Payment Calendar: reader shadow companies",
+   "hidden": 1,
+   "permlevel": 2,
+   "description": "Companies the nightly shadow job compares and never serves. One exact company name per line."
   },
   {
    "fieldname": "agent_tools_col",
