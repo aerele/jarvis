@@ -479,6 +479,9 @@ def missing_fields(s, values: dict, unresolved: list[dict]) -> list[dict]:
 		)
 
 	for fieldname in header:
+		# Frappe fills a fetch_from field on insert once its source link has a value.
+		if intake_spec.fetched_from_value(meta.get_field(fieldname), values):
+			continue
 		if _blank(values.get(fieldname)):
 			add(fieldname, None, _label(meta, fieldname))
 	table = (s.table or {}).get("fieldname")
@@ -503,6 +506,8 @@ def missing_fields(s, values: dict, unresolved: list[dict]) -> list[dict]:
 				if df.fieldname not in columns and intake_spec.depends_mandatory(df, row)
 			]
 			for fieldname in row_columns:
+				if intake_spec.fetched_from_value(child_meta.get_field(fieldname), row):
+					continue
 				if _blank(row.get(fieldname)):
 					add(fieldname, i, _label(child_meta, fieldname))
 	return out
