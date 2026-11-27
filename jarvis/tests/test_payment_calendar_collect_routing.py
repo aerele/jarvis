@@ -23,6 +23,7 @@ from jarvis.tests.payment_calendar_fixtures import (
 	require_calendar_test_site,
 	sync_outstanding,
 )
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_READER_PINS, interface_error, v16_only
 
 SIDES = ("Payable", "Receivable")
 KEY = "k" * 44
@@ -117,6 +118,7 @@ class TestAboveTheGuard(CollectRoutingCase):
 	def above_the_guard(self, kind):
 		return patch.object(sources, "MAX_VOUCHERS" if kind == "vouchers" else "MAX_LEDGER_ROWS", 0)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_served_eligible_user_gets_the_reader_equal_to_todays_unguarded_read(self):
 		for kind in ("vouchers", "ledger rows"):
 			with self.subTest(kind):
@@ -151,6 +153,7 @@ class TestAboveTheGuard(CollectRoutingCase):
 				self.assertEqual(result["unavailable"], {side: "too_large" for side in SIDES})
 				self.assertTrue(all(result["sources"][side] is None for side in SIDES))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_reader_that_cannot_serve_leaves_todays_too_large_for_that_side_only(self):
 		real = routing.builtin_reader.read_obligations
 
@@ -164,6 +167,7 @@ class TestAboveTheGuard(CollectRoutingCase):
 		self.assertEqual(result["unavailable"], {"Receivable": "too_large"})
 		self.assertTrue(result["sources"]["Payable"]["rows"])
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_failed_statement_in_the_probe_leaves_too_large_and_the_other_side_served(self):
 		real, calls = sources._ledger_rows_exceed, {}
 
@@ -204,7 +208,7 @@ class TestAboveTheGuard(CollectRoutingCase):
 			frappe.db.OperationalError(1213, "deadlock"),
 			frappe.db.OperationalError(4031, "idle"),
 			frappe.db.OperationalError(2013, "lost"),
-			frappe.db.InterfaceError("closed"),
+			interface_error(),
 		)
 
 	def assert_view_fails(self, error, patcher):
@@ -215,6 +219,7 @@ class TestAboveTheGuard(CollectRoutingCase):
 				self.collect()
 		self.assertEqual(raised.exception.code, "source_changed", repr(error))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_reader_that_loses_the_view_to_a_rollback_fails_the_job_with_normal_autocommit(self):
 		for error in self.view_errors():
 			with self.subTest(type(error).__name__):
@@ -225,6 +230,7 @@ class TestAboveTheGuard(CollectRoutingCase):
 					),
 				)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_probe_that_loses_the_view_to_a_rollback_fails_the_job_with_normal_autocommit(self):
 		real = sources._ledger_rows_exceed
 
@@ -243,6 +249,7 @@ class TestAboveTheGuard(CollectRoutingCase):
 			with self.subTest(type(error).__name__):
 				self.assert_view_fails(error, patcher)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_an_eligibility_read_that_loses_the_view_to_a_rollback_fails_the_job(self):
 		for error in self.view_errors():
 			with self.subTest(type(error).__name__):
@@ -253,6 +260,7 @@ class TestAboveTheGuard(CollectRoutingCase):
 					),
 				)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_statement_error_does_not_break_the_view_and_payable_is_still_served(self):
 		for code in (1054, 1969):
 			with self.subTest(code):
@@ -325,6 +333,7 @@ class TestOutcomesInCollect(CollectRoutingCase):
 
 		return patch.object(routing.builtin_reader, "read_obligations", read)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_fallback_job_still_publishes_payable_and_counts_the_fallback(self):
 		with self.above_the_guard(), self.fail_reader():
 			result = self.collect()
@@ -333,11 +342,13 @@ class TestOutcomesInCollect(CollectRoutingCase):
 		store.split_result(result, self.scope)
 		self.assertEqual(self.counts(), {"fallback:pin_drift": 1, "served": 1})
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_log_error_runs_only_after_the_view(self):
 		with self.above_the_guard(), self.fail_reader():
 			self.collect()
 		self.assertEqual(self.in_view, [False])
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_raise_after_the_reader_still_writes_the_record(self):
 		contract = CalendarSourceUnavailable("source_contract_unavailable")
 		with (
@@ -372,6 +383,7 @@ class TestOutcomesInCollect(CollectRoutingCase):
 		self.assertEqual([line for line in infos if line.startswith("reader_outcome")], [])
 		self.assertEqual(self.counts(), {})
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_failing_outcome_writer_never_changes_the_result(self):
 		with (
 			self.above_the_guard(),

@@ -62,6 +62,7 @@ from jarvis.tests.batch_permission_fixtures import (
 	oracle,
 	session_as,
 )
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_PERMISSION_PINS, v16_only
 from jarvis.tests.payment_calendar_results import schema2_result
 
 SWITCH = batch_permission.SWITCH
@@ -258,6 +259,7 @@ class TestBreakerNaming(LimitsCase):
 		self.assertTrue(redis("GET", self.key()).decode().count("|") == 1)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestConfirmedMismatch(LimitsCase):
 	"""A confirmed mismatch at the call level: the sample finds a mismatch that the same-input re-check repeats."""
 
@@ -303,6 +305,7 @@ class TestConfirmedMismatch(LimitsCase):
 		self.refused()
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestTransient(LimitsCase):
 	"""A transient mismatch (the re-check does not repeat it) and the limit per doctype and site day."""
 
@@ -355,6 +358,7 @@ class TestTransient(LimitsCase):
 		self.assert_tripped("transient_unknown")
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestChunkOnlyFault(LimitsCase):
 	"""A chunk-only fault: a fault that needs two names in one chunk repeats in the re-check over the same chunks."""
 
@@ -382,6 +386,7 @@ class TestChunkOnlyFault(LimitsCase):
 		self.assertEqual(alone.visible, one)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestStopDuringTheRecheck(LimitsCase):
 	"""A stop during the re-check at the call level: the stop fires in the re-check, so the mismatch is confirmed unresolved."""
 
@@ -413,6 +418,7 @@ class TestStopDuringTheRecheck(LimitsCase):
 		)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestReadsHaveNoSample(LimitsCase):
 	"""A read request makes no sample call."""
 
@@ -550,6 +556,7 @@ class TestBreakerDurability(LimitsCase):
 		self.assertFalse(frappe.local.conf.get(SWITCH))
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestStats(LimitsCase):
 	"""The stats of a call (the reader record and the log line carry these counts, tested below)."""
 
@@ -677,6 +684,7 @@ class JobCase(LimitsCase):
 		return [record.get("step") for record in self.outcomes]
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestStatsWiring(JobCase):
 	"""The reader's `counts` and the job's log line carry the permission counts."""
 
@@ -735,6 +743,7 @@ class TestStatsWiring(JobCase):
 		self.assert_no_names_in(line)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestJobConfirmedMismatch(JobCase):
 	"""A confirmed mismatch in a job."""
 
@@ -777,6 +786,7 @@ class TestJobConfirmedMismatch(JobCase):
 		self.assert_tripped("mismatch")
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestJobStopInTheRecheck(JobCase):
 	"""A stop during the re-check in a job."""
 
@@ -895,6 +905,7 @@ class TestJobStop(JobCase):
 		self.assertEqual((status["state"], status["code"]), ("failed", "timeout"))
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestJobModeChange(JobCase):
 	"""A mode change in a job."""
 
@@ -932,6 +943,7 @@ class TestJobModeChange(JobCase):
 		self.reader.assert_not_called()
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestTripFlagLifetime(JobCase):
 	"""The trip flag lives for one job. `frappe.destroy` is stood in for by `forget_local()` (it would drop the test connection)."""
 
@@ -976,21 +988,25 @@ class TestShimContract(LimitsCase):
 		with self.assertRaises(batch_permission.ShimMiss):
 			self.doc().get(*args, **kwargs)
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_a_loaded_column_the_doctype_and_the_name_are_answered(self):
 		doc = self.doc()
 		self.assertEqual((doc.get("name"), doc.get("owner"), doc.get("company")), ("X", "o", "C"))
 		self.assertEqual(doc.get("doctype"), SI)
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_none_is_answered_for_islocal_and_the_parentfield_of_a_parent(self):
 		doc = self.doc()
 		self.assertIsNone(doc.get("__islocal"))
 		self.assertIsNone(doc.get("parentfield"))
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_a_table_a_column_that_was_not_read_and_any_other_key_raise(self):
 		for key in ("items", "taxes", "grand_total", "parent", "no_such_key_zz", "docstatus"):
 			with self.subTest(key=key):
 				self.assert_shim_miss(key)
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_extra_arguments_and_a_non_string_key_raise(self):
 		self.assert_shim_miss("company", default=0)
 		self.assert_shim_miss("company", filters={})
@@ -1003,6 +1019,7 @@ class TestShimContract(LimitsCase):
 			"customer", batch_permission._null_keys(meta, {"customer": ("varchar", None)}, set())
 		)
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_a_child_row_answers_its_parentfield_as_a_value_and_raises_for_unread_columns(self):
 		table = next(t for t in batch_permission._Layout(SI, {"Company"}).tables if t.relevant)
 		row = batch_permission._PermRow(table, {"idx": 1, "parentfield": table.fieldname, "company": "B"})
@@ -1012,6 +1029,7 @@ class TestShimContract(LimitsCase):
 			row.get("parent")
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestPlanFailsClosed(LimitsCase):
 	"""A broken table link or a missing `restrict_to_companies` column goes per document."""
 
@@ -1043,6 +1061,7 @@ class TestPlanFailsClosed(LimitsCase):
 				self.assertEqual(got, oracle(SI, self.f.names(SI), "read"))
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestLazyClassRows(LimitsCase):
 	"""The rows of the lazy class come from `compatibility`, not from a string list here."""
 
@@ -1068,6 +1087,7 @@ class TestLazyClassRows(LimitsCase):
 			self.assertEqual(self.reason("37:get"), "entry_patched")
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestPlanHooks(LimitsCase):
 	def test_real_hooks_lists_the_hooks_that_run_on_a_lazy_document(self):
 		path = HOOK_PATH + "deny_listed"
@@ -1082,6 +1102,7 @@ class TestPlanHooks(LimitsCase):
 		self.assertNotIn(batch_permission._INHERITED_HOOK, plan.real_hooks)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestHotPathCost(LimitsCase):
 	"""The branch counting calls (extra `has_user_permission` calls) stay off the hot path."""
 
@@ -1166,6 +1187,7 @@ class TestModuleSplit(LimitsCase):
 			with self.subTest(name=name):
 				self.assertTrue(hasattr(batch_permission, name))
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_a_name_rebound_on_the_entry_module_reaches_the_evaluator_and_the_plan(self):
 		names = {self.f.si_twe_b, self.f.si_plain}
 		with session_as(self.f.u1):
@@ -1271,6 +1293,7 @@ class TestRequestPathEvents(LimitsCase):
 		self.assertEqual(self.written.call_count, 1, "the plan is built once for the request")
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestMismatchLabel(LimitsCase):
 	"""Only the stop's own error, after the stop time, is `mismatch_unresolved`."""
 
@@ -1318,6 +1341,7 @@ class TestSwitchIsFixedForAJob(LimitsCase):
 	(Checked, not assumed: a changed `site_config.json` does not reach the running process.)
 	"""
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_the_config_is_assigned_once_by_init_and_the_attribute_is_the_object_the_code_reads(self):
 		import inspect
 
@@ -1430,6 +1454,7 @@ class TestSwitchValue(LimitsCase):
 		self.assertFalse(batch_permission.status()["switch"])
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestEventShape(LimitsCase):
 	"""The Error Log title carries the operation; the text carries the user digest, branch, direction and job."""
 
@@ -1520,6 +1545,7 @@ class TestPlanReasonEvent(LimitsCase):
 				self.assertEqual(self.reasons(), [])
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestStatusReadsAndPlans(LimitsCase):
 	def test_the_counters_are_todays_and_reading_them_counts_nothing(self):
 		redis(
@@ -1699,6 +1725,7 @@ class TestSampleStartPerJob(LimitsCase):
 		self.assertEqual(first[0], first[1])
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestJobFailureRecord(JobCase):
 	def body(self):
 		(call,) = [c for c in self.log_error.call_args_list if "Payment Calendar snapshot" in str(c)]
@@ -1753,6 +1780,7 @@ class TestTimeoutInTheTrip(LimitsCase):
 		self.assertTrue(getattr(frappe.local, batch_permission.CONFIG_PENDING, False))
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestTimeoutInTheTripInAJob(JobCase):
 	def test_the_job_ends_with_the_config_at_zero_although_the_redis_step_timed_out(self):
 		with (

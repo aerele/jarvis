@@ -31,6 +31,7 @@ from jarvis.tests.payment_calendar_fixtures import (
 	require_calendar_test_site,
 	sync_outstanding,
 )
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_READER_PINS, interface_error, v16_only
 
 # Names and keys are per run: parallel runs on the shared test site never meet. The ordinal of NIGHT is a
 # multiple of 6, so the per-night rotation starts at the first company for two or three companies.
@@ -304,6 +305,7 @@ class TestDispatch(ShadowCase):
 	def dispatch(self):
 		shadow.dispatch()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_night_starts_with_one_job_for_unit_zero(self):
 		self.dispatch()
 		self.enqueue.assert_called_once()
@@ -335,6 +337,7 @@ class TestDispatch(ShadowCase):
 			self.dispatch()
 		self.enqueue.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_it_runs_while_the_mode_is_on_too(self):
 		self.current = settings(mode="on", served=(COMPANY_A,), shadow_list=())
 		self.dispatch()
@@ -353,6 +356,7 @@ class TestDispatch(ShadowCase):
 		self.dispatch()
 		self.enqueue.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_killed_unit_is_marked_and_the_chain_resumes_with_the_next_one(self):
 		self.start_night()
 		shadow_state.set_cursor(NIGHT, 3)
@@ -367,6 +371,7 @@ class TestDispatch(ShadowCase):
 		self.assertEqual(shadow_state.cursor(NIGHT), 4)
 		self.assertEqual(self.enqueue.call_args.kwargs["job_id"], f"pcal-shadow:{NIGHT}:4")
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_pending_unit_is_enqueued_again_under_its_own_job_id(self):
 		self.start_night()
 		shadow_state.set_cursor(NIGHT, 5)
@@ -374,6 +379,7 @@ class TestDispatch(ShadowCase):
 		self.assertEqual(self.enqueue.call_args.kwargs["job_id"], f"pcal-shadow:{NIGHT}:5")
 		self.assertTrue(self.enqueue.call_args.kwargs["deduplicate"])
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_units_after_the_night_budget_get_time_cap(self):
 		self.start_night(started=time() - shadow.NIGHT_BUDGET_S - 5)
 		shadow_state.set_cursor(NIGHT, 16)
@@ -385,6 +391,7 @@ class TestDispatch(ShadowCase):
 			self.assertEqual((record["outcome"], record["reason"]), ("not_compared", "time_cap"))
 		self.assertEqual(shadow_state.cursor(NIGHT), 18)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_night_stores_a_digest_of_its_unit_list_not_the_names(self):
 		self.dispatch()
 		info = shadow_state.night_info(NIGHT)
@@ -393,6 +400,7 @@ class TestDispatch(ShadowCase):
 		for name in (COMPANY_A, COMPANY_B):
 			self.assertNotIn(name, info["units"])
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_changed_company_list_restarts_the_night_once_instead_of_stopping(self):
 		self.dispatch()
 		shadow_state.set_cursor(NIGHT, 5)
@@ -406,6 +414,7 @@ class TestDispatch(ShadowCase):
 		self.assertEqual(len(incomplete), 1)
 		self.assertIn("reason=units_changed", incomplete[0].kwargs["message"])
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_swap_of_one_company_for_another_with_the_same_count_also_restarts(self):
 		self.dispatch()
 		self.enqueue.reset_mock()
@@ -414,6 +423,7 @@ class TestDispatch(ShadowCase):
 		self.assertEqual(shadow_state.night_info(NIGHT)["restarts"], 1)
 		self.enqueue.assert_called_once()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_second_change_the_same_night_stops_the_chain_with_a_row(self):
 		self.dispatch()
 		self.current = settings(shadow_list=(COMPANY_A,))
@@ -427,6 +437,7 @@ class TestDispatch(ShadowCase):
 		self.assertEqual(self.log_error.call_args.kwargs["title"], INCOMPLETE_TITLE)
 		self.assertIn("reason=units_changed_again", self.log_error.call_args.kwargs["message"])
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_killed_unit_writes_an_incomplete_row_with_the_digest_and_no_name(self):
 		self.start_night()
 		shadow_state.set_cursor(NIGHT, 2)
@@ -440,6 +451,7 @@ class TestDispatch(ShadowCase):
 		self.assertIn(f"company={digest(COMPANY_A)}", kwargs["message"])
 		self.assertNotIn(COMPANY_A, kwargs["message"])
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_time_cap_writes_one_incomplete_row_per_company(self):
 		self.start_night(started=time() - shadow.NIGHT_BUDGET_S - 5)
 		shadow_state.set_cursor(NIGHT, 6)
@@ -448,6 +460,7 @@ class TestDispatch(ShadowCase):
 		self.assertEqual(len(rows_written), 2)
 		self.assertTrue(all("reason=time_cap" in c.kwargs["message"] for c in rows_written))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_dispatch_starts_the_night_at_the_rotated_company(self):
 		night = "2031-03-16"
 		with patch.object(shadow, "_today", return_value=night):
@@ -586,6 +599,7 @@ class TestRunUnit(ShadowCase):
 			shadow.run_unit(n, NIGHT)
 		return measure
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_unit_stores_its_record_advances_the_cursor_and_chains_the_next(self):
 		self.start_night()
 		self.run_unit(0)
@@ -596,12 +610,14 @@ class TestRunUnit(ShadowCase):
 		self.assertEqual(shadow_state.cursor(NIGHT), 1)
 		self.assertEqual(self.enqueue.call_args.kwargs["job_id"], f"pcal-shadow:{NIGHT}:1")
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_last_unit_chains_nothing(self):
 		self.start_night()
 		self.run_unit(17)
 		self.enqueue.assert_not_called()
 		self.assertEqual(shadow_state.cursor(NIGHT), 18)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_lease_is_held_with_a_token_while_it_runs_and_freed_before_the_next_job(self):
 		self.start_night()
 		seen = {}
@@ -636,6 +652,7 @@ class TestRunUnit(ShadowCase):
 		shadow_state.release_lease(token)
 		self.assertFalse(shadow_state.lease_held())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_an_unexpected_error_is_a_not_compared_record_and_an_error_log_row_without_text(self):
 		self.start_night()
 		self.run_unit(0, MagicMock(side_effect=RuntimeError("Shadow Test Co A leaked")))
@@ -645,6 +662,7 @@ class TestRunUnit(ShadowCase):
 		self.assertNotIn("leaked", self.log_error.call_args.kwargs["message"])
 		self.assertEqual(shadow_state.cursor(NIGHT), 1)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_job_timeout_leaves_the_marker_frees_the_lease_and_chains_nothing(self):
 		self.start_night()
 		with self.assertRaises(JobTimeoutException):
@@ -657,6 +675,7 @@ class TestRunUnit(ShadowCase):
 		self.assertEqual(self.unit_record(COMPANY_A, "Payable:previous")["reason"], "killed")
 		self.assertEqual(self.enqueue.call_args.kwargs["job_id"], f"pcal-shadow:{NIGHT}:1")
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_diff_writes_one_error_log_row_per_unit_and_night_with_its_counts(self):
 		self.start_night()
 		diff = done("diff", counts={"only_today": 1}, digests=["d" * 16])
@@ -672,6 +691,7 @@ class TestRunUnit(ShadowCase):
 			self.assertIn(f"digests={['d' * 16]}", message)
 			self.assertNotIn(COMPANY_A, message)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_same_unit_diffing_again_the_same_night_writes_no_second_row(self):
 		self.start_night()
 		diff = done("diff", counts={"only_today": 1})
@@ -681,6 +701,7 @@ class TestRunUnit(ShadowCase):
 		self.run_unit(0, MagicMock(return_value=diff))
 		self.assertEqual(self.log_error.call_count, 1)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_unit_writes_one_info_line_with_digest_outcome_and_times_and_no_name(self):
 		self.start_night()
 		record = done(today_ms=120, reader_ms=45)
@@ -704,6 +725,7 @@ class TestRunUnit(ShadowCase):
 		self.run_unit(0)
 		self.log_error.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_an_already_finished_unit_is_not_run_again(self):
 		self.start_night()
 		shadow_state.put_record(digest(COMPANY_A), NIGHT, "Payable:previous", done())
@@ -711,6 +733,7 @@ class TestRunUnit(ShadowCase):
 		measure.assert_not_called()
 		self.assertEqual(self.enqueue.call_args.kwargs["job_id"], f"pcal-shadow:{NIGHT}:1")
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_unit_after_the_night_budget_is_capped_not_run(self):
 		self.start_night(started=time() - shadow.NIGHT_BUDGET_S - 5)
 		measure = self.run_unit(2)
@@ -723,6 +746,7 @@ class TestRunUnit(ShadowCase):
 		self.assertEqual(self.run_unit(0).call_count, 0)
 		self.enqueue.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_changed_list_restarts_the_night_once_and_the_unit_runs_on_the_new_list(self):
 		self.start_night(units_hash="0" * 16)
 		self.assertEqual(self.run_unit(0).call_count, 1)
@@ -734,6 +758,7 @@ class TestRunUnit(ShadowCase):
 		self.assertEqual(self.run_unit(0).call_count, 0)
 		self.enqueue.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_unit_chain_covers_the_rotated_order(self):
 		night = "2031-03-16"
 		units = shadow.units_for(self.current, night)
@@ -752,6 +777,7 @@ class TestRunUnit(ShadowCase):
 		ttl = frappe.cache.execute_command("TTL", frappe.cache.make_key(shadow_state.lease_key()))
 		self.assertGreater(ttl, 890)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_job_timeout_reaches_the_runner_as_a_fresh_exception_with_no_names_in_its_traceback(self):
 		self.start_night()
 
@@ -777,12 +803,14 @@ class TestRunUnit(ShadowCase):
 		self.assertEqual(self.unit_record(COMPANY_A, "Payable:previous")["state"], "in_progress")
 		self.assertFalse(shadow_state.lease_held())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_plain_timeout_error_is_fresh_too(self):
 		self.start_night()
 		with self.assertRaises(TimeoutError) as raised:
 			self.run_unit(0, MagicMock(side_effect=TimeoutError("secret " + COMPANY_A)))
 		self.assertEqual(raised.exception.args, ())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_transient_database_error_is_retryable_and_writes_no_row(self):
 		self.start_night()
 		retry = done("not_compared", "error_transient", state="retry")
@@ -792,6 +820,7 @@ class TestRunUnit(ShadowCase):
 		self.log_error.assert_not_called()
 		self.assertEqual(shadow_state.cursor(NIGHT), 1)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_unit_in_retry_state_runs_again_and_a_success_replaces_it(self):
 		self.start_night()
 		shadow_state.put_record(
@@ -804,6 +833,7 @@ class TestRunUnit(ShadowCase):
 		measure.assert_called_once()
 		self.assertEqual(self.unit_record(COMPANY_A, "Payable:previous")["outcome"], "compared")
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_second_transient_failure_ends_the_unit_as_done(self):
 		self.start_night()
 		shadow_state.put_record(
@@ -833,6 +863,7 @@ class TestRunUnit(ShadowCase):
 		self.assertEqual(shadow_state.cursor(NIGHT), 18)
 		self.enqueue.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_finished_night_re_enqueues_a_retry_unit_under_its_own_job_id(self):
 		self.start_night()
 		shadow_state.set_cursor(NIGHT, 18)
@@ -853,6 +884,7 @@ class TestRunUnit(ShadowCase):
 		shadow.dispatch()
 		self.enqueue.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_killed_retry_run_leaves_a_retry_record_with_the_attempt_counted_not_a_stuck_marker(self):
 		self.start_night()
 		shadow_state.set_cursor(NIGHT, 18)
@@ -869,6 +901,7 @@ class TestRunUnit(ShadowCase):
 		self.assertEqual((record["state"], record["attempts"]), ("retry", 2))
 		self.assertFalse(shadow_state.lease_held())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_retry_unit_out_of_attempts_is_closed_as_done_and_not_enqueued_again(self):
 		self.start_night()
 		shadow_state.set_cursor(NIGHT, 18)
@@ -883,6 +916,7 @@ class TestRunUnit(ShadowCase):
 		record = self.unit_record(COMPANY_A, "Payable:next")
 		self.assertEqual((record["state"], record["reason"]), ("done", "error_transient"))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_failed_row_write_does_not_skip_the_commit_or_the_next_unit(self):
 		self.start_night()
 		diff = done("diff", counts={"only_today": 1})
@@ -893,12 +927,14 @@ class TestRunUnit(ShadowCase):
 		self.assertEqual(self.enqueue.call_args.kwargs["job_id"], f"pcal-shadow:{NIGHT}:1")
 		frappe.db.commit.assert_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_job_timeout_in_the_row_write_still_propagates(self):
 		self.start_night()
 		with patch.object(read_log, "error_log_once", side_effect=JobTimeoutException()):
 			with self.assertRaises(JobTimeoutException):
 				self.run_unit(0, MagicMock(return_value=done("diff")))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_shadow_fallback_writes_one_row_per_company_night_and_reason(self):
 		self.start_night()
 		fallback = done("not_compared", "fallback:control_total")
@@ -911,6 +947,7 @@ class TestRunUnit(ShadowCase):
 		self.assertIn(f"company={digest(COMPANY_A)}", message)
 		self.assertNotIn(COMPANY_A, message)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_an_ineligible_unit_and_a_size_skip_write_a_fallback_row(self):
 		self.start_night()
 		self.run_unit(0, MagicMock(return_value=done("not_compared", "ineligible")))
@@ -952,9 +989,13 @@ class TestRunUnit(ShadowCase):
 			shadow_state.records(digest(COMPANY_A), NIGHT)["Payable:next"]["counts"], {"rows": 3}
 		)
 
-	def test_records_keys_are_under_the_persistent_prefix_with_a_ttl(self):
+	def store_a_record(self):
+		"""One stored record, written the way a unit writes it, so these cases need no unit run."""
 		self.start_night()
-		self.run_unit(0)
+		shadow._store(digest(COMPANY_A), NIGHT, "Payable:previous", shadow._not_compared("test"))
+
+	def test_records_keys_are_under_the_persistent_prefix_with_a_ttl(self):
+		self.store_a_record()
 		name = shadow_state.record_key(digest(COMPANY_A), NIGHT)
 		persistent = frappe.get_hooks("persistent_cache_keys")
 		for key in (name, shadow_state.lease_key(), shadow_state.night_key(NIGHT)):
@@ -964,8 +1005,7 @@ class TestRunUnit(ShadowCase):
 		self.assertTrue(34 * 86400 < ttl <= 35 * 86400, ttl)
 
 	def test_records_survive_a_full_cache_clear(self):
-		self.start_night()
-		self.run_unit(0)
+		self.store_a_record()
 		frappe.clear_cache()
 		self.assertIn("Payable:previous", shadow_state.records(digest(COMPANY_A), NIGHT))
 		self.assertIsNotNone(shadow_state.night_info(NIGHT))
@@ -1124,7 +1164,7 @@ class TestMeasure(ShadowCase):
 	def test_a_lost_connection_in_a_read_is_a_retryable_record_not_a_fallback(self):
 		for error in (
 			frappe.db.OperationalError(2013, "lost"),
-			frappe.db.InterfaceError("closed"),
+			interface_error(),
 			frappe.QueryDeadlockError("deadlock"),
 			frappe.QueryTimeoutError("timeout"),
 		):
@@ -1166,6 +1206,7 @@ class TestMeasure(ShadowCase):
 		with self.assertRaises(JobTimeoutException):
 			self.measure()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_nothing_is_written_while_the_view_is_open(self):
 		self.current = settings(shadow_list=(self.company,))
 		self.today.side_effect = lambda *a, **k: rows("a", "b")
@@ -1188,6 +1229,7 @@ class TestMeasure(ShadowCase):
 		self.assertEqual(record["outcome"], "diff")
 		self.assertEqual(self.views, 1)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_measured_unit_is_stored_without_names_or_rows(self):
 		self.current = settings(shadow_list=(self.company,))
 		shadow.run_unit(1, NIGHT)
@@ -1268,12 +1310,14 @@ class TestRealUnit(RealShadowCase):
 
 	# The fixture terms fall due 10 and 20 days from today. The window scope covers them on any day of the
 	# month; a month scope would hold no due voucher late in the month.
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_real_unit_compares_the_reader_with_todays_read(self):
 		records = self.run_real(3)  # Payable:window
 		record = records["Payable:window"]
 		self.assertEqual((record["outcome"], record.get("reason")), ("compared", None), record)
 		self.assertGreater(record["counts"]["rows"], 0)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_above_todays_guard_the_reader_is_compared_with_the_lifted_read(self):
 		with (
 			patch.object(today_sources, "MAX_VOUCHERS", 0),
@@ -1352,6 +1396,20 @@ class TestBankComparison(TestCase):
 		result = self.compare(({"A": 1.0}, None), (None, frappe.db.OperationalError(2013, "lost")))
 		self.assertEqual(result, {"outcome": "not_compared", "reason": shadow.TRANSIENT})
 
+	def test_a_transient_error_is_the_drivers_own_interface_error_not_an_attribute_lookup(self):
+		class DriverInterfaceError(Exception):
+			pass
+
+		driver = SimpleNamespace(
+			OperationalError=frappe.db.OperationalError,
+			InterfaceError=ValueError,  # a different class: a lookup by this name would say False
+			is_interface_error=lambda error: isinstance(error, DriverInterfaceError),
+		)
+		with patch.object(frappe, "db", driver):
+			self.assertTrue(shadow._is_transient(DriverInterfaceError("closed")))
+			self.assertFalse(shadow._is_transient(ValueError("closed")))
+			self.assertFalse(shadow._is_transient(RuntimeError("boom")))
+
 	def test_a_missing_index_is_not_compared(self):
 		result = self.compare(({"A": 1.0}, None), (None, None))
 		self.assertEqual(result, {"outcome": "not_compared", "reason": "one_pass_unavailable"})
@@ -1406,6 +1464,7 @@ class TestRealBankUnit(RealShadowCase):
 			self.fx.account("Cash1", "Cash", "Asset"),
 		]
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_two_paths_compare_on_every_bank_and_cash_account(self):
 		bank2, cash = self.bank_names()[1:]
 		self.fx.gl(250, account=bank2)
@@ -1418,18 +1477,21 @@ class TestRealBankUnit(RealShadowCase):
 		self.assertGreaterEqual(record["today_ms"], 0)
 		self.assertGreaterEqual(record["reader_ms"], 0)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_group_and_a_disabled_account_are_not_read(self):
 		for suffix, field in (("Group", "is_group"), ("Off", "disabled")):
 			frappe.db.set_value("Account", self.fx.account(suffix, "Bank", "Asset"), field, 1)
 		frappe.db.commit()
 		self.assertEqual(self.run_bank()["counts"], {"accounts": 1})
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_company_without_a_bank_account_compares_nothing_and_passes(self):
 		frappe.db.set_value("Account", self.fx.bank, "disabled", 1)
 		frappe.db.commit()
 		record = self.run_bank()
 		self.assertEqual((record["outcome"], record["counts"]), ("compared", {"accounts": 0}))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_more_accounts_than_a_request_may_select_are_not_compared_and_no_path_runs(self):
 		self.bank_names()
 		frappe.db.commit()
@@ -1443,6 +1505,7 @@ class TestRealBankUnit(RealShadowCase):
 		today.assert_not_called()
 		one_pass.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_exactly_the_cap_is_compared_with_one_call_per_path(self):
 		self.bank_names()
 		frappe.db.commit()
@@ -1457,6 +1520,7 @@ class TestRealBankUnit(RealShadowCase):
 		self.assertEqual((record["outcome"], record["counts"]), ("compared", {"accounts": 3}))
 		self.assertEqual((today.call_count, one_pass.call_count), (1, 1))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_changed_one_pass_query_is_a_diff_with_a_row_and_no_name(self):
 		query = shadow.banks._ONE_PASS_SQL.replace("is_cancelled = 0", "is_cancelled = 1")
 		with patch.object(shadow.banks, "_ONE_PASS_SQL", query):
@@ -1476,12 +1540,14 @@ class TestRealBankUnit(RealShadowCase):
 		self.assertIn(f"digests={record['digests']}", text)
 		self.assertNotIn(self.fx.bank, text)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_an_alternative_book_refuses_alike_on_both_paths(self):
 		self.fx.gl(1, finance_book="Other Finance Book")
 		frappe.db.commit()
 		record = self.run_bank()
 		self.assertEqual((record["outcome"], record["reason"]), ("agree_refusal", "multibook_unsupported"))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_an_unexpected_error_in_the_one_pass_is_a_done_record_with_its_class(self):
 		with patch.object(shadow.banks, "one_pass_amounts", side_effect=ValueError("secret")):
 			record = self.run_bank()
@@ -1491,11 +1557,13 @@ class TestRealBankUnit(RealShadowCase):
 		)
 		self.assertNotIn("secret", json.dumps(record))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_missing_index_is_not_compared(self):
 		with patch.object(shadow.banks, "one_pass_amounts", return_value=None):
 			record = self.run_bank()
 		self.assertEqual((record["outcome"], record["reason"]), ("not_compared", "one_pass_unavailable"))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_source_that_is_not_an_audited_revision_is_not_compared_and_runs_no_one_pass(self):
 		with (
 			patch.object(shadow, "bank_one_pass_blocker", return_value="unpinned"),
@@ -1505,6 +1573,7 @@ class TestRealBankUnit(RealShadowCase):
 		self.assertEqual((record["outcome"], record["reason"]), ("not_compared", "unpinned"))
 		one_pass.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_no_fiscal_year_is_not_compared(self):
 		from erpnext.accounts.utils import FiscalYearError
 
@@ -1512,12 +1581,14 @@ class TestRealBankUnit(RealShadowCase):
 			record = self.run_bank()
 		self.assertEqual((record["outcome"], record["reason"]), ("not_compared", "fiscal_year_unavailable"))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_database_error_makes_the_unit_retryable(self):
 		error = frappe.db.OperationalError(2013, "lost")
 		with patch.object(shadow.banks, "today_amounts", side_effect=error):
 			record = self.run_bank()
 		self.assertEqual((record["state"], record["reason"]), ("retry", shadow.TRANSIENT))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_unit_runs_as_administrator_in_one_view_and_restores_the_user(self):
 		views, users = [], []
 		original = shadow.consistent_read
@@ -1547,6 +1618,7 @@ class TestRealBankUnit(RealShadowCase):
 		self.fx.ple("OtherBook", "Purchase Invoice", invoice, 5, finance_book="Other Finance Book")
 		frappe.db.commit()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_served_company_compares_and_reads_the_book_groups_once_beside_the_memo(self):
 		self.serve_company()
 		with patch.object(
@@ -1557,12 +1629,14 @@ class TestRealBankUnit(RealShadowCase):
 		# The memo's one scan (shared by both paths) and the unit's own, the only one that never meets the memo.
 		self.assertEqual(direct.call_count, 2)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_served_company_with_an_alternative_book_only_in_the_ledger_agrees_on_the_refusal(self):
 		self.serve_company()
 		self.ple_only_alternative_book()
 		record = self.run_bank()
 		self.assertEqual((record["outcome"], record["reason"]), ("agree_refusal", "multibook_unsupported"))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_memo_that_does_not_refuse_where_the_ledger_does_is_a_diff(self):
 		self.serve_company()
 		self.ple_only_alternative_book()
@@ -1571,6 +1645,7 @@ class TestRealBankUnit(RealShadowCase):
 		self.assertEqual(record["outcome"], "diff", record)
 		self.assertEqual(record["counts"], {"memo_refuses": 0, "direct_refuses": 1})
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_memo_that_refuses_where_the_ledger_does_not_is_a_diff(self):
 		self.serve_company()
 		refusal = CalendarSourceUnavailable("multibook_unsupported")
@@ -1579,12 +1654,14 @@ class TestRealBankUnit(RealShadowCase):
 		self.assertEqual(record["outcome"], "diff", record)
 		self.assertEqual(record["counts"], {"memo_refuses": 1, "direct_refuses": 0})
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_without_the_memo_serving_the_book_groups_are_not_read_a_third_time(self):
 		with patch.object(shadow.books, "ple_book_groups_direct") as direct:
 			record = self.run_bank()
 		self.assertEqual(record["outcome"], "compared")
 		direct.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_two_paths_are_compared_after_the_view_is_closed(self):
 		open_views, seen = [], []
 		original_view, original_compare = shadow.consistent_read, shadow.compare_bank
@@ -1607,6 +1684,7 @@ class TestRealBankUnit(RealShadowCase):
 		self.assertEqual(record["outcome"], "compared")
 		self.assertEqual(seen, [0])
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_unit_serves_nothing_and_leaves_the_switch_alone(self):
 		with patch("jarvis.payment_calendar.banks.read_bank_balances") as served:
 			self.run_bank()

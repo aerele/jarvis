@@ -11,6 +11,7 @@ from frappe.utils import add_days, nowdate
 from jarvis.payment_calendar import balances, jobs, snapshot, store
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.tests.payment_calendar_fixtures import CalendarFixtures, require_calendar_test_site
+from jarvis.tests.payment_calendar_majors import GATE_BANK_ONE_PASS_V15, v16_only
 
 ACTOR = "Administrator"
 
@@ -117,6 +118,7 @@ class TestBalancesJob(TestCase):
 		self.assertEqual({call.args[2] for call in read.call_args_list}, {nowdate()})
 		self.assertEqual(store.load_result(ACTOR, job_id)["total"], "1500.00")
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_more_than_fifty_accounts_with_the_switch_on_take_the_one_pass_in_two_chunks(self):
 		from jarvis.payment_calendar import routing
 

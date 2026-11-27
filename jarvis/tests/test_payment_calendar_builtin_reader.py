@@ -36,6 +36,11 @@ from jarvis.tests.payment_calendar_fixtures import (
 	require_calendar_test_site,
 	sync_outstanding,
 )
+from jarvis.tests.payment_calendar_majors import (
+	GATE_NO_META_CURRENCY_PRECISION,
+	GATE_NO_V15_READER_PINS,
+	v16_only,
+)
 
 
 class TestFixtureUpkeep(TestCase):
@@ -182,6 +187,7 @@ class TestFixtureUpkeep(TestCase):
 			self.assertEqual(self.read(side), before)
 		self.assertEqual(Decimal(self.read("Payable")["canonical_total"]), Decimal("70"))
 
+	@v16_only(GATE_NO_META_CURRENCY_PRECISION)
 	def test_sync_rounds_with_the_precision_of_the_invoice_currency(self):
 		real = frappe.get_system_settings
 
@@ -459,6 +465,7 @@ class ReaderCase(TestCase):
 		return party, self.fx.account("Receivable2", "Receivable", "Asset")
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestBuiltinReaderCore(ReaderCase):
 	def test_open_partial_invoice(self):
 		self.both_sides(lambda side: self.invoice(side, (40, 60), paid=30))
@@ -1111,6 +1118,7 @@ class TestBuiltinReaderCore(ReaderCase):
 			self.assertTrue(self.reader_result("Payable")["rows"])
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestBuiltinReaderDiscovery(ReaderCase):
 	"""Settled-in-window, FX-residue and multi-account discovery: every case reads what today's read reads."""
 
@@ -1485,6 +1493,7 @@ class TestBuiltinReaderDiscovery(ReaderCase):
 		self.assertEqual(len(line_reads), -(-count // chunk))
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestBuiltinReaderLimits(ReaderCase):
 	"""Memory caps, chunked statements, the ledger index and collation checks, and the error mapping."""
 
@@ -1693,6 +1702,7 @@ class TestBuiltinReaderLimits(ReaderCase):
 		self.assertNotIn("handle_employee_advances", fixed)
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestBuiltinReaderForks(ReaderCase):
 	"""The reader copies four rules of today's read; each copy is checked against its original."""
 
@@ -1776,6 +1786,7 @@ class TestBuiltinReaderForks(ReaderCase):
 				self.assertEqual(engine._multi_account(), expected)
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestBuiltinReaderEntry(ReaderCase):
 	"""The public entry: today's inputs, today's refusals, no size guard, and a fallback that is never a refusal."""
 
@@ -2257,6 +2268,7 @@ class TestBuiltinReaderEntry(ReaderCase):
 				self.assertEqual(stats["control"]["passed"], not fails)
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestPinCheckErrors(ReaderCase):
 	"""Any error of the pin check is a pin drift; a lost view is not special (the view's exit check fails the job)."""
 
@@ -2283,6 +2295,7 @@ class FakeClock:
 		return self.now
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestReaderDeadline(ReaderCase):
 	"""The reader's own time limit: a cooperative check that ends in a fallback, never a `TimeoutError`."""
 
@@ -2423,6 +2436,7 @@ class TestRowCap(TestCase):
 			self.assertFalse(hasattr(builtin_reader, name), name)
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestPermissionDeadline(ReaderCase):
 	"""`sources._assemble` is held to the reader's time inside its per-document permission checks."""
 
@@ -2568,6 +2582,7 @@ class TestPermissionDeadline(ReaderCase):
 		self.assertTrue(inside, "the read got as far as the permission filter")
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestRowCapInTheRead(ReaderCase):
 	"""The cap sits between the engine and `sources._assemble`."""
 
@@ -2605,6 +2620,7 @@ class TestRowCapInTheRead(ReaderCase):
 			self.assertTrue(self.entry("Receivable")["rows"])
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestReaderTransactions(TestCase):
 	"""Committed fixtures: `consistent_read` rolls back first, so savepoint fixtures would vanish."""
 
@@ -2655,6 +2671,7 @@ class TestReaderTransactions(TestCase):
 					)
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestReaderInsideCollectView(TestCase):
 	"""Committed fixtures like `TestReaderTransactions`: `consistent_read` rolls back before it starts."""
 

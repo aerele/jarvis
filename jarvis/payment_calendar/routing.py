@@ -357,15 +357,15 @@ def _run_reader(company, side, as_of, window_start, window_end, started, record,
 def _may_have_rolled_back(exc) -> bool:
 	"""True when `exc` is a database error that may have rolled back the transaction or ended the connection.
 
-	Driver-agnostic and safe on v15 (MariaDB has no `InterfaceError` there): the classes come from
-	`frappe.db` when it has them. A statement error (an unknown column, a statement timeout) is not one.
+	Driver-agnostic and safe on v15: the interface check is the driver's own (`frappe.db.is_interface_error`),
+	and the other classes come from `frappe.db` when it has them. A statement error (an unknown column, a
+	statement timeout) is not one.
 	"""
 	if exc is None:
 		return False
 	if isinstance(exc, (frappe.QueryDeadlockError, frappe.QueryTimeoutError)):
 		return True
-	interface = getattr(frappe.db, "InterfaceError", ())
-	if interface and isinstance(exc, interface):
+	if frappe.db.is_interface_error(exc):
 		return True
 	driver = tuple(
 		c for c in (getattr(frappe.db, n, None) for n in ("OperationalError", "InternalError")) if c

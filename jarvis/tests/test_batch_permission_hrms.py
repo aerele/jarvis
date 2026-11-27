@@ -10,6 +10,7 @@ import frappe
 
 from jarvis.payment_calendar import batch_permission
 from jarvis.tests.batch_permission_fixtures import PE, BatchCase, oracle, session_as
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_PERMISSION_PINS, v16_only
 
 HRMS_CONTROLLER = "EmployeePaymentEntry"
 
@@ -20,6 +21,7 @@ def hrms_controller_in_force() -> bool:
 	return any(base.__name__ == HRMS_CONTROLLER for base in frappe.model.document.get_controller(PE).__mro__)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestHrmsEmployeePaymentEntry(BatchCase):
 	@classmethod
 	def setUpClass(cls):

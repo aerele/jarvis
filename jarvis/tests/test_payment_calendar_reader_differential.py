@@ -24,6 +24,7 @@ from jarvis.tests.payment_calendar_differential import (
 	no_reader_compare,
 )
 from jarvis.tests.payment_calendar_fixtures import sync_outstanding
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_READER_PINS, v16_only
 
 REAL_TODAY = today_sources.read_obligations
 MODULES = (sources_tests, reconciliation_tests, voucher_tests)
@@ -291,7 +292,9 @@ def rerun_under_reader(module):
 	for name, case in vars(module).items():
 		is_case = isinstance(case, type) and issubclass(case, TestCase) and case.__module__ == module.__name__
 		if is_case and any(attribute.startswith("test") for attribute in dir(case)):
-			READER_CASES[name] = type(f"Reader{name}", (RunUnderReader, case), {"__module__": __name__})
+			rerun = type(f"Reader{name}", (RunUnderReader, case), {"__module__": __name__})
+			# Frappe 15 has no v15 reader pins: the reader never serves there, so no scenario can be compared.
+			READER_CASES[name] = v16_only(GATE_NO_V15_READER_PINS)(rerun)
 
 
 for tests in MODULES:
@@ -299,6 +302,7 @@ for tests in MODULES:
 globals().update({case.__name__: case for case in READER_CASES.values()})
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestReaderDifferentialIsWired(TestCase):
 	"""A re-run scenario must really pass through the comparator, or the proof would be empty."""
 
@@ -426,6 +430,7 @@ def scenarios_without_a_real_run(expected, real, skipped):
 	return sorted(set(expected) - set(skipped) - set(real))
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestTallyOfTheWholeFamily(TestCase):
 	"""Runs after the `Reader*` classes (the loader orders classes by name): the family cannot pass empty."""
 

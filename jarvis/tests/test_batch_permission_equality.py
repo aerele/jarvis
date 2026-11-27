@@ -26,6 +26,7 @@ from jarvis.tests.batch_permission_fixtures import (
 	strict,
 	switch_on,
 )
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_PERMISSION_PINS, v16_only
 
 DOCTYPES = (SI, PI, JE, "Customer", "Supplier", PE)
 BRANCHES = (
@@ -43,6 +44,7 @@ BRANCHES = (
 )
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestBatchPermissionWrappedBinding(BatchCase):
 	def test_a_wrapper_on_has_permission_sends_the_doctype_per_document_and_the_result_is_unchanged(self):
 		f = self.f
@@ -65,6 +67,7 @@ class TestBatchPermissionWrappedBinding(BatchCase):
 		batch.assert_not_called()
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestBatchPermissionEquality(BatchCase):
 	def test_batch_equals_per_document_check_for_every_user_doctype_mode_and_ptype(self):
 		f = self.f
@@ -281,6 +284,7 @@ class TestBatchPermissionEquality(BatchCase):
 		self.assertNotIn(f.pe_restricted_customer, pe.visible)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestBatchPermissionHooks(BatchCase):
 	def run_hooks(self, user, doctype, ptype, extra, **state):
 		HOOK_STATE.clear()
@@ -344,6 +348,7 @@ class TestBatchPermissionHooks(BatchCase):
 				batch_permission.batch_visible(SI, names, "read")
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestBatchPermissionRawHooks(BatchCase):
 	def test_a_user_without_a_company_user_permission_still_evaluates_the_raw_audited_hook_for_candidates(
 		self,
@@ -359,6 +364,7 @@ class TestBatchPermissionRawHooks(BatchCase):
 
 
 class TestBatchPermissionInputsAndSwitch(BatchCase):
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_input_spelling_is_exact_and_a_deleted_name_is_not_visible(self):
 		f = self.f
 		names = {f.si_plain, f.si_plain.lower(), f.si_plain + " ", f.si_b.lower(), f.si_missing}
@@ -400,6 +406,7 @@ class TestBatchPermissionInputsAndSwitch(BatchCase):
 		self.assertEqual(frappe.local.pcal_permission_events, [])
 		self.assertFalse(getattr(frappe.local, batch_permission.PLAN_MEMO, None))
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_a_call_records_name_free_stats(self):
 		f = self.f
 		frappe.local.pcal_permission_stats = []
@@ -411,6 +418,7 @@ class TestBatchPermissionInputsAndSwitch(BatchCase):
 		self.assertNotIn(f.si_plain, repr(stats))
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestBatchPermissionValueFidelity(BatchCase):
 	def check(self, expected_mode, expected_reason=None):
 		for strict_on in (False, True):
