@@ -339,6 +339,15 @@ class TestMacroScoping(Part3Base):
 		self.assertIn(mb.name, names)
 		self.assertNotIn(ma.name, names)
 
+	def test_owner_may_email_about_own_macro_only(self):
+		# A scheduled macro's email is logged against the macro itself, so the owner
+		# needs `email` on it (insider 11-26: the test email was refused). Still own rows only.
+		ma = _mk_macro(USER_A, f"{PFX}-mailA")
+		with _as(USER_A):
+			self.assertTrue(frappe.has_permission(MACRO, "email", doc=ma.name))
+		with _as(USER_B):
+			self.assertFalse(frappe.has_permission(MACRO, "email", doc=ma.name))
+
 	def test_macro_run_cross_inject_rejected(self):
 		# MAC-2: B inserts a Macro Run linked to A's macro.
 		ma = _mk_macro(USER_A, f"{PFX}-mac2")
