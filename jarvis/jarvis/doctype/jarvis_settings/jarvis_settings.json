@@ -116,6 +116,9 @@
   "payment_calendar_reader",
   "payment_calendar_reader_companies",
   "payment_calendar_reader_shadow_companies",
+  "payment_calendar_cache",
+  "payment_calendar_cache_companies",
+  "payment_calendar_cache_full_cadence",
   "agent_tools_col",
   "run_query_doctype_allowlist",
   "run_method_blocklist",
@@ -938,6 +941,33 @@
    "description": "Companies the nightly shadow job compares and never serves. One exact company name per line."
   },
   {
+   "fieldname": "payment_calendar_cache",
+   "fieldtype": "Select",
+   "label": "Payment Calendar: per-company cache",
+   "options": "off\nshadow\non",
+   "default": "off",
+   "hidden": 1,
+   "permlevel": 2,
+   "description": "off (default): no cache work at all. shadow: companies in the cache list are copied into Jarvis tables and compared with today's read; nothing is served from the copy. on: accepted for a later release and treated as shadow. Changed only by an Administrator, through save()."
+  },
+  {
+   "fieldname": "payment_calendar_cache_companies",
+   "fieldtype": "Small Text",
+   "label": "Payment Calendar: cache companies",
+   "hidden": 1,
+   "permlevel": 2,
+   "description": "Companies whose open receivables and payables are copied into the cache. One exact company name per line."
+  },
+  {
+   "fieldname": "payment_calendar_cache_full_cadence",
+   "fieldtype": "Check",
+   "label": "Payment Calendar: cache full cadence",
+   "default": "0",
+   "hidden": 1,
+   "permlevel": 2,
+   "description": "On: in shadow, a listed company is refreshed at full speed by day. Off (default): one sample an hour. Set on the playground and on a measurement bench. Changed only by an Administrator, through save()."
+  },
+  {
    "fieldname": "agent_tools_col",
    "fieldtype": "Column Break"
   },
@@ -1618,5 +1648,5 @@
    "write": 1
   }
  ],
- "modified": "2026-11-24 13:00:00.000000"
+ "modified": "2026-11-25 10:00:00.000000"
 }

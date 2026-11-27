@@ -2780,9 +2780,16 @@ class TestReaderCallers(TestCase):
 				offenders[str(path.relative_to(app))] = found
 		self.assertGreater(scanned, 100)
 		self.assertTrue((app / "hooks.py").exists())
-		# S2: the router (`routing`) and the shadow are the only modules that name the reader.
+		# S2: the router (`routing`) and the shadow name the reader. S4b: the per-company cache builds from the
+		# reader's engine and checks the same eligibility, so its three builder modules are the only other callers.
+		cache_builders = {
+			"payment_calendar/cache_eligibility.py",
+			"payment_calendar/cache_refresh.py",
+			"payment_calendar/cache_shadow.py",
+		}
 		self.assertEqual(
-			set(offenders) - {"payment_calendar/routing.py", "payment_calendar/shadow.py"}, set()
+			set(offenders) - {"payment_calendar/routing.py", "payment_calendar/shadow.py"} - cache_builders,
+			set(),
 		)
 		self.assertIn("payment_calendar/routing.py", offenders)
 
@@ -2797,15 +2804,29 @@ class TestReaderCallers(TestCase):
 			found = wiring_references(path.read_text(), ("shadow",))
 			if found:
 				offenders[str(path.relative_to(app))] = found
-		self.assertEqual(offenders, {"hooks.py": ["jarvis.payment_calendar.shadow.dispatch"]})
+		# S4b: `cache_shadow` imports the shadow for its `lifted_guards`; no other module may.
+		self.assertEqual(
+			offenders,
+			{
+				"hooks.py": ["jarvis.payment_calendar.shadow.dispatch"],
+				"payment_calendar/cache_shadow.py": ["jarvis.payment_calendar.shadow"],
+			},
+		)
 
 	def test_hooks_run_the_shadow_from_exactly_one_scheduler_entry_and_name_nothing_else_of_the_reader(self):
 		from jarvis import hooks
 
 		source = (Path(hooks.__file__)).read_text()
 		self.assertEqual(wiring_references(source, ("builtin_reader", "eligibility", "routing")), [])
+		entries = scheduler_entries(hooks.scheduler_events)
 		self.assertEqual(
-			scheduler_entries(hooks.scheduler_events), ["jarvis.payment_calendar.shadow.dispatch"]
+			[entry for entry in entries if entry.startswith("jarvis.payment_calendar.shadow")],
+			["jarvis.payment_calendar.shadow.dispatch"],
+		)
+		# S4b adds one more payment-calendar entry: the cache's own tick. It names no part of the reader.
+		self.assertEqual(
+			sorted(entry for entry in entries if entry.startswith("jarvis.payment_calendar.")),
+			["jarvis.payment_calendar.cache.tick", "jarvis.payment_calendar.shadow.dispatch"],
 		)
 		crons = [
 			cron

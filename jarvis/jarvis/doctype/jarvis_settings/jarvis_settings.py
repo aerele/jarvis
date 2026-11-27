@@ -912,14 +912,15 @@ class JarvisSettings(Document):
 		self.flags.reader_routing_save_only = self._is_reader_routing_save_only()
 
 	def _validate_payment_calendar_reader(self):
-		"""Normalize the two company lists, and refuse a company added in THIS save that does not exist.
+		"""Normalize the company lists (reader and cache), and refuse a company added in THIS save that does not exist.
 
 		Names are exact. Lines that were already saved are not re-checked, so a company deleted later
 		never blocks an unrelated save."""
+		from jarvis.payment_calendar.cache_state import CACHE_LIST_FIELDS
 		from jarvis.payment_calendar.routing import READER_LIST_FIELDS, parse_company_lines
 
 		before = self.get_doc_before_save()
-		for fieldname in READER_LIST_FIELDS:
+		for fieldname in (*READER_LIST_FIELDS, *CACHE_LIST_FIELDS):
 			lines = parse_company_lines(self.get(fieldname))
 			normalized = "\n".join(lines)
 			# An untouched empty list stays NULL: rewriting it to "" would read as a change.
@@ -939,19 +940,21 @@ class JarvisSettings(Document):
 			# Administrator-typed text goes into the message: escape it.
 			names = ", ".join(frappe.bold(escape_html(name)) for name in unknown)
 			frappe.throw(
-				"Unknown company in the Payment Calendar reader list: " + names, frappe.ValidationError
+				"Unknown company in the Payment Calendar reader or cache list: " + names,
+				frappe.ValidationError,
 			)
 
 	def _is_reader_routing_save_only(self) -> bool:
-		"""True when this save changes a reader field and nothing the LLM sync reads.
+		"""True when this save changes a reader or cache field and nothing the LLM sync reads.
 
 		Such a save is inert: it must not enqueue a sync, even on a site whose last sync did not end
-		ok (an unrelated re-save is the retry lever, but flipping the reader switch is not a retry).
+		ok (an unrelated re-save is the retry lever, but flipping the reader or cache switch is not a retry).
 		A change to the LLM config, a forced sync or a new key keeps the normal path."""
+		from jarvis.payment_calendar.cache_state import CACHE_FIELDS
 		from jarvis.payment_calendar.routing import READER_FIELDS
 
 		old = self.get_doc_before_save()
-		if old is None or not any(self.has_value_changed(f) for f in READER_FIELDS):
+		if old is None or not any(self.has_value_changed(f) for f in (*READER_FIELDS, *CACHE_FIELDS)):
 			return False
 		if self.flags.get("force_admin_sync") or self.flags.get("llm_api_key_changed"):
 			return False
@@ -1277,6 +1280,9 @@ class JarvisSettings(Document):
 		"payment_calendar_reader": "Payment Calendar reader mode",
 		"payment_calendar_reader_companies": "Payment Calendar reader served companies",
 		"payment_calendar_reader_shadow_companies": "Payment Calendar reader shadow companies",
+		"payment_calendar_cache": "Payment Calendar cache mode",
+		"payment_calendar_cache_companies": "Payment Calendar cache companies",
+		"payment_calendar_cache_full_cadence": "Payment Calendar cache full cadence",
 	}
 
 	def _guard_admin_only_fields(self):

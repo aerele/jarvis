@@ -132,10 +132,38 @@ def error_log_once(
 		raise
 
 
+def _window_key(operation: str, exception_class: str):
+	return frappe.cache.make_key(f"jarvis:pcal:errlog:{operation}:{exception_class}")
+
+
+def window_open(operation: str, exception_class: str) -> bool | None:
+	"""True when no row is recorded for (operation, class) in its window, False when one is, None when the cache is down.
+
+	It claims nothing. A caller that writes the row itself calls `close_window` only after the row is committed,
+	so a failed or rolled-back write never leaves a key that hides the alert for the rest of the window.
+	"""
+	try:
+		return not frappe.cache.execute_command("EXISTS", _window_key(operation, exception_class))
+	except TIMEOUTS:
+		raise
+	except Exception:
+		return None
+
+
+def close_window(operation: str, exception_class: str, window: int) -> None:
+	"""Record that the row of (operation, class) was written: no other row for `window` seconds. Best effort."""
+	try:
+		frappe.cache.execute_command("SET", _window_key(operation, exception_class), "1", "EX", window)
+	except TIMEOUTS:
+		raise
+	except Exception:
+		pass
+
+
 def _first_in_window(operation: str, exception_class: str, window: int):
 	"""The window key when this is the first failure in the window, False when it is not, None when the cache is down."""
 	try:
-		key = frappe.cache.make_key(f"jarvis:pcal:errlog:{operation}:{exception_class}")
+		key = _window_key(operation, exception_class)
 		return key if frappe.cache.execute_command("SET", key, "1", "NX", "EX", window) else False
 	except TIMEOUTS:
 		raise
@@ -168,6 +196,18 @@ def ops_digest(value: str) -> str:
 
 def company_digest(company: str) -> str:
 	return ops_digest(company)
+
+
+# The digest that stands for "the site" where no company applies, and where a site has no encryption key.
+SITE_DIGEST = "site"
+
+
+def company_digest_or(company: str, default: str | None = None) -> str | None:
+	"""`company_digest`, or `default` on a site with no encryption key (nothing can be keyed by a digest then)."""
+	try:
+		return company_digest(company)
+	except RuntimeError:
+		return default
 
 
 def day_counts(digest: str, date: str) -> dict[str, int]:

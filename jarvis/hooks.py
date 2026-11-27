@@ -295,6 +295,9 @@ scheduler_events = {
 			"jarvis.chat.collaboration_recovery.sweep",
 		],
 		"*/5 * * * *": [
+			# Payment Calendar cache: janitor, then enqueue the refreshes that are due. It only
+			# enqueues; with the cache off and no cache rows it returns after one Singles read.
+			"jarvis.payment_calendar.cache.tick",
 			# Document Intake: start Queued files whose job was lost or found no slot.
 			"jarvis.intake.worker.pump",
 			"jarvis.chat.stale_scan.scan_and_mark_errored",
@@ -1277,3 +1280,42 @@ has_permission.update(
 		"Jarvis Connector": "jarvis.chat.connector_permissions.has_connector_permission",
 	}
 )
+
+# ---------------------------------------------------------------------------
+# Payment Calendar cache
+# ---------------------------------------------------------------------------
+# The three cache tables hold derived rows shared by every user. They carry no DocPerm row of their own
+# (Frappe adds a System Manager one), so these hooks close every path but Administrator.
+_PCAL_CACHE_DOCTYPES = (
+	"Jarvis Payment Calendar Cache Head",
+	"Jarvis Payment Calendar Cache Generation",
+	"Jarvis Payment Calendar Cache Row",
+)
+for _cache_doctype in _PCAL_CACHE_DOCTYPES:
+	has_permission[_cache_doctype] = "jarvis.permissions.deny_cache_table_permission"
+	permission_query_conditions[_cache_doctype] = "jarvis.permissions.deny_cache_table_query_conditions"
+
+# A Company delete or rename, and a Transaction Deletion Record, purge the company's cache rows. The handlers
+# run with transaction control off, bump the purge epoch in the caller's transaction and queue the purge job
+# after the commit. With the cache off they do nothing. `_merge_doc_event` keeps the handlers already there.
+_PCAL_LIFECYCLE = "jarvis.payment_calendar.lifecycle"
+_merge_doc_event(doc_events.setdefault("Company", {}), "on_trash", f"{_PCAL_LIFECYCLE}.on_company_trash")
+_merge_doc_event(doc_events.setdefault("Company", {}), "after_rename", f"{_PCAL_LIFECYCLE}.on_company_rename")
+for _tdr_event in ("on_submit", "on_change"):
+	_merge_doc_event(
+		doc_events.setdefault("Transaction Deletion Record", {}),
+		_tdr_event,
+		f"{_PCAL_LIFECYCLE}.on_deletion_record",
+	)
+
+# Other modules (card keys of a later release) add paths here. Each is called as `fn(digest)` by the purge, the Company and
+# Transaction Deletion Record handlers, the janitor and `before_uninstall`. Contract: Redis only, no database.
+pcal_cache_purge = []
+
+# Other modules (card counters of a later release) add sections to `cache_status`. Each path is called with no argument and
+# returns a dict that is merged under `sections`.
+pcal_cache_status_sections = []
+
+# Uninstall: delete this site's `jarvis:pcal:cache:*` keys (never the bench-wide slot keys) and tell the purge
+# hooks. The tables go with the app's DocTypes.
+before_uninstall = ["jarvis.payment_calendar.lifecycle.before_uninstall"]

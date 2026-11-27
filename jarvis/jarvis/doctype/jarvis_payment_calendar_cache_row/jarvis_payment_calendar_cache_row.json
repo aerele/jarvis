@@ -1,0 +1,199 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "Prompt",
+ "creation": "2026-11-24 00:00:00.000000",
+ "custom": 0,
+ "description": "One stored open item (or residue / excluded FX row) of a Payment Calendar cache generation. Derived shared data; no user but Administrator may read it.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "generation",
+  "row_id",
+  "kind",
+  "voucher_type",
+  "voucher_no",
+  "party_type",
+  "party",
+  "party_name",
+  "account",
+  "posting_date",
+  "due_date",
+  "term",
+  "original",
+  "paid",
+  "credit",
+  "discount",
+  "remaining",
+  "account_remaining",
+  "settlement",
+  "allocation_basis",
+  "allocation_reason",
+  "permission",
+  "residue",
+  "hide_in_window",
+  "window_refusal",
+  "window_due_dates"
+ ],
+ "fields": [
+  {
+   "fieldname": "generation",
+   "fieldtype": "Long Int",
+   "label": "Generation",
+   "reqd": 1
+  },
+  {
+   "fieldname": "row_id",
+   "fieldtype": "Data",
+   "label": "Row Id",
+   "length": 64
+  },
+  {
+   "fieldname": "kind",
+   "fieldtype": "Data",
+   "label": "Kind",
+   "length": 32
+  },
+  {
+   "fieldname": "voucher_type",
+   "fieldtype": "Data",
+   "label": "Voucher Type"
+  },
+  {
+   "fieldname": "voucher_no",
+   "fieldtype": "Data",
+   "label": "Voucher No"
+  },
+  {
+   "fieldname": "party_type",
+   "fieldtype": "Data",
+   "label": "Party Type"
+  },
+  {
+   "fieldname": "party",
+   "fieldtype": "Data",
+   "label": "Party"
+  },
+  {
+   "fieldname": "party_name",
+   "fieldtype": "Data",
+   "label": "Party Name"
+  },
+  {
+   "fieldname": "account",
+   "fieldtype": "Data",
+   "label": "Account"
+  },
+  {
+   "fieldname": "posting_date",
+   "fieldtype": "Date",
+   "label": "Posting Date"
+  },
+  {
+   "fieldname": "due_date",
+   "fieldtype": "Date",
+   "label": "Due Date"
+  },
+  {
+   "fieldname": "term",
+   "fieldtype": "Data",
+   "label": "Term"
+  },
+  {
+   "fieldname": "original",
+   "fieldtype": "Data",
+   "label": "Original",
+   "length": 40
+  },
+  {
+   "fieldname": "paid",
+   "fieldtype": "Data",
+   "label": "Paid",
+   "length": 40
+  },
+  {
+   "fieldname": "credit",
+   "fieldtype": "Data",
+   "label": "Credit",
+   "length": 40
+  },
+  {
+   "fieldname": "discount",
+   "fieldtype": "Data",
+   "label": "Discount",
+   "length": 40
+  },
+  {
+   "fieldname": "remaining",
+   "fieldtype": "Data",
+   "label": "Remaining",
+   "length": 40
+  },
+  {
+   "fieldname": "account_remaining",
+   "fieldtype": "Data",
+   "label": "Account Remaining",
+   "length": 40
+  },
+  {
+   "fieldname": "settlement",
+   "fieldtype": "Data",
+   "label": "Settlement",
+   "length": 32
+  },
+  {
+   "fieldname": "allocation_basis",
+   "fieldtype": "Data",
+   "label": "Allocation Basis",
+   "length": 32
+  },
+  {
+   "fieldname": "allocation_reason",
+   "fieldtype": "Data",
+   "label": "Allocation Reason",
+   "length": 64
+  },
+  {
+   "fieldname": "permission",
+   "fieldtype": "JSON",
+   "label": "Permission"
+  },
+  {
+   "fieldname": "residue",
+   "fieldtype": "Check",
+   "label": "Residue"
+  },
+  {
+   "fieldname": "hide_in_window",
+   "fieldtype": "Check",
+   "label": "Hide In Window"
+  },
+  {
+   "fieldname": "window_refusal",
+   "fieldtype": "Check",
+   "label": "Window Refusal"
+  },
+  {
+   "fieldname": "window_due_dates",
+   "fieldtype": "JSON",
+   "label": "Window Due Dates"
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "issingle": 0,
+ "istable": 0,
+ "links": [],
+ "modified": "2026-11-24 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Payment Calendar Cache Row",
+ "naming_rule": "Set by user",
+ "owner": "Administrator",
+ "permissions": [],
+ "read_only": 1,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}
