@@ -25,7 +25,7 @@ prefix, all per company and side (never per user):
   `SHORT_MEMO_TTL_S`.
 
 A DB error that may have rolled back the snapshot transaction (a deadlock, a lock wait, a lost connection)
-is swallowed like any other reader error, but it also breaks the snapshot view (`_poison_view`): with
+is swallowed like any other reader error, but it also breaks the snapshot view (`poison_view`): with
 autocommit off the next SELECT would open a new transaction, and the view's own exit check could not see
 that the bank and the obligations were read in different views.
 """
@@ -40,7 +40,7 @@ from time import monotonic
 import frappe
 from frappe.utils import nowdate
 
-from jarvis.payment_calendar import builtin_reader, read_log, sources, store
+from jarvis.payment_calendar import builtin_reader, read_log, redis_slots, sources, store
 from jarvis.payment_calendar.compatibility import source_profile
 from jarvis.payment_calendar.errors import (
 	TIMEOUTS,
@@ -102,7 +102,8 @@ _STATEMENT_ERRORS = ("OperationalError", "ProgrammingError", "InternalError", "D
 # MariaDB errors that roll back the transaction or end the connection: deadlock, lock wait, server gone
 # away, connection lost, shutdown, killed, idle transaction timeout.
 _ROLLBACK_ERRNOS = frozenset({1213, 1205, 2006, 2013, 2055, 1927, 4031})
-_RELEASE = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end"
+# The release script lives in `redis_slots`; the name stays for the tests that run it.
+_RELEASE = redis_slots.RELEASE
 
 # The modules whose code decides a figure the reader returns (the reader, the rules it applies, the source it
 # must equal, today's reconciliation, and the bank read). A change to any of them is a new build for the shadow gate.
@@ -121,21 +122,38 @@ FIGURE_MODULES = (
 	"scope",
 	"sources",
 )
-# Every other module of the package: routing, logs, the store, the page API... A new file is in neither list
-# until someone decides, and a test fails until they do.
+# The modules whose code decides what a cache generation holds and when a user may be served from it (the
+# build, the store, the eligibility rules, the serve and the nightly proof). With `FIGURE_MODULES` they make
+# `cache_build`: a change to any of them is a new build for the cache shadow gate. Scheduling, the settings and
+# the logs are not here.
+CACHE_MODULES = (
+	"cache_eligibility",
+	"cache_refresh",
+	"cache_shadow",
+	"cache_store",
+)
+# Every other module of the package: routing, logs, the store, the page API, the cache's scheduling... A new
+# file is in none of the three lists until someone decides, and a test fails until they do.
 OTHER_MODULES = (
 	"__init__",
 	"access",
 	"api",
 	"balances",
 	"bank_labels",
+	"cache",
+	"cache_alerts",
+	"cache_state",
+	"cache_status",
 	"catalog",
 	"detail",
+	"guard",
 	"jobs",
 	"lifecycle",
 	"preferences",
 	"projection",
 	"read_log",
+	"reader_contract",
+	"redis_slots",
 	"routing",
 	"settings",
 	"shadow",
@@ -175,8 +193,8 @@ def reader_settings(*, lists_when_off: bool = True) -> ReaderSettings:
 	except TIMEOUTS:
 		raise
 	except Exception as exc:
-		if _may_have_rolled_back(exc):
-			_poison_view()
+		if may_have_rolled_back(exc):
+			poison_view()
 		return _OFF
 
 
@@ -292,8 +310,8 @@ def _admit(company, side, as_of, token, held, record) -> str | None:
 		except Exception as exc:
 			# A failed statement (say a probe that times out) must not fail the job: today's refusal stands.
 			record[PROBE_ERROR] = type(exc).__name__
-			if _may_have_rolled_back(exc):
-				_poison_view()
+			if may_have_rolled_back(exc):
+				poison_view()
 			return "probe"
 		if exceeds:
 			_remember(memo_key(company, side), SHORT_MEMO_TTL_S)
@@ -333,16 +351,16 @@ def _run_reader(company, side, as_of, window_start, window_end, started, record,
 		record.update({FALLBACK: fallback.reason, DETAIL: list(fallback.detail)})
 		if fallback.__cause__ is not None:
 			record[CAUSE] = type(fallback.__cause__).__name__
-			if _may_have_rolled_back(fallback.__cause__):
-				_poison_view()
+			if may_have_rolled_back(fallback.__cause__):
+				poison_view()
 		memo_ttl = _memo_ttl(fallback.reason, cut)
 	except CalendarSourceUnavailable as refusal:
 		record[REFUSED] = safe_code(refusal, "unknown")
 	except Exception as exc:
 		record[EXCEPTION] = type(exc).__name__
 		memo_ttl = MEMO_TTL_S
-		if _may_have_rolled_back(exc):
-			_poison_view()
+		if may_have_rolled_back(exc):
+			poison_view()
 		if isinstance(exc, _statement_errors()):
 			record.update({FALLBACK: "reader_error", CAUSE: type(exc).__name__})
 	finally:
@@ -354,7 +372,7 @@ def _run_reader(company, side, as_of, window_start, window_end, started, record,
 	return result
 
 
-def _may_have_rolled_back(exc) -> bool:
+def may_have_rolled_back(exc) -> bool:
 	"""True when `exc` is a database error that may have rolled back the transaction or ended the connection.
 
 	Driver-agnostic and safe on v15 (MariaDB has no `InterfaceError` there): the classes come from
@@ -373,7 +391,7 @@ def _may_have_rolled_back(exc) -> bool:
 	return bool(driver) and isinstance(exc, driver) and bool(exc.args) and exc.args[0] in _ROLLBACK_ERRNOS
 
 
-def _poison_view() -> None:
+def poison_view() -> None:
 	"""Break the open snapshot view, so the job fails at its exit check instead of mixing two views.
 
 	Inside `snapshot.consistent_read` (`snapshot.view_is_open`) `frappe.db.rollback` is replaced by a function
@@ -388,6 +406,18 @@ def _poison_view() -> None:
 		frappe.db.rollback()
 	except CalendarSourceUnavailable:
 		pass
+
+
+# The names before they were public. The batch permission code and older tests still call (and patch) them.
+_may_have_rolled_back = may_have_rolled_back
+
+
+def _poison_view() -> None:
+	poison_view()
+
+
+def _today() -> str:
+	return today()
 
 
 def _memo_ttl(reason: str, cut: bool) -> int | None:
@@ -415,40 +445,18 @@ def inflight_key(company: str, side: str) -> bytes:
 
 
 def _claim(key: bytes, token: str) -> bool:
-	"""`SET NX` with the job's token; False when another job holds the key."""
-	return bool(frappe.cache.execute_command("SET", key, token, "NX", "EX", SLOT_TTL_S))
+	"""`SET NX` with the job's token for a slot's life; False when another job holds the key."""
+	return redis_slots.claim(key, token, SLOT_TTL_S)
 
 
 def _take_slot(token: str) -> bytes | None:
 	"""The key of the first free slot, now held by `token`; None when all are held."""
-	for number in range(READER_SLOTS):
-		key = slot_key(number)
-		if _claim(key, token):
-			return key
-	return None
+	return redis_slots.take_slot(token, [slot_key(number) for number in range(READER_SLOTS)], SLOT_TTL_S)
 
 
-def _release(key: bytes, token: str) -> None:
-	"""Delete a key only while it still holds our token (it may have expired and been taken again)."""
-	try:
-		frappe.cache.eval(_RELEASE, 1, key, token)
-	except TIMEOUTS:
-		raise
-	except Exception:
-		pass
-
-
-def _remember(memo: bytes, ttl: int, value: str = "1") -> None:
-	"""Keep the side out of the reader for `ttl` seconds (one atomic SET). Best effort.
-
-	`value` is the owner's token for the pessimistic memo, and "1" for a plain bad-read memo.
-	"""
-	try:
-		frappe.cache.execute_command("SET", memo, value, "EX", ttl)
-	except TIMEOUTS:
-		raise
-	except Exception:
-		pass
+# The key and memo primitives are the shared ones (`redis_slots`); `routing` adds only its key names and TTLs.
+_release = redis_slots.release
+_remember = redis_slots.remember
 
 
 def listed_but_missing(current: ReaderSettings) -> tuple[str, ...]:
@@ -460,7 +468,7 @@ def listed_but_missing(current: ReaderSettings) -> tuple[str, ...]:
 	return tuple(name for name in names if name not in found)
 
 
-def _today() -> str:
+def today() -> str:
 	"""The site date the day counters are keyed by; the one date seam of the reader's logs and the shadow."""
 	return nowdate()
 
@@ -499,6 +507,25 @@ def _build_once() -> str:
 	import erpnext
 
 	return build_identity(Path(__file__).parent, FIGURE_MODULES, frappe.__version__, erpnext.__version__)
+
+
+def cache_build() -> str:
+	"""Identity of the code that builds and serves the cache, computed once per process.
+
+	It hashes `FIGURE_MODULES` and `CACHE_MODULES` (names and contents) and the Frappe and ERPNext versions.
+	It is separate from `reader_build`, which hashes `FIGURE_MODULES` alone, so a cache-only change never
+	restarts the S2 reader nights.
+	"""
+	return _cache_build_once()
+
+
+@cache
+def _cache_build_once() -> str:
+	import erpnext
+
+	return build_identity(
+		Path(__file__).parent, (*FIGURE_MODULES, *CACHE_MODULES), frappe.__version__, erpnext.__version__
+	)
 
 
 def build_identity(directory: Path, modules, frappe_version: str, erpnext_version: str) -> str:

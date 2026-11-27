@@ -469,14 +469,39 @@ class TestReaderBuild(FrappeTestCase):
 
 	def test_every_python_file_of_the_package_is_classified(self):
 		files = {path.stem for path in Path(routing.__file__).parent.glob("*.py")}
-		figure, other = set(routing.FIGURE_MODULES), set(routing.OTHER_MODULES)
-		self.assertEqual(figure & other, set(), "a file is in both lists")
-		self.assertEqual(
-			files - figure - other,
-			set(),
-			"a new payment_calendar module must be classified in routing.FIGURE_MODULES or OTHER_MODULES",
+		figure, cache, other = (
+			set(routing.FIGURE_MODULES),
+			set(routing.CACHE_MODULES),
+			set(routing.OTHER_MODULES),
 		)
-		self.assertEqual((figure | other) - files, set(), "a classified file does not exist")
+		for left, right, names in (
+			("FIGURE_MODULES", "CACHE_MODULES", figure & cache),
+			("FIGURE_MODULES", "OTHER_MODULES", figure & other),
+			("CACHE_MODULES", "OTHER_MODULES", cache & other),
+		):
+			self.assertEqual(names, set(), f"a file is in both {left} and {right}")
+		self.assertEqual(
+			files - figure - cache - other,
+			set(),
+			"a new payment_calendar module must be classified in routing.FIGURE_MODULES, CACHE_MODULES or OTHER_MODULES",
+		)
+		self.assertEqual((figure | cache | other) - files, set(), "a classified file does not exist")
+
+	def test_the_cache_modules_are_the_ones_that_decide_what_a_generation_holds(self):
+		for name in ("cache_store", "cache_refresh", "cache_eligibility", "cache_shadow"):
+			self.assertIn(name, routing.CACHE_MODULES)
+		for name in ("cache", "cache_state", "redis_slots", "routing"):
+			self.assertIn(name, routing.OTHER_MODULES)
+			self.assertNotIn(name, routing.CACHE_MODULES)
+
+	def test_a_change_to_the_serve_code_of_the_cache_starts_a_new_build(self):
+		with tempfile.TemporaryDirectory() as directory:
+			for name in (*routing.FIGURE_MODULES, *routing.CACHE_MODULES):
+				(Path(directory) / f"{name}.py").write_text(f"{name} = 1\n")
+			modules = (*routing.FIGURE_MODULES, *routing.CACHE_MODULES)
+			before = routing.build_identity(Path(directory), modules, "1", "1")
+			(Path(directory) / "cache_shadow.py").write_text("cache_shadow = 2\n")
+			self.assertNotEqual(before, routing.build_identity(Path(directory), modules, "1", "1"))
 
 	def test_the_figure_modules_are_the_ones_that_decide_a_figure(self):
 		for name in (
@@ -583,8 +608,82 @@ class TestViewMarker(FrappeTestCase):
 			routing._poison_view()
 
 
+class TestCacheBuild(FrappeTestCase):
+	"""`cache_build` = figure modules + cache modules + versions; `reader_build` never sees a cache module."""
+
+	def setUp(self):
+		for function in (routing._build_once, routing._cache_build_once):
+			function.cache_clear()
+			self.addCleanup(function.cache_clear)
+
+	def _both(self, directory):
+		for function in (routing._build_once, routing._cache_build_once):
+			function.cache_clear()
+		with (
+			patch.object(routing, "FIGURE_MODULES", ("a",)),
+			patch.object(routing, "CACHE_MODULES", ("b",)),
+			patch.object(routing, "__file__", str(Path(directory) / "routing")),
+		):
+			return routing.reader_build(), routing.cache_build()
+
+	def test_a_cache_module_changes_the_cache_build_and_not_the_reader_build(self):
+		with tempfile.TemporaryDirectory() as directory:
+			for name in ("a", "b", "c"):
+				(Path(directory) / f"{name}.py").write_text(f"{name.upper()} = 1\n")
+			reader, cache = self._both(directory)
+			self.assertNotEqual(reader, cache)
+			(Path(directory) / "b.py").write_text("B = 2\n")
+			changed_reader, changed_cache = self._both(directory)
+			self.assertEqual(reader, changed_reader)
+			self.assertNotEqual(cache, changed_cache)
+
+	def test_a_figure_module_changes_both_builds_and_another_module_changes_neither(self):
+		with tempfile.TemporaryDirectory() as directory:
+			for name in ("a", "b", "c"):
+				(Path(directory) / f"{name}.py").write_text(f"{name.upper()} = 1\n")
+			reader, cache = self._both(directory)
+			(Path(directory) / "c.py").write_text("C = 2\n")
+			self.assertEqual((reader, cache), self._both(directory))
+			(Path(directory) / "a.py").write_text("A = 2\n")
+			changed_reader, changed_cache = self._both(directory)
+			self.assertNotEqual(reader, changed_reader)
+			self.assertNotEqual(cache, changed_cache)
+
+	def test_it_is_computed_once_per_process_and_is_a_hex_digest(self):
+		with patch.object(routing, "build_identity", return_value="y" * 64) as compute:
+			routing.cache_build()
+			routing.cache_build()
+		self.assertEqual(compute.call_count, 1)
+		names = compute.call_args.args[1]
+		self.assertEqual(names, (*routing.FIGURE_MODULES, *routing.CACHE_MODULES))
+
+	def test_the_reader_build_hashes_the_figure_modules_alone(self):
+		with patch.object(routing, "build_identity", return_value="x" * 64) as compute:
+			routing.reader_build()
+		self.assertEqual(compute.call_args.args[1], routing.FIGURE_MODULES)
+
+
 class TestZZNoModeLeftBehind(FrappeTestCase):
 	"""Runs last in the module (alphabetical): the site must read off after the suite."""
 
 	def test_the_mode_is_as_the_site_had_it(self):
 		self.assertEqual(routing.reader_settings(), _start_settings[-1])
+
+
+class TestPublicNames(FrappeTestCase):
+	"""The helpers the cache uses are public; the old private names keep working for the callers that remain."""
+
+	def test_the_old_private_names_are_the_public_helpers(self):
+		self.assertIs(routing._may_have_rolled_back, routing.may_have_rolled_back)
+		self.assertTrue(routing._may_have_rolled_back(frappe.QueryDeadlockError()))
+		self.assertFalse(routing._may_have_rolled_back(ValueError("x")))
+
+	def test_a_patched_public_date_reaches_the_old_name_and_the_old_name_stays_patchable(self):
+		with patch.object(routing, "today", return_value="2099-01-01"):
+			self.assertEqual(routing._today(), "2099-01-01")
+		self.assertEqual(routing._today(), routing.today())
+
+	def test_the_old_view_name_calls_the_public_one(self):
+		with patch.object(routing, "poison_view") as poison:
+			routing._poison_view()
+		poison.assert_called_once_with()

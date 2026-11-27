@@ -451,3 +451,18 @@ class NotRenamable:
 			frappe._("{0} records cannot be renamed or merged.").format(frappe._(self.doctype)),
 			frappe.PermissionError,
 		)
+
+
+# The three Payment Calendar cache DocTypes hold shared, derived rows.
+# They carry no DocPerm row, and these two functions keep a Custom DocPerm from opening them.
+# hooks.py registers both on each of the three DocTypes. Only Administrator passes.
+
+
+def deny_cache_table_permission(doc=None, ptype=None, user=None, **_):
+	"""`has_permission` hook of the cache DocTypes: a controller can only deny, so this closes a grant."""
+	return (user or frappe.session.user) == "Administrator"
+
+
+def deny_cache_table_query_conditions(user=None, doctype=None):
+	"""`permission_query_conditions` hook of the cache DocTypes: no row for any user but Administrator."""
+	return "" if (user or frappe.session.user) == "Administrator" else "1=0"

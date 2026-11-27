@@ -1,0 +1,187 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "autoincrement",
+ "creation": "2026-11-24 00:00:00.000000",
+ "custom": 0,
+ "description": "One refresh of the Payment Calendar cache for a (company, side): state, anchor, counts, checksum and payload. Metadata is kept 30 days; row data is deleted after the grace. Derived data; no user but Administrator may read it.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "side",
+  "company_creation",
+  "state",
+  "anchor",
+  "as_of",
+  "deadline",
+  "cache_build",
+  "outcome",
+  "row_count",
+  "residue_count",
+  "excluded_count",
+  "ledger_lines",
+  "bytes",
+  "checksum",
+  "hook_fingerprint",
+  "payload",
+  "shadow",
+  "duration_ms",
+  "peak_rss_mb",
+  "read_view_ms",
+  "max_write_txn_ms",
+  "failure_class",
+  "failure_trace"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Data",
+   "label": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "side",
+   "fieldtype": "Select",
+   "label": "Side",
+   "options": "Receivable\nPayable\nBank",
+   "reqd": 1
+  },
+  {
+   "fieldname": "company_creation",
+   "fieldtype": "Datetime",
+   "label": "Company Creation"
+  },
+  {
+   "fieldname": "state",
+   "fieldtype": "Select",
+   "label": "State",
+   "options": "building\nready\ncurrent\nretired\nfailed\npurged",
+   "reqd": 1
+  },
+  {
+   "fieldname": "anchor",
+   "fieldtype": "Date",
+   "label": "Anchor"
+  },
+  {
+   "fieldname": "as_of",
+   "fieldtype": "Datetime",
+   "label": "As Of"
+  },
+  {
+   "fieldname": "deadline",
+   "fieldtype": "Datetime",
+   "label": "Deadline"
+  },
+  {
+   "fieldname": "cache_build",
+   "fieldtype": "Data",
+   "label": "Cache Build",
+   "length": 64
+  },
+  {
+   "fieldname": "outcome",
+   "fieldtype": "Data",
+   "label": "Outcome",
+   "length": 64
+  },
+  {
+   "fieldname": "row_count",
+   "fieldtype": "Int",
+   "label": "Row Count"
+  },
+  {
+   "fieldname": "residue_count",
+   "fieldtype": "Int",
+   "label": "Residue Count"
+  },
+  {
+   "fieldname": "excluded_count",
+   "fieldtype": "Int",
+   "label": "Excluded Count"
+  },
+  {
+   "description": "The size gate's measure: the preflight's control-pair line total (Bank: the GL rows its read counted).",
+   "fieldname": "ledger_lines",
+   "fieldtype": "Int",
+   "label": "Ledger Lines"
+  },
+  {
+   "fieldname": "bytes",
+   "fieldtype": "Long Int",
+   "label": "Bytes"
+  },
+  {
+   "fieldname": "checksum",
+   "fieldtype": "Data",
+   "label": "Checksum",
+   "length": 64
+  },
+  {
+   "fieldname": "hook_fingerprint",
+   "fieldtype": "Data",
+   "label": "Hook Fingerprint",
+   "length": 64
+  },
+  {
+   "fieldname": "payload",
+   "fieldtype": "JSON",
+   "label": "Payload"
+  },
+  {
+   "fieldname": "shadow",
+   "fieldtype": "JSON",
+   "label": "Shadow"
+  },
+  {
+   "fieldname": "duration_ms",
+   "fieldtype": "Int",
+   "label": "Duration (ms)"
+  },
+  {
+   "fieldname": "peak_rss_mb",
+   "fieldtype": "Int",
+   "label": "Peak Rss Mb"
+  },
+  {
+   "fieldname": "read_view_ms",
+   "fieldtype": "Int",
+   "label": "Read View Ms"
+  },
+  {
+   "fieldname": "max_write_txn_ms",
+   "fieldtype": "Int",
+   "label": "Max Write Txn Ms"
+  },
+  {
+   "fieldname": "failure_class",
+   "fieldtype": "Data",
+   "label": "Failure Class",
+   "length": 64
+  },
+  {
+   "description": "The frames of the error that failed this refresh, cut to a few thousand characters. Class and frames only: no message, no name.",
+   "fieldname": "failure_trace",
+   "fieldtype": "Long Text",
+   "label": "Failure Trace"
+  }
+ ],
+ "in_create": 1,
+ "index_web_pages_for_search": 0,
+ "issingle": 0,
+ "istable": 0,
+ "links": [],
+ "modified": "2026-11-26 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Jarvis",
+ "name": "Jarvis Payment Calendar Cache Generation",
+ "naming_rule": "Autoincrement",
+ "owner": "Administrator",
+ "permissions": [],
+ "read_only": 1,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 0
+}

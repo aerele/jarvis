@@ -33,6 +33,24 @@ _unrelated(
 
 
 _unrelated(
+	"jarvis.payment_calendar.cache",
+	"System Manager operator command on the per-company cache (company and side only); shared chat identifiers grant no authority.",
+	"""
+    reset
+    """,
+)
+
+
+_unrelated(
+	"jarvis.payment_calendar.cache_status",
+	"System Manager operator status of the per-company cache (counters, no row, party or voucher name); shared chat identifiers grant no authority.",
+	"""
+    cache_status
+    """,
+)
+
+
+_unrelated(
 	"jarvis.holiday_touch.api",
 	"Holiday occasion lookup, scene-showing record and the admin-only support view; no transcript identifier, so shared chat identifiers grant no authority.",
 	"""

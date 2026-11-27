@@ -11,7 +11,7 @@ from frappe.utils import nowdate
 from frappe.utils.background_jobs import get_job
 
 from jarvis.exceptions import PermissionDeniedError
-from jarvis.payment_calendar import balances, batch_permission, catalog, store
+from jarvis.payment_calendar import balances, batch_permission, cache, catalog, store
 from jarvis.payment_calendar.access import ScopeChanged, authorize_scope
 from jarvis.payment_calendar.errors import TIMEOUTS, CalendarSourceUnavailable, safe_code, safe_detail
 from jarvis.payment_calendar.projection import ProjectionError
@@ -39,6 +39,8 @@ def request_snapshot(scope: dict) -> dict:
 		method="jarvis.payment_calendar.jobs.run_snapshot",
 		id_argument="snapshot_id",
 	)
+	# Never changes the reply: `note_opened` swallows every error but a job deadline.
+	cache.note_opened(scope["company"])
 	return store.public_status(status)
 
 
