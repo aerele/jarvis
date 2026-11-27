@@ -84,13 +84,15 @@ class CollectRoutingCase(TestCase):
 
 
 class TestBelowTheGuard(CollectRoutingCase):
-	def test_a_served_side_reads_no_setting_and_never_calls_the_reader(self):
+	def test_a_served_side_reads_one_setting_per_view_and_never_calls_the_reader(self):
 		for mode in ("off", "shadow", "on"):
 			with self.subTest(mode):
 				self.settings.return_value = routing.ReaderSettings(mode, (self.fx.company,), ())
+				self.settings.reset_mock()
 				with patch.object(routing.builtin_reader, "read_obligations") as reader:
 					result = self.collect()
-				self.settings.assert_not_called()
+				# The bank one-pass check and the book memo share one settings read per view, in every mode.
+				self.assertEqual(self.settings.call_count, 1)
 				reader.assert_not_called()
 				self.assertEqual(result["unavailable"], {})
 				for side in SIDES:
