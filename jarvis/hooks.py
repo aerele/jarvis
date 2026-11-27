@@ -433,6 +433,9 @@ scheduler_events = {
 		# Queued runs and drives stale-run recovery. ``schedule_app_learning`` is
 		# likewise conditional (refuses while retired, schedules when re-enabled).
 		"*/10 * * * *": ["jarvis.learning.app_analysis.tick"],
+		# Payment Calendar shadow (S2): starts or resumes the night's reader-vs-today comparison, 02:00-05:59
+		# site time. ONE entry: Frappe keeps one Scheduled Job Type per method, so a second one would replace it.
+		"*/15 2-5 * * *": ["jarvis.payment_calendar.shadow.dispatch"],
 		"*/15 * * * *": [
 			# Behavioural pattern learning tick. Hooks cron is app-static
 			# (per-site rows are reset on migrate), so the window is
