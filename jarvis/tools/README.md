@@ -179,8 +179,16 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
   `{"SUM" | "COUNT" | "AVG" | "MIN" | "MAX": "<one field>", "as": "<word>"}`,
   `{"COUNT": "*", "as": "n"}`, or the same as text (`"sum(f) as t"`). Anything else (a
   list or dict argument, an expression, a nested function, an unknown key or table) is
-  refused with the accepted forms. `group_by` and `order_by` take fields (and, for
-  `order_by`, the aliases) only. Every entry is at most 200 characters (1,000 for a whole
+  refused with the accepted forms (with a hint for SQL date functions and
+  `COUNT(DISTINCT ...)`). `group_by` and `order_by` take fields (and, for `order_by`, the
+  aliases) only. Every filter key (`filters`, `or_filters`, JSON text, `[doctype, field,
+  op, value]`, and the filters of `get_value` / `exists` / `count`) goes through the same
+  allowlist: a field, a qualified or child-table field, or up to two link fields followed
+  to their target (`customer.territory`), with the user's read permission on every target;
+  operators are Frappe's own. Private doctypes and credential fields are refused on
+  every table any entry reaches (a child table, a link target). Two entries returning
+  the same row key, an aggregate over a child table on a parent read, and `distinct`
+  over a number field are refused with the fix. Every entry is at most 200 characters (1,000 for a whole
   `group_by` / `order_by`) before any regular expression sees it. Frappe 16 refuses SQL
   function strings, so `"sum(x) as y"` is rewritten to the dict form there; on Frappe 15
   the dict form is rewritten to the string form.
@@ -214,7 +222,10 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
 - **No partial reads**: a read over the row caps raises; only a limit the code passes
   itself stops a read early (the receipt says so). A read that returns exactly its
   limit with no `order_by` adds a warning (with an `order_by` it is a top-N).
-- **Reports**: `run_report` goes through `run_report`'s own gates. A Prepared Report
+- **Reports**: `run_report` goes through `run_report`'s own gates. Its receipt names the
+  currency (or currencies) of the amount columns, from the rows; rows in more than one
+  currency, or amounts with no currency and no company filter across companies in
+  different currencies, get a warning. A Prepared Report
   answers from its finished copy (`prepared`, `as_of`), else runs inline as the user
   within the call's deadline; nothing starts in the background. A report that fails
   gives its own error (Frappe's Error Log insert for it is dropped at the write guard;
@@ -244,6 +255,12 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
   references. A
   limit fails the whole call even when the code catches the error. No process rlimit
   or subprocess: see the `_compute_sandbox` docstring.
+- **Callables passed to builtins**: `map` and `filter` are Python iterators that tick
+  (time and memory) before every item; a `key=` that is not the script's own function
+  runs from a loop that ticks every 64 items; a callable taken off a class (`str.upper`,
+  `date.strftime`) is checked like any other exposed callable and through the instance
+  guard (the 200-character strftime cap). A record's child table named like a dict method
+  (`doc.items`) returns the rows; `doc.items()` still works.
 - **Every callable is size-checked**: each helper the code is given (the reads, the
   date, number and text helpers, `json`, `frappe.throw`) checks the total size of its
   arguments before the call (1,000,000 characters or values, shared references counted

@@ -2495,3 +2495,265 @@ class TestReview5(ComputeTestCase):
 			with self.assertRaisesRegex(ComputeCodeError, "did not finish within .* Narrow its filters"):
 				_run(f"result = len(run_report('{name}').rows)")
 		self.assertLess(time.monotonic() - started, 5)
+
+
+class TestReview6(ComputeTestCase):
+	"""Kavin's third review of #2875 at 299d2ec9: filter keys through the allowlist (link
+	hops to secrets), map / filter / key callables under the guards, duplicate row keys,
+	private child tables, report currencies, distinct over amounts, teaching errors."""
+
+	SECRET = "ct-reset-key-abc"
+
+	def assertFast(self, code: str, fragment: str, error=ComputeCodeError, limit: float = 2.0):
+		started = time.monotonic()
+		with self.assertRaises(error) as ctx:
+			_run(code)
+		self.assertLess(time.monotonic() - started, limit, code)
+		self.assertIn(fragment, str(ctx.exception))
+		return ctx.exception
+
+	def setUp(self):
+		super().setUp()
+		frappe.db.set_value("User", ACC_USER, "reset_password_key", self.SECRET, update_modified=False)
+		if not frappe.db.exists("ToDo", {"description": "ct-oracle"}):
+			frappe.get_doc({"doctype": "ToDo", "description": "ct-oracle", "assigned_by": ACC_USER}).insert(
+				ignore_permissions=True
+			)
+
+	# 1. Filter keys -------------------------------------------------------------------
+
+	def test_filter_keys_cannot_follow_a_link_to_a_secret_or_private_doctype(self):
+		key = "'assigned_by.reset_password_key'"
+		cond = "['like', 'ct-%']"
+		calls = (
+			f"count('ToDo', {{{key}: {cond}}})",
+			f"count('ToDo', [[{key}, 'like', 'ct-%']])",
+			f"count('ToDo', [{key}, 'like', 'ct-%'])",
+			f"get_list('ToDo', or_filters=[[{key}, 'like', 'ct-%']])",
+			f"get_list('ToDo', filters=json.dumps({{{key}: {cond}}}))",
+			f"get_value('ToDo', {{{key}: {cond}}}, 'name')",
+			f"exists('ToDo', {{{key}: {cond}}})",
+			"count('ToDo', {'`assigned_by`.`reset_password_key`': ['like', 'ct-%']})",
+			"count('ToDo', [['ToDo', 'assigned_by.reset_password_key', 'like', 'ct-%']])",
+			"count('Sales Invoice', {'customer.account_manager.reset_password_key': ['is', 'set']})",
+			"count('Sales Invoice', {'customer.account_manager.api_key': ['is', 'set']})",
+		)
+		for user in (SYS_USER, "Administrator"):
+			with _as(user):
+				for call in calls:
+					with self.subTest(user=user, call=call):
+						self.assertFast(f"result = {call}", "hold credentials", PermissionDeniedError)
+		with _as(SYS_USER):
+			for call in (
+				"count('BOM Update Log', {'error_log.error': ['like', '%']})",
+				"count('BOM Update Log', [['BOM Update Log', 'error_log.method', 'like', '%']])",
+				"get_list('User', filters={'social_logins.userid': 'x'})",
+				"get_list('User', filters=[['User Social Login', 'userid', '=', 'x']])",
+				"get_list('User', fields=['name'], order_by='social_logins.userid')",
+			):
+				with self.subTest(call=call):
+					self.assertFast(f"result = {call}", "not available here", PermissionDeniedError)
+
+	def test_filter_keys_that_do_not_parse_are_refused(self):
+		for key in (
+			"'tabUser.reset_password_key'",
+			"'`tabError Log`.error'",
+			"'a.b.c.d'",
+			"'name; drop table x'",
+			"'ifnull(name, 0)'",
+			"'assigned_by.reset_password_key.x'",
+			"123",
+		):
+			with self.subTest(key=key):
+				self.assertFast(f"result = count('ToDo', {{{key}: 'x'}})", "not accepted here")
+		self.assertFast(
+			"result = count('Sales Invoice', [['Error Log', 'error', 'like', '%']])", "not Sales Invoice"
+		)
+		self.assertFast(
+			"result = count('ToDo', {'assigned_by.no_such_field': 'x'})", "User has no field(s) no_such_field"
+		)
+
+	def test_ordinary_link_and_child_filters_still_work(self):
+		for code in (
+			f"result = count('Sales Invoice', {{'customer.customer_name': '{CUST_A}', 'name': ['like', 'CT-SINV-%']}})",
+			"result = count('Sales Invoice', {'items.item_code': 'CT-ITEM', 'name': ['like', 'CT-SINV-%']})",
+			"result = count('Sales Invoice', [['Sales Invoice Item', 'item_code', '=', 'CT-ITEM'], ['name', 'like', 'CT-SINV-%']])",
+			"result = count('Sales Invoice', {'`tabSales Invoice`.`name`': ['like', 'CT-SINV-%']})",
+			"result = count('ToDo', {'assigned_by.full_name': ['is', 'set']})",
+		):
+			with self.subTest(code=code):
+				self.assertGreaterEqual(_run(code)["result"], 1)
+
+	# 2. map, filter and key callables ----------------------------------------------------
+
+	def test_map_filter_and_keys_check_time(self):
+		# str.isupper scans each 400 KB text and keeps nothing: time without memory, so the
+		# same code is safe to run against a build without these guards.
+		texts = "t = [chr(0x1F600) * 99999] * 199999\n"
+		with patch.object(sandbox, "WALL_CLOCK_S", 1):
+			for tail in (
+				"result = all(map(str.isprintable, t))",
+				"result = any(map(str.isupper, t))",
+				"result = sum(map(len, filter(str.isupper, t)))",
+				"result = len(list(filter(str.isupper, t)))",
+				"result = len(sorted(t, key=str.isupper))",
+				"result = len(min(t, key=str.isupper))",
+				"result = len(max(t, key=str.isupper))",
+				"l = list(t)\nl.sort(key=str.isupper)\nresult = 1",
+				"result = len(dict(zip(range(len(t)), map(str.isupper, t))))",
+				"result = len([i for i, x in enumerate(map(str.isupper, t))])",
+				"result = len(list(zip(map(str.isupper, t), t)))",
+				"result = sum(1 for x in map(str.isupper, t) if x)",
+				"result = all(map(datetime.date.isoformat, [getdate('2026-01-01')] * 199999)) and all(map(str.isprintable, t))",
+			):
+				with self.subTest(tail=tail):
+					self.assertFast(texts + tail, "more than 1 seconds", limit=4.0)
+
+	def test_map_checks_memory(self):
+		with patch.object(sandbox, "MAX_MEMORY_GROWTH_BYTES", 50 * 2**20):
+			self.assertFast(
+				"t = [chr(0x1F600) * 99999] * 2000\nresult = len(list(map(str.upper, t)))", "too much memory"
+			)
+			self.assertFast(
+				"t = [chr(0x1F600) * 99999] * 2000\nresult = len(sorted(t, key=str.upper))", "too much memory"
+			)
+
+	def test_class_path_callables_are_checked(self):
+		self.assertFast("result = date.strftime(getdate('2026-01-01'), '%Y' * 300)", "strftime pattern")
+		self.assertFast(
+			"result = datetime.date.strftime(getdate('2026-01-01'), '%Y' * 300)", "strftime pattern"
+		)
+		self.assertFast("result = len(str.upper('ß' * 60000))", "100,000")
+		out = _run(
+			"result = [list(map(str.upper, ['a', 'b'])), list(filter(None, [0, 1, 2])), sorted(['b', 'A'], key=str.lower),"
+			" date.strftime(getdate('2026-01-02'), '%d'), str(map(str, []))]"
+		)
+		self.assertEqual(out["result"], [["A", "B"], [1, 2], ["A", "b"], "02", "<map object>"])
+
+	# 3. Duplicate row keys --------------------------------------------------------------
+
+	def test_duplicate_row_keys_are_refused(self):
+		for fields in (
+			"['currency', 'customer as currency', 'grand_total']",
+			"['name', 'customer as name']",
+			"['*', 'customer as currency']",
+			"[{'SUM': 'grand_total', 'as': 'customer'}, 'customer']",
+		):
+			with self.subTest(fields=fields):
+				self.assertFast(
+					f"result = get_list('Sales Invoice', filters={OURS!r}, fields={fields})",
+					"two different values",
+				)
+		self.assertEqual(
+			len(
+				_run(f"result = get_list('Sales Invoice', filters={OURS!r}, fields=['name', 'name'])")[
+					"result"
+				]
+			),
+			5,
+		)
+
+	# 4. Private child tables -------------------------------------------------------------
+
+	def test_private_child_tables_are_not_readable(self):
+		with _as(SYS_USER):
+			for code in (
+				"result = get_list('User', fields=['name', 'social_logins.userid'])",
+				"result = get_list('User', fields=['name', '`tabUser Social Login`.userid'])",
+				"result = get_list('User', fields=[{'COUNT': 'social_logins.userid', 'as': 'n'}])",
+				"result = get_list('User', fields=['name'], group_by='social_logins.provider')",
+			):
+				with self.subTest(code=code):
+					self.assertFast(code, "not available here", PermissionDeniedError)
+			doc = _run(f"result = get_doc('User', '{ACC_USER}')")["result"]
+			self.assertNotIn("social_logins", doc)
+
+	# 5. Report currencies ----------------------------------------------------------------
+
+	def test_report_rows_in_several_currencies_warn(self):
+		name = "CT Compute Currency Report"
+		if not frappe.db.exists("Report", name):
+			frappe.get_doc(
+				{
+					"doctype": "Report",
+					"report_name": name,
+					"ref_doctype": "Sales Invoice",
+					"report_type": "Query Report",
+					"is_standard": "No",
+					"query": 'select name as "Invoice:Link/Sales Invoice:120", currency as "Currency:Link/Currency:80", '
+					"grand_total as \"Total:Currency/currency:120\" from `tabSales Invoice` where name like 'CT-SINV-%%'",
+				}
+			).insert(ignore_permissions=True)
+		out = _run(f"r = run_report('{name}')\nresult = sum(flt(row.total) for row in r.rows)")
+		self.assertEqual(out["reads"][0]["currencies"], ["INR", "USD"])
+		self.assertIn("mixes currencies", out["warnings"][0])
+
+	def test_a_report_without_currency_or_company_filter_warns(self):
+		name = "CT Compute Amount Report"
+		if not frappe.db.exists("Report", name):
+			frappe.get_doc(
+				{
+					"doctype": "Report",
+					"report_name": name,
+					"ref_doctype": "Sales Invoice",
+					"report_type": "Query Report",
+					"is_standard": "No",
+					"query": 'select name as "Invoice:Link/Sales Invoice:120", base_grand_total as "Total:Currency:120" '
+					"from `tabSales Invoice` where name like 'CT-SINV-%%'",
+				}
+			).insert(ignore_permissions=True)
+		out = _run(f"r = run_report('{name}')\nresult = sum(flt(row.total) for row in r.rows)")
+		self.assertIn("not filtered by company", out["warnings"][0])
+
+	# 6. distinct over amounts --------------------------------------------------------------
+
+	def test_distinct_over_an_amount_is_refused(self):
+		for fields in ("['grand_total']", "['customer', 'base_grand_total']", "['*']"):
+			with self.subTest(fields=fields):
+				self.assertFast(
+					f"result = get_list('Sales Invoice', filters={OURS!r}, fields={fields}, distinct=True)",
+					"drops rows whose values repeat",
+				)
+		out = _run(
+			f"result = get_list('Sales Invoice', filters={OURS!r}, fields=['customer'], distinct=True)"
+		)
+		self.assertEqual(len(out["result"]), 3)
+
+	# 7. Raw errors become teaching errors ---------------------------------------------------
+
+	def test_raw_errors_teach(self):
+		self.assertFast(
+			"result = get_list('Sales Invoice', filters={'docstatus': [1, 0]}, fields=['name'])",
+			"a list value is [operator, value]",
+		)
+		self.assertFast(
+			"result = get_list('Sales Invoice', filters={'name': ['equals', 'x']}, fields=['name'])",
+			"filter operator 'equals' is not one of",
+		)
+		self.assertFast(
+			"result = get_list('Sales Invoice', fields=[{'SUM': '`tabSales Invoice Item`.amount', 'as': 't'}])",
+			"read Sales Invoice Item itself with parent_doctype",
+		)
+		self.assertFast("result = 2**65000", "too large to return")
+
+	# 8. Hints ---------------------------------------------------------------------------------
+
+	def test_hints_save_a_round_trip(self):
+		for entry, hint in (
+			("'MONTH(posting_date) as m'", "getdate(r.posting_date).month"),
+			("'year(posting_date) as y'", "getdate(r.posting_date).month"),
+			("'DATE_FORMAT(posting_date, \"%Y-%m\") as m'", "getdate(r.posting_date).month"),
+			("'count(distinct customer) as n'", "group by the field and count the rows"),
+			("{'COUNT': 'distinct customer', 'as': 'n'}", "group by the field and count the rows"),
+		):
+			with self.subTest(entry=entry):
+				self.assertFast(
+					f"result = get_list('Sales Invoice', filters={OURS!r}, fields=[{entry}])", hint
+				)
+
+	def test_child_tables_named_like_dict_methods(self):
+		out = _run(
+			"d = get_doc('Sales Invoice', 'CT-SINV-0001')\n"
+			"result = [len(d.items), d.items[0].item_code, 'items' in dict(d.items()), d['items'][0]['item_code']]"
+		)
+		self.assertEqual(out["result"], [1, "CT-ITEM", True, "CT-ITEM"])

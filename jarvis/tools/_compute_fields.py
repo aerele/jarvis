@@ -55,7 +55,61 @@ _REF = re.compile(
 )
 _ALIAS_NAME = re.compile(r"^(?:`(?P<b>\w{1,64})`|\"(?P<q>\w{1,64})\"|'(?P<s>\w{1,64})'|(?P<w>\w{1,64}))$")
 # func(arg): the function name, then everything up to the last ")".
-_AGG_TEXT = re.compile(r"^(?P<func>[A-Za-z]{3,5})\s*\((?P<arg>.*)\)$", re.DOTALL)
+_AGG_TEXT = re.compile(r"^(?P<func>[A-Za-z_]{2,24})\s*\((?P<arg>.*)\)$", re.DOTALL)
+# One segment of a dotted filter key: `anything but a backtick`, or an identifier.
+_SEGMENT = re.compile(r"`([^`]{1,140})`|(" + _IDENT + r")")
+
+# SQL date functions people reach for to bucket by period: refused with how to do it.
+_DATE_FUNCTIONS = frozenset(
+	{
+		"MONTH",
+		"YEAR",
+		"DAY",
+		"DAYOFMONTH",
+		"WEEK",
+		"QUARTER",
+		"DATE",
+		"DATE_FORMAT",
+		"EXTRACT",
+		"MONTHNAME",
+		"YEARWEEK",
+	}
+)
+_DATE_HINT = (
+	"To total by month (or year, week), group_by='posting_date' with {'SUM': ...} and bucket the "
+	"rows in Python with getdate(r.posting_date).month, or read one date range per month with "
+	"filters={'posting_date': ['between', [start, end]]}."
+)
+_DISTINCT_HINT = (
+	"To count distinct values, group by the field and count the rows: "
+	"get_list(doctype, fields=['customer', {'COUNT': '*', 'as': 'n'}], group_by='customer'), then len(rows)."
+)
+
+# Filter operators Frappe takes. Anything else is refused.
+OPERATORS = frozenset(
+	{
+		"=",
+		"!=",
+		"<",
+		">",
+		"<=",
+		">=",
+		"like",
+		"not like",
+		"in",
+		"not in",
+		"between",
+		"is",
+		"timespan",
+		"descendants of",
+		"not descendants of",
+		"ancestors of",
+		"not ancestors of",
+		"descendants of (inclusive)",
+	}
+)
+# Link fields a filter may follow from one doctype to the next: two hops at most.
+MAX_LINK_HOPS = 2
 
 ACCEPTED = (
 	"A field is 'grand_total', 'grand_total as gt' or a child table's 'Sales Invoice Item.amount' "
@@ -72,9 +126,11 @@ class FieldRefused(ValueError):
 class Spec:
 	"""One accepted entry: a field (``func`` None), an aggregate, or ``*``."""
 
-	__slots__ = ("alias", "arg", "field", "func", "original", "star", "table")
+	__slots__ = ("alias", "arg", "field", "func", "linked", "original", "star", "table")
 
-	def __init__(self, *, table=None, field=None, func=None, alias=None, star=False, original=None, arg=None):
+	def __init__(
+		self, *, table=None, field=None, func=None, alias=None, star=False, original=None, arg=None, linked=()
+	):
 		self.table = table  # doctype holding the field (None for COUNT(*) and *)
 		self.field = field  # field name, "*" for COUNT(*)
 		self.func = func  # SUM / COUNT / AVG / MIN / MAX, or None
@@ -82,6 +138,7 @@ class Spec:
 		self.star = star
 		self.original = original
 		self.arg = arg  # an aggregate's argument as written ("`tabX`.f", "f", "*")
+		self.linked = linked  # doctypes a filter key reached through link fields, in order
 
 	@property
 	def key(self) -> str | None:
@@ -222,9 +279,13 @@ def _parse_aggregate_dict(tables: Tables, entry: dict) -> Spec:
 
 def _aggregate(tables: Tables, func: str, arg: str, alias: str | None, original) -> Spec:
 	func = func.upper()
+	if func in _DATE_FUNCTIONS:
+		raise FieldRefused(f"SQL date functions like {func}() are not available. {_DATE_HINT}")
 	if func not in AGGREGATES:
 		raise FieldRefused(f"{func} is not one of {', '.join(AGGREGATES)}.")
 	arg = arg.strip()
+	if arg.casefold().startswith("distinct "):
+		raise FieldRefused(f"COUNT(DISTINCT ...) is not available. {_DISTINCT_HINT}")
 	if arg == "*":
 		if func != "COUNT":
 			raise FieldRefused("Only COUNT takes '*'.")
@@ -236,6 +297,19 @@ def _aggregate(tables: Tables, func: str, arg: str, alias: str | None, original)
 	except FieldRefused as e:
 		raise FieldRefused(str(e) or "The function takes one field, no expression.") from None
 	return Spec(table=table, field=field, func=func, alias=alias, original=original, arg=arg)
+
+
+def check_child_aggregates(tables: Tables, specs: list[Spec]) -> None:
+	"""Refuse an aggregate over a child table's field on a parent read: Frappe does not
+	join the child table for it (MariaDB answers "unknown column"). Called after the
+	private-table check, so the hint never names a table the user may not read."""
+	for spec in specs:
+		if spec.func and spec.table and spec.table not in (tables.doctype, tables.parent):
+			raise FieldRefused(
+				f"fields entry {str(spec.original)[:80]} is not accepted here. To total a {spec.table} field, "
+				f"read {spec.table} itself with parent_doctype: get_list('{spec.table}', "
+				f"parent_doctype='{tables.doctype}', filters=..., fields=[{{'{spec.func}': '{spec.field}', 'as': 't'}}])."
+			)
 
 
 def parse_fields(tables: Tables, fields) -> list[Spec]:
@@ -305,3 +379,145 @@ def frappe_field(spec: Spec, dict_aggregates: bool):
 	alias = spec.alias or f"{spec.func.lower()}_{'all' if spec.arg == '*' else spec.field}"
 	column = spec.arg if spec.arg == "*" or "." in spec.arg else f"`{spec.arg.strip('`')}`"
 	return f"{spec.func.lower()}({column}) as `{alias}`"
+
+
+# --------------------------------------------------------------------------- #
+# Filters                                                                      #
+# --------------------------------------------------------------------------- #
+
+
+class Condition:
+	"""One filter condition: the field it tests (a Spec, with the doctypes any link hops
+	reached in ``linked``), its operator and value."""
+
+	__slots__ = ("op", "spec", "value")
+
+	def __init__(self, spec: Spec, op: str, value):
+		self.spec = spec
+		self.op = op
+		self.value = value
+
+
+def _segments(text: str) -> list[str]:
+	"""The dot-separated segments of a filter key, backticks honoured; FieldRefused for
+	anything else."""
+	out, pos = [], 0
+	while True:
+		m = _SEGMENT.match(text, pos)
+		if not m:
+			raise FieldRefused("")
+		out.append(m.group(1) or m.group(2))
+		pos = m.end()
+		if pos == len(text):
+			return out
+		if text[pos] != ".":
+			raise FieldRefused("")
+		pos += 1
+
+
+def _link_target(tables: Tables, doctype: str, fieldname: str) -> str | None:
+	df = tables.meta_of(doctype).get_field(fieldname)
+	if df and df.fieldtype == "Link" and df.options:
+		return df.options
+	return None
+
+
+def filter_key(tables: Tables, key) -> Spec:
+	"""The (table, field) a filter key tests. Accepted: a field, a qualified field (as in
+	``fields``), a child table's field through its table field (``items.item_code``), and
+	up to MAX_LINK_HOPS link fields followed to the doctype they point to
+	(``customer.territory``): the Spec's table is then that target doctype and
+	``linked`` lists every doctype the hops reached."""
+	if not isinstance(key, str):
+		raise FieldRefused(f"filter field {key!r:.60} is not accepted here: a filter field is text.")
+	text = _short(key, "A filter field").strip()
+	try:
+		parts = _segments(text)
+	except FieldRefused:
+		raise FieldRefused(
+			f"filter field {text[:80]!r} is not accepted here: name a field, e.g. 'customer'."
+		) from None
+	if len(parts) == 1:
+		return Spec(table=tables.doctype, field=parts[0], original=key)
+	if len(parts) > MAX_LINK_HOPS + 1:
+		raise FieldRefused(
+			f"filter field {text[:80]!r} is not accepted here: it follows more than {MAX_LINK_HOPS} links."
+		)
+	table = tables.resolve(parts[0])
+	linked: list[str] = []
+	rest = parts[1:]
+	if table is None:
+		table = _link_target(tables, tables.doctype, parts[0])
+		if table is None:
+			raise FieldRefused(
+				f"filter field {text[:80]!r} is not accepted here: {parts[0]!r} is not a link field, a child "
+				f"table or {tables.doctype}."
+			)
+		linked.append(table)
+	for hop in rest[:-1]:
+		target = _link_target(tables, table, hop)
+		if target is None:
+			raise FieldRefused(
+				f"filter field {text[:80]!r} is not accepted here: {hop!r} is not a link field of {table}."
+			)
+		table = target
+		linked.append(table)
+	return Spec(table=table, field=rest[-1], original=key, linked=tuple(linked))
+
+
+def _condition(tables: Tables, key, value) -> Condition:
+	spec = filter_key(tables, key)
+	if isinstance(value, list | tuple):
+		if not value or not isinstance(value[0], str) or len(value) > 2:
+			raise FieldRefused(
+				f"filter {str(key)[:60]!r}: a list value is [operator, value], e.g. "
+				f"{{'{str(key)[:40]}': ['in', [1, 0]]}}."
+			)
+		op = value[0].strip().casefold()
+		if op not in OPERATORS:
+			raise FieldRefused(
+				f"filter operator {value[0][:40]!r} is not one of: {', '.join(sorted(OPERATORS))}."
+			)
+		return Condition(spec, op, value[1] if len(value) == 2 else None)
+	return Condition(spec, "=", value)
+
+
+def parse_filters(tables: Tables, filters) -> list[Condition]:
+	"""Every condition of ``filters`` (a dict, a list of conditions or one condition,
+	already parsed from JSON text): ``{field: value}``, ``{field: [op, value]}``,
+	``[field, op, value]``, ``[doctype, field, op, value]`` (doctype the queried one, a
+	child table or the parent), ``[field, value]``. Anything else is refused."""
+	if filters is None or filters == {} or filters == []:
+		return []
+	if isinstance(filters, dict):
+		items = list(filters.items())
+		if len(items) > MAX_ENTRIES:
+			raise FieldRefused(f"filters take at most {MAX_ENTRIES} conditions.")
+		return [_condition(tables, k, v) for k, v in items]
+	if not isinstance(filters, list | tuple):
+		raise FieldRefused("filters are a dict or a list of [field, operator, value] conditions.")
+	conds = filters if isinstance(filters[0], list | tuple | dict) else [filters]
+	if len(conds) > MAX_ENTRIES:
+		raise FieldRefused(f"filters take at most {MAX_ENTRIES} conditions.")
+	out = []
+	for cond in conds:
+		if isinstance(cond, dict):
+			out += parse_filters(tables, cond)
+			continue
+		if not isinstance(cond, list | tuple) or len(cond) not in (2, 3, 4):
+			raise FieldRefused(
+				f"filter condition {str(cond)[:80]} is not accepted here: write [field, operator, value]."
+			)
+		if len(cond) == 4:
+			if not isinstance(cond[0], str) or tables.resolve(cond[0]) is None:
+				raise FieldRefused(
+					f"filter condition {str(cond)[:80]}: {str(cond[0])[:60]!r} is not {tables.doctype} or one "
+					"of its child tables."
+				)
+			key = f"`tab{tables.resolve(cond[0])}`.{cond[1]}" if isinstance(cond[1], str) else cond[1]
+			out.append(_condition(tables, key, [cond[2], cond[3]]))
+		elif len(cond) == 3:
+			out.append(_condition(tables, cond[0], [cond[1], cond[2]]))
+		else:
+			out.append(_condition(tables, cond[0], cond[1]))
+	return out

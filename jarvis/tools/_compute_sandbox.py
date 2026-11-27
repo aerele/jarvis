@@ -91,6 +91,7 @@ from RestrictedPython import compile_restricted
 from RestrictedPython.transformer import IOPERATOR_TO_STR, RestrictingNodeTransformer, copy_locations
 
 from jarvis.exceptions import ComputeCodeError, InvalidArgumentError, PermissionDeniedError
+from jarvis.tools._compute_guards import SCRIPT_FILENAME as _GUARDS_SCRIPT_FILENAME
 from jarvis.tools._compute_guards import (
 	Exposed,
 	GuardRefused,
@@ -177,7 +178,7 @@ MAX_READ_RECEIPTS = 15
 RECEIPT_TEXT_CHARS = 100
 
 # The filename the compiled script carries: the deadline watch and error line numbers key on it.
-SCRIPT_FILENAME = "<jarvis-compute>"
+SCRIPT_FILENAME = _GUARDS_SCRIPT_FILENAME
 
 
 # --------------------------------------------------------------------------- #
@@ -977,10 +978,16 @@ def _getattr_factory(guards: Guards):
 			raise AttributeError(f'"{name}" is not available.')
 		if isinstance(obj, _BLOCKED_TYPES):
 			raise AttributeError(f'"{name}" is not available.')
+		if isinstance(obj, Row) and name in _CHILD_ROWS_NAMES and isinstance(dict.get(obj, name), _ChildRows):
+			return dict.__getitem__(obj, name)
 		guarded = guards.method(obj, name)
 		if guarded is not None:
 			return Exposed(guarded, f"{type(obj).__name__}.{name}", check=False)
 		value = getattr(obj, name, *default)
+		if isinstance(obj, type) and callable(value) and not isinstance(value, type | Exposed):
+			# Taken off a class (date.strftime, datetime.strptime): checked like any exposed
+			# callable, and through the instance guard when it has one.
+			return guards.class_attr(obj, name, value)
 		if isinstance(value, _BLOCKED_TYPES):
 			raise AttributeError(f'"{name}" is not available.')
 		return value
@@ -1194,10 +1201,38 @@ def _rows_in_place(rows: list) -> list:
 	return rows
 
 
+# Child-table names that are also dict methods (Sales Invoice ``items``). ``doc.items``
+# returns the child rows; calling it still works as the dict method (``doc.items()``).
+_CHILD_ROWS_NAMES = frozenset({"items", "keys", "values", "get", "copy", "update", "pop", "clear"})
+_CHILD_ROWS_READONLY = frozenset({"items", "keys", "values", "get", "copy"})
+
+
+class _ChildRows(list):
+	"""A record's child rows under a name that is also a dict method: a list of the rows,
+	and, called, that dict method on the record (``doc.items()``)."""
+
+	__slots__ = ("_name", "_record")
+
+	def __call__(self, *args, **kwargs):
+		if self._name not in _CHILD_ROWS_READONLY:
+			raise TypeError(
+				f"this record has a child table named {self._name}: read it as d['{self._name}'], and "
+				"change the record with d[key] = value."
+			)
+		return getattr(dict, self._name)(self._record, *args, **kwargs)
+
+
 def _rows(value):
 	"""Records as ``Row`` (recursively for child tables)."""
 	if isinstance(value, dict):
-		return Row({k: _rows(v) for k, v in value.items()})
+		row = Row({k: _rows(v) for k, v in value.items()})
+		for name in _CHILD_ROWS_NAMES & row.keys():
+			if type(row[name]) is list:
+				rows = _ChildRows(row[name])
+				object.__setattr__(rows, "_name", name)
+				object.__setattr__(rows, "_record", row)
+				dict.__setitem__(row, name, rows)
+		return row
 	if isinstance(value, list):
 		return [_rows(v) for v in value]
 	return value
@@ -1392,6 +1427,9 @@ def _strip_secret_fields(doctype: str, record: dict) -> dict:
 	for name in _secret_fields(doctype):
 		record.pop(name, None)
 	for df in frappe.get_meta(doctype).get_table_fields():
+		if _is_private_doctype(df.options):  # a private child table (User Social Login)
+			record.pop(df.fieldname, None)
+			continue
 		for child in record.get(df.fieldname) or ():
 			if isinstance(child, dict):
 				_strip_secret_fields(df.options, child)
@@ -1460,10 +1498,13 @@ def _doctype(doctype) -> str:
 	return name
 
 
+_NUMERIC_FIELDTYPES = frozenset({"Currency", "Float", "Percent", "Int"})
+
+
 def _parse_read(doctype: str, meta, parent_doctype, fields, kwargs, filters):
-	"""The read's fields, group_by and order_by through the allowlist in
-	``_compute_fields``, and its filter field names checked for length, before any of
-	them reaches a regular expression or Frappe. ``(tables, specs, groups, orders)``."""
+	"""The read's fields, group_by, order_by and every filter key (``filters`` and
+	``or_filters``) through the allowlist in ``_compute_fields``, before any of them
+	reaches a regular expression or Frappe. ``(tables, specs, groups, orders, conds)``."""
 	from jarvis.tools import _compute_fields as cf
 
 	tables = cf.Tables(doctype, meta, parent_doctype)
@@ -1472,21 +1513,93 @@ def _parse_read(doctype: str, meta, parent_doctype, fields, kwargs, filters):
 		groups = cf.parse_group_by(tables, kwargs.get("group_by"))
 		aliases = {s.alias for s in specs if s.alias}
 		orders = cf.parse_order_by(tables, kwargs.get("order_by"), aliases)
+		conds = cf.parse_filters(tables, filters) + cf.parse_filters(tables, kwargs.get("or_filters"))
 	except cf.FieldRefused as e:
 		raise SandboxUsageError(str(e)) from None
-	from jarvis.tools.get_list import _filter_fieldnames
+	_check_row_keys(tables, specs)
+	if kwargs.get("distinct"):
+		_check_distinct(tables, specs)
+	return tables, specs, groups, orders, conds
 
-	for name in _filter_fieldnames(filters) | _filter_fieldnames(kwargs.get("or_filters")):
-		if len(name) > cf.MAX_ENTRY_CHARS:
-			raise SandboxUsageError(
-				f"A filter field of {len(name):,} characters is not accepted here; a field name is at most "
-				f"{cf.MAX_ENTRY_CHARS} characters."
+
+def _check_row_keys(tables, specs) -> None:
+	"""Refuse a read whose rows would carry two values under one key ('customer as
+	currency' next to 'currency'): the amount checks and the code would read the wrong one."""
+	sources: dict[str, tuple] = {}
+	for spec in specs:
+		if spec.star:
+			pairs = [(c, (tables.doctype, c, None)) for c in tables.meta.get_valid_columns()]
+		elif spec.key:
+			pairs = [(spec.key, (spec.table, spec.field, spec.func))]
+		else:
+			continue
+		for key, source in pairs:
+			if sources.setdefault(key, source) != source:
+				raise SandboxUsageError(
+					f"fields return two different values under '{key}'. Give each field its own name: "
+					f"'{spec.field} as {spec.field}_{len(sources)}', or drop one of them."
+				)
+
+
+def _check_distinct(tables, specs) -> None:
+	"""Refuse distinct over an amount: rows with equal amounts would collapse into one, so
+	a total over them comes out short."""
+	for spec in specs:
+		if spec.func is not None:
+			continue
+		names = [df.fieldname for df in tables.meta.fields] if spec.star else [spec.field]
+		meta = tables.meta if spec.star else tables.meta_of(spec.table)
+		for name in names:
+			df = meta.get_field(name) if name else None
+			if df and df.fieldtype in _NUMERIC_FIELDTYPES:
+				raise SandboxUsageError(
+					f"distinct=True with the number field {name} drops rows whose values repeat, so totals "
+					"over them come out short. Drop distinct and total every row, or let the database "
+					"total with group_by and {'SUM': ...}."
+				)
+
+
+def _refuse_private_or_secret(specs) -> None:
+	"""Every table a field, filter, group_by or order_by entry reaches (a child table, a
+	link target) must not be private, and the field must not hold credentials. For
+	everyone, Administrator included, whatever the permissions."""
+	for spec in specs:
+		for doctype in (spec.table, *spec.linked):
+			if doctype:
+				_refuse_private(doctype)
+		if spec.table and spec.field and spec.field in _secret_fields(spec.table):
+			raise PermissionDeniedError(
+				f"{spec.table} field(s) {spec.field} hold credentials or one-time keys; compute never "
+				"reads, filters, sorts or groups on them."
 			)
-	return tables, specs, groups, orders
+
+
+def _check_linked_access(conds) -> None:
+	"""A filter that follows a link (``customer.territory``) reads the target doctype: the
+	user needs read permission on every doctype it reaches and on the field it tests."""
+	from frappe.model import get_permitted_fields
+
+	for cond in conds:
+		spec = cond.spec
+		if not spec.linked:
+			continue
+		for doctype in spec.linked:
+			if not frappe.has_permission(doctype, ptype="read"):
+				raise PermissionDeniedError(
+					f"no read permission on {doctype}, which the filter {str(spec.original)[:60]!r} reaches "
+					"through a link"
+				)
+		if frappe.session.user != "Administrator" and spec.field not in set(get_permitted_fields(spec.table)):
+			raise PermissionDeniedError(f"no read permission on {spec.table} field {spec.field}")
 
 
 def _spec_names(specs) -> set[str]:
 	return {s.field for s in specs if s.field and s.field != "*"}
+
+
+# Columns every non-child table has that the meta does not list (assignments, tags,
+# likes, comments): filtering on them is ordinary ("assigned to me").
+_HIDDEN_COLUMNS = frozenset({"_assign", "_user_tags", "_comments", "_liked_by", "_seen"})
 
 
 def _check_known_fields(tables, specs) -> None:
@@ -1497,7 +1610,10 @@ def _check_known_fields(tables, specs) -> None:
 	for spec in specs:
 		if not spec.table or not spec.field or spec.field == "*":
 			continue
-		if spec.field not in set(tables.meta_of(spec.table).get_valid_columns()):
+		meta = tables.meta_of(spec.table)
+		if spec.field in _HIDDEN_COLUMNS and not meta.istable:
+			continue
+		if spec.field not in set(meta.get_valid_columns()):
 			unknown.setdefault(spec.table, set()).add(spec.field)
 	for table, names in unknown.items():
 		columns = set(tables.meta_of(table).get_valid_columns())
@@ -1514,17 +1630,15 @@ def _check_known_fields(tables, specs) -> None:
 		)
 
 
-def _check_field_access(doctype: str, parent_doctype, specs, groups, orders, filters, or_filters):
+def _check_field_access(doctype: str, parent_doctype, specs, groups, orders, keys):
 	"""Refuse a read that names a field the user cannot read (a permission level they
 	lack) or computes / filters / sorts / groups over a field masked for them.
 	Frappe drops an unreadable SELECT field silently; here it is refused, so the code
 	never totals a column that came back empty."""
-	from jarvis.tools.get_list import _filter_fieldnames
-
 	own = [s for s in specs if s.table == doctype]
 	plain = _spec_names(s for s in own if s.func is None)
 	computed = _spec_names(s for s in own if s.func is not None)
-	conditions = _filter_fieldnames(filters) | _filter_fieldnames(or_filters)
+	conditions = _spec_names(k for k in keys if k.table == doctype and not k.linked)
 	ordering = _spec_names(s for s in [*groups, *orders] if s.table == doctype)
 	if frappe.session.user == "Administrator":
 		return
@@ -1583,10 +1697,10 @@ def _receipt_value(value):
 def make_reads(run: _Run) -> dict:
 	"""The permissioned read helpers, bound to ``run`` in closures (never a keyword or
 	argument the script could override or read back)."""
+	from jarvis.tools import _compute_fields
 	from jarvis.tools._compute_fields import frappe_field
 	from jarvis.tools.get_list import (
 		_child_table_parents,
-		_filter_fieldnames,
 		assert_child_query_fields_readable,
 		assert_child_table_field_readable,
 	)
@@ -1655,22 +1769,26 @@ def make_reads(run: _Run) -> dict:
 			parent_doctype = None
 		# The allowlist first: nothing below (regexes, permission helpers, Frappe) sees an
 		# entry it did not accept.
-		tables, specs, groups, orders = _parse_read(doctype, meta, parent_doctype, as_given, kwargs, filters)
-		# Credentials: refused for everyone, Administrator included, whatever the permissions.
-		_refuse_secret_fields(
-			doctype,
-			_spec_names([*specs, *groups, *orders])
-			| _filter_fieldnames(filters)
-			| _filter_fieldnames(kwargs.get("or_filters")),
+		tables, specs, groups, orders, conds = _parse_read(
+			doctype, meta, parent_doctype, as_given, kwargs, filters
 		)
-		_check_known_fields(tables, [*specs, *groups, *orders])
+		keys = [c.spec for c in conds]
+		# Private doctypes and credentials, on every table any entry reaches: refused for
+		# everyone, Administrator included, whatever the permissions.
+		_refuse_private_or_secret([*specs, *groups, *orders, *keys])
+		try:
+			_compute_fields.check_child_aggregates(tables, specs)
+		except _compute_fields.FieldRefused as e:
+			raise SandboxUsageError(str(e)) from None
+		_check_known_fields(tables, [*specs, *groups, *orders, *keys])
 		fields = [frappe_field(s, _DICT_AGGREGATES) for s in specs]
 		if not frappe.has_permission(doctype, ptype="read", parent_doctype=parent_doctype):
 			raise PermissionDeniedError(f"no read permission on {doctype}")
 		if parent_doctype:
 			assert_child_table_field_readable(doctype, parent_doctype)
 		assert_child_query_fields_readable(doctype, parent_doctype, fields, filters, kwargs.get("order_by"))
-		_check_field_access(doctype, parent_doctype, specs, groups, orders, filters, kwargs.get("or_filters"))
+		_check_linked_access(conds)
+		_check_field_access(doctype, parent_doctype, specs, groups, orders, keys)
 
 		limit = None
 		for key in ("limit", "limit_page_length", "page_length"):
@@ -1705,6 +1823,14 @@ def make_reads(run: _Run) -> dict:
 			raise
 		except frappe.ValidationError as e:
 			raise SandboxUsageError(f"get_list('{doctype}'): {_clean(e)}") from None
+		except Exception as e:
+			if not _missing_column(e):
+				raise
+			raise SandboxUsageError(
+				f"get_list('{doctype}'): a field here is not a column of this query ({_clean(e)}). A child "
+				"table's field is read from the child doctype with parent_doctype, e.g. get_list('Sales "
+				"Invoice Item', parent_doctype='Sales Invoice', fields=[...])."
+			) from None
 		if capped and len(rows) > cap:
 			if cap < MAX_ROWS_PER_READ:
 				run.take_rows(len(rows), f"get_list('{doctype}')")
@@ -1924,6 +2050,33 @@ def make_reads(run: _Run) -> dict:
 		prepared = bool(data.get("prepared"))
 		as_of = str(data["as_of"]) if prepared and data.get("as_of") else None
 		receipt = {"report": report_name, "rows": len(rows)}
+		units, unit_column = _report_units(columns, rows, filters)
+		has_amounts = any(c.get("fieldtype") == "Currency" for c in columns)
+		if not units and has_amounts and rows and not (isinstance(filters, dict) and filters.get("company")):
+			# No currency on the rows and no company filter: the companies the user can read
+			# say whether the amounts can be in more than one currency.
+			possible = {
+				c.default_currency
+				for c in frappe.get_list("Company", fields=["default_currency"], limit=PROBE_COMPANIES)
+				if c.default_currency
+			}
+			if len(possible) > 1:
+				run.warn(
+					("report-units", report_name),
+					f"run_report('{report_name}') does not say which currency its amounts are in, and it is "
+					f"not filtered by company; your companies use {', '.join(sorted(possible))}. Filter one "
+					"company before totalling amounts.",
+				)
+		if len(units) == 1:
+			receipt["currency"] = next(iter(units))
+		elif units:
+			receipt["currencies"] = sorted(units)
+			by = f" per {unit_column}" if unit_column else " per currency"
+			run.warn(
+				("report-units", report_name),
+				f"run_report('{report_name}') rows are in {', '.join(sorted(units))}; adding an amount "
+				f"column across them mixes currencies. Total it{by}, or filter one company.",
+			)
 		if filters:
 			receipt["filters"] = _receipt_value(filters)
 		if prepared:
@@ -2018,6 +2171,66 @@ def _clean(e: BaseException) -> str:
 	from frappe.utils import strip_html
 
 	return " ".join(strip_html(error_text(e, 2_000)).split())[:600]
+
+
+# Companies read to tell whether an unfiltered report's amounts can mix currencies.
+PROBE_COMPANIES = 500
+
+
+def _missing_column(e: BaseException) -> bool:
+	"""Whether ``e`` is the database reporting an unknown column (MariaDB 1054)."""
+	try:
+		return bool(frappe.db.is_missing_column(e))
+	except Exception:
+		args = getattr(e, "args", ())
+		return bool(args) and args[0] == 1054
+
+
+def _report_units(columns: list, rows: list, filters) -> tuple[set, str | None]:
+	"""The currencies a report's amount columns are in, from its rows: an amount column's
+	options naming a currency column, a ``Company:`` company column, a fixed currency; else
+	a currency or company column; else the company filter. ``(currencies, column)``."""
+	amounts = [c for c in columns if c.get("fieldtype") == "Currency"]
+	if not amounts or not rows:
+		return set(), None
+	names = {c.get("fieldname") for c in columns}
+	units: set = set()
+	source = None
+
+	def companies(column: str) -> set:
+		return {
+			frappe.get_cached_value("Company", c, "default_currency")
+			for c in {r.get(column) for r in rows}
+			if c
+		}
+
+	for column in amounts:
+		option = (column.get("options") or "").strip()
+		if option in names:
+			units |= {r.get(option) for r in rows}
+			source = option
+		elif option.startswith("Company:"):
+			company = option.split(":")[1] or "company"
+			if company in names:
+				units |= companies(company)
+				source = company
+		elif option and frappe.db.exists("Currency", option):
+			units.add(option)
+	units = {u for u in units if u}
+	if not units:
+		for candidate in ("currency", "account_currency", "party_currency", "presentation_currency"):
+			if candidate in names:
+				units, source = {r.get(candidate) for r in rows} - {None, ""}, candidate
+				if units:
+					break
+	if not units:
+		# A report whose currency column is empty (Sales Register without a company filter
+		# fills it from the filter): the company of each row, a column or not.
+		if "company" in names or any(isinstance(r, dict) and r.get("company") for r in rows[:50]):
+			units, source = companies("company"), "company"
+		elif isinstance(filters, dict) and isinstance(filters.get("company"), str):
+			units = {frappe.get_cached_value("Company", filters["company"], "default_currency")}
+	return {u for u in units if u}, source
 
 
 def _log_internal(where: str, error: BaseException) -> None:
@@ -2222,7 +2435,10 @@ _GUARD = "a guard: it sizes its own work (materialised with the item cap, cost-c
 _LAZY = "lazy or constant-time in C: it builds nothing from the size of its argument"
 SAFE_CALLABLES = {
 	**dict.fromkeys(("abs", "all", "any", "callable", "chr", "isinstance", "len", "next", "ord"), _LAZY),
-	**dict.fromkeys(("enumerate", "filter", "map", "reversed", "slice", "zip"), _LAZY),
+	**dict.fromkeys(("enumerate", "reversed", "slice", "zip"), _LAZY),
+	**dict.fromkeys(
+		("map", "filter"), "a guard: a Python iterator that checks time and memory before every item"
+	),
 	"bool": _CLASS,
 	"float": "parses text of at most MAX_TEXT_CHARS characters, in linear time",
 	"range": "refuses more than MAX_RANGE numbers, and is lazy",
@@ -2355,6 +2571,8 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 		{
 			**_PLAIN_BUILTINS,
 			**types_,  # str, int, list, tuple, set, dict: size-, hash- and nesting-checked
+			"map": guards.map,
+			"filter": guards.filter,
 			"pow": guards.pow,
 			"round": guards.round,
 			"sum": guards.sum,

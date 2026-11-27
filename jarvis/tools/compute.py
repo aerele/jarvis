@@ -294,7 +294,12 @@ def _json_safe(value):
 		raise ComputeCodeError(str(e)) from None
 	try:
 		return _tidy_floats(json.loads(json.dumps(value, default=_plain, allow_nan=False)))
-	except ValueError:
+	except ValueError as e:
+		if "limit" in sandbox.error_text(e, 200).casefold():
+			raise ComputeCodeError(
+				"result holds a number too large to return (more than 4,300 digits). Return it rounded, "
+				"as a float, or as its number of digits."
+			) from None
 		raise ComputeCodeError(
 			"result holds NaN or Infinity (a division by zero?). Return a number or None instead."
 		) from None

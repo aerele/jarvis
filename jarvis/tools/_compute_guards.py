@@ -115,7 +115,16 @@ MAX_ERROR_CHARS = 1_000
 
 # Items an unsized iterable is read in, between time and memory checks: each chunk is
 # one C call (a few hundred microseconds), a running total keeps it under the cap.
-MATERIALIZE_CHUNK = 4_096
+MATERIALIZE_CHUNK = 256
+
+# The filename the compiled script carries. A function the script defines (a lambda, a
+# def) ticks on every call itself; anything else a C loop calls per item (str.upper as a
+# key, a helper) is driven from a Python loop that ticks instead.
+SCRIPT_FILENAME = "<jarvis-compute>"
+
+# Items a key function is applied to between two time and memory checks, when the key
+# is not the script's own function: one item may cost up to a text of MAX_TEXT_CHARS.
+KEY_TICK_ITEMS = 64
 
 # Containers shorter than this are measured on every comparison (a few microseconds in
 # C) rather than cached: the cache holds what it measures alive until the run ends.
@@ -671,10 +680,11 @@ def check_format_spec(spec: str):
 # --------------------------------------------------------------------------- #
 
 
-def guarded_type(name: str, real: type, call, attrs: dict):
+def guarded_type(name: str, real: type, call, attrs: dict, wrap=None):
 	"""A stand-in for ``real`` the script calls and tests against: calling it runs
 	``call``; ``isinstance`` / ``issubclass`` answer for ``real``; ``name.attr`` comes from
-	``attrs`` (guarded) or ``real``."""
+	``attrs`` (guarded) or ``real``, a callable one through ``wrap(real, attr, value)``
+	(``str.upper`` checked like any other callable)."""
 
 	class _Meta(type):
 		def __instancecheck__(cls, obj):
@@ -691,7 +701,8 @@ def guarded_type(name: str, real: type, call, attrs: dict):
 				raise AttributeError(attr)
 			if attr in attrs:
 				return attrs[attr]
-			return getattr(real, attr)
+			value = getattr(real, attr)
+			return wrap(real, attr, value) if wrap is not None and callable(value) else value
 
 		def __repr__(cls):
 			return f"<class '{name}'>"
@@ -909,8 +920,8 @@ class Guards:
 	def materialize(self, iterable, what: str, cap: int = MAX_SEQUENCE_ITEMS) -> list:
 		"""``iterable`` as a list, refused past ``cap`` items without building more. A sized
 		iterable is checked by its length first; anything else is read in chunks of
-		MATERIALIZE_CHUNK items (each read in C), with the run's time and memory checks
-		between chunks."""
+		MATERIALIZE_CHUNK items (each read in C), with the run's tick (time, and memory every
+		few milliseconds) between chunks."""
 		if hasattr(iterable, "__len__") and not isinstance(iterable, dict):
 			n = len(iterable)
 			if n > cap:
@@ -927,7 +938,7 @@ class Guards:
 				_refuse(f"{what} would make a list of more than {cap:,} items; the limit is {cap:,}.")
 			if len(chunk) < MATERIALIZE_CHUNK:
 				return out
-			self._check_memory()
+			# (the tick above reads memory every MEMORY_CHECK_INTERVAL_S)
 
 	# Starred displays and calls -------------------------------------------------
 
@@ -1044,10 +1055,56 @@ class Guards:
 		return divmod(a, b)
 
 	def _keys(self, items: list, key, what: str) -> list:
-		# nosemgrep: frappe-no-functional-code -- map/compress run the loop in C; a comprehension here costs 3x on 100k rows
-		keys = items if key is None else list(map(key, items))
+		"""``key`` applied to every item. The script's own function ticks on each call, so a
+		C map is safe; any other callable (``str.upper``, a helper) runs from a Python loop
+		that checks time and memory every KEY_TICK_ITEMS items."""
+		if key is None:
+			keys = items
+		elif _ticks_itself(key):
+			# nosemgrep: frappe-no-functional-code -- map runs the loop in C; the key ticks itself
+			keys = list(map(key, items))
+		else:
+			keys = []
+			append = keys.append
+			for i, item in enumerate(items):
+				if not i % KEY_TICK_ITEMS:
+					self._tick()
+				append(key(item))
 		self.check_cost(keys, what)
 		return keys
+
+	# map, filter and class attributes ---------------------------------------------
+
+	def map(self, func, *iterables):
+		"""``map`` as a Python iterator: time and memory checked before every item, and a
+		text it produces at most MAX_TEXT_CHARS (a C map would call ``str.upper`` on
+		200,000 items without a check)."""
+		if not iterables:
+			raise TypeError("map() must have at least two arguments.")
+		return _Mapped(self, func, [iter(it) for it in iterables])
+
+	def filter(self, func, iterable):
+		"""``filter`` as a Python iterator, checked like ``map``."""
+		return _Filtered(self, func, iter(iterable))
+
+	def produced(self, value):
+		if type(value) is str and len(value) > MAX_TEXT_CHARS:
+			_refuse(f"map() would make text of {len(value):,} characters; the limit is {MAX_TEXT_CHARS:,}.")
+		return self._after(value)
+
+	def class_attr(self, cls, name: str, value):
+		"""A callable taken off a class (``str.upper``, ``date.strftime``): checked like any
+		exposed callable, and routed through the instance guard when the instance has one
+		(``date.strftime(d, fmt)`` gets the strftime cap)."""
+
+		def call(*args, **kwargs):
+			if args and isinstance(args[0], cls):
+				guarded = self.method(args[0], name)
+				if guarded is not None:
+					return guarded(*args[1:], **kwargs)
+			return value(*args, **kwargs)
+
+		return Exposed(call, f"{cls.__name__}.{name}")
 
 	def sorted(self, iterable, /, *, key=None, reverse=False):
 		self._tick()
@@ -1164,8 +1221,9 @@ class Guards:
 			check_nesting(value, "dict.fromkeys()")
 			return self._after(dict.fromkeys(items, value))
 
+		wrap = self.class_attr
 		return {
-			"str": guarded_type("str", str, make_str, self._class_methods(str, _TEXT_METHOD_NAMES)),
+			"str": guarded_type("str", str, make_str, self._class_methods(str, _TEXT_METHOD_NAMES), wrap),
 			"int": guarded_type(
 				"int",
 				int,
@@ -1174,10 +1232,15 @@ class Guards:
 					"from_bytes": Exposed(from_bytes, "int.from_bytes", check=False),
 					**self._class_methods(int, ("to_bytes",)),
 				},
+				wrap,
 			),
-			"list": guarded_type("list", list, make_list, self._class_methods(list, _GUARDED_LIST_METHODS)),
-			"tuple": guarded_type("tuple", tuple, make_tuple, self._class_methods(tuple, ("count", "index"))),
-			"set": guarded_type("set", set, make_set, self._class_methods(set, _GUARDED_SET_METHODS)),
+			"list": guarded_type(
+				"list", list, make_list, self._class_methods(list, _GUARDED_LIST_METHODS), wrap
+			),
+			"tuple": guarded_type(
+				"tuple", tuple, make_tuple, self._class_methods(tuple, ("count", "index")), wrap
+			),
+			"set": guarded_type("set", set, make_set, self._class_methods(set, _GUARDED_SET_METHODS), wrap),
 			"dict": guarded_type(
 				"dict",
 				dict,
@@ -1186,6 +1249,7 @@ class Guards:
 					"fromkeys": Exposed(fromkeys, "dict.fromkeys", check=False),
 					**self._class_methods(dict, _GUARDED_DICT_METHODS),
 				},
+				wrap,
 			),
 		}
 
@@ -1358,6 +1422,53 @@ def _add_keyword(kwargs: dict, name, value):
 	if name in kwargs:
 		raise TypeError(f"got multiple values for keyword argument '{name}'")
 	kwargs[name] = value
+
+
+def _ticks_itself(func) -> bool:
+	code = getattr(func, "__code__", None)
+	return code is not None and code.co_filename == SCRIPT_FILENAME
+
+
+class _Mapped:
+	__slots__ = ("_func", "_guards", "_its")
+
+	def __init__(self, guards, func, its):
+		self._guards = guards
+		self._func = func
+		self._its = its
+
+	def __iter__(self):
+		return self
+
+	def __next__(self):
+		self._guards._tick()
+		args = [next(it) for it in self._its]
+		return self._guards.produced(self._func(*args))
+
+	def __repr__(self):
+		return "<map object>"
+
+
+class _Filtered:
+	__slots__ = ("_func", "_guards", "_it")
+
+	def __init__(self, guards, func, it):
+		self._guards = guards
+		self._func = func
+		self._it = it
+
+	def __iter__(self):
+		return self
+
+	def __next__(self):
+		while True:
+			self._guards._tick()
+			item = next(self._it)
+			if item if self._func is None else self._func(item):
+				return item
+
+	def __repr__(self):
+		return "<filter object>"
 
 
 def _pair_keys(pairs: list) -> list:
