@@ -123,16 +123,17 @@ class TestOracleComparator(TestCase):
 			self.compare(invalid, refusing("too_large"))
 
 	def test_the_multibook_and_too_large_precedence_change_is_the_only_accepted_pair(self):
-		with self.assertRaises(CalendarSourceUnavailable) as raised:
-			self.compare(refusing("too_large"), refusing("multibook_unsupported"))
-		self.assertEqual(raised.exception.code, "too_large")
-		for real, oracle in (
-			("multibook_unsupported", "too_large"),
-			("too_large", "reconciliation_mismatch"),
-			("reconciliation_mismatch", "multibook_unsupported"),
-		):
-			with self.subTest(real=real, oracle=oracle), self.assertRaises(AssertionError):
-				self.compare(refusing(real), refusing(oracle))
+		with patch.object(compatibility, "source_profile", return_value=SimpleNamespace(major="16")):
+			with self.assertRaises(CalendarSourceUnavailable) as raised:
+				self.compare(refusing("too_large"), refusing("multibook_unsupported"))
+			self.assertEqual(raised.exception.code, "too_large")
+			for real, oracle in (
+				("multibook_unsupported", "too_large"),
+				("too_large", "reconciliation_mismatch"),
+				("reconciliation_mismatch", "multibook_unsupported"),
+			):
+				with self.subTest(real=real, oracle=oracle), self.assertRaises(AssertionError):
+					self.compare(refusing(real), refusing(oracle))
 
 	def test_the_accepted_pair_is_not_accepted_on_v15(self):
 		with patch.object(compatibility, "source_profile", return_value=SimpleNamespace(major="15")):
