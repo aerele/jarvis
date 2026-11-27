@@ -20,13 +20,27 @@ from unittest.mock import patch
 
 import frappe
 from frappe.model import document as document_module
-from frappe.model.document import Document, LazyChildTable, LazyDocument, _DocumentBase
+from frappe.model.document import Document, _DocumentBase
 from frappe.model.meta import Meta
 from frappe.tests.utils import FrappeTestCase
 
 from jarvis.payment_calendar import compatibility
+from jarvis.tests.payment_calendar_majors import (
+	GATE_NO_DOCUMENT_TABLE_FIELDNAMES,
+	GATE_NO_LAZY_DOCUMENT,
+	GATE_NO_V15_PERMISSION_PINS,
+	IS_V15,
+	v16_only,
+)
 
-MAJOR = "16"
+PIN_MAJOR = "16"  # the key of the pin tables, not the installed major
+
+# Frappe 15 has neither class. The tests that need one carry `v16_only(GATE_NO_LAZY_DOCUMENT)`.
+LazyDocument = getattr(document_module, "LazyDocument", None) if IS_V15 else document_module.LazyDocument
+LazyChildTable = (
+	getattr(document_module, "LazyChildTable", None) if IS_V15 else document_module.LazyChildTable
+)
+_ABSENT = object()
 
 
 def _plain(*args, **kwargs):
@@ -96,7 +110,11 @@ def clean_bindings():
 	try:
 		for row in _module_rows():
 			module = importlib.import_module(row.binding)
-			live = getattr(module, row.attribute)
+			live = getattr(module, row.attribute, _ABSENT)
+			if live is _ABSENT and IS_V15:  # a binding that the installed Frappe lacks
+				continue
+			if live is _ABSENT:
+				live = getattr(module, row.attribute)  # on any other major an absent binding is a failure
 			genuine = _genuine(live, row)
 			if genuine is not None and genuine is not live:
 				saved.append((module, row.attribute, live))
@@ -170,6 +188,7 @@ class TestDefinedSourceHash(CleanBindingsCase):
 		path.write_text(text)
 		return str(path)
 
+	@v16_only(GATE_NO_DOCUMENT_TABLE_FIELDNAMES)
 	def test_hash_equals_the_inspect_source_of_functions_methods_and_nested_functions(self):
 		from frappe.permissions import get_doc_name
 
@@ -253,12 +272,13 @@ class TestDefinedSourceHash(CleanBindingsCase):
 		self.assertIsNotNone(compatibility.defined_source_hash(path, "g.<locals>.f"))
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestPermissionPins(FrappeTestCase):
 	def test_installed_sources_match_the_accepted_hashes(self):
 		self.assertEqual(compatibility.permission_pin_drift(), [])
 
 	def test_every_pin_is_hashed_from_an_installed_source(self):
-		for name in compatibility._PERMISSION_PINS[MAJOR]:
+		for name in compatibility._PERMISSION_PINS[PIN_MAJOR]:
 			with self.subTest(name=name):
 				resolved = compatibility._resolve_pin(name)
 				if resolved is None:
@@ -267,12 +287,12 @@ class TestPermissionPins(FrappeTestCase):
 				self.assertIsNotNone(compatibility.defined_source_hash(*resolved))
 
 	def test_each_pin_drifts_when_its_accepted_hash_changes(self):
-		for name in compatibility._PERMISSION_PINS[MAJOR]:
+		for name in compatibility._PERMISSION_PINS[PIN_MAJOR]:
 			if compatibility._resolve_pin(name) is None:
 				continue
 			with (
 				self.subTest(name=name),
-				patch.dict(compatibility._PERMISSION_PINS[MAJOR], {name: ("0" * 64,)}),
+				patch.dict(compatibility._PERMISSION_PINS[PIN_MAJOR], {name: ("0" * 64,)}),
 			):
 				self.assertIn(name, compatibility.permission_pin_drift())
 
@@ -311,7 +331,7 @@ class TestPermissionPins(FrappeTestCase):
 
 	def test_playground_is_pinned_only_when_importable(self):
 		name = "jarvis_playground.visitors.access.has_permission"
-		self.assertIn(name, compatibility._PERMISSION_PINS[MAJOR])
+		self.assertIn(name, compatibility._PERMISSION_PINS[PIN_MAJOR])
 		with patch.object(compatibility, "_importable", lambda package: package != "jarvis_playground"):
 			self.assertNotIn(name, compatibility.permission_pin_drift())
 			self.assertEqual(compatibility.permission_pin_drift(), [])
@@ -325,7 +345,7 @@ class TestPermissionPins(FrappeTestCase):
 	def test_permission_drift_never_changes_the_reader_pin_drift(self):
 		before = compatibility.reader_pin_drift()
 		with patch.dict(
-			compatibility._PERMISSION_PINS[MAJOR], {"frappe.permissions.has_permission": ("0" * 64,)}
+			compatibility._PERMISSION_PINS[PIN_MAJOR], {"frappe.permissions.has_permission": ("0" * 64,)}
 		):
 			self.assertIn("frappe.permissions.has_permission", compatibility.permission_pin_drift())
 			self.assertEqual(compatibility.reader_pin_drift(), before)
@@ -368,6 +388,7 @@ class TestPermissionPins(FrappeTestCase):
 		self.assertIsInstance(compatibility.CONTROLLER_ALLOWLIST, frozenset)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestPersistedDefinitions(CleanBindingsCase):
 	"""The definitions of a file are kept in Redis, so a forked job parses nothing that nobody changed."""
 
@@ -392,6 +413,7 @@ class TestPersistedDefinitions(CleanBindingsCase):
 		self.assertEqual((result, parses), (self.expected, 0))
 		self.assertEqual(compatibility.defined_line(self.path, "f"), 1)
 
+	@v16_only(GATE_NO_LAZY_DOCUMENT)
 	def test_the_whole_pin_and_identity_check_parses_nothing_in_a_new_process(self):
 		lazy_cls, children = _controllers("Sales Invoice")
 		self.assertEqual(compatibility.permission_pin_drift(), [])
@@ -411,7 +433,7 @@ class TestPersistedDefinitions(CleanBindingsCase):
 		name = "frappe.permissions.get_doc_name"
 		self.assertEqual(compatibility.permission_pin_drift(), [])  # warms the Redis records
 		forget_process_memos()
-		with patch.dict(compatibility._PERMISSION_PINS[MAJOR], {name: ("0" * 64,)}):
+		with patch.dict(compatibility._PERMISSION_PINS[PIN_MAJOR], {name: ("0" * 64,)}):
 			result, parses = self._parses(compatibility.permission_pin_drift)
 		self.assertEqual((result, parses), ([name], 0))
 
@@ -432,7 +454,7 @@ class TestPersistedDefinitions(CleanBindingsCase):
 			self.assertEqual((result, parses), (self.expected, 1))
 			forget_process_memos()
 			with patch.dict(
-				compatibility._PERMISSION_PINS[MAJOR], {"frappe.permissions.get_doc_name": ("0" * 64,)}
+				compatibility._PERMISSION_PINS[PIN_MAJOR], {"frappe.permissions.get_doc_name": ("0" * 64,)}
 			):
 				self.assertEqual(compatibility.permission_pin_drift(), ["frappe.permissions.get_doc_name"])
 		forget_process_memos()
@@ -461,6 +483,7 @@ class TestPersistedDefinitions(CleanBindingsCase):
 		self.assertIn("jarvis:pcal:", keys[0].decode() if isinstance(keys[0], bytes) else keys[0])
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestReaderPinPrefixIsIntact(FrappeTestCase):
 	def test_reader_pin_names_with_the_restriction_prefix_still_resolve(self):
 		prefix = compatibility._RESTRICTION
@@ -482,10 +505,11 @@ class TestLookupTable(FrappeTestCase):
 		self.assertEqual(len({row.row for row in rows}), len(rows))
 		self.assertEqual({row.kind for row in rows}, {"B", "S", "X"})
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_every_b_and_s_row_is_defined_in_a_pinned_source(self):
 		pinned = {
 			compatibility._resolve_pin(name)
-			for name in compatibility._PERMISSION_PINS[MAJOR]
+			for name in compatibility._PERMISSION_PINS[PIN_MAJOR]
 			if compatibility._resolve_pin(name) is not None
 		}
 		for row in compatibility.PERMISSION_LOOKUP:
@@ -500,6 +524,7 @@ class TestLookupTable(FrappeTestCase):
 						)
 					)
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_every_pinned_definition_exists_in_its_file(self):
 		for row in compatibility.PERMISSION_LOOKUP:
 			if row.kind == "X" or not compatibility._row_applies(row):
@@ -509,6 +534,7 @@ class TestLookupTable(FrappeTestCase):
 					self.assertIsNotNone(compatibility.defined_line(path, qualname))
 
 
+@v16_only(GATE_NO_LAZY_DOCUMENT)
 class TestIdentityOnTheCleanSite(CleanBindingsCase):
 	def test_clean_site_passes_for_the_sales_invoice_and_its_children(self):
 		for doctype in (
@@ -540,6 +566,7 @@ class TestIdentityOnTheCleanSite(CleanBindingsCase):
 		self.assertEqual(first, ["4"])
 
 
+@v16_only(GATE_NO_LAZY_DOCUMENT)
 class TestIdentityCost(CleanBindingsCase):
 	def setUp(self):
 		self.lazy_cls, self.children = _controllers("Sales Invoice")
@@ -621,6 +648,7 @@ class TestIdentityCost(CleanBindingsCase):
 			self._failures()
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestPinFailuresAreDrift(FrappeTestCase):
 	def test_an_exception_while_resolving_or_hashing_a_pin_is_drift(self):
 		for target in ("_resolve_pin", "defined_source_hash"):
@@ -645,6 +673,7 @@ class TestPinFailuresAreDrift(FrappeTestCase):
 			compatibility.permission_pin_drift()
 
 
+@v16_only(GATE_NO_LAZY_DOCUMENT)
 class TestModuleRebinds(CleanBindingsCase):
 	"""AC-B12b: rebind ONLY the named binding; its rows, and only its rows, fail."""
 
@@ -747,6 +776,7 @@ class TestModuleRebinds(CleanBindingsCase):
 			self.assertIs(getattr(importlib.import_module(binding), attribute), function)
 
 
+@v16_only(GATE_NO_LAZY_DOCUMENT)
 class TestClassRebinds(CleanBindingsCase):
 	def setUp(self):
 		self.lazy_cls, self.children = _controllers("Sales Invoice")
@@ -911,4 +941,4 @@ class SalesInvoice(Document):
 
 
 SalesInvoice.__qualname__ = "SalesInvoice"
-_FakeLazy = type("LazySalesInvoice", (LazyDocument, SalesInvoice), {})
+_FakeLazy = type("LazySalesInvoice", (LazyDocument, SalesInvoice), {}) if LazyDocument else None

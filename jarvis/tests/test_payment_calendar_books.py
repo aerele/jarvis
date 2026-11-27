@@ -25,6 +25,7 @@ from jarvis.tests.payment_calendar_fixtures import (
 	require_calendar_test_site,
 	sync_outstanding,
 )
+from jarvis.tests.payment_calendar_majors import GATE_BANK_ONE_PASS_V15, v16_only
 
 OTHER_BOOK = "Other Finance Book"
 
@@ -102,11 +103,13 @@ class TestBookMemoDirect(BookFixtures, TestCase):
 		frappe.set_user("Administrator")
 		frappe.db.rollback(save_point="pcal_books")
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_one_ple_query_serves_the_bank_and_both_sides(self):
 		with books.book_memo(), count_ple_book_queries() as seen:
 			self.assertEqual(self.run_checks(), [None, None, None])
 		self.assertEqual(len(seen), 1)
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_the_bank_payment_ledger_check_alone_shares_the_memo_with_the_sides(self):
 		"""The one-pass bank read has no GL book gate; it calls this check on its own."""
 		self.ple_book("Receivable", OTHER_BOOK, "Alt")
@@ -142,6 +145,7 @@ class TestBookMemoDirect(BookFixtures, TestCase):
 		with books.book_memo():
 			self.assertEqual(self.run_checks(), ["multibook_unsupported", None, "multibook_unsupported"])
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_the_memo_is_keyed_by_the_accounting_date(self):
 		self.ple_book("Receivable", OTHER_BOOK, "Future", offset=5)
 		with books.book_memo(), count_ple_book_queries() as seen:
@@ -204,6 +208,7 @@ class TestBookMemoDirect(BookFixtures, TestCase):
 				self.assertEqual(memo[2], "multibook_unsupported")
 				frappe.db.set_value("Payment Ledger Entry", row, "delinked", 1)
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_the_direct_groups_never_come_from_the_memo(self):
 		self.ple_book("Payable", None, "Seen")
 		with books.book_memo() as _, patch.object(routing, "reader_settings", self.settings):
@@ -268,9 +273,11 @@ class TestBookMemoSwitch(BookFixtures, TestCase):
 			with self.subTest(mode=mode, served=served):
 				self.assertEqual(self.queries_with(settings_for(self.fx.company, mode, served)), 3)
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_on_and_listed_uses_the_memo(self):
 		self.assertEqual(self.queries_with(settings_for(self.fx.company)), 1)
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_the_switch_is_read_once_per_view(self):
 		settings = settings_for(self.fx.company)
 		self.queries_with(settings)
@@ -347,6 +354,7 @@ class TestBookMemoInTheView(ViewCase):
 		books.validate_obligation_books(self.fx.company, "Payable", self.fx.today)
 		books.validate_obligation_books(self.fx.company, "Receivable", self.fx.today)
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_the_view_opens_the_memo(self):
 		with snapshot.consistent_read(), count_ple_book_queries() as seen:
 			self.checks()
@@ -383,11 +391,18 @@ class TestBookMemoInCollect(ViewCase):
 		fingerprint = authorize_scope(scope)["fingerprint"]
 		self.collect = lambda: snapshot.collect(scope, fingerprint)
 
-	def test_collect_reads_the_books_once_when_on_and_three_times_otherwise(self):
-		for mode, expected in (("on", 1), ("shadow", 3), ("off", 3)):
+	def assert_collect_reads_the_books(self, cases):
+		for mode, expected in cases:
 			with self.subTest(mode=mode):
 				self.settings.return_value = routing.ReaderSettings(mode, (self.fx.company,), ())
 				with count_ple_book_queries() as seen:
 					result = self.collect()
 				self.assertEqual(result["unavailable"], {})
 				self.assertEqual(len(seen), expected, seen)
+
+	@v16_only(GATE_BANK_ONE_PASS_V15)
+	def test_collect_reads_the_books_once_when_on(self):
+		self.assert_collect_reads_the_books((("on", 1),))
+
+	def test_collect_reads_the_books_three_times_when_shadow_or_off(self):
+		self.assert_collect_reads_the_books((("shadow", 3), ("off", 3)))

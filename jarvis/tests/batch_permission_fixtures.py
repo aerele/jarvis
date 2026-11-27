@@ -13,6 +13,7 @@ import frappe
 
 from jarvis.payment_calendar import batch_permission, read_log
 from jarvis.tests.payment_calendar_fixtures import CalendarFixtures, require_calendar_test_site
+from jarvis.tests.payment_calendar_majors import IS_V15
 from jarvis.tests.test_batch_permission_pins import clean_bindings
 
 SWITCH = batch_permission.SWITCH
@@ -20,6 +21,15 @@ SI, PI, PE, JE = "Sales Invoice", "Purchase Invoice", "Payment Entry", "Journal 
 HOOK_STATE: dict = {}
 # A busy shared site ends a build with a lock wait: a few short retries, then the error is raised.
 BUILD_ATTEMPTS = 4
+# The child doctypes that ERPNext 15 does not have. `row()` inserts nothing for them there; any other name still fails.
+ABSENT_ON_V15 = frozenset(
+	{
+		"Tax Withholding Entry",
+		"Company Restriction",
+		"Customer Number At Supplier",
+		"Supplier Number At Customer",
+	}
+)
 
 
 @contextmanager
@@ -182,6 +192,11 @@ class BatchFixtures:
 		return name
 
 	def row(self, doctype, suffix, parent, table, **fields):
+		"""Insert one child row and return its name; None when Frappe 15 lacks the child doctype."""
+		if IS_V15 and doctype in ABSENT_ON_V15 and not frappe.db.exists("DocType", doctype):
+			# one of the four child doctypes that ERPNext 15 does not have: no row, so a test that needs it
+			# is gated. On any other major, or for any other doctype, a missing doctype stays a loud failure.
+			return None
 		parenttype = fields.pop("parenttype", SI)
 		return self.insert(
 			doctype, suffix, parent=parent, parenttype=parenttype, parentfield=table, idx=1, **fields

@@ -29,6 +29,7 @@ from jarvis.tests.batch_permission_fixtures import (
 	session_as,
 	switch_on,
 )
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_PERMISSION_PINS, v16_only
 
 SI_TABLE = "tabSales Invoice"
 
@@ -88,6 +89,7 @@ def counting_sql(match: str):
 	return seen, patch.object(frappe.db, "sql", sql)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestSchemaFactsLiveOneRequest(BatchCase):
 	def visible(self, user, names=None, doctype=SI):
 		names = set(names or self.f.names(doctype))
@@ -165,6 +167,7 @@ class TestSchemaFactsLiveOneRequest(BatchCase):
 		self.assertGreater(len(seen), before)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestPlanBuildFailsSafe(BatchCase):
 	def plan(self, user=None):
 		with session_as(user or self.f.u1):
@@ -275,6 +278,7 @@ def comment_above(lines: list[str], number: int) -> str:
 	return "\n".join(reversed(block))
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestTranscribedBlocksCiteFrappe(BatchCase):
 	def mirrors(self):
 		text = "".join(

@@ -16,6 +16,7 @@ from jarvis.payment_calendar import banks, books, compatibility, read_log, routi
 from jarvis.payment_calendar.banks import BANK_FALLBACK_KEY, BANK_PATH_KEY, read_bank_balances
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.tests.payment_calendar_fixtures import CalendarFixtures, require_calendar_test_site
+from jarvis.tests.payment_calendar_majors import GATE_BANK_ONE_PASS_V15, v16_only
 
 
 @contextmanager
@@ -242,7 +243,8 @@ class TestOnePassSelection(BankOnePassCase):
 				self.assertEqual(self.assert_same()[0], "raised")
 			frappe.db.set_value("Account", self.fx.bank, field, old)
 
-	def test_fifty_accounts_are_one_gl_query_and_fifty_one_are_refused(self):
+	@v16_only(GATE_BANK_ONE_PASS_V15)
+	def test_fifty_accounts_are_one_gl_query(self):
 		banks = [self.fx.account(f"Many{i}", "Bank", "Asset") for i in range(50)]
 		for index, name in enumerate(banks[:5]):
 			self.gl_row(index + 1, account=name)
@@ -252,6 +254,9 @@ class TestOnePassSelection(BankOnePassCase):
 		self.assertEqual(len(queries), 1)
 		self.assertIn("GROUP BY account, finance_book", queries[0])
 		self.assertEqual(result, self.today_path(banks)[1])
+
+	def test_fifty_one_accounts_are_refused_alike_by_both_paths(self):
+		banks = [self.fx.account(f"Many{i}", "Bank", "Asset") for i in range(50)]
 		self.assertEqual(self.assert_same(banks + [self.fx.bank])[0], "raised")
 
 	def test_an_account_the_user_cannot_read_refuses_alike(self):
@@ -319,16 +324,8 @@ class TestOnePassRouting(BankOnePassCase):
 			result, queries = gl_queries(self.read())
 		return result, any("GROUP BY account, finance_book" in query for query in queries)
 
-	def test_only_on_with_the_company_served_uses_one_pass(self):
+	def assert_one_pass_only_where(self, cases):
 		self.gl_row(100)
-		company = self.fx.company
-		cases = (
-			("off", (company,), False),
-			("shadow", (company,), False),
-			("on", (), False),
-			("on", ("Another Company",), False),
-			("on", (company,), True),
-		)
 		replies = set()
 		for mode, served, expected in cases:
 			with self.subTest(mode=mode, served=served):
@@ -337,6 +334,21 @@ class TestOnePassRouting(BankOnePassCase):
 				replies.add(repr(result))
 		self.assertEqual(len(replies), 1)
 
+	def test_off_shadow_an_empty_list_and_another_company_do_not_use_one_pass(self):
+		company = self.fx.company
+		self.assert_one_pass_only_where(
+			(
+				("off", (company,), False),
+				("shadow", (company,), False),
+				("on", (), False),
+				("on", ("Another Company",), False),
+			)
+		)
+
+	@v16_only(GATE_BANK_ONE_PASS_V15)
+	def test_on_with_the_company_served_uses_one_pass(self):
+		self.assert_one_pass_only_where((("on", (self.fx.company,), True),))
+
 	def test_off_reads_the_ledger_the_way_today_does(self):
 		self.gl_row(100)
 		with switch("off"):
@@ -344,6 +356,7 @@ class TestOnePassRouting(BankOnePassCase):
 		# The book gate and one balance read: at least two GL queries, none of them grouped.
 		self.assertGreaterEqual(len(queries), 2)
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_on_reads_the_ledger_once(self):
 		self.gl_row(100)
 		with switch("on", (self.fx.company,)):
@@ -381,6 +394,7 @@ class TestOnePassPin(BankOnePassCase):
 
 		return get_balance_on
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_the_installed_helper_is_pinned(self):
 		self.assertTrue(compatibility.bank_one_pass_pinned(self.helper()))
 
@@ -456,12 +470,14 @@ class TestOnePassPlanHint(BankOnePassCase):
 		self.assertEqual(result, self.today_path())
 		self.assertEqual(result[1]["total"], "100.00")
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_the_installed_hint_names_an_existing_index(self):
 		self.gl_row(100)
 		result, today_calls = self.run_with_sql(banks._ONE_PASS_SQL)
 		self.assertEqual(today_calls, 0)
 		self.assertEqual(result[1]["total"], "100.00")
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_any_other_database_error_propagates(self):
 		self.gl_row(100)
 		broken = banks._ONE_PASS_SQL.replace("SELECT account,", "SELECT no_such_column,")
@@ -626,6 +642,7 @@ class TestCanonicalAccountLabels(BankOnePassCase):
 		)
 		self.assertEqual(self.assert_same()[1]["total"], "120.00")
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_an_unresolvable_label_falls_back_to_todays_read(self):
 		self.gl_row(100)
 		real = frappe.db.get_value
@@ -649,6 +666,7 @@ class TestCanonicalAccountLabels(BankOnePassCase):
 
 
 class TestStaleCompanyDefault(BankOnePassCase):
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_the_summed_books_follow_the_cached_default_like_get_balance_on(self):
 		book = self.fx.insert("Finance Book", "Book", finance_book_name="Calendar default")
 		frappe.get_cached_value("Company", self.fx.company, "default_finance_book")
@@ -757,6 +775,7 @@ class TestSharedPieces(BankOnePassCase):
 		self.assertEqual(books.allowed_books("Any Co", None), {None, ""})
 		self.assertEqual(books.allowed_books("Any Co", "Default"), {None, "", "Default"})
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_the_helper_hashes_are_one_constant_for_both_readers(self):
 		from erpnext.accounts.utils import get_balance_on
 
@@ -803,6 +822,7 @@ class TestPinHardening(BankOnePassCase):
 
 		return get_balance_on
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_a_wrapper_with_the_audited_source_text_is_not_pinned(self):
 		import functools
 
@@ -814,6 +834,7 @@ class TestPinHardening(BankOnePassCase):
 
 		self.assertEqual(compatibility.bank_one_pass_blocker(wrapper), "unpinned")
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_a_function_from_another_module_is_not_pinned(self):
 		import types
 
@@ -822,6 +843,7 @@ class TestPinHardening(BankOnePassCase):
 		with patch.object(compatibility, "getsource", return_value=compatibility.getsource(self.helper())):
 			self.assertEqual(compatibility.bank_one_pass_blocker(clone), "unpinned")
 
+	@v16_only(GATE_BANK_ONE_PASS_V15)
 	def test_the_blocker_names_v15_and_unpinned(self):
 		import erpnext
 
@@ -849,14 +871,12 @@ class TestSettingsReadInsideAView(BankOnePassCase):
 		self.assertFalse(hasattr(frappe.local, BANK_PATH_KEY))
 
 	def test_a_rolled_back_settings_read_breaks_the_view(self):
-		from MySQLdb import OperationalError
-
 		from jarvis.payment_calendar import snapshot
 
 		# Every view now reads the switch, also when it is off: a deadlock in that read ends the view.
 		frappe.db.rollback()
 		with self.assertRaises(CalendarSourceUnavailable):
 			with snapshot.consistent_read():
-				with patch.object(routing, "_read", side_effect=OperationalError(1213, "deadlock")):
+				with patch.object(routing, "_read", side_effect=frappe.db.OperationalError(1213, "deadlock")):
 					self.assertEqual(books.view_settings().mode, "off")
 				self.assertTrue(snapshot.view_is_broken())

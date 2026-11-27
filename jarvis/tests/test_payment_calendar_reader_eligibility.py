@@ -8,6 +8,7 @@ import frappe
 from jarvis.payment_calendar import compatibility, eligibility
 from jarvis.payment_calendar.errors import ReaderFallback
 from jarvis.tests.payment_calendar_fixtures import CalendarFixtures, require_calendar_test_site
+from jarvis.tests.payment_calendar_majors import GATE_NO_MASKED_FIELDS, v16_only
 
 COMPANY = "Acme"
 RESTRICTION = "erpnext.stock.doctype.company_restriction.company_restriction."
@@ -296,6 +297,7 @@ class TestLinkedDoctypes(TestCase):
 				self.assertLessEqual(fields, set(frappe.get_meta(doctype).get_valid_columns()))
 
 
+@v16_only(GATE_NO_MASKED_FIELDS)
 class TestReaderIneligibility(TestCase):
 	"""The wrapper, with live permissions on a fixture company."""
 
@@ -574,6 +576,7 @@ class TestReaderIneligibility(TestCase):
 					self.reasons()
 
 
+@v16_only(GATE_NO_MASKED_FIELDS)
 class TestReaderFieldsRestricted(TestCase):
 	def setUp(self):
 		require_calendar_test_site()
@@ -616,6 +619,7 @@ class TestReaderFieldsRestricted(TestCase):
 				self.assertTrue(eligibility.reader_fields_restricted())
 
 
+@v16_only(GATE_NO_MASKED_FIELDS)
 class TestReaderFieldsRestrictedThroughFrappe(TestCase):
 	"""The real get_permitted_fields path; the permlevel grant is patched, so no shared state changes."""
 

@@ -16,6 +16,7 @@ import frappe
 
 from jarvis.payment_calendar import batch_permission, read_log
 from jarvis.tests import test_payment_calendar_reply_matrix as matrix
+from jarvis.tests.payment_calendar_majors import GATE_NO_MASKED_FIELDS, v16_only
 from jarvis.tests.test_batch_permission_pins import clean_bindings
 
 PURCHASE_INVOICE, SALES_INVOICE = "Purchase Invoice", "Sales Invoice"
@@ -97,6 +98,7 @@ class SwitchPairCase(matrix.MatrixCase):
 		return {row["voucher_no"] for row in self.served_rows(result, side)} & matrix._hidden
 
 
+@v16_only(GATE_NO_MASKED_FIELDS)
 class TestReplyWithTheSwitchOn(SwitchPairCase):
 	def test_a_user_without_permissions_gets_the_same_reply_and_the_batch_ran(self):
 		outcomes = self.assert_same_reply(self.new_user(), "no permissions")

@@ -18,6 +18,7 @@ from frappe.utils import add_days, nowdate
 from jarvis.payment_calendar import builtin_reader, sources
 from jarvis.payment_calendar.errors import ReaderFallback
 from jarvis.tests import _erpnext_masters as masters
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_READER_PINS, v16_only
 from jarvis.tests.test_payment_calendar_builtin_reader import (
 	INVOICE_TYPES,
 	PARTY_TYPES,
@@ -188,6 +189,7 @@ class VoucherCase(ReaderCase):
 		)
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestVoucherTypeScenarios(VoucherCase):
 	"""One test per voucher type. The `add_*` builders put one scenario into the fixture company for a side.
 
@@ -788,6 +790,7 @@ class TestVoucherTypeScenarios(VoucherCase):
 				self.assertTrue(result["rows"])
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestRealControllerVoucherTypes(VoucherCase):
 	"""Real Sales Invoices from ERPNext's own controller; headers and ledger come from ERPNext."""
 

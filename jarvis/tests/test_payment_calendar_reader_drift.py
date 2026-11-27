@@ -39,6 +39,7 @@ from jarvis.tests import payment_calendar_drift as drift_module
 from jarvis.tests.payment_calendar_differential import READER_TALLY, compare_reader_with_today
 from jarvis.tests.payment_calendar_drift import GuardError, frozen_clock, run_drift, write_guards
 from jarvis.tests.payment_calendar_fixtures import require_calendar_test_site
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_READER_PINS, v16_only
 
 FROZEN = "2025-06-16 10:00:00"
 ANCHOR = date(2025, 6, 16)
@@ -112,6 +113,7 @@ def probe(company: str) -> dict:
 	return counts
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestReaderDrift(FrappeTestCase):
 	@classmethod
 	def setUpClass(cls):

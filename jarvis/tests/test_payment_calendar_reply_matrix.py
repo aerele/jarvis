@@ -28,6 +28,7 @@ from jarvis.tests.payment_calendar_fixtures import (
 	require_calendar_test_site,
 	sync_outstanding,
 )
+from jarvis.tests.payment_calendar_majors import GATE_NO_MASKED_FIELDS, v16_only
 
 SIDES = ("Payable", "Receivable")
 KEY = "k" * 44
@@ -252,6 +253,7 @@ class SpyBox:
 		self.served = served  # what the reader returned: rows it served
 
 
+@v16_only(GATE_NO_MASKED_FIELDS)
 class TestRoutedReplyMatchesToday(MatrixCase):
 	def test_an_unrestricted_user_is_served_and_equal(self):
 		self.assert_served_equal(self.new_user())

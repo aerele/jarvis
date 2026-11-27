@@ -304,7 +304,7 @@ on the `version-16` head, so there is one hash each. When ERPNext changes a pinn
 4. Restart the web and background workers after the bump. A worker caches the pin result in its process,
    so a worker that was not restarted keeps the old verdict (a stale `pin_drift`, or a missed one).
 
-Only a `"16"` entry exists. Entries for v15 come with the v15 backport.
+Only a `"16"` entry exists. v15 entries come with S6; the v15 code is inactive until then.
 
 **Row ids equal today's.** An id encodes the row's position in the whole result, which follows the order
 in which `init_voucher_balance` first meets each key. It keys a line by its own voucher, so the reader
@@ -504,7 +504,7 @@ counters, the Error Log rows and `shadow.status()`.
 | `reader_refused:<code>` | the reader gave today's own refusal for this data; compare with today's read |
 | `deadline`, `assemble_budget`, `too_many_lines` | the company is too big for the limits; figures stay "unavailable" |
 | `busy`, `memo`, `budget`, `probe`, `cache` | expected under load; a memo clears in 30 minutes (5 for a deterministic one); `cache` means Redis did not answer |
-| `v15`, `no_key` | the site cannot run the reader: nothing to do until it is a v16 site with an `encryption_key` |
+| `v15`, `no_key` | the site cannot run the reader: nothing to do until it is a v16 site with an `encryption_key`. On a v15 site `v15` means that someone switched the reader on: set the mode back to `off` and empty both lists (check with `bench --site <site> execute jarvis.payment_calendar.shadow.status` and `...batch_permission.status`) |
 
 **Shadow.** One cron entry, `"*/15 2-5 * * *"` -> `shadow.dispatch`, starts or resumes the night's chain from
 02:00 to 05:59 site time. A unit is one company, one side and one scope (previous, current and next month and
@@ -871,7 +871,8 @@ with these kwargs:
 
 - `status()` or `compatibility.permission_pin_drift()` names the drifted definitions. One Error Log row with the
   title `Payment Calendar batch permission pcal_permission_pin_drift` (search the title).
-- Results stay exact; the batch is `per_doc` (`pin_drift`).
+- Results stay exact; the batch is `per_doc` (`pin_drift`). On a v15 site `pin_drift` means that no v15 pins
+  exist, not that a source changed: the batch stays inert there.
 - Audit the upstream diff against the evaluator's transcribed glue. Find that code with
   `grep -n "Mirrors" jarvis/payment_calendar/batch_permission_eval.py jarvis/payment_calendar/batch_permission_plan.py`:
   each block cites `frappe/<file>:<fn> L<a>-<b>` and the pin. Then add the new hash next to the old one
@@ -1375,13 +1376,20 @@ tests (`TestV15Backport` in `test_payment_calendar_read_path.py`, skipped on v16
 - `row_filter_columns`: pass the report columns through `row_filter_columns(...)` in **both**
   `access._check_proofs` (the read-path check) and `sources._visible_rows` (the publish check) before they go to
   `get_filtered_data`. Without it every read by a user who is not a System Manager is refused.
-- `frappe.get_hooks`, not `effective_hooks`: the hotfix lines have no `jarvis/permission_hooks.py`.
-  `permissions.visible_names` and `incomplete_scope_reasons` read `frappe.get_hooks("has_permission")` and
-  `("permission_query_conditions")`.
+- Keep the reader switched off on v15 until S6 adds the v15 reader pins: reader mode `off`, both reader lists
+  empty, and `payment_calendar_batch_permission` unset. Unset the batch switch before S6 adds v15 pins, or the site flips
+  to the batch check on that release. With the reader switched on anyway, the router refuses at step `v15`
+  (`routing._early_step`) and writes no Error Log row: a side above the caps still shows `too_large`. The signals
+  are the `v15=` counter of the daily row, the `bank_today:v15` site counter and the `bank_one_pass:v15` ERROR
+  line. `unsupported_major` is raised only by a direct `require_supported_source()` call.
+- A test that needs a Frappe 16 object, or a served reader read, carries `v16_only(<gate>)` from
+  `jarvis/tests/payment_calendar_majors.py`, with one of its `GATE_*` constants. A test of a path that is active
+  on v15 is never gated: fix the test so that it runs on v15. `test_payment_calendar_v15_inert.py` pins the
+  gates.
 - Keep `require_obligation_scope` in the `sides` loop of `authorize_scope` (v15 refuses receivables for a user
   with a Sales Person permission, on every read).
-- The tests that simulate a site `has_permission` hook must patch the lookup that the v15 code uses
-  (`frappe.get_hooks`), not the develop helper.
+- The tests that simulate a site `has_permission` hook patch `frappe.get_hooks` under
+  `jarvis.permission_hooks.effective_hooks`, which the v15 code uses once it carries `permission_hooks.py`.
 - Carry `frontend/tests/payment-calendar/golden/` and keep `test_payment_calendar_golden` green and
   byte-identical.
 - The two read-path timing tests print `PCAL_TIMING endpoint=<name> ms=<n>` (no assertion). Read the lines from

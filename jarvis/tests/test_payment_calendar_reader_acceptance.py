@@ -30,6 +30,7 @@ from jarvis.tests.payment_calendar_fixtures import (
 	require_calendar_test_site,
 	sync_outstanding,
 )
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_READER_PINS, v16_only
 
 SIDES = ("Receivable", "Payable")
 TEST_KEY = "t" * 44
@@ -374,6 +375,7 @@ class TestResultDiff(TestCase):
 		self.assertEqual(found["diffs"], 1)
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestAcceptanceRuns(TestCase):
 	"""Committed fixtures with cleanup: `consistent_read` rolls back first, so a savepoint would not survive."""
 
@@ -745,6 +747,7 @@ class TestRoutedAcceptancePure(TestCase):
 		self.assertIn("non-Administrator", str(raised.exception))
 
 
+@v16_only(GATE_NO_V15_READER_PINS)
 class TestRoutedAcceptanceRuns(TestCase):
 	"""Committed fixtures with cleanup, as `TestAcceptanceRuns`: the routed and shadow runs open read views."""
 

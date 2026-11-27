@@ -29,6 +29,7 @@ import frappe.installer
 
 from jarvis.payment_calendar import batch_permission, compatibility, read_log, snapshot
 from jarvis.tests.batch_permission_fixtures import SI, BatchCase, clear_plan_memo
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_PERMISSION_PINS, v16_only
 from jarvis.tests.test_batch_permission_limits import PRIVATE_BREAKER, FakeClock, Recorder, redis
 
 SWITCH = batch_permission.SWITCH
@@ -125,6 +126,7 @@ class DifferentialCase(BatchCase):
 		return patch.object(batch_permission, "_evaluate_batch", evaluate)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestDifferentialRunsTheBatch(DifferentialCase):
 	def setUp(self):
 		super().setUp()
@@ -188,6 +190,7 @@ class TestDifferentialRunsTheBatch(DifferentialCase):
 		self.assertEqual(frappe.session.user, "Administrator")
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestDifferentialGate(DifferentialCase):
 	def test_a_doctype_that_a_guard_sends_to_the_loop_fails_the_gate_with_the_reason(self):
 		real = batch_permission._mro_reason
@@ -226,6 +229,7 @@ class TestDifferentialGate(DifferentialCase):
 		self.assertEqual({row["doctype"] for row in result["gate_failed"]}, set(EXPECT))
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestSelectors(DifferentialCase):
 	"""Each special document is found by SQL, and an ordinary one is not."""
 
@@ -284,6 +288,7 @@ class TestSelectors(DifferentialCase):
 		self.assertEqual(len(users), len(set(users)))
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestGateCatchesWhatTheSelectorsFind(DifferentialCase):
 	def test_a_fault_in_the_child_row_branch_is_caught_without_any_supplied_name(self):
 		f = self.f
@@ -313,6 +318,7 @@ class TestGateCatchesWhatTheSelectorsFind(DifferentialCase):
 		self.assertGreaterEqual(supplied["users"][f.u1][SI]["supplied"], 1)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestTimeBox(DifferentialCase):
 	"""The time box ends the run between users and between doctypes; the cut users are `not_done`."""
 
@@ -349,6 +355,7 @@ class TestTimeBox(DifferentialCase):
 		self.assertTrue(result["gate_passed"])
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestNothingIsWritten(DifferentialCase):
 	"""A plan that hits a drift queues events; the differential reports them and writes nothing."""
 
@@ -423,6 +430,7 @@ class TestNothingIsWritten(DifferentialCase):
 		self.assert_nothing_written(before, result)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestHardening(DifferentialCase):
 	"""A pass must mean that something was compared, and a bad call must fail loudly."""
 
