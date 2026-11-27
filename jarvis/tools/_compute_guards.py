@@ -98,9 +98,20 @@ MAX_ROUND_DIGITS = 300
 # A result bigger than this is followed by an immediate memory check.
 BIG_RESULT_BYTES = 1_000_000
 
-# Most values str() / repr() / print / json.dumps / an f-string may walk, counting
-# shared references as often as they appear: writing it out is one C call.
-MAX_WRITTEN_VALUES = 1_000_000
+# Most characters str() / repr() / print / json.dumps / an f-string / an error message
+# may write, counting shared references as often as they appear: writing it out is one
+# C call. (A tool result is capped at 35,000 characters.)
+MAX_WRITTEN_CHARS = 2_000_000
+
+# Most characters (text by length, every other value as one) all the arguments of one
+# call to a helper the script is given may hold: get_list / get_value / exists / count /
+# get_doc / run_report, the text and date helpers, json, frappe.throw. Checked before
+# the call, so a filter value list cannot flood the database and comma_and cannot build
+# a gigabyte. A filter on 20,000 names is about 400,000.
+MAX_CALL_UNITS = 1_000_000
+
+# Longest error message text taken from what a script raised or asserted.
+MAX_ERROR_CHARS = 1_000
 
 # Items an unsized iterable is read in, between time and memory checks: each chunk is
 # one C call (a few hundred microseconds), a running total keeps it under the cap.
@@ -291,10 +302,6 @@ def _unit_cost(value) -> int:
 	return 1 + _extra_cost(value)
 
 
-def _unit_one(value) -> int:
-	return 1
-
-
 def expanded_size(value, unit, budget: int) -> int | None:
 	"""The size of ``value`` with shared references expanded (each occurrence counted),
 	or None once it passes ``budget``. Each distinct container is walked once and its
@@ -380,14 +387,130 @@ def check_nesting(value, what: str = "This value"):
 	return value
 
 
+def _unit_chars(value) -> int:
+	"""About how many characters ``value`` writes out as: text by length, ints by digits."""
+	if isinstance(value, _TEXT):
+		return len(value) + 2
+	if isinstance(value, int) and not isinstance(value, bool):
+		return value.bit_length() * 31 // 100 + 2
+	return 8
+
+
 def check_written_size(value, what: str = "Writing this value out"):
-	"""Refuse to write out a value with more than MAX_WRITTEN_VALUES values once shared
-	references are expanded."""
-	if isinstance(value, _CONTAINERS) and expanded_size(value, _unit_one, MAX_WRITTEN_VALUES) is None:
+	"""Refuse to write out a value of more than MAX_WRITTEN_CHARS characters once shared
+	references are expanded. An exception writes out its arguments."""
+	if isinstance(value, BaseException):
+		value = value.args
+	if isinstance(value, _CONTAINERS):
+		size = expanded_size(value, _unit_chars, MAX_WRITTEN_CHARS)
+	elif isinstance(value, _TEXT):
+		size = len(value)
+	else:
+		return
+	if size is None or size > MAX_WRITTEN_CHARS:
 		_refuse(
-			f"{what} would write more than {MAX_WRITTEN_VALUES:,} values (shared references count "
+			f"{what} would write more than {MAX_WRITTEN_CHARS:,} characters (shared references count "
 			"each time they appear). Return a summary instead."
 		)
+
+
+def check_call_size(args: tuple, kwargs: dict, name: str):
+	"""Refuse a call whose arguments hold more than MAX_CALL_UNITS characters (text by
+	length, every other value as one; shared references counted each time), before the
+	call runs. Plain short arguments are recognised without a walk."""
+	units = 0
+	for value in (*args, *kwargs.values()):
+		t = type(value)
+		if t is str or t is bytes:
+			units += len(value)
+		elif t in _SCALARS:
+			units += 1
+		else:
+			units = -1
+			break
+	if 0 <= units <= MAX_CALL_UNITS:
+		return
+	size = expanded_size((args, kwargs), _unit_chars, MAX_CALL_UNITS)
+	if size is None or size > MAX_CALL_UNITS:
+		_refuse(
+			f"The arguments of {name}() hold more than {MAX_CALL_UNITS:,} characters or values (shared "
+			"references count each time). Pass less: filter in the read, or summarise first."
+		)
+
+
+def short_text(value, limit: int = MAX_ERROR_CHARS) -> str:
+	"""``value`` as text of at most about ``limit`` characters, without ever writing out
+	more: a structure too large is described, not rendered."""
+	if isinstance(value, str):
+		return value if len(value) <= limit else value[:limit] + "..."
+	if isinstance(value, bool) or value is None or isinstance(value, float):
+		return repr(value)
+	if isinstance(value, int):
+		return (
+			repr(value) if value.bit_length() <= limit * 3 else f"(an integer of {value.bit_length():,} bits)"
+		)
+	if isinstance(value, BaseException):
+		return error_text(value, limit)
+	if isinstance(value, _CONTAINERS) or isinstance(value, bytes):
+		if isinstance(value, bytes):
+			size = len(value)
+		else:
+			size = expanded_size(value, _unit_chars, limit * 4)
+		if size is None or size > limit * 4:
+			return f"(a {type(value).__name__} of {len(value):,} items, too long to show)"
+		text = repr(value)
+		return text if len(text) <= limit else text[:limit] + "..."
+	if type(value) in _SCALARS:
+		return str(value)[:limit]
+	return f"(a {type(value).__name__})"
+
+
+def error_text(error: BaseException, limit: int = MAX_ERROR_CHARS) -> str:
+	"""The message of ``error`` from its arguments, each cut to size before it is written:
+	``str(error)`` would write out a huge argument in full."""
+	args = getattr(error, "args", ())
+	if not isinstance(args, tuple):
+		return type(error).__name__
+	if not args:
+		return ""
+	if isinstance(error, KeyError) and len(args) == 1:
+		text = short_text(args[0], limit)
+		return repr(args[0]) if isinstance(args[0], str) and len(args[0]) <= limit else text
+	parts = [short_text(a, limit) for a in args[:5]]
+	text = parts[0] if len(parts) == 1 else "(" + ", ".join(parts) + (", ..." if len(args) > 5 else "") + ")"
+	return text if len(text) <= limit else text[:limit] + "..."
+
+
+class Exposed:
+	"""A callable the script is given: its arguments' size is checked before the call
+	(``check_call_size``) and a text it returns may be at most MAX_TEXT_CHARS. Writes out
+	as ``<function name>``, never with an address. ``check=False`` for a guard that sizes
+	its own work (sorted, min ...): it only gets the plain name."""
+
+	__slots__ = ("_check", "_func", "_name")
+
+	def __init__(self, func, name: str, check: bool = True):
+		self._func = func
+		self._name = name
+		self._check = check
+
+	def __call__(self, *args, **kwargs):
+		if self._check:
+			if args or kwargs:
+				check_call_size(args, kwargs, self._name)
+			result = self._func(*args, **kwargs)
+			if type(result) is str and len(result) > MAX_TEXT_CHARS:
+				_refuse(
+					f"{self._name}() would return text of {len(result):,} characters; the limit is "
+					f"{MAX_TEXT_CHARS:,}."
+				)
+			return result
+		return self._func(*args, **kwargs)
+
+	def __repr__(self):
+		return f"<function {self._name}>"
+
+	__str__ = __repr__
 
 
 # --------------------------------------------------------------------------- #
@@ -976,7 +1099,7 @@ class Guards:
 
 			return call
 
-		return {name: bound(name) for name in names}
+		return {name: Exposed(bound(name), f"{real.__name__}.{name}", check=False) for name in names}
 
 	def types(self) -> dict:
 		"""The guarded ``str``, ``int``, ``list``, ``tuple``, ``set`` and ``dict`` for the
@@ -1044,7 +1167,13 @@ class Guards:
 		return {
 			"str": guarded_type("str", str, make_str, self._class_methods(str, _TEXT_METHOD_NAMES)),
 			"int": guarded_type(
-				"int", int, make_int, {"from_bytes": from_bytes, **self._class_methods(int, ("to_bytes",))}
+				"int",
+				int,
+				make_int,
+				{
+					"from_bytes": Exposed(from_bytes, "int.from_bytes", check=False),
+					**self._class_methods(int, ("to_bytes",)),
+				},
 			),
 			"list": guarded_type("list", list, make_list, self._class_methods(list, _GUARDED_LIST_METHODS)),
 			"tuple": guarded_type("tuple", tuple, make_tuple, self._class_methods(tuple, ("count", "index"))),
@@ -1053,7 +1182,10 @@ class Guards:
 				"dict",
 				dict,
 				make_dict,
-				{"fromkeys": fromkeys, **self._class_methods(dict, _GUARDED_DICT_METHODS)},
+				{
+					"fromkeys": Exposed(fromkeys, "dict.fromkeys", check=False),
+					**self._class_methods(dict, _GUARDED_DICT_METHODS),
+				},
 			),
 		}
 

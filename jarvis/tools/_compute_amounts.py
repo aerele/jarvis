@@ -14,14 +14,19 @@ and at most one extra permissioned query per read:
 3. **Draft and cancelled rows.** On a submittable doctype a read that does not say
    which docstatus it wants also totals drafts and cancelled documents.
 
-For each read: every field reference is resolved to (table, field), whatever its form
-(``f``, ``f as x``, ``X.f``, `` `tabX`.f ``, a table field's name as qualifier, inside
-an aggregate dict or a ``sum(...)`` string). What the read aggregates in the database
-and what it returns row by row is classified. Then ONE grouped query over the read's
-own filters, with the user's permissions, finds which currencies, companies and
-docstatus values the matching rows have (only the dimensions that matter, and none
-when the rows already show them). A child-table read is probed on its parent with its
-filters rewritten as ``[child, field, op, value]``, the form Frappe joins.
+For each read: the fields arrive already parsed by the allowlist in ``_compute_fields``
+(every entry a known (table, field), or refused). What the read aggregates in the
+database and what it returns row by row is classified. Then ONE grouped query over the
+read's own filters, with the user's permissions, finds which currencies, companies and
+docstatus values the matching rows have. The returned rows are the source only where
+they really hold one value each: the read groups by that column, or it has no aggregate
+and no grouping at all (one row per record). A plain column next to an ungrouped SUM
+holds one arbitrary row's value, so the probe decides. docstatus is never taken from
+the rows: only a filter pinning it to submitted (``1``, ``['=', 1]``, ``['in', [1]]``)
+skips the probe; an explicit ``['in', [0, 1]]`` is a choice and gets a warning that
+drafts are included; anything else (``['>=', 0]``, ``['!=', 2]``) is probed. A
+child-table read is probed on its parent with its filters rewritten as
+``[child, field, op, value]``, the form Frappe joins.
 
 - A database SUM / AVG / MIN / MAX that mixes is refused (fixable error naming the fix).
 - Mixed amounts returned row by row get a warning, once per doctype and field.
@@ -31,79 +36,18 @@ filters rewritten as ``[child, field, op, value]``, the form Frappe joins.
 from __future__ import annotations
 
 import json
-import re
 
 import frappe
+
+from jarvis.tools._compute_fields import Spec, Tables
 
 # Distinct (currency, company, docstatus) combinations the probe reads. Two already
 # decide; the rest only make a message complete.
 PROBE_LIMIT = 200
 
-_AGGREGATES = ("SUM", "AVG", "MIN", "MAX")
-_AGG_STRING = re.compile(r"^\s*(sum|avg|max|min|count)\s*\((.+)\)\s*(?:as\s+\S+)?\s*$", re.IGNORECASE)
-_REF = re.compile(r"^(?:(?P<table>[^.]+)\.)?(?P<field>\w+)$")
-_ALIAS = re.compile(r"\s+as\s+", re.IGNORECASE)
-_TABLE_FIELDTYPES = ("Table", "Table MultiSelect")
+_AMOUNT_AGGREGATES = ("SUM", "AVG", "MIN", "MAX")
 _COUNT_ALIAS = "jv_rows"
-
-
-def parse_ref(text) -> tuple[str | None, str] | None:
-	"""``(qualifier, field)`` of a plain field reference, or None for anything else.
-	Backticks anywhere and an ``as`` alias are dropped."""
-	if not isinstance(text, str):
-		return None
-	s = _ALIAS.split(text.replace("`", "").replace('"', "").strip(), maxsplit=1)[0].strip()
-	m = _REF.match(s)
-	if not m:
-		return None
-	table = m.group("table")
-	return (table.strip() if table else None), m.group("field")
-
-
-def _alias(text: str) -> str | None:
-	parts = _ALIAS.split(text.replace("`", "").strip(), maxsplit=1)
-	return parts[1].strip() if len(parts) == 2 else None
-
-
-class Tables:
-	"""The tables a read can name: its doctype, its child tables (Frappe joins them on a
-	parent read), and for a child-table read its parent."""
-
-	def __init__(self, doctype: str, meta, parent_doctype: str | None):
-		self.doctype = doctype
-		self.meta = meta
-		self.parent = parent_doctype
-		self.metas = {doctype: meta}
-		self._names = {}
-		self._add(doctype, doctype)
-		for df in meta.fields:
-			if df.fieldtype in _TABLE_FIELDTYPES and df.options:
-				self._add(df.options, df.options)
-				self._names[df.fieldname.casefold()] = df.options
-		if parent_doctype:
-			self._add(parent_doctype, parent_doctype)
-
-	def _add(self, name: str, doctype: str):
-		self._names[name.casefold()] = doctype
-		self._names[f"tab{name}".casefold()] = doctype
-
-	def resolve(self, qualifier: str | None) -> str | None:
-		if qualifier is None:
-			return self.doctype
-		return self._names.get(qualifier.strip().casefold())
-
-	def meta_of(self, doctype: str):
-		if doctype not in self.metas:
-			self.metas[doctype] = frappe.get_meta(doctype)
-		return self.metas[doctype]
-
-	def owner_of(self, doctype: str) -> str:
-		"""Where a table's per-row currency and company live: a child table's are on the
-		read's parent doctype (its own parent on a parent read, ``parent_doctype`` on a
-		child read)."""
-		if doctype == self.doctype:
-			return self.parent or doctype
-		return self.doctype
+_DOCSTATUS = frozenset({0, 1, 2})
 
 
 class Kind:
@@ -158,72 +102,136 @@ class Usage:
 		self.selected: list[Kind] = []
 		self.row_keys: dict[tuple[str, str], str] = {}  # (table, field) -> key in each row
 		self.grouped: set[tuple[str, str]] = set()
+		self.has_aggregate = False
 
 
-def usage(tables: Tables, fields, group_by) -> Usage:
+def usage(tables: Tables, specs: list[Spec], groups: list[Spec]) -> Usage:
 	out = Usage()
-	for entry in fields or []:
-		if isinstance(entry, dict):
-			funcs = [k for k in entry if k != "as"]
-			if len(funcs) != 1:
-				continue
-			func, arg = str(funcs[0]).upper(), entry[funcs[0]]
-			kind = _kind_of_ref(tables, arg)
-			if kind is None:
-				continue
-			(out.aggregated if func in _AGGREGATES else out.selected).append(kind)
-			continue
-		if not isinstance(entry, str):
-			continue
-		if entry.strip() == "*":
-			meta = tables.meta
-			for df in meta.fields:
-				kind = amount_kind(tables, tables.doctype, df.fieldname) if df.fieldname else None
+	for spec in specs:
+		if spec.star:
+			for df in tables.meta.fields:
+				if not df.fieldname:
+					continue
+				out.row_keys[(tables.doctype, df.fieldname)] = df.fieldname
+				kind = amount_kind(tables, tables.doctype, df.fieldname)
 				if kind:
 					out.selected.append(kind)
-				if df.fieldname:
-					out.row_keys[(tables.doctype, df.fieldname)] = df.fieldname
 			continue
-		agg = _AGG_STRING.match(entry)
-		if agg:
-			kind = _kind_of_ref(tables, agg.group(2))
-			if kind is not None and agg.group(1).upper() in _AGGREGATES:
-				out.aggregated.append(kind)
+		if spec.func is not None:
+			out.has_aggregate = True
+			if spec.func in _AMOUNT_AGGREGATES and spec.table:
+				kind = amount_kind(tables, spec.table, spec.field)
+				if kind is not None:
+					out.aggregated.append(kind)
 			continue
-		ref = parse_ref(entry)
-		if ref is None:
-			continue
-		table = tables.resolve(ref[0])
-		if table is None:
-			continue
-		out.row_keys[(table, ref[1])] = _alias(entry) or ref[1]
-		kind = amount_kind(tables, table, ref[1])
+		out.row_keys[(spec.table, spec.field)] = spec.key
+		kind = amount_kind(tables, spec.table, spec.field)
 		if kind is not None:
 			out.selected.append(kind)
-	for part in str(group_by or "").split(","):
-		ref = parse_ref(part)
-		if ref:
-			table = tables.resolve(ref[0])
-			if table:
-				out.grouped.add((table, ref[1]))
+	out.grouped = {(g.table, g.field) for g in groups}
 	return out
 
 
-def _kind_of_ref(tables: Tables, text) -> Kind | None:
-	ref = parse_ref(text)
-	if ref is None:
+def _rows_hold(use: Usage, dim: tuple[str, str]) -> bool:
+	"""Whether each returned row holds the one real value of ``dim``: the read groups by
+	it, or it neither aggregates nor groups (one row per record)."""
+	if dim in use.grouped:
+		return True
+	return not use.has_aggregate and not use.grouped
+
+
+def _docstatus_conditions(filters) -> list | None:
+	"""``(op, value)`` of every docstatus condition in ANDed ``filters``; None for a
+	shape this does not know."""
+	if isinstance(filters, str):
+		try:
+			filters = json.loads(filters)
+		except ValueError:
+			return None
+	if not filters:
+		return []
+	if isinstance(filters, dict):
+		items = list(filters.items())
+	elif isinstance(filters, list | tuple):
+		conds = filters if isinstance(filters[0], list | tuple | dict) else [filters]
+		items = []
+		for cond in conds:
+			if isinstance(cond, dict):
+				items += list(cond.items())
+			elif isinstance(cond, list | tuple) and len(cond) in (2, 3, 4):
+				field = cond[1] if len(cond) == 4 else cond[0]
+				rest = cond[2:] if len(cond) == 4 else cond[1:]
+				items.append((field, list(rest) if len(rest) == 2 else rest[0]))
+			else:
+				return None
+	else:
 		return None
-	table = tables.resolve(ref[0])
-	return amount_kind(tables, table, ref[1]) if table else None
+	out = []
+	for field, value in items:
+		if not isinstance(field, str):
+			continue
+		if field.replace("`", "").rsplit(".", 1)[-1].strip() != "docstatus":
+			continue
+		if isinstance(value, list | tuple) and len(value) == 2 and isinstance(value[0], str):
+			out.append((value[0].strip().casefold(), value[1]))
+		else:
+			out.append(("=", value))
+	return out
 
 
-def filters_name_docstatus(filters, or_filters) -> bool:
-	"""Whether every row the read admits has its docstatus chosen: a condition on it in
-	``filters`` (ANDed). One in ``or_filters`` does not count: the OR can still admit
-	drafts through its other branches, so the probe decides."""
-	from jarvis.tools.get_list import _filter_fieldnames
+def _docstatus_ints(value) -> set | None:
+	values = value if isinstance(value, list | tuple | set) else [value]
+	out = set()
+	for v in values:
+		if isinstance(v, bool):
+			return None
+		if isinstance(v, str) and v.strip().isdigit():
+			v = int(v.strip())
+		if not isinstance(v, int):
+			return None
+		out.add(v)
+	return out
 
-	return "docstatus" in _filter_fieldnames(filters)
+
+def _docstatus_allowed(op: str, value) -> tuple[set, bool] | None:
+	"""The docstatus values one condition admits, and whether it names them outright."""
+	ints = _docstatus_ints(value)
+	if ints is None:
+		return None
+	if op in ("=", "==", "in"):
+		return ints, True
+	if op in ("!=", "not in"):
+		return _DOCSTATUS - ints, False
+	if len(ints) != 1:
+		return None
+	v = next(iter(ints))
+	compare = {">": v.__lt__, ">=": v.__le__, "<": v.__gt__, "<=": v.__ge__}.get(op)
+	if compare is None:
+		return None
+	return {d for d in _DOCSTATUS if compare(d)}, False
+
+
+def docstatus_choice(filters) -> str | None:
+	"""What ``filters`` decide about docstatus: ``"submitted"`` (pinned to 1),
+	``"included"`` (drafts or cancelled named outright alongside submitted, a deliberate
+	choice that gets a warning), ``"chosen"`` (named outright, without submitted), or
+	None (not decided: the probe counts what the rows hold). ``or_filters`` never count:
+	the OR can admit drafts through its other branches."""
+	conds = _docstatus_conditions(filters)
+	if not conds:
+		return None
+	allowed, outright = set(_DOCSTATUS), False
+	for op, value in conds:
+		admitted = _docstatus_allowed(op, value)
+		if admitted is None:
+			return None
+		allowed &= admitted[0]
+		outright = outright or admitted[1]
+	if allowed <= {1}:
+		return "submitted"
+	if not outright:
+		return None
+	return "included" if 1 in allowed else "chosen"
 
 
 def _as_child_filters(filters, child: str, parent: str) -> list | None:
@@ -275,10 +283,10 @@ class Probe:
 		self.known_docstatus = False
 
 
-def check(run, doctype: str, meta, parent_doctype, fields, rows, filters, kwargs, receipt) -> None:
+def check(run, tables: Tables, specs, groups, rows, filters, kwargs, receipt) -> None:
 	"""Check one finished get_list read; warn on ``run`` or fail it. See the module docstring."""
-	tables = Tables(doctype, meta, parent_doctype)
-	use = usage(tables, fields, kwargs.get("group_by"))
+	doctype = tables.doctype
+	use = usage(tables, specs, groups)
 	if not (use.aggregated or use.selected):
 		return
 	or_filters = kwargs.get("or_filters")
@@ -292,16 +300,15 @@ def check(run, doctype: str, meta, parent_doctype, fields, rows, filters, kwargs
 		if dim in known or dim in dims:
 			continue
 		key = use.row_keys.get(dim)
-		grouped_by_other = use.grouped and dim not in use.grouped
-		if key is not None and not grouped_by_other and dim[0] == doctype:
+		if key is not None and dim[0] == doctype and _rows_hold(use, dim):
 			known[dim] = {r.get(key) for r in rows}
 		elif dim[0] == main:
 			dims.append(dim)
+	choice = docstatus_choice(filters) if main_meta.is_submittable else "submitted"
 	want_docstatus = (
-		bool(main_meta.is_submittable)
+		choice is None
 		and (main, "docstatus") not in use.grouped
 		and (doctype, "docstatus") not in use.grouped
-		and not filters_name_docstatus(filters, or_filters)
 	)
 	probe = _probe(run, tables, main, dims, want_docstatus, filters, or_filters, kwargs)
 	known.update(probe.values)
@@ -326,6 +333,16 @@ def check(run, doctype: str, meta, parent_doctype, fields, rows, filters, kwargs
 			"for submitted, 0 for drafts, or ['in', [0, 1]] for both."
 		)
 		messages.append((text, summed, ("docstatus", main)))
+
+	if choice == "included" and (main, "docstatus") not in use.grouped:
+		messages.append(
+			(
+				f"These {main} rows include drafts (docstatus 0) or cancelled documents, as the filters "
+				"ask: drafts are included in these amounts. Use docstatus: 1 for submitted only.",
+				False,
+				("docstatus-included", main),
+			)
+		)
 
 	if len(currencies_found) == 1:
 		receipt["currency"] = next(iter(currencies_found))
@@ -375,9 +392,11 @@ def _probe(run, tables: Tables, main: str, dims, want_docstatus: bool, filters, 
 	}
 	if probe_or:
 		call["or_filters"] = probe_or
-	from jarvis.tools._compute_sandbox import _translate_field
+	from jarvis.tools._compute_fields import frappe_field
+	from jarvis.tools._compute_sandbox import _DICT_AGGREGATES
 
-	call["fields"][-1] = _translate_field(call["fields"][-1])  # the string form on Frappe 15
+	count = Spec(field="*", func="COUNT", alias=_COUNT_ALIAS, arg="*")
+	call["fields"][-1] = frappe_field(count, _DICT_AGGREGATES)  # the string form on Frappe 15
 	for row in frappe.get_list(main, **call):
 		for column in columns:
 			if column == "docstatus":

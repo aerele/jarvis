@@ -104,6 +104,20 @@ def compute(code: str, description: str) -> dict:
 			"result is None, so there is no answer to give. Assign the answer itself; when nothing "
 			"matched, say so with a value, e.g. result = {'total': 0, 'rows': 0}."
 		)
+	try:
+		return _shape(result, run)
+	except (JarvisError, frappe.ValidationError):
+		raise
+	except Exception as e:
+		# compute's own failure (shaping the answer), not the script's: logged, then refused.
+		sandbox._log_internal("result", e)
+		raise ComputeCodeError(
+			"compute hit an internal error while shaping the result (it is logged). Return plain "
+			"numbers, text, lists and dicts."
+		) from None
+
+
+def _shape(result, run) -> dict:
 	# warnings first: the model reads the caveats before the numbers.
 	out = {"warnings": list(run.warnings)} if run.warnings else {}
 	out.update(
@@ -193,7 +207,7 @@ def _translate(error: BaseException, run) -> Exception:
 	from jarvis.tools._compute_guards import GuardRefused
 
 	if isinstance(error, JarvisError | sandbox.SandboxUsageError | GuardRefused):
-		message = str(error)
+		message = sandbox.error_text(error, 4_000)
 	else:
 		message = f"{type(error).__name__}: {sandbox._clean(error) or type(error).__name__}"
 	hint = _hint(error)
@@ -201,7 +215,9 @@ def _translate(error: BaseException, run) -> Exception:
 
 
 def _hint(error: BaseException) -> str:
-	text = str(error)
+	from jarvis.tools._compute_guards import error_text
+
+	text = error_text(error)
 	if isinstance(error, KeyError):
 		return (
 			" A row or dict has no such key: ask for the field in fields=[...], use row.get(key) for "
@@ -228,7 +244,8 @@ def _plain(obj):
 		return float(obj)
 	if isinstance(obj, set | frozenset):
 		return sorted(obj, key=repr)
-	raise TypeError(f"a {type(obj).__name__} value is not data")
+	what = "function" if callable(obj) else type(obj).__name__
+	raise TypeError(f"a {what} is not data")
 
 
 # Float noise: a run of zeros or nines right before the last one or two digits of a

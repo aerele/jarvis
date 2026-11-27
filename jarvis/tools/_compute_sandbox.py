@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import ast
 import datetime
+import decimal
 import json
 import re
 import sys
@@ -91,12 +92,15 @@ from RestrictedPython.transformer import IOPERATOR_TO_STR, RestrictingNodeTransf
 
 from jarvis.exceptions import ComputeCodeError, InvalidArgumentError, PermissionDeniedError
 from jarvis.tools._compute_guards import (
+	Exposed,
 	GuardRefused,
 	Guards,
 	check_nesting,
 	check_written_size,
+	error_text,
 	guarded_type,
 	internal_import,
+	short_text,
 )
 
 try:  # Frappe 15 and 16: the policy safe_exec compiles with (allows the name ``_dict``)
@@ -205,11 +209,21 @@ _MISSING = _Missing()
 
 
 def _rss_bytes() -> int | None:
-	"""Resident memory of this process, or None where /proc is not there."""
+	"""Resident memory of this process: /proc on Linux; elsewhere (macOS) the peak
+	resident size from getrusage, which only grows, so the limit still holds (it can
+	only trip early). None where neither exists: the memory limit is then off, and
+	test_resident_memory_is_measured_here says so by skipping."""
 	try:
 		# nosemgrep: frappe-security-file-traversal -- fixed kernel path, no caller input
 		with open("/proc/self/statm") as f:
 			return int(f.read().split()[1]) * _PAGE_SIZE
+	except Exception:
+		pass
+	try:
+		import resource
+
+		peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+		return peak if sys.platform == "darwin" else peak * 1024  # bytes on macOS, KiB elsewhere
 	except Exception:
 		return None
 
@@ -965,7 +979,7 @@ def _getattr_factory(guards: Guards):
 			raise AttributeError(f'"{name}" is not available.')
 		guarded = guards.method(obj, name)
 		if guarded is not None:
-			return guarded
+			return Exposed(guarded, f"{type(obj).__name__}.{name}", check=False)
 		value = getattr(obj, name, *default)
 		if isinstance(value, _BLOCKED_TYPES):
 			raise AttributeError(f'"{name}" is not available.')
@@ -989,7 +1003,9 @@ def _getitem_factory(guards: Guards):
 
 
 def _write(obj):
-	if isinstance(obj, _Namespace | type | types.FunctionType | types.MethodType | types.BuiltinFunctionType):
+	if isinstance(
+		obj, _Namespace | Exposed | type | types.FunctionType | types.MethodType | types.BuiltinFunctionType
+	):
 		raise TypeError("This object cannot be changed.")
 	if isinstance(obj, _BLOCKED_TYPES):
 		raise TypeError("This object cannot be changed.")
@@ -1231,13 +1247,6 @@ _ESCAPE_KWARGS = frozenset(
 	}
 )
 
-_AGGREGATES = ("SUM", "COUNT", "AVG", "MAX", "MIN")
-_AGG_STRING = re.compile(
-	r"^\s*(sum|count|avg|max|min)\s*\(\s*([^()]+?)\s*\)\s*(?:as\s+[`'\"]?(\w+)[`'\"]?)?\s*$",
-	re.IGNORECASE,
-)
-_IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-
 
 def _dict_aggregates_supported() -> bool:
 	"""Frappe 16's query engine takes ``{"SUM": "field", "as": "x"}`` fields and refuses
@@ -1253,10 +1262,19 @@ def _dict_aggregates_supported() -> bool:
 _DICT_AGGREGATES = _dict_aggregates_supported()
 
 
-# Core doctypes that hold sign-in tokens and keys. (Every doctype of the jarvis app is
-# refused by rule, see _is_private_doctype.)
+# Core doctypes that hold sign-in tokens and keys, or whole mails, request payloads,
+# deleted records and tracebacks (where tokens, keys and password-reset links end up).
+# (Every doctype of the jarvis app is refused by rule, see _is_private_doctype.)
 _SECRET_DOCTYPES = frozenset(
 	{
+		"Error Log",
+		"Email Queue",
+		"Email Queue Recipient",
+		"Unhandled Email",
+		"Deleted Document",
+		"Webhook Request Log",
+		"Recorder",
+		"System Console",
 		"OAuth Bearer Token",
 		"OAuth Authorization Code",
 		"OAuth Client",
@@ -1299,8 +1317,9 @@ def _is_private_doctype(doctype: str) -> bool:
 def _refuse_private(doctype: str):
 	if _is_private_doctype(doctype):
 		raise PermissionDeniedError(
-			f"compute reads business records only; {doctype} is not available here (Jarvis's own data "
-			"or sign-in tokens and keys). Use the dedicated Jarvis tool for Jarvis's own records."
+			f"compute reads business records only; {doctype} is not available here (Jarvis's own data, "
+			"sign-in tokens and keys, or logs, mails and deleted records that can hold them). Use the "
+			"dedicated Jarvis tool for Jarvis's own records."
 		)
 
 
@@ -1321,6 +1340,11 @@ _SECRET_FIELDS = {
 	"Integration Request": frozenset(
 		{"data", "output", "error", "url", "request_headers", "response_headers"}
 	),
+	# Serialized documents and exported pages (a Version can record an api_key change).
+	"Version": frozenset({"data"}),
+	"Access Log": frozenset({"page", "filters"}),
+	# One-time codes sent by SMS for two-factor sign-in.
+	"SMS Log": frozenset({"message"}),
 	# India Compliance: GST portal sign-in (password and api_secret are Password fields).
 	"GST Credential": frozenset({"username", "session_key", "auth_token", "app_key", "session_ip"}),
 }
@@ -1436,105 +1460,72 @@ def _doctype(doctype) -> str:
 	return name
 
 
-def _translate_field(entry):
-	"""One ``fields`` entry in the form the installed Frappe accepts. Both the dict form
-	``{"SUM": "base_grand_total", "as": "total"}`` and the string form
-	``"sum(base_grand_total) as total"`` are accepted for SUM / COUNT / AVG / MAX / MIN."""
-	if isinstance(entry, dict):
-		funcs = [k for k in entry if k != "as"]
-		if len(funcs) != 1:
+def _parse_read(doctype: str, meta, parent_doctype, fields, kwargs, filters):
+	"""The read's fields, group_by and order_by through the allowlist in
+	``_compute_fields``, and its filter field names checked for length, before any of
+	them reaches a regular expression or Frappe. ``(tables, specs, groups, orders)``."""
+	from jarvis.tools import _compute_fields as cf
+
+	tables = cf.Tables(doctype, meta, parent_doctype)
+	try:
+		specs = cf.parse_fields(tables, fields)
+		groups = cf.parse_group_by(tables, kwargs.get("group_by"))
+		aliases = {s.alias for s in specs if s.alias}
+		orders = cf.parse_order_by(tables, kwargs.get("order_by"), aliases)
+	except cf.FieldRefused as e:
+		raise SandboxUsageError(str(e)) from None
+	from jarvis.tools.get_list import _filter_fieldnames
+
+	for name in _filter_fieldnames(filters) | _filter_fieldnames(kwargs.get("or_filters")):
+		if len(name) > cf.MAX_ENTRY_CHARS:
 			raise SandboxUsageError(
-				f'an aggregate field takes one function and an alias, e.g. {{"SUM": "base_grand_total", '
-				f'"as": "total"}}; got {entry!r}.'
+				f"A filter field of {len(name):,} characters is not accepted here; a field name is at most "
+				f"{cf.MAX_ENTRY_CHARS} characters."
 			)
-		func = str(funcs[0]).upper()
-		if _DICT_AGGREGATES:
-			return {func: entry[funcs[0]], **({"as": entry["as"]} if "as" in entry else {})}
-		if func not in _AGGREGATES or not isinstance(entry[funcs[0]], str):
-			raise SandboxUsageError(
-				f"aggregate fields here take one of {', '.join(_AGGREGATES)} over one field."
-			)
-		arg = entry[funcs[0]]
-		arg = "*" if arg == "*" else f"`{arg.strip('`')}`"
-		alias = entry.get("as") or f"{func.lower()}_{arg.strip('`*') or 'all'}"
-		return f"{func.lower()}({arg}) as `{alias}`"
-	if isinstance(entry, str) and _DICT_AGGREGATES:
-		m = _AGG_STRING.match(entry)
-		if m:
-			func, arg, alias = m.group(1).upper(), m.group(2).strip(), m.group(3)
-			bare = re.sub(r"\W+", "_", arg.replace("`", "").split(".")[-1]).strip("_") or "all"
-			return {func: arg, "as": alias or f"{func.lower()}_{bare}"}
-	return entry
+	return tables, specs, groups, orders
 
 
-def _field_refs(entry) -> tuple[set[str], bool]:
-	"""``(identifiers, computed)`` a fields entry reads; ``computed`` for an aggregate."""
-	if isinstance(entry, dict):
-		names: set[str] = set()
-		for key, value in entry.items():
-			if key == "as":
-				continue
-			names |= set(_IDENT.findall(json.dumps(value, default=str)))
-		return names, True
-	if isinstance(entry, str):
-		head = re.split(r"\s+as\s+", entry, maxsplit=1, flags=re.IGNORECASE)[0]
-		return set(_IDENT.findall(head.replace("`", ""))), "(" in head
-	return set(), False
+def _spec_names(specs) -> set[str]:
+	return {s.field for s in specs if s.field and s.field != "*"}
 
 
-_PLAIN_FIELD = re.compile(r"^\s*`?(\w+)`?\s*(?:\s+as\s+\w+\s*)?$", re.IGNORECASE)
-
-
-def _check_known_fields(doctype: str, fields) -> None:
-	"""Refuse a plain field (or an aggregate's field) the doctype does not have. Frappe
-	16 drops an unknown SELECT field without a word, so a typo would total as nothing."""
-	columns = set(frappe.get_meta(doctype).get_valid_columns())
-	unknown = []
-	for entry in fields or []:
-		if isinstance(entry, str):
-			m = _PLAIN_FIELD.match(entry)
-			name = m.group(1) if m else None
-		elif isinstance(entry, dict):
-			values = [v for k, v in entry.items() if k != "as"]
-			name = values[0].strip("`") if len(values) == 1 and isinstance(values[0], str) else None
-			if name == "*" or (name and not re.fullmatch(r"\w+", name)):
-				name = None
-		else:
-			name = None
-		if name and name not in columns:
-			unknown.append(name)
-	if unknown:
+def _check_known_fields(tables, specs) -> None:
+	"""Refuse a field (plain, aggregated, grouped or sorted on) its table does not have.
+	Frappe 16 drops an unknown SELECT field without a word, so a typo would total as
+	nothing."""
+	unknown: dict[str, set[str]] = {}
+	for spec in specs:
+		if not spec.table or not spec.field or spec.field == "*":
+			continue
+		if spec.field not in set(tables.meta_of(spec.table).get_valid_columns()):
+			unknown.setdefault(spec.table, set()).add(spec.field)
+	for table, names in unknown.items():
+		columns = set(tables.meta_of(table).get_valid_columns())
 		readable = columns
-		if frappe.session.user != "Administrator":
+		if frappe.session.user != "Administrator" and table == tables.doctype:
 			from frappe.model import get_permitted_fields
 
-			readable = columns & set(get_permitted_fields(doctype))
-		hints = "".join(_did_you_mean(name, readable) for name in sorted(set(unknown)))
+			readable = columns & set(get_permitted_fields(table))
+		hints = "".join(_did_you_mean(name, readable) for name in sorted(names))
 		raise SandboxUsageError(
-			f"{doctype} has no field(s) {', '.join(sorted(set(unknown)))}.{hints} Check the names with "
+			f"{table} has no field(s) {', '.join(sorted(names))}.{hints} Check the names with "
 			"get_meta(doctype) or get_schema; a child table's field is read from the child doctype "
 			"with parent_doctype."
 		)
 
 
-def _check_field_access(doctype: str, parent_doctype, fields, filters, or_filters, order_by, group_by):
+def _check_field_access(doctype: str, parent_doctype, specs, groups, orders, filters, or_filters):
 	"""Refuse a read that names a field the user cannot read (a permission level they
 	lack) or computes / filters / sorts / groups over a field masked for them.
 	Frappe drops an unreadable SELECT field silently; here it is refused, so the code
 	never totals a column that came back empty."""
 	from jarvis.tools.get_list import _filter_fieldnames
 
-	plain: set[str] = set()
-	computed: set[str] = set()
-	for entry in fields or []:
-		names, is_computed = _field_refs(entry)
-		(computed if is_computed else plain).update(names)
+	own = [s for s in specs if s.table == doctype]
+	plain = _spec_names(s for s in own if s.func is None)
+	computed = _spec_names(s for s in own if s.func is not None)
 	conditions = _filter_fieldnames(filters) | _filter_fieldnames(or_filters)
-	ordering = set(_IDENT.findall(str(order_by or "").replace("`", ""))) | set(
-		_IDENT.findall(str(group_by or "").replace("`", ""))
-	)
-	# Credentials: refused for everyone, Administrator included.
-	_refuse_secret_fields(doctype, plain | computed | conditions | ordering)
+	ordering = _spec_names(s for s in [*groups, *orders] if s.table == doctype)
 	if frappe.session.user == "Administrator":
 		return
 	from frappe.model import get_permitted_fields
@@ -1592,8 +1583,10 @@ def _receipt_value(value):
 def make_reads(run: _Run) -> dict:
 	"""The permissioned read helpers, bound to ``run`` in closures (never a keyword or
 	argument the script could override or read back)."""
+	from jarvis.tools._compute_fields import frappe_field
 	from jarvis.tools.get_list import (
 		_child_table_parents,
+		_filter_fieldnames,
 		assert_child_query_fields_readable,
 		assert_child_table_field_readable,
 	)
@@ -1642,7 +1635,6 @@ def make_reads(run: _Run) -> dict:
 				raise SandboxUsageError("pluck must be one field name.")
 			fields = [pluck]
 		as_given = list(fields or ["name"])
-		fields = [_translate_field(f) for f in as_given]
 
 		meta = frappe.get_meta(doctype)
 		if meta.issingle:
@@ -1661,21 +1653,24 @@ def make_reads(run: _Run) -> dict:
 			parent_doctype = _doctype(parent_doctype)
 		else:
 			parent_doctype = None
+		# The allowlist first: nothing below (regexes, permission helpers, Frappe) sees an
+		# entry it did not accept.
+		tables, specs, groups, orders = _parse_read(doctype, meta, parent_doctype, as_given, kwargs, filters)
+		# Credentials: refused for everyone, Administrator included, whatever the permissions.
+		_refuse_secret_fields(
+			doctype,
+			_spec_names([*specs, *groups, *orders])
+			| _filter_fieldnames(filters)
+			| _filter_fieldnames(kwargs.get("or_filters")),
+		)
+		_check_known_fields(tables, [*specs, *groups, *orders])
+		fields = [frappe_field(s, _DICT_AGGREGATES) for s in specs]
 		if not frappe.has_permission(doctype, ptype="read", parent_doctype=parent_doctype):
 			raise PermissionDeniedError(f"no read permission on {doctype}")
 		if parent_doctype:
 			assert_child_table_field_readable(doctype, parent_doctype)
 		assert_child_query_fields_readable(doctype, parent_doctype, fields, filters, kwargs.get("order_by"))
-		_check_known_fields(doctype, fields)
-		_check_field_access(
-			doctype,
-			parent_doctype,
-			fields,
-			filters,
-			kwargs.get("or_filters"),
-			kwargs.get("order_by"),
-			kwargs.get("group_by"),
-		)
+		_check_field_access(doctype, parent_doctype, specs, groups, orders, filters, kwargs.get("or_filters"))
 
 		limit = None
 		for key in ("limit", "limit_page_length", "page_length"):
@@ -1740,7 +1735,18 @@ def make_reads(run: _Run) -> dict:
 		if source == "get_list":
 			from jarvis.tools import _compute_amounts
 
-			_compute_amounts.check(run, doctype, meta, parent_doctype, fields, rows, filters, kwargs, receipt)
+			try:
+				_compute_amounts.check(run, tables, specs, groups, rows, filters, kwargs, receipt)
+			except (_Stop, GuardRefused, SandboxUsageError, InvalidArgumentError, frappe.PermissionError):
+				raise
+			except Exception as e:
+				# compute's own failure, not the script's: logged where nothing blocks it, and
+				# the read refused (an unchecked total must not pass).
+				_log_internal("amount check", e)
+				raise SandboxUsageError(
+					f"compute hit an internal error while checking the amounts of get_list('{doctype}') "
+					"(it is logged). Read the amounts grouped by currency instead."
+				) from None
 		if pluck is not None:
 			return [row.get(pluck) for row in rows]
 		return _rows_in_place(rows)
@@ -2007,9 +2013,26 @@ def _report_row(row, columns: list[dict]):
 
 
 def _clean(e: BaseException) -> str:
+	"""An error's message as one short line. Its text is cut before it is written:
+	``str(e)`` would write out a huge argument in full."""
 	from frappe.utils import strip_html
 
-	return " ".join(strip_html(str(e)).split())[:600]
+	return " ".join(strip_html(error_text(e, 2_000)).split())[:600]
+
+
+def _log_internal(where: str, error: BaseException) -> None:
+	"""Log a failure of compute's own code (not the script's) to the jarvis.compute log
+	file: an Error Log insert inside the run would be dropped with the report-path ones,
+	and this never touches the database."""
+	try:
+		import traceback
+
+		frames = "".join(traceback.format_list(traceback.extract_tb(error.__traceback__)[-12:]))
+		frappe.logger("jarvis.compute", allow_site=True).error(
+			f"compute internal error in {where}: {type(error).__name__}: {error_text(error, 500)}\n{frames}"
+		)
+	except Exception:  # pragma: no cover - logging must never break the tool
+		pass
 
 
 # --------------------------------------------------------------------------- #
@@ -2110,13 +2133,25 @@ def _utils() -> dict:
 MAX_JSON_INDENT = 8
 
 
-def _json_dumps(obj, indent=None, sort_keys=False):
-	from frappe.utils.response import json_handler
+def _json_default(obj):
+	"""``json.dumps`` default inside the sandbox: the non-JSON values records hold, and
+	nothing else (a function or class is not data; Frappe's json_handler would write out
+	its repr)."""
+	if isinstance(obj, datetime.datetime | datetime.date | datetime.time | datetime.timedelta):
+		return str(obj)
+	if isinstance(obj, decimal.Decimal):
+		return float(obj)
+	if isinstance(obj, set | frozenset):
+		return sorted(obj, key=repr)
+	what = "function" if callable(obj) else type(obj).__name__
+	raise TypeError(f"a {what} is not data")
 
+
+def _json_dumps(obj, indent=None, sort_keys=False):
 	if indent is not None and (not isinstance(indent, int) or not 0 <= indent <= MAX_JSON_INDENT):
 		raise SandboxUsageError(f"json.dumps indent must be a whole number from 0 to {MAX_JSON_INDENT}.")
 	check_written_size(obj, "json.dumps()")
-	return json.dumps(obj, indent=indent, sort_keys=sort_keys, default=json_handler)
+	return json.dumps(obj, indent=indent, sort_keys=sort_keys, default=_json_default)
 
 
 def _json_loads(text):
@@ -2124,7 +2159,7 @@ def _json_loads(text):
 
 
 def _throw(message="", *args, **kwargs):
-	raise SandboxUsageError(f"the code stopped itself: {message}")
+	raise SandboxUsageError(f"the code stopped itself: {short_text(message)}")
 
 
 _PLAIN_BUILTINS = {
@@ -2178,10 +2213,84 @@ _PLAIN_BUILTINS = {
 _PLAIN_BUILTIN_NAMES = frozenset(_PLAIN_BUILTINS) | {"pow", "round", "sum", "repr", "str", "divmod"}
 
 
+# Callables the script is given that need no argument-size check, each with why. Every
+# other callable in the namespace is wrapped in Exposed, which checks the size of its
+# arguments before the call (test_every_callable_in_the_namespace_is_size_checked walks
+# the whole namespace, so a helper added later cannot skip it).
+_CLASS = "a class: building one from an argument copies nothing large"
+_GUARD = "a guard: it sizes its own work (materialised with the item cap, cost-checked)"
+_LAZY = "lazy or constant-time in C: it builds nothing from the size of its argument"
+SAFE_CALLABLES = {
+	**dict.fromkeys(("abs", "all", "any", "callable", "chr", "isinstance", "len", "next", "ord"), _LAZY),
+	**dict.fromkeys(("enumerate", "filter", "map", "reversed", "slice", "zip"), _LAZY),
+	"bool": _CLASS,
+	"float": "parses text of at most MAX_TEXT_CHARS characters, in linear time",
+	"range": "refuses more than MAX_RANGE numbers, and is lazy",
+	**dict.fromkeys(("pow", "round", "sum", "divmod", "sorted", "min", "max", "repr", "hash"), _GUARD),
+	**dict.fromkeys(("str", "int", "list", "tuple", "set", "dict", "_dict", "frappe._dict"), _GUARD),
+	**dict.fromkeys(
+		("date", "timedelta", "datetime.date", "datetime.datetime", "datetime.timedelta"),
+		"a date class: its constructor takes numbers, its strftime is guarded",
+	),
+	**dict.fromkeys(
+		(
+			"Exception",
+			"ArithmeticError",
+			"AssertionError",
+			"AttributeError",
+			"IndexError",
+			"KeyError",
+			"LookupError",
+			"NameError",
+			"RuntimeError",
+			"StopIteration",
+			"TypeError",
+			"ValueError",
+			"ZeroDivisionError",
+		),
+		"an exception class: it keeps its arguments, and their text is cut before it is written",
+	),
+}
+
+
+def _expose(names: dict, prefix: str) -> dict:
+	"""``names`` with every callable that is not in SAFE_CALLABLES wrapped in Exposed;
+	safe plain Python functions get Exposed without the check (only for their name)."""
+	out = {}
+	for name, value in names.items():
+		path = f"{prefix}{name}"
+		if not callable(value) or isinstance(value, type | _Namespace | Exposed):
+			out[name] = value
+		elif path in SAFE_CALLABLES or name.startswith("_"):
+			plain = isinstance(value, types.BuiltinFunctionType)
+			out[name] = value if plain else Exposed(value, name, check=False)
+		else:
+			out[name] = Exposed(value, name)
+	return out
+
+
+def namespace_callables(glb: dict):
+	"""``(path, value)`` of every callable the script can reach by name: builtins, top-level
+	names and the names inside each namespace (``frappe.db.count``)."""
+
+	def walk(names: dict, prefix: str):
+		for name, value in names.items():
+			if name.startswith("_") and name != "_dict":
+				continue
+			path = f"{prefix}{name}"
+			if isinstance(value, _Namespace):
+				yield from walk(value._names, f"{path}.")
+			elif callable(value):
+				yield path, value
+
+	yield from walk(glb["__builtins__"], "")
+	yield from walk({k: v for k, v in glb.items() if k != "__builtins__"}, "")
+
+
 def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set[str]]]:
 	"""``(globals, available_names, frappe_names)`` for one run. Built fresh per call:
 	nothing the script does to its namespace outlives the call."""
-	reads = make_reads(run)
+	reads = _expose(make_reads(run), "")
 	guards = Guards(run.check_memory, run.tick)
 	inplacevar, aug_item = _inplace_factory(guards)
 	types_ = guards.types()
@@ -2189,7 +2298,9 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 	guarded_dict = guarded_type(
 		"_dict", frappe._dict, lambda *args, **kwargs: frappe._dict(make_dict(*args, **kwargs)), {}
 	)
-	utils = _utils()
+	utils = _expose(_utils(), "")
+	text_helpers = _expose({"parse_json": _json_loads, "as_json": _json_dumps, "throw": _throw}, "frappe.")
+	json_names = _expose({"loads": _json_loads, "dumps": _json_dumps}, "json.")
 	session = _Namespace("frappe.session", {"user": user})
 	db = _Namespace(
 		"frappe.db",
@@ -2217,14 +2328,12 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 			"user": user,
 			"defaults": defaults,
 			"_dict": guarded_dict,
-			"parse_json": _json_loads,
-			"as_json": _json_dumps,
-			"throw": _throw,
+			**text_helpers,
 			**{k: utils[k] for k in ("flt", "cint", "cstr") if k in utils},
 		},
 		_FORBIDDEN_FRAPPE,
 	)
-	json_ns = _Namespace("json", {"loads": _json_loads, "dumps": _json_dumps})
+	json_ns = _Namespace("json", json_names)
 	# Shaped like the module, so datetime.date(...) and datetime.datetime.now() both work.
 	datetime_ns = _Namespace(
 		"datetime",
@@ -2242,22 +2351,25 @@ def build_namespace(run: _Run, user: str) -> tuple[dict, set[str], dict[str, set
 		**reads,
 		**utils,
 	}
-	builtins = {
-		**_PLAIN_BUILTINS,
-		**types_,  # str, int, list, tuple, set, dict: size-, hash- and nesting-checked
-		"pow": guards.pow,
-		"round": guards.round,
-		"sum": guards.sum,
-		"divmod": guards.divmod,
-		"sorted": guards.sorted,
-		"min": guards.min,
-		"max": guards.max,
-		"repr": guards.repr,
-		"hash": guards.hash,
-		# Unreachable from the script (names starting with "_" never compile); C code
-		# such as datetime.strftime imports ``time`` through it.
-		"__import__": internal_import,
-	}
+	builtins = _expose(
+		{
+			**_PLAIN_BUILTINS,
+			**types_,  # str, int, list, tuple, set, dict: size-, hash- and nesting-checked
+			"pow": guards.pow,
+			"round": guards.round,
+			"sum": guards.sum,
+			"divmod": guards.divmod,
+			"sorted": guards.sorted,
+			"min": guards.min,
+			"max": guards.max,
+			"repr": guards.repr,
+			"hash": guards.hash,
+		},
+		"",
+	)
+	# Unreachable from the script (names starting with "_" never compile); C code such as
+	# datetime.strftime imports ``time`` through it.
+	builtins["__import__"] = internal_import
 	glb = {
 		"__builtins__": builtins,
 		"__name__": "jarvis_compute",

@@ -1267,7 +1267,7 @@ class TestSingleOperations(ComputeTestCase):
 			"result = x",
 		):
 			with self.subTest(tail=tail):
-				self.assertFast(grow + tail, "would write more than")
+				self.assertFast(grow + tail, "more than")
 		self.assertTrue(
 			_run("result = isinstance('a', str) and str(12) == '12' and str.upper('a') == 'A'")["result"]
 		)
@@ -1417,8 +1417,12 @@ class TestDraftRows(ComputeTestCase):
 					f"rows = get_list('Sales Invoice', filters={self.PAIR} + [{condition!r}], "
 					"fields=[{'SUM': 'grand_total', 'as': 't'}])\nresult = rows[0].t"
 				)
-				self.assertNotIn("warnings", out)
 				self.assertEqual(out["result"], total)
+				# Review 5: drafts named outright are allowed, with a warning that they are in.
+				if condition[1] == "in":
+					self.assertIn("drafts are included", out["warnings"][0])
+				else:
+					self.assertNotIn("warnings", out)
 		grouped = _run(
 			f"rows = get_list('Sales Invoice', filters={self.PAIR}, fields=['docstatus', "
 			"{'SUM': 'grand_total', 'as': 't'}], group_by='docstatus')\nresult = {r.docstatus: r.t for r in rows}"
@@ -2179,3 +2183,315 @@ class TestIteration4(ComputeTestCase):
 					self.assertRaisesRegex(PermissionDeniedError, "hold credentials"),
 				):
 					_run(code)
+
+
+class TestReview5(ComputeTestCase):
+	"""Kavin's re-review of #2875 at 2d246ffa: allowlisted fields, the currency source of
+	truth, sizes of every call, error text, regex input, docstatus, credentials."""
+
+	# 3 million characters once expanded, a few hundred bytes in memory: over every cap,
+	# and harmless if a guard were missing (Kavin's repro used 2 GB, which floods MariaDB).
+	BIG = "l = ['x' * 99999] * 30\n"
+	PAIR = [["name", "in", ["CT-SINV-0001", "CT-DRAFT-0007"]]]
+
+	def assertFast(self, code: str, fragment: str, error=ComputeCodeError, limit: float = 1.0):
+		started = time.monotonic()
+		with self.assertRaises(error) as ctx:
+			_run(code)
+		self.assertLess(time.monotonic() - started, limit, code)
+		self.assertIn(fragment, str(ctx.exception))
+		self.assertLess(len(str(ctx.exception)), 5000)
+		return ctx.exception
+
+	# 1. Aggregates and fields are an allowlist -----------------------------------
+
+	def test_an_aggregate_over_anything_but_one_field_is_refused(self):
+		for entry in (
+			"{'SUM': ['grand_total'], 'as': 't'}",
+			"{'AVG': ['grand_total'], 'as': 't'}",
+			"{'MAX': ['grand_total'], 'as': 't'}",
+			"{'SUM': ('grand_total',), 'as': 't'}",
+			"{'SUM': {'x': 'grand_total'}, 'as': 't'}",
+			"{'SUM': 'grand_total + 1', 'as': 't'}",
+			"{'SUM': 'abs(grand_total)', 'as': 't'}",
+			"{'SUM': 'grand_total', 'as': 't', 'extra': 1}",
+			"{'SUM': 'grand_total', 'as': 't x'}",
+			"{'MEDIAN': 'grand_total', 'as': 't'}",
+			"{'SUM': '*', 'as': 't'}",
+			"{'SUM': '`tabCustomer`.name', 'as': 't'}",
+			"'sum(grand_total * 2) as t'",
+			"'count(distinct customer) as n'",
+			"'grand_total + 0'",
+			"'grand_total as t garbage'",
+			"['grand_total']",
+			"123",
+			"None",
+		):
+			with self.subTest(entry=entry):
+				self.assertFast(
+					f"rows = get_list('Sales Invoice', filters={OURS!r}, fields=[{entry}])\nresult = 1",
+					"not accepted here",
+				)
+
+	def test_a_list_argument_on_drafts_is_refused_too(self):
+		self.assertFast(
+			f"rows = get_list('Sales Invoice', filters={self.PAIR!r}, fields=[{{'SUM': ['base_grand_total'], 'as': 't'}}])\n"
+			"result = 1",
+			"not accepted here",
+		)
+
+	def test_accepted_forms_still_work(self):
+		out = _run(
+			"f = [{'SUM': 'base_grand_total', 'as': 't'}, {'COUNT': '*', 'as': 'n'}, {'max': 'posting_date', 'as': 'last'},"
+			" 'customer', 'count(name) as c']\n"
+			f"rows = get_list('Sales Invoice', filters={INR_CO!r}, fields=f, group_by='customer', order_by='t desc')\n"
+			"result = [(r.customer, r.n, r.c) for r in rows]"
+		)
+		self.assertEqual(out["result"], [[CUST_B, 1, 1], [CUST_A, 2, 2]])
+
+	# 2. Currency, company and docstatus of an aggregate never come from its rows ---
+
+	def test_a_plain_column_next_to_an_ungrouped_sum_does_not_name_the_currency(self):
+		self.assertFast(
+			f"rows = get_list('Sales Invoice', filters={OURS!r}, fields=['currency', {{'SUM': 'grand_total', 'as': 't'}}])\n"
+			"result = rows[0].t",
+			"one SUM mixes currencies",
+		)
+		self.assertFast(
+			f"rows = get_list('Sales Invoice', filters={OURS!r}, fields=['company', {{'SUM': 'base_grand_total', 'as': 't'}}])\n"
+			"result = rows[0].t",
+			"one SUM mixes currencies",
+		)
+		self.assertFast(
+			f"rows = get_list('Sales Invoice', filters={self.PAIR!r}, fields=['docstatus', {{'SUM': 'base_grand_total', 'as': 't'}}])\n"
+			"result = rows[0].t",
+			"draft or cancelled",
+		)
+		one = [["name", "in", ["CT-SINV-0001", "CT-SINV-0002"]]]
+		out = _run(
+			f"rows = get_list('Sales Invoice', filters={one!r}, fields=['currency', {{'SUM': 'grand_total', 'as': 't'}}])\n"
+			"result = rows[0].t"
+		)
+		self.assertEqual((out["result"], out["reads"][0]["currency"]), (1500.0, "INR"))
+
+	def test_grouping_by_the_currency_uses_the_rows(self):
+		out = _run(
+			f"rows = get_list('Sales Invoice', filters={OURS!r}, fields=['currency', {{'SUM': 'grand_total', 'as': 't'}}],"
+			" group_by='currency', order_by='currency asc')\nresult = {r.currency: r.t for r in rows}"
+		)
+		self.assertEqual(out["result"], {"INR": 1500.0, "USD": 450.0})
+
+	# 3. Sizes of every call, and of error text ------------------------------------
+
+	def test_text_helpers_are_size_checked(self):
+		for helper in (
+			"comma_and",
+			"comma_or",
+			"cstr",
+			"frappe.utils.comma_and",
+			"frappe.as_json",
+			"json.dumps",
+		):
+			with self.subTest(helper=helper):
+				self.assertFast(self.BIG + f"result = len({helper}(l))", "arguments")
+
+	def test_read_arguments_are_size_checked_before_the_database(self):
+		for call in (
+			"get_list('Sales Invoice', filters=[['name', 'in', l]])",
+			"get_list('Sales Invoice', or_filters=[['name', 'in', l]])",
+			"get_value('Sales Invoice', {'name': ['in', l]}, 'name')",
+			"exists('Sales Invoice', {'name': ['in', l]})",
+			"count('Sales Invoice', {'name': ['in', l]})",
+			"frappe.db.get_list('Sales Invoice', filters={'name': ['in', l]})",
+			"run_report('General Ledger', {'x': l})",
+			"get_doc('Sales Invoice', l)",
+		):
+			with self.subTest(call=call):
+				self.assertFast(self.BIG + f"result = {call}", "arguments")
+
+	def test_error_text_is_capped_before_it_is_written(self):
+		for code in (
+			"raise Exception(l)",
+			"assert False, l",
+			"x = {}\nx[tuple(l[:10])]",
+			"raise ValueError(l, l)",
+		):
+			with self.subTest(code=code):
+				self.assertFast(self.BIG + code, "too long to show")
+		self.assertFast(self.BIG + "frappe.throw(l)", "arguments")
+		for tail in ("result = str(e)", "result = f'{e}'", "result = repr(e)", "print(e)\nresult = 1"):
+			with self.subTest(tail=tail):
+				self.assertFast(
+					self.BIG + "try:\n    raise Exception(l)\nexcept Exception as err:\n    e = err\n" + tail,
+					"write",
+				)
+
+	def test_every_callable_in_the_namespace_is_size_checked(self):
+		from jarvis.tools import _compute_guards
+
+		run = sandbox._Run()
+		glb, _available, _names = sandbox.build_namespace(run, "Administrator")
+		big = ["x" * 99999] * 30
+		checked = []
+		for path, value in sandbox.namespace_callables(glb):
+			if path in sandbox.SAFE_CALLABLES:
+				continue
+			with self.subTest(path=path):
+				self.assertIsInstance(value, sandbox.Exposed, f"{path} is exposed without a size check")
+				started = time.monotonic()
+				with self.assertRaises(_compute_guards.GuardRefused):
+					value(big)
+				self.assertLess(time.monotonic() - started, 1.0)
+				checked.append(path)
+		for path in (
+			"comma_and",
+			"frappe.utils.cstr",
+			"frappe.get_list",
+			"frappe.db.count",
+			"json.dumps",
+			"run_report",
+			"frappe.throw",
+			"frappe.as_json",
+		):
+			self.assertIn(path, checked)
+		# Every safe name says why it needs no check.
+		self.assertTrue(all(reason for reason in sandbox.SAFE_CALLABLES.values()))
+
+	# 4. Regexes only ever see short text --------------------------------------------
+
+	def test_long_field_text_is_refused_before_any_regex(self):
+		# Built inside the script (the code itself is capped at 20,000 characters). 58 s in
+		# the old regexes at 99,000 spaces; about 2 s at this size.
+		pad = "p = ' ' * 20000\n"
+		for call in (
+			"get_list('Sales Invoice', fields=['name' + p + 'x'])",
+			"get_list('Sales Invoice', fields=['name as' + p + 'x'])",
+			"get_list('Sales Invoice', fields=['sum(grand_total' + p + ') as t'])",
+			"get_list('Sales Invoice', fields=[{'SUM': 'grand_total' + p, 'as': 't'}])",
+			"get_list('Sales Invoice', fields=['name'], order_by='name' + p + 'x')",
+			"get_list('Sales Invoice', fields=['name'], group_by='name' + p + 'x')",
+			"get_list('Sales Invoice', filters={'name' + p + 'x': 1})",
+		):
+			with self.subTest(call=call):
+				self.assertFast(f"{pad}result = {call}", "characters")
+
+	# 5. docstatus conditions ------------------------------------------------------
+
+	def test_only_a_condition_pinning_submitted_counts(self):
+		for cond in ("['>=', 0]", "['!=', 2]", "['<', 2]", "['not in', [2]]"):
+			with self.subTest(cond=cond):
+				self.assertFast(
+					f"rows = get_list('Sales Invoice', filters={self.PAIR!r} + [['docstatus', {cond[1:-1]}]],"
+					" fields=[{'SUM': 'base_grand_total', 'as': 't'}])\nresult = rows[0].t",
+					"draft or cancelled",
+				)
+		for cond in ("1", "['=', 1]", "['in', [1]]"):
+			with self.subTest(cond=cond):
+				out = _run(
+					f"rows = get_list('Sales Invoice', filters={{'name': ['in', ['CT-SINV-0001', 'CT-DRAFT-0007']], 'docstatus': {cond}}},"
+					" fields=[{'SUM': 'base_grand_total', 'as': 't'}])\nresult = rows[0].t"
+				)
+				self.assertEqual(out["result"], 1000.0)
+				self.assertNotIn("warnings", out)
+		out = _run(
+			"rows = get_list('Sales Invoice', filters={'name': ['in', ['CT-SINV-0001', 'CT-DRAFT-0007']], "
+			"'docstatus': ['in', [0, 1]]}, fields=[{'SUM': 'base_grand_total', 'as': 't'}])\nresult = rows[0].t"
+		)
+		self.assertEqual(out["result"], 1070.0)
+		self.assertIn("drafts are included", out["warnings"][0])
+
+	# 6. Logs, mail and deleted records ------------------------------------------------
+
+	def test_logs_mail_and_deleted_records_are_not_readable(self):
+		with _as(SYS_USER):
+			for doctype in (
+				"Error Log",
+				"Email Queue",
+				"Deleted Document",
+				"Unhandled Email",
+				"Webhook Request Log",
+			):
+				with self.subTest(doctype=doctype):
+					self.assertFast(
+						f"result = count('{doctype}')", "not available here", PermissionDeniedError
+					)
+			for code in (
+				"result = get_list('Version', fields=['name', 'data'])",
+				"result = get_list('Access Log', fields=['name', 'page'])",
+				"result = get_list('SMS Log', fields=['name', 'message'])",
+			):
+				with self.subTest(code=code):
+					self.assertFast(code, "hold credentials", PermissionDeniedError)
+			self.assertIsInstance(
+				_run("result = len(get_list('Version', fields=['name', 'ref_doctype'], limit=1))")["result"],
+				int,
+			)
+
+	# 7. Nits ---------------------------------------------------------------------------
+
+	def test_compute_logs_its_own_failures(self):
+		from jarvis.tools import _compute_amounts
+
+		with (
+			patch.object(_compute_amounts, "check", side_effect=RuntimeError("bug in the amount check")),
+			patch.object(sandbox, "_log_internal") as logged,
+		):
+			self.assertFast(
+				f"rows = get_list('Sales Invoice', filters={OURS!r}, fields=['name', 'grand_total'])\nresult = 1",
+				"internal error",
+			)
+		logged.assert_called_once()
+
+	def test_no_object_addresses(self):
+		out = _run(
+			"result = [str(dict.fromkeys), repr(get_list), str(frappe.db.count), repr(sorted), str(json.dumps)]"
+		)
+		self.assertFalse(any("0x" in text for text in out["result"]), out["result"])
+		with self.assertRaises(ComputeCodeError) as ctx:
+			_run("result = json.dumps(get_list)")
+		self.assertNotIn("0x", str(ctx.exception))
+		out = _run(
+			f"result = json.loads(json.dumps(get_list('Sales Invoice', filters={OURS!r}, fields=['name'], limit=1)))"
+		)
+		self.assertEqual(list(out["result"][0]), ["name"])
+
+	def test_resident_memory_is_measured_here(self):
+		rss = sandbox._rss_bytes()
+		if rss is None:
+			self.skipTest("no /proc and no resource module: the memory limit is off on this platform")
+		self.assertGreater(rss, 10 * 2**20)
+
+	def test_a_slow_inline_prepared_report_stops_at_the_deadline(self):
+		name = "CT Compute Slow Prepared Report"
+		if not frappe.db.exists("Report", name):
+			frappe.get_doc(
+				{
+					"doctype": "Report",
+					"report_name": name,
+					"ref_doctype": "Sales Invoice",
+					"report_type": "Query Report",
+					"is_standard": "No",
+					"prepared_report": 1,
+					"query": "select name from `tabSales Invoice` where name like 'CT-SINV-%%'",
+				}
+			).insert(ignore_permissions=True)
+
+		def step():
+			return None
+
+		def slow(*args, **kwargs):
+			end = time.monotonic() + 30
+			while time.monotonic() < end:
+				step()  # a Python call: the deadline watch can stop it
+			return {"columns": [], "result": []}
+
+		started = time.monotonic()
+		with (
+			patch.object(sandbox, "WALL_CLOCK_S", 0.5),
+			patch.object(sandbox, "GRACE_S", 0.2),
+			patch("jarvis.tools._prepared_reports.peek", return_value=("missing", None)),
+			patch("jarvis.tools.run_report.frappe_run_report", slow),
+		):
+			with self.assertRaisesRegex(ComputeCodeError, "did not finish within .* Narrow its filters"):
+				_run(f"result = len(run_report('{name}').rows)")
+		self.assertLess(time.monotonic() - started, 5)

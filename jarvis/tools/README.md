@@ -162,18 +162,28 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
   one. Never readable, by any spelling (case, spaces, underscores): every doctype of
   the jarvis app (conversations, memory, skills, settings, MCP OAuth clients and
   tokens, connectors) and core sign-in token and key doctypes (OAuth, Token Cache,
-  Connected App, Social Login Key, LDAP Settings ...). Fields that hold credentials
+  Connected App, Social Login Key, LDAP Settings ...), and logs and mails that can hold
+  them (Error Log, Email Queue, Unhandled Email, Deleted Document, Webhook Request Log,
+  Recorder, System Console). Fields that hold credentials
   or one-time keys (`User.reset_password_key` / `api_key` / `api_secret`, Integration
-  Request payloads and headers, exchange-rate API parameters, GST portal sign-in, every
+  Request payloads and headers, exchange-rate API parameters, GST portal sign-in,
+  `Version.data`, `Access Log` pages, `SMS Log` messages, every
   Password field, text fields named like a secret, token, OTP or API key) are refused
   in `fields`, filters, `order_by` and `group_by` for everyone, Administrator
   included, and stripped from `get_doc`, `fields=["*"]` and report rows. `filters` / `or_filters` /
   `fields` may be JSON text, as in Frappe's API; other text is refused. `get_list` on a
   single doctype points at `get_single_value` / `get_doc`.
-- **Aggregates**: `fields=["customer", {"SUM": "base_grand_total", "as": "total"}]`
-  with `group_by`. Frappe 16 refuses SQL function strings, so `"sum(x) as y"` is
-  rewritten to the dict form there; on Frappe 15 the dict form is rewritten to the
-  string form.
+- **Fields are an allowlist** (`_compute_fields`): every `fields` entry must parse to a
+  known field of the queried doctype, one of its child tables or (child read) its
+  parent: `"f"`, `"f as x"`, `` "`tabChild`.f" ``, `"items.f"`, `"*"`; or an aggregate
+  `{"SUM" | "COUNT" | "AVG" | "MIN" | "MAX": "<one field>", "as": "<word>"}`,
+  `{"COUNT": "*", "as": "n"}`, or the same as text (`"sum(f) as t"`). Anything else (a
+  list or dict argument, an expression, a nested function, an unknown key or table) is
+  refused with the accepted forms. `group_by` and `order_by` take fields (and, for
+  `order_by`, the aliases) only. Every entry is at most 200 characters (1,000 for a whole
+  `group_by` / `order_by`) before any regular expression sees it. Frappe 16 refuses SQL
+  function strings, so `"sum(x) as y"` is rewritten to the dict form there; on Frappe 15
+  the dict form is rewritten to the string form.
 - **Amount checks** (`_compute_amounts`, at most one extra permissioned query per
   `get_list`). Every field reference is resolved to its table and field first (`f`,
   `f as x`, `X.f`, `` `tabX`.f ``, inside an aggregate). Refused when a database SUM /
@@ -185,9 +195,15 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
     `[child, field, op, value]`);
   - companies: a `base_*` field (`Company:company:default_currency`) over companies
     with different default currencies;
-  - drafts: a submittable doctype read whose `filters` do not name `docstatus` (a
-    condition in `or_filters` does not count) and whose matching rows include drafts
-    or cancelled documents.
+  - drafts: a submittable doctype read whose `filters` do not pin `docstatus` to
+    submitted (`1`, `['=', 1]`, `['in', [1]]`; a condition in `or_filters` does not
+    count) and whose matching rows include drafts or cancelled documents.
+    `['>=', 0]` or `['!=', 2]` are probed like no condition; an explicit
+    `['in', [0, 1]]` is a choice and only warns that drafts are included.
+  The returned rows are the source of a currency, company or docstatus only when the
+  read groups by that column, or neither aggregates nor groups (one row per record): a
+  plain column next to an ungrouped SUM holds one arbitrary row's value, so the probe
+  decides.
   One currency: the receipt names it. Read from the meta, nothing hard-coded. Amounts
   read record by record (`get_doc` / `get_value`) carry their currency on the receipt,
   and a warning says when one call read them in more than one currency.
@@ -228,6 +244,17 @@ sentence, shown in the chat step; the stored tool call keeps it with the code.
   references. A
   limit fails the whole call even when the code catches the error. No process rlimit
   or subprocess: see the `_compute_sandbox` docstring.
+- **Every callable is size-checked**: each helper the code is given (the reads, the
+  date, number and text helpers, `json`, `frappe.throw`) checks the total size of its
+  arguments before the call (1,000,000 characters or values, shared references counted
+  each time) and the length of the text it returns; only builtins that build nothing
+  from their argument's size and the guards themselves are exempt, each with its reason
+  (`SAFE_CALLABLES`, enforced by a test that walks the namespace). Error text from a
+  raise, an assert or a throw is cut before it is written. Callables write out as
+  `<function name>`, never with an address.
+- **Internal failures** of compute's own code (the amount check, shaping the result) are
+  logged to the `jarvis.compute` log file (an Error Log insert inside the run is dropped
+  with the report-path ones) and the call is refused, never passed unchecked.
 - **Kill switch**: site config `jarvis_disable_compute`. `true` / `1` / `yes` / `on`
   switch compute off; `false` / `0` / `no` / `off` / empty (or no key) leave it on;
   any other value switches it off (fail closed). Refused calls get
