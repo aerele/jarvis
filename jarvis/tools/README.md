@@ -134,6 +134,154 @@ A match raises `PermissionDeniedError`. An empty field blocks nothing (fail-open
 every `run_method` call still parks for a human confirmation card regardless, so
 the blocklist is the "never even offer these" hardstop, not the only boundary.
 
+## `compute` - read-only Python for totals and cross-checks
+
+```python
+compute(code: str, description: str)
+# -> {"warnings": [str],  # only when there are any, always the first key
+#     "result": <json data>, "reads": [receipt, ...], "rows_read": int,
+#     "elapsed_ms": int, "printed": str}  # printed only when something was
+```
+
+For any total, count, ranking, comparison or cross-check over more than a handful of
+records: one call reads, groups, sums and ranks, and returns only the shaped answer.
+No imports; the answer goes in `result` (None is refused). `description` is one
+sentence, shown in the chat step; the stored tool call keeps it with the code.
+
+- **Namespace** (an allowlist, `_compute_sandbox.build_namespace`): `get_list`,
+  `get_doc`, `get_value`, `get_single_value`, `count`, `exists`, `get_meta`,
+  `run_report`, `default_company`, `get_user_default` (also as `frappe.*` and
+  `frappe.db.*`), date and number helpers (`frappe.utils` subset, also bare),
+  `json.loads/dumps`, `frappe._dict`, `frappe.session.user`, `datetime` / `date` /
+  `timedelta`, and plain builtins. No `frappe.db.sql`, query builder, `get_all`,
+  writes, jobs, mail, HTTP, files or `frappe.local`; each of those fails with what to
+  write instead. An unknown field or doctype says "Did you mean ...".
+- **Permissions**: every read runs as the chat user. `get_list` refuses
+  `ignore_permissions` / `user` / `as_list` and the like, refuses a field the user
+  cannot read (permission level) and aggregating / filtering / sorting on a masked
+  one. Never readable, by any spelling (case, spaces, underscores): every doctype of
+  the jarvis app (conversations, memory, skills, settings, MCP OAuth clients and
+  tokens, connectors) and core sign-in token and key doctypes (OAuth, Token Cache,
+  Connected App, Social Login Key, LDAP Settings ...), and logs and mails that can hold
+  them (Error Log, Email Queue, Unhandled Email, Deleted Document, Webhook Request Log,
+  Recorder, System Console). Fields that hold credentials
+  or one-time keys (`User.reset_password_key` / `api_key` / `api_secret`, Integration
+  Request payloads and headers, exchange-rate API parameters, GST portal sign-in,
+  `Version.data`, `Access Log` pages, `SMS Log` messages, every
+  Password field, text fields named like a secret, token, OTP or API key) are refused
+  in `fields`, filters, `order_by` and `group_by` for everyone, Administrator
+  included, and stripped from `get_doc`, `fields=["*"]` and report rows. `filters` / `or_filters` /
+  `fields` may be JSON text, as in Frappe's API; other text is refused. `get_list` on a
+  single doctype points at `get_single_value` / `get_doc`.
+- **Fields are an allowlist** (`_compute_fields`): every `fields` entry must parse to a
+  known field of the queried doctype, one of its child tables or (child read) its
+  parent: `"f"`, `"f as x"`, `` "`tabChild`.f" ``, `"items.f"`, `"*"`; or an aggregate
+  `{"SUM" | "COUNT" | "AVG" | "MIN" | "MAX": "<one field>", "as": "<word>"}`,
+  `{"COUNT": "*", "as": "n"}`, or the same as text (`"sum(f) as t"`). Anything else (a
+  list or dict argument, an expression, a nested function, an unknown key or table) is
+  refused with the accepted forms (with a hint for SQL date functions and
+  `COUNT(DISTINCT ...)`). `group_by` and `order_by` take fields (and, for `order_by`, the
+  aliases) only. Every filter key (`filters`, `or_filters`, JSON text, `[doctype, field,
+  op, value]`, and the filters of `get_value` / `exists` / `count`) goes through the same
+  allowlist: a field, a qualified or child-table field, or up to two link fields followed
+  to their target (`customer.territory`), with the user's read permission on every target;
+  operators are Frappe's own. Private doctypes and credential fields are refused on
+  every table any entry reaches (a child table, a link target). Two entries returning
+  the same row key, an aggregate over a child table on a parent read, and `distinct`
+  over a number field are refused with the fix. Every entry is at most 200 characters (1,000 for a whole
+  `group_by` / `order_by`) before any regular expression sees it. Frappe 16 refuses SQL
+  function strings, so `"sum(x) as y"` is rewritten to the dict form there; on Frappe 15
+  the dict form is rewritten to the string form.
+- **Amount checks** (`_compute_amounts`, at most one extra permissioned query per
+  `get_list`). Every field reference is resolved to its table and field first (`f`,
+  `f as x`, `X.f`, `` `tabX`.f ``, inside an aggregate). Refused when a database SUM /
+  AVG / MIN / MAX mixes, warned (once per doctype and field) when the same amounts
+  come back row by row:
+  - currencies: a Currency field whose `options` names a currency column (`currency`,
+    `party_account_currency` ...), on its own doctype or, for a child table, on the
+    parent (a child-table read is probed on its parent with its filters as
+    `[child, field, op, value]`);
+  - companies: a `base_*` field (`Company:company:default_currency`) over companies
+    with different default currencies;
+  - drafts: a submittable doctype read whose `filters` do not pin `docstatus` to
+    submitted (`1`, `['=', 1]`, `['in', [1]]`; a condition in `or_filters` does not
+    count) and whose matching rows include drafts or cancelled documents.
+    `['>=', 0]` or `['!=', 2]` are probed like no condition; an explicit
+    `['in', [0, 1]]` is a choice and only warns that drafts are included.
+  The returned rows are the source of a currency, company or docstatus only when the
+  read groups by that column, or neither aggregates nor groups (one row per record): a
+  plain column next to an ungrouped SUM holds one arbitrary row's value, so the probe
+  decides.
+  One currency: the receipt names it. Read from the meta, nothing hard-coded. Amounts
+  read record by record (`get_doc` / `get_value`) carry their currency on the receipt,
+  and a warning says when one call read them in more than one currency.
+- **`reads`**: one compact receipt per read: `doctype` (or `report`), `rows`,
+  `currency` / `currencies` when known, `limited` / `limit` when the code set a
+  limit, `prepared` / `as_of` for a report's finished copy, `filters` cut at 100
+  characters. At most 15, then `{"more": n}`.
+- **No partial reads**: a read over the row caps raises; only a limit the code passes
+  itself stops a read early (the receipt says so). A read that returns exactly its
+  limit with no `order_by` adds a warning (with an `order_by` it is a top-N).
+- **Reports**: `run_report` goes through `run_report`'s own gates. Its receipt names the
+  currency (or currencies) of the amount columns, from the rows; rows in more than one
+  currency, or amounts with no currency and no company filter across companies in
+  different currencies, get a warning. A Prepared Report
+  answers from its finished copy (`prepared`, `as_of`), else runs inline as the user
+  within the call's deadline; nothing starts in the background. A report that fails
+  gives its own error (Frappe's Error Log insert for it is dropped at the write guard;
+  every other write is still refused).
+- **Read-only**: inside `preview_sandbox` (savepoint always rolled back, commit
+  neutralised, jobs dropped), and `frappe.db.sql` refuses every non-read statement
+  before it is sent. A report that writes when it runs makes the call fail
+  (`InvalidArgumentError`, not fixable): call `run_report` directly instead.
+- **Limits** (`_compute_sandbox` and `_compute_guards` constants): 20 s wall clock,
+  8 s per statement, 100,000 rows per read and 200,000 per call, 20,000 characters of
+  code, 2,000 of printed output, 512 MB of memory growth, 100,000 characters per text
+  and 200,000 items per list built in one step (starred parts `[*a, *b]`, `f(*args)`
+  and `{**d}` count before anything is allocated), containers nested at most 10 deep
+  (checked wherever one is built or stored into), and the 35,000-character result
+  guard. Time and memory are checked before every statement, at every lambda call, for
+  every loop item, after every read and after every big operation; a `sys.monitoring`
+  watch also stops any call into the code or the guards at the deadline (and code
+  beneath, such as a report's own Python, 2 s later). A single operation that
+  could grow a value or do a lot of work in one C call is checked first: arithmetic
+  (int size, `//` and `%` included), %-formatting and f-string specs, `pow`, `round`,
+  `sum`, `divmod`, `str.join` and the padding / replace methods, `list` / `tuple` /
+  `set` / `dict` / `int` built from anything, `list.extend` / `sort` / `count` /
+  `index`, `sorted` / `min` / `max` and every comparison and dict key (by the cost of
+  comparing nested or shared structures and long texts; measured again after any
+  mutation), sets and dict keys that hash alike (distinct large ints with distinct
+  hashes, like snowflake ids, are fine), and writing out a structure with shared
+  references. A
+  limit fails the whole call even when the code catches the error. No process rlimit
+  or subprocess: see the `_compute_sandbox` docstring.
+- **Callables passed to builtins**: `map` and `filter` are Python iterators that tick
+  (time and memory) before every item; a `key=` that is not the script's own function
+  runs from a loop that ticks every 64 items; a callable taken off a class (`str.upper`,
+  `date.strftime`) is checked like any other exposed callable and through the instance
+  guard (the 200-character strftime cap). A record's child table named like a dict method
+  (`doc.items`) returns the rows; `doc.items()` still works.
+- **Every callable is size-checked**: each helper the code is given (the reads, the
+  date, number and text helpers, `json`, `frappe.throw`) checks the total size of its
+  arguments before the call (1,000,000 characters or values, shared references counted
+  each time) and the length of the text it returns; only builtins that build nothing
+  from their argument's size and the guards themselves are exempt, each with its reason
+  (`SAFE_CALLABLES`, enforced by a test that walks the namespace). Error text from a
+  raise, an assert or a throw is cut before it is written. Callables write out as
+  `<function name>`, never with an address.
+- **Internal failures** of compute's own code (the amount check, shaping the result) are
+  logged to the `jarvis.compute` log file (an Error Log insert inside the run is dropped
+  with the report-path ones) and the call is refused, never passed unchecked.
+- **Kill switch**: site config `jarvis_disable_compute`. `true` / `1` / `yes` / `on`
+  switch compute off; `false` / `0` / `no` / `off` / empty (or no key) leave it on;
+  any other value switches it off (fail closed). Refused calls get
+  `FeatureDisabledError`. Errors the model can fix are `ComputeCodeError` (wire code
+  `InvalidArgumentError`, kind `fixable`) and name the line.
+- **Floats** in the result lose binary noise only: a run of zeros or nines right
+  before the last digits of a full-precision float (`12345.670000000002` becomes
+  `12345.67`, `66987822.72000001` becomes `66987822.72`); every digit a double really
+  carries is kept (`12345678901234.56`, `0.012345678`).
+
 ## `get_schema` - live introspection (the backbone)
 
 ```python

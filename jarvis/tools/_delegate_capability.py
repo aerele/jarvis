@@ -334,6 +334,9 @@ def snapshot_config_read_denial(cap, tool: str, args: dict | None) -> dict | Non
 		(name == "get_doc" and _is_config_source_doctype(args.get("doctype")))
 		or (name == "get_list" and not _get_list_can_only_read_its_base_doctype(args))
 		or (name == "query" and _query_mentions_config_source(args.get("spec")))
+		# compute's reads are chosen by code at run time, so they cannot be checked for
+		# a configuration source before dispatch: refused outright for such a run.
+		or name == "compute"
 	)
 	if not must_refuse:
 		return None

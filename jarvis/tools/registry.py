@@ -45,6 +45,11 @@ _TOOL_NAMES: tuple[str, ...] = (
 	# which have near-matches to reuse, which are missing (feed create_doc(docs=[...])).
 	"resolve_links",
 	"run_report",
+	# Read-only Python over permissioned reads (get_list / get_doc / run_report as the
+	# chat user) for totals, rankings and cross-checks in ONE call; only the small
+	# shaped result comes back. Never gated: nothing it runs can write (a savepoint
+	# always rolled back, write statements refused). See _compute_sandbox.py.
+	"compute",
 	"get_report_filters",
 	"run_method",
 	"query",

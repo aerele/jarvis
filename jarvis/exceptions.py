@@ -166,6 +166,16 @@ class SandboxCodeError(InvalidFieldValueError):
 	envelope_code = "InvalidArgumentError"
 
 
+class ComputeCodeError(InvalidFieldValueError):
+	"""Code sent to the ``compute`` tool that cannot run as written: a syntax error,
+	a name the sandbox does not offer, an error the code raised, or a limit it hit
+	(rows read, time, result size). The message says what to write instead, so the
+	model alone can fix it and send the call again (``jarvis._failure_kind``:
+	FIXABLE). The envelope keeps the ``InvalidArgumentError`` code."""
+
+	envelope_code = "InvalidArgumentError"
+
+
 class RetryLaterError(JarvisError):
 	"""The site was busy (a lock held or a lock wait that timed out); nothing was
 	saved and the same request can succeed in a moment (``jarvis._failure_kind``:

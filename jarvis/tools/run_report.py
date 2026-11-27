@@ -32,11 +32,23 @@ def run_report(report_name: str, filters: dict | str | None = None) -> dict:
 	return _run_report(report_name, filters)
 
 
-def _run_report(report_name: str, filters: dict | str | None = None, *, inline_only: bool = False) -> dict:
+def _run_report(
+	report_name: str,
+	filters: dict | str | None = None,
+	*,
+	inline_only: bool = False,
+	no_background: bool = False,
+) -> dict:
 	"""The body of ``run_report``. ``inline_only`` is for a report snapshot reload and is
 	not a tool argument: a Prepared Report raises ``SnapshotReloadRefused`` instead of
 	being enqueued, and the given filters are used as they are: a Custom Report's saved
-	default filters (which Frappe would substitute) cannot move the scope of a reload."""
+	default filters (which Frappe would substitute) cannot move the scope of a reload.
+
+	``no_background`` is for the ``compute`` sandbox, which never starts background work
+	and wants every row in one call: a Prepared Report answers with its finished copy for
+	these filters (every row, ``prepared: True`` and its ``as_of``), and with no finished
+	copy it runs inline (``ignore_prepared_report``) as the user, under the sandbox's own
+	deadline and read-only enforcement (``prepared: False``)."""
 	if not report_name:
 		raise InvalidArgumentError("report_name is required")
 	filters = _normalize_filters(filters)
@@ -67,6 +79,8 @@ def _run_report(report_name: str, filters: dict | str | None = None, *, inline_o
 	if frappe.db.get_value("Report", report_name, "prepared_report"):
 		if inline_only:
 			raise SnapshotReloadRefused("prepared")
+		if no_background:
+			return attach_scope(_copy_or_inline(report_name, filters), scope)
 		# Inside a macro run's own step a copy must be as new as the run (see macro_report_wait).
 		ctx = macro_report_wait.current_context()
 		return attach_scope(
@@ -84,6 +98,23 @@ def _run_report(report_name: str, filters: dict | str | None = None, *, inline_o
 		return attach_scope(frappe_run_report(report_name=report_name, filters=filters, **pinned), scope)
 	except frappe.PermissionError as e:
 		raise PermissionDeniedError(str(e) or f"no permission to run report {report_name}") from e
+
+
+def _copy_or_inline(report_name: str, filters: dict) -> dict:
+	"""A Prepared Report for the compute sandbox: its finished copy for ``filters``
+	(``{columns, result, as_of, run}``, every row, read as the caller after the gates
+	``run()`` applies), else the report run inline as the caller. Starts nothing in the
+	background either way."""
+	user = frappe.session.user
+	filled = _prepared_reports.gate_and_fill(report_name, filters, user=user)
+	state, completed = _prepared_reports.peek(report_name, filled, user=user)
+	if state == "ready" and completed is not None:
+		return {**completed, "prepared": True}
+	try:
+		data = frappe_run_report(report_name=report_name, filters=filled, ignore_prepared_report=True)
+	except frappe.PermissionError as e:
+		raise PermissionDeniedError(str(e) or f"no permission to run report {report_name}") from e
+	return {**data, "prepared": False}
 
 
 def _normalize_filters(filters: dict | str | None) -> dict:
