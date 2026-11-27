@@ -1,5 +1,6 @@
 """Real source transactions, including independent committed accounting changes."""
 
+from copy import deepcopy
 from threading import Thread
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
@@ -118,6 +119,51 @@ class TestPaymentCalendarSnapshot(TestCase):
 		self.assertEqual(result["horizon"]["start"], scope["anchor"])
 		self.assertEqual(result["horizon"]["lowest"]["date"], scope["anchor"])
 
+	def test_check_source_contract_refuses_without_a_company_cache_hit(self):
+		profile = source_profile()
+		source = {"currency": "INR", "precision": 2, "rows": [1]}
+		defaults = {profile.defaults_cache_hit}
+		company = {("get_value", "document_cache::Company::X")}
+		with self.assertRaises(CalendarSourceUnavailable) as raised:
+			snapshot.check_source_contract(defaults, {"Payable": source}, None, "INR", 2, profile)
+		self.assertEqual(raised.exception.code, "source_contract_unavailable")
+		self.assertIsNone(
+			snapshot.check_source_contract(defaults | company, {"Payable": source}, None, "INR", 2, profile)
+		)
+		with self.assertRaises(CalendarSourceUnavailable) as raised:
+			snapshot.check_source_contract(defaults | company, {"Payable": source}, None, "USD", 2, profile)
+		self.assertEqual(raised.exception.code, "currency_reconciliation_unavailable")
+
+	def test_collect_refuses_when_only_its_own_precision_read_meets_the_defaults_cache(self):
+		from erpnext.accounts.utils import get_currency_precision
+
+		with snapshot.consistent_read() as hits:
+			self.assertNotIn(source_profile().defaults_cache_hit, hits)
+			get_currency_precision()
+			# The premise: collect's own precision read adds the hit the sources never made.
+			self.assertIn(source_profile().defaults_cache_hit, hits)
+		scope = normalize_scope(self.fx.company, [])
+		# Complete sources taken from real reads, so only the check order can make collect refuse.
+		real = {
+			side: read_obligations(
+				scope["company"], side, scope["anchor"], scope["window_start"], scope["window_end"]
+			)
+			for side in ("Payable", "Receivable")
+		}
+		proof = authorize_scope(scope)
+
+		def read(company, side, *args):
+			# Meets the Company cache like a real read, but never the defaults cache.
+			frappe.get_cached_value("Company", self.fx.company, "default_currency")
+			return deepcopy(real[side])
+
+		with (
+			patch.object(snapshot, "read_obligations", side_effect=read),
+			self.assertRaises(CalendarSourceUnavailable) as raised,
+		):
+			snapshot.collect(scope, proof["fingerprint"])
+		self.assertEqual(raised.exception.code, "source_contract_unavailable")
+
 	def test_the_fiscal_year_contract_needs_the_source_view_to_have_read_fiscal_years(self):
 		self.assertTrue(snapshot.fiscal_years_read({("hget", "fiscal_years")}))
 		self.assertFalse(snapshot.fiscal_years_read({("get_value", "document_cache::Company::X")}))
@@ -173,12 +219,14 @@ class TestPaymentCalendarSnapshot(TestCase):
 				frappe.client_cache.delete_value("defaults::__default")
 
 		original = get()
+		# A stale value that differs from the site's real precision, whatever that is.
+		stale = 7 if get_currency_precision() != 7 else 6
 		try:
-			set_value(frappe._dict(currency_precision="7"))
+			set_value(frappe._dict(currency_precision=str(stale)))
 			with snapshot.consistent_read() as hits:
-				self.assertNotEqual(get_currency_precision(), 7)
+				self.assertNotEqual(get_currency_precision(), stale)
 				self.assertIn(profile.defaults_cache_hit, hits)
-			self.assertEqual(get().currency_precision, "7")
+			self.assertEqual(get().currency_precision, str(stale))
 		finally:
 			delete()
 			if original is not None:

@@ -1796,6 +1796,19 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 				return "old"
 			return None
 
+		def cold_cache(*_args):
+			# A test's own `frappe.clear_cache()`, just before the commit of `fail_run`.
+			frappe.clear_cache()
+			return True
+
+		# What a document save leaves: a cache clear queued for the next commit. A real commit under the fake
+		# `get_value` below would run it, rebuild the DocField meta through the fake and cache a Meta
+		# without `title_field`.
+		frappe.clear_cache(doctype="ToDo")
+		self.addCleanup(frappe.clear_cache)
+		# The queued clear never runs (the commit is patched): drop it, or the next real commit runs it and its
+		# reads open a read view that hides a later writer.
+		self.addCleanup(frappe.db.after_commit.reset)
 		with (
 			patch.object(api, "_get_header", side_effect=lambda name: headers.get(name)) as get_header,
 			patch.object(api, "_request_body_bytes", return_value=b"{}"),
@@ -1804,8 +1817,9 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 			patch("jarvis.chat.collaboration.is_collaborative_session", return_value=False),
 			patch("jarvis.chat.collaboration.legacy_session_user", return_value="owner@example.test"),
 			patch.object(frappe.db, "get_value", side_effect=get_value),
+			patch.object(frappe.db, "commit"),
 			patch.object(frappe.db, "get_single_value", return_value="new"),
-			patch("jarvis.chat.device.session_device_is_stale", return_value=True),
+			patch("jarvis.chat.device.session_device_is_stale", side_effect=cold_cache),
 			patch.object(_delegate_capability, "resolve", return_value=cap),
 			patch.object(api, "impersonate"),
 			patch.object(api, "_persist_and_publish_tool_call") as receipt,
@@ -1818,6 +1832,9 @@ class TestPayrollDepositPrivateAuditRedaction(TestCase):
 		):
 			result = api.call_tool("query_file", {"file_url": sentinel_arg, "sql": sentinel_arg})
 
+		self.assertTrue(
+			"title_field" in frappe.get_meta("DocField").__dict__, "a fake get_value poisoned the meta cache"
+		)
 		self.assertFalse(result["ok"])
 		self.assertEqual(result["error"]["code"], api.RunHaltedError.__name__)
 		self.assertEqual([call.args[0] for call in get_header.call_args_list], ["X-Jarvis-Token"])

@@ -2,6 +2,7 @@ import re
 
 import frappe
 from frappe.model.document import Document
+from frappe.utils import escape_html
 
 # The write-conflict policy (#713) lives in jarvis.chat.txn so every shared-row writer
 # in chat uses the same rules; the private names stay for this module and its tests.
@@ -58,6 +59,8 @@ def clear_brand_boot_cache():
 # We accept both "oauth" (REV-1 canonical) and the legacy "subscription"
 # value migrated tenants might still carry.
 _CONTAINER_OWNED_MODES = {"oauth", "subscription"}
+# The three LLM fields whose change is a structural change for the sync (one list, two readers).
+LLM_STRUCTURAL_FIELDS = ("llm_provider", "llm_model", "llm_base_url")
 
 # Shared budget for the admin-sync background jobs (single-model + pool).
 # One constant, three consumers, one invariant chain:
@@ -905,6 +908,58 @@ class JarvisSettings(Document):
 		# The Desk boot carries the name and the logo; on_update drops its cache on a change.
 		self.flags.brand_changed = any(self.has_value_changed(f) for f in ("agent_name", "brand_logo"))
 		self.flags.shortcut_visibility_changed = self.has_value_changed("hide_shortcut_without_access")
+		self._validate_payment_calendar_reader()
+		self.flags.reader_routing_save_only = self._is_reader_routing_save_only()
+
+	def _validate_payment_calendar_reader(self):
+		"""Normalize the two company lists, and refuse a company added in THIS save that does not exist.
+
+		Names are exact. Lines that were already saved are not re-checked, so a company deleted later
+		never blocks an unrelated save."""
+		from jarvis.payment_calendar.routing import READER_LIST_FIELDS, parse_company_lines
+
+		before = self.get_doc_before_save()
+		for fieldname in READER_LIST_FIELDS:
+			lines = parse_company_lines(self.get(fieldname))
+			normalized = "\n".join(lines)
+			# An untouched empty list stays NULL: rewriting it to "" would read as a change.
+			if normalized != (self.get(fieldname) or ""):
+				self.set(fieldname, normalized)
+			already_saved = set(parse_company_lines(before.get(fieldname) if before else ""))
+			self._refuse_unknown_companies([name for name in lines if name not in already_saved])
+
+	@staticmethod
+	def _refuse_unknown_companies(added):
+		if not added:
+			return
+		# The database compares names without case, so the match is made exactly here.
+		found = set(frappe.get_all("Company", filters={"name": ("in", added)}, pluck="name"))
+		unknown = [name for name in added if name not in found]
+		if unknown:
+			# Administrator-typed text goes into the message: escape it.
+			names = ", ".join(frappe.bold(escape_html(name)) for name in unknown)
+			frappe.throw(
+				"Unknown company in the Payment Calendar reader list: " + names, frappe.ValidationError
+			)
+
+	def _is_reader_routing_save_only(self) -> bool:
+		"""True when this save changes a reader field and nothing the LLM sync reads.
+
+		Such a save is inert: it must not enqueue a sync, even on a site whose last sync did not end
+		ok (an unrelated re-save is the retry lever, but flipping the reader switch is not a retry).
+		A change to the LLM config, a forced sync or a new key keeps the normal path."""
+		from jarvis.payment_calendar.routing import READER_FIELDS
+
+		old = self.get_doc_before_save()
+		if old is None or not any(self.has_value_changed(f) for f in READER_FIELDS):
+			return False
+		if self.flags.get("force_admin_sync") or self.flags.get("llm_api_key_changed"):
+			return False
+		if self.flags.get("llm_auth_mode_changed"):
+			return False
+		if any((self.get(f) or "") != (old.get(f) or "") for f in LLM_STRUCTURAL_FIELDS):
+			return False
+		return self.flags.get("pool_state_snapshot") == self._pool_state_snapshot(old)
 
 	def _preserve_agent_catalog_state(self):
 		"""Keep server-owned Apply state out of a crafted Settings save.
@@ -1174,6 +1229,9 @@ class JarvisSettings(Document):
 			# Invalidate again once the new preference is visible to other sessions.
 			frappe.db.after_commit.add(clear_brand_boot_cache)
 
+		if self.flags.get("reader_routing_save_only"):
+			return
+
 		# ------------------------------------------------------------------ #
 		# Unified LLM path (2026-06-26): models table rows or preset present.
 		# ------------------------------------------------------------------ #
@@ -1216,6 +1274,9 @@ class JarvisSettings(Document):
 	_ADMIN_ONLY_FIELDS = {
 		"enforce_agent_min_model": "Enforce Agent Minimum Model",
 		"payment_calendar_chat_handoff": "Payment Calendar chat hand-off",
+		"payment_calendar_reader": "Payment Calendar reader mode",
+		"payment_calendar_reader_companies": "Payment Calendar reader served companies",
+		"payment_calendar_reader_shadow_companies": "Payment Calendar reader shadow companies",
 	}
 
 	def _guard_admin_only_fields(self):
@@ -2237,7 +2298,7 @@ class JarvisSettings(Document):
 				return "reload"
 			return None
 
-		structural_fields = ("llm_provider", "llm_model", "llm_base_url")
+		structural_fields = LLM_STRUCTURAL_FIELDS
 		structural_changed = any(
 			(getattr(self, f, None) or "") != (getattr(old, f, None) or "") for f in structural_fields
 		)
