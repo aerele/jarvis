@@ -276,7 +276,12 @@ def _validate_coverage(s: IntakeSpec, meta) -> None:
 	missing = [
 		f for f in header if f not in covered and f not in needs_file and not _fetched(by_name[f], covered)
 	]
-	missing_columns = [c for c in columns if c not in ((s.table or {}).get("columns") or [])]
+	read_columns = set((s.table or {}).get("columns") or [])
+	child = _child_doctype(s)
+	column_by_name = {df.fieldname: df for df in frappe.get_meta(child).fields} if child else {}
+	missing_columns = [
+		c for c in columns if c not in read_columns and not _fetched(column_by_name[c], read_columns)
+	]
 	# A mandatory table that the spec does not fill can never be satisfied.
 	table_name = (s.table or {}).get("fieldname")
 	missing_tables = [
@@ -303,9 +308,16 @@ def _validate_coverage(s: IntakeSpec, meta) -> None:
 
 def _fetched(df, covered: set) -> bool:
 	"""True when ``df`` is filled from a Link field (``fetch_from`` "link.field") that is
-	read or defaulted."""
+	read or defaulted, in the same header or table row."""
 	source = (df.get("fetch_from") or "").split(".")[0]
 	return bool(source) and source in covered
+
+
+def fetched_from_value(df, values: dict) -> bool:
+	"""Runtime twin of ``_fetched``: Frappe fills ``df`` on insert when its source Link
+	holds a value in ``values`` (the header or one child row)."""
+	source = (df.get("fetch_from") or "").split(".")[0]
+	return bool(source) and not _is_blank(values.get(source))
 
 
 def select_options(df) -> list[str]:
