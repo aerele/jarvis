@@ -912,6 +912,22 @@ class TestIntakeDraft(FrappeTestCase):
 			missing = draft.missing_fields(s, {"title": "other", "items": []}, [])
 			self.assertNotIn("notes", [m["field"] for m in missing])
 
+	def test_required_fetched_field_is_not_missing_once_its_source_is_read(self):
+		s = self._spec()
+		D = frappe._dict
+		meta = D(
+			fields=[],
+			get_field=lambda f: D(fetch_from="item_code.item_name") if f == "item_name" else D(),
+		)
+		with (
+			mock.patch.object(intake_spec_module, "mandatory_fields", return_value=([], ["item_name"])),
+			mock.patch.object(intake_spec_module, "_child_doctype", return_value="Row"),
+			mock.patch("frappe.get_meta", return_value=meta),
+		):
+			rows = [{"item_code": "BOLT"}, {"item_code": ""}]
+			missing = draft.missing_fields(s, {"items": rows}, [])
+		self.assertEqual([(m["field"], m["row"]) for m in missing], [("item_name", 2)])
+
 	def test_truncated_file_goes_to_review_in_strict_mode_and_the_reviewer_is_told(self):
 		rule = self._rule()
 		row = self._row(rule)
