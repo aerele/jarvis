@@ -5,6 +5,8 @@ from frappe.core.doctype.user_permission.user_permission import get_user_permiss
 from frappe.permissions import get_role_permissions
 
 from jarvis.exceptions import PermissionDeniedError
+from jarvis.payment_calendar import batch_permission
+from jarvis.permission_hooks import effective_hooks
 from jarvis.tools._company_scope import assert_company_permitted
 from jarvis.tools._ledger_access import gl_dimension_doctypes
 from jarvis.tools._report_scope import _assert_company_readable
@@ -89,7 +91,7 @@ def incomplete_scope_reasons() -> list[str]:
 		perms = get_role_permissions(frappe.get_meta(doctype), user)
 		if {"read", "report"}.intersection(perms.get("if_owner", {})):
 			reasons.append("owner_only_obligations")
-	query_hooks = frappe.get_hooks("permission_query_conditions")
+	query_hooks = effective_hooks("permission_query_conditions", user)
 	if any(
 		query_hooks.get(dt)
 		for dt in ("Purchase Invoice", "Sales Invoice", "Payment Ledger Entry", "GL Entry", "Account", "*")
@@ -104,6 +106,7 @@ def visible_names(doctype: str, names, filters: dict | None = None) -> set[str]:
 	allowed = set()
 	try:
 		for offset in range(0, len(names), 500):
+			batch_permission.check_permission_stop()
 			allowed.update(
 				frappe.get_list(
 					doctype,
@@ -114,18 +117,24 @@ def visible_names(doctype: str, names, filters: dict | None = None) -> set[str]:
 			)
 	except (frappe.PermissionError, frappe.DoesNotExistError):
 		return set()
-	hooks = frappe.get_hooks("has_permission")
+	hooks = effective_hooks("has_permission")
 	if hooks.get(doctype) or hooks.get("*"):
 		ptype = "select" if frappe.only_has_select_perm(doctype) else "read"
-		visible = set()
-		for name in allowed:
-			try:
-				if frappe.has_permission(doctype, ptype, doc=name):
-					visible.add(name)
-			except (frappe.DoesNotExistError, frappe.PermissionError):
-				continue
-		return visible
+		return batch_permission.batch_visible(doctype, allowed, ptype)
 	return allowed
+
+
+def _visible_names_per_doc(doctype: str, allowed: set[str], ptype: str) -> set[str]:
+	"""Today's loop: Frappe's own document check for every name (the fallback and the oracle of the batch)."""
+	visible = set()
+	for name in allowed:
+		batch_permission.check_permission_stop()
+		try:
+			if frappe.has_permission(doctype, ptype, doc=name):
+				visible.add(name)
+		except (frappe.DoesNotExistError, frappe.PermissionError):
+			continue
+	return visible
 
 
 def require_floor_write(company: str) -> None:

@@ -11,6 +11,7 @@ from frappe.utils import add_days, nowdate
 from jarvis.payment_calendar import balances, jobs, snapshot, store
 from jarvis.payment_calendar.errors import CalendarSourceUnavailable
 from jarvis.tests.payment_calendar_fixtures import CalendarFixtures, require_calendar_test_site
+from jarvis.tests.payment_calendar_majors import GATE_BANK_ONE_PASS_V15, v16_only
 
 ACTOR = "Administrator"
 
@@ -115,6 +116,31 @@ class TestBalancesJob(TestCase):
 			job_id = self.run_job()
 		self.assertEqual([len(call.args[1]) for call in read.call_args_list], [50, 3])
 		self.assertEqual({call.args[2] for call in read.call_args_list}, {nowdate()})
+		self.assertEqual(store.load_result(ACTOR, job_id)["total"], "1500.00")
+
+	@v16_only(GATE_BANK_ONE_PASS_V15)
+	def test_more_than_fifty_accounts_with_the_switch_on_take_the_one_pass_in_two_chunks(self):
+		from jarvis.payment_calendar import routing
+
+		for index in range(51):
+			self.fx.account(f"Cash{index}", "Cash", "Asset")
+		frappe.db.commit()
+		on = routing.ReaderSettings("on", (self.fx.company,), ())
+		grouped, original = [], frappe.db.sql
+
+		def spy(query, *args, **kwargs):
+			if "GROUP BY account, finance_book" in str(query):
+				grouped.append(query)
+			return original(query, *args, **kwargs)
+
+		with (
+			patch.object(routing, "reader_settings", return_value=on),
+			patch.object(frappe.db, "sql", spy),
+			patch.object(balances, "read_bank_balances", wraps=balances.read_bank_balances) as read,
+		):
+			job_id = self.run_job()
+		self.assertEqual([len(call.args[1]) for call in read.call_args_list], [50, 3])
+		self.assertEqual(len(grouped), 2)
 		self.assertEqual(store.load_result(ACTOR, job_id)["total"], "1500.00")
 
 	def test_balances_are_read_at_the_scope_anchor_not_at_the_worker_clock(self):
