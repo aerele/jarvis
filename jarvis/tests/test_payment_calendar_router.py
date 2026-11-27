@@ -20,6 +20,7 @@ from rq.timeouts import JobTimeoutException
 
 from jarvis.payment_calendar import read_log, routing, snapshot, sources, store
 from jarvis.payment_calendar.errors import READER_FALLBACK_REASONS, CalendarSourceUnavailable, ReaderFallback
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_READER_PINS, interface_error, v16_only
 
 COMPANY = "Router Test Company"
 OTHER = "Another Router Company"
@@ -105,6 +106,7 @@ class RouterCase(TestCase):
 
 
 class TestWhenTodayServesOrRefusesOtherwise(RouterCase):
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_poisoned_view_skips_the_next_side_and_counts_a_fresh_refusal(self):
 		self.reader.side_effect = frappe.QueryDeadlockError("deadlock")
 		with self.assertRaises(CalendarSourceUnavailable) as view_error:
@@ -162,6 +164,7 @@ class TestWhenTodayServesOrRefusesOtherwise(RouterCase):
 
 
 class TestRoutingRules(RouterCase):
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_served_company_with_mode_on_gets_the_readers_result(self):
 		self.assertIs(self.route(), READER_RESULT)
 		record = self.outcomes[0]
@@ -170,6 +173,7 @@ class TestRoutingRules(RouterCase):
 		self.assertTrue(self.slots_free())
 		self.assertFalse(self.memo_set())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_reader_gets_the_arguments_a_stats_dict_and_a_deadline(self):
 		before = monotonic()
 		self.route()
@@ -178,12 +182,14 @@ class TestRoutingRules(RouterCase):
 		self.assertIsInstance(kwargs["stats"], dict)
 		self.assertAlmostEqual(kwargs["deadline"] - before, routing.READER_DEADLINE_S, delta=2)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_deadline_is_cut_to_what_is_left_of_the_view_cap(self):
 		# A late view: 80 s gone of a 100 s cap, so 20 s are left, below the reader's own 30 s.
 		with patch.object(routing, "VIEW_CAP_S", 100):
 			self.route(started=monotonic() - 80)
 		self.assertAlmostEqual(self.reader.call_args.kwargs["deadline"] - monotonic(), 20, delta=1)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_an_early_view_leaves_the_readers_own_limit(self):
 		with patch.object(routing, "VIEW_CAP_S", 100):
 			self.route(started=monotonic() - 10)
@@ -191,6 +197,7 @@ class TestRoutingRules(RouterCase):
 			self.reader.call_args.kwargs["deadline"] - monotonic(), routing.READER_DEADLINE_S, delta=1
 		)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_timings_and_counts_of_the_reader_reach_the_record(self):
 		def read(*args, stats, **kwargs):
 			stats.update(timings_ms={"control": 1.0}, counts={"lines": 3})
@@ -218,6 +225,7 @@ class TestRoutingRules(RouterCase):
 		self.reader.assert_not_called()
 		self.assertEqual({r["step"] for r in self.outcomes}, {"settings"})
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_an_ineligible_user_is_refused_by_the_reader_and_no_memo_is_set(self):
 		self.reader.side_effect = ReaderFallback("ineligible", ("user_permission",))
 		self.refusal()
@@ -226,6 +234,7 @@ class TestRoutingRules(RouterCase):
 		self.assertEqual((record["fallback"], record["fallback_detail"]), ("ineligible", ["user_permission"]))
 		self.assertFalse(self.memo_set())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_each_refusing_step_refuses_without_calling_the_reader(self):
 		def v15():
 			return patch.object(routing, "source_profile", return_value=SimpleNamespace(major="15"))
@@ -291,10 +300,12 @@ class TestRoutingRules(RouterCase):
 		self.assertEqual(routing.READER_LEDGER_CAP, sources.MAX_LEDGER_ROWS)
 		self.assertEqual(routing.READER_LEDGER_CAP, shadow.SHADOW_LEDGER_CAP)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_probe_runs_with_the_company_side_date_and_cap(self):
 		self.route()
 		self.probe.assert_called_once_with(COMPANY, SIDE, "2026-11-20", routing.READER_LEDGER_CAP)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_free_second_slot_is_used_when_the_first_is_taken(self):
 		redis("SET", routing.slot_key(0), "other", "EX", 60)
 		seen = []
@@ -306,6 +317,7 @@ class TestRoutingRules(RouterCase):
 		self.assertEqual(seen, [1])
 		self.assertEqual(redis("GET", routing.slot_key(0)), b"other")
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_slot_and_the_in_flight_marker_outlive_the_longest_job(self):
 		seen = []
 		self.reader.side_effect = lambda *a, **k: (
@@ -321,6 +333,7 @@ class TestRoutingRules(RouterCase):
 
 
 class TestProbeErrors(RouterCase):
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_failed_statement_in_the_probe_refuses_with_a_fresh_too_large(self):
 		for code in (1969, 1054):
 			with self.subTest(code):
@@ -335,6 +348,7 @@ class TestProbeErrors(RouterCase):
 				self.reader.assert_not_called()
 				self.assertTrue(self.slots_free())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_job_deadline_in_the_probe_propagates_and_records_the_class(self):
 		for error in (JobTimeoutException(), TimeoutError()):
 			with self.subTest(type(error).__name__):
@@ -347,8 +361,12 @@ class TestProbeErrors(RouterCase):
 				self.assertTrue(self.slots_free())
 		self.reader.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_lost_connection_in_the_probe_is_a_refused_probe_not_a_special_case(self):
-		for error in (frappe.db.OperationalError(2013, "lost"), frappe.db.InterfaceError("closed")):
+		for error in (
+			frappe.db.OperationalError(2013, "lost"),
+			interface_error(),
+		):
 			with self.subTest(type(error).__name__):
 				self.outcomes.clear()
 				self.probe.side_effect = error
@@ -358,6 +376,7 @@ class TestProbeErrors(RouterCase):
 
 
 class TestReaderOutcomes(RouterCase):
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_each_fallback_reason_is_refused_and_the_memo_follows_the_reason(self):
 		for reason in sorted(READER_FALLBACK_REASONS):
 			with self.subTest(reason):
@@ -374,6 +393,7 @@ class TestReaderOutcomes(RouterCase):
 					self.assertFalse(self.memo_set(), reason)
 				self.assertTrue(self.slots_free())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_cause_of_a_fallback_is_recorded_as_a_class_only(self):
 		def raise_with_cause(*args, **kwargs):
 			try:
@@ -386,6 +406,7 @@ class TestReaderOutcomes(RouterCase):
 		self.assertEqual(self.outcomes[0]["cause"], "KeyError")
 		self.assertNotIn("PRIVATE", repr(self.outcomes))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_deadline_cut_short_by_a_late_view_sets_no_memo_but_an_uncut_one_does(self):
 		self.reader.side_effect = ReaderFallback("deadline")
 		with patch.object(routing, "VIEW_CAP_S", 100):
@@ -396,18 +417,21 @@ class TestReaderOutcomes(RouterCase):
 			self.refusal(started=monotonic() - 10)
 		self.assertAlmostEqual(self.memo_ttl(), routing.MEMO_TTL_S, delta=5)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_probe_that_says_too_big_sets_a_short_memo(self):
 		self.probe.return_value = True
 		self.refusal()
 		self.assertAlmostEqual(self.memo_ttl(), routing.SHORT_MEMO_TTL_S, delta=5)
 		self.assertTrue(self.slots_free())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_reader_refusal_is_refused_and_sets_no_memo(self):
 		self.reader.side_effect = CalendarSourceUnavailable("multiple_invoice_accounts")
 		self.refusal()
 		self.assertEqual(self.outcomes[0]["reader_refused"], "multiple_invoice_accounts")
 		self.assertFalse(self.memo_set())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_any_other_exception_is_refused_and_sets_the_slow_memo(self):
 		self.reader.side_effect = RuntimeError("PRIVATE party text")
 		self.refusal()
@@ -416,6 +440,7 @@ class TestReaderOutcomes(RouterCase):
 		self.assertAlmostEqual(self.memo_ttl(), routing.MEMO_TTL_S, delta=5)
 		self.assertTrue(self.slots_free())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_failed_statement_in_the_reader_is_refused_as_a_reader_error(self):
 		self.reader.side_effect = frappe.db.OperationalError(1054, "Unknown column")
 		self.refusal()
@@ -434,6 +459,7 @@ class TestReaderOutcomes(RouterCase):
 		self.today.return_value = TODAY_RESULT
 		self.assertIs(self.route(args=(COMPANY, "Payable", *ARGS[2:])), TODAY_RESULT)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_only_a_job_deadline_propagates_and_it_leaves_the_record_and_the_memo(self):
 		for error in (JobTimeoutException(), TimeoutError()):
 			with self.subTest(type(error).__name__):
@@ -447,10 +473,11 @@ class TestReaderOutcomes(RouterCase):
 				self.assertTrue(self.slots_free())
 				self.assertAlmostEqual(self.memo_ttl(), routing.MEMO_TTL_S, delta=5)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_lost_connection_in_the_reader_is_refused_like_any_other_error(self):
 		"""No special case: the snapshot view's exit check fails the job when the connection is really gone."""
 		for error in (
-			frappe.db.InterfaceError("closed"),
+			interface_error(),
 			frappe.db.OperationalError(2013, "lost"),
 			frappe.QueryDeadlockError("deadlock"),
 		):
@@ -462,6 +489,7 @@ class TestReaderOutcomes(RouterCase):
 				self.assertEqual(self.outcomes[0]["reader_exception"], type(error).__name__)
 				self.assertTrue(self.slots_free())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_after_a_job_timeout_in_the_reader_the_next_read_skips_with_the_memo(self):
 		self.reader.side_effect = JobTimeoutException()
 		with self.assertRaises(JobTimeoutException):
@@ -473,6 +501,7 @@ class TestReaderOutcomes(RouterCase):
 		self.reader.assert_not_called()
 		self.assertEqual(self.outcomes[0]["step"], "memo")
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_served_read_sets_no_memo_and_a_failed_one_does_not_block_the_next_after_it_expires(self):
 		self.assertIs(self.route(), READER_RESULT)
 		self.assertFalse(self.memo_set())
@@ -483,6 +512,7 @@ class TestReaderOutcomes(RouterCase):
 		self.assertIs(self.route(), READER_RESULT)
 		self.assertFalse(self.memo_set())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_pessimistic_memo_is_set_before_the_reader_and_owned_by_the_in_flight_token(self):
 		seen = []
 		memo, marker = routing.memo_key(COMPANY, SIDE), routing.inflight_key(COMPANY, SIDE)
@@ -497,6 +527,7 @@ class TestReaderOutcomes(RouterCase):
 		self.assertAlmostEqual(ttl, routing.MEMO_TTL_S, delta=5)
 		self.assertFalse(self.memo_set(), "a safe normal outcome deletes it")
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_memo_that_matches_the_live_marker_is_busy_and_one_without_a_marker_is_a_bad_read(self):
 		memo, marker = routing.memo_key(COMPANY, SIDE), routing.inflight_key(COMPANY, SIDE)
 		redis("SET", memo, "tok", "EX", 60)
@@ -510,6 +541,7 @@ class TestReaderOutcomes(RouterCase):
 		self.assertEqual(self.outcomes[0]["step"], "memo")
 		self.reader.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_read_killed_without_a_trace_leaves_the_memo_for_the_full_time(self):
 		"""OOM or SIGKILL bypass every `except`; a BaseException stands in: nothing deletes the memo."""
 		self.reader.side_effect = KeyboardInterrupt()
@@ -525,6 +557,7 @@ class TestReaderOutcomes(RouterCase):
 		self.assertEqual(self.outcomes[0]["step"], "memo")
 		self.reader.assert_not_called()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_job_deletes_the_memo_only_while_it_is_still_its_own(self):
 		memo = routing.memo_key(COMPANY, SIDE)
 
@@ -536,6 +569,7 @@ class TestReaderOutcomes(RouterCase):
 		self.assertIs(self.route(), READER_RESULT)
 		self.assertEqual(redis("GET", memo), b"1")
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_memo_is_checked_again_after_the_marker_is_claimed(self):
 		"""Job A failed and released its marker between B's first memo check and B's claim."""
 		claim = routing._claim
@@ -562,6 +596,7 @@ class TestReaderOutcomes(RouterCase):
 		with patch.object(read_log, "company_digest", side_effect=RuntimeError("no key")):
 			self.assertIsNone(routing._digest(COMPANY))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_second_read_while_one_runs_is_busy_and_remembers_nothing(self):
 		inner = []
 
@@ -579,6 +614,7 @@ class TestReaderOutcomes(RouterCase):
 		self.assertFalse(self.memo_set(), "a busy answer is not remembered")
 		self.assertTrue(self.slots_free())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_the_memo_is_per_company_and_side(self):
 		self.reader.side_effect = ReaderFallback("deadline")
 		self.refusal()
@@ -618,6 +654,7 @@ class TestRefusalsAreFresh(RouterCase):
 				setup()
 				self.assert_fresh(self.refusal())
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_no_frame_of_todays_engine_or_the_readers_is_reachable_from_a_refusal(self):
 		class Engine:
 			pass
@@ -644,6 +681,7 @@ class TestRefusalsAreFresh(RouterCase):
 
 
 class TestSlotRelease(RouterCase):
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_slot_whose_token_was_replaced_is_not_deleted(self):
 		def replace(*args, **kwargs):
 			for n in range(routing.READER_SLOTS):
@@ -677,6 +715,7 @@ class TestSlotRelease(RouterCase):
 		with patch.dict(frappe.conf, {"encryption_key": KEY}):
 			self.assertIn(read_log.company_digest(COMPANY), memo)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_job_timeout_in_the_release_or_in_remembering_propagates(self):
 		real_command = frappe.cache.execute_command
 
@@ -697,6 +736,7 @@ class TestSlotRelease(RouterCase):
 		with patch.object(frappe.cache, "execute_command", kill_memo), self.assertRaises(JobTimeoutException):
 			self.route()
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_a_cache_failure_before_the_reader_refuses_and_leaves_no_slot(self):
 		with patch.object(routing, "_take_slot", side_effect=RuntimeError("redis down")):
 			self.refusal()
@@ -749,15 +789,20 @@ class TestRealSettings(TestCase):
 		):
 			return routing.read_side(too_large, *ARGS, started=monotonic(), outcomes=[])
 
-	def test_on_with_the_company_listed_routes_and_off_does_not(self):
+	@v16_only(GATE_NO_V15_READER_PINS)
+	def test_on_with_the_company_listed_routes(self):
 		reader = MagicMock(return_value=READER_RESULT)
 		self.raw(routing.MODE_FIELD, "on")
 		self.raw(routing.SERVED_FIELD, f"{OTHER}\n{COMPANY}")
 		self.assertIs(self.route(reader), READER_RESULT)
+
+	def test_off_does_not_route(self):
+		reader = MagicMock(return_value=READER_RESULT)
 		self.raw(routing.MODE_FIELD, "off")
+		self.raw(routing.SERVED_FIELD, f"{OTHER}\n{COMPANY}")
 		with self.assertRaises(CalendarSourceUnavailable):
 			self.route(reader)
-		self.assertEqual(reader.call_count, 1)
+		reader.assert_not_called()
 
 
 class TestMayHaveRolledBack(TestCase):
@@ -767,7 +812,7 @@ class TestMayHaveRolledBack(TestCase):
 		rows = [
 			("deadlock", frappe.QueryDeadlockError("x"), True),
 			("lock wait", frappe.QueryTimeoutError("x"), True),
-			("interface error", frappe.db.InterfaceError("x"), True),
+			("interface error", interface_error("x"), True),
 		] + [
 			(f"operational {code}", frappe.db.OperationalError(code, "x"), True)
 			for code in (1213, 1205, 2006, 2013, 2055, 1927, 4031)
@@ -788,14 +833,32 @@ class TestMayHaveRolledBack(TestCase):
 	def test_internal_error_with_a_rollback_code_counts(self):
 		self.assertTrue(routing._may_have_rolled_back(frappe.db.InternalError(1213, "x")))
 
-	def test_a_driver_without_interface_error_is_still_classified(self):
-		"""v15 MariaDB has no `InterfaceError` on `frappe.db`."""
+	def test_a_driver_namespace_without_an_interface_error_attribute_is_still_classified(self):
+		"""A driver with no `InterfaceError` attribute: the interface check is its own `is_interface_error`."""
 		operational = frappe.db.OperationalError(1213, "x")
 		statement = frappe.db.OperationalError(1054, "x")
 		driver = SimpleNamespace(
-			OperationalError=frappe.db.OperationalError, InternalError=frappe.db.InternalError
+			OperationalError=frappe.db.OperationalError,
+			InternalError=frappe.db.InternalError,
+			is_interface_error=lambda error: False,
 		)
 		with patch.object(frappe, "db", driver):
 			self.assertTrue(routing._may_have_rolled_back(operational))
 			self.assertFalse(routing._may_have_rolled_back(statement))
 			self.assertTrue(routing._may_have_rolled_back(frappe.QueryDeadlockError("x")))
+
+	def test_the_interface_check_is_the_drivers_own_not_an_attribute_lookup(self):
+		"""A driver whose `is_interface_error` knows a class that `frappe.db` does not name: the check is consulted."""
+
+		class DriverInterfaceError(Exception):
+			pass
+
+		driver = SimpleNamespace(
+			OperationalError=frappe.db.OperationalError,
+			InternalError=frappe.db.InternalError,
+			InterfaceError=ValueError,  # a different class: a lookup by this name would say False
+			is_interface_error=lambda error: isinstance(error, DriverInterfaceError),
+		)
+		with patch.object(frappe, "db", driver):
+			self.assertTrue(routing._may_have_rolled_back(DriverInterfaceError("closed")))
+			self.assertFalse(routing._may_have_rolled_back(ValueError("closed")))

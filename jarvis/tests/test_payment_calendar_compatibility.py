@@ -21,6 +21,7 @@ from jarvis.payment_calendar.errors import (
 	CalendarSourceUnavailable,
 	ReaderFallback,
 )
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_READER_PINS, v16_only
 
 
 class TestPaymentCalendarCompatibility(TestCase):
@@ -166,6 +167,7 @@ class TestPaymentCalendarCompatibility(TestCase):
 					self.assertEqual(cache.hget("roles", "actor"), "old roles")
 					self.assertFalse({"get_value", "set_value", "hget", "hset"}.intersection(vars(cache)))
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_reader_pins_match_installed_source(self):
 		"""Deliberate tripwire: any edit of a pinned upstream source needs a fresh audit of the reader."""
 		drifted = compatibility.reader_pin_drift()
@@ -242,6 +244,7 @@ class TestPaymentCalendarCompatibility(TestCase):
 				compatibility.qualified_source_hash("erpnext.accounts.utils.update_voucher_outstanding")
 			)
 
+	@v16_only(GATE_NO_V15_READER_PINS)
 	def test_reader_pin_drift_lists_unknown_and_unreadable_sources(self):
 		name = "erpnext.accounts.utils.update_voucher_outstanding"
 		pins = {"16": {**compatibility._READER_PINS["16"], name: ("unknown",)}}

@@ -6,8 +6,10 @@ import frappe
 
 from jarvis.payment_calendar import batch_permission, permissions
 from jarvis.tests.batch_permission_fixtures import SI, BatchCase, session_as, switch_on
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_PERMISSION_PINS, v16_only
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestBatchPermissionQueries(BatchCase):
 	def run_batch(self, names, chunk=2):
 		"""The statements of one evaluation with chunks of `chunk` names, and the helper calls it made."""

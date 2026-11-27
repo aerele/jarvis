@@ -524,16 +524,14 @@ def _attempt(read, args, **kwargs):
 
 
 def _is_transient(error: BaseException) -> bool:
-	"""A database or connection failure: the next run may well succeed, so it is no result of the reader."""
+	"""A database or connection failure: the next run may well succeed, so it is no result of the reader.
+
+	The interface error is the driver's own check, not `frappe.db.InterfaceError`: Frappe 15 has no such attribute.
+	"""
 	return isinstance(
 		error,
-		(
-			frappe.db.OperationalError,
-			frappe.db.InterfaceError,
-			frappe.QueryDeadlockError,
-			frappe.QueryTimeoutError,
-		),
-	)
+		(frappe.db.OperationalError, frappe.QueryDeadlockError, frappe.QueryTimeoutError),
+	) or frappe.db.is_interface_error(error)
 
 
 def _error_reason(error: BaseException) -> str:

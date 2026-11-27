@@ -24,6 +24,7 @@ from jarvis.tests.batch_permission_fixtures import (
 	hooks,
 	session_as,
 )
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_PERMISSION_PINS, v16_only
 from jarvis.tools._preview_sandbox import preview_sandbox
 
 CUSTOMER = "Customer"
@@ -130,6 +131,7 @@ def read(case):
 		)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestEveryCallerUsesTheBatch(CallerCase):
 	def test_collect_reaches_the_batch_for_vouchers_and_parties(self):
 		spy = self.assert_reaches_the_batch(visible_rows, (SI, CUSTOMER))

@@ -1,7 +1,6 @@
 """Each reason that sends a doctype to the per-document loop, the live gate, the stop and the job freeze."""
 
 import ast
-import inspect
 from pathlib import Path
 from unittest.mock import patch
 from uuid import uuid4
@@ -20,6 +19,7 @@ from jarvis.tests.batch_permission_fixtures import (
 	session_as,
 	switch_on,
 )
+from jarvis.tests.payment_calendar_majors import GATE_NO_V15_PERMISSION_PINS, v16_only
 
 SALES_TEAM = "Sales Team"
 
@@ -54,6 +54,7 @@ class GuardCase(BatchCase):
 		self.assertEqual((plan.mode, plan.reason), ("batch", None))
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestBatchPermissionReasons(GuardCase):
 	def test_a_user_with_a_non_company_user_permission(self):
 		self.assert_per_doc("scope_users", user=self.f.u7)
@@ -120,6 +121,7 @@ class TestBatchPermissionReasons(GuardCase):
 				self.assert_batch(doctype)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestBatchPermissionControllers(GuardCase):
 	def lazy_with(self, **attributes):
 		lazy = frappe.model.document.get_lazy_controller(SI)
@@ -151,6 +153,7 @@ class TestBatchPermissionControllers(GuardCase):
 			self.assert_per_doc("controller_override")
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestBatchPermissionFailClosed(GuardCase):
 	def test_any_failure_of_the_pin_check_is_a_pin_drift(self):
 		def boom():
@@ -216,6 +219,7 @@ class TestBatchPermissionLiveGate(GuardCase):
 			with patch.object(frappe.cache, "execute_command", side_effect=ConnectionError):
 				self.assertEqual(batch_permission._live_gate(doctype), "breaker_unknown")
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_a_user_without_user_permissions_and_few_names_takes_the_loop(self):
 		f = self.f
 		names = set(f.names(SI)[:4])
@@ -233,6 +237,7 @@ class TestBatchPermissionLiveGate(GuardCase):
 				batch_permission.batch_visible(SI, set(f.names(SI)[:5]), "read")
 				self.assertEqual(batch.call_count, 1)
 
+	@v16_only(GATE_NO_V15_PERMISSION_PINS)
 	def test_a_user_with_a_user_permission_takes_the_batch_even_for_few_names(self):
 		f = self.f
 		names = set(f.names(SI)[:3])
@@ -251,6 +256,7 @@ class TestBatchPermissionLiveGate(GuardCase):
 		self.assertEqual((loop.call_count, batch.call_count), (0, 1))
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestBatchPermissionSqlErrors(GuardCase):
 	def test_an_error_of_the_batch_sql_propagates_and_no_partial_set_is_returned(self):
 		f = self.f
@@ -307,6 +313,7 @@ class TestBatchPermissionStop(GuardCase):
 				permissions.visible_names(SI, names)
 
 
+@v16_only(GATE_NO_V15_PERMISSION_PINS)
 class TestBatchPermissionJobFreeze(GuardCase):
 	def tearDown(self):
 		frappe.local.pcal_permission_freeze = None
