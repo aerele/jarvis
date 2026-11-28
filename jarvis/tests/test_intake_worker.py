@@ -1108,20 +1108,20 @@ class TestIntakeWorker(FrappeTestCase):
 
 class TestIntakeCapsSurviveSettingsSave(FrappeTestCase):
 	"""#2889: a site migrated before the limits existed has no Singles row for them, and a
-	plain Jarvis Settings save used to store 0 (= paused)."""
+	plain Jarvis Settings save used to store 0 (= paused, or retention off)."""
 
-	CAPS = ("intake_daily_cap", "intake_daily_cap_per_user")
+	FIELDS = ("intake_daily_cap", "intake_daily_cap_per_user", "conversation_retention_days")
 
 	def tearDown(self):
 		frappe.db.rollback()
 
-	def _drop_rows(self):
-		for field in self.CAPS:
-			frappe.db.sql("delete from tabSingles where doctype=%s and field=%s", ("Jarvis Settings", field))
-
 	def _row(self, field):
-		rows = frappe.db.sql(
-			"select value from tabSingles where doctype=%s and field=%s", ("Jarvis Settings", field)
+		singles = frappe.qb.DocType("Singles")
+		rows = (
+			frappe.qb.from_(singles)
+			.select(singles.value)
+			.where((singles.doctype == "Jarvis Settings") & (singles.field == field))
+			.run()
 		)
 		return rows[0][0] if rows else None
 
@@ -1131,17 +1131,18 @@ class TestIntakeCapsSurviveSettingsSave(FrappeTestCase):
 		doc.update(values)
 		doc.save(ignore_permissions=True)
 
-	def test_save_without_stored_caps_keeps_the_defaults(self):
-		self._drop_rows()
-		self._save()
-		self.assertEqual(cint(self._row("intake_daily_cap")), 300)
-		self.assertEqual(cint(self._row("intake_daily_cap_per_user")), 50)
-		self.assertFalse(worker._paused())
+	def test_an_unset_or_emptied_field_is_not_stored_as_zero(self):
+		from jarvis.chat import session_lifecycle
 
-	def test_emptied_cap_saves_as_default_but_explicit_zero_pauses(self):
-		self._save(intake_daily_cap=None, intake_daily_cap_per_user="")
-		self.assertEqual(cint(self._row("intake_daily_cap")), 300)
-		self.assertEqual(cint(self._row("intake_daily_cap_per_user")), 50)
+		for empty in (None, ""):
+			self._save(**{f: empty for f in self.FIELDS})
+			for field in self.FIELDS:
+				self.assertIsNone(self._row(field), f"{field} stored for {empty!r}")
+			self.assertFalse(worker._paused())
+			self.assertEqual(worker._site_cap(), 300)
+			self.assertEqual(session_lifecycle._retention_days(), 30)
+
+	def test_an_explicit_zero_is_kept_and_pauses_intake(self):
 		self._save(intake_daily_cap=0)
 		self.assertEqual(cint(self._row("intake_daily_cap")), 0)
 		self.assertTrue(worker._paused())
