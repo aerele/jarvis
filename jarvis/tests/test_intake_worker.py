@@ -1104,3 +1104,54 @@ class TestIntakeWorker(FrappeTestCase):
 		capture.clear_intake_cache()
 		worker.pump()
 		self.assertEqual(self._get(row).status, "Skipped")
+
+
+class TestIntakeCapsSurviveSettingsSave(FrappeTestCase):
+	"""#2889: a site migrated before the limits existed has no Singles row for them, and a
+	plain Jarvis Settings save used to store 0 (= paused)."""
+
+	CAPS = ("intake_daily_cap", "intake_daily_cap_per_user")
+
+	def tearDown(self):
+		frappe.db.rollback()
+
+	def _drop_rows(self):
+		for field in self.CAPS:
+			frappe.db.sql("delete from tabSingles where doctype=%s and field=%s", ("Jarvis Settings", field))
+
+	def _row(self, field):
+		rows = frappe.db.sql(
+			"select value from tabSingles where doctype=%s and field=%s", ("Jarvis Settings", field)
+		)
+		return rows[0][0] if rows else None
+
+	def _save(self, **values):
+		doc = frappe.get_single("Jarvis Settings")
+		doc.set("models", [])  # a keyless model row left by another module would fail validate
+		doc.update(values)
+		doc.save(ignore_permissions=True)
+
+	def test_save_without_stored_caps_keeps_the_defaults(self):
+		self._drop_rows()
+		self._save()
+		self.assertEqual(cint(self._row("intake_daily_cap")), 300)
+		self.assertEqual(cint(self._row("intake_daily_cap_per_user")), 50)
+		self.assertFalse(worker._paused())
+
+	def test_emptied_cap_saves_as_default_but_explicit_zero_pauses(self):
+		self._save(intake_daily_cap=None, intake_daily_cap_per_user="")
+		self.assertEqual(cint(self._row("intake_daily_cap")), 300)
+		self.assertEqual(cint(self._row("intake_daily_cap_per_user")), 50)
+		self._save(intake_daily_cap=0)
+		self.assertEqual(cint(self._row("intake_daily_cap")), 0)
+		self.assertTrue(worker._paused())
+
+	def test_patch_resets_zero_rows_and_keeps_a_chosen_value(self):
+		from jarvis.patches.v2_33_reset_intake_caps_stored_as_zero import execute
+
+		frappe.db.set_single_value("Jarvis Settings", "intake_daily_cap", 0)
+		frappe.db.set_single_value("Jarvis Settings", "intake_daily_cap_per_user", 7)
+		execute()
+		self.assertIsNone(self._row("intake_daily_cap"))
+		self.assertEqual(cint(self._row("intake_daily_cap_per_user")), 7)
+		self.assertEqual(worker._site_cap(), 300)

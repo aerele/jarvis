@@ -809,6 +809,15 @@ def _direct_subscription_blob(doc) -> tuple[str, dict]:
 	raise admin_client.AdminValidationError("direct subscription leg: no enabled subscription model to push")
 
 
+# Int fields where a stored 0 means "off" and an unset value means the default. Frappe
+# cannot tell the two apart on save (see JarvisSettings._keep_unset_caps_unset).
+_ZERO_MEANS_OFF_DEFAULTS = {
+	"intake_daily_cap": 300,
+	"intake_daily_cap_per_user": 50,
+	"conversation_retention_days": 30,
+}
+
+
 class JarvisSettings(Document):
 	def onload(self):
 		"""Flags the form's buttons read. Only a yes/no about the callback key, never the key."""
@@ -859,7 +868,23 @@ class JarvisSettings(Document):
 			):
 				self.llm_api_key = api_key_val
 
+	def _keep_unset_caps_unset(self):
+		"""An unset limit saves as its default, never as 0.
+
+		A Single loaded without a row for a field holds None for it (``init_valid_columns``,
+		``frappe/model/base_document.py``; ``_fix_numeric_types`` skips None), and an emptied
+		Desk Int control posts null (``ControlInt.parse`` = ``cint(v, null)``). Both then reach
+		``get_valid_dict`` which turns a None Int into 0 (``elif fieldtype == "Int" and not
+		isinstance(value, int): value = cint(value)``), and for these fields a stored 0 means
+		off. Writing the default here keeps a stored value always intentional; an explicit 0
+		is an int and passes through untouched.
+		"""
+		for fieldname, default in _ZERO_MEANS_OFF_DEFAULTS.items():
+			if self.get(fieldname) in (None, ""):
+				self.set(fieldname, default)
+
 	def validate(self):
+		self._keep_unset_caps_unset()
 		self._preserve_agent_catalog_state()
 		self._guard_admin_only_fields()
 		# #731: a genuine ON -> OFF flip of the wiki toggle enqueues a container
