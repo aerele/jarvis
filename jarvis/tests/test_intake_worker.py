@@ -1104,3 +1104,55 @@ class TestIntakeWorker(FrappeTestCase):
 		capture.clear_intake_cache()
 		worker.pump()
 		self.assertEqual(self._get(row).status, "Skipped")
+
+
+class TestIntakeCapsSurviveSettingsSave(FrappeTestCase):
+	"""#2889: a site migrated before the limits existed has no Singles row for them, and a
+	plain Jarvis Settings save used to store 0 (= paused, or retention off)."""
+
+	FIELDS = ("intake_daily_cap", "intake_daily_cap_per_user", "conversation_retention_days")
+
+	def tearDown(self):
+		frappe.db.rollback()
+
+	def _row(self, field):
+		singles = frappe.qb.DocType("Singles")
+		rows = (
+			frappe.qb.from_(singles)
+			.select(singles.value)
+			.where((singles.doctype == "Jarvis Settings") & (singles.field == field))
+			.run()
+		)
+		return rows[0][0] if rows else None
+
+	def _save(self, **values):
+		doc = frappe.get_single("Jarvis Settings")
+		doc.set("models", [])  # a keyless model row left by another module would fail validate
+		doc.update(values)
+		doc.save(ignore_permissions=True)
+
+	def test_an_unset_or_emptied_field_is_not_stored_as_zero(self):
+		from jarvis.chat import session_lifecycle
+
+		for empty in (None, ""):
+			self._save(**{f: empty for f in self.FIELDS})
+			for field in self.FIELDS:
+				self.assertIsNone(self._row(field), f"{field} stored for {empty!r}")
+			self.assertFalse(worker._paused())
+			self.assertEqual(worker._site_cap(), 300)
+			self.assertEqual(session_lifecycle._retention_days(), 30)
+
+	def test_an_explicit_zero_is_kept_and_pauses_intake(self):
+		self._save(intake_daily_cap=0)
+		self.assertEqual(cint(self._row("intake_daily_cap")), 0)
+		self.assertTrue(worker._paused())
+
+	def test_patch_resets_zero_rows_and_keeps_a_chosen_value(self):
+		from jarvis.patches.v2_33_reset_intake_caps_stored_as_zero import execute
+
+		frappe.db.set_single_value("Jarvis Settings", "intake_daily_cap", 0)
+		frappe.db.set_single_value("Jarvis Settings", "intake_daily_cap_per_user", 7)
+		execute()
+		self.assertIsNone(self._row("intake_daily_cap"))
+		self.assertEqual(cint(self._row("intake_daily_cap_per_user")), 7)
+		self.assertEqual(worker._site_cap(), 300)

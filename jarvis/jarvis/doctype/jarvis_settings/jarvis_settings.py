@@ -809,6 +809,11 @@ def _direct_subscription_blob(doc) -> tuple[str, dict]:
 	raise admin_client.AdminValidationError("direct subscription leg: no enabled subscription model to push")
 
 
+# Int fields where a stored 0 means "off" and NO stored row means the reader's default.
+# Frappe cannot tell the two apart on save (see JarvisSettings._note_unset_zero_means_off).
+_ZERO_MEANS_OFF_FIELDS = ("intake_daily_cap", "intake_daily_cap_per_user", "conversation_retention_days")
+
+
 class JarvisSettings(Document):
 	def onload(self):
 		"""Flags the form's buttons read. Only a yes/no about the callback key, never the key."""
@@ -859,7 +864,31 @@ class JarvisSettings(Document):
 			):
 				self.llm_api_key = api_key_val
 
+	def _note_unset_zero_means_off(self):
+		"""Remember which zero-means-off fields are unset, so on_update can drop their rows.
+
+		A Single loaded without a row for a field holds None for it (``init_valid_columns``,
+		``frappe/model/base_document.py``; ``_fix_numeric_types`` skips None), and an emptied
+		Desk Int control posts null (``ControlInt.parse`` = ``cint(v, null)``). Both then reach
+		``get_valid_dict``, which turns a None Int into a stored 0, and for these fields a
+		stored 0 means off. Dropping the row after the write keeps "unset" unset, so each
+		reader applies its own default; an explicit 0 is an int and is kept.
+		"""
+		self.flags.unset_zero_means_off = [f for f in _ZERO_MEANS_OFF_FIELDS if self.get(f) in (None, "")]
+
+	def _drop_unset_zero_means_off_rows(self):
+		fields = self.flags.get("unset_zero_means_off") or []
+		if not fields:
+			return
+		singles = frappe.qb.DocType("Singles")
+		frappe.qb.from_(singles).delete().where(
+			(singles.doctype == self.doctype) & singles.field.isin(fields)
+		).run()
+		frappe.db.value_cache.pop(self.doctype, None)
+		frappe.clear_document_cache(self.doctype, self.doctype)
+
 	def validate(self):
+		self._note_unset_zero_means_off()
 		self._preserve_agent_catalog_state()
 		self._guard_admin_only_fields()
 		# #731: a genuine ON -> OFF flip of the wiki toggle enqueues a container
@@ -1217,6 +1246,9 @@ class JarvisSettings(Document):
 
 	def on_update(self):
 		from jarvis.chat.sharing import on_sharing_setting_changed
+
+		# First, before the early returns below: an unset limit must not stay stored as 0.
+		self._drop_unset_zero_means_off_rows()
 
 		before = self.get_doc_before_save()
 		if before and self.has_value_changed("chat_sharing_enabled"):
